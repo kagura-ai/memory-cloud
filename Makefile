@@ -164,6 +164,8 @@ test-unit:
 coverage-upload:
 	@echo "Running unit tests with coverage and uploading to Codecov..."
 	cd $(BACKEND_DIR) && pytest tests/api/ tests/auth/ tests/smoke/ tests/neural/test_hebbian.py -v --cov=src --cov-report=xml --cov-report=term-missing -x || true
+	@CODECOV_TOKEN=$${CODECOV_TOKEN:-$$(grep '^CODECOV_TOKEN=' .env.local 2>/dev/null | cut -d= -f2)}; \
+	if [ -z "$$CODECOV_TOKEN" ]; then echo "Error: CODECOV_TOKEN not set (add to .env.local)"; exit 1; fi; \
 	cd $(BACKEND_DIR) && codecovcli upload-process --token $$CODECOV_TOKEN -f coverage.xml
 	@echo "Coverage uploaded to Codecov."
 
