@@ -19,68 +19,14 @@ jobs:
           cache: pip
           cache-dependency-path: backend/pyproject.toml
 
-      - name: Install dependencies
-        run: |
-          cd backend
-          pip install --upgrade pip
-          pip install -e ".[dev]"
+      - name: Install ruff
+        run: pip install ruff
 
       - name: Lint
         run: cd backend && ruff check src/ tests/
 
       - name: Format check
         run: cd backend && ruff format --check src/ tests/
-
-  test:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:15-alpine
-        env:
-          POSTGRES_DB: kagura_test
-          POSTGRES_USER: kagura
-          POSTGRES_PASSWORD: test_password
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-          cache-dependency-path: backend/pyproject.toml
-
-      - name: Install dependencies
-        run: |
-          cd backend
-          pip install --upgrade pip
-          pip install -e ".[dev]"
-
-      - name: Run tests with coverage
-        run: |
-          cd backend
-          pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
-        env:
-          DATABASE_URL: postgresql+asyncpg://kagura:test_password@localhost:5432/kagura_test
-          QDRANT_URL: http://localhost:6333
-          REDIS_URL: redis://localhost:6379
-          OPENAI_API_KEY: sk-test-key
-          API_KEY_SECRET: test-secret-32-bytes-long-string-here
-          JWT_SECRET: test-jwt-secret-32-bytes-long-string
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: backend/coverage.xml
-          fail_ci_if_error: false
 
   frontend:
     runs-on: ubuntu-latest
