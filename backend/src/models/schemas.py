@@ -1,0 +1,908 @@
+"""Pydantic schemas for API request/response validation.
+
+Based on Issue #1 - API specifications.
+"""
+
+import logging
+from datetime import datetime
+from uuid import UUID
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+logger = logging.getLogger(__name__)
+
+# ============================================================================
+# OAuth2 Token Introspection (RFC 7662, Issue #157)
+# ============================================================================
+
+
+class TokenIntrospectionResponse(BaseModel):
+    """OAuth 2.0 Token Introspection Response (RFC 7662).
+
+    Issue #157: Type-safe response model for /introspect endpoint.
+
+    Attributes:
+        active: Whether token is active
+        client_id: Client identifier (if active)
+        scope: Granted scopes (if active)
+        exp: Expiration timestamp (if active)
+        iat: Issued-at timestamp (if active)
+        token_type: Token type (if active)
+        aud: Audience/Resource (RFC 8707, if present)
+    """
+
+    active: bool
+    client_id: str | None = None
+    scope: str | None = None
+    exp: int | None = None
+    iat: int | None = None
+    token_type: str | None = None
+    aud: str | None = None  # RFC 8707 audience claim
+
+
+# ============================================================================
+# Memory API Schemas
+# ============================================================================
+
+
+class RememberRequest(BaseModel):
+    """Request schema for remember() API.
+
+    Example:
+        {
+            "summary": "認証エラー修正。JWTトークン有効期限チェック追加。",
+            "context_summary": "ユーザーからログイン失敗の報告があり...",
+            "content": "auth.pyのverify_token関数にexpired_atの検証を追加",
+            "details": {"code_diff": "...", "test_results": "..."},
+            "type": "code",
+            "importance": 0.8,
+            "tags": ["python", "authentication"],
+            "context": {"context_id": "my-context", "file_path": "auth.py"}
+        }
+    """
+
+    # Layer 1: 検索用サマリー (必須)
+    summary: str = Field(..., min_length=10, max_length=500, description="検索用サマリー")
+
+    # Layer 2: 文脈説明 (推奨)
+    context_summary: str | None = Field(None, max_length=2000, description="背景・文脈説明")
+
+    # Layer 3: 完全詳細
+    content: str = Field(..., min_length=1, description="基本内容")
+    details: dict | None = Field(None, description="完全詳細（JSONB）")
+
+    # メタデータ
+    type: str = Field(..., min_length=1, max_length=50, description="メモリタイプ")
+    importance: float = Field(0.5, ge=0.0, le=1.0, description="重要度 (0.0-1.0)")
+    tags: list[str] = Field(default_factory=list, description="タグ")
+    context: dict | None = Field(None, description="コンテキスト情報")
+
+    @field_validator("summary")
+    @classmethod
+    def validate_summary_length(cls, v: str) -> str:
+        """Validate summary length and warn if approaching maximum.
+
+        Optimal summary length: 100-250 characters
+        Warning threshold: 400 characters (80% of max 500)
+        Maximum: 500 characters (enforced by Field constraint)
+        """
+        length = len(v)
+
+        if length > 400:
+            logger.warning(
+                f"Summary length ({length} chars) exceeds recommended 250 chars. "
+                f"Consider splitting into multiple semantic memories for better search quality. "
+                f"See docs: /docs/chunking-guide.md"
+            )
+        elif length < 50:
+            logger.info(
+                f"Summary length ({length} chars) is quite short. "
+                f"Consider adding more context for better semantic matching (optimal: 100-250 chars)."
+            )
+
+        return v
+
+
+class RememberResponse(BaseModel):
+    """Response schema for remember() API."""
+
+    status: str = "success"
+    memory_id: UUID
+    scope: str
+
+
+class RecallRequest(BaseModel):
+    """Request schema for recall() API (Hybrid Search).
+
+    Example:
+        {
+            "query": "認証エラーの解決方法",
+            "k": 5,
+            "use_rerank": false,
+            "filters": {
+                "context_id": "my-context",
+                "scope": "persistent",
+                "type": "code"
+            }
+        }
+    """
+
+    query: str = Field(..., min_length=1, description="検索クエリ")
+    k: int = Field(5, ge=1, le=100, description="返却結果数")
+    use_rerank: bool = Field(False, description="Reranking (Voyage/Cohere)を使用")
+    filters: dict | None = Field(None, description="オプショナルフィルタ")
+
+
+class MemoryResponse(BaseModel):
+    """Response schema for single memory."""
+
+    memory_id: UUID
+    summary: str
+    context_summary: str | None
+    type: str
+    importance: float
+    scope: str
+    created_at: datetime
+    client: str
+    tags: list[str]
+    context: dict | None
+    score: float | None = Field(None, description="検索スコア（recall時のみ）")
+
+    class Config:
+        from_attributes = True
+
+
+class RelatedTagItem(BaseModel):
+    """Related tag with count and sample summary."""
+
+    tag: str
+    count: int
+    sample_summary: str | None = None
+
+
+class RecallResponse(BaseModel):
+    """Response schema for recall() API.
+
+    Issue #104: Added related_tags to help LLMs understand tag context.
+    """
+
+    results: list[MemoryResponse]
+    related_tags: list[RelatedTagItem] = []
+
+
+class ReferenceRequest(BaseModel):
+    """Request schema for reference() API."""
+
+    memory_id: UUID
+
+
+class ReferenceResponse(BaseModel):
+    """Response schema for reference() API (full details)."""
+
+    memory_id: UUID
+    summary: str
+    context_summary: str | None
+    content: str
+    details: dict | None
+    type: str
+    importance: float
+    tags: list[str]
+    context: dict | None
+    created_at: datetime
+    client: str
+
+
+class ForgetRequest(BaseModel):
+    """Request schema for forget() API."""
+
+    memory_id: UUID | None = Field(None, description="削除するメモリID")
+    query: str | None = Field(None, description="削除する検索クエリ")
+    k: int = Field(10, ge=1, le=100, description="削除する結果数（query指定時）")
+
+
+class ForgetResponse(BaseModel):
+    """Response schema for forget() API."""
+
+    status: str = "success"
+    deleted_count: int
+    memory_ids: list[UUID]
+
+
+class ExploreRequest(BaseModel):
+    """Request schema for explore() API.
+
+    Example:
+        {
+            "memory_id": "uuid",
+            "depth": 2,
+            "relation_types": ["neural_association"],
+            "min_weight": 0.05
+        }
+    """
+
+    memory_id: UUID = Field(..., description="起点メモリID")
+    depth: int = Field(2, ge=1, le=5, description="最大ホップ数")
+    relation_types: list[str] | None = Field(None, description="フィルタするリレーションタイプ")
+    min_weight: float = Field(0.05, ge=0.0, le=3.0, description="最小重み閾値（典型値: 0.02-0.05）")
+
+
+class RelatedMemoryResponse(BaseModel):
+    """Response schema for related memory in explore() API."""
+
+    memory_id: UUID
+    summary: str
+    context_summary: str | None
+    type: str
+    activation: float = Field(..., description="活性化強度 (0.0-1.0)")
+    hop: int = Field(..., description="起点からのホップ数")
+    weight: float = Field(..., description="エッジ重み")
+    path: list[UUID] = Field(..., description="起点からのパス")
+
+
+class ExploreResponse(BaseModel):
+    """Response schema for explore() API.
+
+    Returns:
+        seed_memory: 起点メモリ
+        related_memories: 関連メモリーリスト
+        metadata: 探索メタデータ
+    """
+
+    seed_memory: MemoryResponse
+    related_memories: list[RelatedMemoryResponse]
+    metadata: dict = Field(
+        default_factory=dict,
+        description="探索統計（total_activated, returned, etc.）",
+    )
+
+
+class MemoryStatsResponse(BaseModel):
+    """Memory statistics response schema (Issue #84).
+
+    Used by both MCP get_stats tool and REST API /memory/stats endpoint.
+    """
+
+    total_count: int = Field(..., description="Total number of memories (excluding deleted)")
+    working_count: int = Field(..., description="Number of working scope memories")
+    persistent_count: int = Field(..., description="Number of persistent scope memories")
+    by_type: dict[str, int] = Field(
+        default_factory=dict, description="Memory count breakdown by type"
+    )
+    by_importance: dict[str, int] = Field(
+        default_factory=dict, description="Memory count breakdown by importance level"
+    )
+    recent_activity: int = Field(
+        0, description="Recent memories count (time window varies: 24h for REST, 7d for MCP)"
+    )
+
+
+# ============================================================================
+# Authentication Schemas
+# ============================================================================
+
+
+class UserResponse(BaseModel):
+    """Response schema for user info."""
+
+    email: str
+    user_id: str
+    name: str | None
+    picture: str | None
+    role: str
+    timezone: str = "UTC"  # Issue #175: User timezone
+
+    class Config:
+        from_attributes = True
+
+
+class UserProfileResponse(BaseModel):
+    """Response schema for user profile.
+
+    Issue #175: User timezone settings
+    Issue #221: i18n support (locale)
+    """
+
+    id: int
+    email: str
+    name: str | None
+    picture: str | None
+    timezone: str
+    locale: str
+    role: str
+    current_workspace_id: UUID | None
+    # Issue #246: current_context_id removed (context always explicit)
+    created_at: datetime
+    last_login_at: datetime | None
+
+    class Config:
+        from_attributes = True
+
+
+class UpdateUserProfileRequest(BaseModel):
+    """Request schema for updating user profile.
+
+    Issue #175: User timezone settings
+    Issue #221: i18n support (locale)
+    """
+
+    name: str | None = None
+    timezone: str | None = Field(
+        None, description="IANA timezone (e.g., Asia/Tokyo, America/New_York)"
+    )
+    locale: str | None = Field(None, pattern="^(en|ja)$", description="UI language (en, ja)")
+
+
+class APIKeyCreate(BaseModel):
+    """Request schema for API key creation."""
+
+    name: str = Field(..., min_length=1, max_length=100)
+    expires_in_days: int | None = Field(None, ge=1, le=365, description="有効期限（日数）")
+
+
+class APIKeyResponse(BaseModel):
+    """Response schema for API key."""
+
+    id: int
+    key_prefix: str
+    name: str
+    created_at: datetime
+    last_used_at: datetime | None
+    revoked_at: datetime | None
+    expires_at: datetime | None
+
+    class Config:
+        from_attributes = True
+
+
+class APIKeyCreateResponse(BaseModel):
+    """Response schema for API key creation (includes plaintext key once)."""
+
+    key: str = Field(..., description="API key (show once, never stored in plaintext)")
+    key_info: APIKeyResponse
+
+
+class ExternalAPIKeyCreate(BaseModel):
+    """Request schema for external API key creation."""
+
+    key_name: str = Field(..., min_length=1, max_length=100)
+    provider: str = Field(..., min_length=1, max_length=50)
+    api_key_value: str = Field(..., min_length=1, description="API key value (will be encrypted)")
+
+
+class ExternalAPIKeyResponse(BaseModel):
+    """Response schema for external API key (masked)."""
+
+    id: int
+    key_name: str
+    provider: str
+    masked_value: str = Field(..., description="Masked API key (e.g., 'sk-proj-***')")
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ============================================================================
+# Context Search Config Schemas (Issue #130 → #160)
+# ============================================================================
+
+
+class ContextSearchConfigResponse(BaseModel):
+    """Response schema for context search configuration.
+
+    Issue #130: Context-scoped Search & Reranker Settings
+    Issue #146: Added immutable embedding configuration fields
+    Issue #160: Renamed from Project to Context
+    """
+
+    context_id: UUID
+    semantic_weight: float = Field(
+        ..., ge=0.0, le=1.0, description="Semantic search weight (0.0-1.0)"
+    )
+    bm25_weight: float = Field(
+        ..., ge=0.0, le=1.0, description="BM25 keyword search weight (0.0-1.0)"
+    )
+    fetch_factor: int = Field(..., ge=1, le=10, description="Candidate retrieval multiplier (1-10)")
+    use_rerank: bool = Field(..., description="Enable/disable reranking")
+    reranker_provider: str = Field(..., description="Reranker provider (voyage/cohere)")
+    reranker_model: str = Field(..., description="Provider-specific model name")
+    embedding_model: str = Field(..., description="Embedding model (immutable)")
+    embedding_dimensions: int = Field(..., description="Vector dimensions (immutable)")
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ContextSearchConfigUpdate(BaseModel):
+    """Request schema for updating context search configuration.
+
+    Issue #160: Renamed from ProjectSearchConfigUpdate to ContextSearchConfigUpdate
+    """
+
+    semantic_weight: float = Field(..., ge=0.0, le=1.0, description="Semantic search weight")
+    bm25_weight: float = Field(..., ge=0.0, le=1.0, description="BM25 keyword search weight")
+    fetch_factor: int = Field(..., ge=1, le=10, description="Candidate retrieval multiplier")
+    use_rerank: bool = Field(..., description="Enable/disable reranking")
+    reranker_provider: str = Field(..., description="Reranker provider: 'voyage' or 'cohere'")
+    reranker_model: str = Field(..., description="Provider-specific model name")
+
+    @model_validator(mode="after")
+    def validate_weights_sum(self) -> "ContextSearchConfigUpdate":
+        """Validate that weights sum to 1.0 (with tolerance)."""
+        semantic = self.semantic_weight
+        bm25 = self.bm25_weight
+
+        if abs(semantic + bm25 - 1.0) >= 0.01:
+            raise ValueError(f"Weights must sum to 1.0 (got {semantic + bm25:.2f})")
+        return self
+
+    @field_validator("reranker_model")
+    @classmethod
+    def validate_model_provider_match(cls, v: str, info) -> str:
+        """Validate that model matches provider."""
+        provider = info.data.get("reranker_provider")
+
+        valid_models = {
+            "voyage": ["rerank-2", "rerank-2-lite"],
+            "cohere": ["rerank-multilingual-v3.0", "rerank-english-v3.0"],
+        }
+
+        if provider and v not in valid_models.get(provider, []):
+            raise ValueError(
+                f"Invalid model '{v}' for provider '{provider}'. "
+                f"Valid models: {valid_models.get(provider, [])}"
+            )
+        return v
+
+    class Config:
+        validate_assignment = True
+
+
+
+# ============================================================================
+# System Admin Management Schemas (Issue #166)
+# ============================================================================
+
+
+class UserWithAdminFlag(BaseModel):
+    """User model with system admin flags for admin management.
+
+    Issue #166: System Admin vs Workspace Admin RBAC separation.
+    """
+
+    id: int
+    email: str
+    user_id: str
+    name: str | None
+    picture: str | None
+    role: str  # 'admin' or 'user'
+    is_initial_admin: bool
+    created_at: datetime
+    last_login_at: datetime | None
+    memory_count: int
+    is_active: bool
+
+    model_config = {
+        "from_attributes": True,
+        "json_encoders": {
+            datetime: lambda v: v.isoformat() + "Z"
+            if v and v.tzinfo is None
+            else v.isoformat()
+            if v
+            else None
+        },
+    }
+
+
+class SystemAdminListResponse(BaseModel):
+    """Response for listing system administrators.
+
+    Issue #166: System Admin management API.
+    """
+
+    admins: list[UserWithAdminFlag]
+    total: int
+    initial_admin_id: int
+
+
+class PromoteToSystemAdminRequest(BaseModel):
+    """Request to promote user to system admin.
+
+    Issue #166: System Admin promotion.
+    """
+
+    user_id: str = Field(..., description="OAuth2 user_id to promote")
+
+
+class PromoteToSystemAdminResponse(BaseModel):
+    """Response for system admin promotion.
+
+    Issue #166: System Admin promotion result.
+    """
+
+    success: bool
+    user: UserWithAdminFlag
+    message: str
+
+
+# ============================================================================
+# User Management Extension Schemas (Issue #164)
+# ============================================================================
+
+
+class UserWorkspaceInfo(BaseModel):
+    """Workspace membership info for a user.
+
+    Issue #164: User Management拡張.
+    Issue #276: Slug removed.
+    """
+
+    workspace_id: str
+    workspace_name: str
+    role: str  # owner/admin/member/viewer
+    is_primary: bool  # Matches user.current_workspace_id
+    joined_at: datetime | None
+    plan_name: str  # Workspace's current plan tier
+
+    class Config:
+        from_attributes = True
+
+
+class UserAccessibleContext(BaseModel):
+    """Context accessible to user.
+
+    Issue #164: User detail - accessible contexts.
+    """
+
+    context_id: str
+    context_name: str
+    workspace_id: str
+    workspace_name: str
+    role: str  # owner/editor/viewer
+    last_used_at: datetime | None
+
+    class Config:
+        from_attributes = True
+
+
+class UserDetailResponse(BaseModel):
+    """Comprehensive user detail response.
+
+    Issue #164: User detail page.
+    """
+
+    user: dict  # Basic user info
+    workspaces: list[UserWorkspaceInfo]
+    accessible_contexts: list[UserAccessibleContext]
+    stats: dict  # Usage statistics
+
+    class Config:
+        from_attributes = True
+
+
+# ============================================================================
+# Workspace Invitation Schemas (Issue #165)
+# ============================================================================
+
+
+class WorkspaceInvitationCreate(BaseModel):
+    """Create workspace invitation request.
+
+    Issue #165: Team Collaboration - Workspace Invitation System
+
+    Note: Email is required and must match the Google account used for OAuth login.
+    """
+
+    email: str = Field(
+        ...,
+        description="Email address (must match Google OAuth account)",
+        max_length=255,
+        pattern=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$",
+    )
+    role: str = Field(
+        "member",
+        pattern=r"^(owner|admin|member|viewer)$",
+        description="Role to assign upon acceptance",
+    )
+    expires_in_days: int | None = Field(
+        None,
+        ge=1,
+        le=365,
+        description="Days until expiration (7/30/90/365 or null=never)",
+    )
+    allowed_context_ids: list[str] | None = Field(
+        None,
+        description="Context IDs to allow (required for member/viewer, minimum 1)",
+    )
+
+
+class WorkspaceInvitationResponse(BaseModel):
+    """Workspace invitation response.
+
+    Issue #165: Team Collaboration - Workspace Invitation System
+    """
+
+    id: int
+    workspace_id: UUID
+    token: str
+    email: str | None
+    role: str
+    invited_by: str
+    expires_at: datetime | None
+    accepted_at: datetime | None
+    accepted_by: str | None
+    created_at: datetime
+    invitation_url: str  # Full URL to accept invitation
+    is_expired: bool
+    is_accepted: bool
+    allowed_context_ids: list[str] | None = Field(
+        None,
+        description="Allowed context IDs for member/viewer roles (Migration 042)",
+    )
+
+    class Config:
+        from_attributes = True
+
+
+class AcceptInvitationRequest(BaseModel):
+    """Accept invitation request.
+
+    Issue #165: Team Collaboration - Workspace Invitation System
+    """
+
+    token: str = Field(..., min_length=20, description="Invitation token")
+
+
+class AcceptInvitationResponse(BaseModel):
+    """Accept invitation response.
+
+    Issue #165: Team Collaboration - Workspace Invitation System
+    """
+
+    success: bool
+    workspace: dict  # WorkspaceResponse
+    member: dict  # WorkspaceMemberResponse
+
+
+# ============================================================================
+# Workspace OpenAI Key Status (Issue #181)
+# ============================================================================
+
+
+class OpenAIKeyStatusResponse(BaseModel):
+    """OpenAI API key status for workspace.
+
+    Issue #181: OpenAI API key guidance in context creation.
+    """
+
+    has_key: bool = Field(..., description="Whether workspace has OpenAI API key")
+    can_configure: bool = Field(..., description="Whether current user can configure keys")
+    external_keys_url: str = Field(..., description="URL to external keys configuration page")
+
+
+# ============================================================================
+# Pending Invitations (Issue #179)
+# ============================================================================
+
+
+class PendingInvitationItem(BaseModel):
+    """Pending invitation item for current user.
+
+    Issue #179: In-app invitation notifications.
+    """
+
+    id: int
+    workspace_id: str
+    workspace_name: str
+    role: str
+    invited_by: str
+    expires_at: datetime | None
+    created_at: datetime
+    token: str
+    invitation_url: str
+
+    class Config:
+        from_attributes = True
+
+
+class PendingInvitationsResponse(BaseModel):
+    """Response for pending invitations query.
+
+    Issue #179: In-app invitation notifications.
+    """
+
+    pending_invitations: list[PendingInvitationItem]
+    count: int
+
+
+# ============================================================================
+# Member Credentials (Migration 034)
+# ============================================================================
+
+
+class MemberAPIKeyResponse(BaseModel):
+    """Response for member's API key (Zero-knowledge model).
+
+    Migration 034: Member-scoped credentials.
+    """
+
+    id: int
+    name: str
+    key_prefix: str
+    plaintext_key: str | None  # Only if visible + owner
+    is_visible: bool
+    visibility_expires_at: str | None
+    created_at: str
+    revoked_at: str | None
+
+
+class MemberOAuthAppResponse(BaseModel):
+    """Response for member's OAuth app (Zero-knowledge model).
+
+    Migration 034: Member-scoped credentials.
+    """
+
+    client_id: str
+    client_name: str
+    plaintext_secret: str | None  # Only if visible + owner
+    is_visible: bool
+    visibility_expires_at: str | None
+    created_at: str
+    redirect_uris: list[str]
+    scope: str
+
+
+class MemberCredentialsResponse(BaseModel):
+    """Response for member credentials (API Keys).
+
+    Migration 034: Member-scoped credentials.
+    Note: OAuth Apps managed via /oauth/clients API.
+    """
+
+    api_keys: list[MemberAPIKeyResponse]  # Multiple API keys support
+    target_user_role: str  # Target user's workspace role (for permission checks)
+
+
+class CreateAPIKeyRequest(BaseModel):
+    """Request for creating a new API key."""
+
+    name: str
+    auto_hide_minutes: int = 10  # Auto-hide after 10 minutes (default)
+
+
+class RegenerateAPIKeyResponse(BaseModel):
+    """Response for API key regeneration.
+
+    Migration 034: Returns new plaintext key (shown once).
+    """
+
+    key: str
+    key_prefix: str
+    key_id: int
+
+
+class RegenerateOAuthSecretResponse(BaseModel):
+    """Response for OAuth client secret regeneration.
+
+    Migration 034: Returns new plaintext secret (shown once).
+    """
+
+    client_secret: str
+    client_id: str
+
+
+# ============================================================================
+# Resource Ingest API Schemas (Issue #238)
+# ============================================================================
+
+
+class ResourceEventRequest(BaseModel):
+    """Request schema for resource event ingestion.
+
+    Issue #238: Resource-driven incremental indexing.
+
+    Example:
+        {
+            "op": "upsert",
+            "doc_id": "PROD-12345",
+            "version": 3,
+            "payload": {
+                "product_name": "ワイヤレスイヤホン",
+                "price": 5980,
+                "category": "オーディオ"
+            },
+            "idempotency_key": "unique-client-key-123"
+        }
+    """
+
+    op: str = Field(
+        ..., pattern=r"^(upsert|delete)$", description="Operation: 'upsert' or 'delete'"
+    )
+    doc_id: str = Field(
+        ..., min_length=1, max_length=255, description="Document ID (stable across versions)"
+    )
+    version: int | None = Field(
+        None,
+        ge=1,
+        description="Document version (NULL for delete-all-versions, >=1 for specific version)",
+    )  # Issue #262
+    payload: dict | None = Field(None, description="Document payload (NULL for delete)")
+    idempotency_key: str | None = Field(
+        None, min_length=1, max_length=255, description="Optional idempotency key for deduplication"
+    )
+    event_metadata: dict = Field(
+        default_factory=dict, description="Additional metadata (source, tenant, etc.)"
+    )
+    importance: float | None = Field(
+        None, ge=0.0, le=1.0, description="Memory importance score (0.0-1.0, default 0.6)"
+    )  # Issue #262
+
+    @model_validator(mode="after")
+    def validate_payload_for_operation(self):
+        """Validate payload and version based on operation type."""
+        if self.op == "upsert":
+            if not self.payload:
+                # Code quality: Improved error message with context
+                raise ValueError(
+                    f"payload is required for upsert operation (doc_id={self.doc_id}, "
+                    f"version={self.version}, current_payload={self.payload})"
+                )
+            # P0-3: Fix - use 'is None' instead of 'not self.version' to allow version=0
+            if self.version is None:
+                # Code quality: Improved error message with context
+                raise ValueError(
+                    f"version is required for upsert operation (doc_id={self.doc_id}, "
+                    f"current_version={self.version})"
+                )
+        if self.op == "delete" and self.payload:
+            # Code quality: Improved error message with context
+            raise ValueError(
+                f"payload must be null for delete operation (doc_id={self.doc_id}, "
+                f"current_payload_keys={list(self.payload.keys()) if self.payload else None})"
+            )
+        return self
+
+
+class ResourceEventBatchRequest(BaseModel):
+    """Request schema for batch resource event ingestion.
+
+    Issue #238: Batch upsert/delete for efficiency.
+
+    Example:
+        {
+            "events": [
+                {"op": "upsert", "doc_id": "PROD-1", "version": 1, "payload": {...}},
+                {"op": "upsert", "doc_id": "PROD-2", "version": 1, "payload": {...}},
+                {"op": "delete", "doc_id": "PROD-999", "version": 5}
+            ]
+        }
+    """
+
+    events: list[ResourceEventRequest] = Field(
+        ..., min_length=1, max_length=100, description="Events (max 100)"
+    )
+
+
+class ResourceEventResponse(BaseModel):
+    """Response schema for resource event ingestion."""
+
+    status: str = "success"
+    event_id: int = Field(..., description="Created event ID")
+    queued: bool = Field(True, description="Whether indexing is queued")
+    # Bugfix: Allow None for unknown estimation
+    estimated_indexing_time_seconds: int | None = Field(
+        None, description="Estimated time until indexed (seconds, None if unknown)"
+    )
+
+
+class ResourceEventBatchResponse(BaseModel):
+    """Response schema for batch resource event ingestion."""
+
+    status: str = "success"
+    created_count: int = Field(..., description="Number of events created")
+    failed_count: int = Field(0, description="Number of events that failed")
+    event_ids: list[int] = Field(default_factory=list, description="Created event IDs")
+    errors: list[dict] = Field(default_factory=list, description="Error details for failed events")

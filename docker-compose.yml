@@ -1,0 +1,117 @@
+# Kagura Memory Cloud - Local Development
+#
+# Usage:
+#   docker compose up -d
+#
+# Access:
+#   API:      http://localhost:8080
+#   Frontend: http://localhost:3000 (run separately: cd frontend && npm run dev)
+#   MCP:      http://localhost:8080/mcp
+
+services:
+  # ==========================================================================
+  # Database Services
+  # ==========================================================================
+  # PostgreSQL (Primary DB + Graph memory)
+  postgres:
+    image: postgres:15-alpine
+    container_name: kagura-postgres
+    environment:
+      POSTGRES_DB: kagura
+      POSTGRES_USER: kagura
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-kagura_dev_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kagura"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Qdrant (Vector DB)
+  qdrant:
+    image: qdrant/qdrant:v1.15.0
+    container_name: kagura-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 10s bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Redis (Cache)
+  redis:
+    image: redis:7-alpine
+    container_name: kagura-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Backend API
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: kagura-api
+    env_file:
+      - .env.local
+    environment:
+      # Database (local docker postgres - async driver)
+      DATABASE_URL: postgresql+asyncpg://kagura:${DB_PASSWORD:-kagura_dev_password}@postgres:5432/kagura
+
+      # Qdrant (Vector DB)
+      QDRANT_URL: http://qdrant:6333
+
+      # Redis (Cache)
+      REDIS_URL: redis://redis:6379
+
+      # OAuth2 - Let .env.local handle these
+      # GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET are read from .env.local
+      GOOGLE_REDIRECT_URI: http://localhost:8080/api/v1/auth/google/callback
+
+      # Security (for development only - use proper secrets in production)
+      API_KEY_SECRET: "5691fff7607b15b56f4562e7d9d43808cba50cc5d5e3234fe0e7e6cb5d3190d9"
+      JWT_SECRET: "b93cdb3f0c155e7561b7e1291afb284a6baf4734df34d82369a0c47a953061ed"
+      JWT_ALGORITHM: "HS256"
+      JWT_EXPIRE_MINUTES: "60"
+
+      # API Settings
+      API_HOST: 0.0.0.0
+      API_PORT: 8080
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_COLORIZE: "true"
+      PYTHONUNBUFFERED: "1"
+
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:8080}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/src:/app/src  # Hot reload
+      - ./backend/tests:/app/tests
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --reload --log-level info --use-colors
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  redis_data:

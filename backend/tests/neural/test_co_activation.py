@@ -1,0 +1,398 @@
+"""Tests for CoActivationTracker."""
+
+from datetime import datetime, timedelta
+
+import pytest
+
+from neural.co_activation import CoActivationTracker
+from neural.config import NeuralMemoryConfig
+from neural.models import ActivationState
+
+
+class TestCoActivationTracker:
+    """Test CoActivationTracker for Hebbian learning input."""
+
+    @pytest.fixture
+    def config(self):
+        """Create test config."""
+        return NeuralMemoryConfig(
+            track_co_activation=True,
+            co_activation_window=60,  # 60 seconds window
+            min_co_activation_count=2,
+        )
+
+    @pytest.fixture
+    def tracker(self, config):
+        """Create CoActivationTracker."""
+        return CoActivationTracker(config)
+
+    def test_init(self, config):
+        """Test CoActivationTracker initialization."""
+        tracker = CoActivationTracker(config)
+        assert tracker.config == config
+        assert len(tracker._activation_history) == 0
+        assert len(tracker._co_activation_records) == 0
+
+    def test_record_activation_disabled(self):
+        """Test that recording is disabled when config flag is False."""
+        config = NeuralMemoryConfig(track_co_activation=False)
+        tracker = CoActivationTracker(config)
+
+        activations = [
+            ActivationState(node_id="node1", activation=1.0),
+            ActivationState(node_id="node2", activation=0.8),
+        ]
+
+        records = tracker.record_activation("user1", activations)
+
+        # Should return empty list when disabled
+        assert len(records) == 0
+
+    def test_record_activation_empty_list(self, tracker):
+        """Test recording empty activation list."""
+        records = tracker.record_activation("user1", [])
+
+        # Should handle gracefully
+        assert len(records) == 0
+
+    def test_record_activation_single_event(self, tracker):
+        """Test recording a single activation event."""
+        activations = [
+            ActivationState(node_id="node1", activation=1.0),
+            ActivationState(node_id="node2", activation=0.8),
+            ActivationState(node_id="node3", activation=0.6),
+        ]
+
+        records = tracker.record_activation("user1", activations)
+
+        # First event should create co-activation records for all pairs
+        # Pairs: (node1, node2), (node1, node3), (node2, node3) = 3 pairs
+        assert len(records) == 3
+
+        # Check that history is recorded
+        assert "user1" in tracker._activation_history
+        assert len(tracker._activation_history["user1"]) == 1
+
+    def test_record_activation_creates_pairs(self, tracker):
+        """Test that co-activation records are created for all pairs."""
+        activations = [
+            ActivationState(node_id="node1", activation=1.0),
+            ActivationState(node_id="node2", activation=0.8),
+        ]
+
+        records = tracker.record_activation("user1", activations)
+
+        # Should create 1 pair: (node1, node2)
+        assert len(records) == 1
+        record = records[0]
+
+        # Check record properties (order should be normalized)
+        assert {record.node_id_1, record.node_id_2} == {"node1", "node2"}
+        assert record.count == 1
+        assert record.user_id == "user1"
+
+        # Check activation product (1.0 * 0.8 = 0.8)
+        expected_product = 1.0 * 0.8
+        assert abs(record.average_activation_product - expected_product) < 0.001
+
+    def test_record_activation_updates_existing_record(self, tracker):
+        """Test that repeated co-activations update existing records."""
+        activations = [
+            ActivationState(node_id="node1", activation=1.0),
+            ActivationState(node_id="node2", activation=0.8),
+        ]
+
+        # First activation
+        records1 = tracker.record_activation("user1", activations)
+        assert records1[0].count == 1
+
+        # Second activation (within time window)
+        records2 = tracker.record_activation("user1", activations)
+        assert records2[0].count == 2
+
+        # Check that the record was updated (not created new)
+        all_records = tracker.get_all_co_activations("user1", min_count=0)
+        assert len(all_records) == 1  # Still only 1 record for this pair
+
+    def test_get_co_activation_record(self, tracker):
+        """Test retrieving a specific co-activation record."""
+        activations = [
+            ActivationState(node_id="node1", activation=1.0),
+            ActivationState(node_id="node2", activation=0.8),
+        ]
+
+        tracker.record_activation("user1", activations)
+
+        # Get record (order should not matter)
+        record1 = tracker.get_co_activation_record("user1", "node1", "node2")
+        record2 = tracker.get_co_activation_record("user1", "node2", "node1")
+
+        assert record1 is not None
+        assert record2 is not None
+        assert record1 == record2  # Same record regardless of order
+
+    def test_get_co_activation_record_not_exists(self, tracker):
+        """Test retrieving non-existent record."""
+        record = tracker.get_co_activation_record("user1", "node1", "node2")
+        assert record is None
+
+    def test_get_all_co_activations(self, tracker):
+        """Test retrieving all co-activation records."""
+        activations = [
+            ActivationState(node_id="node1", activation=1.0),
+            ActivationState(node_id="node2", activation=0.8),
+            ActivationState(node_id="node3", activation=0.6),
+        ]
+
+        # Create records
+        tracker.record_activation("user1", activations)
+
+        # Get all records
+        all_records = tracker.get_all_co_activations("user1", min_count=0)
+
+        # Should have 3 pairs: (1,2), (1,3), (2,3)
+        assert len(all_records) == 3
+
+    def test_get_all_co_activations_min_count_filter(self, tracker):
+        """Test filtering co-activations by minimum count."""
+        # Create first pair with multiple activations
+        activations1 = [
+            ActivationState(node_id="node1", activation=1.0),
+            ActivationState(node_id="node2", activation=0.8),
+        ]
+        tracker.record_activation("user1", activations1)
+        tracker.record_activation("user1", activations1)
+        tracker.record_activation("user1", activations1)  # Count = 3
+
+        # Create second pair with single activation
+        activations2 = [
+            ActivationState(node_id="node3", activation=1.0),
+            ActivationState(node_id="node4", activation=0.8),
+        ]
+        tracker.record_activation("user1", activations2)  # Count = 1
+
+        # Filter with min_count=2
+        filtered = tracker.get_all_co_activations("user1", min_count=2)
+
+        # Should only return (node1, node2) pair
+        assert len(filtered) == 1
+        record = filtered[0]
+        assert {record.node_id_1, record.node_id_2} == {"node1", "node2"}
+        assert record.count >= 2
+
+    def test_get_all_co_activations_sorted_by_count(self, tracker):
+        """Test that results are sorted by count (descending)."""
+        # Create pairs with different counts
+        activations1 = [
+            ActivationState(node_id="node1", activation=1.0),
+            ActivationState(node_id="node2", activation=0.8),
+        ]
+        # Record 3 times
+        tracker.record_activation("user1", activations1)
+        tracker.record_activation("user1", activations1)
+        tracker.record_activation("user1", activations1)
+
+        activations2 = [
+            ActivationState(node_id="node3", activation=1.0),
+            ActivationState(node_id="node4", activation=0.8),
+        ]
+        # Record 1 time
+        tracker.record_activation("user1", activations2)
+
+        # Get all records
+        all_records = tracker.get_all_co_activations("user1", min_count=0)
+
+        # Should be sorted by count descending
+        counts = [r.count for r in all_records]
+        assert counts == sorted(counts, reverse=True)
+
+        # First record should be (node1, node2) with count=3
+        assert all_records[0].count == 3
+
+    def test_get_frequently_co_activated_with(self, tracker):
+        """Test finding nodes frequently co-activated with a target node."""
+        # Create co-activations
+        # node1 co-activated with node2 (3 times) and node3 (1 time)
+        activations1 = [
+            ActivationState(node_id="node1", activation=1.0),
+            ActivationState(node_id="node2", activation=0.8),
+        ]
+        tracker.record_activation("user1", activations1)
+        tracker.record_activation("user1", activations1)
+        tracker.record_activation("user1", activations1)
+
+        activations2 = [
+            ActivationState(node_id="node1", activation=1.0),
+            ActivationState(node_id="node3", activation=0.6),
+        ]
+        tracker.record_activation("user1", activations2)
+
+        # Get frequently co-activated with node1
+        related = tracker.get_frequently_co_activated_with("user1", "node1", top_k=5)
+
+        # Should return [(node2, record), (node3, record)]
+        assert len(related) == 2
+
+        # node2 should be first (higher count)
+        assert related[0][0] == "node2"
+        assert related[0][1].count == 3
+
+        assert related[1][0] == "node3"
+        assert related[1][1].count == 1
+
+    def test_get_frequently_co_activated_with_top_k(self, tracker):
+        """Test top_k limit."""
+        # Create many co-activations
+        for i in range(2, 6):  # node2, node3, node4, node5
+            activations = [
+                ActivationState(node_id="node1", activation=1.0),
+                ActivationState(node_id=f"node{i}", activation=0.8),
+            ]
+            tracker.record_activation("user1", activations)
+
+        # Get top 2
+        related = tracker.get_frequently_co_activated_with("user1", "node1", top_k=2)
+
+        # Should only return 2 results
+        assert len(related) == 2
+
+    def test_clean_old_history(self, tracker):
+        """Test that old activation events are removed."""
+        # Create activation event
+        activations = [
+            ActivationState(node_id="node1", activation=1.0),
+            ActivationState(node_id="node2", activation=0.8),
+        ]
+        tracker.record_activation("user1", activations)
+
+        # Manually set old timestamp (outside window)
+        old_time = datetime.utcnow() - timedelta(seconds=120)  # 2 minutes ago
+        tracker._activation_history["user1"][0] = (
+            old_time,
+            tracker._activation_history["user1"][0][1],
+        )
+
+        # Record new activation (should trigger cleanup)
+        current_time = datetime.utcnow()
+        tracker._clean_old_history("user1", current_time)
+
+        # Old event should be removed (window is 60 seconds)
+        assert len(tracker._activation_history["user1"]) == 0
+
+    def test_co_activation_window(self, tracker):
+        """Test that co-activations are detected within time window."""
+        # Record first activation
+        activations1 = [ActivationState(node_id="node1", activation=1.0)]
+        tracker.record_activation("user1", activations1)
+
+        # Record second activation within window
+        activations2 = [ActivationState(node_id="node2", activation=0.8)]
+        tracker.record_activation("user1", activations2)
+
+        # Both nodes were activated within the window
+        # So they should be considered co-activated
+        all_records = tracker.get_all_co_activations("user1", min_count=0)
+
+        # Should have co-activation record
+        assert len(all_records) > 0
+
+    def test_clear_user_data(self, tracker):
+        """Test GDPR-compliant data clearing."""
+        # Create co-activations for two users
+        activations = [
+            ActivationState(node_id="node1", activation=1.0),
+            ActivationState(node_id="node2", activation=0.8),
+        ]
+
+        tracker.record_activation("user1", activations)
+        tracker.record_activation("user2", activations)
+
+        # Clear user1 data
+        tracker.clear_user_data("user1")
+
+        # user1 data should be gone
+        assert "user1" not in tracker._activation_history
+        assert "user1" not in tracker._co_activation_records
+
+        # user2 data should remain
+        assert "user2" in tracker._activation_history
+        assert "user2" in tracker._co_activation_records
+
+    def test_get_statistics_empty(self, tracker):
+        """Test statistics with no records."""
+        stats = tracker.get_statistics("user1")
+
+        assert stats["total_pairs"] == 0
+        assert stats["avg_count"] == 0.0
+        assert stats["max_count"] == 0
+        assert stats["min_count"] == 0
+
+    def test_get_statistics(self, tracker):
+        """Test statistics calculation."""
+        # Create co-activations with different counts
+        activations1 = [
+            ActivationState(node_id="node1", activation=1.0),
+            ActivationState(node_id="node2", activation=0.8),
+        ]
+        tracker.record_activation("user1", activations1)
+        tracker.record_activation("user1", activations1)
+        tracker.record_activation("user1", activations1)  # Count = 3
+
+        activations2 = [
+            ActivationState(node_id="node3", activation=1.0),
+            ActivationState(node_id="node4", activation=0.8),
+        ]
+        tracker.record_activation("user1", activations2)  # Count = 1
+
+        stats = tracker.get_statistics("user1")
+
+        assert stats["total_pairs"] == 2
+        assert stats["avg_count"] == 2.0  # (3 + 1) / 2
+        assert stats["max_count"] == 3
+        assert stats["min_count"] == 1
+        assert stats["history_size"] > 0
+
+    def test_co_activation_record_ordering(self, tracker):
+        """Test that node pairs are stored in consistent order."""
+        activations1 = [
+            ActivationState(node_id="node2", activation=0.8),
+            ActivationState(node_id="node1", activation=1.0),
+        ]
+
+        activations2 = [
+            ActivationState(node_id="node1", activation=1.0),
+            ActivationState(node_id="node2", activation=0.8),
+        ]
+
+        # Record both orders
+        tracker.record_activation("user1", activations1)
+        tracker.record_activation("user1", activations2)
+
+        # Should create only one record (not two)
+        all_records = tracker.get_all_co_activations("user1", min_count=0)
+        assert len(all_records) == 1
+
+        # Count should be 2 (both activations counted)
+        assert all_records[0].count == 2
+
+    def test_average_activation_product_calculation(self, tracker):
+        """Test that average activation product is calculated correctly."""
+        # First activation: 1.0 * 0.8 = 0.8
+        activations1 = [
+            ActivationState(node_id="node1", activation=1.0),
+            ActivationState(node_id="node2", activation=0.8),
+        ]
+        tracker.record_activation("user1", activations1)
+
+        # Second activation: 0.6 * 0.9 = 0.54
+        activations2 = [
+            ActivationState(node_id="node1", activation=0.6),
+            ActivationState(node_id="node2", activation=0.9),
+        ]
+        tracker.record_activation("user1", activations2)
+
+        record = tracker.get_co_activation_record("user1", "node1", "node2")
+
+        # Average should be (0.8 + 0.54) / 2 = 0.67
+        expected_avg = (0.8 + 0.54) / 2
+        assert abs(record.average_activation_product - expected_avg) < 0.01

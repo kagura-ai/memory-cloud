@@ -1,0 +1,587 @@
+"""Resource Ingest API routes.
+
+Issue #238: Resource-driven incremental indexing for Public Contexts.
+
+Provides endpoints for external systems (EC inventory, etc.) to push events.
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from auth.resource_tokens import ResourceTokenManager
+from db.base import get_db
+from models.resource import ResourceEvent, ResourceToken
+from models.schemas import (
+    ResourceEventBatchRequest,
+    ResourceEventBatchResponse,
+    ResourceEventRequest,
+    ResourceEventResponse,
+)
+from utils.datetime import utcnow
+from utils.exceptions import ConflictError, RateLimitError, ValidationError
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+router = APIRouter(prefix="/resources", tags=["resource-ingest"])
+
+# Maximum payload size (100KB)
+MAX_PAYLOAD_SIZE_BYTES = 100_000
+
+
+# ============================================================================
+# Dependency: Resource Token Authentication
+# ============================================================================
+
+
+async def verify_resource_token(
+    resource_id: str,
+    x_resource_api_key: str | None = Header(None, alias="X-Resource-API-Key"),
+    db: AsyncSession = Depends(get_db),
+) -> tuple[ResourceToken, int]:
+    """Verify resource token and return (token_record, quota).
+
+    Args:
+        resource_id: Resource ID from path parameter
+        x_resource_api_key: Resource API token from header
+        db: Database session
+
+    Returns:
+        Tuple of (token_record, quota_events_per_hour)
+
+    Raises:
+        HTTPException: 401 if token is invalid/revoked
+    """
+    if not x_resource_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="X-Resource-API-Key header required",
+        )
+
+    # Verify token
+    manager = ResourceTokenManager(db)
+    token_record = await manager.verify_token(x_resource_api_key, resource_id)
+
+    if not token_record:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or revoked resource token",
+        )
+
+    return token_record, token_record.quota_events_per_hour
+
+
+# ============================================================================
+# Resource Ingest Endpoints
+# ============================================================================
+
+
+@router.post(
+    "/{resource_id}/events",
+    response_model=ResourceEventResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def ingest_event(
+    resource_id: str,
+    request: ResourceEventRequest,
+    auth: tuple = Depends(verify_resource_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ingest a single resource event (upsert or delete).
+
+    Issue #238: Append-only event log for incremental indexing.
+
+    Security:
+        - Requires X-Resource-API-Key header
+        - Token must be scoped to this resource_id
+        - Rate limited by quota_events_per_hour
+
+    Request:
+        POST /api/v1/resources/{resource_id}/events
+        Headers:
+            X-Resource-API-Key: kagura_resource_...
+        Body:
+            {
+                "op": "upsert",
+                "doc_id": "PROD-12345",
+                "version": 3,
+                "payload": {"product_name": "...", "price": 5980},
+                "idempotency_key": "optional-key"
+            }
+
+    Response:
+        {
+            "status": "success",
+            "event_id": 12345,
+            "queued": true,
+            "estimated_indexing_time_seconds": 600
+        }
+
+    Errors:
+        - 401: Invalid/revoked token
+        - 409: Duplicate version (resource_id, doc_id, version already exists)
+        - 413: Payload too large (>100KB)
+        - 422: Validation error (e.g., missing payload for upsert)
+        - 429: Quota exceeded
+    """
+    token_record, quota_per_hour = auth
+
+    logger.info(
+        "resource_event_ingest_started",
+        resource_id=resource_id,
+        op=request.op,
+        doc_id=request.doc_id,
+        version=request.version,
+        has_payload=request.payload is not None,
+    )
+
+    # 1. Check quota (events per hour)
+    await _check_event_quota(resource_id, token_record.id, quota_per_hour)
+
+    # 2. Validate payload size
+    if request.payload:
+        import json
+
+        payload_size = len(json.dumps(request.payload))
+        if payload_size > MAX_PAYLOAD_SIZE_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Payload too large: {payload_size} bytes (max {MAX_PAYLOAD_SIZE_BYTES})",
+            )
+
+    # 3. SECURITY: Verify Context-Resource binding BEFORE creating event
+    # Issue #271 Code Review C-3: Validate before insert (avoid rollback)
+    from models.auth import Context, User
+
+    context_result = await db.execute(
+        select(Context).where(Context.resource_id == resource_id, Context.deleted_at.is_(None))
+    )
+    context = context_result.scalar_one_or_none()
+
+    if context and token_record.created_by:
+        # Get token creator's workspace
+        user_result = await db.execute(
+            select(User.current_workspace_id).where(User.user_id == token_record.created_by)
+        )
+        user_workspace_id = user_result.scalar_one_or_none()
+
+        # Verify context belongs to same workspace as token creator
+        if user_workspace_id and context.workspace_id != user_workspace_id:
+            logger.warning(
+                "resource_ingest_workspace_boundary_violation_prevented",
+                resource_id=resource_id,
+                context_workspace_id=str(context.workspace_id),
+                token_creator_org_id=str(user_workspace_id),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Context-Resource binding validation failed. This resource is bound to a context in a different workspace.",
+            )
+
+    # 4. Create event record
+    try:
+        event = ResourceEvent(
+            resource_id=resource_id,
+            op=request.op,
+            doc_id=request.doc_id,
+            version=request.version,
+            payload=request.payload,
+            idempotency_key=request.idempotency_key,
+            event_metadata=request.event_metadata,
+            importance=request.importance if request.importance is not None else 0.6,  # Issue #262
+        )
+
+        db.add(event)
+        await db.commit()
+        await db.refresh(event)
+
+        logger.info(
+            "resource_event_created",
+            event_id=event.id,
+            resource_id=resource_id,
+            op=request.op,
+            doc_id=request.doc_id,
+        )
+
+        # 5. Schedule indexer run (find all contexts using this resource)
+        await _schedule_indexer_for_resource(db, resource_id)
+
+        # 6. Log usage statistics (Issue #242)
+        # Context was already fetched in step 3 for validation
+        from utils.usage_logger import log_usage
+
+        await log_usage(
+            db=db,
+            user_id=token_record.created_by or "system",
+            endpoint=f"/api/v1/resources/{resource_id}/events",
+            method="POST",
+            status_code=201,
+            response_time_ms=None,
+            context_id=str(context.id) if context else None,  # Bugfix: Add context_id
+            workspace_id=str(context.workspace_id) if context else None,  # Bugfix: Add workspace_id
+        )
+
+        return ResourceEventResponse(
+            status="success",
+            event_id=event.id,
+            queued=True,
+            estimated_indexing_time_seconds=None,  # Removed misleading estimate
+        )
+
+    except IntegrityError as e:
+        await db.rollback()
+        error_msg = str(e)
+
+        # Handle duplicate version error
+        if "unique_resource_doc_version" in error_msg:
+            raise ConflictError(
+                f"Version {request.version} already exists for document {request.doc_id}"
+            ) from e
+
+        # Handle duplicate idempotency key
+        if "unique_idempotency_key" in error_msg:
+            # Find existing event with this idempotency key
+            result = await db.execute(
+                select(ResourceEvent).where(
+                    ResourceEvent.idempotency_key == request.idempotency_key
+                )
+            )
+            existing_event = result.scalar_one_or_none()
+
+            if existing_event:
+                logger.info(
+                    "idempotent_request_detected",
+                    idempotency_key=request.idempotency_key,
+                    existing_event_id=existing_event.id,
+                )
+                # Return existing event (202 Accepted - idempotent success)
+                return ResourceEventResponse(
+                    status="success",
+                    event_id=existing_event.id,
+                    queued=False,  # Already processed
+                    estimated_indexing_time_seconds=0,
+                )
+
+        # Unknown integrity error
+        logger.error("resource_event_integrity_error", error=error_msg)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create event due to database constraint",
+        ) from e
+
+
+@router.post(
+    "/{resource_id}/events/batch",
+    response_model=ResourceEventBatchResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def ingest_batch(
+    resource_id: str,
+    request: ResourceEventBatchRequest,
+    auth: tuple = Depends(verify_resource_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ingest multiple resource events in a single request.
+
+    Issue #238: Batch ingestion for efficiency (up to 100 events).
+
+    Security:
+        - Same as single event ingestion
+        - Quota checked for entire batch
+
+    Request:
+        POST /api/v1/resources/{resource_id}/events/batch
+        Headers:
+            X-Resource-API-Key: kagura_resource_...
+        Body:
+            {
+                "events": [
+                    {"op": "upsert", "doc_id": "PROD-1", "version": 1, "payload": {...}},
+                    {"op": "delete", "doc_id": "PROD-999", "version": 5}
+                ]
+            }
+
+    Response:
+        {
+            "status": "success",
+            "created_count": 2,
+            "failed_count": 0,
+            "event_ids": [12345, 12346],
+            "errors": []
+        }
+
+    Errors:
+        - 401: Invalid/revoked token
+        - 422: Validation error (max 100 events)
+        - 429: Quota exceeded
+    """
+    token_record, quota_per_hour = auth
+
+    logger.info(
+        "resource_batch_ingest_started",
+        resource_id=resource_id,
+        batch_size=len(request.events),
+    )
+
+    # 1. Validate batch size (already enforced by Pydantic, but double-check)
+    if len(request.events) > 100:
+        raise ValidationError("Batch size exceeds maximum (100 events)")
+
+    # 2. Check quota for entire batch
+    await _check_event_quota(
+        resource_id, token_record.id, quota_per_hour, count=len(request.events)
+    )
+
+    # 3. Process events
+    created_ids: list[int] = []
+    errors: list[dict] = []
+
+    for idx, event_req in enumerate(request.events):
+        try:
+            # Validate payload size
+            if event_req.payload:
+                import json
+
+                payload_size = len(json.dumps(event_req.payload))
+                if payload_size > MAX_PAYLOAD_SIZE_BYTES:
+                    errors.append(
+                        {
+                            "index": idx,
+                            "doc_id": event_req.doc_id,
+                            "error": f"Payload too large: {payload_size} bytes",
+                        }
+                    )
+                    continue
+
+            # Create event
+            event = ResourceEvent(
+                resource_id=resource_id,
+                op=event_req.op,
+                doc_id=event_req.doc_id,
+                version=event_req.version,
+                payload=event_req.payload,
+                idempotency_key=event_req.idempotency_key,
+                event_metadata=event_req.event_metadata,
+                importance=event_req.importance
+                if event_req.importance is not None
+                else 0.6,  # Issue #262
+            )
+
+            db.add(event)
+            await db.flush()
+            created_ids.append(event.id)
+
+        except IntegrityError as e:
+            error_msg = str(e)
+
+            # Duplicate version (skip silently)
+            if "unique_resource_doc_version" in error_msg:
+                logger.debug(
+                    "duplicate_version_skipped",
+                    doc_id=event_req.doc_id,
+                    version=event_req.version,
+                )
+                errors.append(
+                    {
+                        "index": idx,
+                        "doc_id": event_req.doc_id,
+                        "error": f"Duplicate version {event_req.version}",
+                    }
+                )
+
+            # Duplicate idempotency key (skip silently)
+            elif "unique_idempotency_key" in error_msg:
+                logger.debug("duplicate_idempotency_key_skipped", key=event_req.idempotency_key)
+                errors.append(
+                    {
+                        "index": idx,
+                        "doc_id": event_req.doc_id,
+                        "error": "Duplicate idempotency key",
+                    }
+                )
+
+            else:
+                # Unknown error
+                logger.error("batch_event_failed", index=idx, error=error_msg)
+                errors.append(
+                    {
+                        "index": idx,
+                        "doc_id": event_req.doc_id,
+                        "error": "Database constraint violation",
+                    }
+                )
+
+        except Exception as e:
+            logger.error("batch_event_unexpected_error", index=idx, error=str(e))
+            errors.append(
+                {
+                    "index": idx,
+                    "doc_id": event_req.doc_id,
+                    "error": str(e),
+                }
+            )
+
+    # 4. Commit all successfully created events
+    # NOTE: Batch ingest uses partial-success model (some events can fail while others succeed)
+    # This is intentional for resilience. If atomic behavior is needed, use individual requests.
+    await db.commit()
+
+    # 5. Schedule indexer run
+    if created_ids:
+        await _schedule_indexer_for_resource(db, resource_id)
+
+        # 6. Log usage statistics (Issue #242)
+        from utils.usage_logger import log_usage
+
+        await log_usage(
+            db=db,
+            user_id=token_record.created_by or "system",
+            endpoint=f"/api/v1/resources/{resource_id}/events/batch",
+            method="POST",
+            status_code=201,
+            response_time_ms=None,
+        )
+
+    logger.info(
+        "resource_batch_ingest_completed",
+        resource_id=resource_id,
+        created_count=len(created_ids),
+        failed_count=len(errors),
+    )
+
+    return ResourceEventBatchResponse(
+        status="success",
+        created_count=len(created_ids),
+        failed_count=len(errors),
+        event_ids=created_ids,
+        errors=errors,
+    )
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+
+async def _check_event_quota(
+    resource_id: str,
+    token_id: int,
+    quota_per_hour: int,
+    count: int = 1,
+) -> None:
+    """Check event ingestion quota (per token per hour).
+
+    Uses Redis counter with 1-hour TTL.
+
+    Args:
+        resource_id: Resource identifier
+        token_id: Token ID
+        quota_per_hour: Maximum events allowed per hour
+        count: Number of events to check (default: 1)
+
+    Raises:
+        RateLimitError: If quota exceeded (429)
+    """
+    redis_key = f"resource:events:{resource_id}:{token_id}:hour"
+
+    try:
+        # Get current count without incrementing (fix off-by-one error)
+        from db.redis import get_cache
+
+        current_count_str = await get_cache(redis_key)
+        current_count = int(current_count_str) if current_count_str else 0
+
+        # Check quota BEFORE incrementing
+        if current_count + count > quota_per_hour:
+            logger.warning(
+                "resource_event_quota_exceeded",
+                resource_id=resource_id,
+                token_id=token_id,
+                current=current_count,
+                quota=quota_per_hour,
+            )
+            raise RateLimitError(
+                message=f"Event quota exceeded: {current_count}/{quota_per_hour} events per hour",
+                retry_after=3600,  # Retry after 1 hour
+            )
+
+        logger.debug(
+            "resource_event_quota_checked",
+            resource_id=resource_id,
+            current=current_count,
+            quota=quota_per_hour,
+        )
+
+    except RateLimitError:
+        raise  # Re-raise RateLimitError
+    except Exception as e:
+        # Redis errors: Fail-closed for security (reject request)
+        logger.error("redis_quota_check_failed", error=str(e))
+        raise RateLimitError(
+            message="Quota service unavailable. Please try again later.", retry_after=60
+        ) from e
+
+
+async def _schedule_indexer_for_resource(db: AsyncSession, resource_id: str) -> None:
+    """Schedule indexer runs for all contexts using this resource.
+
+    Args:
+        db: Database session
+        resource_id: Resource identifier
+    """
+    from datetime import timedelta
+
+    from models.auth import Context
+    from models.resource import IndexerState
+
+    # Find all public contexts using this resource
+    result = await db.execute(
+        select(Context).where(
+            Context.resource_id == resource_id,
+            Context.is_public.is_(True),
+            Context.deleted_at.is_(None),
+        )
+    )
+    contexts = list(result.scalars().all())
+
+    if not contexts:
+        logger.debug("no_contexts_for_resource", resource_id=resource_id)
+        return
+
+    # Schedule indexer for each context
+    for context in contexts:
+        # Get or create indexer state
+        state_result = await db.execute(
+            select(IndexerState).where(
+                IndexerState.resource_id == resource_id,
+                IndexerState.context_id == context.id,
+            )
+        )
+        state = state_result.scalar_one_or_none()
+
+        if not state:
+            # Create new state
+            state = IndexerState(
+                resource_id=resource_id,
+                context_id=context.id,
+                last_offset=0,
+                job_status="queued",
+                next_run_at=utcnow() + timedelta(minutes=1),  # Run in 1 minute
+            )
+            db.add(state)
+        elif state.job_status == "idle":
+            # Update to queued
+            state.job_status = "queued"
+            state.next_run_at = utcnow() + timedelta(minutes=1)
+
+        await db.flush()
+
+    logger.info(
+        "indexer_scheduled_for_contexts",
+        resource_id=resource_id,
+        context_count=len(contexts),
+    )

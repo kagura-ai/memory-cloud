@@ -1,0 +1,37 @@
+# CODEOWNERS file for Kagura Memory Cloud v5.0
+#
+# This file defines code ownership and review requirements.
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owners for everything in the repo
+* @JFK
+
+# Backend
+/backend/ @JFK
+/backend/src/api/ @JFK
+/backend/src/auth/ @JFK
+/backend/src/core/ @JFK
+/backend/src/db/ @JFK
+/backend/tests/ @JFK
+
+# Frontend
+/frontend/ @JFK
+
+# Infrastructure
+/infrastructure/ @JFK
+*.tf @JFK
+*.tfvars @JFK
+
+# Docker & CI/CD
+/docker-compose*.yml @JFK
+/.github/workflows/ @JFK
+
+# Documentation
+/docs/ @JFK
+/*.md @JFK
+/CLAUDE.md @JFK
+
+# Configuration
+/.env.example @JFK
+/.gitignore @JFK
+/.editorconfig @JFK

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/kagura-ai/memory-cloud/blob/dev/README.md
+    about: Check the documentation before opening an issue
+  - name: Discussions
+    url: https://github.com/kagura-ai/memory-cloud/discussions
+    about: Ask questions and discuss ideas

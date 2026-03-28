@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="{{ locale }}">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kagura Memory Cloud - Authorization</title>
+<style>
+* {margin:0;padding:0;box-sizing:border-box}
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: linear-gradient(135deg, rgb(4 120 87 / var(--tw-bg-opacity, 1)) 0%, rgb(4 120 87 / var(--tw-bg-opacity, 1)) 100%);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+.card {
+    background: white;
+    border-radius: 16px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    padding: 40px;
+    max-width: 480px;
+    width: 100%;
+}
+.logo {
+    text-align: center;
+    margin-bottom: 32px;
+}
+h1 {
+    font-size: 24px;
+    color: #1a1a1a;
+    margin-bottom: 24px;
+    text-align: center;
+}
+.app-info {
+    background: #f8f9fa;
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 24px;
+}
+.app-name {
+    font-size: 18px;
+    font-weight: 600;
+    color: rgb(4 120 87 / var(--tw-bg-opacity, 1));
+    margin-bottom: 12px;
+}
+.permission-item {
+    display: flex;
+    align-items: center;
+    padding: 8px 0;
+    color: #4a5568;
+}
+.permission-item:before {
+    content: "✓";
+    color: #10b981;
+    font-weight: bold;
+    margin-right: 8px;
+}
+.user-info {
+    text-align: center;
+    color: #718096;
+    margin-bottom: 32px;
+    font-size: 14px;
+}
+
+/* ===== Button Layout Fix ===== */
+.actions {
+    display: flex;
+    justify-content: center;
+    gap: 16px;
+}
+.actions form {
+    flex: none;
+    width: 160px;
+}
+button {
+    width: 100%;
+    padding: 14px;
+    border: none;
+    border-radius: 8px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.approve {
+    background: linear-gradient(135deg, rgb(4 120 87 / var(--tw-bg-opacity, 1)) 0%, rgb(4 120 87 / var(--tw-bg-opacity, 1)) 100%);
+    color: white;
+}
+.approve:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px rgba(4,120,87,0.4);
+}
+.deny {
+    background: rgb(239 68 68 / var(--tw-border-opacity, 1));
+    color: white;
+}
+.deny:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px rgba(239,68,68,0.4);
+}
+
+
+/* ===== Inspired by reference hero design ===== */
+:root {
+  --tw-bg-opacity: 1;
+  --tw-border-opacity: 1;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-radius: 9999px;
+  border: 1px solid rgba(4, 120, 87, 0.18);
+  background: linear-gradient(90deg, rgba(4,120,87,0.08), rgba(16,185,129,0.08));
+  box-shadow: 0 14px 30px rgba(4,120,87,0.18);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  animation: floaty 4.5s ease-in-out infinite;
+}
+.badge .badge-text {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  background: linear-gradient(90deg, rgb(4 120 87 / var(--tw-bg-opacity, 1)), rgba(16,185,129,1));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+@keyframes floaty {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+.card {
+  border: 1px solid rgba(0,0,0,0.06);
+}
+
+.subtitle {
+  text-align: center;
+  color: #4b5563;
+  font-size: 14px;
+  margin-top: -12px;
+  margin-bottom: 22px;
+}
+
+button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 4px rgba(4,120,87,0.22), 0 8px 20px rgba(0,0,0,0.10);
+}
+.deny:focus-visible {
+  box-shadow: 0 0 0 4px rgba(239,68,68,0.22), 0 8px 20px rgba(0,0,0,0.10);
+}
+
+/* Responsive button layout */
+@media (max-width: 420px) {
+  .actions {
+    flex-direction: column;
+  }
+  .actions form {
+    width: 100%;
+  }
+}
+
+</style>
+</head>
+<body>
+<div class="card">
+<div class="logo">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 100" style="height: 60px; width: auto; margin: 0 auto; display: block;">
+  <path d="M70 40 C110 15, 190 25, 230 40 S280 65, 250 70 S170 80, 150 70 S90 65, 70 40"
+        fill="none" stroke="rgb(220, 38, 38)" stroke-width="0.8" stroke-opacity="0.25"/>
+  <path d="M75 35 C125 20, 175 10, 225 35 S265 45, 245 65 S185 75, 145 65 S95 50, 75 35"
+        fill="none" stroke="rgb(4 120 87 / var(--tw-bg-opacity, 1))" stroke-width="0.7" stroke-opacity="0.2"/>
+  <path d="M85 30 C135 5, 165 15, 215 25 S265 45, 235 55 S155 65, 135 55 S95 45, 85 30"
+        fill="none" stroke="rgb(220, 38, 38)" stroke-width="0.6" stroke-opacity="0.15"/>
+  <path d="M65 45 C115 25, 185 30, 235 45 S275 70, 255 75 S175 85, 155 75 S85 70, 65 45"
+        fill="none" stroke="rgb(4 120 87 / var(--tw-bg-opacity, 1))" stroke-width="0.5" stroke-opacity="0.1"/>
+  <defs>
+    <linearGradient id="redGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color: rgb(239 68 68 / var(--tw-border-opacity, 1)); stop-opacity: 0.9"/>
+      <stop offset="100%" style="stop-color: rgb(239 68 68 / var(--tw-border-opacity, 1)); stop-opacity: 1"/>
+    </linearGradient>
+  </defs>
+  <text x="150" y="45" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', serif" font-size="36" font-weight="bold" fill="url(#redGrad)" text-anchor="middle">Kagura</text>
+  <text x="150" y="80" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', serif" font-size="32" font-weight="bold" fill="rgb(4 120 87 / var(--tw-bg-opacity, 1))" text-anchor="middle">Ai</text>
+  <path d="M75 48 C100 53, 130 45, 160 50 C190 54, 210 45, 235 48"
+        fill="none" stroke="rgb(4 120 87 / var(--tw-bg-opacity, 1))" stroke-width="0.9" stroke-opacity="0.5"/>
+  <path d="M80 53 C110 58, 150 48, 180 53 C210 58, 220 50, 240 55"
+        fill="none" stroke="rgb(239 68 68 / var(--tw-border-opacity, 1))" stroke-width="0.7" stroke-opacity="0.3"/>
+</svg>
+</div>
+<div style="text-align:center; margin-bottom: 18px;">
+  <div class="badge" role="note" aria-label="Kagura Memory Cloud Authorization">
+    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: rgb(4 120 87 / var(--tw-bg-opacity, 1));">
+      <path d="M12 2l1.2 5.4a2 2 0 0 0 1.6 1.6L20.2 10l-5.4 1.2a2 2 0 0 0-1.6 1.6L12 18.2l-1.2-5.4a2 2 0 0 0-1.6-1.6L3.8 10l5.4-1.2a2 2 0 0 0 1.6-1.6L12 2z"/>
+      <path d="M20 2v4"/>
+      <path d="M22 4h-4"/>
+    </svg>
+    <span class="badge-text">{{ messages.badge_text }}</span>
+  </div>
+</div>
+<h1>{{ messages.title }}</h1>
+<div class="subtitle">{{ messages.subtitle }}</div>
+<div class="app-info">
+<div class="app-name">{{ client_name }}</div>
+<div class="permission-item">{{ messages.permissions.read }}</div>
+<div class="permission-item">{{ messages.permissions.write }}</div>
+<div class="permission-item">{{ messages.permissions.manage }}</div>
+</div>
+<div class="user-info">
+{{ messages.signing_in_as }} <strong>{{ user_email }}</strong>
+</div>
+<div class="actions">
+<form method="POST" action="/api/v1/oauth/authorize?{{ query_string }}">
+<input type="hidden" name="confirm" value="no">
+<button type="submit" class="deny"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>{{ messages.cancel }}</button>
+</form>
+<form method="POST" action="/api/v1/oauth/authorize?{{ query_string }}">
+<input type="hidden" name="confirm" value="yes">
+<button type="submit" class="approve"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><path d="M20 6L9 17l-5-5"/></svg>{{ messages.authorize }}</button>
+</form>
+</div>
+</div>
+</body>
+</html>

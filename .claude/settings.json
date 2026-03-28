@@ -1,0 +1,111 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls *)",
+      "Bash(tree *)",
+      "Bash(wc *)",
+      "Bash(git log *)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git branch *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git checkout *)",
+      "Bash(git push *)",
+      "Bash(git fetch *)",
+      "Bash(git merge *)",
+      "Bash(git restore *)",
+      "Bash(git rebase *)",
+      "Bash(git grep *)",
+      "Bash(ruff check *)",
+      "Bash(ruff format *)",
+      "Bash(pyright *)",
+      "Bash(cd backend && pytest *)",
+      "Bash(cd backend && python -m pytest *)",
+      "Bash(make *)",
+      "Bash(gh issue view *)",
+      "Bash(gh issue list *)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr list *)",
+      "Bash(docker ps *)",
+      "Bash(docker logs *)",
+      "Bash(npm run *)",
+      "Bash(npx *)"
+    ],
+    "deny": [
+      "Bash(rm -rf /)",
+      "Bash(sudo rm -rf *)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "file_path=$(cat | jq -r '.tool_input.file_path // .tool_input.file_path // empty'); [ -z \"$file_path\" ] && exit 0; case \"$file_path\" in *.py) ruff format --quiet \"$file_path\" 2>/dev/null; exit 0;; *.ts|*.tsx|*.js|*.jsx) npx prettier --write \"$file_path\" 2>/dev/null; exit 0;; *) exit 0;; esac"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/scripts/sync-memory-to-cloud.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "INPUT=$(cat); FILE=$(echo \"$INPUT\" | jq -r '.tool_input.file_path // empty'); [ -z \"$FILE\" ] && exit 0; case \"$FILE\" in *.env|*.env.*|.env*) echo 'Blocked: .env files are protected. Use environment variables instead.' >&2; exit 2;; *.lock|*.lock.*) echo 'Blocked: Lock files must not be modified manually.' >&2; exit 2;; *) exit 0;; esac"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "INPUT=$(cat); CONTENT=$(echo \"$INPUT\" | jq -r '.tool_input.content // .tool_input.new_string // empty'); [ -z \"$CONTENT\" ] && exit 0; if echo \"$CONTENT\" | grep -qE '(kagura_[A-Za-z0-9_-]{20,}|sk-[a-zA-Z0-9]{20,}|AKIA[0-9A-Z]{16}|password\\s*=\\s*[\"'\\'']{1}[^\"'\\'']{8,}[\"'\\'']{1})'; then echo 'Warning: Potential hardcoded secret detected. Use environment variables instead.' >&2; exit 2; fi; exit 0"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "INPUT=$(cat); CONTENT=$(echo \"$INPUT\" | jq -r '.tool_input.content // .tool_input.new_string // empty'); [ -z \"$CONTENT\" ] && exit 0; if echo \"$CONTENT\" | grep -qE 'f\"[^\"]*\\b(SELECT|INSERT|UPDATE|DELETE|DROP)\\b|f'\\''[^'\\'']*\\b(SELECT|INSERT|UPDATE|DELETE|DROP)\\b'; then echo 'Warning: f-string SQL query detected. Use SQLAlchemy parameterized queries instead.' >&2; exit 2; fi; exit 0"
+          }
+        ]
+      }
+      ,
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "INPUT=$(cat); CMD=$(echo \"$INPUT\" | jq -r '.tool_input.command // empty'); if echo \"$CMD\" | grep -qE 'gh pr (merge|create)'; then echo 'Reminder: Before PR, ensure /quality → /simplify → /self-review have been run.' >&2; exit 0; fi; exit 0"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "MESSAGE=$(cat | jq -r '.message // \"Claude Code needs your attention\"'); command -v notify-send >/dev/null 2>&1 && notify-send 'Claude Code' \"$MESSAGE\" 2>/dev/null; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}
