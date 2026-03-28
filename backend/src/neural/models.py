@@ -6,13 +6,13 @@ including memory nodes, activation states, and co-activation records.
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from utils.datetime import utcnow
 
 
-class MemoryKind(str, Enum):
+class MemoryKind(StrEnum):
     """Types of memory nodes."""
 
     FACT = "fact"
@@ -26,7 +26,7 @@ class MemoryKind(str, Enum):
     DECISION = "decision"
 
 
-class SourceKind(str, Enum):
+class SourceKind(StrEnum):
     """Sources of memory information."""
 
     USER = "user"

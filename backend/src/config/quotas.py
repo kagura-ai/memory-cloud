@@ -6,10 +6,10 @@ Issue #2 - Phase 1: QPS要件定義
 Issue #1 - Quota management
 """
 
-from enum import Enum
+from enum import StrEnum
 
 
-class UserPlan(str, Enum):
+class UserPlan(StrEnum):
     """User plan types."""
 
     FREE = "free"

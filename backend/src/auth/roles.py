@@ -14,7 +14,7 @@ Example:
     True
 """
 
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel, Field
 from sqlalchemy import func
@@ -22,7 +22,7 @@ from sqlalchemy import func
 from utils.datetime import utcnow
 
 
-class Role(str, Enum):
+class Role(StrEnum):
     """User roles for access control.
 
     Attributes:

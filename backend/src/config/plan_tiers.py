@@ -6,14 +6,14 @@ Defines quota limits and feature access for each plan tier.
 """
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 # Constants
 UNLIMITED_CONTEXTS = 999999  # Effectively unlimited
 PROTECTED_KEYS = frozenset(["OPENAI_API_KEY"])  # Keys that cannot be deleted
 
 
-class PlanName(str, Enum):
+class PlanName(StrEnum):
     """Plan tier names enum for type safety.
 
     Issue #196: Enum abstraction to prevent typos and improve IDE support.
