@@ -5,6 +5,10 @@
 Give your AI assistants persistent memory across conversations. Works with Claude, ChatGPT, Gemini, and any MCP-compatible client.
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Node.js 20+](https://img.shields.io/badge/node.js-20+-green.svg)](https://nodejs.org/)
+[![MCP](https://img.shields.io/badge/MCP-Streamable_HTTP-purple.svg)](https://modelcontextprotocol.io/)
+[![Python SDK](https://img.shields.io/badge/SDK-kagura--memory-orange.svg)](https://github.com/kagura-ai/kagura-memory-python-sdk)
 
 ## What is Kagura Memory Cloud?
 
