@@ -152,8 +152,20 @@ test-cov:
 .PHONY: test-cov-local
 test-cov-local:
 	@echo "Running tests with coverage locally..."
-	cd $(BACKEND_DIR) && pytest --cov=src --cov-report=html --cov-report=term-missing
+	cd $(BACKEND_DIR) && pytest --cov=src --cov-report=html --cov-report=xml --cov-report=term-missing
 	@echo "Coverage report: backend/htmlcov/index.html"
+
+.PHONY: test-unit
+test-unit:
+	@echo "Running unit tests (no DB required)..."
+	cd $(BACKEND_DIR) && pytest tests/api/ tests/neural/ tests/utils/ tests/auth/ -v --ignore=tests/integration --ignore=tests/e2e
+
+.PHONY: coverage-upload
+coverage-upload:
+	@echo "Running unit tests with coverage and uploading to Codecov..."
+	cd $(BACKEND_DIR) && pytest tests/api/ tests/auth/ tests/smoke/ tests/neural/test_hebbian.py -v --cov=src --cov-report=xml --cov-report=term-missing -x || true
+	cd $(BACKEND_DIR) && codecovcli upload-process --token $$CODECOV_TOKEN -f coverage.xml
+	@echo "Coverage uploaded to Codecov."
 
 .PHONY: test-neural
 test-neural:

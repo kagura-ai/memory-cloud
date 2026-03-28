@@ -62,6 +62,14 @@ gh release create vX.Y.Z --generate-notes --title "vX.Y.Z"
 
 Review the auto-generated notes. If needed, edit to add a summary section at the top.
 
-### 8. Report
+### 8. Upload coverage
+
+```bash
+make coverage-upload
+```
+
+This runs unit tests with coverage and uploads to Codecov (requires `CODECOV_TOKEN` in environment).
+
+### 9. Report
 
 Print the new version, link to the GitHub Release, and the Actions run.
