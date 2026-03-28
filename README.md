@@ -1,16 +1,25 @@
-# Kagura Memory Cloud
+<p align="center">
+  <img src="docs/assets/kagura-logo.svg" alt="Kagura Memory Cloud" width="400">
+</p>
 
-**Universal AI Memory Platform** — Self-hosted, open source.
+<p align="center">
+  <strong>Universal AI Memory Platform</strong> — Self-hosted, open source.<br>
+  Give your AI assistants persistent memory across conversations.
+</p>
 
-Give your AI assistants persistent memory across conversations. Works with Claude, ChatGPT, Gemini, and any MCP-compatible client.
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
+  <a href="https://github.com/kagura-ai/memory-cloud/actions/workflows/ci.yml"><img src="https://github.com/kagura-ai/memory-cloud/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://codecov.io/gh/kagura-ai/memory-cloud"><img src="https://codecov.io/gh/kagura-ai/memory-cloud/graph/badge.svg" alt="codecov"></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python 3.11+"></a>
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node.js-20+-green.svg" alt="Node.js 20+"></a>
+  <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-Streamable_HTTP-purple.svg" alt="MCP"></a>
+</p>
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![CI](https://github.com/kagura-ai/memory-cloud/actions/workflows/ci.yml/badge.svg)](https://github.com/kagura-ai/memory-cloud/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/kagura-ai/memory-cloud/graph/badge.svg)](https://codecov.io/gh/kagura-ai/memory-cloud)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Node.js 20+](https://img.shields.io/badge/node.js-20+-green.svg)](https://nodejs.org/)
-[![MCP](https://img.shields.io/badge/MCP-Streamable_HTTP-purple.svg)](https://modelcontextprotocol.io/)
-[![Python SDK](https://img.shields.io/badge/SDK-kagura--memory-orange.svg)](https://github.com/kagura-ai/kagura-memory-python-sdk)
+<p align="center">
+  Works with Claude, ChatGPT, Gemini, and any MCP-compatible client.<br>
+  <a href="https://github.com/kagura-ai/kagura-memory-python-sdk"><strong>Python SDK (KaguraClient / KaguraAgent)</strong></a>
+</p>
 
 ## What is Kagura Memory Cloud?
 
