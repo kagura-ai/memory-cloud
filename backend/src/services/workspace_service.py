@@ -245,6 +245,7 @@ class WorkspaceService:
             # First time login or workspace deleted - create personal workspace
             # Initial admin gets pro plan by default
             from config.plan_tiers import PlanName
+
             plan = PlanName.PRO if user.is_initial_admin else PlanName.FREE
             workspace = await self.create_workspace(
                 name="Personal Workspace",

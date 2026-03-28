@@ -461,7 +461,6 @@ class ContextSearchConfigUpdate(BaseModel):
         validate_assignment = True
 
 
-
 # ============================================================================
 # System Admin Management Schemas (Issue #166)
 # ============================================================================
@@ -488,11 +487,9 @@ class UserWithAdminFlag(BaseModel):
     model_config = {
         "from_attributes": True,
         "json_encoders": {
-            datetime: lambda v: v.isoformat() + "Z"
-            if v and v.tzinfo is None
-            else v.isoformat()
-            if v
-            else None
+            datetime: lambda v: (
+                v.isoformat() + "Z" if v and v.tzinfo is None else v.isoformat() if v else None
+            )
         },
     }
 

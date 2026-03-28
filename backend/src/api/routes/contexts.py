@@ -659,7 +659,6 @@ async def update_context(
     try:
         from sqlalchemy import select
 
-
         # Context already retrieved by permission check (no second query needed)
 
         # Save workspace_id for later use (before potential rollback)

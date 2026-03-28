@@ -46,11 +46,9 @@ class UserInfo(BaseModel):
 
     model_config = {
         "json_encoders": {
-            datetime: lambda v: v.isoformat() + "Z"
-            if v and v.tzinfo is None
-            else v.isoformat()
-            if v
-            else None
+            datetime: lambda v: (
+                v.isoformat() + "Z" if v and v.tzinfo is None else v.isoformat() if v else None
+            )
         }
     }
 

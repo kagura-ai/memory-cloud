@@ -112,7 +112,9 @@ class SessionManager:
 
                 _redis_client_cache[redis_url] = client
             except ImportError as e:
-                raise ImportError("redis package not installed. Install with: pip install redis") from e
+                raise ImportError(
+                    "redis package not installed. Install with: pip install redis"
+                ) from e
             except Exception as e:
                 raise ConnectionError(f"Failed to connect to Redis: {e}") from e
         else:

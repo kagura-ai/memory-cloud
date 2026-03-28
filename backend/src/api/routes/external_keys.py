@@ -5,7 +5,6 @@ Issue #45: Web UI Endpoint Implementation
 Issue #106: Refactored to use consolidated utilities
 """
 
-
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import and_, select

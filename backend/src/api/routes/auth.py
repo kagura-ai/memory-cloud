@@ -416,7 +416,9 @@ async def google_callback(
 
     except Exception as e:
         logger.error(f"OAuth2 callback failed: {e}")
-        raise HTTPException(status_code=401, detail=f"OAuth2 authentication failed: {str(e)}") from e
+        raise HTTPException(
+            status_code=401, detail=f"OAuth2 authentication failed: {str(e)}"
+        ) from e
 
 
 @router.post("/logout")
@@ -756,7 +758,9 @@ async def github_callback(
 
     except Exception as e:
         logger.error(f"GitHub OAuth2 callback failed: {e}")
-        raise HTTPException(status_code=401, detail=f"GitHub authentication failed: {str(e)}") from e
+        raise HTTPException(
+            status_code=401, detail=f"GitHub authentication failed: {str(e)}"
+        ) from e
 
 
 # Include subrouters
