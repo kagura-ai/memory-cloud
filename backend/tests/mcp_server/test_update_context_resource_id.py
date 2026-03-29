@@ -28,13 +28,13 @@ class TestResourceIdValidation:
     def test_invalid_resource_ids(self):
         """Invalid resource_id formats."""
         invalid = [
-            "",                    # empty
-            "GitHub-Issues",       # uppercase
-            "my resource",         # space
-            "MY_RESOURCE",         # uppercase
-            "resource@id",         # special char
-            "日本語",              # non-ASCII
-            "a" * 256,            # too long
+            "",  # empty
+            "GitHub-Issues",  # uppercase
+            "my resource",  # space
+            "MY_RESOURCE",  # uppercase
+            "resource@id",  # special char
+            "日本語",  # non-ASCII
+            "a" * 256,  # too long
         ]
         for rid in invalid:
             is_valid = bool(self.PATTERN.match(rid)) and len(rid) <= 255
