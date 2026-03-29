@@ -11,7 +11,7 @@
  */
 
 import { useEffect, useState, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useTranslations, useLocale } from 'next-intl';
 import { useAuth } from '@/contexts/AuthContext';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
@@ -113,6 +113,7 @@ export default function ContextsPage() {
   const tCommon = useTranslations('common');
   const locale = useLocale();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { user, refetchUser } = useAuth();
   const { currentWorkspace } = useWorkspace();
   const [contexts, setContexts] = useState<Context[]>([]);
@@ -220,6 +221,18 @@ export default function ContextsPage() {
     fetchContexts();
     checkApiKey();
   }, [fetchContexts, checkApiKey]);
+
+  // Open edit modal from URL param: /workspace/contexts?edit=<context_id>
+  useEffect(() => {
+    const editId = searchParams.get('edit');
+    if (editId && contexts.length > 0 && !editDialogOpen) {
+      const ctx = contexts.find(c => c.id === editId);
+      if (ctx) {
+        handleEditClick(ctx);
+        router.replace('/workspace/contexts', { scroll: false });
+      }
+    }
+  }, [searchParams, contexts]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-select Shared for Admins when opening create dialogs
   useEffect(() => {
