@@ -782,7 +782,9 @@ All other tools require context_id. Use this tool first to discover available co
 
 Response includes:
 - contexts: Array of {id, name, summary, is_private, last_used_at}
-- count: Total number of contexts""",
+- count: Total number of contexts
+- limit: Maximum contexts allowed by plan
+- can_create: Whether new contexts can be created""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2083,6 +2085,39 @@ async def execute_tool_call(
                                 ctx_data["memory_count"] = 0
                         context_list.append(ctx_data)
 
+                    # Get context quota (workspace-wide count, not just user-visible)
+                    quota_info: dict[str, Any] = {"count": len(context_list)}
+                    if workspace_id:
+                        try:
+                            from sqlalchemy import func as sql_func
+                            from sqlalchemy import select as sql_select
+
+                            from models.auth import Context as ContextModel
+                            from services.effective_quota_service import EffectiveQuotaService
+
+                            # Count all non-deleted contexts in workspace
+                            ws_count_result = await db.execute(
+                                sql_select(sql_func.count())
+                                .select_from(ContextModel)
+                                .where(
+                                    ContextModel.workspace_id == workspace_id,
+                                    ContextModel.deleted_at.is_(None),
+                                )
+                            )
+                            ws_context_count = ws_count_result.scalar_one() or 0
+
+                            effective = await EffectiveQuotaService(db).get_effective_quotas(
+                                workspace_id
+                            )
+                            max_contexts = effective.get("max_contexts", 0)
+                            quota_info["count"] = ws_context_count
+                            quota_info["limit"] = max_contexts
+                            quota_info["can_create"] = ws_context_count < max_contexts
+                        except Exception as e:
+                            logger.warning("list_contexts_quota_failed", error=str(e))
+                            quota_info["limit"] = 0
+                            quota_info["can_create"] = False
+
                     await _log_tool_usage(
                         db, user_id, "list_contexts", start_time, 200, None, workspace_id
                     )
@@ -2094,7 +2129,7 @@ async def execute_tool_call(
                                 {
                                     "status": "success",
                                     "contexts": context_list,
-                                    "count": len(context_list),
+                                    **quota_info,
                                 }
                             ),
                         )
