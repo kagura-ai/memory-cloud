@@ -453,8 +453,11 @@ def get_tool_definitions() -> list[dict]:
 
 Supports 3-layer architecture:
 - summary: Concise overview for search (10-500 chars) - write the reusable conclusion/decision, not the process
+  Include synonyms and related terms that users might search for.
+  ✅ Good: "Database performance: PostgreSQL JSONB GIN index optimization for faster queries"
   ✅ Good: "JWT expiry caused 401. Fixed with refresh token rotation and clock skew handling."
   ❌ Bad: "Discussed auth errors in today's meeting."
+  ❌ Bad: "JSONB index optimization" (too narrow — won't match "database performance")
 - context_summary: Why this matters and how to use it
 - details: Complete data, code, or structured information
 
@@ -2118,10 +2121,18 @@ async def execute_tool_call(
                 try:
                     from uuid import UUID as _UUID
 
+                    from models.schemas import ContextSearchConfigUpdate
                     from repositories.config_repository import ContextSearchConfigRepository
                     from services.permission_service import PermissionService
 
-                    ctx_uuid = _UUID(args["context_id"])
+                    # Parse context_id
+                    try:
+                        ctx_uuid = _UUID(args["context_id"])
+                    except ValueError:
+                        return _error_response(
+                            "invalid_context_id",
+                            f"Invalid context_id: {args['context_id']}",
+                        )
 
                     # Permission check (owner/editor)
                     perm_service = PermissionService(db)
@@ -2135,47 +2146,34 @@ async def execute_tool_call(
 
                     if not config:
                         return _error_response(
-                            "not_found", f"No search config for context {args['context_id']}"
+                            "not_found",
+                            f"No search config for context {args['context_id']}",
                         )
 
-                    # Apply updates
-                    updated = False
-                    if "semantic_weight" in args:
-                        config.semantic_weight = args["semantic_weight"]
-                        updated = True
-                    if "bm25_weight" in args:
-                        config.bm25_weight = args["bm25_weight"]
-                        updated = True
-                    if "fetch_factor" in args:
-                        config.fetch_factor = args["fetch_factor"]
-                        updated = True
-                    if "use_rerank" in args:
-                        config.use_rerank = args["use_rerank"]
-                        updated = True
-                    if "reranker_provider" in args:
-                        config.reranker_provider = args["reranker_provider"]
-                        updated = True
-                    if "reranker_model" in args:
-                        config.reranker_model = args["reranker_model"]
-                        updated = True
+                    # Build update with current values as defaults
+                    update_fields = {
+                        "semantic_weight": args.get(
+                            "semantic_weight", float(config.semantic_weight)
+                        ),
+                        "bm25_weight": args.get("bm25_weight", float(config.bm25_weight)),
+                        "fetch_factor": args.get("fetch_factor", config.fetch_factor),
+                        "use_rerank": args.get("use_rerank", config.use_rerank),
+                        "reranker_provider": args.get(
+                            "reranker_provider", config.reranker_provider or "voyage"
+                        ),
+                        "reranker_model": args.get(
+                            "reranker_model", config.reranker_model or "rerank-2"
+                        ),
+                    }
 
-                    if not updated:
-                        return _error_response(
-                            "no_changes",
-                            "No fields to update. Provide at least one of: semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model.",
-                        )
+                    # Validate via Pydantic (same as REST API)
+                    try:
+                        update_data = ContextSearchConfigUpdate(**update_fields)
+                    except Exception as validation_err:
+                        return _error_response("invalid_search_config", str(validation_err))
 
-                    # Validate weights sum to 1.0
-                    sw = float(config.semantic_weight)
-                    bw = float(config.bm25_weight)
-                    if abs(sw + bw - 1.0) >= 0.01:
-                        return _error_response(
-                            "invalid_weights",
-                            f"semantic_weight + bm25_weight must equal 1.0 (got {sw + bw:.2f})",
-                        )
-
-                    await db.commit()
-                    await db.refresh(config)
+                    # Apply via repository (same as REST API)
+                    config = await repo.update(ctx_uuid, update_data)
 
                     await _log_tool_usage(
                         db,
@@ -2194,6 +2192,7 @@ async def execute_tool_call(
                                 {
                                     "status": "success",
                                     "message": "Search configuration updated.",
+                                    "context_id": str(ctx_uuid),
                                     "config": {
                                         "semantic_weight": float(config.semantic_weight),
                                         "bm25_weight": float(config.bm25_weight),
@@ -2202,16 +2201,10 @@ async def execute_tool_call(
                                         "reranker_provider": config.reranker_provider,
                                         "reranker_model": config.reranker_model,
                                     },
-                                    "context_id": str(ctx_uuid),
                                 }
                             ),
                         )
                     ]
-                except ValueError:
-                    return _error_response(
-                        "invalid_context_id",
-                        f"Invalid context_id: {args['context_id']}",
-                    )
                 except Exception as e:
                     await db.rollback()
                     logger.error(f"update_search_config_failed: {e}", exc_info=True)
