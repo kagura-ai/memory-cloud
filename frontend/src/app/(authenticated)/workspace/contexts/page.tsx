@@ -1462,16 +1462,19 @@ export default function ContextsPage() {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => {
+                      onClick={async () => {
                         // If already saved as public → fetch impact and show warning dialog
                         if (contextToEdit?.is_public) {
+                          let tokenCount = 0;
                           if (contextToEdit.resource_id) {
-                            getResourceImpact(contextToEdit.resource_id)
-                              .then((impact) => setUnpublishTokenCount(impact.token_count))
-                              .catch(() => setUnpublishTokenCount(0));
-                          } else {
-                            setUnpublishTokenCount(0);
+                            try {
+                              const impact = await getResourceImpact(contextToEdit.resource_id);
+                              tokenCount = impact.token_count;
+                            } catch {
+                              tokenCount = 0;
+                            }
                           }
+                          setUnpublishTokenCount(tokenCount);
                           setUnpublishDialogOpen(true);
                         } else {
                           // Not yet saved → just toggle back (no warning)
