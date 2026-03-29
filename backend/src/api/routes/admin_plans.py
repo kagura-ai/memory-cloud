@@ -181,11 +181,12 @@ async def list_workspaces_with_plans(
 
         # Fetch all memory counts grouped by workspace
         memory_counts_result = await db.execute(
-            select(WorkspaceMember.workspace_id, func.count(Memory.id).label("memory_count"))
-            .select_from(WorkspaceMember)
-            .outerjoin(Memory, Memory.user_id == WorkspaceMember.user_id)
-            .where(WorkspaceMember.workspace_id.in_(workspace_ids))
-            .group_by(WorkspaceMember.workspace_id)
+            select(Memory.workspace_id, func.count(Memory.id).label("memory_count"))
+            .where(
+                Memory.workspace_id.in_(workspace_ids),
+                Memory.deleted_at.is_(None),
+            )
+            .group_by(Memory.workspace_id)
         )
         memory_counts_by_workspace = {
             row.workspace_id: row.memory_count for row in memory_counts_result.all()
