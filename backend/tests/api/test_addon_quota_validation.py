@@ -8,8 +8,6 @@ Tests the validation rules:
 - Memory addon: soft limit (always allow reduction)
 """
 
-import pytest
-
 from config.plan_tiers import get_plan_tier
 
 

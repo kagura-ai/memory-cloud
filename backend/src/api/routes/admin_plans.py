@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import require_admin as auth_require_admin
 from config.plan_tiers import get_plan_tier
 from db.base import get_db
-from models.auth import Context, PlanChange, User, Workspace, WorkspaceMember
+from models.auth import Context, PlanChange, User, Workspace, WorkspaceInvitation, WorkspaceMember
 from models.memory import Memory
 from services.effective_quota_service import EffectiveQuotaService
 from utils import db_transaction
@@ -424,17 +424,27 @@ async def get_workspace_quotas(
         )
         memory_count = memory_count_result.scalar() or 0
 
-        # Get usage: context count
+        # Get usage: context count (non-deleted only)
         context_count_result = await db.execute(
-            select(func.count(Context.id)).where(Context.workspace_id == ws_uuid)
+            select(func.count(Context.id)).where(
+                Context.workspace_id == ws_uuid,
+                Context.deleted_at.is_(None),
+            )
         )
         context_count = context_count_result.scalar() or 0
 
-        # Get usage: member count
+        # Get usage: member count + pending invitations
         member_count_result = await db.execute(
             select(func.count(WorkspaceMember.id)).where(WorkspaceMember.workspace_id == ws_uuid)
         )
-        member_count = member_count_result.scalar() or 0
+        pending_invite_result = await db.execute(
+            select(func.count(WorkspaceInvitation.id)).where(
+                WorkspaceInvitation.workspace_id == ws_uuid,
+                WorkspaceInvitation.accepted_at.is_(None),
+                WorkspaceInvitation.expires_at > func.now(),
+            )
+        )
+        member_count = (member_count_result.scalar() or 0) + (pending_invite_result.scalar() or 0)
 
         return WorkspaceQuotaDetail(
             workspace_id=workspace_id,
@@ -492,16 +502,23 @@ async def update_workspace_quotas(
         new_effective_members = plan_tier.max_members_per_workspace + request.addon_member_bonus
         new_effective_contexts = plan_tier.max_contexts_per_workspace + request.addon_context_bonus
 
-        # Hard limit: members — cannot reduce below current count
+        # Hard limit: members — cannot reduce below current count + pending invitations
         member_count_result = await db.execute(
             select(func.count(WorkspaceMember.id)).where(WorkspaceMember.workspace_id == ws_uuid)
         )
-        member_count = member_count_result.scalar() or 0
+        pending_invite_result = await db.execute(
+            select(func.count(WorkspaceInvitation.id)).where(
+                WorkspaceInvitation.workspace_id == ws_uuid,
+                WorkspaceInvitation.accepted_at.is_(None),
+                WorkspaceInvitation.expires_at > func.now(),
+            )
+        )
+        member_count = (member_count_result.scalar() or 0) + (pending_invite_result.scalar() or 0)
 
         if member_count > new_effective_members:
             raise HTTPException(
                 status_code=400,
-                detail=f"Cannot reduce member quota: current members ({member_count}) exceeds new effective limit ({new_effective_members})",
+                detail=f"Cannot reduce member quota: current member count ({member_count}) exceeds new effective limit ({new_effective_members})",
             )
 
         # Hard limit: contexts — cannot reduce below current count
@@ -516,7 +533,7 @@ async def update_workspace_quotas(
         if context_count > new_effective_contexts:
             raise HTTPException(
                 status_code=400,
-                detail=f"Cannot reduce context quota: current contexts ({context_count}) exceeds new effective limit ({new_effective_contexts})",
+                detail=f"Cannot reduce context quota: current context count ({context_count}) exceeds new effective limit ({new_effective_contexts})",
             )
 
         # Store old values for logging
