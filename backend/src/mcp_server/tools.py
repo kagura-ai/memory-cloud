@@ -1897,8 +1897,6 @@ async def execute_tool_call(
                                 "Cannot make private: context has a resource_id. Revoke tokens and remove resource_id first.",
                             )
                         context.is_public = is_public
-                        if is_public:
-                            context.is_private = False
 
                     if "resource_id" in args:
                         import re as _re
