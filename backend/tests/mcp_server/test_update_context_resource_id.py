@@ -6,7 +6,7 @@ import re
 class TestResourceIdValidation:
     """Test resource_id format validation (matches REST API Pydantic pattern)."""
 
-    PATTERN = re.compile(r"^[a-z0-9_]+$")
+    PATTERN = re.compile(r"^[a-z0-9_-]+$")
 
     def test_valid_resource_ids(self):
         """Valid resource_id formats."""
@@ -18,6 +18,9 @@ class TestResourceIdValidation:
             "a",
             "abc",
             "resource_with_underscores",
+            "sdk-test",
+            "github-issues",
+            "my-resource-123",
         ]
         for rid in valid:
             assert self.PATTERN.match(rid) and len(rid) <= 255, f"Should be valid: {rid}"
@@ -26,9 +29,8 @@ class TestResourceIdValidation:
         """Invalid resource_id formats."""
         invalid = [
             "",                    # empty
-            "GitHub-Issues",       # uppercase + hyphen
+            "GitHub-Issues",       # uppercase
             "my resource",         # space
-            "my-resource",         # hyphen
             "MY_RESOURCE",         # uppercase
             "resource@id",         # special char
             "日本語",              # non-ASCII

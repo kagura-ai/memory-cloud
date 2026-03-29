@@ -1875,10 +1875,10 @@ async def execute_tool_call(
                         import re as _re
 
                         rid = args["resource_id"]
-                        if not _re.match(r"^[a-z0-9_]+$", rid) or len(rid) > 255:
+                        if not _re.match(r"^[a-z0-9_-]+$", rid) or len(rid) > 255:
                             return _error_response(
                                 "invalid_resource_id",
-                                "resource_id must be lowercase alphanumeric and underscores only (max 255 chars).",
+                                "resource_id must be lowercase alphanumeric, underscores, and hyphens only (max 255 chars).",
                             )
 
                         # Revoke old tokens if resource_id is changing

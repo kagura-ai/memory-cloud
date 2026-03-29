@@ -177,8 +177,8 @@ class ContextUpdate(BaseModel):
     resource_id: str | None = Field(
         None,
         max_length=255,
-        pattern=r"^[a-z0-9_]+$",
-        description="Resource ID for public contexts (Issue #242: Lowercase alphanumeric and underscore only)",
+        pattern=r"^[a-z0-9_-]+$",
+        description="Resource ID for contexts (lowercase alphanumeric, underscore, and hyphen)",
     )
 
 
