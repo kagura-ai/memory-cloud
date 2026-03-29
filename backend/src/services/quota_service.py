@@ -351,9 +351,6 @@ class QuotaService:
                 raise QuotaExceededError(error)
             return False, error
 
-        # Get plan limits
-        plan = get_plan_tier(workspace.plan_name)
-
         # Count current members
         member_count_result = await self.db.execute(
             select(func.count(WorkspaceMember.id)).where(
@@ -377,13 +374,16 @@ class QuotaService:
 
         total_used = member_count + pending_count
 
-        # Check limit
-        if total_used >= plan.max_members_per_workspace:
+        # Check limit using EffectiveQuotaService to avoid drift
+        from services.effective_quota_service import EffectiveQuotaService
+
+        effective = await EffectiveQuotaService(self.db).get_effective_quotas(workspace_id)
+        max_members = effective["max_members"]
+        if total_used >= max_members:
             error = (
-                f"Member limit reached. "
-                f"Your {plan.display_name} plan allows {plan.max_members_per_workspace} member(s) per workspace. "
+                f"Member limit reached ({max_members} seats). "
                 f"Current members: {member_count}, Pending invitations: {pending_count}. "
-                f"Upgrade to add more members."
+                f"Upgrade your plan or add member slots to invite more."
             )
             logger.warning(
                 "member_quota_exceeded",
@@ -391,7 +391,7 @@ class QuotaService:
                 member_count=member_count,
                 pending_count=pending_count,
                 total_used=total_used,
-                limit=plan.max_members_per_workspace,
+                limit=max_members,
                 plan=workspace.plan_name,
             )
 
