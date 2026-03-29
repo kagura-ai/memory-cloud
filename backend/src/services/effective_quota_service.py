@@ -74,6 +74,7 @@ class EffectiveQuotaService:
             and workspace.addon_rest_quota_bonus == 0
             and workspace.addon_public_quota_bonus == 0
             and workspace.addon_member_bonus == 0
+            and workspace.addon_context_bonus == 0
         ):
             # Import here to avoid circular dependency
             from services.addon_calculator_service import AddonCalculatorService
@@ -143,6 +144,7 @@ class EffectiveQuotaService:
             "addon_rest_quota_bonus": workspace.addon_rest_quota_bonus,
             "addon_public_quota_bonus": workspace.addon_public_quota_bonus,
             "addon_member_bonus": workspace.addon_member_bonus,
+            "addon_context_bonus": workspace.addon_context_bonus,
         }
 
     # ========================================================================

@@ -157,7 +157,7 @@ export default function AdminPlansPage() {
     setAddonMemory(quotaDetail.addon.memory_bonus);
     setAddonMcp(quotaDetail.addon.mcp_quota_bonus);
     setAddonMember(quotaDetail.addon.member_bonus);
-    setAddonContext(quotaDetail.addon.context_bonus ?? 0);
+    setAddonContext(quotaDetail.addon.context_bonus);
     setAddonDialogOpen(true);
   };
 
@@ -297,7 +297,7 @@ export default function AdminPlansPage() {
                                     {[
                                       { label: 'Memories', base: quotaDetail.base.memory_limit, addon: quotaDetail.addon.memory_bonus, effective: quotaDetail.effective.memory_limit, usage: quotaDetail.usage.memories },
                                       { label: 'MCP Calls/day', base: quotaDetail.base.mcp_calls_per_day, addon: quotaDetail.addon.mcp_quota_bonus, effective: quotaDetail.effective.mcp_calls_per_day, usage: null },
-                                      { label: 'Contexts', base: quotaDetail.base.max_contexts, addon: quotaDetail.addon.context_bonus ?? 0, effective: quotaDetail.effective.max_contexts, usage: quotaDetail.usage.contexts },
+                                      { label: 'Contexts', base: quotaDetail.base.max_contexts, addon: quotaDetail.addon.context_bonus, effective: quotaDetail.effective.max_contexts, usage: quotaDetail.usage.contexts },
                                       { label: 'Members', base: quotaDetail.base.max_members, addon: quotaDetail.addon.member_bonus, effective: quotaDetail.effective.max_members, usage: quotaDetail.usage.members },
                                     ].map((row) => (
                                       <div key={row.label} className="grid grid-cols-4 gap-2 text-sm">
@@ -571,7 +571,7 @@ export default function AdminPlansPage() {
               </div>
             </div>
 
-            {quotaDetail && (addonMemory < quotaDetail.addon.memory_bonus || addonMember < quotaDetail.addon.member_bonus || addonContext < (quotaDetail.addon.context_bonus ?? 0)) && (
+            {quotaDetail && (addonMemory < quotaDetail.addon.memory_bonus || addonMember < quotaDetail.addon.member_bonus || addonContext < (quotaDetail.addon.context_bonus)) && (
               <div className="bg-yellow-50 dark:bg-yellow-950 p-3 rounded-md">
                 <p className="text-sm text-yellow-800 dark:text-yellow-100">
                   Reducing addons may fail if current usage exceeds the new effective limit.

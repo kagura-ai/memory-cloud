@@ -522,6 +522,7 @@ async def update_workspace_quotas(
         old_memory_bonus = workspace.addon_memory_bonus
         old_mcp_bonus = workspace.addon_mcp_quota_bonus
         old_member_bonus = workspace.addon_member_bonus
+        old_context_bonus = workspace.addon_context_bonus
 
         # Update addon bonuses
         workspace.addon_memory_bonus = request.addon_memory_bonus
@@ -539,6 +540,7 @@ async def update_workspace_quotas(
                 "memory_bonus": f"{old_memory_bonus} -> {request.addon_memory_bonus}",
                 "mcp_quota_bonus": f"{old_mcp_bonus} -> {request.addon_mcp_quota_bonus}",
                 "member_bonus": f"{old_member_bonus} -> {request.addon_member_bonus}",
+                "context_bonus": f"{old_context_bonus} -> {request.addon_context_bonus}",
             },
         )
 
