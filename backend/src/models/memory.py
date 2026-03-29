@@ -25,6 +25,7 @@ from sqlalchemy import (
     LargeBinary,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -304,6 +305,7 @@ class NeuralMemoryEdge(Base):
 
     # Table constraints
     __table_args__ = (
+        UniqueConstraint("user_id", "src_id", "dst_id", name="unique_edge"),
         CheckConstraint("weight >= 0.0 AND weight <= 3.0", name="valid_weight"),
         CheckConstraint("confidence >= 0.0 AND confidence <= 1.0", name="valid_confidence"),
         CheckConstraint(
