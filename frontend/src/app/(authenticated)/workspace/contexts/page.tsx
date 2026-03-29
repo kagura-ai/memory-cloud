@@ -93,6 +93,7 @@ import {
   type ContextMember,
 } from '@/lib/api/contexts';
 import { checkOpenAIKeyStatus } from '@/lib/api/workspaces';
+import { getResourceImpact } from '@/lib/api/schemas';
 import type { Context, ContextStats } from '@/lib/types/context';
 import { CONTEXT_TEMPLATES, getTemplate } from '@/lib/templates/usage-guide';
 import { createExternalAPIKey } from '@/lib/api/external-keys';
@@ -149,8 +150,9 @@ export default function ContextsPage() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [contextToDelete, setContextToDelete] = useState<Context | null>(null);
 
-  // Unpublish confirmation dialog (Issue #238)
+  // Unpublish confirmation dialog (Issue #238, #41)
   const [unpublishDialogOpen, setUnpublishDialogOpen] = useState(false);
+  const [unpublishTokenCount, setUnpublishTokenCount] = useState(0);
 
   // Template selector toggle
   const [showTemplate, setShowTemplate] = useState(false);
@@ -1461,8 +1463,15 @@ export default function ContextsPage() {
                       variant="outline"
                       size="sm"
                       onClick={() => {
-                        // If already saved as public → show warning dialog
+                        // If already saved as public → fetch impact and show warning dialog
                         if (contextToEdit?.is_public) {
+                          if (contextToEdit.resource_id) {
+                            getResourceImpact(contextToEdit.resource_id)
+                              .then((impact) => setUnpublishTokenCount(impact.token_count))
+                              .catch(() => setUnpublishTokenCount(0));
+                          } else {
+                            setUnpublishTokenCount(0);
+                          }
                           setUnpublishDialogOpen(true);
                         } else {
                           // Not yet saved → just toggle back (no warning)
@@ -1914,9 +1923,17 @@ export default function ContextsPage() {
                 <li>{t('unpublishImpact3')}</li>
                 <li>{t('unpublishImpact4')}</li>
               </ul>
-              <Alert className="border-orange-200 bg-orange-50">
+              {unpublishTokenCount > 0 && (
+                <Alert className="border-red-200 bg-red-50 dark:bg-red-900/20">
+                  <AlertTriangle className="h-4 w-4 text-red-600" />
+                  <AlertDescription className="text-red-800 dark:text-red-200 text-xs">
+                    {t('unpublishTokenWarning', { count: unpublishTokenCount })}
+                  </AlertDescription>
+                </Alert>
+              )}
+              <Alert className="border-orange-200 bg-orange-50 dark:bg-orange-900/20">
                 <AlertTriangle className="h-4 w-4 text-orange-600" />
-                <AlertDescription className="text-orange-800 text-xs">
+                <AlertDescription className="text-orange-800 dark:text-orange-200 text-xs">
                   {t('unpublishWarning')}
                 </AlertDescription>
               </Alert>
