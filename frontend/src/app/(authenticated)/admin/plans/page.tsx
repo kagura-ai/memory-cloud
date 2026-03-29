@@ -550,14 +550,14 @@ export default function AdminPlansPage() {
                   onChange={(e) => setAddonMember(Number(e.target.value))}
                 />
                 <span className="text-xs text-muted-foreground whitespace-nowrap">
-                  Effective: {((quotaDetail?.base.max_members ?? 0) + addonMember).toLocaleString()}
+                  Effective: {((quotaDetail?.base.max_members ?? 0) + addonMember).toLocaleString()} ({quotaDetail?.usage.members ?? 0} used)
                 </span>
               </div>
             </div>
 
-            <div className="space-y-2">
+            <div>
               <Label htmlFor="addon-context">Extra Contexts</Label>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 mt-1">
                 <Input
                   id="addon-context"
                   type="number"
@@ -566,15 +566,16 @@ export default function AdminPlansPage() {
                   onChange={(e) => setAddonContext(Number(e.target.value))}
                 />
                 <span className="text-xs text-muted-foreground whitespace-nowrap">
-                  Effective: {((quotaDetail?.base.max_contexts ?? 0) + addonContext).toLocaleString()}
+                  Effective: {((quotaDetail?.base.max_contexts ?? 0) + addonContext).toLocaleString()} ({quotaDetail?.usage.contexts ?? 0} used)
                 </span>
               </div>
             </div>
 
-            {quotaDetail && (addonMemory < quotaDetail.addon.memory_bonus || addonMember < quotaDetail.addon.member_bonus || addonContext < (quotaDetail.addon.context_bonus)) && (
+            {quotaDetail && (addonMember < quotaDetail.addon.member_bonus || addonContext < quotaDetail.addon.context_bonus) && (
               <div className="bg-yellow-50 dark:bg-yellow-950 p-3 rounded-md">
                 <p className="text-sm text-yellow-800 dark:text-yellow-100">
-                  Reducing addons may fail if current usage exceeds the new effective limit.
+                  Reducing member or context addons will be rejected if current usage exceeds the new effective limit.
+                  (Members: {quotaDetail.usage.members} used, Contexts: {quotaDetail.usage.contexts} used)
                 </p>
               </div>
             )}

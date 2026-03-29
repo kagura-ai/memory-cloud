@@ -317,28 +317,43 @@ Saving the same content repeatedly creates duplicates. Remember to delete the ol
 
 ### Using Contexts
 
-Kagura Memory Cloud lets you organize memories into "contexts" (separate workspaces).
+Kagura Memory Cloud organizes memories into "contexts" — isolated namespaces within a workspace.
 
 **Examples:**
 - "Sales Team" context → Deals and customer info
 - "Dev Team" context → Technical knowledge and bug fixes
 - "Personal Notes" context → Private information
 
+**Context Management (via MCP tools):**
+- `list_contexts()` — See all available contexts and quota info
+- `create_context(name="my-project")` — Create a new context
+- `update_context(context_id, summary="...", usage_guide="...")` — Update context settings
+- `get_context_info(context_id)` — Get context details, stats, and usage guidelines
+
+### Search Tuning
+
+Each context can have its own search configuration:
+- `update_search_config(context_id, semantic_weight=0.5, bm25_weight=0.5)` — Adjust hybrid search balance
+- Enable reranking: `update_search_config(context_id, use_rerank=true, reranker_provider="voyage")`
+- Weights must sum to 1.0 (default: semantic 0.6 + BM25 0.4)
+
 ### Context Settings (Recommended)
 
-Each context can have "instructions for AI" configured in the web admin panel.
+Each context can have "instructions for AI" configured via `update_context()` or the web admin panel.
 When you set up instructions, the AI automatically:
 - Adds appropriate tags
 - Judges importance levels
 - Saves in searchable formats
 
-**How to Configure:**
-1. Open context settings in web admin
+**Via MCP:**
+```
+update_context(context_id, summary="Project X knowledge base", usage_guide="Tag all memories with project-x. Set importance 0.8+ for decisions.")
+```
+
+**Via Web Admin:**
+1. Open context settings
 2. Enter "Summary (for AI)" - what this context is for
 3. Enter "Instructions (for AI)" - how to organize memories
-
-**Don't know how to write instructions?** No problem!
-Just use the memory system normally, and ask the AI when you need help.
 
 ---
 
@@ -383,11 +398,32 @@ Just use the memory system normally, and ask the AI when you need help.
 
 ---
 
+## Available Tools (12 tools)
+
+| Tool | Purpose |
+|------|---------|
+| `remember` | Store memories (3-layer: summary, context, details) |
+| `recall` | Search memories (hybrid: semantic + BM25 keyword) |
+| `forget` | Delete memories (soft delete, recoverable) |
+| `reference` | Get full memory details (Layer 3) by ID |
+| `explore` | Discover related memories via Neural Memory graph |
+| `get_context_info` | Get context settings, stats, and usage guide |
+| `list_contexts` | List all contexts with quota info |
+| `create_context` | Create a new context namespace |
+| `update_context` | Update context settings (summary, usage_guide, etc.) |
+| `update_search_config` | Tune hybrid search weights and reranker |
+| `kagura_memory_usage_guide` | Show this usage guide |
+
+All tools except `list_contexts`, `create_context`, and `kagura_memory_usage_guide` require `context_id`.
+
+---
+
 ## Troubleshooting
 
 - **No search results**: Try different keywords or ask "Find anything about [topic]"
 - **Want related info**: Ask "Show me everything related to this"
 - **Clean up old info**: Tell the AI "Delete outdated information about [topic]"
+- **Context full**: Check `list_contexts()` for quota info; upgrade plan or add addon
 """
 
 T = TypeVar("T")
