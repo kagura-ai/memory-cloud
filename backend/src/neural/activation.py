@@ -136,12 +136,15 @@ class ActivationSpreader:
                 from uuid import UUID
 
                 src_uuid = UUID(src_id) if isinstance(src_id, str) else src_id
+                edge_user_id = user_id or self.graph.user_id
                 outgoing_edges = await self.graph.edge_repo.get_outgoing_edges(
-                    self.graph.user_id,
+                    edge_user_id,
                     src_uuid,
                     workspace_id=self.graph.workspace_id,
                     context_id=self.graph.context_id,
                 )
+            except ValueError:
+                raise
             except Exception as e:
                 logger.warning(f"Failed to get outgoing edges for {src_id}: {e}")
                 continue
@@ -308,6 +311,8 @@ class ActivationSpreader:
                     workspace_id=self.graph.workspace_id,
                     context_id=self.graph.context_id,
                 )
+            except ValueError:
+                raise
             except Exception:
                 continue
 
