@@ -141,11 +141,11 @@ export function ResourceTokensTable({
                   </Button>
                   {context && (
                     <Link
-                      href={`/workspace/contexts/${context.id}/stats`}
-                      className="text-blue-600 hover:text-blue-700"
-                      title="View context usage stats"
+                      href={`/workspace/contexts/${context.id}/settings`}
+                      className="text-xs text-gray-500 dark:text-gray-400 hover:text-blue-600 hover:underline"
+                      title={context.display_name || context.name}
                     >
-                      <ExternalLink className="h-3 w-3" />
+                      {context.display_name || context.name}
                     </Link>
                   )}
                 </div>
