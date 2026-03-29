@@ -17,7 +17,6 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import get_current_user
-from config.plan_tiers import get_plan_tier
 from db.base import get_db
 from models.auth import Workspace, WorkspaceInvitation, WorkspaceMember
 from models.schemas import (
@@ -408,8 +407,6 @@ async def get_pending_invitations(
     # Build response with workspace info
     from sqlalchemy import select
 
-    from models.auth import Workspace
-
     # Critical Fix: Avoid N+1 query - batch fetch all workspaces
     workspace_ids = {inv.workspace_id for inv in invitations}
     if workspace_ids:
@@ -547,12 +544,6 @@ async def get_member_quota(
     perm_service = PermissionService(db)
     await perm_service.check_workspace_access(user_id, workspace_id, required_role="member")
 
-    # Get workspace and plan
-    stmt = select(Workspace).where(Workspace.id == workspace_id)
-    result = await db.execute(stmt)
-    workspace = result.scalar_one()
-    plan = get_plan_tier(workspace.plan_name)
-
     # Count current members
     member_count_result = await db.execute(
         select(func.count(WorkspaceMember.id)).where(WorkspaceMember.workspace_id == workspace_id)
@@ -572,21 +563,21 @@ async def get_member_quota(
     )
     pending_count = pending_count_result.scalar() or 0
 
-    # Calculate quota stats
+    # Calculate quota stats using EffectiveQuotaService
+    from services.effective_quota_service import EffectiveQuotaService
+
+    effective = await EffectiveQuotaService(db).get_effective_quotas(workspace_id)
+    max_members = effective["max_members"]
     total_used = member_count + pending_count
-    available = max(0, plan.max_members_per_workspace - total_used)
-    percentage = (
-        (total_used / plan.max_members_per_workspace * 100)
-        if plan.max_members_per_workspace > 0
-        else 0
-    )
+    available = max(0, max_members - total_used)
+    percentage = (total_used / max_members * 100) if max_members > 0 else 0
 
     return {
         "current_members": member_count,
         "pending_invitations": pending_count,
         "total_used": total_used,
-        "limit": plan.max_members_per_workspace,
+        "limit": max_members,
         "available": available,
         "percentage": round(percentage, 2),
-        "can_invite": total_used < plan.max_members_per_workspace,
+        "can_invite": total_used < max_members,
     }
