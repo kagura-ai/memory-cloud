@@ -400,6 +400,7 @@ This project is designed to be developed **with** Claude Code and Kagura Memory 
 - [Getting Started](docs/getting-started.md) — Detailed setup guide
 - [API Reference](docs/api-reference.md) — REST API documentation
 - [Chunking Guide](docs/chunking-guide.md) — Best practices for memory storage
+- [Search Quality Benchmark](docs/search-quality-benchmark.md) — Accuracy tests, reranking, best practices
 - [Contributing](CONTRIBUTING.md) — Development setup, code style, PR workflow
 - [Security](SECURITY.md) — Vulnerability reporting, security design
 - [Python SDK](https://github.com/kagura-ai/kagura-memory-python-sdk) — `KaguraClient` and `KaguraAgent` for Python
