@@ -1249,7 +1249,8 @@
     "resourceIdN1TokenA": "• Token A: Shopify用（500 events/h）",
     "resourceIdN1TokenB": "• Token B: 楽天用（300 events/h）",
     "resourceIdN1Result": "→ 両方から同じContextにデータ送信",
-    "resourceIdManagementNote": "Resource Tokenは、ワークスペース設定の「Resource Tokens」ページで管理します"
+    "resourceIdManagementNote": "Resource Tokenは、ワークスペース設定の「Resource Tokens」ページで管理します",
+    "manageResourceTokensLink": "Resource Tokensを管理 →"
   },
   "memories": {
     "title": "メモリー",
@@ -2285,6 +2286,11 @@
     "noResourceIdWarning": "Resource IDの設定が必要です（上位プラン）",
     "noResourceIdWarningDesc": "Resource Tokenを作成するには、上位プランと、Resource IDが設定されたContextが必要です。",
     "goToContexts": "Contextページへ →",
+    "stepFlow": {
+      "step1": "Resource IDを設定",
+      "step2": "トークンを作成",
+      "step3": "データを送信"
+    },
     "proPlanRequired": "上位プランが必要です",
     "proPlanRequiredDesc": "Resource Tokens機能を利用するには、上位プランへのアップグレードが必要です。",
     "upgradePlan": "プランをアップグレード →",

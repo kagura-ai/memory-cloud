@@ -1410,8 +1410,10 @@ export default function ContextsPage() {
                           {t('resourceIdN1Result')}
                         </p>
                       </div>
-                      <p className="text-blue-600 dark:text-blue-400 italic mt-2">
-                        {t('resourceIdManagementNote')}
+                      <p className="mt-2">
+                        <a href="/workspace/integrations/resource-tokens" className="text-blue-600 dark:text-blue-400 underline hover:text-blue-700 dark:hover:text-blue-300 font-medium">
+                          {t('manageResourceTokensLink', { default: 'Manage Resource Tokens →' })}
+                        </a>
                       </p>
                     </div>
                   </div>
