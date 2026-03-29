@@ -234,9 +234,7 @@ export function Sidebar() {
 
     let cancelled = false;
     listExternalAPIKeys().then(keys => {
-      // Check specifically for OpenAI key (required for embeddings)
-      const hasOpenAI = keys.some(k => k.provider === 'openai');
-      if (!cancelled) setHasExternalKeys(hasOpenAI);
+      if (!cancelled) setHasExternalKeys(keys.length > 0);
     }).catch(() => {
       if (!cancelled) setHasExternalKeys(null);
     });
