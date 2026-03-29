@@ -267,15 +267,15 @@ export default function ResourceTokensPage() {
       {/* Prerequisites Warning (Unified) */}
       {isOwner && (
         currentWorkspace?.plan_name === 'free' ||
-        contexts.filter(c => c.resource_id).length === 0
+        !contexts.some(c => c.resource_id)
       ) && (
         <div className="rounded-lg border-2 border-purple-200 bg-purple-50 p-4 mb-6">
           <div className="flex items-start gap-3">
             <AlertTriangle className="h-5 w-5 text-purple-600 flex-shrink-0 mt-0.5" />
             <div className="flex-1">
-              <p className="text-sm font-medium text-purple-900">{t('noPublicContextsWarning')}</p>
+              <p className="text-sm font-medium text-purple-900">{t('noResourceIdWarning')}</p>
               <p className="text-xs text-purple-700 mt-1 mb-3">
-                {t('noPublicContextsWarningDesc')}
+                {t('noResourceIdWarningDesc')}
               </p>
               <div className="space-y-2">
                 <div className="flex items-center gap-2 text-xs">
@@ -495,7 +495,7 @@ export default function ResourceTokensPage() {
             <Button
               onClick={() => setShowCreateDialog(true)}
               disabled={
-                contexts.filter(c => c.is_public && c.resource_id).length === 0 ||
+                !contexts.some(c => c.resource_id) ||
                 currentWorkspace?.plan_name === 'free'
               }
             >
