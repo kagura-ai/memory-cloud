@@ -192,7 +192,7 @@ async def get_graph_stats(
 async def get_graph_data(
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
-    context_id: UUID | None = Query(None, description="Context ID for scoping"),
+    context_id: UUID = Query(..., description="Context ID (required for isolation)"),
     limit_nodes: int = Query(100, description="Maximum number of nodes to return", ge=1, le=500),
     min_weight: float = Query(0.0, description="Minimum edge weight to include", ge=0.0, le=3.0),
     memory_types: list[str] | None = Query(
@@ -213,15 +213,13 @@ async def get_graph_data(
     try:
         user_id = user["user_id"]
 
-        # Resolve workspace_id from context
-        workspace_id = None
-        str_context_id = None
-        if context_id:
-            context_result = await db.execute(select(Context).where(Context.id == context_id))
-            context = context_result.scalar_one_or_none()
-            if context:
-                workspace_id = str(context.workspace_id)
-                str_context_id = str(context.id)
+        # Resolve workspace_id from context (required)
+        context_result = await db.execute(select(Context).where(Context.id == context_id))
+        context = context_result.scalar_one_or_none()
+        if not context:
+            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+        workspace_id = str(context.workspace_id)
+        str_context_id = str(context.id)
 
         # SQL backend: Load graph (Issue #84)
         graph_service = GraphService(

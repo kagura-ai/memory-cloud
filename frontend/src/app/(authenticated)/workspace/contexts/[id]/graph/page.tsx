@@ -5,7 +5,7 @@
  * Issue #31: Redesigned from React Flow to simple table view
  */
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useParams } from 'next/navigation';
 import { useTranslations } from 'next-intl';
 import { graphApi } from '@/lib/api/graph';
@@ -73,6 +73,7 @@ export default function ContextGraphPage() {
   const nodes = graphData?.nodes || [];
   const edges = graphData?.edges || [];
   const topConnections = s?.top_connections || [];
+  const nodeById = useMemo(() => new Map(nodes.map(n => [n.id, n])), [nodes]);
 
   return (
     <PageContainer>
@@ -129,8 +130,8 @@ export default function ContextGraphPage() {
               </thead>
               <tbody>
                 {edges.map((edge, i) => {
-                  const srcNode = nodes.find(n => n.id === edge.source);
-                  const tgtNode = nodes.find(n => n.id === edge.target);
+                  const srcNode = nodeById.get(edge.source);
+                  const tgtNode = nodeById.get(edge.target);
                   return (
                     <tr key={i} className="border-b border-gray-100 dark:border-gray-800">
                       <td className="px-4 py-2">

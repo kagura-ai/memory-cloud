@@ -49,6 +49,8 @@ export interface GraphStatsResponse {
       node_id: string;
       summary: string;
       degree: number;
+      type?: string;
+      edge_count?: number;
     }>;
     recent_edges: Array<{
       source: string;
