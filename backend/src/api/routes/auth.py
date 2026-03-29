@@ -125,7 +125,7 @@ async def _check_registration_allowed(email: str) -> RedirectResponse | None:
 
         # Block
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-        logger.warning("registration_blocked", email=email)
+        logger.warning("registration_blocked: %s", email)
         return RedirectResponse(
             f"{frontend_url}/login?error=registration_disabled",
             status_code=303,

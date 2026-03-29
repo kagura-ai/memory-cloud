@@ -37,7 +37,7 @@ export function Footer() {
             <h3 className="mb-4 text-sm font-bold text-gray-900">Resources</h3>
             <div className="space-y-3 text-sm">
               <div><a href="https://github.com/kagura-ai/memory-cloud" target="_blank" rel="noopener noreferrer" className="text-gray-600 transition-colors hover:text-brand-green-600">GitHub</a></div>
-              <div><a href="https://github.com/kagura-ai/memory-cloud/blob/dev/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer" className="text-gray-600 transition-colors hover:text-brand-green-600">Contributing</a></div>
+              <div><a href="https://github.com/kagura-ai/memory-cloud/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer" className="text-gray-600 transition-colors hover:text-brand-green-600">Contributing</a></div>
               <div><a href="https://github.com/kagura-ai/memory-cloud/issues" target="_blank" rel="noopener noreferrer" className="text-gray-600 transition-colors hover:text-brand-green-600">Issues</a></div>
             </div>
           </div>
@@ -45,8 +45,8 @@ export function Footer() {
           <div>
             <h3 className="mb-4 text-sm font-bold text-gray-900">Legal</h3>
             <div className="space-y-3 text-sm">
-              <div><a href="https://github.com/kagura-ai/memory-cloud/blob/dev/LICENSE" target="_blank" rel="noopener noreferrer" className="text-gray-600 transition-colors hover:text-brand-green-600">Apache License 2.0</a></div>
-              <div><a href="https://github.com/kagura-ai/memory-cloud/blob/dev/SECURITY.md" target="_blank" rel="noopener noreferrer" className="text-gray-600 transition-colors hover:text-brand-green-600">Security Policy</a></div>
+              <div><a href="https://github.com/kagura-ai/memory-cloud/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" className="text-gray-600 transition-colors hover:text-brand-green-600">Apache License 2.0</a></div>
+              <div><a href="https://github.com/kagura-ai/memory-cloud/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer" className="text-gray-600 transition-colors hover:text-brand-green-600">Security Policy</a></div>
             </div>
           </div>
         </div>
