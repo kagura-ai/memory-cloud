@@ -25,7 +25,7 @@
 
 Kagura Memory Cloud is a memory system that lets AI assistants **remember, search, and learn** from past conversations. It provides:
 
-- **10 MCP Tools** — remember, recall, forget, reference, explore, get_context_info, list_contexts, create_context, update_context, usage_guide
+- **11 MCP Tools** — remember, recall, forget, reference, explore, get_context_info, list_contexts, create_context, update_context, update_search_config, usage_guide
 - **3-Layer Memory Architecture** — summary (search-optimized) / context / full content
 - **Hybrid Search** — 60% semantic (OpenAI embedding) + 40% full-text (Qdrant BM25)
 - **Neural Memory** — Hebbian learning creates automatic connections between related memories
@@ -279,6 +279,7 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `list_contexts` | List available contexts in workspace | Viewer+ |
 | `create_context` | Create a new context | Owner/Admin |
 | `update_context` | Update context settings (summary, usage guide, resource_id, is_public) | Editor+ (Owner for summary/usage_guide/resource_id/is_public) |
+| `update_search_config` | Tune hybrid search weights and reranker settings per context | Editor+ |
 | `kagura_memory_usage_guide` | Get the usage guide | — |
 
 Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.

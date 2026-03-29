@@ -50,6 +50,7 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "list_contexts": _get_timeout("list_contexts", 10.0),  # Database query
     "create_context": _get_timeout("create_context", 15.0),  # Context creation + Qdrant collection
     "update_context": _get_timeout("update_context", 15.0),  # Context update
+    "update_search_config": _get_timeout("update_search_config", 10.0),  # Search config update
     # Issue #240: switch_context removed - use context_id argument in each tool
     "kagura_memory_usage_guide": _get_timeout("kagura_memory_usage_guide", 5.0),  # Static text
 }
@@ -452,8 +453,11 @@ def get_tool_definitions() -> list[dict]:
 
 Supports 3-layer architecture:
 - summary: Concise overview for search (10-500 chars) - write the reusable conclusion/decision, not the process
+  Include synonyms and related terms that users might search for.
+  ✅ Good: "Database performance: PostgreSQL JSONB GIN index optimization for faster queries"
   ✅ Good: "JWT expiry caused 401. Fixed with refresh token rotation and clock skew handling."
   ❌ Bad: "Discussed auth errors in today's meeting."
+  ❌ Bad: "JSONB index optimization" (too narrow — won't match "database performance")
 - context_summary: Why this matters and how to use it
 - details: Complete data, code, or structured information
 
@@ -890,6 +894,58 @@ Use get_context_info() to see current values before updating.""",
         },
         # =================================================================
         # Usage Guide Tool
+        # =================================================================
+        # Tool: update_search_config (Issue #25)
+        # =================================================================
+        {
+            "name": "update_search_config",
+            "description": """Update context search configuration (hybrid search weights, reranker settings).
+
+Tune search quality per context by adjusting semantic vs keyword (BM25) weights.
+
+Requires owner or editor role in the context.
+
+Examples:
+- Increase keyword matching: semantic_weight=0.5, bm25_weight=0.5
+- Semantic-heavy: semantic_weight=0.7, bm25_weight=0.3
+- Enable reranking: use_rerank=true, reranker_provider="voyage"
+
+Weights must sum to 1.0.""",
+            "inputSchema": {
+                "type": "object",
+                "required": ["context_id"],
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "description": "Context UUID to configure.",
+                    },
+                    "semantic_weight": {
+                        "type": "number",
+                        "description": "Semantic (vector) search weight (0.0-1.0). Default: 0.6.",
+                    },
+                    "bm25_weight": {
+                        "type": "number",
+                        "description": "BM25 (keyword) search weight (0.0-1.0). Default: 0.4.",
+                    },
+                    "fetch_factor": {
+                        "type": "integer",
+                        "description": "Candidate retrieval multiplier (1-10). Default: 3.",
+                    },
+                    "use_rerank": {
+                        "type": "boolean",
+                        "description": "Enable/disable reranking. Requires reranker API key.",
+                    },
+                    "reranker_provider": {
+                        "type": "string",
+                        "description": "Reranker provider: 'voyage' or 'cohere'.",
+                    },
+                    "reranker_model": {
+                        "type": "string",
+                        "description": "Provider-specific model name (e.g., 'rerank-2', 'rerank-multilingual-v3.0').",
+                    },
+                },
+            },
+        },
         # =================================================================
         {
             "name": "kagura_memory_usage_guide",
@@ -2054,7 +2110,108 @@ async def execute_tool_call(
                     ]
 
         # =================================================================
-        # Tool 8: kagura_memory_usage_guide
+        # Tool: update_search_config (Issue #25)
+        # =================================================================
+        elif tool_name == "update_search_config":
+            if "context_id" not in args:
+                return _error_response("missing_fields", "Missing required field: context_id")
+
+            start_time = time.time()
+            async for db in get_db():
+                try:
+                    from uuid import UUID as _UUID
+
+                    from models.schemas import ContextSearchConfigUpdate
+                    from repositories.config_repository import ContextSearchConfigRepository
+                    from services.permission_service import PermissionService
+
+                    # Parse context_id
+                    try:
+                        ctx_uuid = _UUID(args["context_id"])
+                    except ValueError:
+                        return _error_response(
+                            "invalid_context_id",
+                            f"Invalid context_id: {args['context_id']}",
+                        )
+
+                    # Permission check (owner/editor)
+                    perm_service = PermissionService(db)
+                    try:
+                        await perm_service.check_context_write(user_id, ctx_uuid)
+                    except Exception as perm_err:
+                        return _error_response("permission_denied", str(perm_err))
+
+                    repo = ContextSearchConfigRepository(db)
+                    config = await repo.get_by_context(ctx_uuid)
+
+                    if not config:
+                        return _error_response(
+                            "not_found",
+                            f"No search config for context {args['context_id']}",
+                        )
+
+                    # Build update with current values as defaults
+                    update_fields = {
+                        "semantic_weight": args.get(
+                            "semantic_weight", float(config.semantic_weight)
+                        ),
+                        "bm25_weight": args.get("bm25_weight", float(config.bm25_weight)),
+                        "fetch_factor": args.get("fetch_factor", config.fetch_factor),
+                        "use_rerank": args.get("use_rerank", config.use_rerank),
+                        "reranker_provider": args.get(
+                            "reranker_provider", config.reranker_provider or "voyage"
+                        ),
+                        "reranker_model": args.get(
+                            "reranker_model", config.reranker_model or "rerank-2"
+                        ),
+                    }
+
+                    # Validate via Pydantic (same as REST API)
+                    try:
+                        update_data = ContextSearchConfigUpdate(**update_fields)
+                    except Exception as validation_err:
+                        return _error_response("invalid_search_config", str(validation_err))
+
+                    # Apply via repository (same as REST API)
+                    config = await repo.update(ctx_uuid, update_data)
+
+                    await _log_tool_usage(
+                        db,
+                        user_id,
+                        "update_search_config",
+                        start_time,
+                        200,
+                        str(ctx_uuid),
+                        workspace_id,
+                    )
+
+                    return [
+                        TextContent(
+                            type="text",
+                            text=json.dumps(
+                                {
+                                    "status": "success",
+                                    "message": "Search configuration updated.",
+                                    "context_id": str(ctx_uuid),
+                                    "config": {
+                                        "semantic_weight": float(config.semantic_weight),
+                                        "bm25_weight": float(config.bm25_weight),
+                                        "fetch_factor": config.fetch_factor,
+                                        "use_rerank": config.use_rerank,
+                                        "reranker_provider": config.reranker_provider,
+                                        "reranker_model": config.reranker_model,
+                                    },
+                                }
+                            ),
+                        )
+                    ]
+                except Exception as e:
+                    await db.rollback()
+                    logger.error(f"update_search_config_failed: {e}", exc_info=True)
+                    return _error_response("update_search_config_error", str(e))
+
+        # =================================================================
+        # Tool: kagura_memory_usage_guide
         # =================================================================
         elif tool_name == "kagura_memory_usage_guide":
             return [TextContent(type="text", text=KAGURA_MEMORY_USAGE_GUIDE)]
