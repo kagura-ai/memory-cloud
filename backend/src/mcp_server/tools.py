@@ -782,7 +782,9 @@ All other tools require context_id. Use this tool first to discover available co
 
 Response includes:
 - contexts: Array of {id, name, summary, is_private, last_used_at}
-- count: Total number of contexts""",
+- count: Total number of contexts
+- limit: Maximum contexts allowed by plan
+- can_create: Whether new contexts can be created""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2083,6 +2085,22 @@ async def execute_tool_call(
                                 ctx_data["memory_count"] = 0
                         context_list.append(ctx_data)
 
+                    # Get context quota
+                    quota_info: dict[str, Any] = {"count": len(context_list)}
+                    if workspace_id:
+                        try:
+                            from services.effective_quota_service import EffectiveQuotaService
+
+                            effective = await EffectiveQuotaService(db).get_effective_quotas(
+                                workspace_id
+                            )
+                            quota_info["limit"] = effective.get("max_contexts", 0)
+                            quota_info["can_create"] = len(context_list) < effective.get(
+                                "max_contexts", 0
+                            )
+                        except Exception:
+                            pass
+
                     await _log_tool_usage(
                         db, user_id, "list_contexts", start_time, 200, None, workspace_id
                     )
@@ -2094,7 +2112,7 @@ async def execute_tool_call(
                                 {
                                     "status": "success",
                                     "contexts": context_list,
-                                    "count": len(context_list),
+                                    **quota_info,
                                 }
                             ),
                         )
