@@ -6,6 +6,7 @@ Create Date: 2026-03-27
 
 Idempotent: uses ON CONFLICT DO NOTHING so safe to run on existing databases.
 """
+
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -139,5 +140,7 @@ Returns context ID, name, summary, usage guide, and optionally stats.'),
 
 def downgrade() -> None:
     """Remove seed data (caution: destructive)."""
-    op.execute("DELETE FROM mcp_tool_descriptions WHERE tool_name IN ('remember','recall','forget','reference','explore','get_context_info')")
+    op.execute(
+        "DELETE FROM mcp_tool_descriptions WHERE tool_name IN ('remember','recall','forget','reference','explore','get_context_info')"
+    )
     op.execute("DELETE FROM neural_config")

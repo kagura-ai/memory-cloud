@@ -188,17 +188,17 @@ def print_report(results: dict[str, int]) -> None:
     print(f"  - Invalid workspace_id UUID: {results['invalid_workspace_id']:,}")
     print(f"  - Invalid context_id UUID: {results['invalid_context_id']:,}")
 
-    if results['deleted'] > 0:
+    if results["deleted"] > 0:
         print(f"\nDeleted orphaned points: {results['deleted']:,}")
 
     print("=" * 60)
 
     # Exit code based on orphaned count
-    if results['orphaned'] > 0 and results['deleted'] == 0:
+    if results["orphaned"] > 0 and results["deleted"] == 0:
         print("\n⚠️  WARNING: Orphaned points detected!")
         print("   Run with --fix to delete them.")
         sys.exit(1)
-    elif results['orphaned'] == 0:
+    elif results["orphaned"] == 0:
         print("\n✓ No orphaned points found. Collection is clean.")
         sys.exit(0)
     else:
