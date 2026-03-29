@@ -211,7 +211,7 @@ function DashboardContent({
                 <div className="container mx-auto flex items-center justify-between text-sm text-slate-600 dark:text-slate-400">
                   <p>© 2025 Kagura Memory Cloud</p>
                   <a
-                    href={`${process.env.NEXT_PUBLIC_API_URL}/redoc`}
+                    href={`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/redoc`}
                     className="hover:text-brand-green-600 transition-colors underline"
                     target="_blank"
                     rel="noopener noreferrer"
