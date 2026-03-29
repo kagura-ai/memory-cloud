@@ -86,6 +86,8 @@ import {
   updateContext,
   deleteContext,
   getContextStats,
+  getContextSearchConfig,
+  updateContextSearchConfig,
   listContextMembers,
   type ContextMember,
 } from '@/lib/api/contexts';
@@ -963,197 +965,158 @@ export default function ContextsPage() {
           </AlertDescription>
         </Alert>
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 items-start">
-          {contexts.map((context) => (
-            <Card
-              key={context.id}
-              className={cn(
-                'relative',
-                transitions.default,
-                context.id === user?.current_context_id && 'ring-2 ring-brand-green-500'
-              )}
-            >
-              <CardHeader className="pb-2">
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-2">
+        <div className="overflow-x-auto border border-gray-200 dark:border-gray-700 rounded-lg">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
+                <th className="px-4 py-3 text-center font-medium text-gray-600 dark:text-gray-300">{t('contextName')}</th>
+                <th className="px-4 py-3 text-center font-medium text-gray-600 dark:text-gray-300">{t('status')}</th>
+                <th className="px-4 py-3 text-center font-medium text-gray-600 dark:text-gray-300">{t('reranker')}</th>
+                <th className="px-4 py-3 text-center font-medium text-gray-600 dark:text-gray-300">{t('created')}</th>
+                <th className="px-4 py-3 text-center font-medium text-gray-600 dark:text-gray-300">{tCommon('actions')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {contexts.map((context) => (
+                <tr
+                  key={context.id}
+                  className={cn(
+                    'border-b border-gray-100 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800/30',
+                    context.id === user?.current_context_id && 'bg-brand-green-50 dark:bg-brand-green-900/10'
+                  )}
+                >
+                  {/* Name */}
+                  <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
-                      <Brain className="h-5 w-5 text-brand-green-600" />
-                      <CardTitle className="text-lg">{context.display_name || context.name}</CardTitle>
-                    </div>
-                    {/* Options menu - only for context creator */}
-                    {context.created_by === user?.id && (
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="sm" className="h-8 w-8 p-0 -mr-2">
-                            <MoreVertical className="h-4 w-4 text-gray-500" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          {context.created_by === user?.id && (
-                            <>
-                              <DropdownMenuItem onClick={() => handleEditClick(context)}>
-                                <Edit className="h-4 w-4 mr-2" />
-                                {tCommon('edit')}
-                              </DropdownMenuItem>
-                              <DropdownMenuSeparator />
-                            </>
-                          )}
-                          <DropdownMenuItem onClick={() => router.push(`/workspace/contexts/${context.id}/search-settings`)}>
-                            <Settings2 className="h-4 w-4 mr-2" />
-                            {t('searchSettings')}
-                          </DropdownMenuItem>
-                          {!context.is_default && (
-                            <>
-                              <DropdownMenuSeparator />
-                              <DropdownMenuItem
-                                onClick={() => handleDeleteClick(context)}
-                                disabled={context.id === user?.current_context_id}
-                                className="text-red-600 focus:text-red-600"
-                              >
-                                <Trash2 className="h-4 w-4 mr-2" />
-                                {tCommon('delete')}
-                              </DropdownMenuItem>
-                            </>
-                          )}
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    )}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-1">
-                    {context.id === user?.current_context_id && (
-                      <Badge variant="default" className="bg-brand-green-600">
-                        {t('current')}
-                      </Badge>
-                    )}
-                    {context.is_default && (
-                      <Badge variant="secondary">{t('default')}</Badge>
-                    )}
-                    {context.is_public && (
-                      <Badge variant="outline" className="bg-gradient-to-r from-purple-100 to-blue-100 text-purple-700 border-purple-300 dark:from-purple-900/40 dark:to-blue-900/40 dark:text-purple-300">
-                        🌍 Public
-                      </Badge>
-                    )}
-                    {context.is_private ? (
-                      <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">
-                        🔒 {t('privateOption')}
-                      </Badge>
-                    ) : (
-                      <>
-                        <Badge variant="outline" className="bg-purple-50 text-purple-700 border-purple-200">
-                          👥 {t('sharedOption')}
-                        </Badge>
-                        <Badge
-                          variant="outline"
-                          className="bg-gray-50 text-gray-700 border-gray-200 cursor-pointer hover:bg-gray-100"
-                          onClick={() => handleMembersClick(context)}
-                          title={t('viewContextMembers')}
-                        >
-                          <Users className="h-3 w-3 mr-1" />
-                          {context.member_count ?? 0}
-                        </Badge>
-                      </>
-                    )}
-                  </div>
-                </div>
-                {context.description && (
-                  <CardDescription className="mt-1">
-                    {context.description}
-                  </CardDescription>
-                )}
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-3">
-                  {/* AI Summary - Collapsible */}
-                  {context.summary && (
-                    <details className="text-sm bg-blue-50 dark:bg-blue-900/20 p-3 rounded border border-blue-100 dark:border-blue-800">
-                      <summary className="cursor-pointer font-medium text-blue-900 dark:text-blue-100 text-xs hover:text-blue-700 dark:hover:text-blue-300">
-                        {t('summaryForAI')} ({context.summary.length}/500)
-                      </summary>
-                      <p className="text-blue-800 dark:text-blue-200 mt-2">
-                        {context.summary}
-                      </p>
-                    </details>
-                  )}
-
-                  {/* Usage Guide (Instructions) - Collapsible */}
-                  {context.usage_guide && (
-                    <details className="text-sm bg-green-50 dark:bg-green-900/20 p-3 rounded border border-green-100 dark:border-green-800">
-                      <summary className="cursor-pointer font-medium text-green-900 dark:text-green-100 text-xs hover:text-green-700 dark:hover:text-green-300">
-                        {t('usageGuideForAI')} ({context.usage_guide.length}/2000)
-                      </summary>
-                      <p className="text-green-800 dark:text-green-200 whitespace-pre-wrap mt-2">
-                        {context.usage_guide}
-                      </p>
-                    </details>
-                  )}
-
-                  <div className="text-sm text-slate-500 dark:text-slate-400">
-                    {context.is_public && context.resource_id && currentWorkspace?.current_user_role === 'owner' && (
-                      <div className="mt-2 p-2 bg-purple-50 dark:bg-purple-950/20 border border-purple-200 dark:border-purple-800 rounded">
-                        <p className="text-xs text-purple-900 dark:text-purple-100">
-                          <span className="font-medium">{t('publicResourceId')}:</span>{' '}
-                          <code className="bg-purple-100 dark:bg-purple-900 px-1.5 py-0.5 rounded text-xs">
-                            {context.resource_id}
-                          </code>
-                        </p>
-                        <p className="text-xs text-purple-700 dark:text-purple-300 mt-1">
-                          {t('resourceIdExplanation')}
-                          <a
-                            href="/workspace/developer/resource-tokens"
-                            className="text-purple-600 dark:text-purple-400 underline ml-1 hover:text-purple-700"
-                          >
-                            {t('manageResourceTokens')}
-                          </a>
-                        </p>
+                      <Brain className="h-4 w-4 text-brand-green-600 flex-shrink-0" />
+                      <div>
+                        <div className="font-medium text-gray-900 dark:text-gray-100">
+                          {context.display_name || context.name}
+                        </div>
+                        {context.description && (
+                          <div className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[250px]" title={context.description}>
+                            {context.description}
+                          </div>
+                        )}
                       </div>
-                    )}
-                    {/* Meta info - less prominent */}
-                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-400 dark:text-gray-500">
-                      <span>
-                        {t('created')}: {formatDate(context.created_at)}
-                      </span>
-                      {context.created_by_name && (
-                        <>
-                          <span>•</span>
-                          <span>
-                            {t('createdBy')}: {context.created_by === user?.id ? t('you') : context.created_by_name}
-                          </span>
-                        </>
+                    </div>
+                  </td>
+
+                  {/* Status badges */}
+                  <td className="px-4 py-3">
+                    <div className="flex flex-wrap items-center justify-center gap-1">
+                      {context.is_default && (
+                        <Badge variant="outline" className="text-xs bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700" title={t('default')}>
+                          {t('default')}
+                        </Badge>
                       )}
-                      {/* Issue #217: Reranker status (Basic+ only) */}
-                      {currentWorkspace?.plan_name !== 'free' && (
-                        <>
-                          <span>•</span>
-                          <span>
-                            {t('reranker')}: {context.use_rerank ? (
-                              context.reranker_provider === 'voyage' ? 'Voyage AI' :
-                              context.reranker_provider === 'cohere' ? 'Cohere' :
-                              t('enabled')
-                            ) : t('off')}
-                          </span>
-                        </>
+                      {context.is_public && (
+                        <Badge variant="outline" className="text-xs bg-gradient-to-r from-purple-100 to-blue-100 text-purple-700 border-purple-300 dark:from-purple-900/40 dark:to-blue-900/40 dark:text-purple-300" title="Public" aria-label="Public">
+                          🌍
+                        </Badge>
+                      )}
+                      {context.is_private ? (
+                        <Badge variant="outline" className="text-xs bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-700" title={t('privateOption')} aria-label={t('privateOption')}>
+                          🔒
+                        </Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-xs bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-900/30 dark:text-purple-300 dark:border-purple-700" title={t('sharedOption')} aria-label={t('sharedOption')}>
+                          👥
+                        </Badge>
                       )}
                     </div>
-                  </div>
+                  </td>
+
+                  {/* Rerank toggle */}
+                  <td className="px-4 py-3 text-center">
+                    {currentWorkspace?.plan_name !== 'free' ? (
+                      <button
+                        disabled={actionLoading === context.id}
+                        onClick={async () => {
+                          try {
+                            setActionLoading(context.id);
+                            const config = await getContextSearchConfig(context.id);
+                            await updateContextSearchConfig(context.id, {
+                              ...config,
+                              use_rerank: !config.use_rerank,
+                            });
+                            fetchContexts();
+                          } catch {
+                            toast({ title: t('rerankToggleFailed'), variant: 'destructive' });
+                          } finally {
+                            setActionLoading(null);
+                          }
+                        }}
+                        className={cn(
+                          'inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors disabled:opacity-50',
+                          context.use_rerank
+                            ? 'bg-green-100 text-green-700 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-300 dark:hover:bg-green-900/50'
+                            : 'bg-gray-100 text-gray-500 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-gray-700'
+                        )}
+                        title={context.use_rerank ? t('rerankOn') : t('rerankOff')}
+                      >
+                        {context.use_rerank ? `✓ ${t('enabled')}` : t('off')}
+                      </button>
+                    ) : (
+                      <span className="text-xs text-gray-400">—</span>
+                    )}
+                  </td>
+
+                  {/* Created */}
+                  <td className="px-4 py-3 text-center text-xs text-gray-500 dark:text-gray-400">
+                    {formatDate(context.created_at)}
+                  </td>
 
                   {/* Actions */}
-                  <div className="flex items-center gap-2 pt-2 border-t border-slate-200 dark:border-slate-700">
-                    {/* Usage Stats button */}
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => handleViewStats(context)}
-                      disabled={actionLoading === context.id}
-                      title={t('viewUsage')}
-                    >
-                      <BarChart className="h-4 w-4 mr-2" />
-                      {t('usage')}
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
+                  <td className="px-4 py-3">
+                    <div className="flex items-center justify-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 w-7 p-0"
+                        onClick={() => handleViewStats(context)}
+                        title={t('viewUsage')}
+                      >
+                        <BarChart className="h-3.5 w-3.5" />
+                      </Button>
+                      {context.created_by === user?.id && (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="sm" className="h-7 w-7 p-0">
+                              <MoreVertical className="h-3.5 w-3.5" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => handleEditClick(context)}>
+                              <Edit className="h-4 w-4 mr-2" />
+                              {tCommon('edit')}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => router.push(`/workspace/contexts/${context.id}/search-settings`)}>
+                              <Settings2 className="h-4 w-4 mr-2" />
+                              {t('searchSettings')}
+                            </DropdownMenuItem>
+                            {!context.is_default && (
+                              <>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem
+                                  onClick={() => handleDeleteClick(context)}
+                                  disabled={context.id === user?.current_context_id}
+                                  className="text-red-600 focus:text-red-600"
+                                >
+                                  <Trash2 className="h-4 w-4 mr-2" />
+                                  {tCommon('delete')}
+                                </DropdownMenuItem>
+                              </>
+                            )}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
