@@ -846,10 +846,10 @@ Use list_contexts() after creation to verify.""",
             "name": "update_context",
             "description": """Update an existing context's settings.
 
-Modify summary, usage_guide, description, or display_name of a context.
+Modify summary, usage_guide, description, display_name, or resource_id of a context.
 
 Requires owner or editor role in the context.
-- summary/usage_guide: Owner-only fields
+- summary/usage_guide/resource_id: Owner-only fields
 - display_name/description: Editor access sufficient
 
 Use get_context_info() to see current values before updating.""",
@@ -876,6 +876,10 @@ Use get_context_info() to see current values before updating.""",
                     "usage_guide": {
                         "type": "string",
                         "description": "Updated LLM-oriented usage guidelines (max 2000 chars). Instructions for how AI should use memories in this context.",
+                    },
+                    "resource_id": {
+                        "type": "string",
+                        "description": "Resource ID for external data ingestion via Resource Tokens. Must be unique within the workspace.",
                     },
                 },
             },
@@ -1822,17 +1826,17 @@ async def execute_tool_call(
                     ctx_uuid = _UUID(args["context_id"])
 
                     perm_service = PermissionService(db)
-                    owner_fields = {"summary", "usage_guide"}
+                    owner_fields = {"summary", "usage_guide", "resource_id"}
                     requested_fields = {
                         k
-                        for k in ("summary", "usage_guide", "display_name", "description")
+                        for k in ("summary", "usage_guide", "display_name", "description", "resource_id")
                         if k in args
                     }
 
                     if not requested_fields:
                         return _error_response(
                             "no_changes",
-                            "No fields to update. Provide at least one of: summary, usage_guide, display_name, description.",
+                            "No fields to update. Provide at least one of: summary, usage_guide, display_name, description, resource_id.",
                         )
 
                     # Permission check using PermissionService (same as REST API)
@@ -1849,7 +1853,7 @@ async def execute_tool_call(
                         return _error_response(
                             "permission_denied",
                             str(perm_err),
-                            help="You need owner access for summary/usage_guide, or editor access for display_name/description.",
+                            help="You need owner access for summary/usage_guide/resource_id, or editor access for display_name/description.",
                         )
 
                     # Apply updates
@@ -1861,6 +1865,8 @@ async def execute_tool_call(
                         context.summary = args["summary"]
                     if "usage_guide" in args:
                         context.usage_guide = args["usage_guide"]
+                    if "resource_id" in args:
+                        context.resource_id = args["resource_id"]
 
                     await db.commit()
                     await db.refresh(context)
