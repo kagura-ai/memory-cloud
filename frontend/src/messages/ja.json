@@ -2291,6 +2291,8 @@
       "step2": "トークンを作成",
       "step3": "データを送信"
     },
+    "sdkHint": "または",
+    "sdkHintSuffix": "でプログラムからデータ取り込み",
     "proPlanRequired": "上位プランが必要です",
     "proPlanRequiredDesc": "Resource Tokens機能を利用するには、上位プランへのアップグレードが必要です。",
     "upgradePlan": "プランをアップグレード →",

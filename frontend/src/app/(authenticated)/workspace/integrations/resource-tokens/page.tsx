@@ -260,6 +260,20 @@ export default function ResourceTokensPage() {
         </span>
       </div>
 
+      {/* SDK Quick Link */}
+      <div className="text-center text-xs text-gray-500 dark:text-gray-400 -mt-4 mb-4">
+        {t('sdkHint', { default: 'Or use the' })}{' '}
+        <a
+          href="https://github.com/kagura-ai/kagura-memory-python-sdk"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-brand-green-600 dark:text-brand-green-400 underline hover:text-brand-green-700"
+        >
+          Python SDK
+        </a>
+        {' '}{t('sdkHintSuffix', { default: 'for programmatic resource ingestion' })}
+      </div>
+
       {/* Resource Tokens Content */}
       <div className="mt-6">
           {error && (

@@ -2282,6 +2282,8 @@
       "step2": "Create Token",
       "step3": "Send Data"
     },
+    "sdkHint": "Or use the",
+    "sdkHintSuffix": "for programmatic resource ingestion",
     "proPlanRequired": "Higher Tier Plan Required",
     "proPlanRequiredDesc": "Resource Tokens feature requires a higher tier plan.",
     "upgradePlan": "Upgrade Plan →",
