@@ -77,32 +77,31 @@ export function CreateResourceTokenDialog({
   const [loadingContexts, setLoadingContexts] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Public contexts for selection
-  const [publicContexts, setPublicContexts] = useState<Context[]>([]);
+  // Contexts with resource_id for selection
+  const [resourceContexts, setResourceContexts] = useState<Context[]>([]);
 
   // One-time display state
   const [createdToken, setCreatedToken] = useState<ResourceTokenCreateResponse | null>(null);
   const [copied, setCopied] = useState(false);
 
-  // Load public contexts when dialog opens
+  // Load contexts with resource_id when dialog opens
   useEffect(() => {
     if (isOpen) {
-      loadPublicContexts();
+      loadResourceContexts();
     }
   }, [isOpen]);
 
-  const loadPublicContexts = async () => {
+  const loadResourceContexts = async () => {
     try {
       setLoadingContexts(true);
       const data = await getContexts();
-      const publicCtxs = data.contexts.filter(
-        ctx => ctx.is_public && ctx.resource_id
+      const ctxs = data.contexts.filter(
+        ctx => ctx.resource_id
       );
-      setPublicContexts(publicCtxs);
+      setResourceContexts(ctxs);
     } catch (err) {
-      // Production-safe logging (L-12)
       if (process.env.NODE_ENV === 'development') {
-        console.error('Failed to load public contexts:', err);
+        console.error('Failed to load contexts:', err);
       }
       // TODO: Send to logging service in production
     } finally {
@@ -288,13 +287,13 @@ export function CreateResourceTokenDialog({
 
             <div className="space-y-2">
               <Label htmlFor="resource_id">{t('createDialog.resourceId')} *</Label>
-              {publicContexts.length > 0 ? (
+              {resourceContexts.length > 0 ? (
                 <Select value={resourceId} onValueChange={setResourceId} disabled={loading || loadingContexts}>
                   <SelectTrigger id="resource_id">
                     <SelectValue placeholder={t('createDialog.resourceIdPlaceholder')} />
                   </SelectTrigger>
                   <SelectContent>
-                    {publicContexts.map((ctx) => (
+                    {resourceContexts.map((ctx) => (
                       <SelectItem value={ctx.resource_id ?? ''} key={ctx.id}>
                         {ctx.display_name || ctx.name}
                         {ctx.resource_id && (
@@ -375,7 +374,7 @@ export function CreateResourceTokenDialog({
             <Button type="button" variant="outline" onClick={handleClose} disabled={loading}>
               {t('createDialog.cancel')}
             </Button>
-            <Button type="submit" disabled={loading || publicContexts.length === 0}>
+            <Button type="submit" disabled={loading || resourceContexts.length === 0}>
               {loading ? t('createDialog.creating') : t('createDialog.create')}
             </Button>
           </DialogFooter>

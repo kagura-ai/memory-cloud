@@ -66,7 +66,7 @@ Required for memory storage and search:
 
 #### Resource Tokens (External Data Ingestion)
 
-Resource Tokens allow external systems (CI/CD, webhooks, scripts) to push data into Kagura Memory Cloud via the Resource Event API. Pro plan only.
+Resource Tokens allow external systems (CI/CD, webhooks, scripts) to push data into Kagura Memory Cloud via the Resource Event API. Higher tier plan required (Basic: 3 tokens, Pro: 30 tokens).
 
 1. Go to **Workspace > Integrations > Resource Tokens** in Web UI
 2. Create a token scoped to a specific `resource_id` (e.g., `github-issues`, `slack-messages`)

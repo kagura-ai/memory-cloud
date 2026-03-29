@@ -846,10 +846,10 @@ Use list_contexts() after creation to verify.""",
             "name": "update_context",
             "description": """Update an existing context's settings.
 
-Modify summary, usage_guide, description, or display_name of a context.
+Modify summary, usage_guide, description, display_name, resource_id, or is_public of a context.
 
 Requires owner or editor role in the context.
-- summary/usage_guide: Owner-only fields
+- summary/usage_guide/resource_id/is_public: Owner-only fields
 - display_name/description: Editor access sufficient
 
 Use get_context_info() to see current values before updating.""",
@@ -876,6 +876,14 @@ Use get_context_info() to see current values before updating.""",
                     "usage_guide": {
                         "type": "string",
                         "description": "Updated LLM-oriented usage guidelines (max 2000 chars). Instructions for how AI should use memories in this context.",
+                    },
+                    "resource_id": {
+                        "type": "string",
+                        "description": "Resource ID for external data ingestion via Resource Tokens. Lowercase alphanumeric and underscores only (e.g., 'github_issues'). Must be unique within the workspace.",
+                    },
+                    "is_public": {
+                        "type": "boolean",
+                        "description": "Make context publicly accessible via REST API. Requires owner permission and higher tier plan.",
                     },
                 },
             },
@@ -1822,17 +1830,24 @@ async def execute_tool_call(
                     ctx_uuid = _UUID(args["context_id"])
 
                     perm_service = PermissionService(db)
-                    owner_fields = {"summary", "usage_guide"}
+                    owner_fields = {"summary", "usage_guide", "resource_id", "is_public"}
                     requested_fields = {
                         k
-                        for k in ("summary", "usage_guide", "display_name", "description")
+                        for k in (
+                            "summary",
+                            "usage_guide",
+                            "display_name",
+                            "description",
+                            "resource_id",
+                            "is_public",
+                        )
                         if k in args
                     }
 
                     if not requested_fields:
                         return _error_response(
                             "no_changes",
-                            "No fields to update. Provide at least one of: summary, usage_guide, display_name, description.",
+                            "No fields to update. Provide at least one of: summary, usage_guide, display_name, description, resource_id, is_public.",
                         )
 
                     # Permission check using PermissionService (same as REST API)
@@ -1849,7 +1864,7 @@ async def execute_tool_call(
                         return _error_response(
                             "permission_denied",
                             str(perm_err),
-                            help="You need owner access for summary/usage_guide, or editor access for display_name/description.",
+                            help="You need owner access for summary/usage_guide/resource_id/is_public, or editor access for display_name/description.",
                         )
 
                     # Apply updates
@@ -1861,8 +1876,71 @@ async def execute_tool_call(
                         context.summary = args["summary"]
                     if "usage_guide" in args:
                         context.usage_guide = args["usage_guide"]
+                    if "is_public" in args:
+                        is_public = args["is_public"]
+                        if is_public and not context.is_public:
+                            # Making public: check plan allows it
+                            from config.plan_tiers import get_plan_tier
+                            from models.auth import Workspace
 
-                    await db.commit()
+                            ws = await db.get(Workspace, context.workspace_id)
+                            if ws:
+                                plan = get_plan_tier(ws.plan_name)
+                                if not plan.allows_shared_contexts:
+                                    return _error_response(
+                                        "plan_required",
+                                        "Public contexts require a higher tier plan.",
+                                    )
+                        if not is_public and context.is_public and context.resource_id:
+                            return _error_response(
+                                "cannot_make_private",
+                                "Cannot make private: context has a resource_id. Revoke tokens and remove resource_id first.",
+                            )
+                        context.is_public = is_public
+
+                    if "resource_id" in args:
+                        import re as _re
+
+                        rid = args["resource_id"]
+                        if not _re.match(r"^[a-z0-9_-]+$", rid) or len(rid) > 255:
+                            return _error_response(
+                                "invalid_resource_id",
+                                "resource_id must be lowercase alphanumeric, underscores, and hyphens only (max 255 chars).",
+                            )
+
+                        # Revoke old tokens if resource_id is changing
+                        old_rid = context.resource_id
+                        if old_rid and old_rid != rid:
+                            from sqlalchemy import select as _select
+
+                            from auth.resource_tokens import ResourceTokenManager
+                            from models.resource import ResourceToken
+
+                            token_mgr = ResourceTokenManager(db)
+                            old_tokens = await db.execute(
+                                _select(ResourceToken).where(
+                                    ResourceToken.resource_id == old_rid,
+                                    ResourceToken.created_by == user_id,
+                                    ResourceToken.is_active == True,  # noqa: E712
+                                )
+                            )
+                            for token in old_tokens.scalars().all():
+                                await token_mgr.revoke_token(token.id)
+
+                        context.resource_id = rid
+
+                    try:
+                        await db.commit()
+                    except Exception as commit_err:
+                        await db.rollback()
+                        if "unique_context_resource_id" in str(commit_err) or "resource_id" in str(
+                            commit_err
+                        ):
+                            return _error_response(
+                                "resource_id_conflict",
+                                f"Resource ID '{args.get('resource_id', '')}' is already used by another context in this workspace.",
+                            )
+                        raise
                     await db.refresh(context)
 
                     await _log_tool_usage(
