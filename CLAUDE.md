@@ -32,6 +32,7 @@ main (default, protected)
 └── {issue-number}-docs/*
 ```
 
+- **Default base branch**: `main`
 - **Merge strategy**: Squash merge for all feature/fix/docs branches
 - **Branch lifespan**: Max 7 days (split if longer)
 - **Keep up to date**: `git rebase origin/main`

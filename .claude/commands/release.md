@@ -69,7 +69,8 @@ Review the auto-generated notes. If needed, edit to add a summary section at the
 make coverage-upload
 ```
 
-This runs unit tests with coverage and uploads to Codecov (requires `CODECOV_TOKEN` in environment).
+This runs unit tests with coverage and uploads to Codecov.
+Requires `CODECOV_TOKEN` environment variable (set in `.env.local` or export manually).
 
 ### 9. Report
 

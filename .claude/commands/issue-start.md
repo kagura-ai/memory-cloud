@@ -7,9 +7,9 @@ Steps:
    ```
    gh issue view $ARGUMENTS
    ```
-2. Create a feature branch from dev:
+2. Create a feature branch from main:
    ```
-   git checkout dev && git pull origin dev
+   git checkout main && git pull origin main
    git checkout -b {issue-number}-feat/{short-description}
    ```
    Use the issue title to derive a short kebab-case description.

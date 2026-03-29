@@ -16,6 +16,7 @@ Audit the FastAPI OpenAPI configuration against actual router endpoints. Report 
 ### 2. Tag Descriptions
 - For each tag in `openapi_tags`, verify the description matches the actual endpoints
 - Check that MCP tools listed in `mcp_server/tools.py` have corresponding REST API endpoints in ReDoc
+- Also check `mcp_server/transport.py` (Streamable HTTP transport) for transport-level endpoints
 - Flag misleading or outdated descriptions
 
 ### 3. Endpoint Coverage
