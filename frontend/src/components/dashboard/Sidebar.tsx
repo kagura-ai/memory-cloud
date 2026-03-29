@@ -18,6 +18,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { hasRole, Role } from '@/lib/auth/rbac';
 import { getContexts } from '@/lib/api/contexts';
+import { listExternalAPIKeys } from '@/lib/api/external-keys';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { KaguraLogo } from '@/components/icons/KaguraLogo';
 import {
@@ -169,6 +170,7 @@ export function Sidebar() {
   const { currentWorkspace, currentWorkspaceId } = useWorkspace();
   const [isOpen, setIsOpen] = useState(false);
   const [contextCount, setContextCount] = useState<number | null>(null);
+  const [hasExternalKeys, setHasExternalKeys] = useState<boolean | null>(null);
   const t = useTranslations('sidebar');
   const tNav = useTranslations('navigation');
 
@@ -221,6 +223,17 @@ export function Sidebar() {
         setContextCount(null);
         // Note: Error not shown in UI to keep sidebar clean
         // Users can see detailed error on /workspace/contexts page
+      });
+    }
+  }, [currentWorkspaceId]);
+
+  // Load external key status on mount
+  useEffect(() => {
+    if (currentWorkspaceId) {
+      listExternalAPIKeys().then(keys => {
+        setHasExternalKeys(keys.length > 0);
+      }).catch(() => {
+        setHasExternalKeys(null);
       });
     }
   }, [currentWorkspaceId]);
@@ -539,6 +552,14 @@ export function Sidebar() {
                       <Icon className="h-5 w-5 flex-shrink-0" />
                       <span className="flex-1">{itemName}</span>
                       {/* Show warning if contexts menu and no contexts or load error */}
+                      {item.nameKey === 'externalKeys' && hasExternalKeys === false && (
+                        <span title={t('noExternalKeys', { default: 'No API keys configured' })}>
+                          <AlertTriangle
+                            className="h-4 w-4 text-amber-500 flex-shrink-0"
+                            aria-label={t('noExternalKeys', { default: 'No API keys configured' })}
+                          />
+                        </span>
+                      )}
                       {item.nameKey === 'contexts' && (contextCount === 0 || contextCount === null) && (
                         <span title={contextCount === null ? 'Failed to load contexts' : 'No contexts found'}>
                           <AlertTriangle

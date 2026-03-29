@@ -53,6 +53,7 @@
     "oauthApps": "OAuth Apps",
     "resourceTokens": "Resource Tokens",
     "externalKeys": "External Keys",
+    "noExternalKeys": "No API keys configured — add OpenAI key to enable memory features",
     "settings": "Settings",
     "workspaceSettings": "Workspace",
     "admin": "Admin",
