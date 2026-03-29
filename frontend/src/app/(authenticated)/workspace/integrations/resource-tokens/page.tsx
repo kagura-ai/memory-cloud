@@ -13,6 +13,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useTranslations } from 'next-intl';
 import { PageHeader } from '@/components/common/PageHeader';
@@ -241,6 +242,38 @@ export default function ResourceTokensPage() {
         <p>{t('featureGuide.useCases')}</p>
         <p className="font-medium">{t('featureGuide.howItWorks')}</p>
       </FeatureGuide>
+
+      {/* Step Flow */}
+      <div className="flex items-center justify-center gap-2 my-6 p-4 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
+        <Link href="/workspace/contexts" className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 hover:text-brand-green-600">
+          <span className="flex items-center justify-center w-6 h-6 rounded-full bg-gray-200 dark:bg-gray-700 text-xs font-bold">1</span>
+          <span>{t('stepFlow.step1', { default: 'Set Resource ID' })}</span>
+        </Link>
+        <span className="text-gray-400">→</span>
+        <span className="flex items-center gap-2 text-sm font-medium text-brand-green-700 dark:text-brand-green-400">
+          <span className="flex items-center justify-center w-6 h-6 rounded-full bg-brand-green-100 dark:bg-brand-green-900 text-xs font-bold text-brand-green-700 dark:text-brand-green-300">2</span>
+          <span>{t('stepFlow.step2', { default: 'Create Token' })}</span>
+        </span>
+        <span className="text-gray-400">→</span>
+        <span className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
+          <span className="flex items-center justify-center w-6 h-6 rounded-full bg-gray-200 dark:bg-gray-700 text-xs font-bold">3</span>
+          <span>{t('stepFlow.step3', { default: 'Send Data' })}</span>
+        </span>
+      </div>
+
+      {/* SDK Quick Link */}
+      <div className="text-center text-xs text-gray-500 dark:text-gray-400 -mt-4 mb-4">
+        {t('sdkHint', { default: 'Or use the' })}{' '}
+        <a
+          href="https://github.com/kagura-ai/kagura-memory-python-sdk"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-brand-green-600 dark:text-brand-green-400 underline hover:text-brand-green-700"
+        >
+          Python SDK
+        </a>
+        {' '}{t('sdkHintSuffix', { default: 'for programmatic resource ingestion' })}
+      </div>
 
       {/* Resource Tokens Content */}
       <div className="mt-6">

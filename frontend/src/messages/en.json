@@ -1249,7 +1249,8 @@
     "resourceIdN1TokenA": "• Token A: Shopify (500 events/h)",
     "resourceIdN1TokenB": "• Token B: Rakuten (300 events/h)",
     "resourceIdN1Result": "→ Both send data to the same Context",
-    "resourceIdManagementNote": "Resource Tokens are managed in Workspace Settings > Resource Tokens"
+    "resourceIdManagementNote": "Resource Tokens are managed in Workspace Settings > Resource Tokens",
+    "manageResourceTokensLink": "Manage Resource Tokens →"
   },
   "memories": {
     "title": "Memories",
@@ -2163,7 +2164,7 @@
     "revokeError": "Failed to revoke resource token",
     "guideTitle": "📖 Quick Start Guide - Resource Ingest API",
     "table": {
-      "resourceId": "Resource ID",
+      "resourceId": "Resource ID / Context",
       "description": "Description",
       "quota": "Quota (events/hour)",
       "status": "Status",
@@ -2276,6 +2277,13 @@
     "noResourceIdWarning": "Resource ID Required (Higher Tier Plan)",
     "noResourceIdWarningDesc": "To create Resource Tokens, you need a higher tier plan and a Context with a Resource ID configured.",
     "goToContexts": "Go to Contexts →",
+    "stepFlow": {
+      "step1": "Set Resource ID",
+      "step2": "Create Token",
+      "step3": "Send Data"
+    },
+    "sdkHint": "Or use the",
+    "sdkHintSuffix": "for programmatic resource ingestion",
     "proPlanRequired": "Higher Tier Plan Required",
     "proPlanRequiredDesc": "Resource Tokens feature requires a higher tier plan.",
     "upgradePlan": "Upgrade Plan →",

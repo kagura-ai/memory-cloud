@@ -15,7 +15,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Trash2, Edit, ExternalLink, Copy, Check } from 'lucide-react';
+import { Trash2, Edit, Copy, Check } from 'lucide-react';
 import Link from 'next/link';
 import { useState } from 'react';
 import type { ResourceToken } from '@/lib/api/resource-tokens';
@@ -122,30 +122,31 @@ export function ResourceTokensTable({
             return (
             <TableRow key={token.id}>
               <TableCell className="font-medium">
-                <div className="flex items-center gap-2">
-                  <code className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">
-                    {token.resource_id}
-                  </code>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 w-6 p-0"
-                    onClick={() => handleCopyResourceId(token.id, token.resource_id)}
-                    title="Copy resource ID"
-                  >
-                    {copiedTokenId === token.id ? (
-                      <Check className="h-3 w-3 text-green-600" />
-                    ) : (
-                      <Copy className="h-3 w-3 text-slate-400" />
-                    )}
-                  </Button>
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <code className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">
+                      {token.resource_id}
+                    </code>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 w-6 p-0"
+                      onClick={() => handleCopyResourceId(token.id, token.resource_id)}
+                      title="Copy resource ID"
+                    >
+                      {copiedTokenId === token.id ? (
+                        <Check className="h-3 w-3 text-green-600" />
+                      ) : (
+                        <Copy className="h-3 w-3 text-slate-400" />
+                      )}
+                    </Button>
+                  </div>
                   {context && (
                     <Link
-                      href={`/workspace/contexts/${context.id}/stats`}
-                      className="text-blue-600 hover:text-blue-700"
-                      title="View context usage stats"
+                      href={`/workspace/contexts?edit=${context.id}`}
+                      className="text-xs text-gray-500 dark:text-gray-400 hover:text-blue-600 hover:underline"
                     >
-                      <ExternalLink className="h-3 w-3" />
+                      → {context.display_name || context.name}
                     </Link>
                   )}
                 </div>

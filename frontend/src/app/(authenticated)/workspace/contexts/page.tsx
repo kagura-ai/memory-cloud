@@ -10,8 +10,9 @@
  * Issue #223: i18n support
  */
 
-import { useEffect, useState, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import { useEffect, useState, useCallback, useRef } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import Link from 'next/link';
 import { useTranslations, useLocale } from 'next-intl';
 import { useAuth } from '@/contexts/AuthContext';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
@@ -113,6 +114,7 @@ export default function ContextsPage() {
   const tCommon = useTranslations('common');
   const locale = useLocale();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { user, refetchUser } = useAuth();
   const { currentWorkspace } = useWorkspace();
   const [contexts, setContexts] = useState<Context[]>([]);
@@ -220,6 +222,20 @@ export default function ContextsPage() {
     fetchContexts();
     checkApiKey();
   }, [fetchContexts, checkApiKey]);
+
+  // Open edit modal from URL param: /workspace/contexts?edit=<context_id>
+  const editHandled = useRef(false);
+  useEffect(() => {
+    const editId = searchParams.get('edit');
+    if (editId && contexts.length > 0 && !editHandled.current) {
+      const ctx = contexts.find(c => c.id === editId);
+      if (ctx) {
+        editHandled.current = true;
+        handleEditClick(ctx);
+        router.replace('/workspace/contexts', { scroll: false });
+      }
+    }
+  }, [searchParams, contexts]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-select Shared for Admins when opening create dialogs
   useEffect(() => {
@@ -1410,8 +1426,10 @@ export default function ContextsPage() {
                           {t('resourceIdN1Result')}
                         </p>
                       </div>
-                      <p className="text-blue-600 dark:text-blue-400 italic mt-2">
-                        {t('resourceIdManagementNote')}
+                      <p className="mt-2">
+                        <Link href="/workspace/integrations/resource-tokens" className="text-blue-600 dark:text-blue-400 underline hover:text-blue-700 dark:hover:text-blue-300 font-medium">
+                          {t('manageResourceTokensLink', { default: 'Manage Resource Tokens →' })}
+                        </Link>
                       </p>
                     </div>
                   </div>
