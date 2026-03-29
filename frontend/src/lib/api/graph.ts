@@ -1,17 +1,15 @@
 /**
  * Graph API client for Neural Memory visualization
- * Issue #60 - Neural Memory Graph Visualization
+ * Issue #31 - Redesigned graph view
  */
 
 import { apiClient } from "./base";
-import type { GraphData, GraphFilters } from "../types/graph";
+import type { GraphData, GraphFilters, GraphStatsResponse } from "../types/graph";
 
 export const graphApi = {
-  /**
-   * Get graph data for visualization with optional filtering
-   */
-  async getGraphData(filters?: GraphFilters): Promise<GraphData> {
+  async getGraphData(contextId: string, filters?: GraphFilters): Promise<GraphData> {
     const params = new URLSearchParams();
+    params.append("context_id", contextId);
 
     if (filters?.limit_nodes) {
       params.append("limit_nodes", filters.limit_nodes.toString());
@@ -25,16 +23,10 @@ export const graphApi = {
       });
     }
 
-    const query = params.toString();
-    const url = `/api/v1/graph/data${query ? `?${query}` : ""}`;
-
-    return apiClient.get<GraphData>(url);
+    return apiClient.get<GraphData>(`/api/v1/graph/data?${params.toString()}`);
   },
 
-  /**
-   * Get graph statistics
-   */
-  async getGraphStats() {
-    return apiClient.get("/api/v1/graph/stats");
+  async getGraphStats(contextId: string): Promise<GraphStatsResponse> {
+    return apiClient.get<GraphStatsResponse>(`/api/v1/graph/stats?context_id=${contextId}`);
   },
 };

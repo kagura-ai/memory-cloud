@@ -39,11 +39,12 @@ Apply SemVer bump:
 - `backend/src/api/main.py` — `version="X.Y.Z"` in FastAPI app
 - `backend/src/mcp_server/transport.py` — `"version": "X.Y.Z"` in serverInfo
 - `frontend/package.json` — `"version": "X.Y.Z"`
+- `frontend/package-lock.json` — run `cd frontend && npm install` to sync lock file
 
 ### 5. Commit and tag
 
 ```bash
-git add backend/pyproject.toml backend/src/api/main.py backend/src/mcp_server/transport.py frontend/package.json
+git add backend/pyproject.toml backend/src/api/main.py backend/src/mcp_server/transport.py frontend/package.json frontend/package-lock.json
 git commit -m "chore(release): vX.Y.Z"
 git tag vX.Y.Z
 ```

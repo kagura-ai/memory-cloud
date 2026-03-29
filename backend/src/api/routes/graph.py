@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import SessionUser
 from db.base import get_db
 from models.auth import Context
-from models.memory import GraphMemory, Memory
+from models.memory import Memory
 from services.context_service import ContextService
 from services.graph_service import GraphService
 from utils.datetime import utcnow
@@ -124,30 +124,7 @@ async def get_graph_stats(
                 workspace_id = str(context.workspace_id)
                 str_context_id = str(context.id)
 
-        # Get graph from database
-        result = await db.execute(select(GraphMemory).where(GraphMemory.user_id == user_id))
-        graph_model = result.scalar_one_or_none()
-
-        if not graph_model or not graph_model.graph_data:
-            # No graph yet - return empty stats
-            return GraphStatsResponse(
-                user_id=user_id,
-                stats=GraphStats(
-                    total_nodes=0,
-                    total_edges=0,
-                    avg_edge_weight=0.0,
-                    max_edge_weight=0.0,
-                    min_edge_weight=0.0,
-                    density=0.0,
-                    top_connections=[],
-                    recent_edges=[],
-                ),
-                last_updated=graph_model.updated_at.isoformat()
-                if graph_model
-                else utcnow().isoformat(),
-            )
-
-        # SQL backend: Load graph (Issue #84)
+        # SQL backend: edges are in neural_memory_edges table (Issue #84)
         graph_service = GraphService(
             user_id, db, workspace_id=workspace_id, context_id=str_context_id
         )
@@ -198,7 +175,7 @@ async def get_graph_stats(
                 top_connections=top_connections,
                 recent_edges=recent_edges,
             ),
-            last_updated=graph_model.updated_at.isoformat(),
+            last_updated=utcnow().isoformat(),
         )
 
     except HTTPException:
@@ -215,7 +192,7 @@ async def get_graph_stats(
 async def get_graph_data(
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
-    context_service: ContextService = Depends(lambda db=Depends(get_db): ContextService(db)),
+    context_id: UUID = Query(..., description="Context ID (required for isolation)"),
     limit_nodes: int = Query(100, description="Maximum number of nodes to return", ge=1, le=500),
     min_weight: float = Query(0.0, description="Minimum edge weight to include", ge=0.0, le=3.0),
     memory_types: list[str] | None = Query(
@@ -224,46 +201,25 @@ async def get_graph_data(
 ):
     """Get Neural Memory graph data for visualization (context-scoped).
 
-    Issue #82: Now returns graph data for current context only.
-
-    Returns graph nodes and edges with filtering options for performance.
-    Designed for React Flow and other graph visualization libraries.
-
     Args:
+        context_id: Context ID for scoping (required for proper isolation)
         limit_nodes: Maximum nodes to return (default: 100, max: 500)
-        min_weight: Minimum edge weight threshold (default: 0.1)
+        min_weight: Minimum edge weight threshold
         memory_types: Optional list of memory types to include
 
     Returns:
-        Graph data with nodes and edges for current context
-
-    Raises:
-        HTTPException: 404 if graph not found, 500 on error
+        Graph data with nodes and edges
     """
     try:
         user_id = user["user_id"]
 
-        # Single Collection Migration: Graph uses workspace_id/context_id for filtering
-        # For now, get all edges (no context filtering in graph visualization)
-        workspace_id = None
-        str_context_id = None
-
-        # Get graph from database
-        result = await db.execute(select(GraphMemory).where(GraphMemory.user_id == user_id))
-        graph_model = result.scalar_one_or_none()
-
-        if not graph_model or not graph_model.graph_data:
-            # No graph yet - return empty data
-            return GraphDataResponse(
-                nodes=[],
-                edges=[],
-                stats={
-                    "total_nodes": 0,
-                    "total_edges": 0,
-                    "filtered_nodes": 0,
-                    "filtered_edges": 0,
-                },
-            )
+        # Resolve workspace_id from context (required)
+        context_result = await db.execute(select(Context).where(Context.id == context_id))
+        context = context_result.scalar_one_or_none()
+        if not context:
+            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+        workspace_id = str(context.workspace_id)
+        str_context_id = str(context.id)
 
         # SQL backend: Load graph (Issue #84)
         graph_service = GraphService(

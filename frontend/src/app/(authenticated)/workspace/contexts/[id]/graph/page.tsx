@@ -1,414 +1,208 @@
-"use client";
+'use client';
 
 /**
- * Individual Context Neural Memory Graph Page
- *
- * Shows graph for a specific context (not necessarily the current one).
- * Allows viewing graph without switching the current context.
+ * Neural Memory Graph View — Stats + Edge Table
+ * Issue #31: Redesigned from React Flow to simple table view
  */
 
-import { useState, useEffect, useCallback } from "react";
-import { useParams } from "next/navigation";
-import Link from "next/link";
-import { PageContainer } from "@/components/common/PageContainer";
-import { PageHeader } from "@/components/common/PageHeader";
-import { SpinnerLoading } from "@/components/common/LoadingState";
-import { NeuralMemoryGraph } from "@/components/graph/NeuralMemoryGraph";
-import { GraphControls } from "@/components/graph/GraphControls";
-import { NodeDetailsPanel } from "@/components/graph/NodeDetailsPanel";
-import { graphApi } from "@/lib/api/graph";
-import { useMemoryContext } from "@/contexts/MemoryContextContext";
-import { ChevronRight, BarChart3, RefreshCw, Check, Lock, Users } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { getContext } from "@/lib/api/contexts";
-import type { Context } from "@/lib/types/context";
-import type {
-  GraphData,
-  GraphFilters,
-  GraphNode,
-  LayoutOptions,
-} from "@/lib/types/graph";
+import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useParams } from 'next/navigation';
+import { useTranslations } from 'next-intl';
+import { graphApi } from '@/lib/api/graph';
+import type { GraphData, GraphStatsResponse } from '@/lib/types/graph';
+import { getMemoryTypeColor } from '@/lib/types/graph';
+import { PageContainer } from '@/components/common/PageContainer';
+import { PageHeader } from '@/components/common/PageHeader';
+import { Brain, GitBranch, Activity, TrendingUp } from 'lucide-react';
 
 export default function ContextGraphPage() {
   const params = useParams();
   const contextId = params.id as string;
-
-  const { currentContext } = useMemoryContext();
-  const [context, setContext] = useState<Context | null>(null);
-  const [loadingContext, setLoadingContext] = useState(true);
-  const [contextError, setContextError] = useState<string | null>(null);
+  const t = useTranslations('contexts');
 
   const [graphData, setGraphData] = useState<GraphData | null>(null);
-  const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [stats, setStats] = useState<GraphStatsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Filters and layout state
-  const [filters, setFilters] = useState<GraphFilters>({
-    limit_nodes: 100,
-    min_weight: 0.0,
-  });
-  const [layoutOptions, setLayoutOptions] = useState<LayoutOptions>({
-    layout: "force",
-    direction: "TB",
-  });
-
-  // Fetch context info
-  useEffect(() => {
-    const fetchContext = async () => {
-      try {
-        setLoadingContext(true);
-        setContextError(null);
-        const ctx = await getContext(contextId);
-        setContext(ctx);
-      } catch (err) {
-        console.error('Failed to fetch context:', err);
-        setContextError('Failed to load context');
-      } finally {
-        setLoadingContext(false);
-      }
-    };
-
-    if (contextId) {
-      fetchContext();
-    }
-  }, [contextId]);
-
-  // Fetch graph data
-  const fetchGraphData = useCallback(async () => {
-    setIsLoading(true);
+  const fetchData = useCallback(async () => {
+    if (!contextId) return;
+    setLoading(true);
     setError(null);
 
     try {
-      // TODO: Update graphApi to accept contextId parameter
-      // For now, this will use the current context from the session
-      const data = await graphApi.getGraphData(filters);
-      setGraphData(data);
+      const [dataResult, statsResult] = await Promise.all([
+        graphApi.getGraphData(contextId, { limit_nodes: 200 }),
+        graphApi.getGraphStats(contextId),
+      ]);
+      setGraphData(dataResult);
+      setStats(statsResult);
     } catch (err) {
-      console.error("Failed to fetch graph data:", err);
-      setError(
-        err instanceof Error ? err.message : "Failed to load graph data"
-      );
+      setError(err instanceof Error ? err.message : 'Failed to load graph data');
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
-  }, [filters]);
-
-  // Initial load and re-fetch on context change
-  useEffect(() => {
-    if (contextId) {
-      fetchGraphData();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contextId]);
 
-  // Handle filter changes
-  const handleFiltersChange = (newFilters: GraphFilters) => {
-    setFilters(newFilters);
-  };
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
 
-  // Handle layout changes
-  const handleLayoutChange = (newLayout: LayoutOptions) => {
-    setLayoutOptions(newLayout);
-  };
-
-  // Handle node click
-  const handleNodeClick = (node: GraphNode) => {
-    setSelectedNode(node);
-  };
-
-  // Handle refresh
-  const handleRefresh = () => {
-    fetchGraphData();
-  };
-
-  if (loadingContext) {
+  if (loading) {
     return (
       <PageContainer>
-        <SpinnerLoading size="lg" message="Loading context..." />
-      </PageContainer>
-    );
-  }
-
-  if (contextError || !context) {
-    return (
-      <PageContainer>
-        <div className="text-center py-12">
-          <p className="text-red-600">{contextError || 'Context not found'}</p>
-          <Link href="/workspace/contexts">
-            <Button variant="outline" className="mt-4">
-              Back to Contexts
-            </Button>
-          </Link>
+        <div className="flex items-center justify-center h-64">
+          <div className="h-8 w-8 animate-spin rounded-full border-4 border-brand-green-200 border-t-brand-green-600" />
         </div>
       </PageContainer>
     );
   }
 
-  const isCurrent = currentContext?.id === context.id;
-  const displayName = context.display_name || context.name;
-  const pageTitle = `${displayName} - Neural Memory Graph`;
-
-  // Privacy indicator
-  const privacyIcon = context.is_private ? (
-    <Lock className="h-5 w-5 text-gray-400 inline-block mr-2" aria-label="Private context" />
-  ) : (
-    <Users className="h-5 w-5 text-blue-500 inline-block mr-2" aria-label="Shared context" />
-  );
-
-  if (isLoading && !graphData) {
+  if (error) {
     return (
       <PageContainer>
-        {/* Breadcrumb */}
-        <nav className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 mb-4">
-          <Link href="/workspace/contexts" className="hover:text-gray-900 dark:hover:text-gray-200 hover:underline">
-            Contexts
-          </Link>
-          <ChevronRight className="h-4 w-4" />
-          <div className="flex items-center gap-2">
-            <span className="text-gray-900 dark:text-gray-100">{displayName}</span>
-            {isCurrent && (
-              <span className="px-2 py-0.5 text-xs bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300 rounded-full font-medium flex items-center gap-1">
-                <Check className="h-3 w-3" />
-                Current
-              </span>
-            )}
-          </div>
-        </nav>
-
-        <PageHeader
-          title={
-            <div className="flex items-center gap-2">
-              {privacyIcon}
-              <span>{pageTitle}</span>
-            </div>
-          }
-          description="Interactive visualization of memory connections"
-          actions={
-            <div className="flex items-center gap-2">
-              <Link href={`/contexts/${contextId}/stats`}>
-                <Button variant="outline" size="sm">
-                  <BarChart3 className="h-4 w-4 mr-2" />
-                  View Stats
-                </Button>
-              </Link>
-              <Button onClick={handleRefresh} variant="outline" size="sm" disabled={isLoading}>
-                <RefreshCw className={`h-4 w-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
-                Refresh
-              </Button>
-            </div>
-          }
-        />
-        <SpinnerLoading size="lg" message="Loading graph data..." />
-      </PageContainer>
-    );
-  }
-
-  if (error && !graphData) {
-    return (
-      <PageContainer>
-        {/* Breadcrumb */}
-        <nav className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 mb-4">
-          <Link href="/workspace/contexts" className="hover:text-gray-900 dark:hover:text-gray-200 hover:underline">
-            Contexts
-          </Link>
-          <ChevronRight className="h-4 w-4" />
-          <div className="flex items-center gap-2">
-            <span className="text-gray-900 dark:text-gray-100">{displayName}</span>
-            {isCurrent && (
-              <span className="px-2 py-0.5 text-xs bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300 rounded-full font-medium flex items-center gap-1">
-                <Check className="h-3 w-3" />
-                Current
-              </span>
-            )}
-          </div>
-        </nav>
-
-        <PageHeader
-          title={
-            <div className="flex items-center gap-2">
-              {privacyIcon}
-              <span>{pageTitle}</span>
-            </div>
-          }
-          description="Interactive visualization of memory connections"
-          actions={
-            <div className="flex items-center gap-2">
-              <Link href={`/contexts/${contextId}/stats`}>
-                <Button variant="outline" size="sm">
-                  <BarChart3 className="h-4 w-4 mr-2" />
-                  View Stats
-                </Button>
-              </Link>
-              <Button onClick={handleRefresh} variant="outline" size="sm" disabled={isLoading}>
-                <RefreshCw className={`h-4 w-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
-                Refresh
-              </Button>
-            </div>
-          }
-        />
-        <div className="rounded-lg border-2 border-dashed border-slate-700 p-12">
-          <div className="text-center">
-            <div className="text-4xl mb-4">⚠️</div>
-            <h3 className="text-lg font-semibold text-slate-200 mb-2">
-              Failed to Load Graph
-            </h3>
-            <p className="text-sm text-slate-400 mb-4">{error}</p>
-            <button
-              onClick={handleRefresh}
-              className="px-4 py-2 bg-brand-green hover:bg-brand-green/80 text-white rounded transition-colors"
-            >
-              Try Again
-            </button>
-          </div>
+        <PageHeader title="Neural Memory Graph" description={contextId} />
+        <div className="p-4 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 rounded-lg">
+          {error}
         </div>
       </PageContainer>
     );
   }
 
-  // Empty state
-  if (graphData && graphData.nodes.length === 0) {
-    return (
-      <PageContainer>
-        {/* Breadcrumb */}
-        <nav className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 mb-4">
-          <Link href="/workspace/contexts" className="hover:text-gray-900 dark:hover:text-gray-200 hover:underline">
-            Contexts
-          </Link>
-          <ChevronRight className="h-4 w-4" />
-          <div className="flex items-center gap-2">
-            <span className="text-gray-900 dark:text-gray-100">{displayName}</span>
-            {isCurrent && (
-              <span className="px-2 py-0.5 text-xs bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300 rounded-full font-medium flex items-center gap-1">
-                <Check className="h-3 w-3" />
-                Current
-              </span>
-            )}
-          </div>
-        </nav>
-
-        <PageHeader
-          title={
-            <div className="flex items-center gap-2">
-              {privacyIcon}
-              <span>{pageTitle}</span>
-            </div>
-          }
-          description="Interactive visualization of memory connections"
-          actions={
-            <div className="flex items-center gap-2">
-              <Link href={`/contexts/${contextId}/stats`}>
-                <Button variant="outline" size="sm">
-                  <BarChart3 className="h-4 w-4 mr-2" />
-                  View Stats
-                </Button>
-              </Link>
-              <Button onClick={handleRefresh} variant="outline" size="sm" disabled={isLoading}>
-                <RefreshCw className={`h-4 w-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
-                Refresh
-              </Button>
-            </div>
-          }
-        />
-        <div className="rounded-lg border-2 border-dashed border-slate-700 p-12">
-          <div className="text-center">
-            <div className="text-4xl mb-4">🧠</div>
-            <h3 className="text-lg font-semibold text-slate-200 mb-2">
-              No Neural Memory Graph Yet
-            </h3>
-            <p className="text-sm text-slate-400 mb-4">
-              Start creating memories to build your neural memory graph. As you
-              add more memories, the AI will automatically learn connections
-              between them using Hebbian learning.
-            </p>
-            <Link href={`/contexts/${contextId}/stats`}>
-              <button className="px-4 py-2 bg-brand-green hover:bg-brand-green/80 text-white rounded transition-colors">
-                View Usage Stats
-              </button>
-            </Link>
-          </div>
-        </div>
-      </PageContainer>
-    );
-  }
+  const s = stats?.stats;
+  const nodes = graphData?.nodes || [];
+  const edges = graphData?.edges || [];
+  const topConnections = s?.top_connections || [];
+  const nodeById = useMemo(() => new Map(nodes.map(n => [n.id, n])), [nodes]);
 
   return (
     <PageContainer>
-      {/* Breadcrumb */}
-      <nav className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 mb-4">
-        <Link href="/workspace/contexts" className="hover:text-gray-900 dark:hover:text-gray-200 hover:underline">
-          Contexts
-        </Link>
-        <ChevronRight className="h-4 w-4" />
-        <div className="flex items-center gap-2">
-          <span className="text-gray-900 dark:text-gray-100">{displayName}</span>
-          {isCurrent && (
-            <span className="px-2 py-0.5 text-xs bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300 rounded-full font-medium flex items-center gap-1">
-              <Check className="h-3 w-3" />
-              Current
-            </span>
-          )}
-        </div>
-      </nav>
+      <PageHeader title="Neural Memory Graph" description={`Context: ${contextId.slice(0, 8)}...`} />
 
-      <PageHeader
-        title={
-          <div className="flex items-center gap-2">
-            {privacyIcon}
-            <span>{pageTitle}</span>
-          </div>
-        }
-        description={`${graphData?.stats.filtered_nodes || 0} nodes, ${
-          graphData?.stats.filtered_edges || 0
-        } connections`}
-        actions={
-          <div className="flex items-center gap-2">
-            <Link href={`/contexts/${contextId}/stats`}>
-              <Button variant="outline" size="sm">
-                <BarChart3 className="h-4 w-4 mr-2" />
-                View Stats
-              </Button>
-            </Link>
-            <Button onClick={handleRefresh} variant="outline" size="sm" disabled={isLoading}>
-              <RefreshCw className={`h-4 w-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
-              Refresh
-            </Button>
-          </div>
-        }
-      />
-
-      <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr_300px] gap-4 h-[calc(100vh-200px)]">
-        {/* Left Sidebar - Controls */}
-        <div className="lg:h-full overflow-y-auto">
-          <GraphControls
-            filters={filters}
-            layoutOptions={layoutOptions}
-            onFiltersChange={handleFiltersChange}
-            onLayoutChange={handleLayoutChange}
-            onRefresh={handleRefresh}
-            isLoading={isLoading}
-          />
-        </div>
-
-        {/* Center - Graph Visualization */}
-        <div className="bg-slate-900 rounded-lg border border-slate-700 h-full min-h-[500px]">
-          {graphData && (
-            <NeuralMemoryGraph
-              graphData={graphData}
-              onNodeClick={handleNodeClick}
-              layoutOptions={layoutOptions}
-            />
-          )}
-        </div>
-
-        {/* Right Sidebar - Node Details */}
-        <div className="lg:h-full overflow-y-auto">
-          <NodeDetailsPanel
-            selectedNode={selectedNode}
-            onClose={() => setSelectedNode(null)}
-          />
-        </div>
+      {/* Stats Cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <StatCard icon={Brain} label={t('graphNodes', { default: 'Nodes' })} value={s?.total_nodes ?? 0} />
+        <StatCard icon={GitBranch} label={t('graphEdges', { default: 'Edges' })} value={s?.total_edges ?? 0} />
+        <StatCard icon={Activity} label={t('graphAvgWeight', { default: 'Avg Weight' })} value={s?.avg_edge_weight?.toFixed(4) ?? '0'} />
+        <StatCard icon={TrendingUp} label={t('graphMaxWeight', { default: 'Max Weight' })} value={s?.max_edge_weight?.toFixed(4) ?? '0'} />
       </div>
+
+      {/* Top Connected Nodes */}
+      {topConnections.length > 0 && (
+        <div className="mb-6">
+          <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+            {t('graphTopConnections', { default: 'Top Connected Memories' })}
+          </h3>
+          <div className="space-y-2">
+            {topConnections.map((node, i) => (
+              <div
+                key={node.node_id}
+                className="flex items-center gap-3 p-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg"
+              >
+                <span className="text-xs font-mono text-gray-400 w-5">{i + 1}</span>
+                <div className="flex-1 text-sm text-gray-900 dark:text-gray-100 truncate">
+                  {node.summary || node.node_id.slice(0, 8)}
+                </div>
+                <span className="text-xs font-medium text-brand-green-600 dark:text-brand-green-400">
+                  {node.degree} {t('graphConnections', { default: 'connections' })}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Edge Table */}
+      {edges.length > 0 ? (
+        <div>
+          <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+            {t('graphEdgeList', { default: 'Edges' })} ({edges.length})
+          </h3>
+          <div className="overflow-x-auto border border-gray-200 dark:border-gray-700 rounded-lg">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
+                  <th className="px-4 py-2 text-left font-medium text-gray-600 dark:text-gray-300">Source</th>
+                  <th className="px-4 py-2 text-left font-medium text-gray-600 dark:text-gray-300">Target</th>
+                  <th className="px-4 py-2 text-center font-medium text-gray-600 dark:text-gray-300">Weight</th>
+                  <th className="px-4 py-2 text-center font-medium text-gray-600 dark:text-gray-300">Type</th>
+                </tr>
+              </thead>
+              <tbody>
+                {edges.map((edge, i) => {
+                  const srcNode = nodeById.get(edge.source);
+                  const tgtNode = nodeById.get(edge.target);
+                  return (
+                    <tr key={i} className="border-b border-gray-100 dark:border-gray-800">
+                      <td className="px-4 py-2">
+                        <div className="flex items-center gap-2">
+                          {srcNode && (
+                            <span
+                              className="w-2 h-2 rounded-full flex-shrink-0"
+                              style={{ backgroundColor: getMemoryTypeColor(srcNode.type) }}
+                            />
+                          )}
+                          <span className="truncate max-w-[200px] text-gray-900 dark:text-gray-100">
+                            {srcNode?.summary || edge.source.slice(0, 8)}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-2">
+                        <div className="flex items-center gap-2">
+                          {tgtNode && (
+                            <span
+                              className="w-2 h-2 rounded-full flex-shrink-0"
+                              style={{ backgroundColor: getMemoryTypeColor(tgtNode.type) }}
+                            />
+                          )}
+                          <span className="truncate max-w-[200px] text-gray-900 dark:text-gray-100">
+                            {tgtNode?.summary || edge.target.slice(0, 8)}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-2 text-center">
+                        <div className="flex items-center justify-center gap-2">
+                          <div className="w-16 bg-gray-200 dark:bg-gray-700 rounded-full h-1.5">
+                            <div
+                              className="bg-brand-green-500 h-1.5 rounded-full"
+                              style={{ width: `${Math.min(edge.weight / (s?.max_edge_weight || 0.5) * 100, 100)}%` }}
+                            />
+                          </div>
+                          <span className="text-xs font-mono text-gray-500 dark:text-gray-400 w-12">
+                            {edge.weight.toFixed(4)}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-2 text-center">
+                        <span className="text-xs text-gray-500 dark:text-gray-400">
+                          {edge.type.replace('_', ' ')}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : (
+        <div className="text-center py-12 text-gray-500 dark:text-gray-400">
+          <Brain className="h-12 w-12 mx-auto mb-3 opacity-30" />
+          <p>{t('graphEmpty', { default: 'No neural edges yet. Use recall to build connections between memories.' })}</p>
+        </div>
+      )}
     </PageContainer>
+  );
+}
+
+function StatCard({ icon: Icon, label, value }: { icon: React.ComponentType<{ className?: string }>; label: string; value: string | number }) {
+  return (
+    <div className="p-4 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg">
+      <div className="flex items-center gap-2 mb-1">
+        <Icon className="h-4 w-4 text-gray-400" />
+        <span className="text-xs text-gray-500 dark:text-gray-400">{label}</span>
+      </div>
+      <p className="text-xl font-semibold text-gray-900 dark:text-gray-100">{value}</p>
+    </div>
   );
 }
