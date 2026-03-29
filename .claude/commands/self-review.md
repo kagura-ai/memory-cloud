@@ -136,7 +136,15 @@ Check for the following issues:
 - No unused abstractions or helpers
 - No added docstrings, comments, or type annotations to unchanged files
 
-### 11. Testing
+### 11. Integration path check
+**Warning:**
+- **New files**: Does every new module have unit tests? Are error paths tested?
+- **Existing function modification**: Check ALL callers — including early-return paths, conditional branches, and error handlers. Don't just read the function you changed.
+- **Data flow consistency**: Trace the full path: input → normalization → storage → search → output. Are the same transformations applied at each step? (e.g., if text is NFKC-normalized before storage, is the query also normalized before search?)
+- **Idempotent initialization**: If adding new resources (indexes, tables, queues), does the init function handle the case where the resource already exists? Check for early-return guards that skip your new code.
+- **Payload/schema changes**: If adding new fields to stored data (DB columns, Qdrant payload), do all write paths populate the field? Do all read paths handle the field being absent (for old data)?
+
+### 12. Testing
 - Is test coverage sufficient for new code?
 - Are edge cases covered?
 - Do existing tests pass? (`make test-local`)
@@ -175,6 +183,7 @@ Check for the following issues:
 | Breaking changes | ✅ / ⚠️ / ❌ |
 | Dependencies | ✅ / ⚠️ / ❌ |
 | Excessive changes | ✅ / ⚠️ / ❌ |
+| Integration paths | ✅ / ⚠️ / ❌ |
 | Testing | ✅ / ⚠️ / ❌ |
 
 ### Verdict: Ready for PR / Needs fixes (X critical, Y warnings)
