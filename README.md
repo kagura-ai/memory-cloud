@@ -278,7 +278,7 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `get_context_info` | Get context metadata and guidelines | Viewer+ |
 | `list_contexts` | List available contexts in workspace | Viewer+ |
 | `create_context` | Create a new context | Owner/Admin |
-| `update_context` | Update context settings (summary, usage guide, resource_id) | Editor+ (Owner for summary/usage_guide/resource_id) |
+| `update_context` | Update context settings (summary, usage guide, resource_id, is_public) | Editor+ (Owner for summary/usage_guide/resource_id/is_public) |
 | `kagura_memory_usage_guide` | Get the usage guide | — |
 
 Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
