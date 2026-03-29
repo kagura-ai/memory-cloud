@@ -2173,7 +2173,7 @@
     "revokeError": "リソーストークンの取り消しに失敗しました",
     "guideTitle": "📖 クイックスタートガイド - Resource Ingest API",
     "table": {
-      "resourceId": "リソースID",
+      "resourceId": "リソースID / コンテキスト",
       "description": "説明",
       "quota": "クォータ（イベント数/時）",
       "status": "ステータス",

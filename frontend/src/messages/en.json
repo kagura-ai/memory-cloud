@@ -2164,7 +2164,7 @@
     "revokeError": "Failed to revoke resource token",
     "guideTitle": "📖 Quick Start Guide - Resource Ingest API",
     "table": {
-      "resourceId": "Resource ID",
+      "resourceId": "Resource ID / Context",
       "description": "Description",
       "quota": "Quota (events/hour)",
       "status": "Status",
