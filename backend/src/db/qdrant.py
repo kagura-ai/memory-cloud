@@ -451,9 +451,15 @@ async def search_memories_fulltext(
             qdrant_filter = Filter(must=conditions)
 
         # Full-text search using MatchText filter + scroll
-        # qdrant-client 1.16+ uses MatchText for text matching
-        # Search in both summary and context_summary fields (OR condition)
+        # Issue #1: Search tokenized fields (Sudachi lemmas) first, plus original fields
+        from utils.tokenizer import tokenize_for_search
+
+        tokenized_query = tokenize_for_search(query)
         text_conditions = [
+            # Tokenized fields (accurate Japanese matching via lemmas)
+            FieldCondition(key="summary_tokens", match=MatchText(text=tokenized_query)),
+            FieldCondition(key="context_summary_tokens", match=MatchText(text=tokenized_query)),
+            # Original fields (fallback for old memories without tokens)
             FieldCondition(key="summary", match=MatchText(text=query)),
             FieldCondition(key="context_summary", match=MatchText(text=query)),
         ]
@@ -516,31 +522,21 @@ async def search_memories_fulltext(
         # Solution: Use `regex` library with Unicode property escapes (\p{L}, \p{N})
         #           which match any Unicode letter/number across all scripts.
         # ============================================================================
-        import regex
-
-        from utils.text import normalize_for_search
-
-        # Issue #163: Normalize query for consistent matching
-        # NFKC: "ｶﾀｶﾅ" (half-width) → "カタカナ" (full-width)
-        # NFC: か + ゛ → が (composed form)
-        normalized_query = normalize_for_search(query.lower()) or ""
-
-        # Extract query terms (Unicode letters and numbers, lowercase)
-        # \p{L} = any Unicode letter (Latin, CJK, Cyrillic, etc.)
-        # \p{N} = any Unicode number
-        query_words = set(regex.findall(r"[\p{L}\p{N}]+", normalized_query))
+        # Issue #1: Use tokenized query terms for TF scoring
+        query_words = set(tokenized_query.split())
 
         results = []
         for point in points:
-            # Combine searchable text fields (handle None values)
-            summary = point.payload.get("summary") or ""
-            context_summary = point.payload.get("context_summary") or ""
-            combined_text = (summary + " " + context_summary).lower()
+            # Issue #1: Use tokenized fields for accurate term matching
+            summary_tokens = point.payload.get("summary_tokens") or ""
+            ctx_tokens = point.payload.get("context_summary_tokens") or ""
+            # Fallback to original fields for old memories without tokens
+            if not summary_tokens:
+                summary_tokens = (point.payload.get("summary") or "").lower()
+            if not ctx_tokens:
+                ctx_tokens = (point.payload.get("context_summary") or "").lower()
+            combined_text = summary_tokens + " " + ctx_tokens
 
-            # Count matching terms using substring matching
-            # Note: For CJK languages without word boundaries, this checks if
-            # query terms appear as substrings in the document. Not as accurate
-            # as proper tokenization (e.g., MeCab), but functional.
             hit_count = sum(1 for word in query_words if word in combined_text)
 
             # Calculate score:
@@ -667,6 +663,21 @@ async def ensure_kagura_memories_collection(embedding_dim: int = 512) -> None:
                 lowercase=True,
             ),
         )
+
+        # Create pre-tokenized text indexes (Issue #1: Japanese BM25)
+        # These fields store Sudachi-lemmatized tokens for accurate Japanese search
+        for field in ("summary_tokens", "context_summary_tokens"):
+            await client.create_payload_index(
+                collection_name=KAGURA_MEMORIES_COLLECTION,
+                field_name=field,
+                field_schema=TextIndexParams(  # type: ignore[arg-type]
+                    type="text",  # type: ignore[arg-type]
+                    tokenizer=TokenizerType.WORD,
+                    min_token_len=2,
+                    max_token_len=30,
+                    lowercase=True,
+                ),
+            )
 
         # Create keyword indexes
         await client.create_payload_index(

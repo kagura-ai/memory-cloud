@@ -231,10 +231,14 @@ class MemoryService:
             )
 
             # Prepare Qdrant payload
+            from utils.tokenizer import tokenize_for_search
+
             payload = {
                 "user_id": user_id,
                 "summary": request.summary,
                 "context_summary": request.context_summary,
+                "summary_tokens": tokenize_for_search(request.summary),
+                "context_summary_tokens": tokenize_for_search(request.context_summary or ""),
                 "type": request.type,
                 "importance": request.importance,
                 "tags": request.tags,
