@@ -65,6 +65,7 @@ class EmbeddingService:
         else:
             self.provider = settings.embedding_provider
         self.ollama_base_url = settings.ollama_base_url
+        self._ollama_verified = False
 
     async def _get_user_api_key(
         self,
@@ -181,21 +182,23 @@ class EmbeddingService:
             AsyncOpenAI client configured for the provider
         """
         if self.provider == "ollama":
-            import httpx
+            # Verify Ollama is reachable on first use only
+            if not self._ollama_verified:
+                import httpx
 
-            # Verify Ollama is reachable on first use
-            try:
-                async with httpx.AsyncClient(timeout=5.0) as http:
-                    resp = await http.get(self.ollama_base_url)
-                    if resp.status_code != 200:
-                        raise ConfigurationError(
-                            f"Ollama not responding at {self.ollama_base_url} (HTTP {resp.status_code})"
-                        )
-            except httpx.ConnectError as err:
-                raise ConfigurationError(
-                    f"Cannot connect to Ollama at {self.ollama_base_url}. "
-                    "Is Ollama running? Start with: ollama serve"
-                ) from err
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as http:
+                        resp = await http.get(self.ollama_base_url)
+                        if resp.status_code != 200:
+                            raise ConfigurationError(
+                                f"Ollama not responding at {self.ollama_base_url} (HTTP {resp.status_code})"
+                            )
+                except httpx.ConnectError as err:
+                    raise ConfigurationError(
+                        f"Cannot connect to Ollama at {self.ollama_base_url}. "
+                        "Is Ollama running? Start with: ollama serve"
+                    ) from err
+                self._ollama_verified = True
             return AsyncOpenAI(
                 base_url=f"{self.ollama_base_url}/v1",
                 api_key="ollama",  # Ollama doesn't require a real key
@@ -203,6 +206,14 @@ class EmbeddingService:
         # OpenAI (default)
         api_key = await self._get_user_api_key(user_id, context_id, workspace_id)
         return AsyncOpenAI(api_key=api_key)
+
+    def _build_embedding_kwargs(self, input_data: str | list[str]) -> dict:
+        """Build kwargs for OpenAI-compatible embeddings.create() call."""
+        kwargs: dict = {"model": self.model, "input": input_data}
+        # OpenAI supports dimensions param; Ollama infers from model
+        if self.provider == "openai":
+            kwargs["dimensions"] = self.dimensions
+        return kwargs
 
     async def embed(
         self,
@@ -269,13 +280,9 @@ class EmbeddingService:
 
             # Cache miss - generate embedding (use normalized text for consistency)
             client = await self._get_client(user_id, context_id, workspace_id)
-
-            kwargs: dict = {"model": self.model, "input": normalized_text}
-            # OpenAI supports dimensions param; Ollama infers from model
-            if self.provider == "openai":
-                kwargs["dimensions"] = self.dimensions
-
-            response = await client.embeddings.create(**kwargs)
+            response = await client.embeddings.create(
+                **self._build_embedding_kwargs(normalized_text)
+            )
 
             vector = response.data[0].embedding
 
@@ -358,12 +365,9 @@ class EmbeddingService:
             # Generate embeddings only for uncached texts
             if uncached_texts:
                 client = await self._get_client(user_id, context_id, workspace_id)
-
-                kwargs: dict = {"model": self.model, "input": uncached_texts}
-                if self.provider == "openai":
-                    kwargs["dimensions"] = self.dimensions
-
-                response = await client.embeddings.create(**kwargs)
+                response = await client.embeddings.create(
+                    **self._build_embedding_kwargs(uncached_texts)
+                )
 
                 # Cache new embeddings and fill results
                 for i, (idx, item) in enumerate(zip(uncached_indices, response.data, strict=False)):
