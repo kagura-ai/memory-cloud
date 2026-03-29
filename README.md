@@ -120,6 +120,10 @@ cd frontend && npm install && npm run dev
 - **macOS**: Install Docker Desktop for Mac. `brew install python@3.11 node`
 - **Linux (Ubuntu/Debian)**: `sudo apt install docker.io docker-compose-v2 python3.11 nodejs npm`
 - **GCP (Production)**: Set production values in `.env.local` (`DATABASE_URL`, `QDRANT_URL`, `ENVIRONMENT=production`, `CORS_ORIGINS`)
+- **Frontend env vars**: Copy `frontend/.env.example` to `frontend/.env.local` and set:
+  - `NEXT_PUBLIC_API_URL` — backend URL (default: `http://localhost:8080`)
+  - `NEXT_PUBLIC_APP_URL` — frontend URL for metadata
+  - `NEXT_PUBLIC_PLAN_FREE_DISPLAY_NAME` / `BASIC` / `PRO` — plan display name customization (default: S/M/L)
 
 </details>
 
