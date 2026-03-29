@@ -77,6 +77,7 @@ class AddonValues(BaseModel):
     memory_bonus: int = 0
     mcp_quota_bonus: int = 0
     member_bonus: int = 0
+    context_bonus: int = 0
 
 
 class UsageValues(BaseModel):
@@ -105,6 +106,7 @@ class UpdateAddonRequest(BaseModel):
     addon_memory_bonus: int = Field(0, ge=0)
     addon_mcp_quota_bonus: int = Field(0, ge=0)
     addon_member_bonus: int = Field(0, ge=0)
+    addon_context_bonus: int = Field(0, ge=0)
 
 
 class PlanChangeAuditEntry(BaseModel):
@@ -448,6 +450,7 @@ async def get_workspace_quotas(
                 memory_bonus=workspace.addon_memory_bonus,
                 mcp_quota_bonus=workspace.addon_mcp_quota_bonus,
                 member_bonus=workspace.addon_member_bonus,
+                context_bonus=workspace.addon_context_bonus,
             ),
             effective=QuotaBreakdown(
                 memory_limit=effective["memory_limit"],
@@ -524,6 +527,7 @@ async def update_workspace_quotas(
         workspace.addon_memory_bonus = request.addon_memory_bonus
         workspace.addon_mcp_quota_bonus = request.addon_mcp_quota_bonus
         workspace.addon_member_bonus = request.addon_member_bonus
+        workspace.addon_context_bonus = request.addon_context_bonus
 
         await db.commit()
 

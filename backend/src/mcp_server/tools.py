@@ -1119,7 +1119,7 @@ async def _log_tool_usage(
                 workspace_id=str(workspace_id) if workspace_id else None,
             )
     except Exception as e:
-        logger.warning("tool_usage_log_failed", tool=tool_name, error=str(e))
+        logger.warning("tool_usage_log_failed: tool=%s error=%s", tool_name, str(e))
 
 
 def _context_response_fields(context: Any) -> dict[str, Any]:
@@ -2114,7 +2114,7 @@ async def execute_tool_call(
                             quota_info["limit"] = max_contexts
                             quota_info["can_create"] = ws_context_count < max_contexts
                         except Exception as e:
-                            logger.warning("list_contexts_quota_failed", error=str(e))
+                            logger.warning("list_contexts_quota_failed: %s", str(e))
                             quota_info["limit"] = 0
                             quota_info["can_create"] = False
 

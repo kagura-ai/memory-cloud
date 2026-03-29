@@ -1069,6 +1069,7 @@ class Workspace(Base):
     addon_rest_quota_bonus = Column(Integer, nullable=False, server_default="0")
     addon_public_quota_bonus = Column(Integer, nullable=False, server_default="0")
     addon_member_bonus = Column(Integer, nullable=False, server_default="0")
+    addon_context_bonus = Column(Integer, nullable=False, server_default="0")  # Issue #15
 
     # Stripe billing (Issue #351)
     stripe_customer_id = Column(String(255), nullable=True)

@@ -101,7 +101,7 @@ class EffectiveQuotaService:
             + workspace.addon_public_quota_bonus,
             # Team
             "max_members": plan_tier.max_members_per_workspace + workspace.addon_member_bonus,
-            "max_contexts": plan_tier.max_contexts_per_workspace,  # No addon for contexts (yet)
+            "max_contexts": plan_tier.max_contexts_per_workspace + workspace.addon_context_bonus,
         }
 
         logger.debug(

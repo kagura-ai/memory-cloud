@@ -77,6 +77,7 @@ export default function AdminPlansPage() {
   const [addonMemory, setAddonMemory] = useState(0);
   const [addonMcp, setAddonMcp] = useState(0);
   const [addonMember, setAddonMember] = useState(0);
+  const [addonContext, setAddonContext] = useState(0);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -156,6 +157,7 @@ export default function AdminPlansPage() {
     setAddonMemory(quotaDetail.addon.memory_bonus);
     setAddonMcp(quotaDetail.addon.mcp_quota_bonus);
     setAddonMember(quotaDetail.addon.member_bonus);
+    setAddonContext(quotaDetail.addon.context_bonus ?? 0);
     setAddonDialogOpen(true);
   };
 
@@ -166,6 +168,7 @@ export default function AdminPlansPage() {
         addon_memory_bonus: addonMemory,
         addon_mcp_quota_bonus: addonMcp,
         addon_member_bonus: addonMember,
+        addon_context_bonus: addonContext,
       });
       toast({ title: tCommon('success'), description: 'Quota addons updated' });
       setAddonDialogOpen(false);
@@ -294,7 +297,7 @@ export default function AdminPlansPage() {
                                     {[
                                       { label: 'Memories', base: quotaDetail.base.memory_limit, addon: quotaDetail.addon.memory_bonus, effective: quotaDetail.effective.memory_limit, usage: quotaDetail.usage.memories },
                                       { label: 'MCP Calls/day', base: quotaDetail.base.mcp_calls_per_day, addon: quotaDetail.addon.mcp_quota_bonus, effective: quotaDetail.effective.mcp_calls_per_day, usage: null },
-                                      { label: 'Contexts', base: quotaDetail.base.max_contexts, addon: 0, effective: quotaDetail.effective.max_contexts, usage: quotaDetail.usage.contexts },
+                                      { label: 'Contexts', base: quotaDetail.base.max_contexts, addon: quotaDetail.addon.context_bonus ?? 0, effective: quotaDetail.effective.max_contexts, usage: quotaDetail.usage.contexts },
                                       { label: 'Members', base: quotaDetail.base.max_members, addon: quotaDetail.addon.member_bonus, effective: quotaDetail.effective.max_members, usage: quotaDetail.usage.members },
                                     ].map((row) => (
                                       <div key={row.label} className="grid grid-cols-4 gap-2 text-sm">
@@ -552,7 +555,23 @@ export default function AdminPlansPage() {
               </div>
             </div>
 
-            {quotaDetail && (addonMemory < quotaDetail.addon.memory_bonus || addonMember < quotaDetail.addon.member_bonus) && (
+            <div className="space-y-2">
+              <Label htmlFor="addon-context">Extra Contexts</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="addon-context"
+                  type="number"
+                  min={0}
+                  value={addonContext}
+                  onChange={(e) => setAddonContext(Number(e.target.value))}
+                />
+                <span className="text-xs text-muted-foreground whitespace-nowrap">
+                  Effective: {((quotaDetail?.base.max_contexts ?? 0) + addonContext).toLocaleString()}
+                </span>
+              </div>
+            </div>
+
+            {quotaDetail && (addonMemory < quotaDetail.addon.memory_bonus || addonMember < quotaDetail.addon.member_bonus || addonContext < (quotaDetail.addon.context_bonus ?? 0)) && (
               <div className="bg-yellow-50 dark:bg-yellow-950 p-3 rounded-md">
                 <p className="text-sm text-yellow-800 dark:text-yellow-100">
                   Reducing addons may fail if current usage exceeds the new effective limit.

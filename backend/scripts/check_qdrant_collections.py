@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Check Qdrant collections after reset_db."""
+
 import asyncio
 import sys
 from pathlib import Path
