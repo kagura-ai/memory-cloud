@@ -69,6 +69,10 @@ dependencies = [
     # Unicode-aware regex (Issue #122: Japanese text support)
     "regex>=2024.0.0",
 
+    # Japanese morphological analysis (Issue #1: BM25 accuracy)
+    "sudachipy>=0.6.8",
+    "sudachidict-core>=20240716",
+
     # Environment
     "python-dotenv>=1.0.0",
 ]

@@ -230,11 +230,15 @@ class MemoryService:
                 workspace_id=current_workspace_id,  # NEW: Issue #146
             )
 
-            # Prepare Qdrant payload
+            # Prepare Qdrant payload (use normalized values for consistent search)
+            from utils.tokenizer import tokenize_for_search
+
             payload = {
                 "user_id": user_id,
-                "summary": request.summary,
-                "context_summary": request.context_summary,
+                "summary": normalized_summary,
+                "context_summary": normalized_context_summary,
+                "summary_tokens": tokenize_for_search(normalized_summary),
+                "context_summary_tokens": tokenize_for_search(normalized_context_summary or ""),
                 "type": request.type,
                 "importance": request.importance,
                 "tags": request.tags,
