@@ -344,6 +344,46 @@ export default function APIKeysPage() {
             </div>
           </details>
 
+          {/* SDK & Integration Links */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <a
+              href="https://github.com/kagura-ai/kagura-memory-python-sdk"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-3 p-3 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+            >
+              <span className="text-lg">🐍</span>
+              <div>
+                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{t('sdkLinks.pythonSdk')}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">pip install kagura-memory</p>
+              </div>
+            </a>
+            <a
+              href={`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/redoc`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-3 p-3 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+            >
+              <span className="text-lg">📘</span>
+              <div>
+                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{t('sdkLinks.restApi')}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">ReDoc / OpenAPI</p>
+              </div>
+            </a>
+            <a
+              href="https://github.com/kagura-ai/memory-cloud#claude-code-recommended"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-3 p-3 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+            >
+              <span className="text-lg">🤖</span>
+              <div>
+                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{t('sdkLinks.claudeCode')}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">.mcp.json</p>
+              </div>
+            </a>
+          </div>
+
           {/* Create API Key Button */}
           <div>
             <ActionButton
