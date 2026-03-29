@@ -152,7 +152,8 @@ export default function ContextsPage() {
 
   // Unpublish confirmation dialog (Issue #238, #41)
   const [unpublishDialogOpen, setUnpublishDialogOpen] = useState(false);
-  const [unpublishTokenCount, setUnpublishTokenCount] = useState(0);
+  const [unpublishTokenCount, setUnpublishTokenCount] = useState<number | null>(null);
+  const [unpublishLoading, setUnpublishLoading] = useState(false);
 
   // Template selector toggle
   const [showTemplate, setShowTemplate] = useState(false);
@@ -1462,19 +1463,22 @@ export default function ContextsPage() {
                     <Button
                       variant="outline"
                       size="sm"
+                      disabled={unpublishLoading}
                       onClick={async () => {
                         // If already saved as public → fetch impact and show warning dialog
                         if (contextToEdit?.is_public) {
-                          let tokenCount = 0;
+                          setUnpublishLoading(true);
+                          let tokenCount: number | null = 0;
                           if (contextToEdit.resource_id) {
                             try {
                               const impact = await getResourceImpact(contextToEdit.resource_id);
                               tokenCount = impact.token_count;
                             } catch {
-                              tokenCount = 0;
+                              tokenCount = null;
                             }
                           }
                           setUnpublishTokenCount(tokenCount);
+                          setUnpublishLoading(false);
                           setUnpublishDialogOpen(true);
                         } else {
                           // Not yet saved → just toggle back (no warning)
@@ -1926,16 +1930,23 @@ export default function ContextsPage() {
                 <li>{t('unpublishImpact3')}</li>
                 <li>{t('unpublishImpact4')}</li>
               </ul>
-              {unpublishTokenCount > 0 && (
+              {unpublishTokenCount === null ? (
+                <Alert className="border-amber-200 bg-amber-50 dark:bg-amber-900/20">
+                  <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+                  <AlertDescription className="text-amber-800 dark:text-amber-200 text-xs">
+                    {t('unpublishTokenUnknown')}
+                  </AlertDescription>
+                </Alert>
+              ) : unpublishTokenCount > 0 ? (
                 <Alert className="border-red-200 bg-red-50 dark:bg-red-900/20">
-                  <AlertTriangle className="h-4 w-4 text-red-600" />
+                  <AlertTriangle className="h-4 w-4 text-red-600 dark:text-red-400" />
                   <AlertDescription className="text-red-800 dark:text-red-200 text-xs">
                     {t('unpublishTokenWarning', { count: unpublishTokenCount })}
                   </AlertDescription>
                 </Alert>
-              )}
+              ) : null}
               <Alert className="border-orange-200 bg-orange-50 dark:bg-orange-900/20">
-                <AlertTriangle className="h-4 w-4 text-orange-600" />
+                <AlertTriangle className="h-4 w-4 text-orange-600 dark:text-orange-400" />
                 <AlertDescription className="text-orange-800 dark:text-orange-200 text-xs">
                   {t('unpublishWarning')}
                 </AlertDescription>
