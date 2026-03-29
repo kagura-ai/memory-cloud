@@ -1046,16 +1046,19 @@ async def _log_tool_usage(
     from utils.usage_logger import log_usage
 
     response_time_ms = int((time.time() - start_time) * 1000)
-    await log_usage(
-        db=db,
-        user_id=user_id,
-        endpoint=f"mcp:{tool_name}",
-        method="MCP",
-        status_code=status_code,
-        response_time_ms=response_time_ms,
-        context_id=str(context_id) if context_id else None,
-        workspace_id=str(workspace_id) if workspace_id else None,
-    )
+    try:
+        await log_usage(
+            db=db,
+            user_id=user_id,
+            endpoint=f"mcp:{tool_name}",
+            method="MCP",
+            status_code=status_code,
+            response_time_ms=response_time_ms,
+            context_id=str(context_id) if context_id else None,
+            workspace_id=str(workspace_id) if workspace_id else None,
+        )
+    except Exception as e:
+        logger.warning("tool_usage_log_failed", tool=tool_name, error=str(e))
 
 
 def _context_response_fields(context: Any) -> dict[str, Any]:
