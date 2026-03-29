@@ -16,6 +16,7 @@ from config.retention import should_promote_to_persistent
 from db.qdrant import (
     add_memory_to_qdrant,
     delete_memory_from_qdrant,
+    get_collection_name,
 )
 from models.auth import Context
 from models.memory import Memory
@@ -62,6 +63,30 @@ class MemoryService:
         self.embedding_service = EmbeddingService(db)
         self.search_service = SearchService(db)
         self.context_service = ContextService(db)
+
+    async def _get_context_search_config(self, context_id: UUID):
+        """Get ContextSearchConfig for a context."""
+        from models.config import ContextSearchConfig
+
+        result = await self.db.execute(
+            select(ContextSearchConfig).where(ContextSearchConfig.context_id == context_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def _get_context_collection_name(self, context_id: UUID) -> str:
+        """Get Qdrant collection name for a context from its search config."""
+        config = await self._get_context_search_config(context_id)
+        if config:
+            return get_collection_name(config.embedding_model, config.embedding_dimensions)
+        return get_collection_name("text-embedding-3-small", 512)
+
+    def _get_embedding_service_for_config(self, config) -> EmbeddingService:
+        """Create EmbeddingService configured for a specific context's model."""
+        if config:
+            return EmbeddingService(
+                self.db, model=config.embedding_model, dimensions=config.embedding_dimensions
+            )
+        return self.embedding_service
 
     async def _get_context_isolation_params(
         self, user_id: str, context_id: UUID | None
@@ -222,12 +247,14 @@ class MemoryService:
             await self.memory_repo.create(memory)
             await self.db.flush()  # Ensure memory exists before Qdrant operation
 
-            # Generate embedding for summary (Layer 1)
-            vector = await self.embedding_service.embed(
+            # Generate embedding for summary (Layer 1) using context's model
+            config = await self._get_context_search_config(context.id)
+            embed_svc = self._get_embedding_service_for_config(config)
+            vector = await embed_svc.embed(
                 request.summary,
                 user_id,
                 context_id=current_context_id,
-                workspace_id=current_workspace_id,  # NEW: Issue #146
+                workspace_id=current_workspace_id,
             )
 
             # Prepare Qdrant payload (use normalized values for consistent search)
@@ -250,7 +277,14 @@ class MemoryService:
             if request.context:
                 payload["context"] = request.context
 
-            # Add to Qdrant with 3-level isolation (Single Collection Migration)
+            # Add to Qdrant with 3-level isolation (per-model collection)
+            # Reuse config already fetched above (avoid double DB query)
+            if config:
+                collection = get_collection_name(
+                    config.embedding_model, config.embedding_dimensions
+                )
+            else:
+                collection = get_collection_name("text-embedding-3-small", 512)
             await add_memory_to_qdrant(
                 user_id=user_id,
                 memory_id=memory_id,
@@ -258,6 +292,7 @@ class MemoryService:
                 payload=payload,
                 workspace_id=workspace_id_str,
                 context_id=context_id_str,
+                collection_name=collection,
             )
 
             # Update embedding status to success
@@ -733,7 +768,10 @@ class MemoryService:
                 await self.memory_repo.update(memory.id, memory)
 
                 # Hard delete from Qdrant (remove from search index)
-                await delete_memory_from_qdrant(user_id, request.memory_id)
+                del_collection = await self._get_context_collection_name(memory.context_id)
+                await delete_memory_from_qdrant(
+                    user_id, request.memory_id, collection_name=del_collection
+                )
 
                 # Clean up neural memory edges with 3-level isolation
                 from repositories.neural_edge import NeuralEdgeRepository
@@ -780,8 +818,11 @@ class MemoryService:
                     memory.deleted_by = user_id
                     await self.memory_repo.update(memory.id, memory)
 
-                    # Hard delete from Qdrant (single collection migration)
-                    await delete_memory_from_qdrant(user_id, memory_response.memory_id)
+                    # Hard delete from Qdrant
+                    del_collection = await self._get_context_collection_name(memory.context_id)
+                    await delete_memory_from_qdrant(
+                        user_id, memory_response.memory_id, collection_name=del_collection
+                    )
 
                     # Clean up neural memory edges
                     from repositories.neural_edge import NeuralEdgeRepository
@@ -867,7 +908,8 @@ class MemoryService:
             await self.memory_repo.delete(memory.id)
 
             # Delete from Qdrant
-            await delete_memory_from_qdrant(user_id, memory.id)
+            del_collection = await self._get_context_collection_name(memory.context_id)
+            await delete_memory_from_qdrant(user_id, memory.id, collection_name=del_collection)
 
             deleted_count += 1
 

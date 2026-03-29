@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     )
     embedding_dimensions: int = Field(default=512, description="Embedding vector dimensions")
 
+    # Ollama Configuration (Issue #44)
+    ollama_base_url: str = Field(
+        default="http://localhost:11434", description="Ollama API base URL"
+    )
+
     # Search Configuration (Issue #105)
     enable_reranking: bool = Field(
         default=True,

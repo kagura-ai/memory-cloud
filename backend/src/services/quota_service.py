@@ -280,8 +280,9 @@ class QuotaService:
                 raise QuotaExceededError(error)
             return False, error
 
-        # Get plan tier limits
+        # Get effective limit (plan base + addon bonus)
         plan = get_plan_tier(workspace.plan_name)
+        max_contexts = plan.max_contexts_per_workspace + (workspace.addon_context_bonus or 0)
 
         # Count current contexts
         context_count_result = await self.db.execute(
@@ -293,17 +294,17 @@ class QuotaService:
         context_count = context_count_result.scalar() or 0
 
         # Check against limit
-        if context_count >= plan.max_contexts_per_workspace:
+        if context_count >= max_contexts:
             error = (
                 f"Context limit reached. "
-                f"Your {plan.display_name} plan allows {plan.max_contexts_per_workspace} context(s) per workspace. "
+                f"Your {plan.display_name} plan allows {max_contexts} context(s) per workspace. "
                 f"Upgrade to Basic or Pro plan for multiple contexts."
             )
             logger.warning(
                 "context_creation_denied",
                 workspace_id=str(workspace_id),
                 current_contexts=context_count,
-                max_contexts=plan.max_contexts_per_workspace,
+                max_contexts=max_contexts,
                 plan=workspace.plan_name,
             )
 

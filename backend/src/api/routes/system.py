@@ -28,6 +28,7 @@ class TelemetryResponse(BaseModel):
     """System telemetry response."""
 
     services: dict[str, ServiceStatus]
+    embedding_config: dict | None = None
     memory_stats: dict
     neural_memory: dict
     uptime_seconds: int
@@ -127,9 +128,13 @@ async def get_system_telemetry(
                 url=settings.qdrant_url, api_key=settings.qdrant_api_key, timeout=5
             )
             collections = await qdrant.get_collections()
+            collection_names = [c.name for c in collections.collections]
             qdrant_status = ServiceStatus(
                 status="ok",
-                details={"collections": len(collections.collections)},
+                details={
+                    "collections": len(collection_names),
+                    "collection_names": collection_names,
+                },
             )
         except Exception as e:
             qdrant_status = ServiceStatus(status="error", details={"error": str(e)})
@@ -148,6 +153,44 @@ async def get_system_telemetry(
             )
         except Exception as e:
             redis_status = ServiceStatus(status="error", details={"error": str(e)})
+
+        # Check Ollama (only if explicitly configured or provider is ollama)
+        ollama_status = ServiceStatus(status="not_configured")
+        ollama_explicitly_configured = (
+            settings.embedding_provider == "ollama"
+            or settings.ollama_base_url != "http://localhost:11434"
+        )
+        if ollama_explicitly_configured:
+            try:
+                import httpx
+
+                async with httpx.AsyncClient(timeout=5.0) as http:
+                    resp = await http.get(settings.ollama_base_url)
+                    if resp.status_code == 200:
+                        # Get available models
+                        models_resp = await http.get(f"{settings.ollama_base_url}/api/tags")
+                        model_names = []
+                        if models_resp.status_code == 200:
+                            model_names = [m["name"] for m in models_resp.json().get("models", [])]
+                        ollama_status = ServiceStatus(
+                            status="ok",
+                            details={
+                                "url": settings.ollama_base_url,
+                                "models": model_names,
+                            },
+                        )
+                    else:
+                        ollama_status = ServiceStatus(
+                            status="error",
+                            details={
+                                "url": settings.ollama_base_url,
+                                "http_status": resp.status_code,
+                            },
+                        )
+            except Exception as e:
+                ollama_status = ServiceStatus(
+                    status="error", details={"url": settings.ollama_base_url, "error": str(e)}
+                )
 
         # Memory stats (all users)
         from sqlalchemy import func
@@ -189,11 +232,20 @@ async def get_system_telemetry(
                 "postgres": postgres_status,
                 "qdrant": qdrant_status,
                 "redis": redis_status,
+                "ollama": ollama_status,
             },
             memory_stats={
                 "total": total_memories,
                 "working": working_memories,
                 "persistent": total_memories - working_memories,
+            },
+            embedding_config={
+                "provider": settings.embedding_provider,
+                "model": settings.embedding_model,
+                "dimensions": settings.embedding_dimensions,
+                "ollama_base_url": settings.ollama_base_url
+                if settings.embedding_provider == "ollama"
+                else None,
             },
             neural_memory=neural_stats,
             uptime_seconds=uptime_seconds,

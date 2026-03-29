@@ -878,6 +878,10 @@ Use list_contexts() after creation to verify.""",
                         "type": "boolean",
                         "description": "Privacy flag (default: true). true=only creator can access, false=workspace members can access (requires Pro plan).",
                     },
+                    "embedding_model": {
+                        "type": "string",
+                        "description": "Embedding model to use for this context. Options: 'text-embedding-3-small' (OpenAI, 512dim), 'qwen3-embedding:8b' (Ollama, 4096dim), etc. Default: global EMBEDDING_MODEL setting. Immutable after creation.",
+                    },
                 },
             },
         },
@@ -1854,6 +1858,18 @@ async def execute_tool_call(
                             help="Delete unused contexts or upgrade your plan.",
                         )
 
+                    # Validate embedding_model if provided
+                    requested_model = args.get("embedding_model")
+                    if requested_model:
+                        from config.constants import EMBEDDING_MODEL_REGISTRY
+
+                        if requested_model not in EMBEDDING_MODEL_REGISTRY:
+                            return _error_response(
+                                "invalid_embedding_model",
+                                f"Unknown embedding model: {requested_model}",
+                                help=f"Supported models: {', '.join(EMBEDDING_MODEL_REGISTRY.keys())}",
+                            )
+
                     # Create context
                     is_private = args.get("is_private", True)
                     context_service = ContextService(db)
@@ -1867,6 +1883,7 @@ async def execute_tool_call(
                             usage_guide=args.get("usage_guide"),
                             created_by=user_id,
                             is_private=is_private,
+                            embedding_model=requested_model,
                         ),
                         operation_name="create_context",
                     )

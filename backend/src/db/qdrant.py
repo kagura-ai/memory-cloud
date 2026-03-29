@@ -40,6 +40,25 @@ _qdrant_client: AsyncQdrantClient | None = None
 KAGURA_MEMORIES_COLLECTION = "kagura_memories"
 
 
+def get_collection_name(model: str, dimensions: int) -> str:
+    """Get Qdrant collection name for a given embedding model.
+
+    Default model (text-embedding-3-small, 512) maps to the legacy collection name
+    for backward compatibility. Other models get a unique collection.
+
+    Args:
+        model: Embedding model name
+        dimensions: Vector dimensions
+
+    Returns:
+        Collection name string
+    """
+    if model == "text-embedding-3-small" and dimensions == 512:
+        return KAGURA_MEMORIES_COLLECTION
+    slug = model.replace("-", "_").replace(":", "_").replace(".", "_").lower()
+    return f"kagura_memories_{slug}_{dimensions}"
+
+
 def _validate_uuid_format(value: str, field_name: str) -> None:
     """Validate UUID format to prevent injection attacks.
 
@@ -164,6 +183,7 @@ async def add_memory_to_qdrant(
     payload: dict[str, Any],
     workspace_id: str,
     context_id: str,
+    collection_name: str = KAGURA_MEMORIES_COLLECTION,
 ) -> None:
     """Add memory point to Qdrant with 3-level isolation.
 
@@ -206,7 +226,7 @@ async def add_memory_to_qdrant(
 
     try:
         await client.upsert(
-            collection_name=KAGURA_MEMORIES_COLLECTION,
+            collection_name=collection_name,
             points=[
                 PointStruct(
                     id=str(memory_id),
@@ -218,7 +238,7 @@ async def add_memory_to_qdrant(
 
         logger.debug(
             "memory_added_to_qdrant",
-            collection=KAGURA_MEMORIES_COLLECTION,
+            collection=collection_name,
             memory_id=str(memory_id),
             workspace_id=workspace_id,
             context_id=context_id,
@@ -236,6 +256,7 @@ async def search_memories_qdrant(
     limit: int = 10,
     filters: dict[str, Any] | None = None,
     is_shared_context: bool = False,  # NEW: Team collaboration support
+    collection_name: str = KAGURA_MEMORIES_COLLECTION,
 ) -> list[dict]:
     """Semantic search in Qdrant with workspace-aware isolation.
 
@@ -310,7 +331,7 @@ async def search_memories_qdrant(
 
         # Search (qdrant-client 1.16+ API)
         results = await client.query_points(
-            collection_name=KAGURA_MEMORIES_COLLECTION,
+            collection_name=collection_name,
             query=query_vector,
             limit=limit,
             query_filter=qdrant_filter,
@@ -333,6 +354,7 @@ async def search_memories_qdrant(
 async def delete_memory_from_qdrant(
     user_id: str,
     memory_id: UUID,
+    collection_name: str = KAGURA_MEMORIES_COLLECTION,
 ) -> None:
     """Delete memory point from Qdrant (single collection migration).
 
@@ -354,13 +376,13 @@ async def delete_memory_from_qdrant(
 
     try:
         await client.delete(
-            collection_name=KAGURA_MEMORIES_COLLECTION,
+            collection_name=collection_name,
             points_selector=PointIdsList(points=[str(memory_id)]),
         )
 
         logger.debug(
             "memory_deleted_from_qdrant",
-            collection=KAGURA_MEMORIES_COLLECTION,
+            collection=collection_name,
             memory_id=str(memory_id),
             user_id=user_id,
         )
@@ -377,6 +399,7 @@ async def search_memories_fulltext(
     limit: int = 10,
     filters: dict[str, Any] | None = None,
     is_shared_context: bool = False,  # NEW: Team collaboration support
+    collection_name: str = KAGURA_MEMORIES_COLLECTION,
 ) -> list[dict]:
     """Full-text search in Qdrant (BM25/keyword search) with workspace-aware isolation.
 
@@ -475,7 +498,7 @@ async def search_memories_fulltext(
 
         # Use scroll to get matching points
         scroll_result = await client.scroll(
-            collection_name=KAGURA_MEMORIES_COLLECTION,
+            collection_name=collection_name,
             scroll_filter=combined_filter,
             limit=limit,
             with_payload=True,
@@ -565,7 +588,10 @@ async def search_memories_fulltext(
 # ============================================================================
 
 
-async def ensure_kagura_memories_collection(embedding_dim: int = 512) -> None:
+async def ensure_kagura_memories_collection(
+    embedding_dim: int = 512,
+    collection_name: str = KAGURA_MEMORIES_COLLECTION,
+) -> None:
     """Ensure single kagura_memories collection exists with 3-level isolation indexes.
 
     Creates a single unified collection for all workspaces, contexts, and users.
@@ -599,16 +625,16 @@ async def ensure_kagura_memories_collection(embedding_dim: int = 512) -> None:
     try:
         # Check if collection exists
         collections = await client.get_collections()
-        exists = any(c.name == KAGURA_MEMORIES_COLLECTION for c in collections.collections)
+        exists = any(c.name == collection_name for c in collections.collections)
 
         if exists:
             # Ensure pre-tokenized indexes exist (Issue #1: Japanese BM25)
-            info = await client.get_collection(KAGURA_MEMORIES_COLLECTION)
+            info = await client.get_collection(collection_name)
             existing_fields = set(info.payload_schema.keys()) if info.payload_schema else set()
             for field in ("summary_tokens", "context_summary_tokens"):
                 if field not in existing_fields:
                     await client.create_payload_index(
-                        collection_name=KAGURA_MEMORIES_COLLECTION,
+                        collection_name=collection_name,
                         field_name=field,
                         field_schema=TextIndexParams(  # type: ignore[arg-type]
                             type="text",  # type: ignore[arg-type]
@@ -623,7 +649,7 @@ async def ensure_kagura_memories_collection(embedding_dim: int = 512) -> None:
 
         # Create collection with vector config
         await client.create_collection(
-            collection_name=KAGURA_MEMORIES_COLLECTION,
+            collection_name=collection_name,
             vectors_config=VectorParams(
                 size=embedding_dim,
                 distance=Distance.COSINE,
@@ -632,32 +658,32 @@ async def ensure_kagura_memories_collection(embedding_dim: int = 512) -> None:
 
         logger.info(
             "single_collection_created",
-            collection=KAGURA_MEMORIES_COLLECTION,
+            collection=collection_name,
             dim=embedding_dim,
         )
 
         # Create isolation indexes (CRITICAL)
         await client.create_payload_index(
-            collection_name=KAGURA_MEMORIES_COLLECTION,
+            collection_name=collection_name,
             field_name="workspace_id",
             field_schema="keyword",  # type: ignore[arg-type]
         )
 
         await client.create_payload_index(
-            collection_name=KAGURA_MEMORIES_COLLECTION,
+            collection_name=collection_name,
             field_name="context_id",
             field_schema="keyword",  # type: ignore[arg-type]
         )
 
         await client.create_payload_index(
-            collection_name=KAGURA_MEMORIES_COLLECTION,
+            collection_name=collection_name,
             field_name="user_id",
             field_schema="keyword",  # type: ignore[arg-type]
         )
 
         # Create full-text indexes
         await client.create_payload_index(
-            collection_name=KAGURA_MEMORIES_COLLECTION,
+            collection_name=collection_name,
             field_name="summary",
             field_schema=TextIndexParams(  # type: ignore[arg-type]
                 type="text",  # type: ignore[arg-type]
@@ -669,7 +695,7 @@ async def ensure_kagura_memories_collection(embedding_dim: int = 512) -> None:
         )
 
         await client.create_payload_index(
-            collection_name=KAGURA_MEMORIES_COLLECTION,
+            collection_name=collection_name,
             field_name="context_summary",
             field_schema=TextIndexParams(  # type: ignore[arg-type]
                 type="text",  # type: ignore[arg-type]
@@ -684,7 +710,7 @@ async def ensure_kagura_memories_collection(embedding_dim: int = 512) -> None:
         # These fields store Sudachi-lemmatized tokens for accurate Japanese search
         for field in ("summary_tokens", "context_summary_tokens"):
             await client.create_payload_index(
-                collection_name=KAGURA_MEMORIES_COLLECTION,
+                collection_name=collection_name,
                 field_name=field,
                 field_schema=TextIndexParams(  # type: ignore[arg-type]
                     type="text",  # type: ignore[arg-type]
@@ -697,27 +723,27 @@ async def ensure_kagura_memories_collection(embedding_dim: int = 512) -> None:
 
         # Create keyword indexes
         await client.create_payload_index(
-            collection_name=KAGURA_MEMORIES_COLLECTION,
+            collection_name=collection_name,
             field_name="scope",
             field_schema="keyword",  # type: ignore[arg-type]
         )
 
         await client.create_payload_index(
-            collection_name=KAGURA_MEMORIES_COLLECTION,
+            collection_name=collection_name,
             field_name="type",
             field_schema="keyword",  # type: ignore[arg-type]
         )
 
         # Create float index for importance range filtering
         await client.create_payload_index(
-            collection_name=KAGURA_MEMORIES_COLLECTION,
+            collection_name=collection_name,
             field_name="importance",
             field_schema="float",  # type: ignore[arg-type]
         )
 
         logger.info(
             "single_collection_indexes_created",
-            collection=KAGURA_MEMORIES_COLLECTION,
+            collection=collection_name,
             indexes=[
                 "workspace_id",
                 "context_id",
@@ -733,13 +759,15 @@ async def ensure_kagura_memories_collection(embedding_dim: int = 512) -> None:
     except Exception as e:
         logger.error(
             "single_collection_creation_failed",
-            collection=KAGURA_MEMORIES_COLLECTION,
+            collection=collection_name,
             error=str(e),
         )
         raise QdrantError(f"Failed to create kagura_memories collection: {e}") from e
 
 
-async def delete_context_points(workspace_id: str, context_id: str) -> int:
+async def delete_context_points(
+    workspace_id: str, context_id: str, collection_name: str = KAGURA_MEMORIES_COLLECTION
+) -> int:
     """Delete all points for a specific context from kagura_memories collection.
 
     This is used when a context is deleted. Instead of deleting an entire collection
@@ -773,20 +801,20 @@ async def delete_context_points(workspace_id: str, context_id: str) -> int:
         # Issue #273 Review: Count before delete for verification
         # Prevents silent failures - caller can verify deletion succeeded
         count_result = await client.count(
-            collection_name=KAGURA_MEMORIES_COLLECTION,
+            collection_name=collection_name,
             count_filter=filter_conditions,
         )
         points_to_delete = count_result.count
 
         # Delete points matching the filter
         await client.delete(
-            collection_name=KAGURA_MEMORIES_COLLECTION,
+            collection_name=collection_name,
             points_selector=filter_conditions,
         )
 
         logger.info(
             "context_points_deleted",
-            collection=KAGURA_MEMORIES_COLLECTION,
+            collection=collection_name,
             workspace_id=workspace_id,
             context_id=context_id,
             count=points_to_delete,
@@ -797,7 +825,7 @@ async def delete_context_points(workspace_id: str, context_id: str) -> int:
     except Exception as e:
         logger.error(
             "context_points_deletion_failed",
-            collection=KAGURA_MEMORIES_COLLECTION,
+            collection=collection_name,
             workspace_id=workspace_id,
             context_id=context_id,
             error=str(e),

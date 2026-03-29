@@ -150,19 +150,15 @@ class ContextService:
                     "Shared contexts require Pro plan. Upgrade to share contexts with team members."
                 )
 
-        # Get embedding settings from environment (single collection mode)
-        settings = get_settings()
-        actual_embedding_model = settings.embedding_model
-        actual_dimensions = settings.embedding_dimensions
+        # Determine embedding model: parameter > global setting
+        from config.constants import EMBEDDING_MODEL_REGISTRY
 
-        # Log if deprecated parameter was passed
-        if embedding_model is not None:
-            logger.warning(
-                "deprecated_embedding_model_parameter",
-                passed_value=embedding_model,
-                using_value=actual_embedding_model,
-                message="embedding_model parameter is deprecated. Using EMBEDDING_MODEL env var.",
-            )
+        settings = get_settings()
+        actual_embedding_model = embedding_model or settings.embedding_model
+        if actual_embedding_model in EMBEDDING_MODEL_REGISTRY:
+            actual_dimensions = EMBEDDING_MODEL_REGISTRY[actual_embedding_model][0]
+        else:
+            actual_dimensions = settings.embedding_dimensions
 
         # Validate name format
         self.validate_context_name(name)
@@ -220,9 +216,14 @@ class ContextService:
             dimensions=actual_dimensions,
         )
 
-        # Create Qdrant collection
+        # Create Qdrant collection (model-specific)
         if create_collection:
-            await self._ensure_context_collection(str(workspace_id), name)
+            from db.qdrant import get_collection_name
+
+            collection = get_collection_name(actual_embedding_model, actual_dimensions)
+            await self._ensure_context_collection(
+                str(workspace_id), name, embedding_dim=actual_dimensions, collection_name=collection
+            )
 
         # Note: Do NOT auto-set as current context
         # Users should explicitly switch to the new context if desired
@@ -676,23 +677,25 @@ class ContextService:
         workspace_id: str,
         context_name: str,
         embedding_dim: int = 512,
+        collection_name: str | None = None,
     ) -> None:
-        """Ensure kagura_memories collection exists (single collection migration).
+        """Ensure the appropriate Qdrant collection exists for this context.
 
-        Single Collection Migration: Instead of creating per-context collections,
-        this now ensures the single "kagura_memories" collection exists.
-        Context isolation is achieved through payload filtering on workspace_id/context_id.
+        Uses per-model collections (e.g., kagura_memories_qwen3_embedding_8b_4096).
+        Default model (text-embedding-3-small, 512) maps to legacy "kagura_memories".
 
         Args:
             workspace_id: Workspace ID (as string)
-            context_name: Context name (not used for collection naming anymore)
+            context_name: Context name (for logging)
             embedding_dim: Embedding dimension (default: 512)
+            collection_name: Qdrant collection name (default: kagura_memories)
         """
-        from db.qdrant import ensure_kagura_memories_collection
+        from db.qdrant import KAGURA_MEMORIES_COLLECTION, ensure_kagura_memories_collection
+
+        target_collection = collection_name or KAGURA_MEMORIES_COLLECTION
 
         try:
-            # Single collection migration: Ensure kagura_memories exists
-            await ensure_kagura_memories_collection(embedding_dim)
+            await ensure_kagura_memories_collection(embedding_dim, target_collection)
 
             logger.info(
                 "single_collection_ensured",

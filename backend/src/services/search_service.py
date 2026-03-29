@@ -13,7 +13,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.qdrant import search_memories_fulltext, search_memories_qdrant
+from db.qdrant import get_collection_name, search_memories_fulltext, search_memories_qdrant
 from repositories.config_repository import ContextSearchConfigRepository
 from services.embedding_service import EmbeddingService
 from services.reranker_service import RerankerService
@@ -120,10 +120,20 @@ class SearchService:
             query_normalized=query != normalized_query,
         )
 
+        # Determine collection and embedding model for this context
+        embedding_model = getattr(config, "embedding_model", "text-embedding-3-small")
+        embedding_dims = getattr(config, "embedding_dimensions", 512)
+        collection = get_collection_name(embedding_model, embedding_dims)
+        # Reuse cached service if model matches, otherwise create context-specific one
+        if embedding_model == self.embedding_service.model:
+            embed_svc = self.embedding_service
+        else:
+            embed_svc = EmbeddingService(self.db, model=embedding_model, dimensions=embedding_dims)
+
         # 1. Semantic Search (Vector search)
         logger.debug("semantic_search_starting", query=normalized_query[:50], fetch_size=fetch_size)
 
-        query_vector = await self.embedding_service.embed(
+        query_vector = await embed_svc.embed(
             normalized_query, user_id, context_id=context_id, workspace_id=workspace_id
         )
         semantic_results = await search_memories_qdrant(
@@ -133,7 +143,8 @@ class SearchService:
             context_id=context_id,
             limit=fetch_size,
             filters=filters,
-            is_shared_context=is_shared_context,  # NEW: Team collaboration
+            is_shared_context=is_shared_context,
+            collection_name=collection,
         )
 
         # 2. Full-text Search (MatchText via scroll)
@@ -146,7 +157,8 @@ class SearchService:
             context_id=context_id,
             limit=fetch_size,
             filters=filters,
-            is_shared_context=is_shared_context,  # NEW: Team collaboration
+            is_shared_context=is_shared_context,
+            collection_name=collection,
         )
 
         # 3. Hybrid Merge (Dynamic weights from config - Issue #130)

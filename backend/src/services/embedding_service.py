@@ -27,20 +27,45 @@ logger = get_logger(__name__)
 
 
 class EmbeddingService:
-    """Service for generating embeddings using OpenAI.
+    """Service for generating embeddings using OpenAI or Ollama.
 
+    Supports multiple providers via OpenAI-compatible API.
     User-specific API keys are retrieved from database (encrypted).
     """
 
-    def __init__(self, db: AsyncSession):
+    def __init__(
+        self,
+        db: AsyncSession,
+        model: str | None = None,
+        dimensions: int | None = None,
+    ):
         """Initialize embedding service.
 
         Args:
             db: Database session (for retrieving user's API key)
+            model: Embedding model name (default: from settings)
+            dimensions: Vector dimensions (default: from settings or model registry)
         """
+        from config.constants import EMBEDDING_MODEL_REGISTRY
+        from config.settings import get_settings
+
+        settings = get_settings()
         self.db = db
-        self.model = "text-embedding-3-small"
-        self.dimensions = 512
+        self.model = model or settings.embedding_model
+        # Look up dimensions from registry if not explicitly provided
+        if dimensions is not None:
+            self.dimensions = dimensions
+        elif self.model in EMBEDDING_MODEL_REGISTRY:
+            self.dimensions = EMBEDDING_MODEL_REGISTRY[self.model][0]
+        else:
+            self.dimensions = settings.embedding_dimensions
+        # Determine provider from registry or settings
+        if self.model in EMBEDDING_MODEL_REGISTRY:
+            self.provider = EMBEDDING_MODEL_REGISTRY[self.model][1]
+        else:
+            self.provider = settings.embedding_provider
+        self.ollama_base_url = settings.ollama_base_url
+        self._ollama_verified = False
 
     async def _get_user_api_key(
         self,
@@ -140,6 +165,56 @@ class EmbeddingService:
             "Please set OPENAI_API_KEY environment variable or configure in settings."
         )
 
+    async def _get_client(
+        self,
+        user_id: str,
+        context_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> AsyncOpenAI:
+        """Get the appropriate OpenAI-compatible client for the configured provider.
+
+        Args:
+            user_id: User ID (for API key retrieval)
+            context_id: Optional context ID
+            workspace_id: Optional workspace ID
+
+        Returns:
+            AsyncOpenAI client configured for the provider
+        """
+        if self.provider == "ollama":
+            # Verify Ollama is reachable on first use only
+            if not self._ollama_verified:
+                import httpx
+
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as http:
+                        resp = await http.get(self.ollama_base_url)
+                        if resp.status_code != 200:
+                            raise ConfigurationError(
+                                f"Ollama not responding at {self.ollama_base_url} (HTTP {resp.status_code})"
+                            )
+                except httpx.ConnectError as err:
+                    raise ConfigurationError(
+                        f"Cannot connect to Ollama at {self.ollama_base_url}. "
+                        "Is Ollama running? Start with: ollama serve"
+                    ) from err
+                self._ollama_verified = True
+            return AsyncOpenAI(
+                base_url=f"{self.ollama_base_url}/v1",
+                api_key="ollama",  # Ollama doesn't require a real key
+            )
+        # OpenAI (default)
+        api_key = await self._get_user_api_key(user_id, context_id, workspace_id)
+        return AsyncOpenAI(api_key=api_key)
+
+    def _build_embedding_kwargs(self, input_data: str | list[str]) -> dict:
+        """Build kwargs for OpenAI-compatible embeddings.create() call."""
+        kwargs: dict = {"model": self.model, "input": input_data}
+        # OpenAI supports dimensions param; Ollama infers from model
+        if self.provider == "openai":
+            kwargs["dimensions"] = self.dimensions
+        return kwargs
+
     async def embed(
         self,
         text: str,
@@ -156,7 +231,7 @@ class EmbeddingService:
             workspace_id: Optional workspace ID (Issue #146: workspace-scoped keys)
 
         Returns:
-            Embedding vector (512 dimensions)
+            Embedding vector (dimensions depend on configured model)
 
         Raises:
             OpenAIError: If embedding generation fails
@@ -188,7 +263,9 @@ class EmbeddingService:
             normalized_text = unicodedata.normalize("NFC", text)
 
             # Issue #84 Phase 2A: Check cache first (xxHash for 4x speed/space improvement)
-            cache_key = f"emb:{xxhash.xxh64(normalized_text.encode()).hexdigest()[:16]}"
+            # Include model in cache key to avoid cross-model collisions
+            text_hash = xxhash.xxh64(normalized_text.encode()).hexdigest()[:16]
+            cache_key = f"emb:{self.model}:{text_hash}"
             cached = await get_cache(cache_key)
 
             if cached:
@@ -202,11 +279,9 @@ class EmbeddingService:
                 return vector
 
             # Cache miss - generate embedding (use normalized text for consistency)
-            api_key = await self._get_user_api_key(user_id, context_id, workspace_id)
-            client = AsyncOpenAI(api_key=api_key)
-
+            client = await self._get_client(user_id, context_id, workspace_id)
             response = await client.embeddings.create(
-                model=self.model, input=normalized_text, dimensions=self.dimensions
+                **self._build_embedding_kwargs(normalized_text)
             )
 
             vector = response.data[0].embedding
@@ -265,7 +340,8 @@ class EmbeddingService:
             uncached_texts: list[str] = []
 
             for i, text in enumerate(normalized_texts):
-                cache_key = f"emb:{xxhash.xxh64(text.encode()).hexdigest()[:16]}"
+                text_hash = xxhash.xxh64(text.encode()).hexdigest()[:16]
+                cache_key = f"emb:{self.model}:{text_hash}"
                 cached = await get_cache(cache_key)
 
                 if cached:
@@ -288,11 +364,9 @@ class EmbeddingService:
 
             # Generate embeddings only for uncached texts
             if uncached_texts:
-                api_key = await self._get_user_api_key(user_id, context_id, workspace_id)
-                client = AsyncOpenAI(api_key=api_key)
-
+                client = await self._get_client(user_id, context_id, workspace_id)
                 response = await client.embeddings.create(
-                    model=self.model, input=uncached_texts, dimensions=self.dimensions
+                    **self._build_embedding_kwargs(uncached_texts)
                 )
 
                 # Cache new embeddings and fill results
@@ -301,7 +375,8 @@ class EmbeddingService:
                     results[idx] = vector
 
                     # Cache for 24 hours (use normalized text from uncached_texts)
-                    cache_key = f"emb:{xxhash.xxh64(uncached_texts[i].encode()).hexdigest()[:16]}"
+                    text_hash = xxhash.xxh64(uncached_texts[i].encode()).hexdigest()[:16]
+                    cache_key = f"emb:{self.model}:{text_hash}"
                     await set_cache(cache_key, json.dumps(vector), ttl=86400)
 
                 logger.debug(
