@@ -266,8 +266,8 @@ export default function ResourceTokensPage() {
 
       {/* Prerequisites Warning (Unified) */}
       {isOwner && (
-        currentWorkspace?.plan_name !== 'pro' ||
-        contexts.filter(c => c.is_public && c.resource_id).length === 0
+        currentWorkspace?.plan_name === 'free' ||
+        contexts.filter(c => c.resource_id).length === 0
       ) && (
         <div className="rounded-lg border-2 border-purple-200 bg-purple-50 p-4 mb-6">
           <div className="flex items-start gap-3">
