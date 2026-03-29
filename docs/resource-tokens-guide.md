@@ -166,7 +166,7 @@ def sync_products():
 ## Quotas
 
 - Each token has a `quota_events_per_hour` limit
-- Free plan: No resource tokens (Pro plan required)
+- Free plan: No resource tokens (higher tier plan required)
 - Basic plan: Up to 3 active tokens
 - Pro plan: Up to 30 active tokens
 

@@ -846,10 +846,10 @@ Use list_contexts() after creation to verify.""",
             "name": "update_context",
             "description": """Update an existing context's settings.
 
-Modify summary, usage_guide, description, display_name, or resource_id of a context.
+Modify summary, usage_guide, description, display_name, resource_id, or is_public of a context.
 
 Requires owner or editor role in the context.
-- summary/usage_guide/resource_id: Owner-only fields
+- summary/usage_guide/resource_id/is_public: Owner-only fields
 - display_name/description: Editor access sufficient
 
 Use get_context_info() to see current values before updating.""",
@@ -880,6 +880,10 @@ Use get_context_info() to see current values before updating.""",
                     "resource_id": {
                         "type": "string",
                         "description": "Resource ID for external data ingestion via Resource Tokens. Lowercase alphanumeric and underscores only (e.g., 'github_issues'). Must be unique within the workspace.",
+                    },
+                    "is_public": {
+                        "type": "boolean",
+                        "description": "Make context publicly accessible via REST API. Requires owner permission and higher tier plan.",
                     },
                 },
             },
@@ -1826,7 +1830,7 @@ async def execute_tool_call(
                     ctx_uuid = _UUID(args["context_id"])
 
                     perm_service = PermissionService(db)
-                    owner_fields = {"summary", "usage_guide", "resource_id"}
+                    owner_fields = {"summary", "usage_guide", "resource_id", "is_public"}
                     requested_fields = {
                         k
                         for k in (
@@ -1835,6 +1839,7 @@ async def execute_tool_call(
                             "display_name",
                             "description",
                             "resource_id",
+                            "is_public",
                         )
                         if k in args
                     }
@@ -1842,7 +1847,7 @@ async def execute_tool_call(
                     if not requested_fields:
                         return _error_response(
                             "no_changes",
-                            "No fields to update. Provide at least one of: summary, usage_guide, display_name, description, resource_id.",
+                            "No fields to update. Provide at least one of: summary, usage_guide, display_name, description, resource_id, is_public.",
                         )
 
                     # Permission check using PermissionService (same as REST API)
@@ -1859,7 +1864,7 @@ async def execute_tool_call(
                         return _error_response(
                             "permission_denied",
                             str(perm_err),
-                            help="You need owner access for summary/usage_guide/resource_id, or editor access for display_name/description.",
+                            help="You need owner access for summary/usage_guide/resource_id/is_public, or editor access for display_name/description.",
                         )
 
                     # Apply updates
@@ -1871,6 +1876,30 @@ async def execute_tool_call(
                         context.summary = args["summary"]
                     if "usage_guide" in args:
                         context.usage_guide = args["usage_guide"]
+                    if "is_public" in args:
+                        is_public = args["is_public"]
+                        if is_public and not context.is_public:
+                            # Making public: check plan allows it
+                            from config.plan_tiers import get_plan_tier
+                            from models.auth import Workspace
+
+                            ws = await db.get(Workspace, context.workspace_id)
+                            if ws:
+                                plan = get_plan_tier(ws.plan_name)
+                                if not plan.allows_shared_contexts:
+                                    return _error_response(
+                                        "plan_required",
+                                        "Public contexts require a higher tier plan.",
+                                    )
+                        if not is_public and context.is_public and context.resource_id:
+                            return _error_response(
+                                "cannot_make_private",
+                                "Cannot make private: context has a resource_id. Revoke tokens and remove resource_id first.",
+                            )
+                        context.is_public = is_public
+                        if is_public:
+                            context.is_private = False
+
                     if "resource_id" in args:
                         import re as _re
 
