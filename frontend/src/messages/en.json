@@ -1206,6 +1206,8 @@
     "unpublishImpact2": "Public Search API will be disabled",
     "unpublishImpact3": "Resource Ingest API will be disabled",
     "unpublishImpact4": "Previously published data history remains",
+    "unpublishTokenWarning": "{count, plural, one {# active Resource Token will be revoked.} other {# active Resource Tokens will be revoked.}}",
+    "unpublishTokenUnknown": "Could not verify active Resource Tokens. There may be tokens that will be revoked.",
     "unpublishWarning": "If external systems depend on this context, they will encounter access errors.",
     "publicExplanation": "Making this public will enable:",
     "publicFeature1": "Search API: External systems can search this context",

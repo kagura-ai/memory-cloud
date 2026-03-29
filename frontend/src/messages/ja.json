@@ -1206,6 +1206,8 @@
     "unpublishImpact2": "Public Search API が無効化されます",
     "unpublishImpact3": "Resource Ingest API が無効化されます",
     "unpublishImpact4": "既に公開されたデータの履歴は残ります",
+    "unpublishTokenWarning": "{count}件のアクティブなResource Tokenが失効します。",
+    "unpublishTokenUnknown": "アクティブなResource Tokenの確認ができませんでした。失効するトークンがある可能性があります。",
     "unpublishWarning": "外部システムがこのContextに依存している場合、アクセスエラーが発生します。",
     "publicExplanation": "Public Contextにすると以下が可能になります",
     "publicFeature1": "Public Search API: 外部システムがこのContextを検索できます",
