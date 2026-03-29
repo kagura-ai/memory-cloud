@@ -164,7 +164,7 @@ export default function ContextGraphPage() {
                           <div className="w-16 bg-gray-200 dark:bg-gray-700 rounded-full h-1.5">
                             <div
                               className="bg-brand-green-500 h-1.5 rounded-full"
-                              style={{ width: `${Math.min(edge.weight / 0.5 * 100, 100)}%` }}
+                              style={{ width: `${Math.min(edge.weight / (s?.max_edge_weight || 0.5) * 100, 100)}%` }}
                             />
                           </div>
                           <span className="text-xs font-mono text-gray-500 dark:text-gray-400 w-12">
