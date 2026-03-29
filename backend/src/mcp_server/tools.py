@@ -1043,20 +1043,23 @@ async def _log_tool_usage(
         context_id: Context ID (optional)
         workspace_id: Workspace ID (optional)
     """
+    from db.base import get_db
     from utils.usage_logger import log_usage
 
     response_time_ms = int((time.time() - start_time) * 1000)
     try:
-        await log_usage(
-            db=db,
-            user_id=user_id,
-            endpoint=f"mcp:{tool_name}",
-            method="MCP",
-            status_code=status_code,
-            response_time_ms=response_time_ms,
-            context_id=str(context_id) if context_id else None,
-            workspace_id=str(workspace_id) if workspace_id else None,
-        )
+        # Use independent session to avoid affecting tool handler's transaction
+        async for log_db in get_db():
+            await log_usage(
+                db=log_db,
+                user_id=user_id,
+                endpoint=f"mcp:{tool_name}",
+                method="MCP",
+                status_code=status_code,
+                response_time_ms=response_time_ms,
+                context_id=str(context_id) if context_id else None,
+                workspace_id=str(workspace_id) if workspace_id else None,
+            )
     except Exception as e:
         logger.warning("tool_usage_log_failed", tool=tool_name, error=str(e))
 
