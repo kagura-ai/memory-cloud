@@ -127,6 +127,20 @@ QDRANT_MIN_WEIGHT_FILTER = 0.0
 # Vector dimension for embeddings (OpenAI text-embedding-3-small)
 EMBEDDING_DIMENSION = 512
 
+# Supported embedding models: model_name → (dimensions, provider)
+EMBEDDING_MODEL_REGISTRY: dict[str, tuple[int, str]] = {
+    # OpenAI
+    "text-embedding-3-small": (512, "openai"),
+    "text-embedding-3-large": (3072, "openai"),
+    # Ollama (qwen3-embedding)
+    "qwen3-embedding:0.6b": (1024, "ollama"),
+    "qwen3-embedding:4b": (2560, "ollama"),
+    "qwen3-embedding:8b": (4096, "ollama"),
+    # Ollama (other)
+    "nomic-embed-text": (768, "ollama"),
+    "mxbai-embed-large": (1024, "ollama"),
+}
+
 # ============================================================================
 # Session & Cache TTL
 # ============================================================================
