@@ -768,7 +768,10 @@ class MemoryService:
                 await self.memory_repo.update(memory.id, memory)
 
                 # Hard delete from Qdrant (remove from search index)
-                await delete_memory_from_qdrant(user_id, request.memory_id)
+                del_collection = await self._get_context_collection_name(memory.context_id)
+                await delete_memory_from_qdrant(
+                    user_id, request.memory_id, collection_name=del_collection
+                )
 
                 # Clean up neural memory edges with 3-level isolation
                 from repositories.neural_edge import NeuralEdgeRepository
@@ -815,8 +818,11 @@ class MemoryService:
                     memory.deleted_by = user_id
                     await self.memory_repo.update(memory.id, memory)
 
-                    # Hard delete from Qdrant (single collection migration)
-                    await delete_memory_from_qdrant(user_id, memory_response.memory_id)
+                    # Hard delete from Qdrant
+                    del_collection = await self._get_context_collection_name(memory.context_id)
+                    await delete_memory_from_qdrant(
+                        user_id, memory_response.memory_id, collection_name=del_collection
+                    )
 
                     # Clean up neural memory edges
                     from repositories.neural_edge import NeuralEdgeRepository
@@ -902,7 +908,8 @@ class MemoryService:
             await self.memory_repo.delete(memory.id)
 
             # Delete from Qdrant
-            await delete_memory_from_qdrant(user_id, memory.id)
+            del_collection = await self._get_context_collection_name(memory.context_id)
+            await delete_memory_from_qdrant(user_id, memory.id, collection_name=del_collection)
 
             deleted_count += 1
 

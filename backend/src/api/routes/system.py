@@ -154,9 +154,13 @@ async def get_system_telemetry(
         except Exception as e:
             redis_status = ServiceStatus(status="error", details={"error": str(e)})
 
-        # Check Ollama (always check if base URL is set)
+        # Check Ollama (only if explicitly configured or provider is ollama)
         ollama_status = ServiceStatus(status="not_configured")
-        if settings.ollama_base_url:
+        ollama_explicitly_configured = (
+            settings.embedding_provider == "ollama"
+            or settings.ollama_base_url != "http://localhost:11434"
+        )
+        if ollama_explicitly_configured:
             try:
                 import httpx
 

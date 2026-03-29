@@ -231,7 +231,7 @@ class EmbeddingService:
             workspace_id: Optional workspace ID (Issue #146: workspace-scoped keys)
 
         Returns:
-            Embedding vector (512 dimensions)
+            Embedding vector (dimensions depend on configured model)
 
         Raises:
             OpenAIError: If embedding generation fails
