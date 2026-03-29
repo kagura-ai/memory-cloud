@@ -489,24 +489,10 @@ async def update_workspace_quotas(
         plan_tier = get_plan_tier(workspace.plan_name)
 
         # Calculate new effective values
-        new_effective_memory = workspace.memory_limit + request.addon_memory_bonus
         new_effective_members = plan_tier.max_members_per_workspace + request.addon_member_bonus
+        new_effective_contexts = plan_tier.max_contexts_per_workspace + request.addon_context_bonus
 
-        # Validate: check current usage doesn't exceed new effective limits
-        memory_count_result = await db.execute(
-            select(func.count(Memory.id)).where(
-                Memory.workspace_id == ws_uuid,
-                Memory.deleted_at.is_(None),
-            )
-        )
-        memory_count = memory_count_result.scalar() or 0
-
-        if memory_count > new_effective_memory:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Cannot reduce memory quota: current usage ({memory_count}) exceeds new effective limit ({new_effective_memory})",
-            )
-
+        # Hard limit: members — cannot reduce below current count
         member_count_result = await db.execute(
             select(func.count(WorkspaceMember.id)).where(WorkspaceMember.workspace_id == ws_uuid)
         )
@@ -516,6 +502,21 @@ async def update_workspace_quotas(
             raise HTTPException(
                 status_code=400,
                 detail=f"Cannot reduce member quota: current members ({member_count}) exceeds new effective limit ({new_effective_members})",
+            )
+
+        # Hard limit: contexts — cannot reduce below current count
+        context_count_result = await db.execute(
+            select(func.count(Context.id)).where(
+                Context.workspace_id == ws_uuid,
+                Context.deleted_at.is_(None),
+            )
+        )
+        context_count = context_count_result.scalar() or 0
+
+        if context_count > new_effective_contexts:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot reduce context quota: current contexts ({context_count}) exceeds new effective limit ({new_effective_contexts})",
             )
 
         # Store old values for logging
