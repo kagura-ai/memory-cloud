@@ -146,6 +146,15 @@ For running Kagura Memory Cloud as a hosted service:
    GITHUB_OAUTH_ENABLED=true      # Enable/disable GitHub login
    ```
 
+4. Frontend environment variables (`frontend/.env.local`):
+   ```
+   NEXT_PUBLIC_API_URL=https://api.your-domain.com
+   NEXT_PUBLIC_APP_URL=https://your-domain.com
+   NEXT_PUBLIC_PLAN_FREE_DISPLAY_NAME=S    # optional: customize plan names
+   NEXT_PUBLIC_PLAN_BASIC_DISPLAY_NAME=M
+   NEXT_PUBLIC_PLAN_PRO_DISPLAY_NAME=L
+   ```
+
 Users sign up via OAuth, get a Free (S) workspace, and can upgrade to M/L via Stripe checkout. Admins manage users and plans via the Admin panel (`/admin`).
 
 #### Recommended Workflows

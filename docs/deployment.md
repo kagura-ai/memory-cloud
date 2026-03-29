@@ -75,3 +75,20 @@ volumes:
   caddy_data:
   caddy_config:
 ```
+
+## Frontend Environment Variables
+
+Copy `frontend/.env.example` to `frontend/.env.local` and configure:
+
+```bash
+# Required: Backend API URL (must be accessible from the browser)
+NEXT_PUBLIC_API_URL=https://api.your-domain.com
+
+# Required: Frontend URL (for OpenGraph metadata)
+NEXT_PUBLIC_APP_URL=https://your-domain.com
+
+# Optional: Custom plan display names (default: S/M/L)
+# NEXT_PUBLIC_PLAN_FREE_DISPLAY_NAME=Free
+# NEXT_PUBLIC_PLAN_BASIC_DISPLAY_NAME=Standard
+# NEXT_PUBLIC_PLAN_PRO_DISPLAY_NAME=Premium
+```
