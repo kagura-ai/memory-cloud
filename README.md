@@ -23,6 +23,8 @@
 
 ## What is Kagura Memory Cloud?
 
+[![SafeSkill 90/100](https://img.shields.io/badge/SafeSkill-90%2F100_Verified%20Safe-brightgreen)](https://safeskill.dev/scan/kagura-ai-memory-cloud)
+
 Kagura Memory Cloud is a memory system that lets AI assistants **remember, search, and learn** from past conversations. It provides:
 
 - **11 MCP Tools** — remember, recall, forget, reference, explore, get_context_info, list_contexts, create_context, update_context, update_search_config, usage_guide
