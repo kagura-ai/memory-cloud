@@ -75,7 +75,7 @@ export interface WorkspaceQuotaDetail {
   workspace_name: string;
   plan_name: string;
   base: QuotaBreakdown;
-  addon: { memory_bonus: number; mcp_quota_bonus: number; member_bonus: number };
+  addon: { memory_bonus: number; mcp_quota_bonus: number; member_bonus: number; context_bonus: number };
   effective: QuotaBreakdown;
   usage: { memories: number; contexts: number; members: number };
 }
@@ -84,6 +84,7 @@ export interface UpdateAddonRequest {
   addon_memory_bonus: number;
   addon_mcp_quota_bonus: number;
   addon_member_bonus: number;
+  addon_context_bonus: number;
 }
 
 /**

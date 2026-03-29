@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import WorkspaceOwner, get_current_user
+from auth.dependencies import APIKeyOrSessionUser, WorkspaceOwner
 from db.base import get_db
 from models.auth import Context, User
 from models.memory import Memory
@@ -98,8 +98,8 @@ class ResourceImpactResponse(BaseModel):
 @router.get("/{resource_id}/schema", response_model=SchemaResponse)
 async def get_schema(
     resource_id: str,
+    user: APIKeyOrSessionUser,
     schema_version: int | None = None,
-    user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Get resource schema (latest or specific version).
@@ -252,7 +252,7 @@ async def create_schema(
 @router.get("/{resource_id}/impact", response_model=ResourceImpactResponse)
 async def get_resource_impact(
     resource_id: str,
-    user: dict = Depends(get_current_user),
+    user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
     """Get resource change impact information.
