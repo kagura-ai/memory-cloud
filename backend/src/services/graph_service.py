@@ -367,8 +367,12 @@ class GraphService:
         node_uuid = UUID(node_id) if isinstance(node_id, str) else node_id
 
         # Get edges
-        incoming = await self.edge_repo.get_incoming_edges(self.user_id, node_uuid)
-        outgoing = await self.edge_repo.get_outgoing_edges(self.user_id, node_uuid)
+        incoming = await self.edge_repo.get_incoming_edges(
+            self.user_id, node_uuid, workspace_id=self.workspace_id, context_id=self.context_id
+        )
+        outgoing = await self.edge_repo.get_outgoing_edges(
+            self.user_id, node_uuid, workspace_id=self.workspace_id, context_id=self.context_id
+        )
         all_edges = incoming + outgoing
 
         edge_count = len(all_edges)

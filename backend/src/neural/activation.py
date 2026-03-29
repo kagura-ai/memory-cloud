@@ -136,11 +136,17 @@ class ActivationSpreader:
                 from uuid import UUID
 
                 src_uuid = UUID(src_id) if isinstance(src_id, str) else src_id
+                edge_user_id = user_id or self.graph.user_id
                 outgoing_edges = await self.graph.edge_repo.get_outgoing_edges(
-                    self.graph.user_id, src_uuid
+                    edge_user_id,
+                    src_uuid,
+                    workspace_id=self.graph.workspace_id,
+                    context_id=self.graph.context_id,
                 )
+            except ValueError:
+                raise
             except Exception as e:
-                logger.debug(f"Failed to get neighbors for {src_id}: {e}")
+                logger.warning(f"Failed to get outgoing edges for {src_id}: {e}")
                 continue
 
             for edge in outgoing_edges:
@@ -300,8 +306,13 @@ class ActivationSpreader:
 
                 node_uuid = UUID(node_id) if isinstance(node_id, str) else node_id
                 outgoing_edges = await self.graph.edge_repo.get_outgoing_edges(
-                    self.graph.user_id, node_uuid
+                    self.graph.user_id,
+                    node_uuid,
+                    workspace_id=self.graph.workspace_id,
+                    context_id=self.graph.context_id,
                 )
+            except ValueError:
+                raise
             except Exception:
                 continue
 

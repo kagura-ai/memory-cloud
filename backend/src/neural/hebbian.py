@@ -367,7 +367,9 @@ class HebbianLearner:
             node_uuid = UUID(node_id) if isinstance(node_id, str) else node_id
             outgoing_edges = await self.graph.edge_repo.get_outgoing_edges(
                 user_id,
-                node_uuid,  # Fixed: use parameter, not self.user_id
+                node_uuid,
+                workspace_id=self.graph.workspace_id,
+                context_id=self.graph.context_id,
             )
         except Exception as e:
             logger.error(f"Failed to get outgoing edges for node {node_id}: {e}")
