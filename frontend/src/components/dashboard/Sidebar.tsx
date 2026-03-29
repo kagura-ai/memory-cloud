@@ -227,15 +227,19 @@ export function Sidebar() {
     }
   }, [currentWorkspaceId]);
 
-  // Load external key status on mount
+  // Load external key status (with race condition guard)
   useEffect(() => {
-    if (currentWorkspaceId) {
-      listExternalAPIKeys().then(keys => {
-        setHasExternalKeys(keys.length > 0);
-      }).catch(() => {
-        setHasExternalKeys(null);
-      });
-    }
+    setHasExternalKeys(null);
+    if (!currentWorkspaceId) return;
+
+    let cancelled = false;
+    listExternalAPIKeys().then(keys => {
+      if (!cancelled) setHasExternalKeys(keys.length > 0);
+    }).catch(() => {
+      if (!cancelled) setHasExternalKeys(null);
+    });
+
+    return () => { cancelled = true; };
   }, [currentWorkspaceId]);
 
   // Sync collapse state across browser tabs
