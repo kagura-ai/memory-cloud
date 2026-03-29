@@ -48,6 +48,12 @@ export default function ContextGraphPage() {
     fetchData();
   }, [fetchData]);
 
+  const s = stats?.stats;
+  const nodes = graphData?.nodes || [];
+  const edges = graphData?.edges || [];
+  const topConnections = s?.top_connections || [];
+  const nodeById = useMemo(() => new Map(nodes.map(n => [n.id, n])), [nodes]);
+
   if (loading) {
     return (
       <PageContainer>
@@ -68,12 +74,6 @@ export default function ContextGraphPage() {
       </PageContainer>
     );
   }
-
-  const s = stats?.stats;
-  const nodes = graphData?.nodes || [];
-  const edges = graphData?.edges || [];
-  const topConnections = s?.top_connections || [];
-  const nodeById = useMemo(() => new Map(nodes.map(n => [n.id, n])), [nodes]);
 
   return (
     <PageContainer>
