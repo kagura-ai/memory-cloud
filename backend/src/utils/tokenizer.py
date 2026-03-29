@@ -59,10 +59,8 @@ def tokenize_for_search(text: str) -> str:
             pos = token.part_of_speech()[0]
             if pos in _STOP_POS:
                 continue
-            form = token.dictionary_form()
-            if len(form) >= 2 or not form.isascii():
-                lemmas.append(form.lower())
+            lemmas.append(token.dictionary_form().lower())
         return " ".join(lemmas)
-    except Exception:
-        logger.warning("sudachi_tokenization_failed", text_length=len(text))
+    except Exception as e:
+        logger.warning("sudachi_tokenization_failed", text_length=len(text), error=str(e), exc_info=True)
         return text.lower()

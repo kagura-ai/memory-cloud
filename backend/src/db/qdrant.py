@@ -602,7 +602,23 @@ async def ensure_kagura_memories_collection(embedding_dim: int = 512) -> None:
         exists = any(c.name == KAGURA_MEMORIES_COLLECTION for c in collections.collections)
 
         if exists:
-            logger.debug("collection_already_exists", collection=KAGURA_MEMORIES_COLLECTION)
+            # Ensure pre-tokenized indexes exist (Issue #1: Japanese BM25)
+            info = await client.get_collection(KAGURA_MEMORIES_COLLECTION)
+            existing_fields = set(info.payload_schema.keys()) if info.payload_schema else set()
+            for field in ("summary_tokens", "context_summary_tokens"):
+                if field not in existing_fields:
+                    await client.create_payload_index(
+                        collection_name=KAGURA_MEMORIES_COLLECTION,
+                        field_name=field,
+                        field_schema=TextIndexParams(  # type: ignore[arg-type]
+                            type="text",  # type: ignore[arg-type]
+                            tokenizer=TokenizerType.WORD,
+                            min_token_len=1,
+                            max_token_len=30,
+                            lowercase=True,
+                        ),
+                    )
+                    logger.info("created_missing_token_index", field=field)
             return
 
         # Create collection with vector config
@@ -673,7 +689,7 @@ async def ensure_kagura_memories_collection(embedding_dim: int = 512) -> None:
                 field_schema=TextIndexParams(  # type: ignore[arg-type]
                     type="text",  # type: ignore[arg-type]
                     tokenizer=TokenizerType.WORD,
-                    min_token_len=2,
+                    min_token_len=1,
                     max_token_len=30,
                     lowercase=True,
                 ),
