@@ -121,15 +121,10 @@ class SearchService:
         )
 
         # Determine collection and embedding model for this context
-        collection = get_collection_name(
-            getattr(config, "embedding_model", "text-embedding-3-small"),
-            getattr(config, "embedding_dimensions", 512),
-        )
-        embed_svc = EmbeddingService(
-            self.db,
-            model=getattr(config, "embedding_model", None),
-            dimensions=getattr(config, "embedding_dimensions", None),
-        )
+        embedding_model = getattr(config, "embedding_model", "text-embedding-3-small")
+        embedding_dims = getattr(config, "embedding_dimensions", 512)
+        collection = get_collection_name(embedding_model, embedding_dims)
+        embed_svc = EmbeddingService(self.db, model=embedding_model, dimensions=embedding_dims)
 
         # 1. Semantic Search (Vector search)
         logger.debug("semantic_search_starting", query=normalized_query[:50], fetch_size=fetch_size)

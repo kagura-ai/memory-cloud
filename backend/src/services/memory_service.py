@@ -278,7 +278,13 @@ class MemoryService:
                 payload["context"] = request.context
 
             # Add to Qdrant with 3-level isolation (per-model collection)
-            collection = await self._get_context_collection_name(context.id)
+            # Reuse config already fetched above (avoid double DB query)
+            if config:
+                collection = get_collection_name(
+                    config.embedding_model, config.embedding_dimensions
+                )
+            else:
+                collection = get_collection_name("text-embedding-3-small", 512)
             await add_memory_to_qdrant(
                 user_id=user_id,
                 memory_id=memory_id,
