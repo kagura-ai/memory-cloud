@@ -879,7 +879,7 @@ Use get_context_info() to see current values before updating.""",
                     },
                     "resource_id": {
                         "type": "string",
-                        "description": "Resource ID for external data ingestion via Resource Tokens. Must be unique within the workspace.",
+                        "description": "Resource ID for external data ingestion via Resource Tokens. Lowercase alphanumeric and underscores only (e.g., 'github_issues'). Must be unique within the workspace.",
                     },
                 },
             },
@@ -1829,7 +1829,13 @@ async def execute_tool_call(
                     owner_fields = {"summary", "usage_guide", "resource_id"}
                     requested_fields = {
                         k
-                        for k in ("summary", "usage_guide", "display_name", "description", "resource_id")
+                        for k in (
+                            "summary",
+                            "usage_guide",
+                            "display_name",
+                            "description",
+                            "resource_id",
+                        )
                         if k in args
                     }
 
@@ -1866,9 +1872,48 @@ async def execute_tool_call(
                     if "usage_guide" in args:
                         context.usage_guide = args["usage_guide"]
                     if "resource_id" in args:
-                        context.resource_id = args["resource_id"]
+                        import re as _re
 
-                    await db.commit()
+                        rid = args["resource_id"]
+                        if not _re.match(r"^[a-z0-9_]+$", rid) or len(rid) > 255:
+                            return _error_response(
+                                "invalid_resource_id",
+                                "resource_id must be lowercase alphanumeric and underscores only (max 255 chars).",
+                            )
+
+                        # Revoke old tokens if resource_id is changing
+                        old_rid = context.resource_id
+                        if old_rid and old_rid != rid:
+                            from sqlalchemy import select as _select
+
+                            from auth.resource_tokens import ResourceTokenManager
+                            from models.resource import ResourceToken
+
+                            token_mgr = ResourceTokenManager(db)
+                            old_tokens = await db.execute(
+                                _select(ResourceToken).where(
+                                    ResourceToken.resource_id == old_rid,
+                                    ResourceToken.created_by == user_id,
+                                    ResourceToken.is_active == True,  # noqa: E712
+                                )
+                            )
+                            for token in old_tokens.scalars().all():
+                                await token_mgr.revoke_token(token.id)
+
+                        context.resource_id = rid
+
+                    try:
+                        await db.commit()
+                    except Exception as commit_err:
+                        await db.rollback()
+                        if "unique_context_resource_id" in str(commit_err) or "resource_id" in str(
+                            commit_err
+                        ):
+                            return _error_response(
+                                "resource_id_conflict",
+                                f"Resource ID '{args.get('resource_id', '')}' is already used by another context in this workspace.",
+                            )
+                        raise
                     await db.refresh(context)
 
                     await _log_tool_usage(
