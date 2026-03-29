@@ -15,7 +15,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Trash2, Edit, ExternalLink, Copy, Check } from 'lucide-react';
+import { Trash2, Edit, Copy, Check } from 'lucide-react';
 import Link from 'next/link';
 import { useState } from 'react';
 import type { ResourceToken } from '@/lib/api/resource-tokens';

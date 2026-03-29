@@ -13,6 +13,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useTranslations } from 'next-intl';
 import { PageHeader } from '@/components/common/PageHeader';
@@ -244,10 +245,10 @@ export default function ResourceTokensPage() {
 
       {/* Step Flow */}
       <div className="flex items-center justify-center gap-2 my-6 p-4 bg-gray-50 dark:bg-gray-800/50 rounded-lg">
-        <a href="/workspace/contexts" className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 hover:text-brand-green-600">
+        <Link href="/workspace/contexts" className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 hover:text-brand-green-600">
           <span className="flex items-center justify-center w-6 h-6 rounded-full bg-gray-200 dark:bg-gray-700 text-xs font-bold">1</span>
           <span>{t('stepFlow.step1', { default: 'Set Resource ID' })}</span>
-        </a>
+        </Link>
         <span className="text-gray-400">→</span>
         <span className="flex items-center gap-2 text-sm font-medium text-brand-green-700 dark:text-brand-green-400">
           <span className="flex items-center justify-center w-6 h-6 rounded-full bg-brand-green-100 dark:bg-brand-green-900 text-xs font-bold text-brand-green-700 dark:text-brand-green-300">2</span>

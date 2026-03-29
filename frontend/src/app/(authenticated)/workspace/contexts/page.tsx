@@ -10,8 +10,9 @@
  * Issue #223: i18n support
  */
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import Link from 'next/link';
 import { useTranslations, useLocale } from 'next-intl';
 import { useAuth } from '@/contexts/AuthContext';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
@@ -223,11 +224,13 @@ export default function ContextsPage() {
   }, [fetchContexts, checkApiKey]);
 
   // Open edit modal from URL param: /workspace/contexts?edit=<context_id>
+  const editHandled = useRef(false);
   useEffect(() => {
     const editId = searchParams.get('edit');
-    if (editId && contexts.length > 0 && !editDialogOpen) {
+    if (editId && contexts.length > 0 && !editHandled.current) {
       const ctx = contexts.find(c => c.id === editId);
       if (ctx) {
+        editHandled.current = true;
         handleEditClick(ctx);
         router.replace('/workspace/contexts', { scroll: false });
       }
@@ -1424,9 +1427,9 @@ export default function ContextsPage() {
                         </p>
                       </div>
                       <p className="mt-2">
-                        <a href="/workspace/integrations/resource-tokens" className="text-blue-600 dark:text-blue-400 underline hover:text-blue-700 dark:hover:text-blue-300 font-medium">
+                        <Link href="/workspace/integrations/resource-tokens" className="text-blue-600 dark:text-blue-400 underline hover:text-blue-700 dark:hover:text-blue-300 font-medium">
                           {t('manageResourceTokensLink', { default: 'Manage Resource Tokens →' })}
-                        </a>
+                        </Link>
                       </p>
                     </div>
                   </div>
