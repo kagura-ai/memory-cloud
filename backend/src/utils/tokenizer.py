@@ -62,5 +62,7 @@ def tokenize_for_search(text: str) -> str:
             lemmas.append(token.dictionary_form().lower())
         return " ".join(lemmas)
     except Exception as e:
-        logger.warning("sudachi_tokenization_failed", text_length=len(text), error=str(e), exc_info=True)
+        logger.warning(
+            "sudachi_tokenization_failed", text_length=len(text), error=str(e), exc_info=True
+        )
         return text.lower()
