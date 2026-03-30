@@ -100,7 +100,7 @@ The `create_admin` CLI automatically generates `.mcp.json`. If you need to creat
   "mcpServers": {
     "kagura-memory": {
       "type": "http",
-      "url": "http://localhost:8080/mcp",
+      "url": "http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID",
       "headers": {
         "Authorization": "Bearer YOUR_API_KEY"
       }

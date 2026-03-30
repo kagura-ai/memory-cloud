@@ -111,7 +111,7 @@ def _create_api_key(db: Session, user_id: str, workspace_id) -> str:
     return raw_key
 
 
-def _write_mcp_json(api_key: str):
+def _write_mcp_json(api_key: str, workspace_id: str):
     """Write .mcp.json to project root."""
     mcp_path = _project_root / ".mcp.json"
 
@@ -119,7 +119,7 @@ def _write_mcp_json(api_key: str):
         "mcpServers": {
             "kagura-memory": {
                 "type": "http",
-                "url": "http://localhost:8080/mcp",
+                "url": f"http://localhost:8080/mcp/w/{workspace_id}",
                 "headers": {"Authorization": f"Bearer {api_key}"},
             }
         }
@@ -239,7 +239,7 @@ def create_admin():
 
         # Write .mcp.json
         print("\n==> Writing .mcp.json...")
-        _write_mcp_json(api_key)
+        _write_mcp_json(api_key, str(workspace.id))
 
         db.commit()
 
@@ -248,7 +248,7 @@ def create_admin():
         print(f"  Login ID:  {login_id}")
         print(f"  MFA:       {'enabled' if totp_enabled else 'disabled'}")
         print(f"  API Key:   {api_key}")
-        print("  MCP URL:   http://localhost:8080/mcp")
+        print(f"  MCP URL:   http://localhost:8080/mcp/w/{workspace.id}")
         print("  MCP:       .mcp.json written")
         print("  Login:     http://localhost:3000/login")
         print("=" * 50)
