@@ -10,7 +10,6 @@ Usage:
 """
 
 import getpass
-import hashlib
 import json
 import os
 import secrets
@@ -23,18 +22,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
+from auth.api_keys import APIKeyManager
 from auth.password import hash_password
 from auth.totp import generate_totp_secret, get_provisioning_uri, verify_totp
-from config.database import get_database_url
+from cli import get_sync_database_url
 from db.base import Base  # noqa: F401
 from models.auth import APIKey, User, Workspace, WorkspaceMember
 from utils.datetime import utcnow
-
-
-def get_sync_database_url() -> str:
-    """Get synchronous database URL (psycopg2)."""
-    url = get_database_url()
-    return url.replace("+asyncpg", "").replace("postgresql://", "postgresql+psycopg2://")
 
 
 def _ensure_api_key_secret() -> str:
@@ -54,6 +48,7 @@ def _create_workspace(db: Session, user_id: str) -> "Workspace":
     workspace = Workspace(
         name="Personal Workspace",
         owner_user_id=user_id,
+        plan_name="pro",
     )
     db.add(workspace)
     db.flush()  # get workspace.id
@@ -73,8 +68,8 @@ def _create_api_key(db: Session, user_id: str, workspace_id) -> str:
     _ensure_api_key_secret()
     from utils.encryption import get_encryptor
 
-    raw_key = f"kagura_{secrets.token_urlsafe(32)}"
-    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    raw_key = APIKeyManager._generate_key()
+    key_hash = APIKeyManager._hash_key(raw_key)
     key_prefix = raw_key[:16]
 
     encryptor = get_encryptor()
@@ -178,7 +173,7 @@ def create_admin():
                 qr.add_data(uri)
                 qr.make(fit=True)
                 qr.print_ascii(invert=True)
-            except Exception:
+            except ImportError:
                 pass
 
             verify_code = input("\n  Enter 6-digit code to verify: ").strip()
@@ -194,9 +189,6 @@ def create_admin():
 
                 totp_secret = get_encryptor().encrypt(totp_secret)
 
-        # Check if this is the first user
-        user_count = db.execute(select(func.count()).select_from(User)).scalar() or 0
-
         admin = User(
             login_id=login_id,
             email=f"{login_id}@local",
@@ -207,7 +199,7 @@ def create_admin():
             password_hash=hash_password(password),
             totp_secret=totp_secret,
             totp_enabled=totp_enabled,
-            is_initial_admin=(user_count == 0),
+            is_initial_admin=(admin_count == 0),
             last_login_at=utcnow(),
         )
         db.add(admin)

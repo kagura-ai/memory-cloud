@@ -20,14 +20,9 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from auth.password import hash_password
-from config.database import get_database_url
+from cli import get_sync_database_url
 from db.base import Base  # noqa: F401
 from models.auth import User
-
-
-def get_sync_database_url() -> str:
-    url = get_database_url()
-    return url.replace("+asyncpg", "").replace("postgresql://", "postgresql+psycopg2://")
 
 
 def reset_password():
@@ -110,7 +105,7 @@ def reset_password():
                         qr.add_data(uri)
                         qr.make(fit=True)
                         qr.print_ascii(invert=True)
-                    except Exception:
+                    except ImportError:
                         pass
 
                     verify_code = input("\n  Enter 6-digit code: ").strip()

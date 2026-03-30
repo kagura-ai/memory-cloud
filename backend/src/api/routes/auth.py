@@ -32,11 +32,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser
 from auth.oauth2 import OAuth2Manager
+from auth.password import verify_password
 from auth.roles import get_role_manager
 from auth.session import SessionManager
+from auth.totp import verify_totp
 from db.base import get_db
 from models.auth import User
 from services.workspace_service import WorkspaceService
+from utils.datetime import utcnow
+from utils.encryption import get_encryptor
 
 logger = logging.getLogger(__name__)
 
@@ -836,6 +840,12 @@ async def _create_session_and_workspace(
                 user_id=user_id,
                 email=email,
             )
+            # Update last_login_at
+            result = await db.execute(select(User).where(User.user_id == user_id))
+            db_user = result.scalar_one_or_none()
+            if db_user:
+                db_user.last_login_at = utcnow()
+                await db.commit()
             break
     except Exception as e:
         logger.error(f"Error ensuring personal workspace for {user_id}: {e}", exc_info=True)
@@ -877,8 +887,6 @@ async def password_login(
     if not _session_manager:
         raise HTTPException(status_code=500, detail="Session manager not initialized")
 
-    from auth.password import verify_password
-
     async for db in get_db():
         result = await db.execute(
             select(User).where(User.login_id == body.login_id, User.auth_method == "password")
@@ -903,16 +911,6 @@ async def password_login(
     session_id = await _create_session_and_workspace(
         user_id=user.user_id, email=user.email, name=user.name, role=user.role
     )
-
-    async for db in get_db():
-        from utils.datetime import utcnow
-
-        result = await db.execute(select(User).where(User.user_id == user.user_id))
-        db_user = result.scalar_one_or_none()
-        if db_user:
-            db_user.last_login_at = utcnow()
-            await db.commit()
-        break
 
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
     redirect_url = return_to or f"{frontend_url}/workspace/dashboard"
@@ -951,13 +949,9 @@ async def mfa_verify(
         raise HTTPException(status_code=401, detail="MFA not configured")
 
     try:
-        from utils.encryption import get_encryptor
-
         totp_secret = get_encryptor().decrypt(user.totp_secret)
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to decrypt MFA secret")
-
-    from auth.totp import verify_totp
 
     if not verify_totp(totp_secret, body.totp_code):
         raise HTTPException(status_code=401, detail="Invalid TOTP code")
@@ -967,16 +961,6 @@ async def mfa_verify(
     session_id = await _create_session_and_workspace(
         user_id=user.user_id, email=user.email, name=user.name, role=user.role
     )
-
-    async for db in get_db():
-        from utils.datetime import utcnow
-
-        result = await db.execute(select(User).where(User.user_id == user.user_id))
-        db_user = result.scalar_one_or_none()
-        if db_user:
-            db_user.last_login_at = utcnow()
-            await db.commit()
-        break
 
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
     redirect_url = return_to or f"{frontend_url}/workspace/dashboard"

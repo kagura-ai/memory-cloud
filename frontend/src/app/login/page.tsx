@@ -257,6 +257,15 @@ function LoginContent() {
                 {/* Admin Password Login Form (hidden by default) */}
                 {showAdminLogin && authConfig?.password_login_enabled && (
                   <>
+                    <div className="mb-4 flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => setShowAdminLogin(false)}
+                        className="text-sm text-gray-400 hover:text-gray-600"
+                      >
+                        {t("backToHome", { default: "← Back" })}
+                      </button>
+                    </div>
                     <form onSubmit={handlePasswordLogin} className="space-y-4">
                       <div className="space-y-2">
                         <Label htmlFor="loginId" className="text-gray-700">

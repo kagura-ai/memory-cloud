@@ -17,14 +17,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
-from config.database import get_database_url
+from cli import get_sync_database_url
 from db.base import Base  # noqa: F401
 from models.auth import APIKey, User, Workspace, WorkspaceMember
-
-
-def get_sync_database_url() -> str:
-    url = get_database_url()
-    return url.replace("+asyncpg", "").replace("postgresql://", "postgresql+psycopg2://")
 
 
 def delete_admin():
