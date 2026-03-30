@@ -27,7 +27,7 @@ from auth.password import hash_password
 from auth.totp import generate_totp_secret, get_provisioning_uri, verify_totp
 from config.database import get_database_url
 from db.base import Base  # noqa: F401
-from models.auth import APIKey, User
+from models.auth import APIKey, User, Workspace, WorkspaceMember
 from utils.datetime import utcnow
 
 
@@ -49,8 +49,27 @@ def _ensure_api_key_secret() -> str:
     return secret
 
 
-def _create_api_key(db: Session, user_id: str) -> str:
-    """Create an API key for the admin user (sync, no workspace scope)."""
+def _create_workspace(db: Session, user_id: str) -> "Workspace":
+    """Create personal workspace and membership for admin."""
+    workspace = Workspace(
+        name="Personal Workspace",
+        owner_user_id=user_id,
+    )
+    db.add(workspace)
+    db.flush()  # get workspace.id
+
+    member = WorkspaceMember(
+        workspace_id=workspace.id,
+        user_id=user_id,
+        role="owner",
+    )
+    db.add(member)
+    db.flush()
+    return workspace
+
+
+def _create_api_key(db: Session, user_id: str, workspace_id) -> str:
+    """Create an API key for the admin user scoped to workspace."""
     _ensure_api_key_secret()
     from utils.encryption import get_encryptor
 
@@ -66,7 +85,7 @@ def _create_api_key(db: Session, user_id: str) -> str:
         key_prefix=key_prefix,
         name="admin-cli",
         user_id=user_id,
-        workspace_id=None,
+        workspace_id=workspace_id,
         visibility_expires_at=utcnow() + timedelta(days=365 * 10),
         plaintext_encrypted=plaintext_encrypted,
     )
@@ -194,9 +213,15 @@ def create_admin():
         db.add(admin)
         db.flush()
 
-        # Generate API key
+        # Create workspace
+        print("\n==> Creating workspace...")
+        workspace = _create_workspace(db, admin.user_id)
+        admin.current_workspace_id = workspace.id
+        print(f"  Workspace: {workspace.name} ({workspace.id})")
+
+        # Generate API key (scoped to workspace)
         print("\n==> Generating API key...")
-        api_key = _create_api_key(db, admin.user_id)
+        api_key = _create_api_key(db, admin.user_id, workspace.id)
         print(f"  API Key: {api_key}")
 
         # Write .mcp.json
