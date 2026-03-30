@@ -19,6 +19,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Auto-load .env.local so API_KEY_SECRET etc. are available
+from dotenv import load_dotenv
+
+_project_root = Path(__file__).parent.parent.parent.parent
+load_dotenv(_project_root / ".env.local")
+
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
