@@ -1,0 +1,153 @@
+"""Reset password and/or MFA for a local admin user.
+
+Issue #51: Password + MFA login for initial admin.
+
+Usage:
+    cd backend && python -m src.cli.reset_password
+"""
+
+import getpass
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from sqlalchemy import create_engine, select  # noqa: E402
+from sqlalchemy.orm import Session  # noqa: E402
+
+from auth.password import hash_password  # noqa: E402
+from cli.db import get_sync_database_url  # noqa: E402
+from models.auth import User  # noqa: E402
+
+_project_root = Path(__file__).parent.parent.parent.parent
+
+
+def _get_env_from_docker(key: str) -> str | None:
+    """Get env var from running API container."""
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "exec", "-T", "api", "printenv", key],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(_project_root),
+        )
+        value = result.stdout.strip()
+        return value if result.returncode == 0 and value else None
+    except Exception:
+        return None  # Docker not running or not accessible
+
+
+def reset_password():
+    print("=" * 50)
+    print("Kagura Memory Cloud - Reset Password / MFA")
+    print("=" * 50)
+
+    engine = create_engine(get_sync_database_url())
+
+    with Session(engine) as db:
+        login_id = input("\n  Login ID: ").strip()
+        if not login_id:
+            print("✗ Login ID cannot be empty.")
+            sys.exit(1)
+
+        user = db.execute(
+            select(User).where(User.login_id == login_id, User.auth_method == "password")
+        ).scalar_one_or_none()
+
+        if not user:
+            print(f"✗ No password user found with login_id '{login_id}'.")
+            sys.exit(1)
+
+        print(f"\n  Current MFA: {'enabled' if user.totp_enabled else 'disabled'}")
+        print("\n  What do you want to reset?")
+        print("  1) Password only")
+        print("  2) Disable MFA only")
+        print("  3) Both (password + disable MFA)")
+        choice = input("  Choice [1/2/3]: ").strip()
+
+        if choice not in ("1", "2", "3"):
+            print("✗ Invalid choice.")
+            sys.exit(1)
+
+        # Reset password
+        if choice in ("1", "3"):
+            while True:
+                print("\nEnter new password (minimum 12 characters):")
+                password = getpass.getpass("  New Password: ")
+                if len(password) < 12:
+                    print("  ✗ Password must be at least 12 characters. Try again.")
+                    continue
+
+                password_confirm = getpass.getpass("  Confirm:      ")
+                if password != password_confirm:
+                    print("  ✗ Passwords do not match. Try again.")
+                    continue
+
+                break
+
+            user.password_hash = hash_password(password)
+            print("  ✓ Password updated.")
+
+        # Disable MFA
+        if choice in ("2", "3"):
+            user.totp_enabled = False
+            user.totp_secret = None
+            print("  ✓ MFA disabled.")
+
+        db.commit()
+
+        # Offer to re-enable MFA
+        if choice in ("2", "3"):
+            re_enable = input("\n  Re-enable MFA now? [y/N]: ").strip().lower()
+            if re_enable == "y":
+                from auth.totp import (  # noqa: E402
+                    generate_totp_secret,
+                    get_provisioning_uri,
+                    verify_totp,
+                )
+
+                api_key_secret = os.getenv("API_KEY_SECRET") or _get_env_from_docker(
+                    "API_KEY_SECRET"
+                )
+                if not api_key_secret:
+                    print("  ⚠ API_KEY_SECRET not available. Ensure Docker is running.")
+                else:
+                    os.environ["API_KEY_SECRET"] = api_key_secret
+                    totp_secret = generate_totp_secret()
+                    uri = get_provisioning_uri(totp_secret, login_id)
+                    print(f"\n  Scan this URI:\n  {uri}")
+
+                    try:
+                        import qrcode
+
+                        qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L)
+                        qr.add_data(uri)
+                        qr.make(fit=True)
+                        qr.print_ascii(invert=True)
+                    except ImportError:
+                        print("  (Install 'qrcode' package to display QR code in terminal)")
+
+                    verify_code = input("\n  Enter 6-digit code: ").strip()
+
+                    if verify_totp(totp_secret, verify_code):
+                        from utils.encryption import get_encryptor  # noqa: E402
+
+                        user.totp_secret = get_encryptor().encrypt(totp_secret)
+                        user.totp_enabled = True
+                        db.commit()
+                        print("  ✓ MFA re-enabled!")
+                    else:
+                        print("  ✗ Invalid code. MFA remains disabled.")
+
+        print("\n" + "=" * 50)
+        print(f"✓ Done for '{login_id}'.")
+        print("=" * 50)
+
+    engine.dispose()
+
+
+if __name__ == "__main__":
+    reset_password()

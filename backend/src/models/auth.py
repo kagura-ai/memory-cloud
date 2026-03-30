@@ -99,6 +99,13 @@ class User(Base):
 
     # Issue #246: current_context_id removed (context always explicit from Frontend/API)
 
+    # Issue #51: Password + MFA authentication
+    login_id = Column(String(255), nullable=True, unique=True, index=True)
+    password_hash = Column(String(255), nullable=True)
+    auth_method = Column(String(20), nullable=False, default="oauth", index=True)
+    totp_secret = Column(String(255), nullable=True)  # Fernet-encrypted
+    totp_enabled = Column(Boolean, nullable=False, default=False)
+
     # Timestamps
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(DateTime, nullable=True, onupdate=func.now())
@@ -107,10 +114,12 @@ class User(Base):
 
     # Relationships
     current_workspace = relationship("Workspace", foreign_keys=[current_workspace_id])
-    # Issue #246: current_context relationship removed
 
-    # Constraints (Issue #166: removed read_only, use workspace viewer instead)
-    __table_args__ = (CheckConstraint("role IN ('admin', 'user')", name="valid_role"),)
+    # Constraints
+    __table_args__ = (
+        CheckConstraint("role IN ('admin', 'user')", name="valid_role"),
+        CheckConstraint("auth_method IN ('password', 'oauth')", name="valid_auth_method"),
+    )
 
     def __repr__(self) -> str:
         return f"<User(email='{self.email}', role='{self.role}')>"

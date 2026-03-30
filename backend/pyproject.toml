@@ -38,6 +38,9 @@ dependencies = [
     "python-jose[cryptography]>=3.3.0",  # JWT
     "google-auth>=2.35.0",  # Google OAuth2
     "google-auth-oauthlib>=1.2.0",  # Google OAuth2 helpers
+    "bcrypt>=4.0.0",        # Password hashing (Issue #51)
+    "pyotp>=2.9.0",         # TOTP MFA (Issue #51)
+    "qrcode[pil]>=7.4",    # QR code for MFA setup (Issue #51)
 
     # Cache & Queue
     "redis>=5.2.0",

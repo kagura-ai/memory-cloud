@@ -22,9 +22,6 @@ RUN uv pip install --system -e ".[dev]"
 # Copy source code
 COPY src/ ./src/
 
-# Copy migrations
-COPY migrations/ ./migrations/
-
 # Copy scripts
 COPY scripts/ ./scripts/
 

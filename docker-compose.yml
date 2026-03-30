@@ -82,9 +82,8 @@ services:
       # GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET are read from .env.local
       GOOGLE_REDIRECT_URI: http://localhost:8080/api/v1/auth/google/callback
 
-      # Security (for development only - use proper secrets in production)
-      API_KEY_SECRET: "5691fff7607b15b56f4562e7d9d43808cba50cc5d5e3234fe0e7e6cb5d3190d9"
-      JWT_SECRET: "b93cdb3f0c155e7561b7e1291afb284a6baf4734df34d82369a0c47a953061ed"
+      # Security — values from .env.local (via env_file above)
+      # API_KEY_SECRET, JWT_SECRET are read from .env.local
       JWT_ALGORITHM: "HS256"
       JWT_EXPIRE_MINUTES: "60"
 
@@ -111,7 +110,25 @@ services:
       - ./backend/tests:/app/tests
     command: uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --reload --log-level info --use-colors
 
+  # Frontend (Next.js dev server)
+  web:
+    image: node:20-alpine
+    container_name: kagura-web-dev
+    working_dir: /app
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8080
+      NEXT_TELEMETRY_DISABLED: "1"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    command: sh -c "npm install && npx next dev --hostname 0.0.0.0"
+    depends_on:
+      - api
+
 volumes:
   postgres_data:
   qdrant_data:
   redis_data:
+  frontend_node_modules:
