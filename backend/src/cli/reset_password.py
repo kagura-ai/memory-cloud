@@ -20,7 +20,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from auth.password import hash_password
-from cli import get_sync_database_url
+from cli.db import get_sync_database_url
 from db.base import Base  # noqa: F401
 from models.auth import User
 

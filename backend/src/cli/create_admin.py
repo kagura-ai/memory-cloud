@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from auth.api_keys import APIKeyManager
 from auth.password import hash_password
 from auth.totp import generate_totp_secret, get_provisioning_uri, verify_totp
-from cli import get_sync_database_url
+from cli.db import get_sync_database_url
 from db.base import Base  # noqa: F401
 from models.auth import APIKey, User, Workspace, WorkspaceMember
 from utils.datetime import utcnow
