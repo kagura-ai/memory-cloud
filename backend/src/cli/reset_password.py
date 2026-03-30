@@ -1,4 +1,4 @@
-"""Reset password for a local admin user.
+"""Reset password and/or MFA for a local admin user.
 
 Issue #51: Password + MFA login for initial admin.
 
@@ -10,6 +10,7 @@ Usage:
 """
 
 import getpass
+import os
 import sys
 from pathlib import Path
 
@@ -25,15 +26,13 @@ from models.auth import User
 
 
 def get_sync_database_url() -> str:
-    """Get synchronous database URL (psycopg2)."""
     url = get_database_url()
     return url.replace("+asyncpg", "").replace("postgresql://", "postgresql+psycopg2://")
 
 
 def reset_password():
-    """Interactive password reset."""
     print("=" * 50)
-    print("Kagura Memory Cloud - Reset Password")
+    print("Kagura Memory Cloud - Reset Password / MFA")
     print("=" * 50)
 
     engine = create_engine(get_sync_database_url())
@@ -52,22 +51,82 @@ def reset_password():
             print(f"✗ No password user found with login_id '{login_id}'.")
             sys.exit(1)
 
-        print("\nEnter new password (minimum 12 characters):")
-        password = getpass.getpass("  New Password: ")
-        if len(password) < 12:
-            print("✗ Password must be at least 12 characters.")
+        print(f"\n  Current MFA: {'enabled' if user.totp_enabled else 'disabled'}")
+        print("\n  What do you want to reset?")
+        print("  1) Password only")
+        print("  2) Disable MFA only")
+        print("  3) Both (password + disable MFA)")
+        choice = input("  Choice [1/2/3]: ").strip()
+
+        if choice not in ("1", "2", "3"):
+            print("✗ Invalid choice.")
             sys.exit(1)
 
-        password_confirm = getpass.getpass("  Confirm:      ")
-        if password != password_confirm:
-            print("✗ Passwords do not match.")
-            sys.exit(1)
+        # Reset password
+        if choice in ("1", "3"):
+            while True:
+                print("\nEnter new password (minimum 12 characters):")
+                password = getpass.getpass("  New Password: ")
+                if len(password) < 12:
+                    print("  ✗ Password must be at least 12 characters. Try again.")
+                    continue
 
-        user.password_hash = hash_password(password)
+                password_confirm = getpass.getpass("  Confirm:      ")
+                if password != password_confirm:
+                    print("  ✗ Passwords do not match. Try again.")
+                    continue
+
+                break
+
+            user.password_hash = hash_password(password)
+            print("  ✓ Password updated.")
+
+        # Disable MFA
+        if choice in ("2", "3"):
+            user.totp_enabled = False
+            user.totp_secret = None
+            print("  ✓ MFA disabled.")
+
         db.commit()
 
+        # Offer to re-enable MFA
+        if choice in ("2", "3"):
+            re_enable = input("\n  Re-enable MFA now? [y/N]: ").strip().lower()
+            if re_enable == "y":
+                from auth.totp import generate_totp_secret, get_provisioning_uri, verify_totp
+
+                api_key_secret = os.getenv("API_KEY_SECRET")
+                if not api_key_secret:
+                    print("  ⚠ Set API_KEY_SECRET env var to enable MFA.")
+                else:
+                    totp_secret = generate_totp_secret()
+                    uri = get_provisioning_uri(totp_secret, login_id)
+                    print(f"\n  Scan this URI:\n  {uri}")
+
+                    try:
+                        import qrcode
+
+                        qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L)
+                        qr.add_data(uri)
+                        qr.make(fit=True)
+                        qr.print_ascii(invert=True)
+                    except Exception:
+                        pass
+
+                    verify_code = input("\n  Enter 6-digit code: ").strip()
+
+                    if verify_totp(totp_secret, verify_code):
+                        from utils.encryption import get_encryptor
+
+                        user.totp_secret = get_encryptor().encrypt(totp_secret)
+                        user.totp_enabled = True
+                        db.commit()
+                        print("  ✓ MFA re-enabled!")
+                    else:
+                        print("  ✗ Invalid code. MFA remains disabled.")
+
         print("\n" + "=" * 50)
-        print(f"✓ Password reset successfully for '{login_id}'!")
+        print(f"✓ Done for '{login_id}'.")
         print("=" * 50)
 
     engine.dispose()
