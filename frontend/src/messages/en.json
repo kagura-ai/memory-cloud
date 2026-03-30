@@ -107,7 +107,8 @@
     "enterTotpCode": "Enter the 6-digit code from your authenticator app",
     "totpCode": "Verification Code",
     "verify": "Verify",
-    "verifying": "Verifying..."
+    "verifying": "Verifying...",
+    "adminLogin": "Admin Login"
   },
   "landing": {
     "heroTitle": "Never lose your AI context",

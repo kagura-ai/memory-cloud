@@ -39,6 +39,7 @@ function LoginContent() {
   const [error, setError] = useState<string | null>(null);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
+  const [showAdminLogin, setShowAdminLogin] = useState(false);
 
   // Password login state
   const [loginId, setLoginId] = useState("");
@@ -226,7 +227,9 @@ function LoginContent() {
               /* MFA Form */
               <form onSubmit={handleMfaVerify} className="space-y-4">
                 <div className="space-y-2">
-                  <Label htmlFor="totpCode">{t("totpCode")}</Label>
+                  <Label htmlFor="totpCode" className="text-gray-700">
+                    {t("totpCode")}
+                  </Label>
                   <Input
                     id="totpCode"
                     type="text"
@@ -251,87 +254,93 @@ function LoginContent() {
               </form>
             ) : (
               <>
-                {/* Password Login Form */}
-                {authConfig?.password_login_enabled && (
-                  <form onSubmit={handlePasswordLogin} className="space-y-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="loginId">{t("loginId")}</Label>
-                      <Input
-                        id="loginId"
-                        type="text"
-                        value={loginId}
-                        onChange={(e) => setLoginId(e.target.value)}
-                        autoFocus
-                        autoComplete="username"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="password">{t("password")}</Label>
-                      <Input
-                        id="password"
-                        type="password"
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        autoComplete="current-password"
-                      />
-                    </div>
-
-                    {/* Terms */}
-                    <div>
-                      <label className="flex items-start gap-3 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={agreedToTerms}
-                          onChange={(e) => setAgreedToTerms(e.target.checked)}
-                          className="mt-1 h-4 w-4 rounded border-gray-300 text-brand-green-600 focus:ring-brand-green-500"
+                {/* Admin Password Login Form (hidden by default) */}
+                {showAdminLogin && authConfig?.password_login_enabled && (
+                  <>
+                    <form onSubmit={handlePasswordLogin} className="space-y-4">
+                      <div className="space-y-2">
+                        <Label htmlFor="loginId" className="text-gray-700">
+                          {t("loginId")}
+                        </Label>
+                        <Input
+                          id="loginId"
+                          type="text"
+                          value={loginId}
+                          onChange={(e) => setLoginId(e.target.value)}
+                          autoFocus
+                          autoComplete="username"
                         />
-                        <span className="text-sm text-gray-700">
-                          {t("agreeToTerms")}{" "}
-                          <a
-                            href="/terms"
-                            target="_blank"
-                            className="font-medium text-brand-green-600 hover:underline"
-                          >
-                            {t("termsOfService")}
-                          </a>{" "}
-                          {t("termsAndPrivacy")}{" "}
-                          <a
-                            href="/privacy"
-                            target="_blank"
-                            className="font-medium text-brand-green-600 hover:underline"
-                          >
-                            {t("privacyPolicy")}
-                          </a>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="password" className="text-gray-700">
+                          {t("password")}
+                        </Label>
+                        <Input
+                          id="password"
+                          type="password"
+                          value={password}
+                          onChange={(e) => setPassword(e.target.value)}
+                          autoComplete="current-password"
+                        />
+                      </div>
+
+                      {/* Terms */}
+                      <div>
+                        <label className="flex items-start gap-3 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={agreedToTerms}
+                            onChange={(e) => setAgreedToTerms(e.target.checked)}
+                            className="mt-1 h-4 w-4 rounded border-gray-300 text-brand-green-600 focus:ring-brand-green-500"
+                          />
+                          <span className="text-sm text-gray-700">
+                            {t("agreeToTerms")}{" "}
+                            <a
+                              href="/terms"
+                              target="_blank"
+                              className="font-medium text-brand-green-600 hover:underline"
+                            >
+                              {t("termsOfService")}
+                            </a>{" "}
+                            {t("termsAndPrivacy")}{" "}
+                            <a
+                              href="/privacy"
+                              target="_blank"
+                              className="font-medium text-brand-green-600 hover:underline"
+                            >
+                              {t("privacyPolicy")}
+                            </a>
+                          </span>
+                        </label>
+                      </div>
+
+                      <Button
+                        type="submit"
+                        disabled={
+                          loadingAction !== null ||
+                          !agreedToTerms ||
+                          !loginId ||
+                          !password
+                        }
+                        className="h-12 w-full bg-gradient-to-r from-brand-green-600 to-emerald-600 text-base font-semibold text-white shadow-lg hover:from-brand-green-700 hover:to-emerald-700 disabled:opacity-50"
+                      >
+                        {loadingAction === "password"
+                          ? t("signingIn")
+                          : t("signIn")}
+                      </Button>
+                    </form>
+
+                    {/* Divider between admin form and OAuth */}
+                    {hasOAuth && (
+                      <div className="my-6 flex items-center gap-3">
+                        <div className="h-px flex-1 bg-gray-200" />
+                        <span className="text-sm text-gray-500">
+                          {t("orContinueWith")}
                         </span>
-                      </label>
-                    </div>
-
-                    <Button
-                      type="submit"
-                      disabled={
-                        loadingAction !== null ||
-                        !agreedToTerms ||
-                        !loginId ||
-                        !password
-                      }
-                      className="h-12 w-full bg-gradient-to-r from-brand-green-600 to-emerald-600 text-base font-semibold text-white shadow-lg hover:from-brand-green-700 hover:to-emerald-700 disabled:opacity-50"
-                    >
-                      {loadingAction === "password"
-                        ? t("signingIn")
-                        : t("signIn")}
-                    </Button>
-                  </form>
-                )}
-
-                {/* OAuth divider */}
-                {authConfig?.password_login_enabled && hasOAuth && (
-                  <div className="my-6 flex items-center gap-3">
-                    <div className="h-px flex-1 bg-gray-200" />
-                    <span className="text-sm text-gray-500">
-                      {t("orContinueWith")}
-                    </span>
-                    <div className="h-px flex-1 bg-gray-200" />
-                  </div>
+                        <div className="h-px flex-1 bg-gray-200" />
+                      </div>
+                    )}
+                  </>
                 )}
 
                 {/* Google */}
@@ -340,11 +349,9 @@ function LoginContent() {
                     onClick={handleGoogleLogin}
                     disabled={loadingAction !== null || !agreedToTerms}
                     size="lg"
-                    variant={
-                      authConfig.password_login_enabled ? "outline" : "default"
-                    }
+                    variant={showAdminLogin ? "outline" : "default"}
                     className={`group relative h-14 w-full overflow-hidden text-base font-semibold transition-all hover:scale-[1.02] disabled:opacity-50 disabled:hover:scale-100 ${
-                      !authConfig.password_login_enabled
+                      !showAdminLogin
                         ? "bg-gradient-to-r from-brand-green-600 to-emerald-600 text-white shadow-xl shadow-brand-green-500/30 hover:from-brand-green-700 hover:to-emerald-700"
                         : "shadow-md hover:shadow-lg"
                     }`}
@@ -384,19 +391,18 @@ function LoginContent() {
                 {/* GitHub */}
                 {authConfig?.github_oauth_enabled && (
                   <>
-                    {authConfig.google_oauth_enabled &&
-                      !authConfig.password_login_enabled && (
-                        <div className="relative my-2">
-                          <div className="absolute inset-0 flex items-center">
-                            <span className="w-full border-t border-gray-300" />
-                          </div>
-                          <div className="relative flex justify-center text-xs uppercase">
-                            <span className="bg-white px-2 text-gray-500">
-                              or
-                            </span>
-                          </div>
+                    {authConfig.google_oauth_enabled && !showAdminLogin && (
+                      <div className="relative my-2">
+                        <div className="absolute inset-0 flex items-center">
+                          <span className="w-full border-t border-gray-300" />
                         </div>
-                      )}
+                        <div className="relative flex justify-center text-xs uppercase">
+                          <span className="bg-white px-2 text-gray-500">
+                            or
+                          </span>
+                        </div>
+                      </div>
+                    )}
                     <Button
                       onClick={handleGitHubLogin}
                       disabled={loadingAction !== null || !agreedToTerms}
@@ -428,8 +434,8 @@ function LoginContent() {
                   </>
                 )}
 
-                {/* Terms (shown here only when no password form) */}
-                {!authConfig?.password_login_enabled && (
+                {/* Terms (shown here when admin form is hidden) */}
+                {!showAdminLogin && (
                   <div className="mt-6">
                     <label className="flex items-start gap-3 cursor-pointer">
                       <input
@@ -488,13 +494,21 @@ function LoginContent() {
           </CardContent>
         </Card>
 
-        <div className="mt-6 text-center">
+        <div className="mt-6 flex items-center justify-between">
           <button
             onClick={() => router.push("/")}
             className="text-sm font-medium text-gray-600 transition-colors hover:text-brand-green-600"
           >
             {t("backToHome")}
           </button>
+          {authConfig?.password_login_enabled && !showAdminLogin && (
+            <button
+              onClick={() => setShowAdminLogin(true)}
+              className="text-sm font-medium text-gray-400 transition-colors hover:text-gray-600"
+            >
+              {t("adminLogin")}
+            </button>
+          )}
         </div>
       </div>
     </div>
