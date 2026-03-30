@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from config.database import get_database_url
 from db.base import Base  # noqa: F401
-from models.auth import APIKey, User
+from models.auth import APIKey, User, Workspace, WorkspaceMember
 
 
 def get_sync_database_url() -> str:
@@ -51,12 +51,16 @@ def delete_admin():
             print("  Cancelled.")
             sys.exit(0)
 
-        # Delete API keys
+        # Delete API keys, workspace memberships, workspaces, then user
         db.execute(APIKey.__table__.delete().where(APIKey.user_id == admin.user_id))
+        db.execute(
+            WorkspaceMember.__table__.delete().where(WorkspaceMember.user_id == admin.user_id)
+        )
+        db.execute(Workspace.__table__.delete().where(Workspace.owner_user_id == admin.user_id))
         db.delete(admin)
         db.commit()
 
-        print("\n✓ Admin and API keys deleted.")
+        print("\n✓ Admin, workspace, and API keys deleted.")
         print("  Run: python -m src.cli.create_admin")
 
     engine.dispose()
