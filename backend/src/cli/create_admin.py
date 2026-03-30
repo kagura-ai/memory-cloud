@@ -38,14 +38,35 @@ from utils.datetime import utcnow
 
 
 def _ensure_api_key_secret() -> str:
-    """Ensure API_KEY_SECRET is set, prompt if missing."""
+    """Ensure API_KEY_SECRET is set. Auto-generate and save to .env.local if missing."""
     secret = os.getenv("API_KEY_SECRET")
-    if not secret or secret == "change-me-to-random-hex-string-min-32-bytes":
-        print("\n  ⚠ API_KEY_SECRET not set. Generating one...")
-        secret = secrets.token_hex(32)
-        os.environ["API_KEY_SECRET"] = secret
+    placeholder = "change-me-to-random-hex-string-min-32-bytes"
+    if secret and secret != placeholder:
+        return secret
+
+    print("\n  ⚠ API_KEY_SECRET not set. Generating one...")
+    secret = secrets.token_hex(32)
+    os.environ["API_KEY_SECRET"] = secret
+
+    # Write back to .env.local
+    env_file = _project_root / ".env.local"
+    if env_file.exists():
+        content = env_file.read_text()
+        if placeholder in content:
+            content = content.replace(placeholder, secret)
+        elif "API_KEY_SECRET=" in content:
+            # Replace existing empty/old value
+            import re
+
+            content = re.sub(r"API_KEY_SECRET=.*", f"API_KEY_SECRET={secret}", content)
+        else:
+            content += f"\nAPI_KEY_SECRET={secret}\n"
+        env_file.write_text(content)
+        print(f"  ✓ API_KEY_SECRET saved to .env.local")
+    else:
         print(f"  API_KEY_SECRET={secret}")
-        print("  → Add this to your .env.local or docker-compose.yml")
+        print("  → Create .env.local and add this value")
+
     return secret
 
 
