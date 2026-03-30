@@ -82,9 +82,8 @@ services:
       # GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET are read from .env.local
       GOOGLE_REDIRECT_URI: http://localhost:8080/api/v1/auth/google/callback
 
-      # Security (for development only - use proper secrets in production)
-      API_KEY_SECRET: "5691fff7607b15b56f4562e7d9d43808cba50cc5d5e3234fe0e7e6cb5d3190d9"
-      JWT_SECRET: "b93cdb3f0c155e7561b7e1291afb284a6baf4734df34d82369a0c47a953061ed"
+      # Security — values from .env.local (via env_file above)
+      # API_KEY_SECRET, JWT_SECRET are read from .env.local
       JWT_ALGORITHM: "HS256"
       JWT_EXPIRE_MINUTES: "60"
 
