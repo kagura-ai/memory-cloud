@@ -15,7 +15,6 @@ from sqlalchemy import create_engine, func, select  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from cli.db import get_sync_database_url  # noqa: E402
-from db.base import Base  # noqa: E402, F401
 from models.auth import APIKey, User, Workspace, WorkspaceMember  # noqa: E402
 
 

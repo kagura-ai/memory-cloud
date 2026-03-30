@@ -24,7 +24,6 @@ from auth.api_keys import APIKeyManager  # noqa: E402
 from auth.password import hash_password  # noqa: E402
 from auth.totp import generate_totp_secret, get_provisioning_uri, verify_totp  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
-from db.base import Base  # noqa: E402, F401
 from models.auth import APIKey, User, Workspace, WorkspaceMember  # noqa: E402
 from utils.datetime import utcnow  # noqa: E402
 
@@ -44,7 +43,7 @@ def _get_env_from_docker(key: str) -> str | None:
         value = result.stdout.strip()
         return value if result.returncode == 0 and value else None
     except Exception:
-        return None
+        return None  # Docker not running or not accessible
 
 
 def _require_api_key_secret() -> str:
@@ -195,7 +194,7 @@ def create_admin():
                 qr.make(fit=True)
                 qr.print_ascii(invert=True)
             except ImportError:
-                pass
+                print("  (Install 'qrcode' package to display QR code in terminal)")
 
             verify_code = input("\n  Enter 6-digit code to verify: ").strip()
 
