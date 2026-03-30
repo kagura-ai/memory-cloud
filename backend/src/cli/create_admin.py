@@ -39,14 +39,47 @@ from utils.datetime import utcnow  # noqa: E402
 _secrets_were_generated = False
 
 
+def _get_secret_from_docker(key: str) -> str | None:
+    """Try to get a secret from the running API container."""
+    import subprocess
+
+    try:
+        compose_file = _project_root / "docker-compose.yml"
+        if not compose_file.exists():
+            return None
+        result = subprocess.run(
+            ["docker", "compose", "-f", str(compose_file), "exec", "-T", "api", "env"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        for line in result.stdout.splitlines():
+            if line.startswith(f"{key}="):
+                return line.split("=", 1)[1]
+    except Exception:
+        pass
+    return None
+
+
 def _ensure_api_key_secret() -> str:
-    """Ensure API_KEY_SECRET is set. Auto-generate and save to .env.local if missing."""
+    """Ensure API_KEY_SECRET is set. Try Docker → .env.local → generate new."""
     global _secrets_were_generated
     secret = os.getenv("API_KEY_SECRET")
-    placeholders = {"change-me-api-key-secret", "change-me-to-random-hex-string-min-32-bytes"}
+    placeholders = {"change-me-api-key-secret", "change-me-to-random-hex-string-min-32-bytes", ""}
+
     if secret and secret not in placeholders:
         return secret
 
+    # Try to get from running Docker container
+    docker_secret = _get_secret_from_docker("API_KEY_SECRET")
+    if docker_secret and docker_secret not in placeholders:
+        print("  ✓ API_KEY_SECRET loaded from Docker container")
+        os.environ["API_KEY_SECRET"] = docker_secret
+        _update_env_local("API_KEY_SECRET", docker_secret)
+        print("  ✓ API_KEY_SECRET saved to .env.local")
+        return docker_secret
+
+    # Generate new
     print("\n  ⚠ API_KEY_SECRET not set. Generating one...")
     secret = secrets.token_hex(32)
     os.environ["API_KEY_SECRET"] = secret
@@ -57,12 +90,18 @@ def _ensure_api_key_secret() -> str:
 
     # Also generate JWT_SECRET if it's a placeholder
     jwt_secret = os.getenv("JWT_SECRET", "")
-    jwt_placeholders = {"change-me-jwt-secret", "change-me-to-random-hex-string-min-32-bytes"}
+    jwt_placeholders = {"change-me-jwt-secret", "change-me-to-random-hex-string-min-32-bytes", ""}
     if not jwt_secret or jwt_secret in jwt_placeholders:
-        new_jwt = secrets.token_hex(32)
-        os.environ["JWT_SECRET"] = new_jwt
-        _update_env_local("JWT_SECRET", new_jwt)
-        print("  ✓ JWT_SECRET saved to .env.local")
+        docker_jwt = _get_secret_from_docker("JWT_SECRET")
+        if docker_jwt and docker_jwt not in jwt_placeholders:
+            os.environ["JWT_SECRET"] = docker_jwt
+            _update_env_local("JWT_SECRET", docker_jwt)
+            print("  ✓ JWT_SECRET loaded from Docker and saved to .env.local")
+        else:
+            new_jwt = secrets.token_hex(32)
+            os.environ["JWT_SECRET"] = new_jwt
+            _update_env_local("JWT_SECRET", new_jwt)
+            print("  ✓ JWT_SECRET generated and saved to .env.local")
 
     return secret
 
