@@ -47,8 +47,7 @@ cd backend && alembic upgrade head
 ### 5. Create Admin Account
 
 ```bash
-API_KEY_SECRET="$(grep API_KEY_SECRET ../docker-compose.yml | head -1 | sed 's/.*: *//' | tr -d '"')" \
-  python -m src.cli.create_admin
+python -m src.cli.create_admin
 ```
 
 This interactive command will:
@@ -80,7 +79,7 @@ python -m src.cli.reset_password
 python -m src.cli.delete_admin
 ```
 
-> **Note**: Set `API_KEY_SECRET` environment variable when using MFA or API key features.
+> **Note**: Docker API container must be running. CLI reads `API_KEY_SECRET` from it.
 
 ## Authentication
 

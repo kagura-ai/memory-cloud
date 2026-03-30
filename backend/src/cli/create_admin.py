@@ -1,29 +1,21 @@
 """Create initial admin user with password authentication.
 
 Issue #51: Password + MFA login for initial admin.
+Requires Docker API container to be running (reads env vars from it).
 
 Usage:
     cd backend && python -m src.cli.create_admin
-
-    # Inside Docker:
-    docker compose exec api python -m src.cli.create_admin
 """
 
 import getpass
 import json
 import os
-import secrets
+import subprocess
 import sys
 from datetime import timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
-# Auto-load .env.local so API_KEY_SECRET etc. are available
-from dotenv import load_dotenv
-
-_project_root = Path(__file__).parent.parent.parent.parent
-load_dotenv(_project_root / ".env.local")
 
 from sqlalchemy import create_engine, func, select  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
@@ -36,117 +28,44 @@ from db.base import Base  # noqa: E402, F401
 from models.auth import APIKey, User, Workspace, WorkspaceMember  # noqa: E402
 from utils.datetime import utcnow  # noqa: E402
 
-_secrets_were_generated = False
+_project_root = Path(__file__).parent.parent.parent.parent
 
 
-def _get_secret_from_docker(key: str) -> str | None:
-    """Try to get a secret from the running API container."""
-    import subprocess
-
+def _get_env_from_docker(key: str) -> str | None:
+    """Get env var from running API container."""
     try:
-        compose_file = _project_root / "docker-compose.yml"
-        if not compose_file.exists():
-            return None
         result = subprocess.run(
-            ["docker", "compose", "-f", str(compose_file), "exec", "-T", "api", "env"],
+            ["docker", "compose", "exec", "-T", "api", "printenv", key],
             capture_output=True,
             text=True,
             timeout=10,
+            cwd=str(_project_root),
         )
-        for line in result.stdout.splitlines():
-            if line.startswith(f"{key}="):
-                return line.split("=", 1)[1]
+        value = result.stdout.strip()
+        return value if result.returncode == 0 and value else None
     except Exception:
-        pass
-    return None
+        return None
 
 
-def _ensure_api_key_secret() -> str:
-    """Ensure API_KEY_SECRET is set. Try Docker → .env.local → generate new."""
-    global _secrets_were_generated
+def _require_api_key_secret() -> str:
+    """Get API_KEY_SECRET from Docker container. Exit if unavailable."""
+    # Check environment first (may already be set)
     secret = os.getenv("API_KEY_SECRET")
-    placeholders = {"change-me-api-key-secret", "change-me-to-random-hex-string-min-32-bytes", ""}
-
-    if secret and secret not in placeholders:
+    if secret:
         return secret
 
-    # Try to get from running Docker container
-    docker_secret = _get_secret_from_docker("API_KEY_SECRET")
-    if docker_secret and docker_secret not in placeholders:
-        print("  ✓ API_KEY_SECRET loaded from Docker container")
-        os.environ["API_KEY_SECRET"] = docker_secret
-        _update_env_local("API_KEY_SECRET", docker_secret)
-        print("  ✓ API_KEY_SECRET saved to .env.local")
-        return docker_secret
+    # Get from Docker
+    secret = _get_env_from_docker("API_KEY_SECRET")
+    if secret:
+        os.environ["API_KEY_SECRET"] = secret
+        return secret
 
-    # Generate new
-    print("\n  ⚠ API_KEY_SECRET not set. Generating one...")
-    secret = secrets.token_hex(32)
-    os.environ["API_KEY_SECRET"] = secret
-    _secrets_were_generated = True
-
-    _update_env_local("API_KEY_SECRET", secret)
-    print("  ✓ API_KEY_SECRET saved to .env.local")
-
-    # Also generate JWT_SECRET if it's a placeholder
-    jwt_secret = os.getenv("JWT_SECRET", "")
-    jwt_placeholders = {"change-me-jwt-secret", "change-me-to-random-hex-string-min-32-bytes", ""}
-    if not jwt_secret or jwt_secret in jwt_placeholders:
-        docker_jwt = _get_secret_from_docker("JWT_SECRET")
-        if docker_jwt and docker_jwt not in jwt_placeholders:
-            os.environ["JWT_SECRET"] = docker_jwt
-            _update_env_local("JWT_SECRET", docker_jwt)
-            print("  ✓ JWT_SECRET loaded from Docker and saved to .env.local")
-        else:
-            new_jwt = secrets.token_hex(32)
-            os.environ["JWT_SECRET"] = new_jwt
-            _update_env_local("JWT_SECRET", new_jwt)
-            print("  ✓ JWT_SECRET generated and saved to .env.local")
-
-    return secret
+    print("✗ API_KEY_SECRET not available.")
+    print("  Ensure Docker is running: docker compose up -d")
+    sys.exit(1)
 
 
-def _update_env_local(key: str, value: str) -> None:
-    """Update or add a key in .env.local."""
-    import re
-
-    env_file = _project_root / ".env.local"
-    if not env_file.exists():
-        return
-
-    content = env_file.read_text()
-    pattern = rf"^{key}=.*$"
-    if re.search(pattern, content, re.MULTILINE):
-        content = re.sub(pattern, f"{key}={value}", content, flags=re.MULTILINE)
-    else:
-        content += f"\n{key}={value}\n"
-    env_file.write_text(content)
-
-
-def _restart_api_if_needed() -> None:
-    """Restart API container if secrets were generated (so it picks up new .env.local)."""
-    if not _secrets_were_generated:
-        return
-
-    import subprocess
-
-    print("\n==> Restarting API container (new secrets generated)...")
-    try:
-        compose_file = _project_root / "docker-compose.yml"
-        if compose_file.exists():
-            subprocess.run(
-                ["docker", "compose", "-f", str(compose_file), "restart", "api"],
-                capture_output=True,
-                timeout=30,
-            )
-            print("  ✓ API container restarted")
-        else:
-            print("  ⚠ docker-compose.yml not found. Restart API manually.")
-    except Exception:
-        print("  ⚠ Could not restart API. Run: docker compose restart api")
-
-
-def _create_workspace(db: Session, user_id: str) -> "Workspace":
+def _create_workspace(db: Session, user_id: str) -> Workspace:
     """Create personal workspace and membership for admin."""
     workspace = Workspace(
         name="Personal Workspace",
@@ -154,7 +73,7 @@ def _create_workspace(db: Session, user_id: str) -> "Workspace":
         plan_name="pro",
     )
     db.add(workspace)
-    db.flush()  # get workspace.id
+    db.flush()
 
     member = WorkspaceMember(
         workspace_id=workspace.id,
@@ -168,8 +87,8 @@ def _create_workspace(db: Session, user_id: str) -> "Workspace":
 
 def _create_api_key(db: Session, user_id: str, workspace_id) -> str:
     """Create an API key for the admin user scoped to workspace."""
-    _ensure_api_key_secret()
-    from utils.encryption import get_encryptor
+    _require_api_key_secret()
+    from utils.encryption import get_encryptor  # noqa: E402
 
     raw_key = APIKeyManager._generate_key()
     key_hash = APIKeyManager._hash_key(raw_key)
@@ -194,8 +113,7 @@ def _create_api_key(db: Session, user_id: str, workspace_id) -> str:
 
 def _write_mcp_json(api_key: str):
     """Write .mcp.json to project root."""
-    project_root = Path(__file__).parent.parent.parent.parent
-    mcp_path = project_root / ".mcp.json"
+    mcp_path = _project_root / ".mcp.json"
 
     mcp_config = {
         "mcpServers": {
@@ -262,7 +180,7 @@ def create_admin():
         mfa_choice = input("  Enable MFA? [Y/n]: ").strip().lower()
 
         if mfa_choice != "n":
-            _ensure_api_key_secret()
+            _require_api_key_secret()
 
             totp_secret = generate_totp_secret()
             uri = get_provisioning_uri(totp_secret, login_id)
@@ -288,7 +206,7 @@ def create_admin():
                 totp_enabled = True
                 print("  ✓ MFA verified!")
 
-                from utils.encryption import get_encryptor
+                from utils.encryption import get_encryptor  # noqa: E402
 
                 totp_secret = get_encryptor().encrypt(totp_secret)
 
@@ -324,9 +242,6 @@ def create_admin():
         _write_mcp_json(api_key)
 
         db.commit()
-
-        # Restart API container if API_KEY_SECRET was generated
-        _restart_api_if_needed()
 
         print("\n" + "=" * 50)
         print("✓ Admin setup complete!")

@@ -4,22 +4,15 @@ Issue #51: Password + MFA login for initial admin.
 
 Usage:
     cd backend && python -m src.cli.reset_password
-
-    # Inside Docker:
-    docker compose exec api python -m src.cli.reset_password
 """
 
 import getpass
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from dotenv import load_dotenv
-
-_project_root = Path(__file__).parent.parent.parent.parent
-load_dotenv(_project_root / ".env.local")
 
 from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
@@ -28,6 +21,24 @@ from auth.password import hash_password  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
 from db.base import Base  # noqa: E402, F401
 from models.auth import User  # noqa: E402
+
+_project_root = Path(__file__).parent.parent.parent.parent
+
+
+def _get_env_from_docker(key: str) -> str | None:
+    """Get env var from running API container."""
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "exec", "-T", "api", "printenv", key],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(_project_root),
+        )
+        value = result.stdout.strip()
+        return value if result.returncode == 0 and value else None
+    except Exception:
+        return None
 
 
 def reset_password():
@@ -93,12 +104,19 @@ def reset_password():
         if choice in ("2", "3"):
             re_enable = input("\n  Re-enable MFA now? [y/N]: ").strip().lower()
             if re_enable == "y":
-                from auth.totp import generate_totp_secret, get_provisioning_uri, verify_totp
+                from auth.totp import (  # noqa: E402
+                    generate_totp_secret,
+                    get_provisioning_uri,
+                    verify_totp,
+                )
 
-                api_key_secret = os.getenv("API_KEY_SECRET")
+                api_key_secret = os.getenv("API_KEY_SECRET") or _get_env_from_docker(
+                    "API_KEY_SECRET"
+                )
                 if not api_key_secret:
-                    print("  ⚠ Set API_KEY_SECRET env var to enable MFA.")
+                    print("  ⚠ API_KEY_SECRET not available. Ensure Docker is running.")
                 else:
+                    os.environ["API_KEY_SECRET"] = api_key_secret
                     totp_secret = generate_totp_secret()
                     uri = get_provisioning_uri(totp_secret, login_id)
                     print(f"\n  Scan this URI:\n  {uri}")
@@ -116,7 +134,7 @@ def reset_password():
                     verify_code = input("\n  Enter 6-digit code: ").strip()
 
                     if verify_totp(totp_secret, verify_code):
-                        from utils.encryption import get_encryptor
+                        from utils.encryption import get_encryptor  # noqa: E402
 
                         user.totp_secret = get_encryptor().encrypt(totp_secret)
                         user.totp_enabled = True

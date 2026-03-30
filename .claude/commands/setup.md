@@ -83,7 +83,7 @@ cd backend && alembic upgrade head
 Prompt the user to run this command interactively (it requires keyboard input for password and MFA):
 
 ```
-! cd backend && API_KEY_SECRET="$(grep API_KEY_SECRET ../docker-compose.yml | head -1 | sed 's/.*: *//' | tr -d '"')" python -m src.cli.create_admin
+! cd backend && python -m src.cli.create_admin
 ```
 
 This will:
@@ -117,6 +117,6 @@ Inform the user of available admin commands (all from `backend/` directory):
 | `python -m src.cli.reset_password` | Reset password and/or MFA |
 | `python -m src.cli.delete_admin` | Delete admin (for re-creation) |
 
-> Set `API_KEY_SECRET` env var when running CLI commands that involve MFA or API keys.
+> Docker API container must be running. CLI reads `API_KEY_SECRET` from it.
 
 Report the status of each step. If any step fails, diagnose and suggest fixes.

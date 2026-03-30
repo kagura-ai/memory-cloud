@@ -13,7 +13,7 @@ Ask the user which action they want, or infer from context:
 Run interactively (requires user input for password + MFA):
 
 ```
-! cd backend && API_KEY_SECRET="$(grep API_KEY_SECRET ../docker-compose.yml | head -1 | sed 's/.*: *//' | tr -d '"')" python -m src.cli.create_admin
+! cd backend && python -m src.cli.create_admin
 ```
 
 Creates: admin user, workspace, API key, `.mcp.json`
@@ -23,7 +23,7 @@ Creates: admin user, workspace, API key, `.mcp.json`
 Run interactively:
 
 ```
-! cd backend && API_KEY_SECRET="$(grep API_KEY_SECRET ../docker-compose.yml | head -1 | sed 's/.*: *//' | tr -d '"')" python -m src.cli.reset_password
+! cd backend && python -m src.cli.reset_password
 ```
 
 Options: reset password only, disable MFA only, or both. Can re-enable MFA after disabling.
@@ -43,7 +43,7 @@ After deletion, run create_admin to set up again.
 
 ## Notes
 
-- `API_KEY_SECRET` env var is required for MFA and API key operations
+- Docker API container must be running (CLI reads `API_KEY_SECRET` from it)
 - All commands must be run from the `backend/` directory
 - MFA is enabled by default during admin creation (recommended)
 - Admin login uses arbitrary login ID (not email)
