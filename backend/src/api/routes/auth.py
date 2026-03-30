@@ -27,6 +27,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser
@@ -34,6 +35,7 @@ from auth.oauth2 import OAuth2Manager
 from auth.roles import get_role_manager
 from auth.session import SessionManager
 from db.base import get_db
+from models.auth import User
 from services.workspace_service import WorkspaceService
 
 logger = logging.getLogger(__name__)
@@ -761,6 +763,234 @@ async def github_callback(
         raise HTTPException(
             status_code=401, detail=f"GitHub authentication failed: {str(e)}"
         ) from e
+
+
+# ============================================================================
+# Password + MFA Endpoints (Issue #51)
+# ============================================================================
+
+
+class PasswordLoginRequest(BaseModel):
+    """Password login request."""
+
+    login_id: str
+    password: str
+
+
+class PasswordLoginResponse(BaseModel):
+    """Password login response."""
+
+    success: bool
+    mfa_required: bool = False
+    mfa_session_token: str | None = None
+    redirect_url: str | None = None
+
+
+class MfaVerifyRequest(BaseModel):
+    """MFA verification request."""
+
+    mfa_session_token: str
+    totp_code: str
+
+
+class AuthConfigResponse(BaseModel):
+    """Auth configuration for frontend."""
+
+    password_login_enabled: bool
+    google_oauth_enabled: bool
+    github_oauth_enabled: bool
+
+
+async def _create_session_and_workspace(
+    user_id: str,
+    email: str,
+    name: str | None,
+    role: str,
+    picture: str | None = None,
+) -> str:
+    """Create session and ensure personal workspace exists.
+
+    Shared by OAuth callbacks and password login.
+    """
+    if not _session_manager:
+        raise HTTPException(status_code=500, detail="Session manager not initialized")
+
+    deleted_count = _session_manager.delete_user_sessions(user_id)
+    if deleted_count > 0:
+        logger.info(f"Invalidated {deleted_count} old session(s) for {email}")
+
+    session_data = {
+        "sub": user_id,
+        "user_id": user_id,
+        "email": email,
+        "name": name,
+        "picture": picture,
+        "role": role,
+    }
+    session_id = _session_manager.create_session(session_data)
+
+    try:
+        async for db in get_db():
+            workspace_service = WorkspaceService(db)
+            await workspace_service.ensure_personal_workspace(
+                user_id=user_id,
+                email=email,
+            )
+            break
+    except Exception as e:
+        logger.error(f"Error ensuring personal workspace for {user_id}: {e}", exc_info=True)
+
+    return session_id
+
+
+def _set_session_cookie(response: Response, session_id: str) -> None:
+    """Set session cookie on response."""
+    if not _session_manager:
+        return
+    response.set_cookie(
+        key="kagura_session",
+        value=session_id,
+        path="/",
+        httponly=True,
+        secure=False,
+        samesite="lax",
+        max_age=_session_manager.session_ttl,
+    )
+
+
+@router.get("/config")
+async def get_auth_config():
+    """Get authentication configuration (public)."""
+    return AuthConfigResponse(
+        password_login_enabled=True,
+        google_oauth_enabled=bool(os.getenv("GOOGLE_CLIENT_ID")),
+        github_oauth_enabled=bool(os.getenv("GITHUB_CLIENT_ID")),
+    )
+
+
+@router.post("/login")
+async def password_login(
+    body: PasswordLoginRequest,
+    return_to: str | None = Query(None),
+):
+    """Authenticate with login_id and password."""
+    if not _session_manager:
+        raise HTTPException(status_code=500, detail="Session manager not initialized")
+
+    from auth.password import verify_password
+
+    async for db in get_db():
+        result = await db.execute(
+            select(User).where(User.login_id == body.login_id, User.auth_method == "password")
+        )
+        user = result.scalar_one_or_none()
+        break
+
+    if not user or not user.password_hash:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    if not verify_password(body.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    # MFA check
+    if user.totp_enabled and user.totp_secret:
+        mfa_token = secrets.token_urlsafe(32)
+        _session_manager._redis.setex(f"mfa_pending:{mfa_token}", 300, user.user_id)
+
+        return PasswordLoginResponse(success=True, mfa_required=True, mfa_session_token=mfa_token)
+
+    # No MFA — create session
+    session_id = await _create_session_and_workspace(
+        user_id=user.user_id, email=user.email, name=user.name, role=user.role
+    )
+
+    async for db in get_db():
+        from utils.datetime import utcnow
+
+        result = await db.execute(select(User).where(User.user_id == user.user_id))
+        db_user = result.scalar_one_or_none()
+        if db_user:
+            db_user.last_login_at = utcnow()
+            await db.commit()
+        break
+
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    redirect_url = return_to or f"{frontend_url}/workspace/dashboard"
+
+    response = Response(
+        content=PasswordLoginResponse(
+            success=True, mfa_required=False, redirect_url=redirect_url
+        ).model_dump_json(),
+        media_type="application/json",
+    )
+    _set_session_cookie(response, session_id)
+
+    logger.info(f"Password login successful: {user.email}")
+    return response
+
+
+@router.post("/mfa/verify")
+async def mfa_verify(
+    body: MfaVerifyRequest,
+    return_to: str | None = Query(None),
+):
+    """Verify TOTP code and create session."""
+    if not _session_manager:
+        raise HTTPException(status_code=500, detail="Session manager not initialized")
+
+    user_id = _session_manager._redis.get(f"mfa_pending:{body.mfa_session_token}")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired MFA session")
+
+    async for db in get_db():
+        result = await db.execute(select(User).where(User.user_id == user_id))
+        user = result.scalar_one_or_none()
+        break
+
+    if not user or not user.totp_secret:
+        raise HTTPException(status_code=401, detail="MFA not configured")
+
+    try:
+        from utils.encryption import get_encryptor
+
+        totp_secret = get_encryptor().decrypt(user.totp_secret)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to decrypt MFA secret")
+
+    from auth.totp import verify_totp
+
+    if not verify_totp(totp_secret, body.totp_code):
+        raise HTTPException(status_code=401, detail="Invalid TOTP code")
+
+    _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
+
+    session_id = await _create_session_and_workspace(
+        user_id=user.user_id, email=user.email, name=user.name, role=user.role
+    )
+
+    async for db in get_db():
+        from utils.datetime import utcnow
+
+        result = await db.execute(select(User).where(User.user_id == user.user_id))
+        db_user = result.scalar_one_or_none()
+        if db_user:
+            db_user.last_login_at = utcnow()
+            await db.commit()
+        break
+
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    redirect_url = return_to or f"{frontend_url}/workspace/dashboard"
+
+    response = Response(
+        content=PasswordLoginResponse(
+            success=True, mfa_required=False, redirect_url=redirect_url
+        ).model_dump_json(),
+        media_type="application/json",
+    )
+    _set_session_cookie(response, session_id)
+
+    logger.info(f"MFA verification successful: {user.email}")
+    return response
 
 
 # Include subrouters

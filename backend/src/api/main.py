@@ -44,11 +44,18 @@ async def lifespan(app: FastAPI):
     logger.info("role_manager_initialized (postgresql mode)")
 
     # Initialize OAuth2 and Session managers
+    # Issue #51: OAuth2Manager is optional (only when Google OAuth is configured)
+    import os
+
     global _session_middleware_manager
-    oauth2_manager = OAuth2Manager(provider="google")
+    google_client_id = os.getenv("GOOGLE_CLIENT_ID", "")
+    oauth2_manager = OAuth2Manager(provider="google") if google_client_id else None
     _session_middleware_manager = SessionManager(redis_url=get_redis_url())
     initialize_auth_routes(oauth2_manager, _session_middleware_manager)
-    logger.info("auth_routes_initialized")
+    if oauth2_manager:
+        logger.info("auth_routes_initialized (google oauth enabled)")
+    else:
+        logger.info("auth_routes_initialized (password only, google oauth disabled)")
 
     # Start background task scheduler
     from tasks import (

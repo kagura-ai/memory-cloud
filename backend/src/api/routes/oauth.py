@@ -20,6 +20,7 @@ Security:
 """
 
 import hashlib
+import os
 import secrets
 from pathlib import Path
 from urllib.parse import urlencode
@@ -1118,7 +1119,8 @@ async def oauth_authorize_get(
         from urllib.parse import quote
 
         return_to = quote(str(request.url), safe="")
-        return RedirectResponse(f"/api/v1/auth/google/login?return_to={return_to}")
+        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+        return RedirectResponse(f"{frontend_url}/login?return_to={return_to}")
 
     # Save resource parameter to Redis for POST request (Issue #157)
     logger.info(

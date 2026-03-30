@@ -96,7 +96,18 @@
     "termsAndPrivacy": "および",
     "continueWithGitHub": "GitHubで続ける",
     "redirecting": "リダイレクト中...",
-    "registrationDisabled": "新規登録は無効です。管理者に招待を依頼してください。"
+    "registrationDisabled": "新規登録は無効です。管理者に招待を依頼してください。",
+    "loginId": "ログインID",
+    "password": "パスワード",
+    "signIn": "サインイン",
+    "signingIn": "サインイン中...",
+    "invalidCredentials": "ログインIDまたはパスワードが正しくありません",
+    "orContinueWith": "または以下で続ける",
+    "mfaRequired": "二要素認証",
+    "enterTotpCode": "認証アプリの6桁のコードを入力してください",
+    "totpCode": "認証コード",
+    "verify": "認証",
+    "verifying": "認証中..."
   },
   "landing": {
     "heroTitle": "AIコンテキストを二度と失わない",
