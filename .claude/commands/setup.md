@@ -1,5 +1,5 @@
 ---
-description: Set up Kagura Memory Cloud from scratch (Docker services, DB migration, frontend)
+description: Set up Kagura Memory Cloud from scratch (Docker services, DB migration, admin account)
 ---
 
 Set up the local development environment from scratch.
@@ -39,15 +39,8 @@ Do NOT proceed until all prerequisites are available.
 nproc && free -h | head -2 && df -h / | tail -1
 ```
 
-**Minimum requirements:**
-- CPU: 2 cores
-- RAM: 4 GB
-- Disk: 10 GB free
-
-**Recommended:**
-- CPU: 4+ cores
-- RAM: 8+ GB
-- Disk: 20+ GB free
+**Minimum:** 2 cores, 4 GB RAM, 10 GB disk
+**Recommended:** 4+ cores, 8+ GB RAM, 20+ GB disk
 
 If below minimum, warn the user that services may be unstable.
 
@@ -64,11 +57,11 @@ If any command fails, guide the user with the platform-specific install instruct
 ```bash
 ls -la .env.local
 ```
-If missing, copy from example:
+If missing:
 ```bash
 cp .env.example .env.local
 ```
-Remind the user to set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `OPENAI_API_KEY` in `.env.local`.
+OAuth providers (Google, GitHub) are optional — admin login uses password + MFA.
 
 ### 3. Start Docker services
 ```bash
@@ -78,53 +71,52 @@ Wait for all services to be healthy:
 ```bash
 docker compose ps
 ```
-Expected: postgres, qdrant, redis, api — all healthy/running.
+Expected: postgres, qdrant, redis, api, web — all healthy/running.
 
 ### 4. Run database migrations
 ```bash
 cd backend && alembic upgrade head
 ```
 
-### 5. Install frontend dependencies and start dev server
-```bash
-cd frontend && npm install && npm run dev
+### 5. Create admin account
+
+Prompt the user to run this command interactively (it requires keyboard input for password and MFA):
+
 ```
+! cd backend && API_KEY_SECRET="$(grep API_KEY_SECRET ../docker-compose.yml | head -1 | sed 's/.*: *//' | tr -d '"')" python -m src.cli.create_admin
+```
+
+This will:
+- Create admin user with login ID + password
+- Set up MFA (TOTP) — recommended, requires authenticator app
+- Create personal workspace
+- Generate API key
+- Write `.mcp.json` for MCP client configuration
 
 ### 6. Verify
+
 ```bash
-curl -s http://localhost:8080/health | jq .
+curl -s http://localhost:8080/health | python3 -m json.tool
+curl -s http://localhost:8080/api/v1/auth/config | python3 -m json.tool
 ```
-Expected: `{"status": "ok"}`
+Expected: `{"status": "ok"}` and auth config showing enabled methods.
 
-### 7. MCP setup guide
+### 7. Test MCP connection
 
-After all services are running, guide the user through MCP client setup:
+After `.mcp.json` is written, tell the user to restart Claude Code, then test:
+- `remember` — store a test memory
+- `recall` — search for it
 
-1. **Create an API key**: Open http://localhost:3000/workspace/integrations/api-keys in a browser and create a new API key. Copy the key (starts with `kagura_`).
+### 8. Admin CLI reference
 
-2. **Find your workspace ID**: The workspace ID is in the URL bar when logged in (e.g., `http://localhost:3000/workspace/...`). Or query it from the API key table:
-```bash
-docker exec kagura-postgres psql -U kagura -d kagura -c "SELECT workspace_id FROM api_keys ORDER BY created_at DESC LIMIT 1;"
-```
+Inform the user of available admin commands (all from `backend/` directory):
 
-3. **Create `.mcp.json`** in the project root (or any repo where you want to use Kagura Memory):
-```json
-{
-  "mcpServers": {
-    "kagura-memory": {
-      "type": "http",
-      "url": "http://localhost:8080/mcp/w/{WORKSPACE_ID}",
-      "headers": {
-        "Authorization": "Bearer {YOUR_API_KEY}"
-      }
-    }
-  }
-}
-```
-Replace `{WORKSPACE_ID}` and `{YOUR_API_KEY}` with actual values.
+| Command | Purpose |
+|---------|---------|
+| `python -m src.cli.create_admin` | Create admin + workspace + API key + .mcp.json |
+| `python -m src.cli.reset_password` | Reset password and/or MFA |
+| `python -m src.cli.delete_admin` | Delete admin (for re-creation) |
 
-4. **Restart Claude Code** to pick up the new MCP config, then verify with:
-   - `remember` — store a test memory
-   - `recall` — search for it
+> Set `API_KEY_SECRET` env var when running CLI commands that involve MFA or API keys.
 
 Report the status of each step. If any step fails, diagnose and suggest fixes.
