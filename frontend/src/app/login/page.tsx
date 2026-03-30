@@ -239,7 +239,7 @@ function LoginContent() {
                     value={totpCode}
                     onChange={(e) => setTotpCode(e.target.value)}
                     placeholder="000000"
-                    className="text-center text-2xl tracking-widest"
+                    className="bg-white text-gray-900 text-center text-2xl tracking-widest"
                     autoFocus
                     autoComplete="one-time-code"
                   />
@@ -269,6 +269,7 @@ function LoginContent() {
                           onChange={(e) => setLoginId(e.target.value)}
                           autoFocus
                           autoComplete="username"
+                          className="bg-white text-gray-900"
                         />
                       </div>
                       <div className="space-y-2">
@@ -281,6 +282,7 @@ function LoginContent() {
                           value={password}
                           onChange={(e) => setPassword(e.target.value)}
                           autoComplete="current-password"
+                          className="bg-white text-gray-900"
                         />
                       </div>
 
