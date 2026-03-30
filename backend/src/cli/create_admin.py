@@ -111,7 +111,8 @@ def create_admin():
         ).scalar()
         if admin_count and admin_count > 0:
             print("\n✗ Password admin already exists.")
-            print("  Use reset_password to change the password.")
+            print("  To change password:  python -m src.cli.reset_password")
+            print("  To delete and redo:  python -m src.cli.delete_admin")
             sys.exit(1)
 
         # Login ID
