@@ -857,15 +857,73 @@ def _set_session_cookie(response: Response, session_id: str) -> None:
     """Set session cookie on response."""
     if not _session_manager:
         return
+    is_production = os.getenv("ENVIRONMENT", "development") == "production"
     response.set_cookie(
         key="kagura_session",
         value=session_id,
         path="/",
         httponly=True,
-        secure=False,
+        secure=is_production,
         samesite="lax",
         max_age=_session_manager.session_ttl,
     )
+
+
+def _safe_redirect_url(return_to: str | None) -> str:
+    """Validate return_to to prevent open redirect attacks."""
+    from urllib.parse import urlparse
+
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    default = f"{frontend_url}/workspace/dashboard"
+
+    if not return_to:
+        return default
+
+    parsed = urlparse(return_to)
+    # Allow relative paths or same-origin URLs
+    if not parsed.netloc:
+        return return_to
+    frontend_host = urlparse(frontend_url).netloc
+    api_host = urlparse(os.getenv("API_URL", "http://localhost:8080")).netloc
+    if parsed.netloc in (frontend_host, api_host, "localhost:8080", "localhost:3000"):
+        return return_to
+    return default
+
+
+_LOGIN_ATTEMPT_PREFIX = "login_attempts:"
+_MAX_LOGIN_ATTEMPTS = 5
+_LOGIN_LOCKOUT_SECONDS = 300  # 5 minutes
+
+
+def _check_login_rate_limit(login_id: str) -> None:
+    """Check brute-force protection. Raises 429 if too many attempts."""
+    if not _session_manager:
+        return
+    key = f"{_LOGIN_ATTEMPT_PREFIX}{login_id}"
+    attempts = _session_manager._redis.get(key)
+    if attempts and int(attempts) >= _MAX_LOGIN_ATTEMPTS:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts. Please try again later.",
+        )
+
+
+def _record_login_failure(login_id: str) -> None:
+    """Record a failed login attempt."""
+    if not _session_manager:
+        return
+    key = f"{_LOGIN_ATTEMPT_PREFIX}{login_id}"
+    pipe = _session_manager._redis.pipeline()
+    pipe.incr(key)
+    pipe.expire(key, _LOGIN_LOCKOUT_SECONDS)
+    pipe.execute()
+
+
+def _clear_login_failures(login_id: str) -> None:
+    """Clear failed login attempts on success."""
+    if not _session_manager:
+        return
+    _session_manager._redis.delete(f"{_LOGIN_ATTEMPT_PREFIX}{login_id}")
 
 
 @router.get("/config")
@@ -887,6 +945,9 @@ async def password_login(
     if not _session_manager:
         raise HTTPException(status_code=500, detail="Session manager not initialized")
 
+    # Brute-force protection
+    _check_login_rate_limit(body.login_id)
+
     async for db in get_db():
         result = await db.execute(
             select(User).where(User.login_id == body.login_id, User.auth_method == "password")
@@ -895,10 +956,14 @@ async def password_login(
         break
 
     if not user or not user.password_hash:
+        _record_login_failure(body.login_id)
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     if not verify_password(body.password, user.password_hash):
+        _record_login_failure(body.login_id)
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    _clear_login_failures(body.login_id)
 
     # MFA check
     if user.totp_enabled and user.totp_secret:
@@ -912,12 +977,9 @@ async def password_login(
         user_id=user.user_id, email=user.email, name=user.name, role=user.role
     )
 
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-    redirect_url = return_to or f"{frontend_url}/workspace/dashboard"
-
     response = Response(
         content=PasswordLoginResponse(
-            success=True, mfa_required=False, redirect_url=redirect_url
+            success=True, mfa_required=False, redirect_url=_safe_redirect_url(return_to)
         ).model_dump_json(),
         media_type="application/json",
     )
@@ -954,7 +1016,9 @@ async def mfa_verify(
         raise HTTPException(status_code=500, detail="Failed to decrypt MFA secret")
 
     if not verify_totp(totp_secret, body.totp_code):
-        raise HTTPException(status_code=401, detail="Invalid TOTP code")
+        # Delete MFA token on failed attempt (prevent brute-force replay)
+        _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
+        raise HTTPException(status_code=401, detail="Invalid TOTP code. Please login again.")
 
     _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
 
@@ -962,12 +1026,9 @@ async def mfa_verify(
         user_id=user.user_id, email=user.email, name=user.name, role=user.role
     )
 
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-    redirect_url = return_to or f"{frontend_url}/workspace/dashboard"
-
     response = Response(
         content=PasswordLoginResponse(
-            success=True, mfa_required=False, redirect_url=redirect_url
+            success=True, mfa_required=False, redirect_url=_safe_redirect_url(return_to)
         ).model_dump_json(),
         media_type="application/json",
     )
