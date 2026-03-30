@@ -122,17 +122,20 @@ def create_admin():
             print("✗ Login ID must be 1-255 characters.")
             sys.exit(1)
 
-        # Password
-        print("\nEnter a password (minimum 12 characters):")
-        password = getpass.getpass("  Password: ")
-        if len(password) < 12:
-            print("✗ Password must be at least 12 characters.")
-            sys.exit(1)
+        # Password (retry on failure)
+        while True:
+            print("\nEnter a password (minimum 12 characters):")
+            password = getpass.getpass("  Password: ")
+            if len(password) < 12:
+                print("  ✗ Password must be at least 12 characters. Try again.")
+                continue
 
-        password_confirm = getpass.getpass("  Confirm:  ")
-        if password != password_confirm:
-            print("✗ Passwords do not match.")
-            sys.exit(1)
+            password_confirm = getpass.getpass("  Confirm:  ")
+            if password != password_confirm:
+                print("  ✗ Passwords do not match. Try again.")
+                continue
+
+            break
 
         # MFA (default: on)
         totp_secret = None
