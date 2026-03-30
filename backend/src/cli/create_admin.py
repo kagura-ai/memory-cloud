@@ -227,9 +227,9 @@ def create_admin():
         print(f"  Login ID:  {login_id}")
         print(f"  MFA:       {'enabled' if totp_enabled else 'disabled'}")
         print(f"  API Key:   {api_key}")
-        print(f"  MCP URL:   http://localhost:8080/mcp")
-        print(f"  MCP:       .mcp.json written")
-        print(f"  Login:     http://localhost:3000/login")
+        print("  MCP URL:   http://localhost:8080/mcp")
+        print("  MCP:       .mcp.json written")
+        print("  Login:     http://localhost:3000/login")
         print("=" * 50)
 
     engine.dispose()

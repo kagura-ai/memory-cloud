@@ -1012,8 +1012,8 @@ async def mfa_verify(
 
     try:
         totp_secret = get_encryptor().decrypt(user.totp_secret)
-    except Exception:
-        raise HTTPException(status_code=500, detail="Failed to decrypt MFA secret")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to decrypt MFA secret") from e
 
     if not verify_totp(totp_secret, body.totp_code):
         # Delete MFA token on failed attempt (prevent brute-force replay)
