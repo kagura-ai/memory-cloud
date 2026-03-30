@@ -21,13 +21,13 @@ from dotenv import load_dotenv
 _project_root = Path(__file__).parent.parent.parent.parent
 load_dotenv(_project_root / ".env.local")
 
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session
+from sqlalchemy import create_engine, select  # noqa: E402
+from sqlalchemy.orm import Session  # noqa: E402
 
-from auth.password import hash_password
-from cli.db import get_sync_database_url
-from db.base import Base  # noqa: F401
-from models.auth import User
+from auth.password import hash_password  # noqa: E402
+from cli.db import get_sync_database_url  # noqa: E402
+from db.base import Base  # noqa: E402, F401
+from models.auth import User  # noqa: E402
 
 
 def reset_password():

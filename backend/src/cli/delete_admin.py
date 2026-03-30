@@ -19,12 +19,12 @@ from dotenv import load_dotenv
 _project_root = Path(__file__).parent.parent.parent.parent
 load_dotenv(_project_root / ".env.local")
 
-from sqlalchemy import create_engine, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import create_engine, func, select  # noqa: E402
+from sqlalchemy.orm import Session  # noqa: E402
 
-from cli.db import get_sync_database_url
-from db.base import Base  # noqa: F401
-from models.auth import APIKey, User, Workspace, WorkspaceMember
+from cli.db import get_sync_database_url  # noqa: E402
+from db.base import Base  # noqa: E402, F401
+from models.auth import APIKey, User, Workspace, WorkspaceMember  # noqa: E402
 
 
 def delete_admin():

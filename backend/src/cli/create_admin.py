@@ -25,49 +25,86 @@ from dotenv import load_dotenv
 _project_root = Path(__file__).parent.parent.parent.parent
 load_dotenv(_project_root / ".env.local")
 
-from sqlalchemy import create_engine, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import create_engine, func, select  # noqa: E402
+from sqlalchemy.orm import Session  # noqa: E402
 
-from auth.api_keys import APIKeyManager
-from auth.password import hash_password
-from auth.totp import generate_totp_secret, get_provisioning_uri, verify_totp
-from cli.db import get_sync_database_url
-from db.base import Base  # noqa: F401
-from models.auth import APIKey, User, Workspace, WorkspaceMember
-from utils.datetime import utcnow
+from auth.api_keys import APIKeyManager  # noqa: E402
+from auth.password import hash_password  # noqa: E402
+from auth.totp import generate_totp_secret, get_provisioning_uri, verify_totp  # noqa: E402
+from cli.db import get_sync_database_url  # noqa: E402
+from db.base import Base  # noqa: E402, F401
+from models.auth import APIKey, User, Workspace, WorkspaceMember  # noqa: E402
+from utils.datetime import utcnow  # noqa: E402
+
+_secrets_were_generated = False
 
 
 def _ensure_api_key_secret() -> str:
     """Ensure API_KEY_SECRET is set. Auto-generate and save to .env.local if missing."""
+    global _secrets_were_generated
     secret = os.getenv("API_KEY_SECRET")
-    placeholder = "change-me-to-random-hex-string-min-32-bytes"
-    if secret and secret != placeholder:
+    placeholders = {"change-me-api-key-secret", "change-me-to-random-hex-string-min-32-bytes"}
+    if secret and secret not in placeholders:
         return secret
 
     print("\n  ⚠ API_KEY_SECRET not set. Generating one...")
     secret = secrets.token_hex(32)
     os.environ["API_KEY_SECRET"] = secret
+    _secrets_were_generated = True
 
-    # Write back to .env.local
-    env_file = _project_root / ".env.local"
-    if env_file.exists():
-        content = env_file.read_text()
-        if placeholder in content:
-            content = content.replace(placeholder, secret)
-        elif "API_KEY_SECRET=" in content:
-            # Replace existing empty/old value
-            import re
+    _update_env_local("API_KEY_SECRET", secret)
+    print("  ✓ API_KEY_SECRET saved to .env.local")
 
-            content = re.sub(r"API_KEY_SECRET=.*", f"API_KEY_SECRET={secret}", content)
-        else:
-            content += f"\nAPI_KEY_SECRET={secret}\n"
-        env_file.write_text(content)
-        print(f"  ✓ API_KEY_SECRET saved to .env.local")
-    else:
-        print(f"  API_KEY_SECRET={secret}")
-        print("  → Create .env.local and add this value")
+    # Also generate JWT_SECRET if it's a placeholder
+    jwt_secret = os.getenv("JWT_SECRET", "")
+    jwt_placeholders = {"change-me-jwt-secret", "change-me-to-random-hex-string-min-32-bytes"}
+    if not jwt_secret or jwt_secret in jwt_placeholders:
+        new_jwt = secrets.token_hex(32)
+        os.environ["JWT_SECRET"] = new_jwt
+        _update_env_local("JWT_SECRET", new_jwt)
+        print("  ✓ JWT_SECRET saved to .env.local")
 
     return secret
+
+
+def _update_env_local(key: str, value: str) -> None:
+    """Update or add a key in .env.local."""
+    import re
+
+    env_file = _project_root / ".env.local"
+    if not env_file.exists():
+        return
+
+    content = env_file.read_text()
+    pattern = rf"^{key}=.*$"
+    if re.search(pattern, content, re.MULTILINE):
+        content = re.sub(pattern, f"{key}={value}", content, flags=re.MULTILINE)
+    else:
+        content += f"\n{key}={value}\n"
+    env_file.write_text(content)
+
+
+def _restart_api_if_needed() -> None:
+    """Restart API container if secrets were generated (so it picks up new .env.local)."""
+    if not _secrets_were_generated:
+        return
+
+    import subprocess
+
+    print("\n==> Restarting API container (new secrets generated)...")
+    try:
+        compose_file = _project_root / "docker-compose.yml"
+        if compose_file.exists():
+            subprocess.run(
+                ["docker", "compose", "-f", str(compose_file), "restart", "api"],
+                capture_output=True,
+                timeout=30,
+            )
+            print("  ✓ API container restarted")
+        else:
+            print("  ⚠ docker-compose.yml not found. Restart API manually.")
+    except Exception:
+        print("  ⚠ Could not restart API. Run: docker compose restart api")
 
 
 def _create_workspace(db: Session, user_id: str) -> "Workspace":
@@ -248,6 +285,9 @@ def create_admin():
         _write_mcp_json(api_key)
 
         db.commit()
+
+        # Restart API container if API_KEY_SECRET was generated
+        _restart_api_if_needed()
 
         print("\n" + "=" * 50)
         print("✓ Admin setup complete!")
