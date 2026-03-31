@@ -480,24 +480,9 @@ async def get_workspace_usage_history(
     async with db_transaction(
         db, "get_workspace_usage_history", "Failed to get workspace usage history"
     ):
-        # Get all member user_ids
-        members_result = await db.execute(
-            select(WorkspaceMember.user_id).where(WorkspaceMember.workspace_id == workspace_id)
-        )
-        member_ids = [row[0] for row in members_result.all()]
-
         # Calculate date range
         end_date = utcnow().date()
         start_date = end_date - timedelta(days=days - 1)
-
-        if not member_ids:
-            # No members, return empty history
-            return UsageHistoryResponse(
-                daily_stats=[],
-                total_requests=0,
-                period_start=start_date.isoformat(),
-                period_end=end_date.isoformat(),
-            )
 
         # Aggregate API calls by date across all members
         daily_stats_result = await db.execute(
@@ -561,23 +546,9 @@ async def get_workspace_usage_breakdown(
     async with db_transaction(
         db, "get_workspace_usage_breakdown", "Failed to get workspace usage breakdown"
     ):
-        # Get all member user_ids
-        members_result = await db.execute(
-            select(WorkspaceMember.user_id).where(WorkspaceMember.workspace_id == workspace_id)
-        )
-        member_ids = [row[0] for row in members_result.all()]
-
         # Calculate date range
         end_date = utcnow().date()
         start_date = end_date - timedelta(days=days - 1)
-
-        if not member_ids:
-            # No members, return empty breakdown
-            return UsageBreakdownResponse(
-                by_endpoint=[],
-                total_requests=0,
-                period_days=days,
-            )
 
         # Aggregate usage by endpoint across all members
         breakdown_result = await db.execute(

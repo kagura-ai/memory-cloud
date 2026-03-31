@@ -332,15 +332,8 @@ async def get_usage_history(
     """
     try:
         user_id = user["user_id"]
-        # Issue #50: Workspace-scoped usage stats
         current_workspace_id = user.get("current_workspace_id")
-        if current_workspace_id:
-            usage_filter = and_(
-                UsageStats.user_id == user_id,
-                UsageStats.workspace_id == str(current_workspace_id),
-            )
-        else:
-            usage_filter = UsageStats.user_id == user_id
+        usage_filter = _build_usage_filter(user_id, current_workspace_id)
 
         # Calculate period
         end_date = utcnow().date()
@@ -416,15 +409,8 @@ async def get_usage_breakdown(
     """
     try:
         user_id = user["user_id"]
-        # Issue #50: Workspace-scoped usage stats
         current_workspace_id = user.get("current_workspace_id")
-        if current_workspace_id:
-            usage_filter = and_(
-                UsageStats.user_id == user_id,
-                UsageStats.workspace_id == str(current_workspace_id),
-            )
-        else:
-            usage_filter = UsageStats.user_id == user_id
+        usage_filter = _build_usage_filter(user_id, current_workspace_id)
 
         # Calculate period
         start_date = utcnow().date() - timedelta(days=days)

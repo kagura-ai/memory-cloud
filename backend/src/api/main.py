@@ -192,6 +192,14 @@ from api.middleware.rate_limit import RateLimitMiddleware  # noqa: E402
 app.add_middleware(RateLimitMiddleware)
 logger.info("rate_limit_middleware_registered")
 
+# Request Logging Middleware (Issue #48, #50)
+# Must be added LAST (so it runs outermost — records after all other middleware)
+# Execution order: RequestLogger → RateLimit → Session → Route handler → (response logged)
+from api.middleware.request_logger import RequestLoggingMiddleware  # noqa: E402
+
+app.add_middleware(RequestLoggingMiddleware)
+logger.info("request_logging_middleware_registered")
+
 
 # ============================================================================
 # Exception Handlers

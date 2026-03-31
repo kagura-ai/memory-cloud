@@ -81,21 +81,17 @@ class TestUsageEndpointsWorkspaceScoped:
     """Usage endpoints should not return 500 when workspace is set."""
 
     @pytest.mark.parametrize("endpoint", USAGE_ENDPOINTS)
-    def test_usage_with_workspace_does_not_500(self, client_workspace_a, endpoint):
-        """Usage endpoints with workspace should not crash.
-
-        May return 500 due to no DB, but validates the endpoint accepts
-        workspace-scoped user dict without errors.
-        """
+    def test_usage_with_workspace_accepts_request(self, client_workspace_a, endpoint):
+        """Usage endpoints accept workspace-scoped user without validation errors."""
         response = client_workspace_a.get(endpoint)
-        # 500 = DB not available (expected in unit test), but not 422 (validation error)
+        # 422 = validation error (our code bug), other codes are DB/service issues
         assert response.status_code != 422, (
             f"{endpoint} returned 422 — validation error with workspace user"
         )
 
     @pytest.mark.parametrize("endpoint", USAGE_ENDPOINTS)
-    def test_usage_without_workspace_does_not_500(self, client_no_workspace, endpoint):
-        """Usage endpoints without workspace should fall back to user-scoped."""
+    def test_usage_without_workspace_accepts_request(self, client_no_workspace, endpoint):
+        """Usage endpoints accept user without workspace (fallback to user-scoped)."""
         response = client_no_workspace.get(endpoint)
         assert response.status_code != 422, (
             f"{endpoint} returned 422 — validation error without workspace"
