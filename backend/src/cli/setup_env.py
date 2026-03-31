@@ -83,9 +83,16 @@ def setup_env():
         _set_env_value("JWT_SECRET", secret)
         print("✓ JWT_SECRET generated and saved")
 
-    # 4. OPENAI_API_KEY (optional)
-    if env.get("OPENAI_API_KEY"):
-        print("✓ OPENAI_API_KEY already set")
+    # 4. OPENAI_API_KEY (optional — check env var, .env.local, then prompt)
+    import os
+
+    existing_key = env.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if existing_key:
+        if not env.get("OPENAI_API_KEY"):
+            _set_env_value("OPENAI_API_KEY", existing_key)
+            print("✓ OPENAI_API_KEY found in environment and saved to .env.local")
+        else:
+            print("✓ OPENAI_API_KEY already set")
     else:
         print("\nOpenAI API key (for embeddings). Press Enter to skip if using Ollama.")
         key = input("  OPENAI_API_KEY: ").strip()
