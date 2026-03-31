@@ -2102,7 +2102,7 @@
     "environment": {
       "title": "Environment",
       "titleFull": "Environment Configuration",
-      "description": "View and manage system configuration values (.env)",
+      "description": "View system configuration and service status",
       "loadingDesc": "Loading configuration...",
       "configManagement": "Configuration management",
       "actions": {

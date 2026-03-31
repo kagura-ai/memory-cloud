@@ -124,8 +124,10 @@ async def get_system_telemetry(
         try:
             from qdrant_client import AsyncQdrantClient
 
+            from config.database import get_qdrant_url
+
             qdrant = AsyncQdrantClient(
-                url=settings.qdrant_url, api_key=settings.qdrant_api_key, timeout=5
+                url=get_qdrant_url(), api_key=settings.qdrant_api_key, timeout=5
             )
             collections = await qdrant.get_collections()
             collection_names = [c.name for c in collections.collections]
@@ -142,7 +144,7 @@ async def get_system_telemetry(
         # Check Redis
         redis_status = ServiceStatus(status="unknown")
         try:
-            from config.database import get_redis_client
+            from db.redis import get_redis_client
 
             redis = get_redis_client()
             await redis.ping()

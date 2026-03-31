@@ -822,7 +822,7 @@ export default function ContextsPage() {
                         onChange={(e) => setNewEmbeddingModel(e.target.value)}
                         className="w-full rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm"
                       >
-                        <option value="">{t('embeddingModelDefault', { default: `Default (${defaultEmbeddingModel})` })}</option>
+                        <option value="">{t('embeddingModelDefault', { model: defaultEmbeddingModel })}</option>
                         {embeddingModels.filter(m => m.available).map((m) => (
                           <option key={m.name} value={m.name}>
                             {m.name} ({m.dimensions}d, {m.provider})

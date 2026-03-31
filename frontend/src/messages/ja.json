@@ -2111,7 +2111,7 @@
     "environment": {
       "title": "環境設定",
       "titleFull": "環境設定",
-      "description": "システム設定値を表示・管理します（.env）",
+      "description": "システム設定とサービスステータスを表示します",
       "loadingDesc": "設定を読み込み中...",
       "configManagement": "設定管理",
       "actions": {
