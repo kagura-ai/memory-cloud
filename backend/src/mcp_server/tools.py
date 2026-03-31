@@ -1730,6 +1730,16 @@ async def execute_tool_call(
 
                     context_data = None
                     if current_context:
+                        # Get embedding model info from search config
+                        from models.config import ContextSearchConfig
+
+                        config_result = await db.execute(
+                            select(ContextSearchConfig).where(
+                                ContextSearchConfig.context_id == current_context.id
+                            )
+                        )
+                        search_config = config_result.scalar_one_or_none()
+
                         context_data = {
                             "id": str(current_context.id),
                             "name": current_context.name,
@@ -1739,6 +1749,12 @@ async def execute_tool_call(
                             "usage_guide": current_context.usage_guide
                             or "No usage guide provided. Please add usage guidelines in the context settings.",
                             "is_private": current_context.is_private,
+                            "embedding_model": search_config.embedding_model
+                            if search_config
+                            else "text-embedding-3-small",
+                            "embedding_dimensions": search_config.embedding_dimensions
+                            if search_config
+                            else 512,
                         }
 
                     workspace_data = None
@@ -2119,8 +2135,20 @@ async def execute_tool_call(
                         reverse=True,
                     )
 
+                    # Batch-fetch embedding configs to avoid N+1
+                    from models.config import ContextSearchConfig
+
+                    context_ids = [ctx.id for ctx in contexts_sorted]
+                    config_results = await db.execute(
+                        select(ContextSearchConfig).where(
+                            ContextSearchConfig.context_id.in_(context_ids)
+                        )
+                    )
+                    config_by_ctx = {c.context_id: c for c in config_results.scalars().all()}
+
                     context_list = []
                     for ctx in contexts_sorted:
+                        cfg = config_by_ctx.get(ctx.id)
                         ctx_data: dict[str, Any] = {
                             "id": str(ctx.id),
                             "name": ctx.name,
@@ -2129,6 +2157,9 @@ async def execute_tool_call(
                             "last_used_at": ctx.last_used_at.isoformat()
                             if ctx.last_used_at
                             else None,
+                            "embedding_model": cfg.embedding_model
+                            if cfg
+                            else "text-embedding-3-small",
                         }
                         if include_stats:
                             try:
