@@ -315,7 +315,15 @@ async def get_workspace_usage_current(
         # Calculate effective limits (base + addon bonuses) via shared service
         from services.effective_quota_service import EffectiveQuotaService
 
-        effective_quotas = await EffectiveQuotaService(db).get_effective_quotas(workspace_id)
+        try:
+            effective_quotas = await EffectiveQuotaService(db).get_effective_quotas(workspace_id)
+        except ValueError:
+            # Shouldn't happen — workspace was validated above. Fallback to base limits.
+            effective_quotas = {
+                "memory_limit": workspace.memory_limit,
+                "mcp_calls_per_day": workspace.daily_api_limit,
+                "rest_calls_per_day": 0,
+            }
         effective_memory_limit = effective_quotas["memory_limit"]
         effective_daily_api_limit = (
             effective_quotas["mcp_calls_per_day"] + effective_quotas["rest_calls_per_day"]
