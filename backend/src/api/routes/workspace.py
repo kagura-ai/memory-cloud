@@ -312,23 +312,41 @@ async def get_workspace_usage_current(
         )
         member_ids = [row[0] for row in members_result.all()]
 
+        # Calculate effective limits (base + addon bonuses) via shared service
+        from services.effective_quota_service import EffectiveQuotaService
+
+        try:
+            effective_quotas = await EffectiveQuotaService(db).get_effective_quotas(workspace_id)
+        except ValueError:
+            # Shouldn't happen — workspace was validated above. Fallback to base limits.
+            effective_quotas = {
+                "memory_limit": workspace.memory_limit,
+                "mcp_calls_per_day": workspace.daily_api_limit,
+                "rest_calls_per_day": 0,
+            }
+        effective_memory_limit = effective_quotas["memory_limit"]
+        effective_daily_api_limit = (
+            effective_quotas["mcp_calls_per_day"] + effective_quotas["rest_calls_per_day"]
+        )
+        effective_weekly_api_limit = effective_daily_api_limit * 7
+
         if not member_ids:
             # Workspace has no members, return zero usage
             return UsageCurrentResponse(
                 plan=PlanLimits(
                     plan_name=workspace.plan_name,
-                    memory_limit=workspace.memory_limit,
-                    daily_api_limit=workspace.daily_api_limit,
-                    weekly_api_limit=workspace.weekly_api_limit,
+                    memory_limit=effective_memory_limit,
+                    daily_api_limit=effective_daily_api_limit,
+                    weekly_api_limit=effective_weekly_api_limit,
                 ),
                 usage=CurrentUsage(
                     memory_count=0,
                     api_calls_today=0,
                     api_calls_this_week=0,
                 ),
-                memory_usage=calculate_usage_status(0, workspace.memory_limit),
-                daily_api_usage=calculate_usage_status(0, workspace.daily_api_limit),
-                weekly_api_usage=calculate_usage_status(0, workspace.weekly_api_limit),
+                memory_usage=calculate_usage_status(0, effective_memory_limit),
+                daily_api_usage=calculate_usage_status(0, effective_daily_api_limit),
+                weekly_api_usage=calculate_usage_status(0, effective_weekly_api_limit),
             )
 
         # Single Collection Migration: Count memories by workspace_id (memory count only)
@@ -424,13 +442,13 @@ async def get_workspace_usage_current(
         )
         rest_calls_week = rest_week_result.scalar() or 0
 
-        # Build response with aggregated data
+        # Build response with aggregated data and effective limits (base + addons)
         return UsageCurrentResponse(
             plan=PlanLimits(
                 plan_name=workspace.plan_name,
-                memory_limit=workspace.memory_limit,
-                daily_api_limit=workspace.daily_api_limit,
-                weekly_api_limit=workspace.weekly_api_limit,
+                memory_limit=effective_memory_limit,
+                daily_api_limit=effective_daily_api_limit,
+                weekly_api_limit=effective_weekly_api_limit,
             ),
             usage=CurrentUsage(
                 memory_count=memory_count,
@@ -443,9 +461,9 @@ async def get_workspace_usage_current(
                 public_calls_today=public_calls_today,
                 public_calls_this_week=public_calls_week,
             ),
-            memory_usage=calculate_usage_status(memory_count, workspace.memory_limit),
-            daily_api_usage=calculate_usage_status(api_calls_today, workspace.daily_api_limit),
-            weekly_api_usage=calculate_usage_status(api_calls_week, workspace.weekly_api_limit),
+            memory_usage=calculate_usage_status(memory_count, effective_memory_limit),
+            daily_api_usage=calculate_usage_status(api_calls_today, effective_daily_api_limit),
+            weekly_api_usage=calculate_usage_status(api_calls_week, effective_weekly_api_limit),
         )
 
 

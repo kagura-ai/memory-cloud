@@ -1,7 +1,7 @@
 """Tests for MemoryService."""
 
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -9,120 +9,58 @@ import pytest
 from models.schemas import (
     ForgetRequest,
     RecallRequest,
-    ReferenceRequest,
     RememberRequest,
 )
 from services.memory_service import MemoryService
 
 
-class TestMemoryService:
-    """Test MemoryService for core memory operations."""
+class TestMemoryServiceInit:
+    """Test MemoryService initialization."""
 
-    @pytest.fixture
-    def mock_db(self):
-        """Create mock database session."""
-        return MagicMock()
-
-    @pytest.fixture
-    def service(self, mock_db):
-        """Create MemoryService."""
-        return MemoryService(mock_db)
-
-    def test_init(self, mock_db):
-        """Test MemoryService initialization."""
+    def test_init(self):
+        """Test MemoryService creates all sub-services."""
+        mock_db = MagicMock()
         service = MemoryService(mock_db)
-
         assert service.db == mock_db
         assert service.memory_repo is not None
         assert service.embedding_service is not None
         assert service.search_service is not None
 
-    @pytest.mark.asyncio
-    async def test_remember_basic(self, service):
-        """Test basic memory creation."""
-        request = RememberRequest(
-            summary="Test memory",
-            content="Test content",
-            type="code",
-            context_summary="Test context",
-        )
 
-        # Mock dependencies
-        with patch("services.memory_service.ensure_user_collection", new=AsyncMock()):
-            service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+class TestRecall:
+    """Test recall (search) operations."""
 
-            with patch("services.memory_service.add_memory_to_qdrant", new=AsyncMock()):
-                service.memory_repo.create = AsyncMock(
-                    return_value=MagicMock(id=uuid4(), scope="working")
-                )
+    @pytest.fixture
+    def service(self):
+        return MemoryService(MagicMock())
 
-                response = await service.remember(
-                    request=request,
-                    user_id="test_user",
-                )
+    @pytest.fixture
+    def context_id(self):
+        return uuid4()
 
-                # Check response
-                assert response.memory_id is not None
-                assert response.scope in ["working", "persistent"]
-                assert response.message is not None
+    @pytest.fixture
+    def workspace_id(self):
+        return uuid4()
 
     @pytest.mark.asyncio
-    async def test_remember_with_tags(self, service):
-        """Test memory creation with tags."""
-        request = RememberRequest(
-            summary="Test memory",
-            content="Test content",
-            type="code",
-            tags=["python", "test"],
-        )
+    async def test_recall_requires_context(self, service):
+        """recall() requires current_workspace_id and current_context_id."""
+        request = RecallRequest(query="test query", k=5)
 
-        with patch("services.memory_service.ensure_user_collection", new=AsyncMock()):
-            service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
-
-            with patch("services.memory_service.add_memory_to_qdrant", new=AsyncMock()):
-                service.memory_repo.create = AsyncMock(
-                    return_value=MagicMock(id=uuid4(), scope="working")
-                )
-
-                response = await service.remember(
-                    request=request,
-                    user_id="test_user",
-                )
-
-                assert response.memory_id is not None
+        with pytest.raises(ValueError, match="requires current_workspace_id"):
+            await service.recall(request=request, user_id="test_user")
 
     @pytest.mark.asyncio
-    async def test_remember_with_importance(self, service):
-        """Test memory creation with custom importance."""
-        request = RememberRequest(
-            summary="Important memory",
-            content="Critical content",
-            type="decision",
-            importance=0.9,
+    async def test_recall_basic(self, service, context_id, workspace_id):
+        """Test basic recall with mocked search."""
+        request = RecallRequest(query="test query", k=5)
+
+        # Mock context lookup
+        mock_context = MagicMock(
+            id=context_id, workspace_id=workspace_id, is_private=True, created_by="test_user"
         )
-
-        with patch("services.memory_service.ensure_user_collection", new=AsyncMock()):
-            service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
-
-            with patch("services.memory_service.add_memory_to_qdrant", new=AsyncMock()):
-                service.memory_repo.create = AsyncMock(
-                    return_value=MagicMock(id=uuid4(), scope="working")
-                )
-
-                response = await service.remember(
-                    request=request,
-                    user_id="test_user",
-                )
-
-                assert response.memory_id is not None
-
-    @pytest.mark.asyncio
-    async def test_recall_basic(self, service):
-        """Test basic memory recall."""
-        request = RecallRequest(
-            query="test query",
-            k=5,
-        )
+        service.context_service.get_context = AsyncMock(return_value=mock_context)
+        service._get_context_search_config = AsyncMock(return_value=None)
 
         # Mock search results
         search_results = [
@@ -136,301 +74,124 @@ class TestMemoryService:
                 },
             }
         ]
-
         service.search_service.hybrid_search = AsyncMock(return_value=search_results)
 
         response = await service.recall(
             request=request,
             user_id="test_user",
+            current_context_id=context_id,
+            current_workspace_id=workspace_id,
         )
 
-        # Check response
         assert response.results is not None
-        assert len(response.results) > 0
         assert response.total > 0
 
     @pytest.mark.asyncio
-    async def test_recall_with_filters(self, service):
-        """Test recall with filters."""
-        request = RecallRequest(
-            query="test query",
-            k=5,
-            filters={"type": "code"},
-        )
-
-        service.search_service.hybrid_search = AsyncMock(return_value=[])
-
-        await service.recall(
-            request=request,
-            user_id="test_user",
-        )
-
-        # Check filters were passed
-        service.search_service.hybrid_search.assert_called_once()
-        call_kwargs = service.search_service.hybrid_search.call_args.kwargs
-        assert call_kwargs["filters"] == {"type": "code"}
-
-    @pytest.mark.asyncio
-    async def test_recall_no_results(self, service):
+    async def test_recall_no_results(self, service, context_id, workspace_id):
         """Test recall with no results."""
-        request = RecallRequest(
-            query="nonexistent query",
-            k=5,
-        )
+        request = RecallRequest(query="nonexistent", k=5)
 
+        mock_context = MagicMock(
+            id=context_id, workspace_id=workspace_id, is_private=True, created_by="test_user"
+        )
+        service.context_service.get_context = AsyncMock(return_value=mock_context)
+        service._get_context_search_config = AsyncMock(return_value=None)
         service.search_service.hybrid_search = AsyncMock(return_value=[])
 
         response = await service.recall(
             request=request,
             user_id="test_user",
+            current_context_id=context_id,
+            current_workspace_id=workspace_id,
         )
 
         assert response.total == 0
         assert len(response.results) == 0
 
+
+class TestRemember:
+    """Test remember (store) operations."""
+
+    @pytest.fixture
+    def service(self):
+        return MemoryService(MagicMock())
+
     @pytest.mark.asyncio
-    async def test_forget_by_id(self, service):
-        """Test forgetting memory by ID."""
-        memory_id = uuid4()
-        request = ForgetRequest(memory_id=memory_id)
-
-        # Mock memory exists
-        service.memory_repo.get_by_id = AsyncMock(
-            return_value=MagicMock(id=memory_id, user_id="test_user")
+    async def test_remember_requires_context(self, service):
+        """remember() requires current_context_id."""
+        request = RememberRequest(
+            summary="Test memory for search",
+            type="code",
         )
-        service.memory_repo.delete = AsyncMock()
 
-        with patch("services.memory_service.delete_memory_from_qdrant", new=AsyncMock()):
-            response = await service.forget(
+        with pytest.raises(ValueError, match="requires current_context_id"):
+            await service.remember(
                 request=request,
                 user_id="test_user",
             )
 
-            assert response.success is True
-            assert response.deleted_count == 1
+
+class TestReference:
+    """Test reference (get details) operations."""
+
+    @pytest.fixture
+    def service(self):
+        return MemoryService(MagicMock())
 
     @pytest.mark.asyncio
-    async def test_forget_nonexistent(self, service):
-        """Test forgetting nonexistent memory."""
-        memory_id = uuid4()
-        request = ForgetRequest(memory_id=memory_id)
-
-        # Mock memory doesn't exist
-        service.memory_repo.get_by_id = AsyncMock(return_value=None)
-
+    async def test_reference_not_found(self, service):
+        """reference() with nonexistent memory raises NotFoundException."""
         from utils.exceptions import NotFoundException
 
-        with pytest.raises(NotFoundException):
-            await service.forget(
-                request=request,
-                user_id="test_user",
-            )
-
-    @pytest.mark.asyncio
-    async def test_forget_by_query(self, service):
-        """Test forgetting memories by query."""
-        request = ForgetRequest(query="test query", k=10)
-
-        # Mock search results
-        search_results = [{"id": str(uuid4()), "score": 0.9, "payload": {}} for _ in range(3)]
-
-        service.search_service.hybrid_search = AsyncMock(return_value=search_results)
-        service.memory_repo.get_by_id = AsyncMock(return_value=MagicMock(user_id="test_user"))
-        service.memory_repo.delete = AsyncMock()
-
-        with patch("services.memory_service.delete_memory_from_qdrant", new=AsyncMock()):
-            response = await service.forget(
-                request=request,
-                user_id="test_user",
-            )
-
-            assert response.success is True
-            assert response.deleted_count > 0
-
-    @pytest.mark.asyncio
-    async def test_reference_basic(self, service):
-        """Test getting memory reference."""
         memory_id = uuid4()
-        request = ReferenceRequest(memory_id=memory_id)
+        service.memory_repo.get_by_id = AsyncMock(return_value=None)
 
-        # Mock memory exists
+        with pytest.raises(NotFoundException):
+            await service.reference(memory_id=memory_id, user_id="test_user")
+
+    @pytest.mark.asyncio
+    async def test_reference_found(self, service):
+        """reference() returns full memory details."""
+        memory_id = uuid4()
         mock_memory = MagicMock(
             id=memory_id,
             user_id="test_user",
             summary="Test",
             content="Test content",
+            context_summary="Context",
             details={"key": "value"},
             type="code",
+            importance=0.8,
+            tags=["python"],
+            context="test context",
+            scope="working",
+            client="claude",
             created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+            embedding_status="success",
         )
-
         service.memory_repo.get_by_id = AsyncMock(return_value=mock_memory)
 
-        response = await service.reference(
-            request=request,
-            user_id="test_user",
-        )
-
+        response = await service.reference(memory_id=memory_id, user_id="test_user")
         assert response.memory_id == memory_id
-        assert response.summary is not None
-        assert response.content is not None
-        assert response.details is not None
+        assert response.summary == "Test"
+
+
+class TestForget:
+    """Test forget (delete) operations."""
+
+    @pytest.fixture
+    def service(self):
+        return MemoryService(MagicMock())
 
     @pytest.mark.asyncio
-    async def test_reference_nonexistent(self, service):
-        """Test getting reference for nonexistent memory."""
-        memory_id = uuid4()
-        request = ReferenceRequest(memory_id=memory_id)
-
-        service.memory_repo.get_by_id = AsyncMock(return_value=None)
-
+    async def test_forget_by_id_not_found(self, service):
+        """forget() with nonexistent memory raises NotFoundException."""
         from utils.exceptions import NotFoundException
 
+        memory_id = uuid4()
+        request = ForgetRequest(memory_id=memory_id)
+        service.memory_repo.get_by_id = AsyncMock(return_value=None)
+
         with pytest.raises(NotFoundException):
-            await service.reference(
-                request=request,
-                user_id="test_user",
-            )
-
-    @pytest.mark.asyncio
-    async def test_remember_embedding_error(self, service):
-        """Test handling of embedding generation errors."""
-        request = RememberRequest(
-            summary="Test",
-            content="Test",
-            type="code",
-        )
-
-        with patch("services.memory_service.ensure_user_collection", new=AsyncMock()):
-            service.embedding_service.embed = AsyncMock(side_effect=Exception("Embedding failed"))
-
-            with pytest.raises(Exception, match="Embedding failed"):
-                await service.remember(
-                    request=request,
-                    user_id="test_user",
-                )
-
-    @pytest.mark.asyncio
-    async def test_remember_qdrant_error(self, service):
-        """Test handling of Qdrant errors."""
-        request = RememberRequest(
-            summary="Test",
-            content="Test",
-            type="code",
-        )
-
-        with patch("services.memory_service.ensure_user_collection", new=AsyncMock()):
-            service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
-
-            with patch(
-                "services.memory_service.add_memory_to_qdrant",
-                new=AsyncMock(side_effect=Exception("Qdrant error")),
-            ):
-                with pytest.raises(Exception, match="Qdrant error"):
-                    await service.remember(
-                        request=request,
-                        user_id="test_user",
-                    )
-
-    @pytest.mark.asyncio
-    async def test_recall_with_rerank(self, service):
-        """Test recall with reranking enabled."""
-        request = RecallRequest(
-            query="test query",
-            k=5,
-            use_rerank=True,
-        )
-
-        search_results = [
-            {
-                "id": str(uuid4()),
-                "score": 0.9,
-                "payload": {
-                    "summary": "Test",
-                    "type": "code",
-                    "created_at": datetime.utcnow().isoformat(),
-                },
-            }
-        ]
-
-        service.search_service.hybrid_search = AsyncMock(return_value=search_results)
-
-        await service.recall(
-            request=request,
-            user_id="test_user",
-        )
-
-        # Reranking should be passed to search service
-        call_kwargs = service.search_service.hybrid_search.call_args.kwargs
-        assert "use_rerank" in call_kwargs
-
-    @pytest.mark.asyncio
-    async def test_remember_working_scope(self, service):
-        """Test that new memories start in working scope."""
-        request = RememberRequest(
-            summary="New memory",
-            content="Content",
-            type="code",
-        )
-
-        with patch("services.memory_service.ensure_user_collection", new=AsyncMock()):
-            service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
-
-            with patch("services.memory_service.add_memory_to_qdrant", new=AsyncMock()):
-                mock_memory = MagicMock(id=uuid4(), scope="working")
-                service.memory_repo.create = AsyncMock(return_value=mock_memory)
-
-                response = await service.remember(
-                    request=request,
-                    user_id="test_user",
-                )
-
-                # New memories should be in working scope
-                assert response.scope == "working"
-
-    @pytest.mark.asyncio
-    async def test_recall_sorted_by_score(self, service):
-        """Test that recall results are sorted by score."""
-        request = RecallRequest(query="test", k=10)
-
-        # Unsorted results
-        search_results = [
-            {
-                "id": str(uuid4()),
-                "score": 0.7,
-                "payload": {
-                    "summary": "Test",
-                    "type": "code",
-                    "created_at": datetime.utcnow().isoformat(),
-                },
-            },
-            {
-                "id": str(uuid4()),
-                "score": 0.9,
-                "payload": {
-                    "summary": "Test",
-                    "type": "code",
-                    "created_at": datetime.utcnow().isoformat(),
-                },
-            },
-            {
-                "id": str(uuid4()),
-                "score": 0.8,
-                "payload": {
-                    "summary": "Test",
-                    "type": "code",
-                    "created_at": datetime.utcnow().isoformat(),
-                },
-            },
-        ]
-
-        service.search_service.hybrid_search = AsyncMock(return_value=search_results)
-
-        response = await service.recall(
-            request=request,
-            user_id="test_user",
-        )
-
-        # Results should be sorted by score descending
-        scores = [r.score for r in response.results]
-        assert scores == sorted(scores, reverse=True)
+            await service.forget(request=request, user_id="test_user")

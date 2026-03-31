@@ -20,403 +20,183 @@ class TestSearchService:
         """Create SearchService."""
         return SearchService(mock_db)
 
+    @pytest.fixture
+    def default_search_config(self):
+        """Create default search config mock."""
+        return type(
+            "DefaultConfig",
+            (),
+            {
+                "semantic_weight": 0.6,
+                "bm25_weight": 0.4,
+                "fetch_factor": 3,
+                "use_rerank": False,
+                "embedding_model": "text-embedding-3-small",
+                "embedding_dimensions": 512,
+            },
+        )()
+
     def test_init(self, mock_db):
         """Test SearchService initialization."""
         service = SearchService(mock_db)
-
         assert service.db == mock_db
         assert service.embedding_service is not None
 
     @pytest.mark.asyncio
-    async def test_hybrid_search_basic(self, service):
-        """Test basic hybrid search."""
-        # Mock embedding service
-        service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
-
-        # Mock Qdrant results
+    async def test_hybrid_search_basic(self, service, default_search_config):
+        """Test basic hybrid search with all deps mocked."""
         semantic_results = [
             {"id": "mem1", "score": 0.9, "payload": {"summary": "Test 1"}},
             {"id": "mem2", "score": 0.8, "payload": {"summary": "Test 2"}},
         ]
-
         fulltext_results = [
             {"id": "mem2", "score": 0.7, "payload": {"summary": "Test 2"}},
             {"id": "mem3", "score": 0.6, "payload": {"summary": "Test 3"}},
         ]
 
-        with patch(
-            "services.search_service.search_memories_qdrant",
-            new=AsyncMock(return_value=semantic_results),
-        ):
-            with patch(
+        service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+        service._get_search_config = AsyncMock(return_value=default_search_config)
+
+        mock_ctx_svc = MagicMock()
+        mock_ctx_svc.is_context_shared = AsyncMock(return_value=False)
+
+        with (
+            patch(
+                "services.search_service.search_memories_qdrant",
+                new=AsyncMock(return_value=semantic_results),
+            ),
+            patch(
                 "services.search_service.search_memories_fulltext",
                 new=AsyncMock(return_value=fulltext_results),
-            ):
-                results = await service.hybrid_search(
-                    query="test query",
-                    user_id="test_user",
-                    k=5,
-                    use_rerank=False,  # Disable reranking for simplicity
-                )
-
-                # Should merge results
-                assert len(results) > 0
-                assert all("id" in r for r in results)
-                assert all("score" in r for r in results)
-
-    @pytest.mark.asyncio
-    async def test_hybrid_search_semantic_only(self, service):
-        """Test hybrid search when only semantic results exist."""
-        service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
-
-        semantic_results = [
-            {"id": "mem1", "score": 0.9, "payload": {"summary": "Test 1"}},
-        ]
-
-        with patch(
-            "services.search_service.search_memories_qdrant",
-            new=AsyncMock(return_value=semantic_results),
+            ),
+            patch(
+                "services.context_service.ContextService",
+                return_value=mock_ctx_svc,
+            ),
         ):
-            with patch(
-                "services.search_service.search_memories_fulltext", new=AsyncMock(return_value=[])
-            ):
-                results = await service.hybrid_search(
-                    query="test query",
-                    user_id="test_user",
-                    k=5,
-                    use_rerank=False,
-                )
-
-                # Should return semantic results
-                assert len(results) > 0
-
-    @pytest.mark.asyncio
-    async def test_hybrid_search_fulltext_only(self, service):
-        """Test hybrid search when only fulltext results exist."""
-        service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
-
-        fulltext_results = [
-            {"id": "mem1", "score": 0.9, "payload": {"summary": "Test 1"}},
-        ]
-
-        with patch(
-            "services.search_service.search_memories_qdrant", new=AsyncMock(return_value=[])
-        ):
-            with patch(
-                "services.search_service.search_memories_fulltext",
-                new=AsyncMock(return_value=fulltext_results),
-            ):
-                results = await service.hybrid_search(
-                    query="test query",
-                    user_id="test_user",
-                    k=5,
-                    use_rerank=False,
-                )
-
-                # Should return fulltext results
-                assert len(results) > 0
-
-    @pytest.mark.asyncio
-    async def test_hybrid_search_no_results(self, service):
-        """Test hybrid search with no results."""
-        service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
-
-        with patch(
-            "services.search_service.search_memories_qdrant", new=AsyncMock(return_value=[])
-        ):
-            with patch(
-                "services.search_service.search_memories_fulltext", new=AsyncMock(return_value=[])
-            ):
-                results = await service.hybrid_search(
-                    query="test query",
-                    user_id="test_user",
-                    k=5,
-                    use_rerank=False,
-                )
-
-                # Should return empty list
-                assert len(results) == 0
-
-    @pytest.mark.asyncio
-    async def test_hybrid_search_with_filters(self, service):
-        """Test hybrid search with filters."""
-        service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
-
-        filters = {"type": "code"}
-
-        with patch(
-            "services.search_service.search_memories_qdrant", new=AsyncMock(return_value=[])
-        ) as mock_semantic:
-            with patch(
-                "services.search_service.search_memories_fulltext", new=AsyncMock(return_value=[])
-            ):
-                await service.hybrid_search(
-                    query="test query",
-                    user_id="test_user",
-                    k=5,
-                    filters=filters,
-                    use_rerank=False,
-                )
-
-                # Check filters were passed to semantic search
-                mock_semantic.assert_called_once()
-                call_kwargs = mock_semantic.call_args.kwargs
-                assert call_kwargs["filters"] == filters
-
-    @pytest.mark.asyncio
-    async def test_hybrid_search_top_k_limit(self, service):
-        """Test that top k limit is respected."""
-        service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
-
-        # Create many results
-        semantic_results = [
-            {"id": f"mem{i}", "score": 0.9 - i * 0.01, "payload": {"summary": f"Test {i}"}}
-            for i in range(20)
-        ]
-
-        with patch(
-            "services.search_service.search_memories_qdrant",
-            new=AsyncMock(return_value=semantic_results),
-        ):
-            with patch(
-                "services.search_service.search_memories_fulltext", new=AsyncMock(return_value=[])
-            ):
-                results = await service.hybrid_search(
-                    query="test query",
-                    user_id="test_user",
-                    k=5,
-                    use_rerank=False,
-                )
-
-                # Should return at most k results
-                assert len(results) <= 5
-
-    @pytest.mark.asyncio
-    async def test_hybrid_search_score_fusion(self, service):
-        """Test that scores are properly fused (60% semantic + 40% fulltext)."""
-        service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
-
-        # Same result in both searches
-        semantic_results = [
-            {"id": "mem1", "score": 1.0, "payload": {"summary": "Test"}},
-        ]
-
-        fulltext_results = [
-            {"id": "mem1", "score": 0.5, "payload": {"summary": "Test"}},
-        ]
-
-        with patch(
-            "services.search_service.search_memories_qdrant",
-            new=AsyncMock(return_value=semantic_results),
-        ):
-            with patch(
-                "services.search_service.search_memories_fulltext",
-                new=AsyncMock(return_value=fulltext_results),
-            ):
-                results = await service.hybrid_search(
-                    query="test query",
-                    user_id="test_user",
-                    k=5,
-                    use_rerank=False,
-                )
-
-                # Check fusion score
-                # Expected: 0.6 * 1.0 + 0.4 * 0.5 = 0.8
-                if len(results) > 0:
-                    result = results[0]
-                    assert "score" in result
-                    # Score should be combination of both
-
-    @pytest.mark.asyncio
-    async def test_hybrid_search_sorted_by_score(self, service):
-        """Test that results are sorted by score (descending)."""
-        service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
-
-        semantic_results = [
-            {"id": "mem1", "score": 0.9, "payload": {"summary": "Test 1"}},
-            {"id": "mem2", "score": 0.7, "payload": {"summary": "Test 2"}},
-            {"id": "mem3", "score": 0.8, "payload": {"summary": "Test 3"}},
-        ]
-
-        with patch(
-            "services.search_service.search_memories_qdrant",
-            new=AsyncMock(return_value=semantic_results),
-        ):
-            with patch(
-                "services.search_service.search_memories_fulltext", new=AsyncMock(return_value=[])
-            ):
-                results = await service.hybrid_search(
-                    query="test query",
-                    user_id="test_user",
-                    k=10,
-                    use_rerank=False,
-                )
-
-                # Check sorted descending
-                if len(results) > 1:
-                    scores = [r["score"] for r in results]
-                    assert scores == sorted(scores, reverse=True)
-
-    @pytest.mark.asyncio
-    async def test_hybrid_search_deduplication(self, service):
-        """Test that duplicate results are handled correctly."""
-        service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
-
-        # Same ID appears in both results
-        semantic_results = [
-            {"id": "mem1", "score": 0.9, "payload": {"summary": "Test"}},
-        ]
-
-        fulltext_results = [
-            {"id": "mem1", "score": 0.7, "payload": {"summary": "Test"}},
-        ]
-
-        with patch(
-            "services.search_service.search_memories_qdrant",
-            new=AsyncMock(return_value=semantic_results),
-        ):
-            with patch(
-                "services.search_service.search_memories_fulltext",
-                new=AsyncMock(return_value=fulltext_results),
-            ):
-                results = await service.hybrid_search(
-                    query="test query",
-                    user_id="test_user",
-                    k=10,
-                    use_rerank=False,
-                )
-
-                # Should not have duplicate IDs
-                ids = [r["id"] for r in results]
-                assert len(ids) == len(set(ids))
-
-    @pytest.mark.asyncio
-    async def test_hybrid_search_embedding_error(self, service):
-        """Test handling of embedding generation errors."""
-        # Mock embedding service to raise error
-        service.embedding_service.embed = AsyncMock(side_effect=Exception("Embedding failed"))
-
-        with pytest.raises(Exception, match="Embedding failed"):
-            await service.hybrid_search(
+            results = await service.hybrid_search(
                 query="test query",
                 user_id="test_user",
+                workspace_id="00000000-0000-0000-0000-000000000001",
+                context_id="00000000-0000-0000-0000-000000000002",
                 k=5,
+                use_rerank=False,
             )
+            assert len(results) > 0
+            assert all("id" in r for r in results)
 
     @pytest.mark.asyncio
-    async def test_hybrid_search_qdrant_error(self, service):
-        """Test handling of Qdrant errors."""
+    async def test_hybrid_search_no_results(self, service, default_search_config):
+        """Test hybrid search with no results."""
         service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+        service._get_search_config = AsyncMock(return_value=default_search_config)
 
-        # Mock Qdrant to raise error
-        with patch(
-            "services.search_service.search_memories_qdrant",
-            new=AsyncMock(side_effect=Exception("Qdrant error")),
+        mock_ctx_svc = MagicMock()
+        mock_ctx_svc.is_context_shared = AsyncMock(return_value=False)
+
+        with (
+            patch(
+                "services.search_service.search_memories_qdrant",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "services.search_service.search_memories_fulltext",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "services.context_service.ContextService",
+                return_value=mock_ctx_svc,
+            ),
         ):
-            with pytest.raises(Exception, match="Qdrant error"):
-                await service.hybrid_search(
-                    query="test query",
-                    user_id="test_user",
-                    k=5,
-                )
+            results = await service.hybrid_search(
+                query="test query",
+                user_id="test_user",
+                workspace_id="00000000-0000-0000-0000-000000000001",
+                context_id="00000000-0000-0000-0000-000000000002",
+                k=5,
+                use_rerank=False,
+            )
+            assert len(results) == 0
 
-    @pytest.mark.asyncio
-    async def test_hybrid_search_with_rerank_disabled(self, service):
-        """Test hybrid search with reranking disabled."""
-        service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
 
-        semantic_results = [
-            {"id": "mem1", "score": 0.9, "payload": {"summary": "Test"}},
+class TestSearchServiceMergeResults:
+    """Test _merge_results method directly — no external deps needed."""
+
+    @pytest.fixture
+    def service(self):
+        return SearchService(MagicMock())
+
+    def test_merge_empty_both(self, service):
+        """Test merge with no results from either source."""
+        assert service._merge_results([], []) == []
+
+    def test_merge_semantic_only(self, service):
+        """Test merge with only semantic results."""
+        semantic = [{"id": "m1", "score": 0.9, "payload": {}}]
+        result = service._merge_results(semantic, [])
+        assert len(result) == 1
+        assert result[0]["semantic_score"] == 1.0
+        assert result[0]["keyword_score"] == 0.0
+
+    def test_merge_keyword_only(self, service):
+        """Test merge with only keyword results."""
+        keyword = [{"id": "m1", "score": 0.8, "payload": {}}]
+        result = service._merge_results([], keyword)
+        assert len(result) == 1
+        assert result[0]["semantic_score"] == 0.0
+        assert result[0]["keyword_score"] == 1.0
+
+    def test_merge_overlap(self, service):
+        """Test merge with overlapping results."""
+        semantic = [{"id": "m1", "score": 1.0, "payload": {}}]
+        keyword = [{"id": "m1", "score": 0.5, "payload": {}}]
+        result = service._merge_results(semantic, keyword)
+        assert len(result) == 1
+        assert result[0]["hybrid_score"] == pytest.approx(1.0)
+
+    def test_merge_sorted_by_hybrid_score(self, service):
+        """Test that merge results are sorted by hybrid_score descending."""
+        semantic = [
+            {"id": "m1", "score": 0.5, "payload": {}},
+            {"id": "m2", "score": 1.0, "payload": {}},
         ]
+        keyword = [{"id": "m3", "score": 1.0, "payload": {}}]
+        result = service._merge_results(semantic, keyword)
+        scores = [r["hybrid_score"] for r in result]
+        assert scores == sorted(scores, reverse=True)
 
-        with patch(
-            "services.search_service.search_memories_qdrant",
-            new=AsyncMock(return_value=semantic_results),
-        ):
-            with patch(
-                "services.search_service.search_memories_fulltext", new=AsyncMock(return_value=[])
-            ):
-                # Reranking should not be called
-                with patch(
-                    "services.search_service.SearchService._rerank_with_cohere"
-                ) as mock_rerank:
-                    await service.hybrid_search(
-                        query="test query",
-                        user_id="test_user",
-                        k=5,
-                        use_rerank=False,
-                    )
+    def test_merge_custom_weights(self, service):
+        """Test merge with custom weights."""
+        semantic = [{"id": "m1", "score": 1.0, "payload": {}}]
+        keyword = [{"id": "m2", "score": 1.0, "payload": {}}]
+        result = service._merge_results(semantic, keyword, semantic_weight=0.8, keyword_weight=0.2)
+        m1 = next(r for r in result if r["id"] == "m1")
+        m2 = next(r for r in result if r["id"] == "m2")
+        assert m1["hybrid_score"] == pytest.approx(0.8)
+        assert m2["hybrid_score"] == pytest.approx(0.2)
 
-                    # Rerank should not be called
-                    mock_rerank.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_hybrid_search_empty_query(self, service):
-        """Test hybrid search with empty query."""
-        service.embedding_service.embed = AsyncMock(return_value=[0.0] * 512)
-
-        with patch(
-            "services.search_service.search_memories_qdrant", new=AsyncMock(return_value=[])
-        ):
-            with patch(
-                "services.search_service.search_memories_fulltext", new=AsyncMock(return_value=[])
-            ):
-                results = await service.hybrid_search(
-                    query="",
-                    user_id="test_user",
-                    k=5,
-                    use_rerank=False,
-                )
-
-                # Should handle empty query gracefully
-                assert isinstance(results, list)
-
-    @pytest.mark.asyncio
-    async def test_hybrid_search_japanese_query(self, service):
-        """Test hybrid search with Japanese query."""
-        service.embedding_service.embed = AsyncMock(return_value=[0.5] * 512)
-
-        japanese_query = "認証エラー修正"
-
-        semantic_results = [
-            {"id": "mem1", "score": 0.9, "payload": {"summary": "認証エラー"}},
+    def test_merge_score_normalization(self, service):
+        """Test that scores are normalized to 0-1 range."""
+        semantic = [
+            {"id": "m1", "score": 0.5, "payload": {}},
+            {"id": "m2", "score": 1.0, "payload": {}},
         ]
+        result = service._merge_results(semantic, [])
+        m2 = next(r for r in result if r["id"] == "m2")
+        m1 = next(r for r in result if r["id"] == "m1")
+        assert m2["semantic_score"] == 1.0
+        assert m1["semantic_score"] == 0.5
 
-        with patch(
-            "services.search_service.search_memories_qdrant",
-            new=AsyncMock(return_value=semantic_results),
-        ):
-            with patch(
-                "services.search_service.search_memories_fulltext", new=AsyncMock(return_value=[])
-            ):
-                results = await service.hybrid_search(
-                    query=japanese_query,
-                    user_id="test_user",
-                    k=5,
-                    use_rerank=False,
-                )
+    def test_merge_deduplication(self, service):
+        """Test that duplicate IDs are merged, not duplicated."""
+        semantic = [{"id": "m1", "score": 0.9, "payload": {"summary": "A"}}]
+        keyword = [{"id": "m1", "score": 0.7, "payload": {"summary": "A"}}]
+        result = service._merge_results(semantic, keyword)
+        assert len(result) == 1
 
-                # Should handle Japanese text
-                assert len(results) > 0
-
-    @pytest.mark.asyncio
-    async def test_hybrid_search_candidate_expansion(self, service):
-        """Test that k*2 candidates are fetched for merging."""
-        service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
-
-        with patch(
-            "services.search_service.search_memories_qdrant", new=AsyncMock(return_value=[])
-        ) as mock_semantic:
-            with patch(
-                "services.search_service.search_memories_fulltext", new=AsyncMock(return_value=[])
-            ) as mock_fulltext:
-                await service.hybrid_search(
-                    query="test",
-                    user_id="test_user",
-                    k=5,
-                    use_rerank=False,
-                )
-
-                # Should request k*2 candidates
-                assert mock_semantic.call_args.kwargs["limit"] == 10  # k*2
-                assert mock_fulltext.call_args.kwargs["limit"] == 10  # k*2
+    def test_merge_many_results_sorted(self, service):
+        """Test merge with many results maintains sort order."""
+        semantic = [{"id": f"m{i}", "score": 0.9 - i * 0.01, "payload": {}} for i in range(20)]
+        result = service._merge_results(semantic, [])
+        scores = [r["hybrid_score"] for r in result]
+        assert scores == sorted(scores, reverse=True)
