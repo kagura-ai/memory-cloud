@@ -1,0 +1,354 @@
+"""MCP tool handlers: memory operations (remember, recall, forget, reference).
+
+Extracted from tools.py for modularity (Issue #7).
+"""
+
+import json
+import logging
+import time
+from typing import Any
+from uuid import UUID
+
+from mcp.types import TextContent
+
+from mcp_server.tools._helpers import (
+    _check_viewer_permission,
+    _context_response_fields,
+    _ContextNotFoundError,
+    _error_response,
+    _log_tool_usage,
+    _resolve_context,
+    _resolve_context_id,
+    _validate_memory_id,
+    execute_with_timeout,
+)
+
+logger = logging.getLogger(__name__)
+
+
+async def handle_remember(
+    args: dict[str, Any], user_id: str, workspace_id: UUID | None
+) -> list[TextContent]:
+    """Store a new memory."""
+    if "summary" not in args or "content" not in args or "type" not in args:
+        return _error_response(
+            "missing_fields",
+            "Missing required fields: summary, content, type",
+        )
+
+    from db.base import get_db
+    from models.schemas import RememberRequest
+    from services.memory_service import MemoryService
+
+    request = RememberRequest(
+        summary=args["summary"],
+        context_summary=args.get("context_summary"),
+        content=args["content"],
+        details=args.get("details"),
+        type=args["type"],
+        importance=args.get("importance", 0.5),
+        tags=args.get("tags", []),
+        context=args.get("context"),
+    )
+
+    start_time = time.time()
+    async for db in get_db():
+        try:
+            current_context_id = _resolve_context_id(args["context_id"])
+
+            perm_error = await _check_viewer_permission(
+                db, user_id, workspace_id, "create memories"
+            )
+            if perm_error:
+                return perm_error
+
+            current_context = await _resolve_context(db, user_id, current_context_id)
+
+            service = MemoryService(db)
+            result = await execute_with_timeout(
+                service.remember(
+                    request,
+                    user_id=user_id,
+                    client="mcp",
+                    current_context_id=current_context_id,
+                    current_workspace_id=workspace_id,
+                ),
+                operation_name="remember",
+            )
+
+            await _log_tool_usage(
+                db, user_id, "remember", start_time, 200, current_context_id, workspace_id
+            )
+            await db.commit()
+
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "status": "success",
+                            "memory_id": str(result.memory_id),
+                            "scope": result.scope,
+                            **_context_response_fields(current_context),
+                        }
+                    ),
+                )
+            ]
+        except _ContextNotFoundError as e:
+            await db.rollback()
+            return e.to_response()
+        except Exception:
+            await db.rollback()
+            await _log_tool_usage(
+                db,
+                user_id,
+                "remember",
+                start_time,
+                500,
+                args.get("context_id"),
+                workspace_id,
+            )
+            raise
+
+    # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")
+
+
+async def handle_recall(
+    args: dict[str, Any], user_id: str, workspace_id: UUID | None
+) -> list[TextContent]:
+    """Search memories with hybrid search."""
+    if "query" not in args:
+        return _error_response("missing_fields", "Missing required field: query")
+
+    from db.base import get_db
+    from models.schemas import RecallRequest
+    from services.memory_service import MemoryService
+
+    request = RecallRequest(
+        query=args["query"],
+        k=args.get("k", 5),
+        use_rerank=args.get("use_rerank", False),
+        filters=args.get("filters"),
+    )
+
+    start_time = time.time()
+    async for db in get_db():
+        try:
+            current_context_id = _resolve_context_id(args["context_id"])
+            current_context = await _resolve_context(db, user_id, current_context_id)
+
+            service = MemoryService(db)
+            result = await execute_with_timeout(
+                service.recall(
+                    request,
+                    user_id=user_id,
+                    current_context_id=current_context_id,
+                    current_workspace_id=workspace_id,
+                ),
+                operation_name="recall",
+            )
+
+            results_data = [
+                {
+                    "memory_id": str(r.memory_id),
+                    "summary": r.summary,
+                    "context_summary": r.context_summary,
+                    "type": r.type,
+                    "importance": r.importance,
+                    "scope": r.scope,
+                    "score": r.score,
+                    "tags": r.tags,
+                }
+                for r in result.results
+            ]
+
+            related_tags_data = [
+                {"tag": tag.tag, "count": tag.count, "sample_summary": tag.sample_summary}
+                for tag in result.related_tags
+            ]
+
+            await _log_tool_usage(
+                db, user_id, "recall", start_time, 200, current_context_id, workspace_id
+            )
+            await db.commit()
+
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "status": "success",
+                            "results": results_data,
+                            "count": len(results_data),
+                            "related_tags": related_tags_data,
+                            **_context_response_fields(current_context),
+                        }
+                    ),
+                )
+            ]
+        except _ContextNotFoundError as e:
+            await db.rollback()
+            return e.to_response()
+        except Exception:
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "recall", start_time, 500, args.get("context_id"), workspace_id
+            )
+            raise
+
+    # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")
+
+
+async def handle_forget(
+    args: dict[str, Any], user_id: str, workspace_id: UUID | None
+) -> list[TextContent]:
+    """Delete memories (soft delete)."""
+    from db.base import get_db
+    from models.schemas import ForgetRequest
+    from services.memory_service import MemoryService
+
+    memory_id = args.get("memory_id")
+    request = ForgetRequest(
+        memory_id=UUID(memory_id) if memory_id else None,
+        query=args.get("query"),
+        k=args.get("k", 10),
+    )
+
+    start_time = time.time()
+    async for db in get_db():
+        try:
+            current_context_id = _resolve_context_id(args["context_id"])
+
+            perm_error = await _check_viewer_permission(
+                db, user_id, workspace_id, "delete memories"
+            )
+            if perm_error:
+                return perm_error
+
+            current_context = await _resolve_context(db, user_id, current_context_id)
+
+            service = MemoryService(db)
+            result = await execute_with_timeout(
+                service.forget(
+                    request,
+                    user_id=user_id,
+                    current_context_id=current_context_id,
+                ),
+                operation_name="forget",
+            )
+
+            await _log_tool_usage(
+                db, user_id, "forget", start_time, 200, current_context_id, workspace_id
+            )
+            await db.commit()
+
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "status": "success",
+                            "deleted_count": result.deleted_count,
+                            "memory_ids": [str(mid) for mid in result.memory_ids],
+                            "context_id": str(current_context.id) if current_context else None,
+                            "context_name": current_context.name if current_context else None,
+                        }
+                    ),
+                )
+            ]
+        except _ContextNotFoundError as e:
+            await db.rollback()
+            return e.to_response()
+        except Exception:
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "forget", start_time, 500, args.get("context_id"), workspace_id
+            )
+            raise
+
+    # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")
+
+
+async def handle_reference(
+    args: dict[str, Any], user_id: str, workspace_id: UUID | None
+) -> list[TextContent]:
+    """Get complete memory details (Layer 3)."""
+    memory_uuid, error = _validate_memory_id(args, "reference")
+    if error or memory_uuid is None:
+        return error or _error_response("invalid_memory_id_format", "Invalid memory_id")
+
+    from db.base import get_db
+    from models.schemas import ReferenceRequest
+    from services.memory_service import MemoryService
+
+    request = ReferenceRequest(memory_id=memory_uuid)
+
+    start_time = time.time()
+    async for db in get_db():
+        try:
+            current_context_id = _resolve_context_id(args["context_id"])
+            await _resolve_context(db, user_id, current_context_id)
+
+            service = MemoryService(db)
+            try:
+                result = await execute_with_timeout(
+                    service.reference(request.memory_id, user_id=user_id),
+                    operation_name="reference",
+                )
+            except Exception as e:
+                from utils.exceptions import NotFoundException
+
+                if isinstance(e, NotFoundException):
+                    return _error_response(
+                        "memory_not_found",
+                        f"Memory not found or you don't have access: {request.memory_id}",
+                        help="Use recall() to find memories you have access to.",
+                    )
+                raise
+
+            reference_data = {
+                "memory_id": str(result.memory_id),
+                "summary": result.summary,
+                "context_summary": result.context_summary,
+                "content": result.content,
+                "details": result.details,
+                "type": result.type,
+                "importance": result.importance,
+                "tags": result.tags,
+                "context": result.context,
+                "created_at": result.created_at.isoformat(),
+                "client": result.client,
+            }
+
+            await _log_tool_usage(
+                db, user_id, "reference", start_time, 200, current_context_id, workspace_id
+            )
+            await db.commit()
+
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps({"status": "success", "memory": reference_data}),
+                )
+            ]
+        except _ContextNotFoundError as e:
+            await db.rollback()
+            return e.to_response()
+        except Exception:
+            await db.rollback()
+            await _log_tool_usage(
+                db,
+                user_id,
+                "reference",
+                start_time,
+                500,
+                args.get("context_id"),
+                workspace_id,
+            )
+            raise
+
+    # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")

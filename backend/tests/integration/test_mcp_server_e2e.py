@@ -1,6 +1,5 @@
 """End-to-end tests for MCP Server."""
 
-from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -37,8 +36,7 @@ class TestMCPServerE2E:
         # Should return SSE or authentication required
         assert response.status_code in [200, 401, 403]
 
-    @patch("mcp_server.tools.MemoryService")
-    def test_mcp_remember_tool(self, mock_service, client):
+    def test_mcp_remember_tool(self, client):
         """Test MCP remember tool execution."""
         # This would require actual SSE/JSON-RPC implementation
         # For now, just verify the tools module is importable
@@ -46,29 +44,25 @@ class TestMCPServerE2E:
 
         assert handle_remember is not None
 
-    @patch("mcp_server.tools.MemoryService")
-    def test_mcp_recall_tool(self, mock_service, client):
+    def test_mcp_recall_tool(self, client):
         """Test MCP recall tool execution."""
         from mcp_server.tools import handle_recall
 
         assert handle_recall is not None
 
-    @patch("mcp_server.tools.MemoryService")
-    def test_mcp_forget_tool(self, mock_service, client):
+    def test_mcp_forget_tool(self, client):
         """Test MCP forget tool execution."""
         from mcp_server.tools import handle_forget
 
         assert handle_forget is not None
 
-    @patch("mcp_server.tools.MemoryService")
-    def test_mcp_reference_tool(self, mock_service, client):
+    def test_mcp_reference_tool(self, client):
         """Test MCP reference tool execution."""
         from mcp_server.tools import handle_reference
 
         assert handle_reference is not None
 
-    @patch("mcp_server.tools.MemoryService")
-    def test_mcp_explore_tool(self, mock_service, client):
+    def test_mcp_explore_tool(self, client):
         """Test MCP explore tool execution."""
         from mcp_server.tools import handle_explore
 
