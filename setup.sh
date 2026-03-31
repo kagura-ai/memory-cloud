@@ -39,23 +39,35 @@ echo "==> Step 1/4: Configure environment"
 cd backend && python3 -m src.cli.setup_env
 cd ..
 
-# Step 2: Start Docker services
+# Step 2: Install Python dependencies
 echo ""
-echo "==> Step 2/4: Start Docker services"
+echo "==> Step 2/5: Install Python dependencies"
+cd backend && pip install -q -e ".[dev]" 2>&1 | tail -1
+cd ..
+
+# Step 3: Start Docker services
+echo ""
+echo "==> Step 3/5: Start Docker services"
 docker compose up -d
 echo "Waiting for services to be healthy..."
-sleep 5
+# Wait for postgres to be healthy (up to 30s)
+for i in $(seq 1 30); do
+  if docker compose ps --format json | grep -q '"healthy"'; then
+    break
+  fi
+  sleep 1
+done
 docker compose ps
 
-# Step 3: Run migrations
+# Step 4: Run migrations
 echo ""
-echo "==> Step 3/4: Run database migrations"
+echo "==> Step 4/5: Run database migrations"
 cd backend && alembic upgrade head
 cd ..
 
-# Step 4: Create admin
+# Step 5: Create admin
 echo ""
-echo "==> Step 4/4: Create admin account"
+echo "==> Step 5/5: Create admin account"
 echo "(Interactive — will prompt for login ID, password, and MFA)"
 echo ""
 cd backend && python3 -m src.cli.create_admin

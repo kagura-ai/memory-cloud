@@ -166,7 +166,7 @@ def _configure_embedding_provider(db: Session, user_id: str, workspace_id) -> st
             if resp.status == 200:
                 return "ollama"
     except Exception:
-        pass
+        pass  # Ollama not running or unreachable — expected on most setups
 
     return None
 

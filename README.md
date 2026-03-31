@@ -106,16 +106,16 @@ git clone https://github.com/kagura-ai/memory-cloud.git
 cd memory-cloud
 
 # 2. Configure environment (generates secrets, prompts for API keys)
-cd backend && python -m src.cli.setup_env
+(cd backend && python -m src.cli.setup_env)
 
 # 3. Start all services
 docker compose up -d
 
 # 4. Run migrations
-cd backend && alembic upgrade head
+(cd backend && alembic upgrade head)
 
 # 5. Create admin account (interactive — sets password, MFA, API key, embedding provider)
-cd backend && python -m src.cli.create_admin
+(cd backend && python -m src.cli.create_admin)
 
 # Backend API:  http://localhost:8080
 # Frontend UI:  http://localhost:3000

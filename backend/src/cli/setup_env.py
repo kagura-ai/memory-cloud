@@ -39,13 +39,34 @@ def _read_env_file(path: Path) -> dict[str, str]:
     return env
 
 
+_PLACEHOLDER_VALUES = {"change-me-api-key-secret", "change-me-jwt-secret", ""}
+
+
 def _set_env_value(key: str, value: str):
-    """Set key=value in .env.local (append if missing, skip if exists)."""
+    """Set key=value in .env.local (append if missing, replace if placeholder)."""
     env = _read_env_file(_env_local)
-    if key in env:
-        return  # Already set, don't duplicate
-    with open(_env_local, "a") as f:
-        f.write(f"\n{key}={value}\n")
+    existing = env.get(key)
+    if existing and existing not in _PLACEHOLDER_VALUES:
+        return  # Already set with real value, don't duplicate
+
+    if existing is not None:
+        # Replace placeholder in-place
+        content = _env_local.read_text()
+        lines = content.splitlines()
+        new_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                k, _, _ = stripped.partition("=")
+                if k.strip() == key:
+                    new_lines.append(f"{key}={value}")
+                    continue
+            new_lines.append(line)
+        _env_local.write_text("\n".join(new_lines) + "\n")
+    else:
+        # Append new key
+        with open(_env_local, "a") as f:
+            f.write(f"\n{key}={value}\n")
 
 
 def setup_env():
@@ -102,7 +123,9 @@ def setup_env():
         else:
             print("  → Skipped (Ollama or manual setup later)")
 
-    # 5. Ollama detection
+    # 5. Ollama detection — re-read env to pick up any changes
+    env = _read_env_file(_env_local)
+    has_openai = bool(env.get("OPENAI_API_KEY"))
     ollama_url = env.get("OLLAMA_BASE_URL", "http://localhost:11434")
     try:
         import urllib.request
@@ -111,11 +134,11 @@ def setup_env():
         with urllib.request.urlopen(req, timeout=3) as resp:
             if resp.status == 200:
                 print(f"✓ Ollama detected at {ollama_url}")
-                if not env.get("OPENAI_API_KEY"):
+                if not has_openai:
                     print("  → You can use Ollama for embeddings:")
                     print("    Set EMBEDDING_PROVIDER=ollama in .env.local")
     except Exception:
-        if not env.get("OPENAI_API_KEY"):
+        if not has_openai:
             print(f"\n⚠ No Ollama at {ollama_url} and no OPENAI_API_KEY.")
             print("  Memory features require one of these. Configure before using remember/recall.")
 
