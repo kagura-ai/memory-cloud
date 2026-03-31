@@ -26,16 +26,7 @@ class TestActivationSpreader:
         """Generate valid UUID node IDs."""
         return {f"node{i}": str(uuid4()) for i in range(1, 6)}
 
-    @pytest.fixture
-    def mock_graph(self):
-        """Create mock graph service with SQL backend."""
-        graph = MagicMock()
-        graph.user_id = "test_user"
-        graph.workspace_id = None
-        graph.context_id = None
-        graph.edge_repo = MagicMock()
-        graph.edge_repo.get_outgoing_edges = AsyncMock(return_value=[])
-        return graph
+    # mock_graph from neural/conftest.py
 
     @pytest.fixture
     def spreader(self, mock_graph, config):

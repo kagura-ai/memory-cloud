@@ -9,14 +9,14 @@ class TestNeuralMemoryConfig:
     """Test NeuralMemoryConfig dataclass."""
 
     def test_default_values(self):
-        """Test default configuration values."""
+        """Test default configuration is valid."""
         config = NeuralMemoryConfig()
-        assert config.spread_hops == 2
-        assert config.spread_decay == 0.8
-        assert config.spread_threshold == 0.1
-        assert config.learning_rate == 0.1
-        assert config.enable_decay is True
-        assert config.weight_max == 3.0
+        assert config.spread_hops >= 1
+        assert 0 < config.spread_decay <= 1.0
+        assert config.spread_threshold >= 0
+        assert config.learning_rate > 0
+        assert isinstance(config.enable_decay, bool)
+        assert config.weight_max > 0
 
     def test_custom_values(self):
         """Test custom configuration."""

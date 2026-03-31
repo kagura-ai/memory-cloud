@@ -67,24 +67,10 @@ class TestEffectiveQuotaService:
         quotas = await service.get_effective_quotas(uuid4())
         assert quotas["mcp_calls_per_day"] > 200  # base + 200
 
+    @pytest.mark.skip(reason="Zero-bonus path triggers AddonCalculatorService which needs real DB")
     @pytest.mark.asyncio
     async def test_no_addons_returns_base(self, service, mock_db):
-        """With zero addon bonuses, returns base plan limits."""
-        ws = self._mock_workspace(
-            addon_memory_bonus=0,
-            addon_mcp_quota_bonus=0,
-            addon_rest_quota_bonus=0,
-            addon_public_quota_bonus=0,
-            addon_member_bonus=0,
-            addon_context_bonus=0,
-        )
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = ws
-        mock_db.execute = AsyncMock(return_value=mock_result)
-
-        # When all bonuses are 0, recalculate is triggered internally
-        # This calls AddonCalculatorService which needs real DB — skip this path
-        # The important test is test_effective_memory_includes_addon above
+        """With zero addon bonuses, recalculation is triggered (needs integration test)."""
 
     @pytest.mark.asyncio
     async def test_workspace_not_found(self, service, mock_db):
@@ -128,30 +114,29 @@ class TestEffectiveQuotaService:
 
 
 class TestDashboardAddonReflection:
-    """Test that dashboard would show correct limits with addon bonuses.
+    """Verify EffectiveQuotaService returns correct values for dashboard display."""
 
-    Simulates the calculation done in workspace.py usage endpoint.
-    """
+    @pytest.mark.asyncio
+    async def test_effective_limits_with_addons(self):
+        """Service returns base + addon for all quota types."""
+        mock_db = MagicMock()
+        ws = MagicMock()
+        ws.plan_name = "pro"
+        ws.memory_limit = 1000
+        ws.addon_memory_bonus = 500
+        ws.addon_mcp_quota_bonus = 200
+        ws.addon_rest_quota_bonus = 100
+        ws.addon_public_quota_bonus = 50
+        ws.addon_member_bonus = 3
+        ws.addon_context_bonus = 5
 
-    def test_effective_limits_calculation(self):
-        """Verify the formula: effective = base + addon bonus."""
-        # Simulate workspace fields
-        memory_limit = 1000
-        addon_memory_bonus = 500
-        daily_api_limit = 1000
-        addon_mcp_quota_bonus = 200
-        addon_rest_quota_bonus = 100
-        weekly_api_limit = 5000
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = ws
+        mock_db.execute = AsyncMock(return_value=mock_result)
 
-        effective_memory = memory_limit + addon_memory_bonus
-        effective_daily = daily_api_limit + addon_mcp_quota_bonus + addon_rest_quota_bonus
-        effective_weekly = weekly_api_limit + (addon_mcp_quota_bonus + addon_rest_quota_bonus) * 7
+        service = EffectiveQuotaService(mock_db)
+        quotas = await service.get_effective_quotas(uuid4())
 
-        assert effective_memory == 1500
-        assert effective_daily == 1300
-        assert effective_weekly == 7100
-
-    def test_no_addon_unchanged(self):
-        """Without addons, limits are unchanged."""
-        assert 1000 + 0 == 1000
-        assert 5000 + 0 * 7 == 5000
+        assert quotas["memory_limit"] == 1500
+        assert quotas["mcp_calls_per_day"] > 200  # base_mcp + 200
+        assert quotas["rest_calls_per_day"] > 100  # base_rest + 100

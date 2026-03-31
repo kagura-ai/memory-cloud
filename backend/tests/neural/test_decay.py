@@ -1,7 +1,6 @@
 """Tests for DecayManager."""
 
 import math
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -24,16 +23,7 @@ class TestDecayManager:
             consolidation_importance_min=0.7,
         )
 
-    @pytest.fixture
-    def mock_graph(self):
-        """Create mock graph service."""
-        graph = MagicMock()
-        graph.user_id = "test_user"
-        graph.db = MagicMock()
-        graph.edge_repo = MagicMock()
-        graph.edge_repo.bulk_decay_weights = AsyncMock(return_value=10)
-        graph.edge_repo.prune_weak_edges = AsyncMock(return_value=2)
-        return graph
+    # mock_graph from neural/conftest.py
 
     @pytest.fixture
     def manager(self, mock_graph, config):

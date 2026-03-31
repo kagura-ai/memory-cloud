@@ -2,7 +2,6 @@
 
 import math
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -31,16 +30,7 @@ class TestUnifiedScorer:
             spread_threshold=0.1,
         )
 
-    @pytest.fixture
-    def mock_graph(self):
-        """Create mock graph service."""
-        graph = MagicMock()
-        graph.user_id = "test_user"
-        graph.workspace_id = None
-        graph.context_id = None
-        graph.edge_repo = MagicMock()
-        graph.edge_repo.get_outgoing_edges = AsyncMock(return_value=[])
-        return graph
+    # mock_graph from neural/conftest.py
 
     @pytest.fixture
     def activation_spreader(self, mock_graph, config):
@@ -323,9 +313,12 @@ class TestUnifiedScorer:
         assert abs(result.score - expected_score) < 0.001
 
     def test_scoring_weights_normalized(self, config):
-        """Test that scoring weights are normalized (excluding zeta penalty)."""
+        """Test that scoring weights are normalized (excluding zeta penalty).
+
+        zeta is a redundancy penalty, not a scoring weight,
+        so it is excluded from normalization.
+        """
         weights = config.scoring_weights_normalized
-        # Alpha through epsilon should sum to 1.0 (zeta is penalty, not normalized)
         scoring_sum = (
             weights["alpha"]
             + weights["beta"]

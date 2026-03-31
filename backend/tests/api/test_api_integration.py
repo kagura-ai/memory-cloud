@@ -44,27 +44,16 @@ TEST_USER = {
 
 
 def _check_db_available():
-    """Check if test DB is available using sync connection."""
+    """Check if test DB is available using sync psycopg2 connection."""
     try:
         import psycopg2
 
-        # Parse asyncpg URL to psycopg2 format
         url = TEST_DB_URL.replace("postgresql+asyncpg://", "postgresql://")
         conn = psycopg2.connect(url, connect_timeout=3)
         conn.close()
         return True
     except Exception:
-        try:
-            # Fallback: try socket connection
-            import socket
-
-            host = "localhost"
-            port = 5432
-            sock = socket.create_connection((host, port), timeout=2)
-            sock.close()
-            return True
-        except Exception:
-            return False
+        return False
 
 
 pytestmark = pytest.mark.skipif(
@@ -80,19 +69,15 @@ def db_engine():
 
     engine = create_async_engine(TEST_DB_URL, poolclass=NullPool, echo=False)
 
-    # Create tables
     async def _setup():
         async with engine.begin() as conn:
             await conn.run_sync(AuthBase.metadata.create_all)
             await conn.run_sync(MemoryBase.metadata.create_all)
 
-    asyncio.get_event_loop().run_until_complete(_setup())
+    asyncio.run(_setup())
     yield engine
 
-    async def _teardown():
-        await engine.dispose()
-
-    asyncio.get_event_loop().run_until_complete(_teardown())
+    asyncio.run(engine.dispose())
 
 
 @pytest.fixture

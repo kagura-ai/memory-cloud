@@ -1,7 +1,6 @@
 """Tests for HebbianLearner."""
 
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -13,24 +12,7 @@ from neural.models import ActivationState, MemoryKind, NeuralMemoryNode
 class TestHebbianLearner:
     """Test Hebbian learning algorithm."""
 
-    @pytest.fixture
-    def mock_graph(self):
-        """Create mock graph service."""
-        graph = MagicMock()
-        graph.user_id = "test_user"
-        graph.db = MagicMock()
-        graph.edge_repo = MagicMock()
-        graph.edge_repo.get_edge_weight = AsyncMock(return_value=0.5)
-        graph.edge_repo.update_edge_weight = AsyncMock(return_value=True)
-        graph.edge_repo.create_edge = AsyncMock()
-        graph.edge_repo.get_outgoing_edges_count = AsyncMock(return_value=5)
-        graph.edge_repo.prune_weakest_edges = AsyncMock(return_value=0)
-        # _get_current_weight uses graph.get_edge()
-        graph.get_edge = AsyncMock(return_value={"weight": 0.5})
-        graph.has_edge = AsyncMock(return_value=True)
-        graph.remove_edge = AsyncMock()
-        graph.update_edge = AsyncMock()
-        return graph
+    # mock_graph from neural/conftest.py
 
     @pytest.fixture
     def config(self):

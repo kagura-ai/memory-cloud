@@ -312,17 +312,15 @@ async def get_workspace_usage_current(
         )
         member_ids = [row[0] for row in members_result.all()]
 
-        # Calculate effective limits (base + addon bonuses)
-        effective_memory_limit = workspace.memory_limit + workspace.addon_memory_bonus
+        # Calculate effective limits (base + addon bonuses) via shared service
+        from services.effective_quota_service import EffectiveQuotaService
+
+        effective_quotas = await EffectiveQuotaService(db).get_effective_quotas(workspace_id)
+        effective_memory_limit = effective_quotas["memory_limit"]
         effective_daily_api_limit = (
-            workspace.daily_api_limit
-            + workspace.addon_mcp_quota_bonus
-            + workspace.addon_rest_quota_bonus
+            effective_quotas["mcp_calls_per_day"] + effective_quotas["rest_calls_per_day"]
         )
-        effective_weekly_api_limit = (
-            workspace.weekly_api_limit
-            + (workspace.addon_mcp_quota_bonus + workspace.addon_rest_quota_bonus) * 7
-        )
+        effective_weekly_api_limit = effective_daily_api_limit * 7
 
         if not member_ids:
             # Workspace has no members, return zero usage
