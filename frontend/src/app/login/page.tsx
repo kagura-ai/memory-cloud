@@ -530,6 +530,15 @@ function LoginContent() {
             </div>
           );
         })()}
+
+        <div className="mt-4 flex justify-center">
+          <button
+            onClick={() => router.push("/")}
+            className="text-sm font-medium text-gray-500 transition-colors hover:text-brand-green-600"
+          >
+            {t("backToHome")}
+          </button>
+        </div>
       </div>
     </div>
   );
