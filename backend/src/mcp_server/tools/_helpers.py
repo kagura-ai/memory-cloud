@@ -62,6 +62,23 @@ async def execute_with_timeout(
 # ============================================================================
 
 
+def _success_response(**data: Any) -> list[TextContent]:
+    """Create a standardized success response.
+
+    Args:
+        **data: Fields to include in the response
+
+    Returns:
+        List with single TextContent success response
+    """
+    return [
+        TextContent(
+            type="text",
+            text=json.dumps({"status": "success", **data}),
+        )
+    ]
+
+
 def _error_response(error: str, message: str, **extra: Any) -> list[TextContent]:
     """Create a standardized error response.
 
@@ -307,6 +324,8 @@ async def _log_tool_usage(
 
     response_time_ms = int((time.time() - start_time) * 1000)
     try:
+        # Use independent session: log_usage() calls db.commit() internally,
+        # which would prematurely commit the handler's transaction if shared.
         async for log_db in get_db():
             await log_usage(
                 db=log_db,
