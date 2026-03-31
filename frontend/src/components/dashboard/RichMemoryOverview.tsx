@@ -140,7 +140,7 @@ export const RichMemoryOverview = forwardRef<RichMemoryOverviewRef, RichMemoryOv
         {[...Array(4)].map((_, i) => (
           <Card key={i}>
             <CardContent className="p-6">
-              <div className="h-64 animate-pulse rounded bg-gray-200" />
+              <div className="h-64 animate-pulse rounded bg-gray-200 dark:bg-gray-700" />
             </CardContent>
           </Card>
         ))}
@@ -235,7 +235,7 @@ export const RichMemoryOverview = forwardRef<RichMemoryOverviewRef, RichMemoryOv
       {/* Section 2: Neural Memory Activity */}
       <div>
         <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
-          <Network className="h-6 w-6 text-purple-600" />
+          <Network className="h-6 w-6 text-purple-600 dark:text-purple-400" />
           {t('neuralActivity')}
         </h2>
 

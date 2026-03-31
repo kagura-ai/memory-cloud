@@ -23,6 +23,9 @@ logger = get_logger(__name__)
 # Lazy-loaded singleton
 _synonym_dict: dict[str, list[str]] | None = None
 
+# Cap expanded tokens to prevent BM25 score distortion from large synonym groups
+MAX_EXPANDED_TOKENS = 50
+
 # Default path: backend/src/data/sudachi_synonyms.txt
 _DEFAULT_PATH = Path(__file__).parent.parent / "data" / "sudachi_synonyms.txt"
 
@@ -123,12 +126,15 @@ def expand_query_tokens(tokens_str: str) -> str:
     for token in tokens_str.split():
         expanded.extend(expand_synonyms(token))
 
-    # Deduplicate while preserving order
+    # Deduplicate while preserving order, cap to prevent BM25 distortion
     seen: set[str] = set()
     result = []
     for t in expanded:
         if t not in seen:
             seen.add(t)
             result.append(t)
+            if len(result) >= MAX_EXPANDED_TOKENS:
+                logger.debug("synonym_expansion_capped", original_count=len(expanded))
+                break
 
     return " ".join(result)

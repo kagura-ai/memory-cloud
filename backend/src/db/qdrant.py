@@ -34,6 +34,7 @@ from config.database import QDRANT_URL
 from utils.exceptions import QdrantError
 from utils.logger import get_logger
 from utils.sparse_vector import build_query_sparse_vector
+from utils.synonyms import expand_query_tokens
 from utils.tokenizer import tokenize_for_search
 
 logger = get_logger(__name__)
@@ -493,8 +494,6 @@ async def search_memories_fulltext(
         )
 
         # Build sparse query vector from Sudachi-tokenized + synonym-expanded query
-        from utils.synonyms import expand_query_tokens
-
         tokenized_query = tokenize_for_search(query)
         expanded_query = expand_query_tokens(tokenized_query)
         query_indices, query_values = build_query_sparse_vector(expanded_query)
