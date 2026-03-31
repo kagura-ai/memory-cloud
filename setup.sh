@@ -6,9 +6,10 @@
 #
 # What this does:
 #   1. Configure .env.local (generate secrets, prompt for API keys)
-#   2. Start Docker services
-#   3. Run database migrations
-#   4. Create admin account (interactive)
+#   2. Install Python dependencies
+#   3. Start Docker services
+#   4. Run database migrations
+#   5. Create admin account (interactive)
 
 set -euo pipefail
 
@@ -42,8 +43,10 @@ cd ..
 # Step 2: Install Python dependencies
 echo ""
 echo "==> Step 2/5: Install Python dependencies"
-cd backend && pip install -q -e ".[dev]" 2>&1 | tail -1
+cd backend && pip install -e ".[dev]"
 cd ..
+echo "Installing kagura-memory SDK..."
+pip install kagura-memory
 
 # Step 3: Start Docker services
 echo ""

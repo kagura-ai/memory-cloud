@@ -75,10 +75,27 @@ def reset_password():
         # Reset password
         if choice in ("1", "3"):
             while True:
-                print("\nEnter new password (minimum 12 characters):")
-                password = getpass.getpass("  New Password: ")
+                print("\nPassword requirements:")
+                print("  - Minimum 12 characters")
+                print("  - At least 1 uppercase letter (A-Z)")
+                print("  - At least 1 lowercase letter (a-z)")
+                print("  - At least 1 digit (0-9)")
+                print("  - At least 1 special character (!@#$%^&*...)")
+                password = getpass.getpass("\n  New Password: ")
+
+                errors = []
                 if len(password) < 12:
-                    print("  ✗ Password must be at least 12 characters. Try again.")
+                    errors.append("at least 12 characters")
+                if not any(c.isupper() for c in password):
+                    errors.append("1 uppercase letter")
+                if not any(c.islower() for c in password):
+                    errors.append("1 lowercase letter")
+                if not any(c.isdigit() for c in password):
+                    errors.append("1 digit")
+                if not any(not c.isalnum() for c in password):
+                    errors.append("1 special character")
+                if errors:
+                    print(f"  ✗ Missing: {', '.join(errors)}. Try again.")
                     continue
 
                 password_confirm = getpass.getpass("  Confirm:      ")

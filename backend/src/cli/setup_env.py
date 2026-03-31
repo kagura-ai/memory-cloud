@@ -154,9 +154,10 @@ def setup_env():
     print("✓ Environment setup complete!")
     print(f"  Config: {_env_local}")
     print("\nNext steps:")
-    print("  1. docker compose up -d")
-    print("  2. cd backend && alembic upgrade head")
-    print("  3. cd backend && python -m src.cli.create_admin")
+    print("  1. cd backend && pip install -e '.[dev]' && pip install kagura-memory")
+    print("  2. docker compose up -d")
+    print("  3. cd backend && alembic upgrade head")
+    print("  4. cd backend && python -m src.cli.create_admin")
     print("=" * 50)
 
 
