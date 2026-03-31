@@ -991,6 +991,7 @@ export default function ContextsPage() {
                 <th className="px-4 py-3 text-center font-medium text-gray-600 dark:text-gray-300">{t('contextName')}</th>
                 <th className="px-4 py-3 text-center font-medium text-gray-600 dark:text-gray-300">{t('status')}</th>
                 <th className="px-4 py-3 text-center font-medium text-gray-600 dark:text-gray-300">{t('reranker')}</th>
+                <th className="px-4 py-3 text-center font-medium text-gray-600 dark:text-gray-300">{t('embeddingModel', { default: 'Embedding' })}</th>
                 <th className="px-4 py-3 text-center font-medium text-gray-600 dark:text-gray-300">{t('created')}</th>
                 <th className="px-4 py-3 text-center font-medium text-gray-600 dark:text-gray-300">{tCommon('actions')}</th>
               </tr>
@@ -1079,6 +1080,13 @@ export default function ContextsPage() {
                     ) : (
                       <span className="text-xs text-gray-400">—</span>
                     )}
+                  </td>
+
+                  {/* Embedding Model */}
+                  <td className="px-4 py-3 text-center">
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400">
+                      {context.embedding_model || 'text-embedding-3-small'}
+                    </span>
                   </td>
 
                   {/* Created */}

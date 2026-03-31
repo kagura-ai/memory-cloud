@@ -1087,6 +1087,7 @@
     "createdBy": "Created by",
     "you": "You",
     "reranker": "Reranker",
+    "embeddingModel": "Embedding",
     "rerankToggleFailed": "Failed to update reranking setting",
     "rerankOn": "Reranking active",
     "rerankOff": "Reranking off",

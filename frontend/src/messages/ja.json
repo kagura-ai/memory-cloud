@@ -1087,6 +1087,7 @@
     "createdBy": "作成者",
     "you": "あなた",
     "reranker": "リランカー",
+    "embeddingModel": "Embedding",
     "rerankToggleFailed": "リランキング設定の更新に失敗しました",
     "rerankOn": "リランキング有効",
     "rerankOff": "リランキング無効",
