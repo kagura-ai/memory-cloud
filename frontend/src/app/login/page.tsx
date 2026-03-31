@@ -183,8 +183,8 @@ function LoginContent() {
       <div className="pointer-events-none absolute -left-1/4 -top-1/4 h-96 w-96 rounded-full bg-brand-green-300/30 blur-3xl" />
       <div className="pointer-events-none absolute -right-1/4 -bottom-1/4 h-96 w-96 rounded-full bg-emerald-300/30 blur-3xl" />
 
-      <div className="absolute top-4 right-4">
-        <LanguageSelector />
+      <div className="absolute top-4 right-4 z-10">
+        <LanguageSelector className="bg-white/90 backdrop-blur-sm border border-gray-300 shadow-sm hover:bg-white text-gray-700" showLabel />
       </div>
 
       <div className="relative w-full max-w-md px-4">
@@ -263,7 +263,7 @@ function LoginContent() {
                         onClick={() => setShowAdminLogin(false)}
                         className="text-sm text-gray-400 hover:text-gray-600"
                       >
-                        {t("backToHome", { default: "← Back" })}
+                        {t("backToOAuth", { default: "← Back" })}
                       </button>
                     </div>
                     <form onSubmit={handlePasswordLogin} className="space-y-4">
@@ -505,22 +505,17 @@ function LoginContent() {
           </CardContent>
         </Card>
 
-        <div className="mt-6 flex items-center justify-between">
-          <button
-            onClick={() => router.push("/")}
-            className="text-sm font-medium text-gray-600 transition-colors hover:text-brand-green-600"
-          >
-            {t("backToHome")}
-          </button>
-          {authConfig?.password_login_enabled && !showAdminLogin && (
+        {authConfig?.password_login_enabled && !showAdminLogin && (
+          <div className="mt-6 flex justify-center">
             <button
               onClick={() => setShowAdminLogin(true)}
-              className="text-sm font-medium text-gray-400 transition-colors hover:text-gray-600"
+              className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white/60 px-4 py-2 text-sm font-medium text-gray-600 backdrop-blur-sm transition-colors hover:bg-white hover:text-brand-green-600"
             >
+              <Shield className="h-4 w-4" />
               {t("adminLogin")}
             </button>
-          )}
-        </div>
+          </div>
+        )}
       </div>
     </div>
   );
