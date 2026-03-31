@@ -75,8 +75,14 @@ def setup_env():
     print("Kagura Memory Cloud - Environment Setup")
     print("=" * 50)
 
-    # 1. Ensure .env.local exists
-    if not _env_local.exists():
+    # 1. Ensure .env.local exists (backup existing)
+    if _env_local.exists():
+        import shutil
+
+        bak_path = _env_local.with_suffix(".local.bak")
+        shutil.copy(_env_local, bak_path)
+        print(f"\n✓ Backed up existing {_env_local.name} → {bak_path.name}")
+    else:
         if _env_example.exists():
             import shutil
 
