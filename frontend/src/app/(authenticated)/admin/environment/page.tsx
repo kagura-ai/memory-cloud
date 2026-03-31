@@ -433,15 +433,22 @@ export default function EnvironmentPage() {
                 {/* Qdrant Collections */}
                 <div className="p-4 border dark:border-gray-700 rounded-lg space-y-2">
                   <div className="text-sm font-medium text-gray-700 dark:text-gray-300">Qdrant Collections</div>
-                  {telemetry.services?.qdrant?.status === 'ok' && telemetry.services.qdrant.details?.collection_names ? (
-                    <div className="space-y-1">
-                      {telemetry.services.qdrant.details.collection_names.map((name: string) => (
-                        <div key={name} className="flex items-center gap-2">
-                          <div className="w-2 h-2 rounded-full bg-green-500" />
-                          <code className="text-xs font-mono">{name}</code>
-                        </div>
-                      ))}
-                    </div>
+                  {telemetry.services?.qdrant?.status === 'ok' ? (
+                    telemetry.services.qdrant.details?.collection_names?.length > 0 ? (
+                      <div className="space-y-1">
+                        {telemetry.services.qdrant.details.collection_names.map((name: string) => (
+                          <div key={name} className="flex items-center gap-2">
+                            <div className="w-2 h-2 rounded-full bg-green-500" />
+                            <code className="text-xs font-mono">{name}</code>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <CheckCircle className="h-4 w-4 text-green-500" />
+                        <span className="text-sm text-gray-500">Connected — no collections yet. Create a context to get started.</span>
+                      </div>
+                    )
                   ) : (
                     <div className="flex items-center gap-2">
                       <XCircle className="h-4 w-4 text-red-500" />
