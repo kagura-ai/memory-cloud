@@ -141,7 +141,7 @@ def _configure_embedding_provider(db: Session, user_id: str, workspace_id) -> st
     if openai_key:
         encryptor = get_encryptor()
         ext_key = ExternalAPIKey(
-            key_name="openai_embedding",
+            key_name="OPENAI_API_KEY",
             provider="openai",
             encrypted_value=encryptor.encrypt(openai_key),
             user_id=user_id,
