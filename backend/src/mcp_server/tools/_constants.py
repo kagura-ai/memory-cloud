@@ -386,7 +386,7 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 
 ---
 
-## Available Tools (12 tools)
+## Available Tools (11 tools)
 
 | Tool | Purpose |
 |------|---------|
