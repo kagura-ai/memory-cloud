@@ -260,12 +260,17 @@ class MemoryService:
             # Prepare Qdrant payload (use normalized values for consistent search)
             from utils.tokenizer import tokenize_for_search
 
+            # Issue #67: content_tokens for BM25 search on content field
+            content_text = request.content or ""
+            content_tokens = tokenize_for_search(content_text) if content_text else ""
+
             payload = {
                 "user_id": user_id,
                 "summary": normalized_summary,
                 "context_summary": normalized_context_summary,
                 "summary_tokens": tokenize_for_search(normalized_summary),
                 "context_summary_tokens": tokenize_for_search(normalized_context_summary or ""),
+                "content_tokens": content_tokens,
                 "type": request.type,
                 "importance": request.importance,
                 "tags": request.tags,
