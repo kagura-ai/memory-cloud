@@ -260,18 +260,28 @@ class MemoryService:
             # Prepare Qdrant payload (use normalized values for consistent search)
             from utils.tokenizer import tokenize_for_search
 
-            # Issue #67: content_tokens for BM25 search on content field
-            # Truncate to 2000 chars to limit Qdrant payload size and Sudachi cost
+            # Tokenize fields for BM25 sparse vector (Issue #16)
             content_text = (request.content or "")[:2000]
-            content_tokens = tokenize_for_search(content_text) if content_text else ""
+            summary_tokens_str = tokenize_for_search(normalized_summary)
+            ctx_summary_tokens_str = tokenize_for_search(normalized_context_summary or "")
+            content_tokens_str = tokenize_for_search(content_text) if content_text else ""
+
+            # Build sparse vector for native BM25 (Issue #16)
+            from utils.sparse_vector import build_document_sparse_vector
+
+            sparse_indices, sparse_values = build_document_sparse_vector(
+                summary_tokens=summary_tokens_str,
+                context_summary_tokens=ctx_summary_tokens_str,
+                content_tokens=content_tokens_str,
+            )
 
             payload = {
                 "user_id": user_id,
                 "summary": normalized_summary,
                 "context_summary": normalized_context_summary,
-                "summary_tokens": tokenize_for_search(normalized_summary),
-                "context_summary_tokens": tokenize_for_search(normalized_context_summary or ""),
-                "content_tokens": content_tokens,
+                "summary_tokens": summary_tokens_str,
+                "context_summary_tokens": ctx_summary_tokens_str,
+                "content_tokens": content_tokens_str,
                 "type": request.type,
                 "importance": request.importance,
                 "tags": request.tags,
@@ -298,6 +308,8 @@ class MemoryService:
                 payload=payload,
                 workspace_id=workspace_id_str,
                 context_id=context_id_str,
+                sparse_indices=sparse_indices,
+                sparse_values=sparse_values,
                 collection_name=collection,
             )
 
