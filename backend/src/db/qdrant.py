@@ -33,6 +33,8 @@ from qdrant_client.models import (
 from config.database import QDRANT_URL
 from utils.exceptions import QdrantError
 from utils.logger import get_logger
+from utils.sparse_vector import build_query_sparse_vector
+from utils.tokenizer import tokenize_for_search
 
 logger = get_logger(__name__)
 
@@ -110,6 +112,50 @@ def _build_tag_filter_condition(filters: dict[str, Any]) -> FieldCondition | Non
         if valid_tags:
             return FieldCondition(key="tags", match=MatchAny(any=valid_tags))
     return None
+
+
+def _build_search_filter(
+    workspace_id: str,
+    context_id: str,
+    user_id: str,
+    is_shared_context: bool = False,
+    filters: dict[str, Any] | None = None,
+) -> Filter | None:
+    """Build combined isolation + metadata filter for search queries.
+
+    Shared by semantic search and BM25 search to avoid duplication.
+
+    Args:
+        workspace_id: Workspace ID (isolation)
+        context_id: Context ID (isolation)
+        user_id: User ID (isolation, skipped for shared contexts)
+        is_shared_context: If True, skip user_id filter
+        filters: Optional metadata filters (scope, type, importance, tags)
+
+    Returns:
+        Qdrant Filter or None
+    """
+    conditions: list[FieldCondition] = [
+        FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
+        FieldCondition(key="context_id", match=MatchValue(value=context_id)),
+    ]
+
+    if not is_shared_context:
+        conditions.append(FieldCondition(key="user_id", match=MatchValue(value=user_id)))
+
+    if filters:
+        if "scope" in filters:
+            conditions.append(FieldCondition(key="scope", match=MatchValue(value=filters["scope"])))
+        if "type" in filters:
+            conditions.append(FieldCondition(key="type", match=MatchValue(value=filters["type"])))
+        importance_condition = _build_importance_range_condition(filters)
+        if importance_condition:
+            conditions.append(importance_condition)
+        tag_condition = _build_tag_filter_condition(filters)
+        if tag_condition:
+            conditions.append(tag_condition)
+
+    return Filter(must=conditions) if conditions else None
 
 
 def _build_importance_range_condition(filters: dict[str, Any]) -> FieldCondition | None:
@@ -324,45 +370,10 @@ async def search_memories_qdrant(
     _validate_uuid_format(context_id, "context_id")
 
     try:
-        # Build Qdrant filter with workspace-aware isolation
-        # Issue #XXX: Team collaboration - shared contexts allow workspace member access
-        conditions = [
-            FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
-            FieldCondition(key="context_id", match=MatchValue(value=context_id)),
-        ]
+        qdrant_filter = _build_search_filter(
+            workspace_id, context_id, user_id, is_shared_context, filters
+        )
 
-        # Add user_id filter only for private contexts
-        if not is_shared_context:
-            conditions.append(FieldCondition(key="user_id", match=MatchValue(value=user_id)))
-
-        # Additional filters (scope, type, importance, etc.)
-        if filters:
-            if "scope" in filters:
-                conditions.append(
-                    FieldCondition(key="scope", match=MatchValue(value=filters["scope"]))
-                )
-
-            if "type" in filters:
-                conditions.append(
-                    FieldCondition(key="type", match=MatchValue(value=filters["type"]))
-                )
-
-            # Issue #139: importance range filter support
-            importance_condition = _build_importance_range_condition(filters)
-            if importance_condition:
-                conditions.append(importance_condition)
-
-            # Issue #67: Tag filtering (exact match, not BM25)
-            tag_condition = _build_tag_filter_condition(filters)
-            if tag_condition:
-                conditions.append(tag_condition)
-
-        # Build filter
-        qdrant_filter = None
-        if conditions:
-            qdrant_filter = Filter(must=conditions)
-
-        # Search (qdrant-client 1.16+ API)
         # Issue #16: Named vector "dense" for semantic search
         results = await client.query_points(
             collection_name=collection_name,
@@ -470,41 +481,17 @@ async def search_memories_fulltext(
     _validate_uuid_format(context_id, "context_id")
 
     try:
-        # Build isolation + metadata filter (same as semantic search)
-        conditions = [
-            FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
-            FieldCondition(key="context_id", match=MatchValue(value=context_id)),
-        ]
-
-        if not is_shared_context:
-            conditions.append(FieldCondition(key="user_id", match=MatchValue(value=user_id)))
-
-        if filters:
-            if "scope" in filters:
-                conditions.append(
-                    FieldCondition(key="scope", match=MatchValue(value=filters["scope"]))
-                )
-            if "type" in filters:
-                conditions.append(
-                    FieldCondition(key="type", match=MatchValue(value=filters["type"]))
-                )
-            importance_condition = _build_importance_range_condition(filters)
-            if importance_condition:
-                conditions.append(importance_condition)
-            tag_condition = _build_tag_filter_condition(filters)
-            if tag_condition:
-                conditions.append(tag_condition)
-
-        qdrant_filter = Filter(must=conditions) if conditions else None
+        qdrant_filter = _build_search_filter(
+            workspace_id, context_id, user_id, is_shared_context, filters
+        )
 
         # Build sparse query vector from Sudachi-tokenized query
-        from utils.sparse_vector import build_query_sparse_vector
-        from utils.tokenizer import tokenize_for_search
 
         tokenized_query = tokenize_for_search(query)
         query_indices, query_values = build_query_sparse_vector(tokenized_query)
 
         if not query_indices:
+            logger.debug("bm25_query_empty_after_tokenization", query=query[:50])
             return []
 
         # Native BM25 search via sparse vector (Qdrant handles IDF + length norm)
@@ -576,9 +563,10 @@ async def ensure_kagura_memories_collection(
         if exists:
             # Issue #16: Check if collection has sparse vector config
             info = await client.get_collection(collection_name)
-            has_sparse = info.config.params.sparse_vectors is not None and "bm25" in (
-                info.config.params.sparse_vectors or {}
-            )
+            params = getattr(info.config, "params", None) if info.config else None
+            sparse_cfg = getattr(params, "sparse_vectors", None) if params else None
+            has_sparse = sparse_cfg is not None and "bm25" in sparse_cfg
+
             if has_sparse:
                 # Collection is up-to-date, ensure keyword indexes
                 existing_fields = set(info.payload_schema.keys()) if info.payload_schema else set()
@@ -591,11 +579,21 @@ async def ensure_kagura_memories_collection(
                     logger.info("created_missing_index", field="tags", type="keyword")
                 return
 
-            # Old collection without sparse vectors — delete and recreate
+            # Old collection without sparse vectors — requires manual migration
+            import os
+
+            if os.getenv("KAGURA_RECREATE_COLLECTIONS", "").lower() not in ("true", "1"):
+                logger.error(
+                    "collection_needs_sparse_vector_migration",
+                    collection=collection_name,
+                    help="Set KAGURA_RECREATE_COLLECTIONS=true to auto-recreate (destroys data)",
+                )
+                return  # Start in degraded mode rather than destroy data
+
             logger.warning(
-                "collection_missing_sparse_vectors",
+                "collection_recreating",
                 collection=collection_name,
-                action="delete_and_recreate",
+                reason="missing sparse vector config",
             )
             await client.delete_collection(collection_name)
 
