@@ -18,11 +18,13 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     MatchAny,
-    MatchText,
     MatchValue,
+    Modifier,
     PointIdsList,
     PointStruct,
     Range,
+    SparseVector,
+    SparseVectorParams,
     TextIndexParams,
     TokenizerType,
     VectorParams,
@@ -205,28 +207,27 @@ async def add_memory_to_qdrant(
     payload: dict[str, Any],
     workspace_id: str,
     context_id: str,
+    sparse_indices: list[int] | None = None,
+    sparse_values: list[float] | None = None,
     collection_name: str = KAGURA_MEMORIES_COLLECTION,
 ) -> None:
-    """Add memory point to Qdrant with 3-level isolation.
+    """Add memory point to Qdrant with dense + sparse vectors and 3-level isolation.
 
-    Single Collection Migration: Always uses "kagura_memories" collection.
-    Adds workspace_id, context_id, user_id to payload for filtering.
+    Issue #16: Supports named vectors (dense for semantic, bm25 for sparse BM25).
 
     Args:
         user_id: User ID (required)
         memory_id: Memory UUID
-        vector: Embedding vector
+        vector: Dense embedding vector
         payload: Metadata payload
         workspace_id: Workspace ID (required for 3-level isolation)
         context_id: Context ID (required for 3-level isolation)
+        sparse_indices: Sparse vector token indices (MurmurHash3)
+        sparse_values: Sparse vector TF values
 
     Raises:
         QdrantError: If operation fails
         ValueError: If workspace_id or context_id is missing
-
-    Note:
-        Single Collection Migration: workspace_id, context_id, user_id are required
-        for 3-level isolation (workspace, context, user).
     """
     client = get_qdrant_client()
 
@@ -247,12 +248,17 @@ async def add_memory_to_qdrant(
     payload["user_id"] = user_id
 
     try:
+        # Issue #16: Named vectors (dense + sparse BM25)
+        point_vector: dict[str, Any] = {"dense": vector}
+        if sparse_indices and sparse_values:
+            point_vector["bm25"] = SparseVector(indices=sparse_indices, values=sparse_values)
+
         await client.upsert(
             collection_name=collection_name,
             points=[
                 PointStruct(
                     id=str(memory_id),
-                    vector=vector,
+                    vector=point_vector,
                     payload=payload,
                 )
             ],
@@ -357,9 +363,11 @@ async def search_memories_qdrant(
             qdrant_filter = Filter(must=conditions)
 
         # Search (qdrant-client 1.16+ API)
+        # Issue #16: Named vector "dense" for semantic search
         results = await client.query_points(
             collection_name=collection_name,
             query=query_vector,
+            using="dense",
             limit=limit,
             query_filter=qdrant_filter,
         )
@@ -425,13 +433,13 @@ async def search_memories_fulltext(
     context_id: str,
     limit: int = 10,
     filters: dict[str, Any] | None = None,
-    is_shared_context: bool = False,  # NEW: Team collaboration support
+    is_shared_context: bool = False,
     collection_name: str = KAGURA_MEMORIES_COLLECTION,
 ) -> list[dict]:
-    """Full-text search in Qdrant (BM25/keyword search) with workspace-aware isolation.
+    """BM25 keyword search using Qdrant native sparse vectors.
 
-    Uses Qdrant's Multilingual tokenizer for Japanese/English support.
-    Single Collection Migration: Always uses "kagura_memories" collection.
+    Issue #16: Replaces MatchText + manual TF scoring with native BM25.
+    Qdrant handles IDF, TF saturation, and document length normalization.
 
     Args:
         user_id: User ID (required for isolation)
@@ -439,19 +447,15 @@ async def search_memories_fulltext(
         workspace_id: Workspace ID (required for isolation)
         context_id: Context ID (required for isolation)
         limit: Max results
-        filters: Optional filters (scope, type, importance range, etc.)
-        is_shared_context: If True, skip user_id filter (workspace members can access)
+        filters: Optional filters (scope, type, importance, tags)
+        is_shared_context: If True, skip user_id filter
 
     Returns:
-        List of scored results
+        List of scored results with native BM25 scores
 
     Raises:
         QdrantError: If search fails
-        ValueError: If workspace_id, context_id, or user_id is missing
-
-    Note:
-        Single Collection Migration: workspace_id, context_id, user_id are required
-        for isolation filtering. user_id filter is skipped for shared contexts.
+        ValueError: If isolation parameters are missing
     """
     client = get_qdrant_client()
 
@@ -462,160 +466,67 @@ async def search_memories_fulltext(
             f"Got workspace_id={workspace_id}, context_id={context_id}, user_id={user_id}"
         )
 
-    # Issue #273 H-4: Validate UUID format to prevent filter injection
     _validate_uuid_format(workspace_id, "workspace_id")
     _validate_uuid_format(context_id, "context_id")
 
     try:
-        # Build Qdrant filter with workspace-aware isolation
-        # Issue #XXX: Team collaboration - shared contexts allow workspace member access
+        # Build isolation + metadata filter (same as semantic search)
         conditions = [
             FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
             FieldCondition(key="context_id", match=MatchValue(value=context_id)),
         ]
 
-        # Add user_id filter only for private contexts
         if not is_shared_context:
             conditions.append(FieldCondition(key="user_id", match=MatchValue(value=user_id)))
 
-        # Additional filters (scope, type, importance, etc.)
         if filters:
             if "scope" in filters:
                 conditions.append(
                     FieldCondition(key="scope", match=MatchValue(value=filters["scope"]))
                 )
-
             if "type" in filters:
                 conditions.append(
                     FieldCondition(key="type", match=MatchValue(value=filters["type"]))
                 )
-
-            # Issue #139: importance range filter support
             importance_condition = _build_importance_range_condition(filters)
             if importance_condition:
                 conditions.append(importance_condition)
-
-            # Issue #67: Tag filtering (exact match, not BM25)
             tag_condition = _build_tag_filter_condition(filters)
             if tag_condition:
                 conditions.append(tag_condition)
 
-        # Build filter
-        qdrant_filter = None
-        if conditions:
-            qdrant_filter = Filter(must=conditions)
+        qdrant_filter = Filter(must=conditions) if conditions else None
 
-        # Full-text search using MatchText filter + scroll
-        # Issue #1: Search tokenized fields (Sudachi lemmas) first, plus original fields
+        # Build sparse query vector from Sudachi-tokenized query
+        from utils.sparse_vector import build_query_sparse_vector
         from utils.tokenizer import tokenize_for_search
 
         tokenized_query = tokenize_for_search(query)
-        text_conditions = [
-            # Tokenized fields (accurate Japanese matching via lemmas)
-            FieldCondition(key="summary_tokens", match=MatchText(text=tokenized_query)),
-            FieldCondition(key="context_summary_tokens", match=MatchText(text=tokenized_query)),
-            # Issue #67: Content tokens for deeper keyword matching
-            FieldCondition(key="content_tokens", match=MatchText(text=tokenized_query)),
-            # Original fields (fallback for old memories without tokens)
-            FieldCondition(key="summary", match=MatchText(text=query)),
-            FieldCondition(key="context_summary", match=MatchText(text=query)),
-        ]
+        query_indices, query_values = build_query_sparse_vector(tokenized_query)
 
-        # Combine text conditions (should = OR) with other filters (must = AND)
-        if qdrant_filter and qdrant_filter.must:
-            combined_filter = Filter(
-                should=text_conditions,  # Match in summary OR context_summary
-                must=qdrant_filter.must,  # AND with other filters
-            )
-        else:
-            combined_filter = Filter(should=text_conditions)
+        if not query_indices:
+            return []
 
-        # Use scroll to get matching points
-        scroll_result = await client.scroll(
+        # Native BM25 search via sparse vector (Qdrant handles IDF + length norm)
+        results = await client.query_points(
             collection_name=collection_name,
-            scroll_filter=combined_filter,
+            query=SparseVector(indices=query_indices, values=query_values),
+            using="bm25",
             limit=limit,
-            with_payload=True,
-            with_vectors=False,
+            query_filter=qdrant_filter,
         )
 
-        points, next_page = scroll_result
-
-        # ============================================================================
-        # BUG FIX #83-1: Simple BM25-like scoring for full-text search
-        # ============================================================================
-        # Problem: Qdrant's scroll() API with MatchText filter does not return
-        #          relevance scores (BM25). All results were hardcoded to score=1.0,
-        #          making Hybrid Search ineffective (all keyword results ranked equally).
-        #
-        # Solution: Implement simple term frequency scoring as approximation of BM25.
-        #           This gives higher scores to documents matching more query terms.
-        #
-        # Formula: score = base_score + (term_hit_boost × number_of_matching_terms)
-        #          - base_score: 0.5 (baseline for any match)
-        #          - term_hit_boost: 0.1 per matching term
-        #          - Clamped to [0, 1] range
-        #
-        # Example: Query "Python エラー 解決"
-        #          - Doc with all 3 terms: score = 0.5 + 0.1×3 = 0.8
-        #          - Doc with 1 term: score = 0.5 + 0.1×1 = 0.6
-        #
-        # Note: This is a temporary solution. For production-grade BM25:
-        #       - Option A: Use Qdrant's search() API with sparse vectors
-        #       - Option B: Use external BM25 library (rank-bm25)
-        #       - Option C: Implement proper BM25 with IDF calculation
-        # ============================================================================
-
-        # ============================================================================
-        # BUG FIX #122-1: Unicode-aware tokenization for Japanese text
-        # ============================================================================
-        # Problem: re.findall(r"\w+", query) uses ASCII-only word matching.
-        #          Japanese characters (ひらがな、カタカナ、漢字) are ignored,
-        #          resulting in empty query_words for Japanese queries.
-        #
-        # Before: "認証エラー解決" → query_words = {} (empty!)
-        # After:  "認証エラー解決" → query_words = {"認証エラー解決"}
-        #
-        # Solution: Use `regex` library with Unicode property escapes (\p{L}, \p{N})
-        #           which match any Unicode letter/number across all scripts.
-        # ============================================================================
-        # Issue #1: Use tokenized query terms for TF scoring
-        query_words = set(tokenized_query.split())
-
-        results = []
-        for point in points:
-            # Issue #1: Use tokenized fields for accurate term matching
-            summary_tokens = point.payload.get("summary_tokens") or ""
-            ctx_tokens = point.payload.get("context_summary_tokens") or ""
-            # Fallback to original fields for old memories without tokens
-            if not summary_tokens:
-                summary_tokens = (point.payload.get("summary") or "").lower()
-            if not ctx_tokens:
-                ctx_tokens = (point.payload.get("context_summary") or "").lower()
-            # Issue #67: content_tokens for deeper keyword matching
-            content_tokens = point.payload.get("content_tokens") or ""
-            summary_ctx_text = summary_tokens + " " + ctx_tokens
-
-            # Score: summary/context matches weighted higher than content matches
-            summary_hits = sum(1 for word in query_words if word in summary_ctx_text)
-            content_hits = sum(1 for word in query_words if word in content_tokens)
-
-            # Base: 0.5, summary/ctx: +0.1/term, content: +0.05/term (lower to avoid length bias)
-            score = 0.5 + (0.1 * summary_hits) + (0.05 * content_hits)
-            score = min(1.0, score)
-
-            results.append(
-                {
-                    "id": point.id,
-                    "score": score,
-                    "payload": point.payload,
-                }
-            )
-
-        return results
+        return [
+            {
+                "id": point.id,
+                "score": point.score,
+                "payload": point.payload,
+            }
+            for point in results.points
+        ]
 
     except Exception as e:
-        raise QdrantError(f"Full-text search failed: {e}") from e
+        raise QdrantError(f"BM25 search failed: {e}") from e
 
 
 # ============================================================================
@@ -663,42 +574,45 @@ async def ensure_kagura_memories_collection(
         exists = any(c.name == collection_name for c in collections.collections)
 
         if exists:
-            # Ensure pre-tokenized indexes exist (Issue #1: Japanese BM25)
+            # Issue #16: Check if collection has sparse vector config
             info = await client.get_collection(collection_name)
-            existing_fields = set(info.payload_schema.keys()) if info.payload_schema else set()
-            for field in ("summary_tokens", "context_summary_tokens", "content_tokens"):
-                if field not in existing_fields:
+            has_sparse = info.config.params.sparse_vectors is not None and "bm25" in (
+                info.config.params.sparse_vectors or {}
+            )
+            if has_sparse:
+                # Collection is up-to-date, ensure keyword indexes
+                existing_fields = set(info.payload_schema.keys()) if info.payload_schema else set()
+                if "tags" not in existing_fields:
                     await client.create_payload_index(
                         collection_name=collection_name,
-                        field_name=field,
-                        field_schema=TextIndexParams(  # type: ignore[arg-type]
-                            type="text",  # type: ignore[arg-type]
-                            tokenizer=TokenizerType.WORD,
-                            min_token_len=1,
-                            max_token_len=30,
-                            lowercase=True,
-                        ),
+                        field_name="tags",
+                        field_schema="keyword",  # type: ignore[arg-type]
                     )
-                    logger.info("created_missing_index", field=field, type="text")
+                    logger.info("created_missing_index", field="tags", type="keyword")
+                return
 
-            # Issue #67: Backfill keyword index for tags (exact-match filtering)
-            if "tags" not in existing_fields:
-                await client.create_payload_index(
-                    collection_name=collection_name,
-                    field_name="tags",
-                    field_schema="keyword",  # type: ignore[arg-type]
-                )
-                logger.info("created_missing_index", field="tags", type="keyword")
+            # Old collection without sparse vectors — delete and recreate
+            logger.warning(
+                "collection_missing_sparse_vectors",
+                collection=collection_name,
+                action="delete_and_recreate",
+            )
+            await client.delete_collection(collection_name)
 
-            return
-
-        # Create collection with vector config
+        # Create collection with dense + sparse vector config (Issue #16)
         await client.create_collection(
             collection_name=collection_name,
-            vectors_config=VectorParams(
-                size=embedding_dim,
-                distance=Distance.COSINE,
-            ),
+            vectors_config={
+                "dense": VectorParams(
+                    size=embedding_dim,
+                    distance=Distance.COSINE,
+                ),
+            },
+            sparse_vectors_config={
+                "bm25": SparseVectorParams(
+                    modifier=Modifier.IDF,
+                ),
+            },
         )
 
         logger.info(
