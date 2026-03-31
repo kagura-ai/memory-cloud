@@ -247,12 +247,9 @@ class MemoryService:
             await self.memory_repo.create(memory)
             await self.db.flush()  # Ensure memory exists before Qdrant operation
 
-            # Generate embedding for summary only (P3 reverted — tags in embedding
-            # degraded semantic search quality by diluting summary signal)
+            # Generate embedding for summary (Layer 1) using context's model
             config = await self._get_context_search_config(context.id)
             embed_svc = self._get_embedding_service_for_config(config)
-            # Pre-lowercase tags for consistent BM25 scoring (P0-P2 still active)
-            tags_str = " ".join(t.lower() for t in request.tags) if request.tags else ""
             vector = await embed_svc.embed(
                 request.summary,
                 user_id,
@@ -272,7 +269,6 @@ class MemoryService:
                 "type": request.type,
                 "importance": request.importance,
                 "tags": request.tags,
-                "tags_text": tags_str,
                 "scope": "working",
                 "client": client,
                 "created_at": utcnow().isoformat(),

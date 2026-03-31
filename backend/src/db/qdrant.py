@@ -17,7 +17,6 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
-    MatchAny,
     MatchText,
     MatchValue,
     PointIdsList,
@@ -87,23 +86,6 @@ def _validate_uuid_format(value: str, field_name: str) -> None:
         UUID(value)
     except (ValueError, AttributeError) as e:
         raise ValueError(ERROR_MSG_INVALID_UUID.format(field=field_name, value=value)) from e
-
-
-def _build_tag_filter_condition(filters: dict[str, Any]) -> FieldCondition | None:
-    """Build FieldCondition for tag filtering (match any).
-
-    Issue #67: Helper function to avoid code duplication.
-
-    Args:
-        filters: Filter dict with optional tags list
-
-    Returns:
-        FieldCondition for tag matching or None
-    """
-    filter_tags = filters.get("tags")
-    if isinstance(filter_tags, list) and filter_tags:
-        return FieldCondition(key="tags", match=MatchAny(any=filter_tags))
-    return None
 
 
 def _build_importance_range_condition(filters: dict[str, Any]) -> FieldCondition | None:
@@ -342,11 +324,6 @@ async def search_memories_qdrant(
             if importance_condition:
                 conditions.append(importance_condition)
 
-            # Issue #67: Tag filtering
-            tag_condition = _build_tag_filter_condition(filters)
-            if tag_condition:
-                conditions.append(tag_condition)
-
         # Build filter
         qdrant_filter = None
         if conditions:
@@ -491,11 +468,6 @@ async def search_memories_fulltext(
             if importance_condition:
                 conditions.append(importance_condition)
 
-            # Issue #67: Tag filtering
-            tag_condition = _build_tag_filter_condition(filters)
-            if tag_condition:
-                conditions.append(tag_condition)
-
         # Build filter
         qdrant_filter = None
         if conditions:
@@ -513,9 +485,6 @@ async def search_memories_fulltext(
             # Original fields (fallback for old memories without tokens)
             FieldCondition(key="summary", match=MatchText(text=query)),
             FieldCondition(key="context_summary", match=MatchText(text=query)),
-            # Issue #67: Tags in BM25 search (writing variations, categories)
-            FieldCondition(key="tags_text", match=MatchText(text=query)),
-            FieldCondition(key="tags_text", match=MatchText(text=tokenized_query)),
         ]
 
         # Combine text conditions (should = OR) with other filters (must = AND)
@@ -589,9 +558,7 @@ async def search_memories_fulltext(
                 summary_tokens = (point.payload.get("summary") or "").lower()
             if not ctx_tokens:
                 ctx_tokens = (point.payload.get("context_summary") or "").lower()
-            # Issue #67: Include tags in term matching (pre-lowercased at storage time)
-            tags_text = point.payload.get("tags_text") or ""
-            combined_text = summary_tokens + " " + ctx_tokens + " " + tags_text
+            combined_text = summary_tokens + " " + ctx_tokens
 
             hit_count = sum(1 for word in query_words if word in combined_text)
 
@@ -664,8 +631,7 @@ async def ensure_kagura_memories_collection(
             # Ensure pre-tokenized indexes exist (Issue #1: Japanese BM25)
             info = await client.get_collection(collection_name)
             existing_fields = set(info.payload_schema.keys()) if info.payload_schema else set()
-            # Backfill text indexes for pre-tokenized fields (Issue #1)
-            for field in ("summary_tokens", "context_summary_tokens", "tags_text"):
+            for field in ("summary_tokens", "context_summary_tokens"):
                 if field not in existing_fields:
                     await client.create_payload_index(
                         collection_name=collection_name,
@@ -678,17 +644,7 @@ async def ensure_kagura_memories_collection(
                             lowercase=True,
                         ),
                     )
-                    logger.info("created_missing_index", field=field, type="text")
-
-            # Backfill keyword index for tags (Issue #67)
-            if "tags" not in existing_fields:
-                await client.create_payload_index(
-                    collection_name=collection_name,
-                    field_name="tags",
-                    field_schema="keyword",  # type: ignore[arg-type]
-                )
-                logger.info("created_missing_index", field="tags", type="keyword")
-
+                    logger.info("created_missing_token_index", field=field)
             return
 
         # Create collection with vector config
@@ -785,28 +741,6 @@ async def ensure_kagura_memories_collection(
             field_schema="float",  # type: ignore[arg-type]
         )
 
-        # Issue #67: Tags indexes for filtering and BM25 search
-        # Keyword index: enables exact-match filtering (recall with tags filter)
-        await client.create_payload_index(
-            collection_name=collection_name,
-            field_name="tags",
-            field_schema="keyword",  # type: ignore[arg-type]
-        )
-
-        # Text index on tags_text: enables BM25 fulltext search across tags
-        # tags_text is a space-joined string of all tags (stored alongside tags array)
-        await client.create_payload_index(
-            collection_name=collection_name,
-            field_name="tags_text",
-            field_schema=TextIndexParams(  # type: ignore[arg-type]
-                type="text",  # type: ignore[arg-type]
-                tokenizer=TokenizerType.WORD,
-                min_token_len=1,
-                max_token_len=30,
-                lowercase=True,
-            ),
-        )
-
         logger.info(
             "single_collection_indexes_created",
             collection=collection_name,
@@ -819,8 +753,6 @@ async def ensure_kagura_memories_collection(
                 "scope",
                 "type",
                 "importance",
-                "tags",
-                "tags_text",
             ],
         )
 
