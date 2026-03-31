@@ -368,27 +368,27 @@ export default function EnvironmentPage() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Server className="h-5 w-5" />
-                System Status
+                {t('systemStatus.title')}
               </CardTitle>
-              <CardDescription>Embedding provider, Ollama, and Qdrant status</CardDescription>
+              <CardDescription>{t('systemStatus.description')}</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {/* Embedding Config */}
                 <div className="p-4 border dark:border-gray-700 rounded-lg space-y-2">
-                  <div className="text-sm font-medium text-gray-700 dark:text-gray-300">Embedding Config</div>
+                  <div className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('systemStatus.embeddingConfig')}</div>
                   {telemetry.embedding_config ? (
                     <div className="space-y-1 text-sm">
                       <div className="flex justify-between">
-                        <span className="text-gray-500">Provider</span>
+                        <span className="text-gray-500">{t('systemStatus.provider')}</span>
                         <code className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-xs">{telemetry.embedding_config.provider}</code>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-gray-500">Model</span>
+                        <span className="text-gray-500">{t('systemStatus.model')}</span>
                         <code className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-xs">{telemetry.embedding_config.model}</code>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-gray-500">Dimensions</span>
+                        <span className="text-gray-500">{t('systemStatus.dimensions')}</span>
                         <span className="text-xs">{telemetry.embedding_config.dimensions}</span>
                       </div>
                     </div>
@@ -399,7 +399,7 @@ export default function EnvironmentPage() {
 
                 {/* Ollama Status */}
                 <div className="p-4 border dark:border-gray-700 rounded-lg space-y-2">
-                  <div className="text-sm font-medium text-gray-700 dark:text-gray-300">Ollama</div>
+                  <div className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('systemStatus.ollama')}</div>
                   {telemetry.services?.ollama ? (
                     <div className="space-y-2">
                       <div className="flex items-center gap-2">
@@ -414,25 +414,26 @@ export default function EnvironmentPage() {
                       </div>
                       {telemetry.services.ollama.details?.models && (
                         <div className="text-xs text-gray-500">
-                          {telemetry.services.ollama.details.models.filter((m: string) => m.includes('embed')).length > 0 ? (
-                            <span>Embedding models: {telemetry.services.ollama.details.models.filter((m: string) => m.includes('embed')).join(', ')}</span>
-                          ) : (
-                            <span>{telemetry.services.ollama.details.models.length} models available</span>
-                          )}
+                          {(() => {
+                            const embedModels = telemetry.services.ollama.details.models.filter((m: string) => m.includes('embed'));
+                            return embedModels.length > 0
+                              ? t('systemStatus.embeddingModels', { models: embedModels.join(', ') })
+                              : t('systemStatus.modelsAvailable', { count: telemetry.services.ollama.details.models.length });
+                          })()}
                         </div>
                       )}
                     </div>
                   ) : (
                     <div className="flex items-center gap-2">
                       <XCircle className="h-4 w-4 text-gray-400" />
-                      <span className="text-sm text-gray-400">Not configured</span>
+                      <span className="text-sm text-gray-400">{t('systemStatus.ollamaNotConfigured')}</span>
                     </div>
                   )}
                 </div>
 
                 {/* Qdrant Collections */}
                 <div className="p-4 border dark:border-gray-700 rounded-lg space-y-2">
-                  <div className="text-sm font-medium text-gray-700 dark:text-gray-300">Qdrant Collections</div>
+                  <div className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('systemStatus.qdrantCollections')}</div>
                   {telemetry.services?.qdrant?.status === 'ok' ? (
                     telemetry.services.qdrant.details?.collection_names?.length > 0 ? (
                       <div className="space-y-1">
@@ -446,13 +447,13 @@ export default function EnvironmentPage() {
                     ) : (
                       <div className="flex items-center gap-2">
                         <CheckCircle className="h-4 w-4 text-green-500" />
-                        <span className="text-sm text-gray-500">Connected — no collections yet. Create a context to get started.</span>
+                        <span className="text-sm text-gray-500">{t('systemStatus.qdrantNoCollections')}</span>
                       </div>
                     )
                   ) : (
                     <div className="flex items-center gap-2">
                       <XCircle className="h-4 w-4 text-red-500" />
-                      <span className="text-sm text-gray-500">{telemetry.services?.qdrant?.details?.error || 'Error'}</span>
+                      <span className="text-sm text-gray-500">{telemetry.services?.qdrant?.details?.error || t('systemStatus.qdrantError')}</span>
                     </div>
                   )}
                 </div>

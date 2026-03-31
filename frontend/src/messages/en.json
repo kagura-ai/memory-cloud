@@ -2119,6 +2119,21 @@
         "memory": "Memory Configuration",
         "system": "System Configuration"
       },
+      "systemStatus": {
+        "title": "System Status",
+        "description": "Embedding provider, Ollama, and Qdrant status",
+        "embeddingConfig": "Embedding Config",
+        "provider": "Provider",
+        "model": "Model",
+        "dimensions": "Dimensions",
+        "ollama": "Ollama",
+        "ollamaNotConfigured": "Not configured",
+        "embeddingModels": "Embedding models: {models}",
+        "modelsAvailable": "{count} models available",
+        "qdrantCollections": "Qdrant Collections",
+        "qdrantNoCollections": "Connected — no collections yet. Create a context to get started.",
+        "qdrantError": "Error"
+      },
       "table": {
         "key": "Key",
         "value": "Value",

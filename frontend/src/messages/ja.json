@@ -2128,6 +2128,21 @@
         "memory": "メモリー設定",
         "system": "システム設定"
       },
+      "systemStatus": {
+        "title": "システムステータス",
+        "description": "Embeddingプロバイダー、Ollama、Qdrantの状態",
+        "embeddingConfig": "Embedding設定",
+        "provider": "プロバイダー",
+        "model": "モデル",
+        "dimensions": "次元数",
+        "ollama": "Ollama",
+        "ollamaNotConfigured": "未設定",
+        "embeddingModels": "Embeddingモデル: {models}",
+        "modelsAvailable": "{count}個のモデルが利用可能",
+        "qdrantCollections": "Qdrantコレクション",
+        "qdrantNoCollections": "接続済み — コレクションはまだありません。コンテキストを作成してください。",
+        "qdrantError": "エラー"
+      },
       "table": {
         "key": "キー",
         "value": "値",
