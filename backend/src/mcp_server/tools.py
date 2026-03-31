@@ -2136,11 +2136,13 @@ async def execute_tool_call(
                     )
 
                     # Batch-fetch embedding configs to avoid N+1
+                    from sqlalchemy import select as _select
+
                     from models.config import ContextSearchConfig
 
                     context_ids = [ctx.id for ctx in contexts_sorted]
                     config_results = await db.execute(
-                        select(ContextSearchConfig).where(
+                        _select(ContextSearchConfig).where(
                             ContextSearchConfig.context_id.in_(context_ids)
                         )
                     )
