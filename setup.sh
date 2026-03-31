@@ -35,7 +35,7 @@ echo "✓ Prerequisites OK"
 
 # Step 1: Configure environment
 echo ""
-echo "==> Step 1/4: Configure environment"
+echo "==> Step 1/5: Configure environment"
 cd backend && python3 -m src.cli.setup_env
 cd ..
 
@@ -50,9 +50,11 @@ echo ""
 echo "==> Step 3/5: Start Docker services"
 docker compose up -d
 echo "Waiting for services to be healthy..."
-# Wait for postgres to be healthy (up to 30s)
-for i in $(seq 1 30); do
-  if docker compose ps --format json | grep -q '"healthy"'; then
+# Wait for postgres and qdrant to be healthy (up to 60s)
+for i in $(seq 1 60); do
+  pg_healthy=$(docker compose ps postgres --format json 2>/dev/null | grep -c '"healthy"' || echo 0)
+  qd_healthy=$(docker compose ps qdrant --format json 2>/dev/null | grep -c '"healthy"' || echo 0)
+  if [ "$pg_healthy" -ge 1 ] && [ "$qd_healthy" -ge 1 ]; then
     break
   fi
   sleep 1

@@ -106,7 +106,7 @@ git clone https://github.com/kagura-ai/memory-cloud.git
 cd memory-cloud
 
 # 2. Configure environment (generates secrets, prompts for API keys)
-(cd backend && python -m src.cli.setup_env)
+(cd backend && python3 -m src.cli.setup_env)
 
 # 3. Start all services
 docker compose up -d
@@ -115,7 +115,7 @@ docker compose up -d
 (cd backend && alembic upgrade head)
 
 # 5. Create admin account (interactive — sets password, MFA, API key, embedding provider)
-(cd backend && python -m src.cli.create_admin)
+(cd backend && python3 -m src.cli.create_admin)
 
 # Backend API:  http://localhost:8080
 # Frontend UI:  http://localhost:3000
@@ -140,10 +140,10 @@ docker compose up -d
 
 | Command | Purpose |
 |---------|---------|
-| `python -m src.cli.setup_env` | Generate secrets + configure `.env.local` (run before Docker) |
-| `python -m src.cli.create_admin` | Create admin + workspace + API key + `.mcp.json` + embedding setup |
-| `python -m src.cli.reset_password` | Reset password and/or MFA |
-| `python -m src.cli.delete_admin` | Delete admin (for re-creation) |
+| `python3 -m src.cli.setup_env` | Generate secrets + configure `.env.local` (run before Docker) |
+| `python3 -m src.cli.create_admin` | Create admin + workspace + API key + `.mcp.json` + embedding setup |
+| `python3 -m src.cli.reset_password` | Reset password and/or MFA |
+| `python3 -m src.cli.delete_admin` | Delete admin (for re-creation) |
 
 > Run from `backend/` directory. Docker API container must be running.
 

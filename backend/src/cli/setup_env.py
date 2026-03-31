@@ -75,11 +75,13 @@ def setup_env():
     print("Kagura Memory Cloud - Environment Setup")
     print("=" * 50)
 
-    # 1. Ensure .env.local exists (backup existing)
+    # 1. Ensure .env.local exists (backup existing with timestamp)
     if _env_local.exists():
         import shutil
+        from datetime import datetime
 
-        bak_path = _env_local.with_suffix(".local.bak")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        bak_path = _project_root / f".env.local.bak.{timestamp}"
         shutil.copy(_env_local, bak_path)
         print(f"\n✓ Backed up existing {_env_local.name} → {bak_path.name}")
     else:

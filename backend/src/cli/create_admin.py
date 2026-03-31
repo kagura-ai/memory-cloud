@@ -136,8 +136,8 @@ def _configure_embedding_provider(db: Session, user_id: str, workspace_id) -> st
     """
     from utils.encryption import get_encryptor  # noqa: E402
 
-    # 1. Check OPENAI_API_KEY
-    openai_key = os.getenv("OPENAI_API_KEY") or _get_env_from_docker("OPENAI_API_KEY")
+    # 1. Check OPENAI_API_KEY (Docker/env.local first, host env as fallback)
+    openai_key = _get_env_from_docker("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     if openai_key:
         encryptor = get_encryptor()
         ext_key = ExternalAPIKey(
