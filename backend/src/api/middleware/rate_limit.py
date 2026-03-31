@@ -83,9 +83,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         try:
-            # 5. Get user's plan tier
-            plan_name = await self._get_user_plan(user_id)
+            # 5. Get user's plan tier and workspace_id
+            plan_name, workspace_id = await self._get_user_plan(user_id)
             plan = PlanName(plan_name)
+
+            # Issue #50: Store workspace_id for downstream middleware (request_logger)
+            request.state.workspace_id = str(workspace_id) if workspace_id else None
 
             # 6. Get rate limit for this endpoint (tier-based or override)
             per_minute_limit = get_rate_limit_for_endpoint(path, plan)
@@ -135,9 +138,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     },
                 )
 
-            # 9. Check daily quota (MCP vs REST separation)
+            # 9. Check daily quota (MCP vs REST separation, workspace-scoped)
             try:
-                await self._check_daily_quota(user_id, path, plan)
+                await self._check_daily_quota(user_id, path, plan, workspace_id)
             except QuotaExceededError as e:
                 logger.warning(
                     "daily_quota_exceeded",
@@ -179,14 +182,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             # Fail-open: Allow request on unexpected errors
             return await call_next(request)
 
-    async def _get_user_plan(self, user_id: str) -> str:
-        """Get user's plan from workspace.
+    async def _get_user_plan(self, user_id: str) -> tuple[str, str | None]:
+        """Get user's plan and workspace_id.
 
         Args:
             user_id: User ID
 
         Returns:
-            Plan name ('free', 'basic', 'pro')
+            Tuple of (plan_name, workspace_id_str).
+            workspace_id is None if user has no workspace.
 
         Note:
             Creates new database session to avoid conflicts with request handler.
@@ -202,8 +206,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             workspace_id = result.scalar_one_or_none()
 
             if not workspace_id:
-                # No workspace → default to free plan
-                return "free"
+                return "free", None
 
             # Get workspace's plan
             result = await db.execute(
@@ -211,63 +214,59 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             )
             plan_name = result.scalar_one_or_none()
 
-            return plan_name or "free"
+            return plan_name or "free", str(workspace_id)
 
         finally:
             await db.close()
 
-    async def _check_daily_quota(self, user_id: str, path: str, plan: PlanName):
+    async def _check_daily_quota(
+        self, user_id: str, path: str, plan: PlanName, workspace_id: str | None
+    ):
         """Check daily quota (MCP vs Public vs REST API separation).
 
         Issue #238: Separated quotas for MCP and REST APIs.
         Issue #242: Added Public API quota separation.
+        Issue #50: Workspace-scoped quotas (falls back to user-scoped if no workspace).
 
         Args:
             user_id: User ID
             path: Request path
             plan: User's plan tier
+            workspace_id: Workspace ID (None if no workspace)
 
         Raises:
             QuotaExceededError: If daily quota exceeded
-
-        Note:
-            - MCP endpoints: /api/v1/memory/*, /mcp/*
-            - Public endpoints: /api/v1/public/* (Issue #242)
-            - REST endpoints: Everything else
-            - Free plan: rest_calls_per_day=0, public_calls_per_day=0 (disabled)
         """
         today = utcnow().date().isoformat()
         plan_tier = get_plan_tier(plan)
+
+        # Issue #50: Workspace-scoped Redis keys (fallback to user-scoped)
+        scope_key = f"ws:{workspace_id}" if workspace_id else f"user:{user_id}"
 
         # Determine quota type (priority order: MCP > Public > REST)
         is_mcp = path.startswith("/api/v1/memory/") or path.startswith("/mcp/")
         is_public = path.startswith("/api/v1/public/") or path.startswith("/api/v1/resources/")
 
         if is_mcp:
-            # MCP API quota
-            daily_key = f"quota:user:{user_id}:mcp:{today}"
+            daily_key = f"quota:{scope_key}:mcp:{today}"
             daily_limit = plan_tier.mcp_calls_per_day
             quota_type = "MCP"
 
         elif is_public:
-            # Public API quota (Issue #242)
-            daily_key = f"quota:user:{user_id}:public:{today}"
+            daily_key = f"quota:{scope_key}:public:{today}"
             daily_limit = plan_tier.public_calls_per_day
             quota_type = "Public API"
 
-            # Free plan: Public API disabled (public_calls_per_day=0)
             if daily_limit == 0:
                 raise QuotaExceededError(
                     "Public API is not available on Free plan. Please upgrade to Basic or Pro plan."
                 )
 
         else:
-            # REST API quota
-            daily_key = f"quota:user:{user_id}:rest:{today}"
+            daily_key = f"quota:{scope_key}:rest:{today}"
             daily_limit = plan_tier.rest_calls_per_day
             quota_type = "REST"
 
-            # Free plan: REST API disabled (rest_calls_per_day=0)
             if daily_limit == 0:
                 raise QuotaExceededError(
                     "REST API is not available on Free plan. Please upgrade to Basic or Pro plan."
