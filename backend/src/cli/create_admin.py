@@ -24,7 +24,7 @@ from auth.api_keys import APIKeyManager  # noqa: E402
 from auth.password import hash_password  # noqa: E402
 from auth.totp import generate_totp_secret, get_provisioning_uri, verify_totp  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
-from models.auth import APIKey, User, Workspace, WorkspaceMember  # noqa: E402
+from models.auth import APIKey, ExternalAPIKey, User, Workspace, WorkspaceMember  # noqa: E402
 from utils.datetime import utcnow  # noqa: E402
 
 _project_root = Path(__file__).parent.parent.parent.parent
@@ -126,6 +126,49 @@ def _write_mcp_json(api_key: str, workspace_id: str):
 
     mcp_path.write_text(json.dumps(mcp_config, indent=2) + "\n")
     print(f"  → {mcp_path}")
+
+
+def _configure_embedding_provider(db: Session, user_id: str, workspace_id) -> str | None:
+    """Auto-detect and configure embedding provider.
+
+    Priority: OPENAI_API_KEY env → Ollama running → warn.
+    Returns provider name or None.
+    """
+    from utils.encryption import get_encryptor  # noqa: E402
+
+    # 1. Check OPENAI_API_KEY
+    openai_key = os.getenv("OPENAI_API_KEY") or _get_env_from_docker("OPENAI_API_KEY")
+    if openai_key:
+        encryptor = get_encryptor()
+        ext_key = ExternalAPIKey(
+            key_name="openai_embedding",
+            provider="openai",
+            encrypted_value=encryptor.encrypt(openai_key),
+            user_id=user_id,
+            workspace_id=workspace_id,
+            enabled=True,
+        )
+        db.add(ext_key)
+        db.flush()
+        return "openai"
+
+    # 2. Check Ollama
+    ollama_url = (
+        os.getenv("OLLAMA_BASE_URL")
+        or _get_env_from_docker("OLLAMA_BASE_URL")
+        or "http://localhost:11434"
+    )
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(ollama_url, method="GET")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            if resp.status == 200:
+                return "ollama"
+    except Exception:
+        pass
+
+    return None
 
 
 def create_admin():
@@ -239,6 +282,18 @@ def create_admin():
         # Write .mcp.json
         print("\n==> Writing .mcp.json...")
         _write_mcp_json(api_key, str(workspace.id))
+
+        # Auto-configure embedding provider
+        print("\n==> Configuring embedding provider...")
+        provider = _configure_embedding_provider(db, admin.user_id, workspace.id)
+        if provider == "openai":
+            print("  ✓ OpenAI API key registered for workspace")
+        elif provider == "ollama":
+            print("  ✓ Ollama detected — set EMBEDDING_PROVIDER=ollama in .env.local")
+        else:
+            print("  ⚠ No embedding provider found.")
+            print("    Set OPENAI_API_KEY in .env.local, or start Ollama.")
+            print("    Memory features (remember/recall) require an embedding provider.")
 
         db.commit()
 

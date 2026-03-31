@@ -74,9 +74,8 @@ Query → OpenAI Embedding → Qdrant Hybrid Search (semantic 60% + BM25 40%)
 - Docker & Docker Compose
 - Python 3.11+
 - Node.js 20+
-- Google OAuth2 credentials ([console.cloud.google.com](https://console.cloud.google.com/apis/credentials))
-- GitHub OAuth2 credentials (optional — [github.com/settings/developers](https://github.com/settings/developers))
-- OpenAI API key (for embeddings)
+- OpenAI API key (for embeddings) — or Ollama for local embeddings
+- OAuth2 credentials (optional — password + MFA login available without OAuth)
 
 ### Setup
 
@@ -86,7 +85,6 @@ Query → OpenAI Embedding → Qdrant Hybrid Search (semantic 60% + BM25 40%)
 git clone https://github.com/kagura-ai/memory-cloud.git
 cd memory-cloud
 cp .env.example .env.local
-# Edit .env.local — set GOOGLE_CLIENT_ID/SECRET (and optionally GITHUB_CLIENT_ID/SECRET)
 claude   # then run /setup
 ```
 
@@ -97,7 +95,7 @@ claude   # then run /setup
 git clone https://github.com/kagura-ai/memory-cloud.git
 cd memory-cloud
 cp .env.example .env.local
-# Edit .env.local — set GOOGLE_CLIENT_ID/SECRET (and optionally GITHUB_CLIENT_ID/SECRET)
+# Edit .env.local if needed (OAuth credentials are optional)
 
 # 2. Start all services
 docker compose up -d
@@ -105,14 +103,23 @@ docker compose up -d
 # 3. Run migrations
 cd backend && alembic upgrade head
 
-# 4. (Optional) Start frontend/backend in dev mode
-cd backend && pip install -e ".[dev]" && uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
-cd frontend && npm install && npm run dev
+# 4. Create admin account (interactive — sets password, MFA, API key)
+cd backend && python -m src.cli.create_admin
 
 # Backend API:  http://localhost:8080
 # Frontend UI:  http://localhost:3000
-# Swagger docs: http://localhost:8080/docs
+# API docs:     http://localhost:8080/redoc
 ```
+
+### Admin CLI
+
+| Command | Purpose |
+|---------|---------|
+| `python -m src.cli.create_admin` | Create admin + workspace + API key + `.mcp.json` |
+| `python -m src.cli.reset_password` | Reset password and/or MFA |
+| `python -m src.cli.delete_admin` | Delete admin (for re-creation) |
+
+> Run from `backend/` directory. Docker API container must be running.
 
 <details>
 <summary>Platform-specific notes</summary>
