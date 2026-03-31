@@ -247,14 +247,14 @@ class MemoryService:
             await self.memory_repo.create(memory)
             await self.db.flush()  # Ensure memory exists before Qdrant operation
 
-            # Issue #67: Join tags once for both embedding and BM25 payload
+            # Generate embedding for summary only (P3 reverted — tags in embedding
+            # degraded semantic search quality by diluting summary signal)
             config = await self._get_context_search_config(context.id)
             embed_svc = self._get_embedding_service_for_config(config)
-            # Pre-lowercase for consistent BM25 scoring (avoids .lower() in search loop)
+            # Pre-lowercase tags for consistent BM25 scoring (P0-P2 still active)
             tags_str = " ".join(t.lower() for t in request.tags) if request.tags else ""
-            embed_text = f"{request.summary} {tags_str}" if tags_str else request.summary
             vector = await embed_svc.embed(
-                embed_text,
+                request.summary,
                 user_id,
                 context_id=current_context_id,
                 workspace_id=current_workspace_id,
