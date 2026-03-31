@@ -6,7 +6,7 @@
  * Issue #166: System Admin vs Workspace Admin RBAC separation
  */
 
-import { User } from './auth';
+import { User } from "./auth";
 
 /**
  * System-level user roles
@@ -15,8 +15,8 @@ import { User } from './auth';
  * and managed in WorkspaceMember.role
  */
 export enum Role {
-  ADMIN = 'admin',  // System Administrator (platform-wide)
-  USER = 'user',    // Standard user
+  ADMIN = "admin", // System Administrator (platform-wide)
+  USER = "user", // Standard user
 }
 
 /**
@@ -61,11 +61,11 @@ export function canEdit(user: User | null | undefined): boolean {
 export function getRoleLabel(role: string | undefined): string {
   switch (role) {
     case Role.ADMIN:
-      return 'System Administrator';
+      return "System Administrator";
     case Role.USER:
-      return 'User';
+      return "User";
     default:
-      return 'Unknown';
+      return "Unknown";
   }
 }
 
@@ -73,15 +73,15 @@ export function getRoleLabel(role: string | undefined): string {
  * Get role badge color (for UI display)
  */
 export function getRoleBadgeColor(
-  role: string | undefined
-): 'default' | 'destructive' | 'secondary' | 'outline' {
+  role: string | undefined,
+): "default" | "destructive" | "secondary" | "outline" {
   switch (role) {
     case Role.ADMIN:
-      return 'destructive'; // Red for system admin
+      return "destructive"; // Red for system admin
     case Role.USER:
-      return 'default'; // Default color
+      return "default"; // Default color
     default:
-      return 'outline';
+      return "outline";
   }
 }
 
@@ -95,7 +95,33 @@ export function getRoleBadgeColor(
  * System admins have platform-wide access, independent of workspace roles.
  */
 export function isSystemAdmin(user: User | null | undefined): boolean {
-  return user?.role === 'admin';
+  return user?.role === "admin";
+}
+
+/**
+ * Workspace role hierarchy weights (higher = more privilege)
+ */
+const WORKSPACE_ROLE_WEIGHTS: Record<string, number> = {
+  owner: 4,
+  admin: 3,
+  member: 2,
+  viewer: 1,
+};
+
+/**
+ * Check if user's workspace role meets the minimum required role.
+ *
+ * Issue #59: Unified workspace role hierarchy check.
+ */
+export function hasWorkspaceRole(
+  userRole: string | null | undefined,
+  requiredRole: "owner" | "admin" | "member",
+): boolean {
+  if (!userRole) return false;
+  return (
+    (WORKSPACE_ROLE_WEIGHTS[userRole] ?? 0) >=
+    WORKSPACE_ROLE_WEIGHTS[requiredRole]
+  );
 }
 
 /**
@@ -104,10 +130,8 @@ export function isSystemAdmin(user: User | null | undefined): boolean {
  * Workspace admins (owner or admin role at workspace level) have workspace-wide access
  * but not system-level access.
  */
-export function isWorkspaceAdmin(
-  workspaceRole: string | undefined
-): boolean {
-  return workspaceRole === 'admin' || workspaceRole === 'owner';
+export function isWorkspaceAdmin(workspaceRole: string | undefined): boolean {
+  return workspaceRole === "admin" || workspaceRole === "owner";
 }
 
 /**
@@ -117,12 +141,12 @@ export function isWorkspaceAdmin(
  */
 export function getSystemRoleBadgeColor(role: string | undefined): string {
   switch (role) {
-    case 'admin':
-      return 'bg-red-100 text-red-800'; // Red for system admin
-    case 'user':
-      return 'bg-blue-100 text-blue-800'; // Blue for user
+    case "admin":
+      return "bg-red-100 text-red-800"; // Red for system admin
+    case "user":
+      return "bg-blue-100 text-blue-800"; // Blue for user
     default:
-      return 'bg-gray-100 text-gray-800';
+      return "bg-gray-100 text-gray-800";
   }
 }
 
@@ -131,17 +155,19 @@ export function getSystemRoleBadgeColor(role: string | undefined): string {
  *
  * Returns Tailwind color classes for workspace-level role badges.
  */
-export function getWorkspaceRoleBadgeColor(workspaceRole: string | undefined): string {
+export function getWorkspaceRoleBadgeColor(
+  workspaceRole: string | undefined,
+): string {
   switch (workspaceRole) {
-    case 'owner':
-      return 'bg-purple-100 text-purple-800'; // Purple for owner
-    case 'admin':
-      return 'bg-blue-100 text-blue-800'; // Blue for workspace admin
-    case 'member':
-      return 'bg-gray-100 text-gray-800'; // Gray for member
-    case 'viewer':
-      return 'bg-green-100 text-green-800'; // Green for viewer
+    case "owner":
+      return "bg-purple-100 text-purple-800"; // Purple for owner
+    case "admin":
+      return "bg-blue-100 text-blue-800"; // Blue for workspace admin
+    case "member":
+      return "bg-gray-100 text-gray-800"; // Gray for member
+    case "viewer":
+      return "bg-green-100 text-green-800"; // Green for viewer
     default:
-      return 'bg-gray-100 text-gray-800';
+      return "bg-gray-100 text-gray-800";
   }
 }

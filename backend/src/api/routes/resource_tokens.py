@@ -16,11 +16,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import APIKeyOrSessionUser, WorkspaceOwner
+from auth.dependencies import WorkspaceOwner
 from auth.resource_tokens import ResourceTokenManager
 from db.base import get_db
 from models.resource import ResourceToken
-from utils import get_user_id
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -159,7 +158,7 @@ def _format_token_response(token: ResourceToken) -> ResourceTokenResponse:
 
 @router.get("", response_model=PaginatedResourceTokensResponse)
 async def list_resource_tokens(
-    user: APIKeyOrSessionUser,
+    owner: WorkspaceOwner,
     manager: ResourceTokenManager = Depends(get_resource_token_manager),
     db: AsyncSession = Depends(get_db),
     resource_id: str | None = Query(None, description="Filter by resource_id"),
@@ -170,19 +169,20 @@ async def list_resource_tokens(
 
     Issue #242: Owner-only access.
     Issue #264: Added pagination support.
+    Issue #59: Changed from APIKeyOrSessionUser to WorkspaceOwner.
 
     Args:
         resource_id: Optional filter by resource_id
         limit: Number of tokens per page (1-100, default 50)
         offset: Starting offset (default 0)
-        user: Current user (session or API key)
+        owner: Workspace owner (user_id, workspace_id) from dependency
         manager: ResourceTokenManager instance
 
     Returns:
         Paginated response with tokens, total count, limit, and offset
     """
     try:
-        user_id = get_user_id(user)
+        user_id, current_workspace_id = owner
         logger.info(
             "list_resource_tokens_request",
             user_id=user_id,
@@ -191,18 +191,10 @@ async def list_resource_tokens(
             offset=offset,
         )
 
-        # SECURITY: Workspace boundary check only needed when filtering by resource_id
-        # Issue #268/#270: When no filter, user_id filtering is sufficient (owner-only access)
+        # SECURITY: Workspace boundary check when filtering by resource_id
+        # Issue #268/#270: Verify resource belongs to owner's workspace
         if resource_id is not None:
-            # Verify resource_id belongs to user's workspace
             from models.auth import Context
-
-            current_workspace_id = user.get("current_workspace_id")
-            if not current_workspace_id:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No workspace selected. Please select an workspace first.",
-                )
 
             # SECURITY: Verify resource_id belongs to current workspace
             # Issue #268: Prevent accessing tokens for resources in other workspaces

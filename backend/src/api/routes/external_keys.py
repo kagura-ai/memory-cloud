@@ -10,10 +10,10 @@ from pydantic import BaseModel
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import APIKeyOrSessionUser
+from auth.dependencies import WorkspaceMember
 from db.base import get_db
 from models.auth import ExternalAPIKey
-from utils import db_transaction, get_user_email, get_user_id, mask_secret
+from utils import db_transaction, get_user_email, mask_secret
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -172,17 +172,18 @@ async def validate_reranker_exclusivity(
 
 @router.get("", response_model=ExternalKeyListResponse)
 async def list_external_keys(
-    user: APIKeyOrSessionUser,
+    user: WorkspaceMember,
     db: AsyncSession = Depends(get_db),
 ):
     """List all external API keys for the authenticated user's current context.
 
     Issue #82: Now context-scoped - returns external keys for current context only.
     Issue #246: current_context_id removed - show all user keys
+    Issue #59: Viewers cannot access external keys.
 
     Returns masked values for security.
     """
-    user_id = get_user_id(user)
+    user_id = user.get("user_id")
     # Issue #246: current_context_id removed
     # current_context_id = user.get("current_context_id")
     current_workspace_id = user.get("current_workspace_id")  # Issue #146
@@ -252,15 +253,16 @@ async def list_external_keys(
 @router.post("", response_model=ExternalKeyResponse)
 async def create_external_key(
     request: ExternalKeyCreate,
-    user: APIKeyOrSessionUser,
+    user: WorkspaceMember,
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new external API key for current context.
 
     Issue #82: Auto-assigns external key to current context.
     Issue #246: current_context_id removed - use context_id=None
+    Issue #59: Viewers cannot access external keys.
     """
-    user_id = get_user_id(user)
+    user_id = user.get("user_id")
     user_email = get_user_email(user) or user_id
     # Issue #246: current_context_id removed
     # current_context_id = user.get("current_context_id")
@@ -341,15 +343,16 @@ async def create_external_key(
 async def update_external_key(
     key_name: str,
     request: ExternalKeyUpdate,
-    user: APIKeyOrSessionUser,
+    user: WorkspaceMember,
     db: AsyncSession = Depends(get_db),
 ):
     """Update an external API key value in current context.
 
     Issue #112: Now filters by context_id to handle duplicate key names across contexts.
     Issue #246: current_context_id removed - use context_id=None
+    Issue #59: Viewers cannot access external keys.
     """
-    user_id = get_user_id(user)
+    user_id = user.get("user_id")
     user_email = get_user_email(user) or user_id
     # Issue #246: current_context_id removed
     # current_context_id = user.get("current_context_id")
@@ -418,7 +421,7 @@ async def update_external_key(
 async def toggle_external_key(
     key_name: str,
     request: ExternalKeyToggle,
-    user: APIKeyOrSessionUser,
+    user: WorkspaceMember,
     db: AsyncSession = Depends(get_db),
 ):
     """Toggle enabled/disabled state without re-entering API key value.
@@ -429,8 +432,10 @@ async def toggle_external_key(
     Rules:
     - OpenAI keys cannot be disabled
     - Only ONE reranker (Cohere/Voyage) can be enabled at a time
+
+    Issue #59: Viewers cannot access external keys.
     """
-    user_id = get_user_id(user)
+    user_id = user.get("user_id")
     user_email = get_user_email(user) or user_id
     # Issue #246: current_context_id removed
     # current_context_id = user.get("current_context_id")
@@ -511,15 +516,16 @@ async def toggle_external_key(
 @router.delete("/{key_name}")
 async def delete_external_key(
     key_name: str,
-    user: APIKeyOrSessionUser,
+    user: WorkspaceMember,
     db: AsyncSession = Depends(get_db),
 ):
     """Delete an external API key from current context.
 
     Issue #112: Now filters by context_id to handle duplicate key names across contexts.
     Issue #246: current_context_id removed - no context filtering
+    Issue #59: Viewers cannot access external keys.
     """
-    user_id = get_user_id(user)
+    user_id = user.get("user_id")
     # Issue #246: current_context_id removed
     # current_context_id = user.get("current_context_id")
 
@@ -581,7 +587,7 @@ async def delete_external_key(
 
 @router.post("/import")
 async def import_external_keys(
-    user: APIKeyOrSessionUser,
+    user: WorkspaceMember,
     db: AsyncSession = Depends(get_db),
 ):
     """Import external API keys from .env.cloud file.
@@ -590,7 +596,7 @@ async def import_external_keys(
     """
     from pathlib import Path
 
-    user_id = get_user_id(user)
+    user_id = user.get("user_id")
     user_email = get_user_email(user) or user_id
 
     env_file = Path("/app/.env.cloud")
