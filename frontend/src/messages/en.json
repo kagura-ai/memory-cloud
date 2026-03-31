@@ -996,7 +996,7 @@
     "saveContextAccess": "Save",
     "contextAccessNotApplicable": "No restrictions",
     "noContextsAvailable": "No contexts available",
-    "authentication": "Authentication",
+    "authentication": "Actions",
     "contextAccessInfo": "Select which contexts this member can access",
     "selectAll": "Select All",
     "deselectAll": "Deselect All",

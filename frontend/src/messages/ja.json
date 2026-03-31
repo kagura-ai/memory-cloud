@@ -995,7 +995,7 @@
     "saveContextAccess": "保存",
     "contextAccessNotApplicable": "制限なし",
     "noContextsAvailable": "利用可能なContextがありません",
-    "authentication": "認証",
+    "authentication": "操作",
     "credentialsSettings": "設定",
     "contextAccessInfo": "このメンバーがアクセスできるContextを選択",
     "selectAll": "すべて選択",
