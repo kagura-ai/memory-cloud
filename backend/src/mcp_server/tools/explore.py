@@ -106,3 +106,6 @@ async def handle_explore(
                 workspace_id,
             )
             raise
+
+    # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")

@@ -206,6 +206,9 @@ async def handle_get_context_info(
                 )
             ]
 
+    # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")
+
 
 async def handle_create_context(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
@@ -321,6 +324,9 @@ async def handle_create_context(
                 )
             logger.error(f"create_context_failed: {e}", exc_info=True)
             return _error_response("create_context_error", error_str)
+
+    # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")
 
 
 async def handle_update_context(
@@ -493,6 +499,9 @@ async def handle_update_context(
             logger.error(f"update_context_failed: {e}", exc_info=True)
             return _error_response("update_context_error", str(e))
 
+    # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")
+
 
 async def handle_list_contexts(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
@@ -608,3 +617,6 @@ async def handle_list_contexts(
                     text=json.dumps({"status": "error", "error": str(e)}),
                 )
             ]
+
+    # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")

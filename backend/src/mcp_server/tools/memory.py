@@ -110,6 +110,9 @@ async def handle_remember(
             )
             raise
 
+    # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")
+
 
 async def handle_recall(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
@@ -194,6 +197,9 @@ async def handle_recall(
             )
             raise
 
+    # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")
+
 
 async def handle_forget(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
@@ -261,6 +267,9 @@ async def handle_forget(
                 db, user_id, "forget", start_time, 500, args.get("context_id"), workspace_id
             )
             raise
+
+    # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")
 
 
 async def handle_reference(
@@ -340,3 +349,6 @@ async def handle_reference(
                 workspace_id,
             )
             raise
+
+    # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")

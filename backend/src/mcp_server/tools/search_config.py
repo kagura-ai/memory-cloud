@@ -118,3 +118,6 @@ async def handle_update_search_config(
             await db.rollback()
             logger.error(f"update_search_config_failed: {e}", exc_info=True)
             return _error_response("update_search_config_error", str(e))
+
+    # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")

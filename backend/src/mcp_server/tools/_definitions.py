@@ -3,6 +3,7 @@
 Extracted from tools.py for modularity (Issue #7).
 """
 
+
 def get_tool_definitions() -> list[dict]:
     """Get static tool definitions for HTTP transport.
 
@@ -551,9 +552,6 @@ No parameters required - just call this tool to get the full guide.""",
 # ============================================================================
 
 
-
 # ============================================================================
 # Main Tool Execution Entry Point
 # ============================================================================
-
-
