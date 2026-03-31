@@ -65,43 +65,18 @@ class TestBuildTagFilterCondition:
         assert len(condition.match.any) == 2
 
 
-class TestTagsTextPayload:
-    """Test tags_text construction logic (mirrors memory_service.py)."""
+class TestTagFilterIntegration:
+    """Test that tag filtering works as exact-match only (not BM25)."""
 
-    def test_tags_to_tags_text(self):
-        """Tags should be joined and lowercased."""
-        tags = ["Python", "FastAPI", "category:Backend"]
-        tags_str = " ".join(t.lower() for t in tags)
-        assert tags_str == "python fastapi category:backend"
+    def test_filter_does_not_affect_bm25_scoring(self):
+        """Tag filter uses MatchAny (exact), not MatchText (BM25)."""
+        from qdrant_client.models import MatchAny
 
-    def test_empty_tags(self):
-        """Empty tags should produce empty string."""
-        tags_str = " ".join(t.lower() for t in []) if [] else ""
-        assert tags_str == ""
+        condition = _build_tag_filter_condition({"tags": ["python"]})
+        # Must use MatchAny, NOT MatchText
+        assert isinstance(condition.match, MatchAny)
 
-    def test_none_tags(self):
-        """None tags should produce empty string."""
-        tags = None
-        tags_str = " ".join(t.lower() for t in tags) if tags else ""
-        assert tags_str == ""
-
-    def test_japanese_tags_lowercase(self):
-        """Japanese tags are unaffected by lowercase (no case in Japanese)."""
-        tags = ["鯖", "サバ", "さば", "味噌煮"]
-        tags_str = " ".join(t.lower() for t in tags)
-        assert tags_str == "鯖 サバ さば 味噌煮"
-
-    def test_embed_text_with_tags(self):
-        """Embedding text should include summary + tags."""
-        summary = "鯖の味噌煮レシピ"
-        tags = ["鯖", "サバ", "category:料理"]
-        tags_str = " ".join(t.lower() for t in tags)
-        embed_text = f"{summary} {tags_str}" if tags_str else summary
-        assert embed_text == "鯖の味噌煮レシピ 鯖 サバ category:料理"
-
-    def test_embed_text_without_tags(self):
-        """Without tags, embedding text is just summary."""
-        summary = "Test memory"
-        tags_str = ""
-        embed_text = f"{summary} {tags_str}" if tags_str else summary
-        assert embed_text == "Test memory"
+    def test_multiple_tags_any_match(self):
+        """MatchAny matches if ANY tag in the list is present."""
+        condition = _build_tag_filter_condition({"tags": ["引越し", "ひっこし"]})
+        assert len(condition.match.any) == 2

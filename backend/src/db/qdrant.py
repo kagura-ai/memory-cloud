@@ -17,6 +17,7 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    MatchAny,
     MatchText,
     MatchValue,
     PointIdsList,
@@ -86,6 +87,24 @@ def _validate_uuid_format(value: str, field_name: str) -> None:
         UUID(value)
     except (ValueError, AttributeError) as e:
         raise ValueError(ERROR_MSG_INVALID_UUID.format(field=field_name, value=value)) from e
+
+
+def _build_tag_filter_condition(filters: dict[str, Any]) -> FieldCondition | None:
+    """Build FieldCondition for tag filtering (match any).
+
+    Issue #67: Exact-match tag filtering only. Tags are NOT added to
+    BM25 text search to avoid score inflation for tag-heavy memories.
+
+    Args:
+        filters: Filter dict with optional tags list
+
+    Returns:
+        FieldCondition for tag matching or None
+    """
+    filter_tags = filters.get("tags")
+    if isinstance(filter_tags, list) and filter_tags:
+        return FieldCondition(key="tags", match=MatchAny(any=filter_tags))
+    return None
 
 
 def _build_importance_range_condition(filters: dict[str, Any]) -> FieldCondition | None:
@@ -324,6 +343,11 @@ async def search_memories_qdrant(
             if importance_condition:
                 conditions.append(importance_condition)
 
+            # Issue #67: Tag filtering (exact match, not BM25)
+            tag_condition = _build_tag_filter_condition(filters)
+            if tag_condition:
+                conditions.append(tag_condition)
+
         # Build filter
         qdrant_filter = None
         if conditions:
@@ -467,6 +491,11 @@ async def search_memories_fulltext(
             importance_condition = _build_importance_range_condition(filters)
             if importance_condition:
                 conditions.append(importance_condition)
+
+            # Issue #67: Tag filtering (exact match, not BM25)
+            tag_condition = _build_tag_filter_condition(filters)
+            if tag_condition:
+                conditions.append(tag_condition)
 
         # Build filter
         qdrant_filter = None
@@ -644,7 +673,17 @@ async def ensure_kagura_memories_collection(
                             lowercase=True,
                         ),
                     )
-                    logger.info("created_missing_token_index", field=field)
+                    logger.info("created_missing_index", field=field, type="text")
+
+            # Issue #67: Backfill keyword index for tags (exact-match filtering)
+            if "tags" not in existing_fields:
+                await client.create_payload_index(
+                    collection_name=collection_name,
+                    field_name="tags",
+                    field_schema="keyword",  # type: ignore[arg-type]
+                )
+                logger.info("created_missing_index", field="tags", type="keyword")
+
             return
 
         # Create collection with vector config
@@ -741,6 +780,13 @@ async def ensure_kagura_memories_collection(
             field_schema="float",  # type: ignore[arg-type]
         )
 
+        # Issue #67: Keyword index for tag filtering (exact match)
+        await client.create_payload_index(
+            collection_name=collection_name,
+            field_name="tags",
+            field_schema="keyword",  # type: ignore[arg-type]
+        )
+
         logger.info(
             "single_collection_indexes_created",
             collection=collection_name,
@@ -753,6 +799,7 @@ async def ensure_kagura_memories_collection(
                 "scope",
                 "type",
                 "importance",
+                "tags",
             ],
         )
 

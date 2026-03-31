@@ -145,7 +145,7 @@ IMPORTANT: Always specify context_id to ensure you're searching the intended con
                     },
                     "filters": {
                         "type": "object",
-                        "description": "Optional filters as JSON. Examples: {'type': 'code'}, {'tags': ['python']}, {'importance': {'gte': 0.7}}",
+                        "description": "Optional filters as JSON. Tag filter matches ANY of the specified tags (exact match). Use tags to find memories with specific writing variations or categories. Examples: {'type': 'code'}, {'tags': ['python', 'fastapi']}, {'tags': ['ひっこし']}, {'importance': {'gte': 0.7}}",
                     },
                     "context_id": {
                         "type": "string",
