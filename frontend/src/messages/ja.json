@@ -1088,6 +1088,8 @@
     "you": "あなた",
     "reranker": "リランカー",
     "embeddingModel": "Embedding",
+    "embeddingModelDefault": "デフォルト ({model})",
+    "embeddingModelHelp": "作成後は変更できません。ベクトルの次元数と検索品質を決定します。",
     "rerankToggleFailed": "リランキング設定の更新に失敗しました",
     "rerankOn": "リランキング有効",
     "rerankOff": "リランキング無効",

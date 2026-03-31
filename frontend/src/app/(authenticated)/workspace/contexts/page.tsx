@@ -90,7 +90,9 @@ import {
   getContextSearchConfig,
   updateContextSearchConfig,
   listContextMembers,
+  getEmbeddingModels,
   type ContextMember,
+  type EmbeddingModel,
 } from '@/lib/api/contexts';
 import { checkOpenAIKeyStatus } from '@/lib/api/workspaces';
 import { getResourceImpact } from '@/lib/api/schemas';
@@ -137,6 +139,7 @@ export default function ContextsPage() {
   const [newContextUsageGuide, setNewContextUsageGuide] = useState('');
   // Note: Embedding model is now fixed via EMBEDDING_MODEL env var (single collection mode)
   const [isPrivate, setIsPrivate] = useState(true);  // Issue #165: Privacy control
+  const [newEmbeddingModel, setNewEmbeddingModel] = useState<string>('');  // Issue #49: empty = default
   const [createError, setCreateError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
@@ -166,6 +169,10 @@ export default function ContextsPage() {
 
   // Resource ID copy state
   const [copiedResourceId, setCopiedResourceId] = useState<string | null>(null);
+
+  // Embedding models (Issue #49)
+  const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModel[]>([]);
+  const [defaultEmbeddingModel, setDefaultEmbeddingModel] = useState<string>('');
   const [deleting, setDeleting] = useState(false);
 
   // Edit dialog state
@@ -224,6 +231,13 @@ export default function ContextsPage() {
   useEffect(() => {
     fetchContexts();
     checkApiKey();
+    // Fetch available embedding models
+    getEmbeddingModels()
+      .then((resp) => {
+        setEmbeddingModels(resp.models);
+        setDefaultEmbeddingModel(resp.default_model);
+      })
+      .catch(() => {});  // Non-critical: selector won't show
   }, [fetchContexts, checkApiKey]);
 
   // Open edit modal from URL param: /workspace/contexts?edit=<context_id>
@@ -330,6 +344,7 @@ export default function ContextsPage() {
         description: newContextDescription.trim() || undefined,
         summary: newContextSummary.trim() || undefined,
         usage_guide: newContextUsageGuide.trim() || undefined,
+        embedding_model: newEmbeddingModel || undefined,
         is_private: isPrivate,  // Issue #165
       });
       setCreateDialogOpen(false);
@@ -796,6 +811,30 @@ export default function ContextsPage() {
                     </p>
                   </div>
 
+                  {/* Embedding Model - Issue #49 */}
+                  {embeddingModels.length > 1 && (
+                    <div className="space-y-2">
+                      <label className={cn(typography.bodySmall, 'font-medium')}>
+                        {t('embeddingModel')}
+                      </label>
+                      <select
+                        value={newEmbeddingModel}
+                        onChange={(e) => setNewEmbeddingModel(e.target.value)}
+                        className="w-full rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm"
+                      >
+                        <option value="">{t('embeddingModelDefault', { default: `Default (${defaultEmbeddingModel})` })}</option>
+                        {embeddingModels.filter(m => m.available).map((m) => (
+                          <option key={m.name} value={m.name}>
+                            {m.name} ({m.dimensions}d, {m.provider})
+                          </option>
+                        ))}
+                      </select>
+                      <p className={cn(typography.caption, colors.text.muted)}>
+                        {t('embeddingModelHelp', { default: 'Immutable after creation. Determines vector dimensions and search quality.' })}
+                      </p>
+                    </div>
+                  )}
+
                   {/* Privacy Control - Issue #182 */}
                   <div className="space-y-2">
                     <label className={cn(typography.bodySmall, 'font-medium')}>
@@ -1167,6 +1206,18 @@ export default function ContextsPage() {
               {t('permissionNoticeDesc')}
             </AlertDescription>
           </Alert>
+
+          {/* Embedding Model Info (read-only) */}
+          {contextToEdit?.embedding_model && (
+            <div className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
+              <Database className="h-4 w-4" />
+              <span>{t('embeddingModel')}: </span>
+              <code className="px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800 font-mono text-xs">
+                {contextToEdit.embedding_model}
+              </code>
+              <span className="text-xs text-gray-400">({contextToEdit.embedding_dimensions}d)</span>
+            </div>
+          )}
 
           <div className="space-y-4 py-4">
             <div className="space-y-2">

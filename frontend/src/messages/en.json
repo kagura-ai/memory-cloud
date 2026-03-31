@@ -1088,6 +1088,8 @@
     "you": "You",
     "reranker": "Reranker",
     "embeddingModel": "Embedding",
+    "embeddingModelDefault": "Default ({model})",
+    "embeddingModelHelp": "Immutable after creation. Determines vector dimensions and search quality.",
     "rerankToggleFailed": "Failed to update reranking setting",
     "rerankOn": "Reranking active",
     "rerankOff": "Reranking off",

@@ -193,3 +193,26 @@ export async function removeContextMember(
 ): Promise<void> {
   return apiClient.delete<void>(`/api/v1/contexts/${contextId}/members/${userId}`);
 }
+
+// ============================================================================
+// Embedding Models (Issue #49)
+// ============================================================================
+
+export interface EmbeddingModel {
+  name: string;
+  dimensions: number;
+  provider: string;
+  available: boolean;
+}
+
+export interface EmbeddingModelsResponse {
+  models: EmbeddingModel[];
+  default_model: string;
+}
+
+/**
+ * Get available embedding models with availability status
+ */
+export async function getEmbeddingModels(): Promise<EmbeddingModelsResponse> {
+  return apiClient.get<EmbeddingModelsResponse>('/api/v1/system/embedding/models');
+}
