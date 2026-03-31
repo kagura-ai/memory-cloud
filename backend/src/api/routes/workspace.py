@@ -346,7 +346,7 @@ async def get_workspace_usage_current(
         today = utcnow().date()
         api_today_result = await db.execute(
             select(func.count(UsageStatsModel.id)).where(
-                UsageStatsModel.workspace_id == str(workspace_id),
+                UsageStatsModel.workspace_id == workspace_id,
                 UsageStatsModel.date == today,
             )
         )
@@ -355,7 +355,7 @@ async def get_workspace_usage_current(
         # MCP calls today
         mcp_today_result = await db.execute(
             select(func.count(UsageStatsModel.id)).where(
-                UsageStatsModel.workspace_id == str(workspace_id),
+                UsageStatsModel.workspace_id == workspace_id,
                 UsageStatsModel.date == today,
                 UsageStatsModel.endpoint.like("mcp:%"),
             )
@@ -365,7 +365,7 @@ async def get_workspace_usage_current(
         # Public REST calls today
         public_today_result = await db.execute(
             select(func.count(UsageStatsModel.id)).where(
-                UsageStatsModel.workspace_id == str(workspace_id),
+                UsageStatsModel.workspace_id == workspace_id,
                 UsageStatsModel.date == today,
                 UsageStatsModel.endpoint.like("/api/v1/public/%"),
             )
@@ -375,7 +375,7 @@ async def get_workspace_usage_current(
         # REST calls today (non-public)
         rest_today_result = await db.execute(
             select(func.count(UsageStatsModel.id)).where(
-                UsageStatsModel.workspace_id == str(workspace_id),
+                UsageStatsModel.workspace_id == workspace_id,
                 UsageStatsModel.date == today,
                 UsageStatsModel.endpoint.like("/api/v1/%"),
                 UsageStatsModel.endpoint.notlike("/api/v1/public/%"),
@@ -387,7 +387,7 @@ async def get_workspace_usage_current(
         week_ago = today - timedelta(days=7)
         api_week_result = await db.execute(
             select(func.count(UsageStatsModel.id)).where(
-                UsageStatsModel.workspace_id == str(workspace_id),
+                UsageStatsModel.workspace_id == workspace_id,
                 UsageStatsModel.date >= week_ago,
             )
         )
@@ -396,7 +396,7 @@ async def get_workspace_usage_current(
         # MCP calls this week
         mcp_week_result = await db.execute(
             select(func.count(UsageStatsModel.id)).where(
-                UsageStatsModel.workspace_id == str(workspace_id),
+                UsageStatsModel.workspace_id == workspace_id,
                 UsageStatsModel.date >= week_ago,
                 UsageStatsModel.endpoint.like("mcp:%"),
             )
@@ -406,7 +406,7 @@ async def get_workspace_usage_current(
         # Public REST calls this week
         public_week_result = await db.execute(
             select(func.count(UsageStatsModel.id)).where(
-                UsageStatsModel.workspace_id == str(workspace_id),
+                UsageStatsModel.workspace_id == workspace_id,
                 UsageStatsModel.date >= week_ago,
                 UsageStatsModel.endpoint.like("/api/v1/public/%"),
             )
@@ -416,7 +416,7 @@ async def get_workspace_usage_current(
         # REST calls this week (non-public)
         rest_week_result = await db.execute(
             select(func.count(UsageStatsModel.id)).where(
-                UsageStatsModel.workspace_id == str(workspace_id),
+                UsageStatsModel.workspace_id == workspace_id,
                 UsageStatsModel.date >= week_ago,
                 UsageStatsModel.endpoint.like("/api/v1/%"),
                 UsageStatsModel.endpoint.notlike("/api/v1/public/%"),
@@ -506,7 +506,7 @@ async def get_workspace_usage_history(
                 func.count(UsageStatsModel.id).label("count"),
             )
             .where(
-                UsageStatsModel.workspace_id == str(workspace_id),
+                UsageStatsModel.workspace_id == workspace_id,
                 UsageStatsModel.date >= start_date,
                 UsageStatsModel.date <= end_date,
             )
@@ -586,7 +586,7 @@ async def get_workspace_usage_breakdown(
                 func.count(UsageStatsModel.id).label("count"),
             )
             .where(
-                UsageStatsModel.workspace_id == str(workspace_id),
+                UsageStatsModel.workspace_id == workspace_id,
                 UsageStatsModel.date >= start_date,
                 UsageStatsModel.date <= end_date,
             )
@@ -686,7 +686,7 @@ async def get_workspace_member_usage(
         api_today_result = await db.execute(
             select(UsageStatsModel.user_id, func.count(UsageStatsModel.id))
             .where(
-                UsageStatsModel.workspace_id == str(workspace_id),
+                UsageStatsModel.workspace_id == workspace_id,
                 UsageStatsModel.date == today,
             )
             .group_by(UsageStatsModel.user_id)
@@ -697,7 +697,7 @@ async def get_workspace_member_usage(
         api_week_result = await db.execute(
             select(UsageStatsModel.user_id, func.count(UsageStatsModel.id))
             .where(
-                UsageStatsModel.workspace_id == str(workspace_id),
+                UsageStatsModel.workspace_id == workspace_id,
                 UsageStatsModel.date >= week_ago,
             )
             .group_by(UsageStatsModel.user_id)

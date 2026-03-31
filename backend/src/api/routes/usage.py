@@ -24,6 +24,20 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/usage", tags=["usage"])
 
 
+def _build_usage_filter(user_id: str, workspace_id=None):
+    """Build workspace-scoped or user-scoped usage filter.
+
+    Issue #50: When workspace_id is available, filter by both user and workspace.
+    Falls back to user-only filter when no workspace selected.
+    """
+    if workspace_id:
+        return and_(
+            UsageStats.user_id == user_id,
+            UsageStats.workspace_id == workspace_id,
+        )
+    return UsageStats.user_id == user_id
+
+
 # ============================================================================
 # Response Models
 # ============================================================================
@@ -160,14 +174,7 @@ async def get_current_usage(
         # Issue #50: Workspace-scoped usage stats
         current_workspace_id = user.get("current_workspace_id")
 
-        # Issue #50: Workspace-scoped usage filter
-        if current_workspace_id:
-            usage_filter = and_(
-                UsageStats.user_id == user_id,
-                UsageStats.workspace_id == str(current_workspace_id),
-            )
-        else:
-            usage_filter = UsageStats.user_id == user_id
+        usage_filter = _build_usage_filter(user_id, current_workspace_id)
 
         settings = get_settings()
 
