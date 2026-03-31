@@ -506,12 +506,11 @@ function LoginContent() {
           </CardContent>
         </Card>
 
-        {authConfig && (() => {
-          const hasOAuth = authConfig.google_oauth_enabled || authConfig.github_oauth_enabled;
-          // Only show admin login toggle when OAuth is available and admin form is not shown
-          if (!hasOAuth || showAdminLogin) return null;
-          return (
-            <div className="mt-6 flex justify-center">
+        <div className="mt-6 flex items-center justify-center gap-4">
+          {authConfig && (() => {
+            const hasOAuth = authConfig.google_oauth_enabled || authConfig.github_oauth_enabled;
+            if (!hasOAuth || showAdminLogin) return null;
+            return (
               <button
                 onClick={() => setShowAdminLogin(true)}
                 className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white/60 px-4 py-2 text-sm font-medium text-gray-600 backdrop-blur-sm transition-colors hover:bg-white hover:text-brand-green-600"
@@ -519,11 +518,8 @@ function LoginContent() {
                 <Shield className="h-4 w-4" />
                 {t("adminLogin")}
               </button>
-            </div>
-          );
-        })()}
-
-        <div className="mt-4 flex justify-center">
+            );
+          })()}
           <button
             onClick={() => router.push("/")}
             className="text-sm font-medium text-gray-500 transition-colors hover:text-brand-green-600"
