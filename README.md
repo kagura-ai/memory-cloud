@@ -95,15 +95,30 @@ claude   # then run /setup
 git clone https://github.com/kagura-ai/memory-cloud.git
 cd memory-cloud
 cp .env.example .env.local
-# Edit .env.local if needed (OAuth credentials are optional)
+```
 
-# 2. Start all services
+**2. Configure `.env.local`:**
+
+| Setting | Required | Description |
+|---------|----------|-------------|
+| `API_KEY_SECRET` | **Yes** | Secret for API key encryption. Generate: `python3 -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `JWT_SECRET` | **Yes** | Secret for JWT tokens. Generate same way as above. |
+| `OPENAI_API_KEY` | **Yes**\* | OpenAI API key for embeddings. Auto-registered on admin setup. |
+| `OLLAMA_BASE_URL` | No | Ollama URL (default: `http://localhost:11434`). Alternative to OpenAI. |
+| `EMBEDDING_PROVIDER` | No | `openai` (default) or `ollama` |
+| `GOOGLE_CLIENT_ID/SECRET` | No | Google OAuth2 login (optional — password login available) |
+| `GITHUB_CLIENT_ID/SECRET` | No | GitHub OAuth2 login (optional) |
+
+\* Either `OPENAI_API_KEY` or a running Ollama instance is required for memory features.
+
+```bash
+# 3. Start all services
 docker compose up -d
 
-# 3. Run migrations
+# 4. Run migrations
 cd backend && alembic upgrade head
 
-# 4. Create admin account (interactive — sets password, MFA, API key)
+# 5. Create admin account (interactive — sets password, MFA, API key, embedding provider)
 cd backend && python -m src.cli.create_admin
 
 # Backend API:  http://localhost:8080
@@ -115,7 +130,7 @@ cd backend && python -m src.cli.create_admin
 
 | Command | Purpose |
 |---------|---------|
-| `python -m src.cli.create_admin` | Create admin + workspace + API key + `.mcp.json` |
+| `python -m src.cli.create_admin` | Create admin + workspace + API key + `.mcp.json` + embedding setup |
 | `python -m src.cli.reset_password` | Reset password and/or MFA |
 | `python -m src.cli.delete_admin` | Delete admin (for re-creation) |
 
