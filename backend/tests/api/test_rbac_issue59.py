@@ -152,7 +152,7 @@ class TestExternalKeysMemberAccess:
         May get 500 (no DB) but NOT 403.
         """
         response = member_client.get("/api/v1/external-keys")
-        assert response.status_code != 403, f"Member got 403 on list — RBAC too restrictive"
+        assert response.status_code != 403, "Member got 403 on list — RBAC too restrictive"
 
 
 # ============================================================================
@@ -174,4 +174,4 @@ class TestResourceTokenListOwnerOnly:
         May get 500 (no DB) but NOT 403.
         """
         response = owner_client.get("/api/v1/resource-tokens")
-        assert response.status_code != 403, f"Owner got 403 on list — RBAC too restrictive"
+        assert response.status_code != 403, "Owner got 403 on list — RBAC too restrictive"
