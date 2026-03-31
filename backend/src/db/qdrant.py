@@ -103,7 +103,10 @@ def _build_tag_filter_condition(filters: dict[str, Any]) -> FieldCondition | Non
     """
     filter_tags = filters.get("tags")
     if isinstance(filter_tags, list) and filter_tags:
-        return FieldCondition(key="tags", match=MatchAny(any=filter_tags))
+        # Validate: only non-empty strings, bounded to 50 tags
+        valid_tags = [t for t in filter_tags if isinstance(t, str) and t][:50]
+        if valid_tags:
+            return FieldCondition(key="tags", match=MatchAny(any=valid_tags))
     return None
 
 

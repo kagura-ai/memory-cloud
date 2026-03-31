@@ -73,7 +73,7 @@ class SearchService:
         # content-based BM25 length bias (reranker will re-score and trim)
         if use_rerank and getattr(config, "use_rerank", False):
             fetch_factor = fetch_factor * 2
-        fetch_size = k * fetch_factor
+        fetch_size = min(k * fetch_factor, 200)  # Cap to prevent excessive Qdrant/reranker load
 
         # Issue #XXX: Team collaboration - workspace membership + context privacy check
         from uuid import UUID

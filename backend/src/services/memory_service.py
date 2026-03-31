@@ -261,7 +261,8 @@ class MemoryService:
             from utils.tokenizer import tokenize_for_search
 
             # Issue #67: content_tokens for BM25 search on content field
-            content_text = request.content or ""
+            # Truncate to 2000 chars to limit Qdrant payload size and Sudachi cost
+            content_text = (request.content or "")[:2000]
             content_tokens = tokenize_for_search(content_text) if content_text else ""
 
             payload = {
