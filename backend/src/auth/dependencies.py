@@ -416,6 +416,45 @@ async def require_workspace_owner(
     return user_id, workspace_id
 
 
+async def require_workspace_member(
+    user: dict = Depends(get_user_from_api_key_or_session),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Verify user has at least member role (excludes viewers).
+
+    Issue #59: Viewers should not access certain workspace features.
+    Accepts both session auth and API key auth.
+    Returns the full user dict (unlike WorkspaceOwner which returns a tuple).
+
+    Args:
+        user: Current authenticated user (session or API key)
+        db: Database session
+
+    Returns:
+        User info dict (same as APIKeyOrSessionUser)
+
+    Raises:
+        HTTPException: 400 if no workspace selected
+        HTTPException: 403 if viewer or not a member
+    """
+    user_id = user.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    workspace_id = user.get("current_workspace_id")
+    if not workspace_id:
+        raise HTTPException(
+            status_code=400, detail="No workspace selected. Please select a workspace first."
+        )
+
+    from services.permission_service import PermissionService
+
+    perm_service = PermissionService(db)
+    await perm_service.check_workspace_access(user_id, workspace_id, required_role="member")
+
+    return user
+
+
 # ============================================================================
 # Type Aliases
 # ============================================================================
@@ -427,3 +466,4 @@ APIKeyUser = Annotated[dict, Depends(verify_api_key_user)]
 APIKeyOrSessionUser = Annotated[dict, Depends(get_user_from_api_key_or_session)]
 SessionUser = Annotated[dict, Depends(require_session_auth)]  # Issue #252
 WorkspaceOwner = Annotated[tuple[str, UUID], Depends(require_workspace_owner)]  # Issue #276
+WorkspaceMember = Annotated[dict, Depends(require_workspace_member)]  # Issue #59
