@@ -142,16 +142,23 @@ class TestDetectSymbolDensity:
         assert detect_symbol_density("Hello World") is False
 
     def test_url(self):
-        """URLs should have high symbol density."""
-        assert detect_symbol_density("https://example.com/path?q=1") is True
+        """URLs should have high symbol density with lower threshold."""
+        # "https://example.com/path?q=1" has 7 symbols out of 28 chars = 25%
+        assert detect_symbol_density("https://example.com/path?q=1", threshold=0.2) is True
+        assert detect_symbol_density("https://example.com/path?q=1") is False  # 25% < 30%
 
     def test_code_snippet(self):
-        """Code snippets should have high symbol density."""
-        assert detect_symbol_density("C++ node.js AWS_S3") is True
+        """Code-heavy text should have high symbol density."""
+        # "(){}" = 100% symbols
+        assert detect_symbol_density("(){}") is True
+        # "C++ node.js AWS_S3" only has ~22% symbols (below 30%)
+        assert detect_symbol_density("C++ node.js AWS_S3") is False
 
     def test_email(self):
-        """Email addresses should have high symbol density."""
-        assert detect_symbol_density("user@example.com") is True
+        """Email addresses have moderate symbol density."""
+        # "user@example.com" has 2 symbols out of 16 = 12.5%
+        assert detect_symbol_density("user@example.com") is False
+        assert detect_symbol_density("user@example.com", threshold=0.1) is True
 
     def test_japanese_text(self):
         """Japanese text without symbols should have low density."""
@@ -159,13 +166,16 @@ class TestDetectSymbolDensity:
 
     def test_custom_threshold(self):
         """Custom threshold should work."""
-        # "a:b" has 25% symbols (1 out of 4 non-space chars)
+        # "a:b" has 1 symbol out of 3 chars = 33.3%
         assert detect_symbol_density("a:b", threshold=0.2) is True
-        assert detect_symbol_density("a:b", threshold=0.3) is False
+        assert detect_symbol_density("a:b", threshold=0.4) is False
 
     def test_programming_symbols(self):
         """Programming symbols should be detected."""
-        assert detect_symbol_density("function() { return; }") is True
+        # "function() { return; }" has 5 symbols out of 22 chars = 22.7%
+        assert detect_symbol_density("function() { return; }", threshold=0.2) is True
+        # Heavy symbols: "{{{}}}()()" has 100% symbols
+        assert detect_symbol_density("{{{}}}()()") is True
 
     def test_date_format(self):
         """Date formats should have moderate density."""

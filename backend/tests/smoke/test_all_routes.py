@@ -31,7 +31,11 @@ def _get_all_routes():
         if route.path in ("/openapi.json", "/docs/oauth2-redirect"):
             continue
         # Skip OAuth routes that require external provider config
-        if "/auth/google" in route.path or "/oauth/token" in route.path:
+        if (
+            "/auth/google" in route.path
+            or "/auth/github" in route.path
+            or "/oauth/token" in route.path
+        ):
             continue
         for method in route.methods:
             if method in ("HEAD", "OPTIONS"):
