@@ -59,6 +59,8 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
                 try:
                     # Log usage via common function
+                    # Issue #50: Pass workspace_id (set by RateLimitMiddleware)
+                    workspace_id = getattr(request.state, "workspace_id", None)
                     await log_usage(
                         db=db,
                         user_id=user_id,
@@ -66,6 +68,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                         method=request.method,
                         status_code=response.status_code,
                         response_time_ms=response_time_ms,
+                        workspace_id=workspace_id,
                     )
 
                 finally:

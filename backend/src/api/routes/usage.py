@@ -8,7 +8,7 @@ from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser
@@ -22,6 +22,20 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/usage", tags=["usage"])
+
+
+def _build_usage_filter(user_id: str, workspace_id=None):
+    """Build workspace-scoped or user-scoped usage filter.
+
+    Issue #50: When workspace_id is available, filter by both user and workspace.
+    Falls back to user-only filter when no workspace selected.
+    """
+    if workspace_id:
+        return and_(
+            UsageStats.user_id == user_id,
+            UsageStats.workspace_id == workspace_id,
+        )
+    return UsageStats.user_id == user_id
 
 
 # ============================================================================
@@ -157,6 +171,11 @@ async def get_current_usage(
     """
     try:
         user_id = user["user_id"]
+        # Issue #50: Workspace-scoped usage stats
+        current_workspace_id = user.get("current_workspace_id")
+
+        usage_filter = _build_usage_filter(user_id, current_workspace_id)
+
         settings = get_settings()
 
         # Get user plan (or default to free)
@@ -184,16 +203,14 @@ async def get_current_usage(
         # Get API calls today (Issue #238: Separate MCP/REST/Public)
         today = utcnow().date()
         today_result = await db.execute(
-            select(func.count(UsageStats.id)).where(
-                UsageStats.user_id == user_id, UsageStats.date == today
-            )
+            select(func.count(UsageStats.id)).where(usage_filter, UsageStats.date == today)
         )
         api_calls_today = today_result.scalar() or 0
 
         # Get MCP calls today
         mcp_today_result = await db.execute(
             select(func.count(UsageStats.id)).where(
-                UsageStats.user_id == user_id,
+                usage_filter,
                 UsageStats.date == today,
                 UsageStats.endpoint.like("mcp:%"),
             )
@@ -203,7 +220,7 @@ async def get_current_usage(
         # Get Public REST calls today
         public_today_result = await db.execute(
             select(func.count(UsageStats.id)).where(
-                UsageStats.user_id == user_id,
+                usage_filter,
                 UsageStats.date == today,
                 UsageStats.endpoint.like("/api/v1/public/%"),
             )
@@ -213,7 +230,7 @@ async def get_current_usage(
         # Get REST calls today (non-public)
         rest_today_result = await db.execute(
             select(func.count(UsageStats.id)).where(
-                UsageStats.user_id == user_id,
+                usage_filter,
                 UsageStats.date == today,
                 UsageStats.endpoint.like("/api/v1/%"),
                 UsageStats.endpoint.notlike("/api/v1/public/%"),
@@ -224,16 +241,14 @@ async def get_current_usage(
         # Get API calls this week (last 7 days)
         week_ago = utcnow().date() - timedelta(days=7)
         week_result = await db.execute(
-            select(func.count(UsageStats.id)).where(
-                UsageStats.user_id == user_id, UsageStats.date >= week_ago
-            )
+            select(func.count(UsageStats.id)).where(usage_filter, UsageStats.date >= week_ago)
         )
         api_calls_week = week_result.scalar() or 0
 
         # Get MCP calls this week
         mcp_week_result = await db.execute(
             select(func.count(UsageStats.id)).where(
-                UsageStats.user_id == user_id,
+                usage_filter,
                 UsageStats.date >= week_ago,
                 UsageStats.endpoint.like("mcp:%"),
             )
@@ -243,7 +258,7 @@ async def get_current_usage(
         # Get Public REST calls this week
         public_week_result = await db.execute(
             select(func.count(UsageStats.id)).where(
-                UsageStats.user_id == user_id,
+                usage_filter,
                 UsageStats.date >= week_ago,
                 UsageStats.endpoint.like("/api/v1/public/%"),
             )
@@ -253,7 +268,7 @@ async def get_current_usage(
         # Get REST calls this week (non-public)
         rest_week_result = await db.execute(
             select(func.count(UsageStats.id)).where(
-                UsageStats.user_id == user_id,
+                usage_filter,
                 UsageStats.date >= week_ago,
                 UsageStats.endpoint.like("/api/v1/%"),
                 UsageStats.endpoint.notlike("/api/v1/public/%"),
@@ -317,6 +332,8 @@ async def get_usage_history(
     """
     try:
         user_id = user["user_id"]
+        current_workspace_id = user.get("current_workspace_id")
+        usage_filter = _build_usage_filter(user_id, current_workspace_id)
 
         # Calculate period
         end_date = utcnow().date()
@@ -329,7 +346,7 @@ async def get_usage_history(
                 func.count(UsageStats.id).label("count"),
             )
             .where(
-                UsageStats.user_id == user_id,
+                usage_filter,
                 UsageStats.date >= start_date,
                 UsageStats.date <= end_date,
             )
@@ -392,6 +409,8 @@ async def get_usage_breakdown(
     """
     try:
         user_id = user["user_id"]
+        current_workspace_id = user.get("current_workspace_id")
+        usage_filter = _build_usage_filter(user_id, current_workspace_id)
 
         # Calculate period
         start_date = utcnow().date() - timedelta(days=days)
@@ -402,7 +421,7 @@ async def get_usage_breakdown(
                 UsageStats.endpoint,
                 func.count(UsageStats.id).label("count"),
             )
-            .where(UsageStats.user_id == user_id, UsageStats.date >= start_date)
+            .where(usage_filter, UsageStats.date >= start_date)
             .group_by(UsageStats.endpoint)
             .order_by(func.count(UsageStats.id).desc())
         )
