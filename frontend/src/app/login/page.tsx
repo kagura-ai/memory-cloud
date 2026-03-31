@@ -184,7 +184,7 @@ function LoginContent() {
       <div className="pointer-events-none absolute -right-1/4 -bottom-1/4 h-96 w-96 rounded-full bg-emerald-300/30 blur-3xl" />
 
       <div className="absolute top-4 right-4 z-10">
-        <LanguageSelector className="bg-white/90 backdrop-blur-sm border border-gray-300 shadow-sm hover:bg-white text-gray-700" showLabel />
+        <LanguageSelector className="!bg-white/90 backdrop-blur-sm border border-gray-300 shadow-sm hover:!bg-white !text-gray-700 hover:!text-gray-900" showLabel />
       </div>
 
       <div className="relative w-full max-w-md px-4">
