@@ -17,6 +17,7 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    MatchAny,
     MatchText,
     MatchValue,
     PointIdsList,
@@ -86,6 +87,27 @@ def _validate_uuid_format(value: str, field_name: str) -> None:
         UUID(value)
     except (ValueError, AttributeError) as e:
         raise ValueError(ERROR_MSG_INVALID_UUID.format(field=field_name, value=value)) from e
+
+
+def _build_tag_filter_condition(filters: dict[str, Any]) -> FieldCondition | None:
+    """Build FieldCondition for tag filtering (match any).
+
+    Issue #67: Exact-match tag filtering only. Tags are NOT added to
+    BM25 text search to avoid score inflation for tag-heavy memories.
+
+    Args:
+        filters: Filter dict with optional tags list
+
+    Returns:
+        FieldCondition for tag matching or None
+    """
+    filter_tags = filters.get("tags")
+    if isinstance(filter_tags, list) and filter_tags:
+        # Validate: only non-empty strings, bounded to 50 tags
+        valid_tags = [t for t in filter_tags if isinstance(t, str) and t][:50]
+        if valid_tags:
+            return FieldCondition(key="tags", match=MatchAny(any=valid_tags))
+    return None
 
 
 def _build_importance_range_condition(filters: dict[str, Any]) -> FieldCondition | None:
@@ -324,6 +346,11 @@ async def search_memories_qdrant(
             if importance_condition:
                 conditions.append(importance_condition)
 
+            # Issue #67: Tag filtering (exact match, not BM25)
+            tag_condition = _build_tag_filter_condition(filters)
+            if tag_condition:
+                conditions.append(tag_condition)
+
         # Build filter
         qdrant_filter = None
         if conditions:
@@ -468,6 +495,11 @@ async def search_memories_fulltext(
             if importance_condition:
                 conditions.append(importance_condition)
 
+            # Issue #67: Tag filtering (exact match, not BM25)
+            tag_condition = _build_tag_filter_condition(filters)
+            if tag_condition:
+                conditions.append(tag_condition)
+
         # Build filter
         qdrant_filter = None
         if conditions:
@@ -482,6 +514,8 @@ async def search_memories_fulltext(
             # Tokenized fields (accurate Japanese matching via lemmas)
             FieldCondition(key="summary_tokens", match=MatchText(text=tokenized_query)),
             FieldCondition(key="context_summary_tokens", match=MatchText(text=tokenized_query)),
+            # Issue #67: Content tokens for deeper keyword matching
+            FieldCondition(key="content_tokens", match=MatchText(text=tokenized_query)),
             # Original fields (fallback for old memories without tokens)
             FieldCondition(key="summary", match=MatchText(text=query)),
             FieldCondition(key="context_summary", match=MatchText(text=query)),
@@ -558,15 +592,16 @@ async def search_memories_fulltext(
                 summary_tokens = (point.payload.get("summary") or "").lower()
             if not ctx_tokens:
                 ctx_tokens = (point.payload.get("context_summary") or "").lower()
-            combined_text = summary_tokens + " " + ctx_tokens
+            # Issue #67: content_tokens for deeper keyword matching
+            content_tokens = point.payload.get("content_tokens") or ""
+            summary_ctx_text = summary_tokens + " " + ctx_tokens
 
-            hit_count = sum(1 for word in query_words if word in combined_text)
+            # Score: summary/context matches weighted higher than content matches
+            summary_hits = sum(1 for word in query_words if word in summary_ctx_text)
+            content_hits = sum(1 for word in query_words if word in content_tokens)
 
-            # Calculate score:
-            # - Base: 0.5 (any match gets baseline score)
-            # - Boost: +0.1 per matching term
-            # - Clamp: max 1.0
-            score = 0.5 + (0.1 * hit_count)
+            # Base: 0.5, summary/ctx: +0.1/term, content: +0.05/term (lower to avoid length bias)
+            score = 0.5 + (0.1 * summary_hits) + (0.05 * content_hits)
             score = min(1.0, score)
 
             results.append(
@@ -631,7 +666,7 @@ async def ensure_kagura_memories_collection(
             # Ensure pre-tokenized indexes exist (Issue #1: Japanese BM25)
             info = await client.get_collection(collection_name)
             existing_fields = set(info.payload_schema.keys()) if info.payload_schema else set()
-            for field in ("summary_tokens", "context_summary_tokens"):
+            for field in ("summary_tokens", "context_summary_tokens", "content_tokens"):
                 if field not in existing_fields:
                     await client.create_payload_index(
                         collection_name=collection_name,
@@ -644,7 +679,17 @@ async def ensure_kagura_memories_collection(
                             lowercase=True,
                         ),
                     )
-                    logger.info("created_missing_token_index", field=field)
+                    logger.info("created_missing_index", field=field, type="text")
+
+            # Issue #67: Backfill keyword index for tags (exact-match filtering)
+            if "tags" not in existing_fields:
+                await client.create_payload_index(
+                    collection_name=collection_name,
+                    field_name="tags",
+                    field_schema="keyword",  # type: ignore[arg-type]
+                )
+                logger.info("created_missing_index", field="tags", type="keyword")
+
             return
 
         # Create collection with vector config
@@ -708,7 +753,7 @@ async def ensure_kagura_memories_collection(
 
         # Create pre-tokenized text indexes (Issue #1: Japanese BM25)
         # These fields store Sudachi-lemmatized tokens for accurate Japanese search
-        for field in ("summary_tokens", "context_summary_tokens"):
+        for field in ("summary_tokens", "context_summary_tokens", "content_tokens"):
             await client.create_payload_index(
                 collection_name=collection_name,
                 field_name=field,
@@ -741,6 +786,13 @@ async def ensure_kagura_memories_collection(
             field_schema="float",  # type: ignore[arg-type]
         )
 
+        # Issue #67: Keyword index for tag filtering (exact match)
+        await client.create_payload_index(
+            collection_name=collection_name,
+            field_name="tags",
+            field_schema="keyword",  # type: ignore[arg-type]
+        )
+
         logger.info(
             "single_collection_indexes_created",
             collection=collection_name,
@@ -753,6 +805,7 @@ async def ensure_kagura_memories_collection(
                 "scope",
                 "type",
                 "importance",
+                "tags",
             ],
         )
 

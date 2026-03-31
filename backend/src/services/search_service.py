@@ -68,7 +68,12 @@ class SearchService:
         """
         # Load context search configuration (Issue #130)
         config = await self._get_search_config(context_id)
-        fetch_size = k * config.fetch_factor
+        fetch_factor = config.fetch_factor
+        # Issue #67: Double fetch size when reranker is active to compensate for
+        # content-based BM25 length bias (reranker will re-score and trim)
+        if use_rerank and getattr(config, "use_rerank", False):
+            fetch_factor = fetch_factor * 2
+        fetch_size = min(k * fetch_factor, 200)  # Cap to prevent excessive Qdrant/reranker load
 
         # Issue #XXX: Team collaboration - workspace membership + context privacy check
         from uuid import UUID
@@ -322,7 +327,7 @@ class SearchService:
                 {
                     "semantic_weight": 0.6,
                     "bm25_weight": 0.4,
-                    "fetch_factor": 3,
+                    "fetch_factor": 5,
                     "use_rerank": False,
                 },
             )()
@@ -354,7 +359,7 @@ class SearchService:
                 {
                     "semantic_weight": 0.6,
                     "bm25_weight": 0.4,
-                    "fetch_factor": 3,
+                    "fetch_factor": 5,
                     "use_rerank": False,
                 },
             )()
