@@ -995,7 +995,7 @@
     "saveContextAccess": "保存",
     "contextAccessNotApplicable": "制限なし",
     "noContextsAvailable": "利用可能なContextがありません",
-    "authentication": "認証",
+    "authentication": "操作",
     "credentialsSettings": "設定",
     "contextAccessInfo": "このメンバーがアクセスできるContextを選択",
     "selectAll": "すべて選択",
@@ -1087,6 +1087,9 @@
     "createdBy": "作成者",
     "you": "あなた",
     "reranker": "リランカー",
+    "embeddingModel": "Embedding",
+    "embeddingModelDefault": "デフォルト ({model})",
+    "embeddingModelHelp": "作成後は変更できません。ベクトルの次元数と検索品質を決定します。",
     "rerankToggleFailed": "リランキング設定の更新に失敗しました",
     "rerankOn": "リランキング有効",
     "rerankOff": "リランキング無効",
@@ -2108,7 +2111,7 @@
     "environment": {
       "title": "環境設定",
       "titleFull": "環境設定",
-      "description": "システム設定値を表示・管理します（.env）",
+      "description": "システム設定とサービスステータスを表示します",
       "loadingDesc": "設定を読み込み中...",
       "configManagement": "設定管理",
       "actions": {
@@ -2124,6 +2127,22 @@
         "search": "検索設定",
         "memory": "メモリー設定",
         "system": "システム設定"
+      },
+      "systemStatus": {
+        "title": "システムステータス",
+        "description": "Embeddingプロバイダー、Ollama、Qdrantの状態",
+        "embeddingConfig": "Embedding設定",
+        "provider": "プロバイダー",
+        "model": "モデル",
+        "dimensions": "次元数",
+        "ollama": "Ollama",
+        "ollamaNotConfigured": "未設定",
+        "embeddingModelsTitle": "Embeddingモデル",
+        "installed": "インストール済み",
+        "notInstalled": "未インストール",
+        "qdrantCollections": "Qdrantコレクション",
+        "qdrantNoCollections": "接続済み — コレクションはまだありません。コンテキストを作成してください。",
+        "qdrantError": "エラー"
       },
       "table": {
         "key": "キー",

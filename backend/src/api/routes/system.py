@@ -124,8 +124,10 @@ async def get_system_telemetry(
         try:
             from qdrant_client import AsyncQdrantClient
 
+            from config.database import get_qdrant_url
+
             qdrant = AsyncQdrantClient(
-                url=settings.qdrant_url, api_key=settings.qdrant_api_key, timeout=5
+                url=get_qdrant_url(), api_key=settings.qdrant_api_key, timeout=5
             )
             collections = await qdrant.get_collections()
             collection_names = [c.name for c in collections.collections]
@@ -142,7 +144,7 @@ async def get_system_telemetry(
         # Check Redis
         redis_status = ServiceStatus(status="unknown")
         try:
-            from config.database import get_redis_client
+            from db.redis import get_redis_client
 
             redis = get_redis_client()
             await redis.ping()
@@ -345,3 +347,112 @@ async def get_system_overview(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve system overview",
         ) from e
+
+
+# ============================================================================
+# Embedding Models (Issue #49)
+# ============================================================================
+
+
+class EmbeddingModelInfo(BaseModel):
+    """Individual embedding model info."""
+
+    name: str
+    dimensions: int
+    provider: str
+    available: bool
+
+
+class EmbeddingModelsResponse(BaseModel):
+    """Response for available embedding models."""
+
+    models: list[EmbeddingModelInfo]
+    default_model: str
+
+
+@router.get("/embedding/models", response_model=EmbeddingModelsResponse)
+async def list_embedding_models(
+    user: APIKeyOrSessionUser,
+    db: AsyncSession = Depends(get_db),
+) -> EmbeddingModelsResponse:
+    """List available embedding models with availability status.
+
+    Returns all models from EMBEDDING_MODEL_REGISTRY with availability
+    based on whether the provider is configured and reachable.
+
+    Returns:
+        List of models with name, dimensions, provider, and availability
+    """
+    from config.constants import EMBEDDING_MODEL_REGISTRY
+    from config.settings import get_settings
+
+    settings = get_settings()
+
+    # Check OpenAI availability: user has external API key or env var set
+    openai_available = False
+    try:
+        from models.auth import ExternalAPIKey
+
+        user_id = user["user_id"]
+        workspace_id = user.get("current_workspace_id")
+
+        conditions = [
+            ExternalAPIKey.provider == "openai",
+            ExternalAPIKey.enabled.is_(True),
+        ]
+        if workspace_id:
+            from sqlalchemy import or_
+
+            conditions.append(
+                or_(
+                    ExternalAPIKey.workspace_id == workspace_id,
+                    ExternalAPIKey.user_id == user_id,
+                )
+            )
+        else:
+            conditions.append(ExternalAPIKey.user_id == user_id)
+
+        result = await db.execute(select(ExternalAPIKey).where(*conditions).limit(1))
+        openai_available = result.scalar_one_or_none() is not None
+
+        # Fallback: check env var
+        if not openai_available:
+            import os
+
+            openai_available = bool(os.getenv("OPENAI_API_KEY"))
+    except Exception:
+        pass  # Non-critical: OpenAI availability is best-effort
+
+    # Check Ollama availability (only if explicitly configured)
+    ollama_available = False
+    ollama_url = settings.ollama_base_url
+    ollama_configured = (
+        settings.embedding_provider == "ollama" or ollama_url != "http://localhost:11434"
+    )
+    if ollama_configured:
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=3.0) as http:
+                resp = await http.get(ollama_url)
+                ollama_available = resp.status_code == 200
+        except Exception:
+            pass  # Ollama not reachable — models marked as unavailable
+
+    # Build model list
+    models = []
+    for name, (dimensions, provider) in EMBEDDING_MODEL_REGISTRY.items():
+        available = openai_available if provider == "openai" else ollama_available
+        models.append(
+            EmbeddingModelInfo(
+                name=name,
+                dimensions=dimensions,
+                provider=provider,
+                available=available,
+            )
+        )
+
+    return EmbeddingModelsResponse(
+        models=models,
+        default_model=settings.embedding_model,
+    )

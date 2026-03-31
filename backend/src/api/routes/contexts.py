@@ -134,8 +134,7 @@ class ContextCreate(BaseModel):
     )
     embedding_model: str | None = Field(
         None,
-        pattern=r"^text-embedding-3-(small|large)$",
-        description="DEPRECATED: Ignored. Embedding model is now fixed via EMBEDDING_MODEL env var (single collection mode)",
+        description="Embedding model for this context. Default: global EMBEDDING_MODEL setting. Immutable after creation.",
     )
     is_private: bool = Field(
         True,
@@ -207,6 +206,9 @@ class ContextResponse(BaseModel):
     # Issue #217: Search config summary for context card display
     use_rerank: bool | None = Field(None, description="Reranking enabled (Basic+ only)")
     reranker_provider: str | None = Field(None, description="Reranker provider: voyage/cohere")
+    # Embedding model info (Issue #49)
+    embedding_model: str | None = Field(None, description="Embedding model used for this context")
+    embedding_dimensions: int | None = Field(None, description="Embedding vector dimensions")
     # Context members count (workspace members with access + explicit context members)
     member_count: int | None = Field(
         None, description="Number of members with access to this context"
@@ -361,6 +363,9 @@ async def list_contexts(
                 # Issue #217: Search config summary
                 use_rerank=search_config.use_rerank if search_config else None,
                 reranker_provider=search_config.reranker_provider if search_config else None,
+                # Issue #49: Embedding model info
+                embedding_model=search_config.embedding_model if search_config else None,
+                embedding_dimensions=search_config.embedding_dimensions if search_config else None,
                 # Member count
                 member_count=member_counts.get(context.id, 0) if not context.is_private else None,
             )
@@ -432,6 +437,17 @@ async def create_context(
                         detail="Shared contexts require Pro plan. Upgrade your plan to share contexts with your team.",
                     )
 
+        # Validate embedding model if provided
+        if request.embedding_model:
+            from config.constants import EMBEDDING_MODEL_REGISTRY
+
+            if request.embedding_model not in EMBEDDING_MODEL_REGISTRY:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown embedding model: {request.embedding_model}. "
+                    f"Supported: {', '.join(EMBEDDING_MODEL_REGISTRY.keys())}",
+                )
+
         context = await service.create_context(
             workspace_id=workspace_id,
             name=request.name,
@@ -455,6 +471,14 @@ async def create_context(
 
         # Issue #246: Auto-set current context logic removed
 
+        # Fetch search config for response
+        from models.config import ContextSearchConfig
+
+        config_result = await service.db.execute(
+            select(ContextSearchConfig).where(ContextSearchConfig.context_id == context.id)
+        )
+        ctx_config = config_result.scalar_one_or_none()
+
         return ContextResponse(
             id=context.id,
             name=context.name,
@@ -463,11 +487,12 @@ async def create_context(
             summary=context.summary,
             usage_guide=context.usage_guide,
             is_default=context.is_default,
-            # Issue #246: is_current removed
-            is_private=context.is_private,  # Issue #165: Privacy control
-            created_by=context.created_by,  # Issue #165
+            is_private=context.is_private,
+            created_by=context.created_by,
             created_at=context.created_at,
             updated_at=context.updated_at,
+            embedding_model=ctx_config.embedding_model if ctx_config else None,
+            embedding_dimensions=ctx_config.embedding_dimensions if ctx_config else None,
         )
 
     except ValidationError as e:

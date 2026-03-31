@@ -19,7 +19,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Settings, Save, RefreshCw, AlertCircle, Eye, EyeOff, Info, ExternalLink } from 'lucide-react';
+import { Settings, Save, RefreshCw, AlertCircle, Eye, EyeOff, Info, ExternalLink, CheckCircle, XCircle, Server } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { apiClient } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
@@ -57,6 +57,8 @@ export default function EnvironmentPage() {
   const [error, setError] = useState<string | null>(null);
   const [editedValues, setEditedValues] = useState<Record<string, any>>({});
   const [showSensitive, setShowSensitive] = useState<Record<string, boolean>>({});
+  const [telemetry, setTelemetry] = useState<Record<string, any> | null>(null);
+  const [registryModels, setRegistryModels] = useState<Array<{ name: string; dimensions: number; provider: string; available: boolean }>>([]);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -67,8 +69,8 @@ export default function EnvironmentPage() {
     try {
       setLoading(true);
 
-      // Fetch both config values and schema in parallel
-      const [configResponse, schemaResponse] = await Promise.all([
+      // Fetch config values, schema, telemetry, and embedding models in parallel
+      const [configResponse, schemaResponse, telemetryResponse, embeddingResponse] = await Promise.all([
         apiClient.get<{
           configs: Array<{
             key: string;
@@ -80,7 +82,13 @@ export default function EnvironmentPage() {
           total: number;
         }>('/api/v1/config?mask_sensitive=true'),
         apiClient.get<Record<string, any>>('/api/v1/config/schema'),
+        apiClient.get<Record<string, any>>('/api/v1/system/telemetry').catch(() => null),
+        apiClient.get<{ models: Array<{ name: string; dimensions: number; provider: string; available: boolean }>; default_model: string }>('/api/v1/system/embedding/models').catch(() => null),
       ]);
+      setTelemetry(telemetryResponse);
+      if (embeddingResponse) {
+        setRegistryModels(embeddingResponse.models);
+      }
 
       // Transform API response to ConfigData format with schema metadata
       const configData: ConfigData = {};
@@ -359,6 +367,119 @@ export default function EnvironmentPage() {
       )}
 
       <div className="space-y-6">
+        {/* System Status — Embedding & Services */}
+        {telemetry && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Server className="h-5 w-5" />
+                {t('systemStatus.title')}
+              </CardTitle>
+              <CardDescription>{t('systemStatus.description')}</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* Embedding Config */}
+                <div className="p-4 border dark:border-gray-700 rounded-lg space-y-2">
+                  <div className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('systemStatus.embeddingConfig')}</div>
+                  {telemetry.embedding_config ? (
+                    <div className="space-y-1 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">{t('systemStatus.provider')}</span>
+                        <code className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-xs">{telemetry.embedding_config.provider}</code>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">{t('systemStatus.model')}</span>
+                        <code className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-xs">{telemetry.embedding_config.model}</code>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">{t('systemStatus.dimensions')}</span>
+                        <span className="text-xs">{telemetry.embedding_config.dimensions}</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <span className="text-xs text-gray-400">—</span>
+                  )}
+                </div>
+
+                {/* Ollama Status + Embedding Models */}
+                <div className="p-4 border dark:border-gray-700 rounded-lg space-y-2">
+                  <div className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('systemStatus.ollama')}</div>
+                  {telemetry.services?.ollama ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2">
+                        {telemetry.services.ollama.status === 'ok' ? (
+                          <CheckCircle className="h-4 w-4 text-green-500" />
+                        ) : telemetry.services.ollama.status === 'not_configured' ? (
+                          <XCircle className="h-4 w-4 text-gray-400" />
+                        ) : (
+                          <XCircle className="h-4 w-4 text-red-500" />
+                        )}
+                        <span className="text-sm">{telemetry.services.ollama.status}</span>
+                      </div>
+                      {telemetry.services.ollama.status === 'ok' && registryModels.length > 0 && (
+                        <div className="space-y-1">
+                          <div className="text-xs font-medium text-gray-500 dark:text-gray-400">{t('systemStatus.embeddingModelsTitle')}</div>
+                          {registryModels.filter(m => m.provider === 'ollama').map((model) => {
+                            const installedModels: string[] = telemetry.services?.ollama?.details?.models || [];
+                            const isInstalled = installedModels.some((m: string) => m.startsWith(model.name));
+                            return (
+                              <div key={model.name} className="flex items-center justify-between text-xs">
+                                <code className="font-mono">{model.name}</code>
+                                {isInstalled ? (
+                                  <span className="flex items-center gap-1 text-green-600 dark:text-green-400">
+                                    <CheckCircle className="h-3 w-3" /> {t('systemStatus.installed')}
+                                  </span>
+                                ) : (
+                                  <span className="flex items-center gap-1 text-gray-400">
+                                    <XCircle className="h-3 w-3" /> {t('systemStatus.notInstalled')}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <XCircle className="h-4 w-4 text-gray-400" />
+                      <span className="text-sm text-gray-400">{t('systemStatus.ollamaNotConfigured')}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Qdrant Collections */}
+                <div className="p-4 border dark:border-gray-700 rounded-lg space-y-2">
+                  <div className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('systemStatus.qdrantCollections')}</div>
+                  {telemetry.services?.qdrant?.status === 'ok' ? (
+                    telemetry.services.qdrant.details?.collection_names?.length > 0 ? (
+                      <div className="space-y-1">
+                        {telemetry.services.qdrant.details.collection_names.map((name: string) => (
+                          <div key={name} className="flex items-center gap-2">
+                            <div className="w-2 h-2 rounded-full bg-green-500" />
+                            <code className="text-xs font-mono">{name}</code>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <CheckCircle className="h-4 w-4 text-green-500" />
+                        <span className="text-sm text-gray-500">{t('systemStatus.qdrantNoCollections')}</span>
+                      </div>
+                    )
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <XCircle className="h-4 w-4 text-red-500" />
+                      <span className="text-sm text-gray-500">{telemetry.services?.qdrant?.details?.error || t('systemStatus.qdrantError')}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {Object.entries(groupedConfig).map(([category, items]) => (
           <Card key={category}>
             <CardHeader>

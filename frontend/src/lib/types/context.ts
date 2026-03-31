@@ -24,6 +24,9 @@ export interface Context {
   // Issue #217: Search config summary
   use_rerank: boolean | null;
   reranker_provider: string | null;  // 'voyage' | 'cohere'
+  // Embedding model info (Issue #49)
+  embedding_model: string | null;
+  embedding_dimensions: number | null;
   // Context members count
   member_count: number | null;
 }
@@ -49,7 +52,7 @@ export interface CreateContextRequest {
   description?: string;
   summary?: string;
   usage_guide?: string;
-  // Note: embedding_model removed - now fixed via EMBEDDING_MODEL env var (single collection mode)
+  embedding_model?: string;  // Issue #49: Embedding model selection
   is_private?: boolean;  // Issue #165: Privacy control (default: true)
 }
 

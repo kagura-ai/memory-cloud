@@ -996,7 +996,7 @@
     "saveContextAccess": "Save",
     "contextAccessNotApplicable": "No restrictions",
     "noContextsAvailable": "No contexts available",
-    "authentication": "Authentication",
+    "authentication": "Actions",
     "contextAccessInfo": "Select which contexts this member can access",
     "selectAll": "Select All",
     "deselectAll": "Deselect All",
@@ -1087,6 +1087,9 @@
     "createdBy": "Created by",
     "you": "You",
     "reranker": "Reranker",
+    "embeddingModel": "Embedding",
+    "embeddingModelDefault": "Default ({model})",
+    "embeddingModelHelp": "Immutable after creation. Determines vector dimensions and search quality.",
     "rerankToggleFailed": "Failed to update reranking setting",
     "rerankOn": "Reranking active",
     "rerankOff": "Reranking off",
@@ -2099,7 +2102,7 @@
     "environment": {
       "title": "Environment",
       "titleFull": "Environment Configuration",
-      "description": "View and manage system configuration values (.env)",
+      "description": "View system configuration and service status",
       "loadingDesc": "Loading configuration...",
       "configManagement": "Configuration management",
       "actions": {
@@ -2115,6 +2118,22 @@
         "search": "Search Configuration",
         "memory": "Memory Configuration",
         "system": "System Configuration"
+      },
+      "systemStatus": {
+        "title": "System Status",
+        "description": "Embedding provider, Ollama, and Qdrant status",
+        "embeddingConfig": "Embedding Config",
+        "provider": "Provider",
+        "model": "Model",
+        "dimensions": "Dimensions",
+        "ollama": "Ollama",
+        "ollamaNotConfigured": "Not configured",
+        "embeddingModelsTitle": "Embedding Models",
+        "installed": "installed",
+        "notInstalled": "not installed",
+        "qdrantCollections": "Qdrant Collections",
+        "qdrantNoCollections": "Connected — no collections yet. Create a context to get started.",
+        "qdrantError": "Error"
       },
       "table": {
         "key": "Key",
