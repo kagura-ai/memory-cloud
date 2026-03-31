@@ -28,7 +28,7 @@
 
 | Feature | Description |
 |---------|-------------|
-| **12 MCP Tools** | remember, recall, forget, reference, explore, and 7 more |
+| **11 MCP Tools** | remember, recall, forget, reference, explore, and 6 more |
 | **Hybrid Search** | Semantic (OpenAI/Ollama) + BM25 keyword — 96% top-1 accuracy |
 | **Neural Memory** | Hebbian learning auto-connects related memories |
 | **Multi-Provider** | OpenAI or Ollama (local, private, zero cost) |

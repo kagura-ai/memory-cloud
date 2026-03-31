@@ -21,7 +21,7 @@ def _generate_secret() -> str:
 
 
 def _read_env_file(path: Path) -> dict[str, str]:
-    """Read .env file into dict (key=value, ignoring comments)."""
+    """Read .env file into dict (key=value, ignoring comments and handling quotes)."""
     env = {}
     if not path.exists():
         return env
@@ -31,12 +31,19 @@ def _read_env_file(path: Path) -> dict[str, str]:
             continue
         if "=" in line:
             key, _, value = line.partition("=")
-            env[key.strip()] = value.strip()
+            value = value.strip()
+            # Remove surrounding quotes
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+            env[key.strip()] = value
     return env
 
 
-def _append_to_env(key: str, value: str):
-    """Append key=value to .env.local."""
+def _set_env_value(key: str, value: str):
+    """Set key=value in .env.local (append if missing, skip if exists)."""
+    env = _read_env_file(_env_local)
+    if key in env:
+        return  # Already set, don't duplicate
     with open(_env_local, "a") as f:
         f.write(f"\n{key}={value}\n")
 
@@ -65,7 +72,7 @@ def setup_env():
         print("\n✓ API_KEY_SECRET already set")
     else:
         secret = _generate_secret()
-        _append_to_env("API_KEY_SECRET", secret)
+        _set_env_value("API_KEY_SECRET", secret)
         print("\n✓ API_KEY_SECRET generated and saved")
 
     # 3. JWT_SECRET
@@ -73,7 +80,7 @@ def setup_env():
         print("✓ JWT_SECRET already set")
     else:
         secret = _generate_secret()
-        _append_to_env("JWT_SECRET", secret)
+        _set_env_value("JWT_SECRET", secret)
         print("✓ JWT_SECRET generated and saved")
 
     # 4. OPENAI_API_KEY (optional)
@@ -83,7 +90,7 @@ def setup_env():
         print("\nOpenAI API key (for embeddings). Press Enter to skip if using Ollama.")
         key = input("  OPENAI_API_KEY: ").strip()
         if key:
-            _append_to_env("OPENAI_API_KEY", key)
+            _set_env_value("OPENAI_API_KEY", key)
             print("  ✓ Saved")
         else:
             print("  → Skipped (Ollama or manual setup later)")
