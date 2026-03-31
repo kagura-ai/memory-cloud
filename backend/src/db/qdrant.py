@@ -293,6 +293,13 @@ async def add_memory_to_qdrant(
     payload["context_id"] = context_id
     payload["user_id"] = user_id
 
+    # Validate sparse vector inputs
+    if (sparse_indices is None) ^ (sparse_values is None):
+        raise ValueError("sparse_indices and sparse_values must be provided together or both None")
+    if sparse_indices is not None and sparse_values is not None:
+        if len(sparse_indices) != len(sparse_values):
+            raise ValueError("sparse_indices and sparse_values must have the same length")
+
     try:
         # Issue #16: Named vectors (dense + sparse BM25)
         point_vector: dict[str, Any] = {"dense": vector}
@@ -583,12 +590,10 @@ async def ensure_kagura_memories_collection(
             import os
 
             if os.getenv("KAGURA_RECREATE_COLLECTIONS", "").lower() not in ("true", "1"):
-                logger.error(
-                    "collection_needs_sparse_vector_migration",
-                    collection=collection_name,
-                    help="Set KAGURA_RECREATE_COLLECTIONS=true to auto-recreate (destroys data)",
+                raise QdrantError(
+                    f"Collection '{collection_name}' needs sparse vector migration. "
+                    "Set KAGURA_RECREATE_COLLECTIONS=true to auto-recreate (destroys data)."
                 )
-                return  # Start in degraded mode rather than destroy data
 
             logger.warning(
                 "collection_recreating",
