@@ -1731,10 +1731,15 @@ async def execute_tool_call(
                     context_data = None
                     if current_context:
                         # Get embedding model info from search config
+                        from sqlalchemy import select as _ctx_select
+
+                        from config.settings import get_settings as _get_settings
                         from models.config import ContextSearchConfig
 
+                        _settings = _get_settings()
+
                         config_result = await db.execute(
-                            select(ContextSearchConfig).where(
+                            _ctx_select(ContextSearchConfig).where(
                                 ContextSearchConfig.context_id == current_context.id
                             )
                         )
@@ -1751,10 +1756,10 @@ async def execute_tool_call(
                             "is_private": current_context.is_private,
                             "embedding_model": search_config.embedding_model
                             if search_config
-                            else "text-embedding-3-small",
+                            else _settings.embedding_model,
                             "embedding_dimensions": search_config.embedding_dimensions
                             if search_config
-                            else 512,
+                            else _settings.embedding_dimensions,
                         }
 
                     workspace_data = None
@@ -2138,7 +2143,10 @@ async def execute_tool_call(
                     # Batch-fetch embedding configs to avoid N+1
                     from sqlalchemy import select as _select
 
+                    from config.settings import get_settings as _get_settings2
                     from models.config import ContextSearchConfig
+
+                    _settings2 = _get_settings2()
 
                     context_ids = [ctx.id for ctx in contexts_sorted]
                     config_results = await db.execute(
@@ -2161,7 +2169,7 @@ async def execute_tool_call(
                             else None,
                             "embedding_model": cfg.embedding_model
                             if cfg
-                            else "text-embedding-3-small",
+                            else _settings2.embedding_model,
                         }
                         if include_stats:
                             try:

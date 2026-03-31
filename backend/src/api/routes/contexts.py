@@ -471,6 +471,14 @@ async def create_context(
 
         # Issue #246: Auto-set current context logic removed
 
+        # Fetch search config for response
+        from models.config import ContextSearchConfig
+
+        config_result = await service.db.execute(
+            select(ContextSearchConfig).where(ContextSearchConfig.context_id == context.id)
+        )
+        ctx_config = config_result.scalar_one_or_none()
+
         return ContextResponse(
             id=context.id,
             name=context.name,
@@ -479,11 +487,12 @@ async def create_context(
             summary=context.summary,
             usage_guide=context.usage_guide,
             is_default=context.is_default,
-            # Issue #246: is_current removed
-            is_private=context.is_private,  # Issue #165: Privacy control
-            created_by=context.created_by,  # Issue #165
+            is_private=context.is_private,
+            created_by=context.created_by,
             created_at=context.created_at,
             updated_at=context.updated_at,
+            embedding_model=ctx_config.embedding_model if ctx_config else None,
+            embedding_dimensions=ctx_config.embedding_dimensions if ctx_config else None,
         )
 
     except ValidationError as e:

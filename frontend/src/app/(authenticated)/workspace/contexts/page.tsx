@@ -812,7 +812,7 @@ export default function ContextsPage() {
                   </div>
 
                   {/* Embedding Model - Issue #49 */}
-                  {embeddingModels.length > 1 && (
+                  {embeddingModels.filter(m => m.available).length > 1 && (
                     <div className="space-y-2">
                       <label className={cn(typography.bodySmall, 'font-medium')}>
                         {t('embeddingModel')}
@@ -1123,9 +1123,13 @@ export default function ContextsPage() {
 
                   {/* Embedding Model */}
                   <td className="px-4 py-3 text-center">
-                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400">
-                      {context.embedding_model || 'text-embedding-3-small'}
-                    </span>
+                    {context.embedding_model ? (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400">
+                        {context.embedding_model}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-gray-400">—</span>
+                    )}
                   </td>
 
                   {/* Created */}
@@ -1215,7 +1219,9 @@ export default function ContextsPage() {
               <code className="px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800 font-mono text-xs">
                 {contextToEdit.embedding_model}
               </code>
-              <span className="text-xs text-gray-400">({contextToEdit.embedding_dimensions}d)</span>
+              {contextToEdit.embedding_dimensions && (
+                <span className="text-xs text-gray-400">({contextToEdit.embedding_dimensions}d)</span>
+              )}
             </div>
           )}
 

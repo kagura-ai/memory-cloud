@@ -421,19 +421,23 @@ async def list_embedding_models(
 
             openai_available = bool(os.getenv("OPENAI_API_KEY"))
     except Exception:
-        pass
+        pass  # Non-critical: OpenAI availability is best-effort
 
-    # Check Ollama availability
+    # Check Ollama availability (only if explicitly configured)
     ollama_available = False
     ollama_url = settings.ollama_base_url
-    try:
-        import httpx
+    ollama_configured = (
+        settings.embedding_provider == "ollama" or ollama_url != "http://localhost:11434"
+    )
+    if ollama_configured:
+        try:
+            import httpx
 
-        async with httpx.AsyncClient(timeout=3.0) as http:
-            resp = await http.get(ollama_url)
-            ollama_available = resp.status_code == 200
-    except Exception:
-        pass
+            async with httpx.AsyncClient(timeout=3.0) as http:
+                resp = await http.get(ollama_url)
+                ollama_available = resp.status_code == 200
+        except Exception:
+            pass  # Ollama not reachable — models marked as unavailable
 
     # Build model list
     models = []
