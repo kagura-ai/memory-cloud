@@ -17,6 +17,7 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    MatchAny,
     MatchText,
     MatchValue,
     PointIdsList,
@@ -324,6 +325,17 @@ async def search_memories_qdrant(
             if importance_condition:
                 conditions.append(importance_condition)
 
+            # Issue #67: Tag filtering (match any of the specified tags)
+            if "tags" in filters:
+                filter_tags = filters["tags"]
+                if isinstance(filter_tags, list) and filter_tags:
+                    conditions.append(
+                        FieldCondition(
+                            key="tags",
+                            match=MatchAny(any=filter_tags),
+                        )
+                    )
+
         # Build filter
         qdrant_filter = None
         if conditions:
@@ -468,6 +480,17 @@ async def search_memories_fulltext(
             if importance_condition:
                 conditions.append(importance_condition)
 
+            # Issue #67: Tag filtering (match any of the specified tags)
+            if "tags" in filters:
+                filter_tags = filters["tags"]
+                if isinstance(filter_tags, list) and filter_tags:
+                    conditions.append(
+                        FieldCondition(
+                            key="tags",
+                            match=MatchAny(any=filter_tags),
+                        )
+                    )
+
         # Build filter
         qdrant_filter = None
         if conditions:
@@ -485,6 +508,8 @@ async def search_memories_fulltext(
             # Original fields (fallback for old memories without tokens)
             FieldCondition(key="summary", match=MatchText(text=query)),
             FieldCondition(key="context_summary", match=MatchText(text=query)),
+            # Issue #67: Tags in BM25 search (writing variations, categories)
+            FieldCondition(key="tags_text", match=MatchText(text=query)),
         ]
 
         # Combine text conditions (should = OR) with other filters (must = AND)
@@ -558,7 +583,9 @@ async def search_memories_fulltext(
                 summary_tokens = (point.payload.get("summary") or "").lower()
             if not ctx_tokens:
                 ctx_tokens = (point.payload.get("context_summary") or "").lower()
-            combined_text = summary_tokens + " " + ctx_tokens
+            # Issue #67: Include tags in term matching for BM25 scoring
+            tags_text = (point.payload.get("tags_text") or "").lower()
+            combined_text = summary_tokens + " " + ctx_tokens + " " + tags_text
 
             hit_count = sum(1 for word in query_words if word in combined_text)
 
@@ -741,6 +768,28 @@ async def ensure_kagura_memories_collection(
             field_schema="float",  # type: ignore[arg-type]
         )
 
+        # Issue #67: Tags indexes for filtering and BM25 search
+        # Keyword index: enables exact-match filtering (recall with tags filter)
+        await client.create_payload_index(
+            collection_name=collection_name,
+            field_name="tags",
+            field_schema="keyword",  # type: ignore[arg-type]
+        )
+
+        # Text index on tags_text: enables BM25 fulltext search across tags
+        # tags_text is a space-joined string of all tags (stored alongside tags array)
+        await client.create_payload_index(
+            collection_name=collection_name,
+            field_name="tags_text",
+            field_schema=TextIndexParams(  # type: ignore[arg-type]
+                type="text",  # type: ignore[arg-type]
+                tokenizer=TokenizerType.WORD,
+                min_token_len=1,
+                max_token_len=30,
+                lowercase=True,
+            ),
+        )
+
         logger.info(
             "single_collection_indexes_created",
             collection=collection_name,
@@ -753,6 +802,8 @@ async def ensure_kagura_memories_collection(
                 "scope",
                 "type",
                 "importance",
+                "tags",
+                "tags_text",
             ],
         )
 

@@ -247,11 +247,14 @@ class MemoryService:
             await self.memory_repo.create(memory)
             await self.db.flush()  # Ensure memory exists before Qdrant operation
 
-            # Generate embedding for summary (Layer 1) using context's model
+            # Generate embedding for summary + tags (Issue #67: enrich semantic vector)
             config = await self._get_context_search_config(context.id)
             embed_svc = self._get_embedding_service_for_config(config)
+            embed_text = request.summary
+            if request.tags:
+                embed_text = f"{request.summary} {' '.join(request.tags)}"
             vector = await embed_svc.embed(
-                request.summary,
+                embed_text,
                 user_id,
                 context_id=current_context_id,
                 workspace_id=current_workspace_id,
@@ -269,6 +272,7 @@ class MemoryService:
                 "type": request.type,
                 "importance": request.importance,
                 "tags": request.tags,
+                "tags_text": " ".join(request.tags) if request.tags else "",
                 "scope": "working",
                 "client": client,
                 "created_at": utcnow().isoformat(),

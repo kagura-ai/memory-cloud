@@ -90,7 +90,7 @@ IMPORTANT: Always specify context_id to ensure you're using the intended context
                     "tags": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Tags for categorization and filtering (e.g., ['python', 'fastapi', 'auth']). Helps organize and search memories.",
+                        "description": "Tags for categorization, filtering, and search. Tags are indexed for both keyword filtering and full-text search. Include: (1) Category tags: 'category:{domain}' (e.g., 'category:auth', 'category:料理'). (2) Entity tags: key terms. (3) For Japanese: include kanji, katakana, hiragana variations (e.g., ['鯖', 'サバ', 'さば']). Examples: ['python', 'fastapi', 'category:backend'] or ['category:和食', '鯖', 'サバ', 'さば', '味噌煮'].",
                     },
                     "context": {
                         "type": "object",
