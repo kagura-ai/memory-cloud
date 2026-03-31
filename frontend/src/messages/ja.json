@@ -2137,8 +2137,9 @@
         "dimensions": "次元数",
         "ollama": "Ollama",
         "ollamaNotConfigured": "未設定",
-        "embeddingModels": "Embeddingモデル: {models}",
-        "modelsAvailable": "{count}個のモデルが利用可能",
+        "embeddingModelsTitle": "Embeddingモデル",
+        "installed": "インストール済み",
+        "notInstalled": "未インストール",
         "qdrantCollections": "Qdrantコレクション",
         "qdrantNoCollections": "接続済み — コレクションはまだありません。コンテキストを作成してください。",
         "qdrantError": "エラー"

@@ -58,6 +58,7 @@ export default function EnvironmentPage() {
   const [editedValues, setEditedValues] = useState<Record<string, any>>({});
   const [showSensitive, setShowSensitive] = useState<Record<string, boolean>>({});
   const [telemetry, setTelemetry] = useState<Record<string, any> | null>(null);
+  const [registryModels, setRegistryModels] = useState<Array<{ name: string; dimensions: number; provider: string; available: boolean }>>([]);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -68,8 +69,8 @@ export default function EnvironmentPage() {
     try {
       setLoading(true);
 
-      // Fetch config values, schema, and telemetry in parallel
-      const [configResponse, schemaResponse, telemetryResponse] = await Promise.all([
+      // Fetch config values, schema, telemetry, and embedding models in parallel
+      const [configResponse, schemaResponse, telemetryResponse, embeddingResponse] = await Promise.all([
         apiClient.get<{
           configs: Array<{
             key: string;
@@ -82,8 +83,12 @@ export default function EnvironmentPage() {
         }>('/api/v1/config?mask_sensitive=true'),
         apiClient.get<Record<string, any>>('/api/v1/config/schema'),
         apiClient.get<Record<string, any>>('/api/v1/system/telemetry').catch(() => null),
+        apiClient.get<{ models: Array<{ name: string; dimensions: number; provider: string; available: boolean }>; default_model: string }>('/api/v1/system/embedding/models').catch(() => null),
       ]);
       setTelemetry(telemetryResponse);
+      if (embeddingResponse) {
+        setRegistryModels(embeddingResponse.models);
+      }
 
       // Transform API response to ConfigData format with schema metadata
       const configData: ConfigData = {};
@@ -397,11 +402,11 @@ export default function EnvironmentPage() {
                   )}
                 </div>
 
-                {/* Ollama Status */}
+                {/* Ollama Status + Embedding Models */}
                 <div className="p-4 border dark:border-gray-700 rounded-lg space-y-2">
                   <div className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('systemStatus.ollama')}</div>
                   {telemetry.services?.ollama ? (
-                    <div className="space-y-2">
+                    <div className="space-y-3">
                       <div className="flex items-center gap-2">
                         {telemetry.services.ollama.status === 'ok' ? (
                           <CheckCircle className="h-4 w-4 text-green-500" />
@@ -412,14 +417,27 @@ export default function EnvironmentPage() {
                         )}
                         <span className="text-sm">{telemetry.services.ollama.status}</span>
                       </div>
-                      {telemetry.services.ollama.details?.models && (
-                        <div className="text-xs text-gray-500">
-                          {(() => {
-                            const embedModels = telemetry.services.ollama.details.models.filter((m: string) => m.includes('embed'));
-                            return embedModels.length > 0
-                              ? t('systemStatus.embeddingModels', { models: embedModels.join(', ') })
-                              : t('systemStatus.modelsAvailable', { count: telemetry.services.ollama.details.models.length });
-                          })()}
+                      {telemetry.services.ollama.status === 'ok' && registryModels.length > 0 && (
+                        <div className="space-y-1">
+                          <div className="text-xs font-medium text-gray-500 dark:text-gray-400">{t('systemStatus.embeddingModelsTitle')}</div>
+                          {registryModels.filter(m => m.provider === 'ollama').map((model) => {
+                            const installedModels: string[] = telemetry.services?.ollama?.details?.models || [];
+                            const isInstalled = installedModels.some((m: string) => m.startsWith(model.name));
+                            return (
+                              <div key={model.name} className="flex items-center justify-between text-xs">
+                                <code className="font-mono">{model.name}</code>
+                                {isInstalled ? (
+                                  <span className="flex items-center gap-1 text-green-600 dark:text-green-400">
+                                    <CheckCircle className="h-3 w-3" /> {t('systemStatus.installed')}
+                                  </span>
+                                ) : (
+                                  <span className="flex items-center gap-1 text-gray-400">
+                                    <XCircle className="h-3 w-3" /> {t('systemStatus.notInstalled')}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
                     </div>
