@@ -39,7 +39,7 @@ function LoginContent() {
   const [error, setError] = useState<string | null>(null);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
-  const [showAdminLogin, setShowAdminLogin] = useState(false);
+  const [showAdminLogin, setShowAdminLogin] = useState<boolean | null>(null);
 
   // Password login state
   const [loginId, setLoginId] = useState("");
@@ -75,13 +75,23 @@ function LoginContent() {
     }
 
     getAuthConfig()
-      .then(setAuthConfig)
+      .then((config) => {
+        setAuthConfig(config);
+        // Auto-show admin login if no OAuth providers configured
+        const hasOAuth = config.google_oauth_enabled || config.github_oauth_enabled;
+        if (!hasOAuth && config.password_login_enabled) {
+          setShowAdminLogin(true);
+        } else {
+          setShowAdminLogin(false);
+        }
+      })
       .catch(() => {
         setAuthConfig({
           password_login_enabled: true,
           google_oauth_enabled: false,
           github_oauth_enabled: false,
         });
+        setShowAdminLogin(true);
       });
   }, [searchParams, isMockAuth, router, t]);
 
@@ -496,26 +506,30 @@ function LoginContent() {
           </CardContent>
         </Card>
 
-        {authConfig?.password_login_enabled && (
-          <div className="mt-6 flex justify-center gap-4">
-            {showAdminLogin ? (
-              <button
-                onClick={() => setShowAdminLogin(false)}
-                className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white/60 px-4 py-2 text-sm font-medium text-gray-600 backdrop-blur-sm transition-colors hover:bg-white hover:text-gray-900"
-              >
-                ← {t("back")}
-              </button>
-            ) : (
-              <button
-                onClick={() => setShowAdminLogin(true)}
-                className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white/60 px-4 py-2 text-sm font-medium text-gray-600 backdrop-blur-sm transition-colors hover:bg-white hover:text-brand-green-600"
-              >
-                <Shield className="h-4 w-4" />
-                {t("adminLogin")}
-              </button>
-            )}
-          </div>
-        )}
+        {authConfig && (() => {
+          const hasOAuth = authConfig.google_oauth_enabled || authConfig.github_oauth_enabled;
+          if (!hasOAuth) return null; // No toggle needed — admin login is default
+          return (
+            <div className="mt-6 flex justify-center">
+              {showAdminLogin ? (
+                <button
+                  onClick={() => setShowAdminLogin(false)}
+                  className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white/60 px-4 py-2 text-sm font-medium text-gray-600 backdrop-blur-sm transition-colors hover:bg-white hover:text-gray-900"
+                >
+                  ← {t("back")}
+                </button>
+              ) : (
+                <button
+                  onClick={() => setShowAdminLogin(true)}
+                  className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white/60 px-4 py-2 text-sm font-medium text-gray-600 backdrop-blur-sm transition-colors hover:bg-white hover:text-brand-green-600"
+                >
+                  <Shield className="h-4 w-4" />
+                  {t("adminLogin")}
+                </button>
+              )}
+            </div>
+          );
+        })()}
       </div>
     </div>
   );
