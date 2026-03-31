@@ -39,7 +39,7 @@ function LoginContent() {
   const [error, setError] = useState<string | null>(null);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
-  const [showAdminLogin, setShowAdminLogin] = useState(false);
+  const [showAdminLogin, setShowAdminLogin] = useState<boolean | null>(null);
 
   // Password login state
   const [loginId, setLoginId] = useState("");
@@ -75,13 +75,23 @@ function LoginContent() {
     }
 
     getAuthConfig()
-      .then(setAuthConfig)
+      .then((config) => {
+        setAuthConfig(config);
+        // Auto-show admin login if no OAuth providers configured
+        const hasOAuth = config.google_oauth_enabled || config.github_oauth_enabled;
+        if (!hasOAuth && config.password_login_enabled) {
+          setShowAdminLogin(true);
+        } else {
+          setShowAdminLogin(false);
+        }
+      })
       .catch(() => {
         setAuthConfig({
           password_login_enabled: true,
           google_oauth_enabled: false,
           github_oauth_enabled: false,
         });
+        setShowAdminLogin(true);
       });
   }, [searchParams, isMockAuth, router, t]);
 
@@ -183,8 +193,8 @@ function LoginContent() {
       <div className="pointer-events-none absolute -left-1/4 -top-1/4 h-96 w-96 rounded-full bg-brand-green-300/30 blur-3xl" />
       <div className="pointer-events-none absolute -right-1/4 -bottom-1/4 h-96 w-96 rounded-full bg-emerald-300/30 blur-3xl" />
 
-      <div className="absolute top-4 right-4">
-        <LanguageSelector />
+      <div className="absolute top-4 right-4 z-10">
+        <LanguageSelector className="!bg-white/90 backdrop-blur-sm border border-gray-300 shadow-sm hover:!bg-white !text-gray-700 hover:!text-gray-900" showLabel />
       </div>
 
       <div className="relative w-full max-w-md px-4">
@@ -257,15 +267,6 @@ function LoginContent() {
                 {/* Admin Password Login Form (hidden by default) */}
                 {showAdminLogin && authConfig?.password_login_enabled && (
                   <>
-                    <div className="mb-4 flex justify-end">
-                      <button
-                        type="button"
-                        onClick={() => setShowAdminLogin(false)}
-                        className="text-sm text-gray-400 hover:text-gray-600"
-                      >
-                        {t("backToHome", { default: "← Back" })}
-                      </button>
-                    </div>
                     <form onSubmit={handlePasswordLogin} className="space-y-4">
                       <div className="space-y-2">
                         <Label htmlFor="loginId" className="text-gray-700">
@@ -508,18 +509,23 @@ function LoginContent() {
         <div className="mt-6 flex items-center justify-between">
           <button
             onClick={() => router.push("/")}
-            className="text-sm font-medium text-gray-600 transition-colors hover:text-brand-green-600"
+            className="text-sm font-medium text-gray-500 transition-colors hover:text-brand-green-600"
           >
             {t("backToHome")}
           </button>
-          {authConfig?.password_login_enabled && !showAdminLogin && (
-            <button
-              onClick={() => setShowAdminLogin(true)}
-              className="text-sm font-medium text-gray-400 transition-colors hover:text-gray-600"
-            >
-              {t("adminLogin")}
-            </button>
-          )}
+          {authConfig && (() => {
+            const hasOAuth = authConfig.google_oauth_enabled || authConfig.github_oauth_enabled;
+            if (!hasOAuth || showAdminLogin) return null;
+            return (
+              <button
+                onClick={() => setShowAdminLogin(true)}
+                className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white/60 px-4 py-2 text-sm font-medium text-gray-600 backdrop-blur-sm transition-colors hover:bg-white hover:text-brand-green-600"
+              >
+                <Shield className="h-4 w-4" />
+                {t("adminLogin")}
+              </button>
+            );
+          })()}
         </div>
       </div>
     </div>

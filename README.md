@@ -22,16 +22,19 @@
   <a href="https://github.com/kagura-ai/kagura-memory-python-sdk"><strong>Python SDK (KaguraClient / KaguraAgent)</strong></a>
 </p>
 
-## What is Kagura Memory Cloud?
+## Why Kagura Memory Cloud?
 
-Kagura Memory Cloud is a memory system that lets AI assistants **remember, search, and learn** from past conversations. It provides:
+> **Your AI forgets everything after each conversation. Kagura fixes that.**
 
-- **11 MCP Tools** — remember, recall, forget, reference, explore, get_context_info, list_contexts, create_context, update_context, update_search_config, usage_guide
-- **3-Layer Memory Architecture** — summary (search-optimized) / context / full content
-- **Hybrid Search** — 60% semantic (OpenAI embedding) + 40% full-text (Qdrant BM25)
-- **Neural Memory** — Hebbian learning creates automatic connections between related memories
-- **Team Collaboration** — Workspaces with RBAC (Owner/Admin/Member/Viewer)
-- **Web Management UI** — Next.js dashboard for browsing, searching, and managing memories
+| Feature | Description |
+|---------|-------------|
+| **11 MCP Tools** | remember, recall, forget, reference, explore, and 6 more |
+| **Hybrid Search** | Semantic (OpenAI/Ollama) + BM25 keyword — 96% top-1 accuracy |
+| **Neural Memory** | Hebbian learning auto-connects related memories |
+| **Multi-Provider** | OpenAI or Ollama (local, private, zero cost) |
+| **Team Ready** | Workspaces, RBAC, context isolation |
+| **Web UI** | Next.js dashboard for managing memories |
+| **5-Minute Setup** | `./setup.sh` and you're done |
 
 ## Architecture
 
@@ -74,45 +77,75 @@ Query → OpenAI Embedding → Qdrant Hybrid Search (semantic 60% + BM25 40%)
 - Docker & Docker Compose
 - Python 3.11+
 - Node.js 20+
-- Google OAuth2 credentials ([console.cloud.google.com](https://console.cloud.google.com/apis/credentials))
-- GitHub OAuth2 credentials (optional — [github.com/settings/developers](https://github.com/settings/developers))
-- OpenAI API key (for embeddings)
+- OpenAI API key (for embeddings) — or Ollama for local embeddings
+- OAuth2 credentials (optional — password + MFA login available without OAuth)
 
 ### Setup
 
-**With Claude Code** (recommended):
+**One-line setup:**
 
 ```bash
 git clone https://github.com/kagura-ai/memory-cloud.git
 cd memory-cloud
-cp .env.example .env.local
-# Edit .env.local — set GOOGLE_CLIENT_ID/SECRET (and optionally GITHUB_CLIENT_ID/SECRET)
+./setup.sh
+```
+
+**With Claude Code:**
+
+```bash
+git clone https://github.com/kagura-ai/memory-cloud.git
+cd memory-cloud
 claude   # then run /setup
 ```
 
-**Manual setup:**
+**Step-by-step setup:**
 
 ```bash
-# 1. Clone and configure
+# 1. Clone
 git clone https://github.com/kagura-ai/memory-cloud.git
 cd memory-cloud
-cp .env.example .env.local
-# Edit .env.local — set GOOGLE_CLIENT_ID/SECRET (and optionally GITHUB_CLIENT_ID/SECRET)
 
-# 2. Start all services
+# 2. Configure environment (generates secrets, prompts for API keys)
+(cd backend && python3 -m src.cli.setup_env)
+
+# 3. Start all services
 docker compose up -d
 
-# 3. Run migrations
-cd backend && alembic upgrade head
+# 4. Run migrations
+(cd backend && alembic upgrade head)
 
-# 4. (Optional) Start frontend/backend in dev mode
-cd backend && pip install -e ".[dev]" && uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
-cd frontend && npm install && npm run dev
+# 5. Create admin account (interactive — sets password, MFA, API key, embedding provider)
+(cd backend && python3 -m src.cli.create_admin)
 
 # Backend API:  http://localhost:8080
 # Frontend UI:  http://localhost:3000
-# Swagger docs: http://localhost:8080/docs
+# API docs:     http://localhost:8080/redoc
 ```
+
+**`.env.local` settings** (auto-configured by `setup_env`):
+
+| Setting | Required | Description |
+|---------|----------|-------------|
+| `API_KEY_SECRET` | **Yes** | Secret for API key encryption (auto-generated) |
+| `JWT_SECRET` | **Yes** | Secret for JWT tokens (auto-generated) |
+| `OPENAI_API_KEY` | **Yes**\* | OpenAI API key for embeddings |
+| `OLLAMA_BASE_URL` | No | Ollama URL (default: `http://localhost:11434`) |
+| `EMBEDDING_PROVIDER` | No | `openai` (default) or `ollama` |
+| `GOOGLE_CLIENT_ID/SECRET` | No | Google OAuth2 login (optional — password login available) |
+| `GITHUB_CLIENT_ID/SECRET` | No | GitHub OAuth2 login (optional) |
+
+\* Either `OPENAI_API_KEY` or a running Ollama instance is required for memory features.
+
+### Admin CLI
+
+| Command | Purpose |
+|---------|---------|
+| `python3 -m src.cli.setup_env` | Generate secrets + configure `.env.local` (run before Docker) |
+| `python3 -m src.cli.create_admin` | Create admin + workspace + API key + `.mcp.json` + embedding setup |
+| `python3 -m src.cli.reset_password` | Reset password and/or MFA |
+| `python3 -m src.cli.delete_admin` | Delete admin (for re-creation) |
+
+> Run from `backend/` directory. Docker API container must be running.
 
 <details>
 <summary>Platform-specific notes</summary>
