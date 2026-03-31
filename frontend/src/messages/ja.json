@@ -108,7 +108,8 @@
     "totpCode": "認証コード",
     "verify": "認証",
     "verifying": "認証中...",
-    "adminLogin": "管理者ログイン"
+    "adminLogin": "管理者ログイン",
+    "back": "戻る"
   },
   "landing": {
     "heroTitle": "AIコンテキストを二度と失わない",

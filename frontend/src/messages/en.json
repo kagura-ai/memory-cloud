@@ -108,7 +108,8 @@
     "totpCode": "Verification Code",
     "verify": "Verify",
     "verifying": "Verifying...",
-    "adminLogin": "Admin Login"
+    "adminLogin": "Admin Login",
+    "back": "Back"
   },
   "landing": {
     "heroTitle": "Never lose your AI context",

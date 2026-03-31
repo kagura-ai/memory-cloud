@@ -257,15 +257,6 @@ function LoginContent() {
                 {/* Admin Password Login Form (hidden by default) */}
                 {showAdminLogin && authConfig?.password_login_enabled && (
                   <>
-                    <div className="mb-4 flex justify-end">
-                      <button
-                        type="button"
-                        onClick={() => setShowAdminLogin(false)}
-                        className="text-sm text-gray-400 hover:text-gray-600"
-                      >
-                        {t("backToOAuth", { default: "← Back" })}
-                      </button>
-                    </div>
                     <form onSubmit={handlePasswordLogin} className="space-y-4">
                       <div className="space-y-2">
                         <Label htmlFor="loginId" className="text-gray-700">
@@ -505,15 +496,24 @@ function LoginContent() {
           </CardContent>
         </Card>
 
-        {authConfig?.password_login_enabled && !showAdminLogin && (
-          <div className="mt-6 flex justify-center">
-            <button
-              onClick={() => setShowAdminLogin(true)}
-              className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white/60 px-4 py-2 text-sm font-medium text-gray-600 backdrop-blur-sm transition-colors hover:bg-white hover:text-brand-green-600"
-            >
-              <Shield className="h-4 w-4" />
-              {t("adminLogin")}
-            </button>
+        {authConfig?.password_login_enabled && (
+          <div className="mt-6 flex justify-center gap-4">
+            {showAdminLogin ? (
+              <button
+                onClick={() => setShowAdminLogin(false)}
+                className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white/60 px-4 py-2 text-sm font-medium text-gray-600 backdrop-blur-sm transition-colors hover:bg-white hover:text-gray-900"
+              >
+                ← {t("back")}
+              </button>
+            ) : (
+              <button
+                onClick={() => setShowAdminLogin(true)}
+                className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white/60 px-4 py-2 text-sm font-medium text-gray-600 backdrop-blur-sm transition-colors hover:bg-white hover:text-brand-green-600"
+              >
+                <Shield className="h-4 w-4" />
+                {t("adminLogin")}
+              </button>
+            )}
           </div>
         )}
       </div>
