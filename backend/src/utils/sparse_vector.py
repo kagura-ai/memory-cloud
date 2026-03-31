@@ -62,8 +62,9 @@ def build_document_sparse_vector(
     if not merged:
         return [], []
 
-    indices = sorted(merged.keys())
-    values = [merged[i] for i in indices]
+    # Qdrant SparseVector accepts indices in any order — no sort needed
+    indices = list(merged.keys())
+    values = list(merged.values())
     return indices, values
 
 
@@ -82,6 +83,6 @@ def build_query_sparse_vector(query_tokens: str) -> tuple[list[int], list[float]
     if not query_tokens:
         return [], []
     unique_tokens = set(query_tokens.split())
-    indices = sorted(mmh3.hash(t, signed=False) for t in unique_tokens)
+    indices = [mmh3.hash(t, signed=False) for t in unique_tokens]
     values = [1.0] * len(indices)
     return indices, values

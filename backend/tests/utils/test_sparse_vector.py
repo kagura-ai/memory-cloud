@@ -59,11 +59,10 @@ class TestBuildDocumentSparseVector:
     """Test build_document_sparse_vector."""
 
     def test_basic(self):
-        """Produces sorted indices and values."""
+        """Produces indices and values of equal length."""
         indices, values = build_document_sparse_vector("hello", "", "")
         assert len(indices) > 0
         assert len(values) == len(indices)
-        assert indices == sorted(indices)
 
     def test_summary_weighted_2x(self):
         """Summary tokens get 2x weight."""
@@ -113,10 +112,10 @@ class TestBuildQuerySparseVector:
         assert indices == []
         assert values == []
 
-    def test_sorted_indices(self):
-        """Indices are sorted."""
+    def test_indices_length(self):
+        """Indices match unique token count."""
         indices, _ = build_query_sparse_vector("z a m")
-        assert indices == sorted(indices)
+        assert len(indices) == 3
 
     def test_japanese_query(self):
         """Japanese query tokens work."""
