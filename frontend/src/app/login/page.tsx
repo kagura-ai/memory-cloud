@@ -506,7 +506,13 @@ function LoginContent() {
           </CardContent>
         </Card>
 
-        <div className="mt-6 flex items-center justify-center gap-4">
+        <div className="mt-6 flex items-center justify-between">
+          <button
+            onClick={() => router.push("/")}
+            className="text-sm font-medium text-gray-500 transition-colors hover:text-brand-green-600"
+          >
+            {t("backToHome")}
+          </button>
           {authConfig && (() => {
             const hasOAuth = authConfig.google_oauth_enabled || authConfig.github_oauth_enabled;
             if (!hasOAuth || showAdminLogin) return null;
@@ -520,12 +526,6 @@ function LoginContent() {
               </button>
             );
           })()}
-          <button
-            onClick={() => router.push("/")}
-            className="text-sm font-medium text-gray-500 transition-colors hover:text-brand-green-600"
-          >
-            {t("backToHome")}
-          </button>
         </div>
       </div>
     </div>
