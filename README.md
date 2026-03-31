@@ -22,16 +22,19 @@
   <a href="https://github.com/kagura-ai/kagura-memory-python-sdk"><strong>Python SDK (KaguraClient / KaguraAgent)</strong></a>
 </p>
 
-## What is Kagura Memory Cloud?
+## Why Kagura Memory Cloud?
 
-Kagura Memory Cloud is a memory system that lets AI assistants **remember, search, and learn** from past conversations. It provides:
+> **Your AI forgets everything after each conversation. Kagura fixes that.**
 
-- **11 MCP Tools** — remember, recall, forget, reference, explore, get_context_info, list_contexts, create_context, update_context, update_search_config, usage_guide
-- **3-Layer Memory Architecture** — summary (search-optimized) / context / full content
-- **Hybrid Search** — 60% semantic (OpenAI embedding) + 40% full-text (Qdrant BM25)
-- **Neural Memory** — Hebbian learning creates automatic connections between related memories
-- **Team Collaboration** — Workspaces with RBAC (Owner/Admin/Member/Viewer)
-- **Web Management UI** — Next.js dashboard for browsing, searching, and managing memories
+| Feature | Description |
+|---------|-------------|
+| **12 MCP Tools** | remember, recall, forget, reference, explore, and 7 more |
+| **Hybrid Search** | Semantic (OpenAI/Ollama) + BM25 keyword — 96% top-1 accuracy |
+| **Neural Memory** | Hebbian learning auto-connects related memories |
+| **Multi-Provider** | OpenAI or Ollama (local, private, zero cost) |
+| **Team Ready** | Workspaces, RBAC, context isolation |
+| **Web UI** | Next.js dashboard for managing memories |
+| **5-Minute Setup** | `./setup.sh` and you're done |
 
 ## Architecture
 
@@ -79,39 +82,32 @@ Query → OpenAI Embedding → Qdrant Hybrid Search (semantic 60% + BM25 40%)
 
 ### Setup
 
-**With Claude Code** (recommended):
+**One-line setup:**
 
 ```bash
 git clone https://github.com/kagura-ai/memory-cloud.git
 cd memory-cloud
-cp .env.example .env.local
+./setup.sh
+```
+
+**With Claude Code:**
+
+```bash
+git clone https://github.com/kagura-ai/memory-cloud.git
+cd memory-cloud
 claude   # then run /setup
 ```
 
-**Manual setup:**
+**Step-by-step setup:**
 
 ```bash
-# 1. Clone and configure
+# 1. Clone
 git clone https://github.com/kagura-ai/memory-cloud.git
 cd memory-cloud
-cp .env.example .env.local
-```
 
-**2. Configure `.env.local`:**
+# 2. Configure environment (generates secrets, prompts for API keys)
+cd backend && python -m src.cli.setup_env
 
-| Setting | Required | Description |
-|---------|----------|-------------|
-| `API_KEY_SECRET` | **Yes** | Secret for API key encryption. Generate: `python3 -c "import secrets; print(secrets.token_urlsafe(32))"` |
-| `JWT_SECRET` | **Yes** | Secret for JWT tokens. Generate same way as above. |
-| `OPENAI_API_KEY` | **Yes**\* | OpenAI API key for embeddings. Auto-registered on admin setup. |
-| `OLLAMA_BASE_URL` | No | Ollama URL (default: `http://localhost:11434`). Alternative to OpenAI. |
-| `EMBEDDING_PROVIDER` | No | `openai` (default) or `ollama` |
-| `GOOGLE_CLIENT_ID/SECRET` | No | Google OAuth2 login (optional — password login available) |
-| `GITHUB_CLIENT_ID/SECRET` | No | GitHub OAuth2 login (optional) |
-
-\* Either `OPENAI_API_KEY` or a running Ollama instance is required for memory features.
-
-```bash
 # 3. Start all services
 docker compose up -d
 
@@ -126,10 +122,25 @@ cd backend && python -m src.cli.create_admin
 # API docs:     http://localhost:8080/redoc
 ```
 
+**`.env.local` settings** (auto-configured by `setup_env`):
+
+| Setting | Required | Description |
+|---------|----------|-------------|
+| `API_KEY_SECRET` | **Yes** | Secret for API key encryption (auto-generated) |
+| `JWT_SECRET` | **Yes** | Secret for JWT tokens (auto-generated) |
+| `OPENAI_API_KEY` | **Yes**\* | OpenAI API key for embeddings |
+| `OLLAMA_BASE_URL` | No | Ollama URL (default: `http://localhost:11434`) |
+| `EMBEDDING_PROVIDER` | No | `openai` (default) or `ollama` |
+| `GOOGLE_CLIENT_ID/SECRET` | No | Google OAuth2 login (optional — password login available) |
+| `GITHUB_CLIENT_ID/SECRET` | No | GitHub OAuth2 login (optional) |
+
+\* Either `OPENAI_API_KEY` or a running Ollama instance is required for memory features.
+
 ### Admin CLI
 
 | Command | Purpose |
 |---------|---------|
+| `python -m src.cli.setup_env` | Generate secrets + configure `.env.local` (run before Docker) |
 | `python -m src.cli.create_admin` | Create admin + workspace + API key + `.mcp.json` + embedding setup |
 | `python -m src.cli.reset_password` | Reset password and/or MFA |
 | `python -m src.cli.delete_admin` | Delete admin (for re-creation) |
