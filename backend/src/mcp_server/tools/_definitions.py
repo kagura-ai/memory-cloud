@@ -159,7 +159,7 @@ Search modes: Use search_mode to control the search strategy.
                     "search_mode": {
                         "type": "string",
                         "enum": ["hybrid", "semantic", "keyword"],
-                        "description": "Search strategy. hybrid (default): semantic + BM25 blend. semantic: vector similarity only. keyword: BM25 only (best for hiragana queries where embedding models struggle).",
+                        "description": "Search strategy. If omitted, hybrid is used by default: 60% semantic + 40% BM25 with Neural Memory boosting. semantic: vector similarity only (no BM25, Neural Memory skipped). keyword: BM25 only (no embeddings; best for hiragana queries where embedding models struggle).",
                     },
                 },
             },

@@ -117,7 +117,7 @@ async def handle_remember(
 async def handle_recall(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
-    """Search memories with hybrid search."""
+    """Search memories with configurable mode (hybrid/semantic/keyword)."""
     if "query" not in args:
         return _error_response("missing_fields", "Missing required field: query")
 

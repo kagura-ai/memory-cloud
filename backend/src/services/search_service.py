@@ -67,7 +67,13 @@ class SearchService:
 
         Returns:
             List of search results with scores
+
+        Raises:
+            ValueError: If search_mode is not hybrid/semantic/keyword
         """
+        if search_mode not in ("hybrid", "semantic", "keyword"):
+            raise ValueError(f"Invalid search_mode: {search_mode}")
+
         # Load context search configuration (Issue #130)
         config = await self._get_search_config(context_id)
         fetch_factor = config.fetch_factor

@@ -480,9 +480,9 @@ class MemoryService:
         memories_list = list(result.scalars().all())
         memories = {str(m.id): m for m in memories_list}
 
-        # Skip Neural Memory for keyword/semantic-only mode (no meaningful embeddings)
+        # Skip Neural Memory for keyword-only mode (no embeddings available)
         # or when Neural Memory is disabled
-        if not neural_enabled or request.search_mode != "hybrid":
+        if not neural_enabled or request.search_mode == "keyword":
             responses = []
             for search_result in search_results[: request.k]:
                 memory_id = search_result["id"]
