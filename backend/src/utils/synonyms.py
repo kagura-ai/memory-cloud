@@ -1,7 +1,7 @@
 """Sudachi synonym dictionary for query-time synonym expansion.
 
-Issue #69: Loads Sudachi synonyms.txt at startup and provides O(1)
-synonym lookup for BM25 query expansion.
+Issue #69: Lazy-loads Sudachi synonyms.txt on first use and provides
+O(1) synonym lookup for BM25 query expansion.
 
 Format: CSV with group_id as first column, surface form at column index 8.
 Empty lines separate groups. All surfaces in the same group are synonyms.
@@ -26,7 +26,7 @@ _synonym_dict: dict[str, list[str]] | None = None
 # Cap expanded tokens to prevent BM25 score distortion from large synonym groups
 MAX_EXPANDED_TOKENS = 50
 
-# Default path: backend/src/data/sudachi_synonyms.txt
+# Default path: backend/src/data/sudachi_synonyms.txt (relative to this module)
 _DEFAULT_PATH = Path(__file__).parent.parent / "data" / "sudachi_synonyms.txt"
 
 
@@ -66,10 +66,11 @@ def _load_synonyms(path: str | Path | None = None) -> dict[str, list[str]]:
             # Include all group members except self
             others = [s for s in surfaces if s != surface]
             if surface in synonym_dict:
-                # Surface appears in multiple groups — merge
-                existing = set(synonym_dict[surface])
-                existing.update(others)
-                synonym_dict[surface] = list(existing)
+                # Surface appears in multiple groups — merge deterministically
+                existing_list = synonym_dict[surface]
+                for s in others:
+                    if s not in existing_list:
+                        existing_list.append(s)
             else:
                 synonym_dict[surface] = others
 
@@ -122,19 +123,30 @@ def expand_query_tokens(tokens_str: str) -> str:
     if not tokens_str:
         return ""
 
-    expanded = []
-    for token in tokens_str.split():
-        expanded.extend(expand_synonyms(token))
+    tokens = tokens_str.split()
 
-    # Deduplicate while preserving order, cap to prevent BM25 distortion
+    # First: ensure all original tokens are always included
     seen: set[str] = set()
-    result = []
-    for t in expanded:
-        if t not in seen:
-            seen.add(t)
-            result.append(t)
-            if len(result) >= MAX_EXPANDED_TOKENS:
-                logger.debug("synonym_expansion_capped", original_count=len(expanded))
+    result: list[str] = []
+    for token in tokens:
+        if token not in seen:
+            seen.add(token)
+            result.append(token)
+
+    # Then: fill remaining capacity with synonyms (cap prevents BM25 distortion)
+    remaining = MAX_EXPANDED_TOKENS - len(result)
+    if remaining > 0:
+        for token in tokens:
+            for synonym in expand_synonyms(token)[1:]:  # Skip token itself (already added)
+                if synonym in seen:
+                    continue
+                seen.add(synonym)
+                result.append(synonym)
+                remaining -= 1
+                if remaining <= 0:
+                    logger.debug("synonym_expansion_capped", token_count=len(result))
+                    break
+            if remaining <= 0:
                 break
 
     return " ".join(result)

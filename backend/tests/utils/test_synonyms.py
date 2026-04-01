@@ -3,29 +3,34 @@
 Issue #69: Verify synonym expansion for Japanese writing variations.
 """
 
+import pytest
+
 from utils.synonyms import (
-    _load_synonyms,
     expand_query_tokens,
     expand_synonyms,
+    get_synonym_dict,
 )
+
+
+@pytest.fixture(scope="module")
+def synonym_dict():
+    """Load synonym dict once for all tests (avoid repeated 2.8MB parse)."""
+    return get_synonym_dict()
 
 
 class TestLoadSynonyms:
     """Test synonym dictionary loading."""
 
-    def test_loads_entries(self):
+    def test_loads_entries(self, synonym_dict):
         """Should load a non-empty dictionary."""
-        d = _load_synonyms()
-        assert len(d) > 0
+        assert len(synonym_dict) > 0
 
-    def test_groups_are_bidirectional(self):
+    def test_groups_are_bidirectional(self, synonym_dict):
         """If A→B then B→A."""
-        d = _load_synonyms()
-        # 曖昧 and あいまい should reference each other
-        if "曖昧" in d:
-            assert "あいまい" in d["曖昧"]
-        if "あいまい" in d:
-            assert "曖昧" in d["あいまい"]
+        if "曖昧" in synonym_dict:
+            assert "あいまい" in synonym_dict["曖昧"]
+        if "あいまい" in synonym_dict:
+            assert "曖昧" in synonym_dict["あいまい"]
 
 
 class TestExpandSynonyms:
@@ -36,7 +41,6 @@ class TestExpandSynonyms:
         result = expand_synonyms("引越し")
         assert "引越し" in result
         assert len(result) > 1
-        # Should include okurigana variations
         assert any("引っ越し" in s or "ひっこす" in s for s in result)
 
     def test_unknown_word(self):
@@ -50,7 +54,7 @@ class TestExpandSynonyms:
         assert result == [""]
 
     def test_server_variations(self):
-        """サーバー/サーバ/server should be linked."""
+        """Server variations should be linked."""
         result = expand_synonyms("サーバー")
         assert "サーバ" in result or "server" in result
 
@@ -63,7 +67,8 @@ class TestExpandQueryTokens:
         result = expand_query_tokens("引越し 費用")
         tokens = result.split()
         assert "引越し" in tokens
-        assert len(tokens) > 2  # Expanded
+        assert "費用" in tokens
+        assert len(tokens) > 2
 
     def test_empty_query(self):
         """Empty query returns empty."""
@@ -71,7 +76,7 @@ class TestExpandQueryTokens:
 
     def test_no_duplicates(self):
         """Result should not have duplicate tokens."""
-        result = expand_query_tokens("概要 要約")  # Both in same synonym group
+        result = expand_query_tokens("概要 要約")
         tokens = result.split()
         assert len(tokens) == len(set(tokens))
 
@@ -81,3 +86,13 @@ class TestExpandQueryTokens:
         tokens = result.split()
         assert "認証" in tokens
         assert "エラー" in tokens
+
+    def test_originals_preserved_before_cap(self):
+        """All original tokens survive even when synonym cap is hit."""
+        # Use many tokens that each have synonyms
+        query = "概要 経緯 曖昧 宛て先 粗筋"
+        result = expand_query_tokens(query)
+        tokens = result.split()
+        # All 5 original tokens must be present
+        for original in query.split():
+            assert original in tokens

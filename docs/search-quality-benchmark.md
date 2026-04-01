@@ -38,7 +38,7 @@ typo, mixed-lang, noise
 ## Search Architecture
 
 ```
-Query → Sudachi tokenization → Synonym expansion (Sudachi dict, 50k groups)
+Query → Sudachi tokenization → Synonym expansion (Sudachi dict, ~25k groups)
   ↓
 BM25: Sparse vector search (Qdrant native, Modifier.IDF)
   - summary/context_summary tokens (weight ×2.0)
