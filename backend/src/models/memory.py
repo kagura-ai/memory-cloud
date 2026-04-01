@@ -163,7 +163,7 @@ class Memory(Base):
         CheckConstraint("confidence BETWEEN 0 AND 1", name="valid_confidence"),
         CheckConstraint("scope IN ('working', 'persistent')", name="valid_scope"),
         CheckConstraint(
-            "embedding_status IN ('pending', 'success', 'failed')",
+            "embedding_status IN ('pending', 'processing', 'success', 'failed')",
             name="valid_embedding_status",
         ),
         # Indexes

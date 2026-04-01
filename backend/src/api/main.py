@@ -61,6 +61,7 @@ async def lifespan(app: FastAPI):
     from tasks import (
         get_scheduler,
         schedule_credentials_tasks,
+        schedule_embedding_tasks,
         schedule_mcp_tasks,
         schedule_neural_tasks,
         schedule_resource_indexer_jobs,
@@ -69,9 +70,10 @@ async def lifespan(app: FastAPI):
 
     scheduler = get_scheduler()
     schedule_neural_tasks(scheduler)
-    schedule_mcp_tasks(scheduler)  # BUG FIX #83-11: Add MCP session cleanup
-    schedule_credentials_tasks(scheduler)  # Migration 034: Auto-hide expired credentials
-    schedule_resource_indexer_jobs(scheduler)  # Issue #238: Resource incremental indexing
+    schedule_mcp_tasks(scheduler)
+    schedule_credentials_tasks(scheduler)
+    schedule_embedding_tasks(scheduler)
+    schedule_resource_indexer_jobs(scheduler)
     start_scheduler()
     logger.info("background_tasks_scheduled")
 

@@ -10,6 +10,7 @@ Implements scheduled tasks for:
 """
 
 from .credentials_tasks import schedule_credentials_tasks
+from .embedding_tasks import schedule_embedding_tasks
 from .mcp_tasks import schedule_mcp_tasks
 from .neural_tasks import schedule_neural_tasks
 from .resource_indexer_job import schedule_resource_indexer_jobs
@@ -22,5 +23,6 @@ __all__ = [
     "schedule_neural_tasks",
     "schedule_mcp_tasks",
     "schedule_credentials_tasks",
+    "schedule_embedding_tasks",
     "schedule_resource_indexer_jobs",
 ]
