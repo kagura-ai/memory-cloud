@@ -151,6 +151,11 @@ IMPORTANT: Always specify context_id to ensure you're searching the intended con
                         "type": "string",
                         "description": "Target context UUID. Use list_contexts() to discover available IDs.",
                     },
+                    "search_mode": {
+                        "type": "string",
+                        "enum": ["hybrid", "semantic", "keyword"],
+                        "description": "Search strategy. hybrid (default): semantic + BM25 blend. semantic: vector similarity only. keyword: BM25 only (best for hiragana queries where embedding models struggle).",
+                    },
                 },
             },
         },

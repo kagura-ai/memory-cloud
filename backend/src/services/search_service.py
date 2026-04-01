@@ -8,7 +8,7 @@ Issue #1 specification:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +20,8 @@ from services.reranker_service import RerankerService
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+SearchMode = Literal["hybrid", "semantic", "keyword"]
 
 
 class SearchService:
@@ -44,10 +46,14 @@ class SearchService:
         k: int = 10,
         use_rerank: bool = False,
         filters: dict[str, Any] | None = None,
+        search_mode: SearchMode = "hybrid",
     ) -> list[dict]:
-        """Hybrid Search: Semantic (60%) + BM25 (40%) with 3-level isolation.
+        """Search with configurable mode: hybrid, semantic, or keyword.
 
-        Single Collection Migration: Always uses "kagura_memories" collection.
+        Issue #17: search_mode parameter allows choosing the search strategy.
+        - hybrid (default): Semantic + BM25 blend with configurable weights
+        - semantic: Vector search only (embedding similarity)
+        - keyword: BM25 only (Sudachi tokenized, good for hiragana queries)
 
         Args:
             query: Search query
@@ -57,14 +63,10 @@ class SearchService:
             k: Number of results
             use_rerank: Use reranking if available
             filters: Optional filters
+            search_mode: Search strategy (hybrid/semantic/keyword)
 
         Returns:
             List of search results with scores
-
-        Example:
-            >>> results = await search_service.hybrid_search(
-            ...     "認証エラー", user_id="kiyota", k=5
-            ... )
         """
         # Load context search configuration (Issue #130)
         config = await self._get_search_config(context_id)
@@ -125,56 +127,65 @@ class SearchService:
             query_normalized=query != normalized_query,
         )
 
-        # Determine collection and embedding model for this context
+        # Determine collection name from embedding config
         embedding_model = getattr(config, "embedding_model", "text-embedding-3-small")
         embedding_dims = getattr(config, "embedding_dimensions", 512)
         collection = get_collection_name(embedding_model, embedding_dims)
-        # Reuse cached service if model matches, otherwise create context-specific one
-        if embedding_model == self.embedding_service.model:
-            embed_svc = self.embedding_service
+
+        semantic_results: list[dict] = []
+        fulltext_results: list[dict] = []
+
+        if search_mode in ("hybrid", "semantic"):
+            if embedding_model == self.embedding_service.model:
+                embed_svc = self.embedding_service
+            else:
+                embed_svc = EmbeddingService(
+                    self.db, model=embedding_model, dimensions=embedding_dims
+                )
+            logger.debug(
+                "semantic_search_starting", query=normalized_query[:50], fetch_size=fetch_size
+            )
+            query_vector = await embed_svc.embed(
+                normalized_query, user_id, context_id=context_id, workspace_id=workspace_id
+            )
+            semantic_results = await search_memories_qdrant(
+                user_id=user_id,
+                query_vector=query_vector,
+                workspace_id=workspace_id,
+                context_id=context_id,
+                limit=fetch_size,
+                filters=filters,
+                is_shared_context=is_shared_context,
+                collection_name=collection,
+            )
+
+        if search_mode in ("hybrid", "keyword"):
+            logger.debug(
+                "fulltext_search_starting", query=normalized_query[:50], fetch_size=fetch_size
+            )
+            fulltext_results = await search_memories_fulltext(
+                user_id=user_id,
+                query=normalized_query,
+                workspace_id=workspace_id,
+                context_id=context_id,
+                limit=fetch_size,
+                filters=filters,
+                is_shared_context=is_shared_context,
+                collection_name=collection,
+            )
+
+        # Merge results based on mode
+        if search_mode == "semantic":
+            merged_results = semantic_results
+        elif search_mode == "keyword":
+            merged_results = fulltext_results
         else:
-            embed_svc = EmbeddingService(self.db, model=embedding_model, dimensions=embedding_dims)
-
-        # 1. Semantic Search (Vector search)
-        logger.debug("semantic_search_starting", query=normalized_query[:50], fetch_size=fetch_size)
-
-        query_vector = await embed_svc.embed(
-            normalized_query, user_id, context_id=context_id, workspace_id=workspace_id
-        )
-        semantic_results = await search_memories_qdrant(
-            user_id=user_id,
-            query_vector=query_vector,
-            workspace_id=workspace_id,
-            context_id=context_id,
-            limit=fetch_size,
-            filters=filters,
-            is_shared_context=is_shared_context,
-            collection_name=collection,
-        )
-
-        # 2. Full-text Search (MatchText via scroll)
-        logger.debug("fulltext_search_starting", query=normalized_query[:50], fetch_size=fetch_size)
-
-        fulltext_results = await search_memories_fulltext(
-            user_id=user_id,
-            query=normalized_query,
-            workspace_id=workspace_id,
-            context_id=context_id,
-            limit=fetch_size,
-            filters=filters,
-            is_shared_context=is_shared_context,
-            collection_name=collection,
-        )
-
-        # 3. Hybrid Merge (Dynamic weights from config - Issue #130)
-        logger.debug("hybrid_merge_starting")
-
-        merged_results = self._merge_results(
-            semantic_results,
-            fulltext_results,
-            semantic_weight=float(config.semantic_weight),
-            keyword_weight=float(config.bm25_weight),
-        )
+            merged_results = self._merge_results(
+                semantic_results,
+                fulltext_results,
+                semantic_weight=float(config.semantic_weight),
+                keyword_weight=float(config.bm25_weight),
+            )
 
         # 4. Reranking (optional) - Issue #105: Multi-provider support (Voyage AI, Cohere)
         # Issue #130: Check both use_rerank parameter and config setting

@@ -461,6 +461,7 @@ class MemoryService:
             k=candidates_k,
             use_rerank=request.use_rerank,
             filters=request.filters,
+            search_mode=request.search_mode,
         )
 
         # Get full memory data from PostgreSQL

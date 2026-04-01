@@ -130,6 +130,7 @@ async def handle_recall(
         k=args.get("k", 5),
         use_rerank=args.get("use_rerank", False),
         filters=args.get("filters"),
+        search_mode=args.get("search_mode", "hybrid"),
     )
 
     start_time = time.time()

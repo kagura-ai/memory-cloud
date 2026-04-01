@@ -131,6 +131,11 @@ class RecallRequest(BaseModel):
     k: int = Field(5, ge=1, le=100, description="返却結果数")
     use_rerank: bool = Field(False, description="Reranking (Voyage/Cohere)を使用")
     filters: dict | None = Field(None, description="オプショナルフィルタ")
+    search_mode: str = Field(
+        "hybrid",
+        pattern="^(hybrid|semantic|keyword)$",
+        description="Search mode: hybrid (default), semantic (vector only), keyword (BM25 only)",
+    )
 
 
 class MemoryResponse(BaseModel):
