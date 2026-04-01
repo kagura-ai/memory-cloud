@@ -50,6 +50,7 @@ def _build_registry() -> dict[str, Any]:
 
     return {
         "remember": handle_remember,
+        "update_memory": handle_update_memory,
         "recall": handle_recall,
         "forget": handle_forget,
         "reference": handle_reference,
@@ -129,4 +130,5 @@ from mcp_server.tools.memory import (  # noqa: E402, F401
     handle_recall,
     handle_reference,
     handle_remember,
+    handle_update_memory,
 )

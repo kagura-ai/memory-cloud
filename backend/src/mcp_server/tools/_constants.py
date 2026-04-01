@@ -18,6 +18,7 @@ def _get_timeout(tool_name: str, default: float) -> float:
 # Issue #163: Tool execution timeouts (seconds)
 TOOL_TIMEOUTS: dict[str, float] = {
     "remember": _get_timeout("remember", 30.0),
+    "update_memory": _get_timeout("update_memory", 30.0),
     "recall": _get_timeout("recall", 60.0),
     "forget": _get_timeout("forget", 15.0),
     "reference": _get_timeout("reference", 10.0),
@@ -57,7 +58,8 @@ Call get_context_info() once to load:
 ## Core Workflow
 1. recall() - Search before starting tasks
 2. remember() - Store important decisions/code
-3. explore() - Find related memories via graph traversal
+3. update_memory() - Modify existing memories (in-place or upsert)
+4. explore() - Find related memories via graph traversal
 
 ## remember() Tips
 - summary: Write reusable conclusions (not process)
@@ -265,22 +267,23 @@ You: "Remember Kyoto autumn foliage spots for November:
 
 ## Updating Memories
 
-When saved information changes, **delete the old memory and save it again**.
+Use `update_memory()` to modify existing memories.
 
 ### How to Update
 
-**Method 1: Ask in one go (Easy)**
+**Method 1: In-place update (Recommended)**
 ```
-"Mr. Tanaka's budget changed from $50K to $80K. Update it."
+recall() → find memory_id → update_memory(memory_id, summary="updated text")
 ```
-→ AI automatically finds and deletes old memory → saves new one
+→ Preserves memory ID, graph edges, and creation timestamp.
+→ Only re-embeds if summary or content changes.
 
-**Method 2: Step by step (Reliable)**
+**Method 2: Upsert by external ID**
 ```
-1. "Delete the memory about Tanaka's $50K budget"
-2. "Save: Tanaka's budget is now $80K"
-3. "Search for Tanaka's budget to confirm"
+update_memory(external_id="my-key", summary="...", content="...", type="note")
 ```
+→ Creates if not exists, replaces if exists.
+→ Useful for sync workflows with stable external identifiers.
 
 ### When to Update
 
@@ -288,9 +291,6 @@ When saved information changes, **delete the old memory and save it again**.
 - Contract terms updated
 - Contact information changed
 - Procedures/rules revised
-
-**Note:**
-Saving the same content repeatedly creates duplicates. Remember to delete the old version.
 
 ---
 
@@ -386,11 +386,12 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 
 ---
 
-## Available Tools (11 tools)
+## Available Tools (12 tools)
 
 | Tool | Purpose |
 |------|---------|
 | `remember` | Store memories (3-layer: summary, context, details) |
+| `update_memory` | Update existing memory (in-place or upsert by external ID) |
 | `recall` | Search memories (hybrid: semantic + BM25 keyword) |
 | `forget` | Delete memories (soft delete, recoverable) |
 | `reference` | Get full memory details (Layer 3) by ID |

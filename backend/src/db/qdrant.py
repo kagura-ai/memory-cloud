@@ -405,6 +405,43 @@ async def search_memories_qdrant(
         raise QdrantError(f"Search failed: {e}") from e
 
 
+async def update_memory_payload_in_qdrant(
+    memory_id: UUID,
+    payload_updates: dict[str, Any],
+    collection_name: str = KAGURA_MEMORIES_COLLECTION,
+) -> None:
+    """Update payload fields of a Qdrant point without re-embedding.
+
+    Uses set_payload to update only specified fields (e.g. tags, importance, type).
+
+    Args:
+        memory_id: Memory UUID
+        payload_updates: Dict of payload fields to update
+        collection_name: Qdrant collection name
+
+    Raises:
+        QdrantError: If operation fails
+    """
+    client = get_qdrant_client()
+
+    try:
+        await client.set_payload(
+            collection_name=collection_name,
+            payload=payload_updates,
+            points=[str(memory_id)],
+        )
+
+        logger.debug(
+            "memory_payload_updated_in_qdrant",
+            collection=collection_name,
+            memory_id=str(memory_id),
+            updated_fields=list(payload_updates.keys()),
+        )
+
+    except Exception as e:
+        raise QdrantError(f"Failed to update memory payload: {e}") from e
+
+
 async def delete_memory_from_qdrant(
     user_id: str,
     memory_id: UUID,

@@ -213,6 +213,72 @@ class ForgetResponse(BaseModel):
     memory_ids: list[UUID]
 
 
+class UpdateMemoryRequest(BaseModel):
+    """Request schema for update_memory() API.
+
+    Two modes:
+    - In-place update: provide memory_id (preserves ID, graph edges, created_at)
+    - Upsert by external_id: provide external_id (forget + remember internally)
+    """
+
+    # Identifier (exactly one required)
+    memory_id: UUID | None = Field(None, description="Memory UUID for in-place update")
+    external_id: str | None = Field(
+        None, max_length=255, description="External resource ID for upsert lookup"
+    )
+
+    # Updatable fields (all optional for in-place, summary/content/type required for upsert)
+    summary: str | None = Field(None, min_length=10, max_length=500, description="Updated summary")
+    context_summary: str | None = Field(
+        None, max_length=2000, description="Updated context summary"
+    )
+    content: str | None = Field(None, min_length=1, description="Updated content")
+    details: dict | None = Field(None, description="Updated details (JSONB)")
+    type: str | None = Field(None, min_length=1, max_length=50, description="Updated type")
+    importance: float | None = Field(None, ge=0.0, le=1.0, description="Updated importance")
+    tags: list[str] | None = Field(None, description="Updated tags")
+    context: dict | None = Field(None, description="Updated context metadata")
+
+    @model_validator(mode="after")
+    def validate_identifier_and_required_fields(self) -> "UpdateMemoryRequest":
+        has_memory_id = self.memory_id is not None
+        has_external_id = self.external_id is not None
+
+        if not has_memory_id and not has_external_id:
+            raise ValueError("Either memory_id or external_id must be provided")
+        if has_memory_id and has_external_id:
+            raise ValueError("Provide either memory_id or external_id, not both")
+
+        # For upsert-by-external_id mode, enforce required fields
+        if has_external_id:
+            missing = [
+                name
+                for name, value in (
+                    ("summary", self.summary),
+                    ("content", self.content),
+                    ("type", self.type),
+                )
+                if not value or (isinstance(value, str) and not value.strip())
+            ]
+            if missing:
+                raise ValueError(
+                    "summary, content, and type are required and must be non-empty "
+                    "when using external_id for upsert"
+                )
+
+        return self
+
+
+class UpdateMemoryResponse(BaseModel):
+    """Response schema for update_memory() API."""
+
+    status: str = "success"
+    memory_id: UUID
+    operation: str  # "updated" | "created" | "replaced"
+    re_embedded: bool
+    scope: str
+
+
 class ExploreRequest(BaseModel):
     """Request schema for explore() API.
 
