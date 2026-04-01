@@ -34,6 +34,7 @@ from config.database import QDRANT_URL
 from utils.exceptions import QdrantError
 from utils.logger import get_logger
 from utils.sparse_vector import build_query_sparse_vector
+from utils.synonyms import expand_query_tokens
 from utils.tokenizer import tokenize_for_search
 
 logger = get_logger(__name__)
@@ -492,10 +493,10 @@ async def search_memories_fulltext(
             workspace_id, context_id, user_id, is_shared_context, filters
         )
 
-        # Build sparse query vector from Sudachi-tokenized query
-
+        # Build sparse query vector from Sudachi-tokenized + synonym-expanded query
         tokenized_query = tokenize_for_search(query)
-        query_indices, query_values = build_query_sparse_vector(tokenized_query)
+        expanded_query = expand_query_tokens(tokenized_query)
+        query_indices, query_values = build_query_sparse_vector(expanded_query)
 
         if not query_indices:
             logger.debug("bm25_query_empty_after_tokenization", query=query[:50])

@@ -140,7 +140,7 @@ export const RichMemoryOverview = forwardRef<RichMemoryOverviewRef, RichMemoryOv
         {[...Array(4)].map((_, i) => (
           <Card key={i}>
             <CardContent className="p-6">
-              <div className="h-64 animate-pulse rounded bg-gray-200" />
+              <div className="h-64 animate-pulse rounded bg-gray-200 dark:bg-gray-700" />
             </CardContent>
           </Card>
         ))}
@@ -235,7 +235,7 @@ export const RichMemoryOverview = forwardRef<RichMemoryOverviewRef, RichMemoryOv
       {/* Section 2: Neural Memory Activity */}
       <div>
         <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
-          <Network className="h-6 w-6 text-purple-600" />
+          <Network className="h-6 w-6 text-purple-600 dark:text-purple-400" />
           {t('neuralActivity')}
         </h2>
 
@@ -256,7 +256,7 @@ export const RichMemoryOverview = forwardRef<RichMemoryOverviewRef, RichMemoryOv
               <CardTitle className="text-sm">{t('totalConnections')}</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-3xl font-bold text-blue-600">
+              <div className="text-3xl font-bold text-blue-600 dark:text-blue-400">
                 {graphStats.stats.total_edges}
               </div>
             </CardContent>
@@ -318,7 +318,7 @@ export const RichMemoryOverview = forwardRef<RichMemoryOverviewRef, RichMemoryOv
       {/* Section 3: Access Patterns */}
       <div>
         <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
-          <Activity className="h-6 w-6 text-blue-600" />
+          <Activity className="h-6 w-6 text-blue-600 dark:text-blue-400" />
           {t('accessPatterns')}
         </h2>
 
@@ -335,20 +335,20 @@ export const RichMemoryOverview = forwardRef<RichMemoryOverviewRef, RichMemoryOv
                   accessPatterns.most_accessed.map((mem) => (
                     <div
                       key={mem.memory_id}
-                      className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 bg-gray-50 rounded hover:bg-gray-100 transition-colors"
+                      className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 bg-gray-50 dark:bg-gray-800 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
                     >
                       <div className="flex-1 min-w-0 overflow-hidden">
-                        <p className="text-sm font-medium line-clamp-2 break-words">{mem.summary}</p>
-                        <p className="text-xs text-gray-500">{mem.type}</p>
+                        <p className="text-sm font-medium text-gray-900 dark:text-gray-100 line-clamp-2 break-words">{mem.summary}</p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">{mem.type}</p>
                       </div>
                       <div className="flex items-center gap-2 sm:ml-4 shrink-0">
-                        <span className="text-sm font-bold text-blue-600">{mem.access_count}</span>
-                        <span className="text-xs text-gray-400">{t('times')}</span>
+                        <span className="text-sm font-bold text-blue-600 dark:text-blue-400">{mem.access_count}</span>
+                        <span className="text-xs text-gray-400 dark:text-gray-500">{t('times')}</span>
                       </div>
                     </div>
                   ))
                 ) : (
-                  <p className="text-sm text-gray-500">{t('noAccessData')}</p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">{t('noAccessData')}</p>
                 )}
               </div>
             </CardContent>
@@ -383,7 +383,7 @@ export const RichMemoryOverview = forwardRef<RichMemoryOverviewRef, RichMemoryOv
                   </ResponsiveContainer>
                 ) : (
                   <div className="flex items-center justify-center h-full">
-                    <p className="text-sm text-gray-500">{t('noMemoryData')}</p>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">{t('noMemoryData')}</p>
                   </div>
                 )}
               </div>
