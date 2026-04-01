@@ -29,13 +29,16 @@ def _get_sudachi():
     return _sudachi_tokenizer
 
 
-def _sudachi_extract(text: str, extractor, error_label: str = "tokenization") -> str:
+def _sudachi_extract(
+    text: str, extractor, error_label: str = "tokenization", fallback: str | None = None
+) -> str:
     """Shared Sudachi extraction: tokenize, filter stop words, extract attribute.
 
     Args:
         text: Input CJK text
         extractor: Function to call on each token (e.g., lambda t: t.dictionary_form())
         error_label: Label for error logging
+        fallback: Value to return on error (default: text.lower() for search, "" for reading)
 
     Returns:
         Space-separated extracted tokens
@@ -50,8 +53,10 @@ def _sudachi_extract(text: str, extractor, error_label: str = "tokenization") ->
             result.append(extractor(token))
         return " ".join(result)
     except Exception as e:
-        logger.warning(f"sudachi_{error_label}_failed", text_length=len(text), error=str(e))
-        return text.lower()
+        logger.warning(
+            f"sudachi_{error_label}_failed", text_length=len(text), error=str(e), exc_info=True
+        )
+        return fallback if fallback is not None else text.lower()
 
 
 def tokenize_and_reading(text: str) -> tuple[str, str]:
@@ -103,7 +108,7 @@ def text_to_reading(text: str) -> str:
     if not text or not _CJK_PATTERN.search(text):
         return ""
 
-    return _sudachi_extract(text, lambda t: t.reading_form(), "reading")
+    return _sudachi_extract(text, lambda t: t.reading_form(), "reading", fallback="")
 
 
 def tokenize_for_search(text: str) -> str:
