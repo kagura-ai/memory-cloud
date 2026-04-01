@@ -449,6 +449,12 @@ class ContextService:
 
         # Issue #85: Lock/unlock context
         if is_locked is not None:
+            logger.info(
+                "setting_is_locked",
+                context_id=str(context_id),
+                old_value=context.is_locked,
+                new_value=is_locked,
+            )
             context.is_locked = is_locked
 
         await self.db.commit()
@@ -566,7 +572,7 @@ class ContextService:
         if context.is_default:
             raise ValidationError("Cannot delete default context")
 
-        # Issue #85: Cannot delete locked context
+        # Issue #85: Guard for non-HTTP callers (MCP tools call service directly)
         if context.is_locked:
             raise ValidationError("Context is locked. Unlock it before deleting.")
 

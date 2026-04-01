@@ -181,7 +181,7 @@ class ContextUpdate(BaseModel):
     )
     is_locked: bool | None = Field(
         None,
-        description="Lock flag: TRUE=prevent deletion, FALSE=allow deletion (Issue #85)",
+        description="When true, prevents this context from being deleted until unlocked.",
     )
 
 
@@ -203,7 +203,7 @@ class ContextResponse(BaseModel):
     resource_id: str | None = Field(
         None, description="Resource ID for public contexts"
     )  # Issue #238
-    is_locked: bool = Field(False, description="Lock status: TRUE=deletion prevented")  # Issue #85
+    is_locked: bool = Field(False, description="When true, deletion is prevented until unlocked")
     created_by: str | None = Field(None, description="Creator user ID")  # Issue #165
     created_by_name: str | None = Field(None, description="Creator name")
     created_at: datetime = Field(..., description="Creation timestamp")
@@ -577,8 +577,10 @@ async def get_context(
             summary=context.summary,
             usage_guide=context.usage_guide,
             is_default=context.is_default,
-            # Issue #246: is_current removed
             is_private=context.is_private,
+            is_public=context.is_public,
+            resource_id=context.resource_id,
+            is_locked=context.is_locked,
             created_by=context.created_by,
             created_by_name=creator_name,
             created_at=context.created_at,

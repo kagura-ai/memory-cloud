@@ -80,6 +80,9 @@ export default function ContextSettingsPage() {
   const [isLocked, setIsLocked] = useState(false);  // Issue #85: Context lock
   const [resourceIdPrefix, setResourceIdPrefix] = useState('');  // Issue #238: Resource ID prefix
 
+  // Lock toggle (Issue #85)
+  const [lockSaving, setLockSaving] = useState(false);
+
   // Delete dialog
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -165,6 +168,24 @@ export default function ContextSettingsPage() {
       setDeleteDialogOpen(false);
     } finally {
       setDeleting(false);
+    }
+  };
+
+  // Issue #85: Handle lock toggle
+  const handleLockToggle = async () => {
+    if (!context) return;
+    const newLocked = !isLocked;
+    try {
+      setLockSaving(true);
+      setError(null);
+      await updateContext(context.id, { is_locked: newLocked });
+      setIsLocked(newLocked);
+      setSuccessMessage(newLocked ? 'Context locked' : 'Context unlocked');
+      setTimeout(() => setSuccessMessage(null), 3000);
+    } catch {
+      setError('Failed to update lock status');
+    } finally {
+      setLockSaving(false);
     }
   };
 
@@ -587,17 +608,8 @@ export default function ContextSettingsPage() {
                 </p>
               </div>
               <button
-                onClick={async () => {
-                  const newLocked = !isLocked;
-                  try {
-                    await updateContext(context.id, { is_locked: newLocked });
-                    setIsLocked(newLocked);
-                    setSuccessMessage(newLocked ? 'Context locked' : 'Context unlocked');
-                    setTimeout(() => setSuccessMessage(null), 3000);
-                  } catch (err) {
-                    setError('Failed to update lock status');
-                  }
-                }}
+                onClick={handleLockToggle}
+                disabled={lockSaving}
                 className={cn(
                   'px-4 py-2 rounded font-medium text-sm transition-colors',
                   isLocked
@@ -605,7 +617,7 @@ export default function ContextSettingsPage() {
                     : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300'
                 )}
               >
-                {isLocked ? 'Unlock' : 'Lock'}
+                {lockSaving ? 'Saving...' : isLocked ? 'Unlock' : 'Lock'}
               </button>
             </div>
 
