@@ -364,9 +364,11 @@ class MemoryService:
             else None
         )
 
-        # Determine what changed
+        # Determine what changed (BM25 tokens depend on summary, context_summary, content)
         needs_reembed = False
         if normalized_summary is not None and normalized_summary != memory.summary:
+            needs_reembed = True
+        if normalized_ctx_summary is not None and normalized_ctx_summary != memory.context_summary:
             needs_reembed = True
         if request.content is not None and request.content != memory.content:
             needs_reembed = True
@@ -413,7 +415,21 @@ class MemoryService:
 
             import asyncio
 
-            asyncio.create_task(process_pending_embedding(memory.id))
+            def _log_embedding_task_result(t: asyncio.Task) -> None:
+                if t.cancelled():
+                    logger.warning("embedding_task_cancelled", memory_id=str(memory.id))
+                    return
+                exc = t.exception()
+                if exc is not None:
+                    logger.error(
+                        "embedding_task_exception",
+                        memory_id=str(memory.id),
+                        error=str(exc),
+                        exc_info=exc,
+                    )
+
+            task = asyncio.create_task(process_pending_embedding(memory.id))
+            task.add_done_callback(_log_embedding_task_result)
         else:
             # Metadata-only update: patch Qdrant payload without re-embedding
             payload_updates: dict = {}
@@ -458,27 +474,17 @@ class MemoryService:
         current_context_id: UUID | None = None,
         current_workspace_id: UUID | None = None,
     ) -> UpdateMemoryResponse:
-        """Upsert by external_id: forget existing + remember new."""
+        """Upsert by external_id: remember new, then forget old if exists."""
         existing = await self.memory_repo.get_by_resource_id(
             resource_id=request.external_id,
             context_id=current_context_id,
             user_id=user_id,
         )
 
-        operation = "created"
-        if existing:
-            # Forget existing memory
-            await self.forget(
-                ForgetRequest(memory_id=existing.id),
-                user_id=user_id,
-                current_context_id=current_context_id,
-            )
-            operation = "replaced"
-
         # Build details with resource_id preserved (copy to avoid mutating request)
         details = {**(request.details or {}), "resource_id": request.external_id}
 
-        # Remember new memory
+        # Create new memory first (before deleting old — prevents data loss on failure)
         remember_request = RememberRequest(
             summary=request.summary,
             context_summary=request.context_summary,
@@ -497,6 +503,16 @@ class MemoryService:
             current_context_id=current_context_id,
             current_workspace_id=current_workspace_id,
         )
+
+        # Only forget old memory after new one is successfully created
+        operation = "created"
+        if existing:
+            await self.forget(
+                ForgetRequest(memory_id=existing.id),
+                user_id=user_id,
+                current_context_id=current_context_id,
+            )
+            operation = "replaced"
 
         return UpdateMemoryResponse(
             memory_id=result.memory_id,

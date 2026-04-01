@@ -240,11 +240,32 @@ class UpdateMemoryRequest(BaseModel):
     context: dict | None = Field(None, description="Updated context metadata")
 
     @model_validator(mode="after")
-    def validate_identifier(self) -> "UpdateMemoryRequest":
-        if not self.memory_id and not self.external_id:
+    def validate_identifier_and_required_fields(self) -> "UpdateMemoryRequest":
+        has_memory_id = self.memory_id is not None
+        has_external_id = self.external_id is not None
+
+        if not has_memory_id and not has_external_id:
             raise ValueError("Either memory_id or external_id must be provided")
-        if self.memory_id and self.external_id:
+        if has_memory_id and has_external_id:
             raise ValueError("Provide either memory_id or external_id, not both")
+
+        # For upsert-by-external_id mode, enforce required fields
+        if has_external_id:
+            missing = [
+                name
+                for name, value in (
+                    ("summary", self.summary),
+                    ("content", self.content),
+                    ("type", self.type),
+                )
+                if not value or (isinstance(value, str) and not value.strip())
+            ]
+            if missing:
+                raise ValueError(
+                    "summary, content, and type are required and must be non-empty "
+                    "when using external_id for upsert"
+                )
+
         return self
 
 

@@ -118,19 +118,14 @@ async def handle_update_memory(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
     """Update an existing memory or upsert by external ID."""
-    memory_id = args.get("memory_id")
-    external_id = args.get("external_id")
-
-    # Validate upsert mode requires summary, content, type
-    if external_id and ("summary" not in args or "content" not in args or "type" not in args):
-        return _error_response(
-            "missing_fields",
-            "summary, content, and type are required for upsert mode (external_id)",
-        )
+    from pydantic import ValidationError
 
     from db.base import get_db
     from models.schemas import UpdateMemoryRequest
     from services.memory_service import MemoryService
+
+    memory_id = args.get("memory_id")
+    external_id = args.get("external_id")
 
     try:
         request = UpdateMemoryRequest(
@@ -145,7 +140,7 @@ async def handle_update_memory(
             tags=args.get("tags"),
             context=args.get("context"),
         )
-    except (ValueError, Exception) as e:
+    except (ValueError, ValidationError) as e:
         return _error_response("validation_error", str(e))
 
     start_time = time.time()

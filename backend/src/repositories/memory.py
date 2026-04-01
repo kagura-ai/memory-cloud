@@ -262,14 +262,17 @@ class MemoryRepository(BaseRepository[Memory]):
             Memory or None
         """
         result = await self.db.execute(
-            select(Memory).where(
+            select(Memory)
+            .where(
                 Memory.resource_id == resource_id,
                 Memory.context_id == context_id,
                 Memory.user_id == user_id,
                 Memory.deleted_at.is_(None),
             )
+            .order_by(desc(Memory.created_at))
+            .limit(1)
         )
-        return result.scalar_one_or_none()
+        return result.scalars().first()
 
     async def get_old_working_memories(self, user_id: str, age_days: int = 30) -> list[Memory]:
         """Get old working memories for cleanup.
