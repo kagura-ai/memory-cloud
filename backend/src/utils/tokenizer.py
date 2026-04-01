@@ -29,6 +29,60 @@ def _get_sudachi():
     return _sudachi_tokenizer
 
 
+# Hiragana → Katakana translation table (for query normalization)
+_HIRA_TO_KATA = str.maketrans(
+    "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほ"
+    "まみむめもやゆよらりるれろわをんがぎぐげござじずぜぞだぢづでど"
+    "ばびぶべぼぱぴぷぺぽぁぃぅぇぉっゃゅょー",
+    "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホ"
+    "マミムメモヤユヨラリルレロワヲンガギグゲゴザジズゼゾダヂヅデド"
+    "バビブベボパピプペポァィゥェォッャュョー",
+)
+
+
+def text_to_reading(text: str) -> str:
+    """Convert text to space-separated katakana readings using Sudachi.
+
+    Issue #73: For BM25 matching of full-hiragana queries (voice input, IME).
+    Returns token-level readings with stop words removed, matching the
+    tokenize_for_search() filtering for consistent BM25 matching.
+
+    Args:
+        text: Input text (any script)
+
+    Returns:
+        Space-separated katakana reading tokens
+    """
+    if not text:
+        return ""
+
+    try:
+        tokenizer = _get_sudachi()
+        tokens = tokenizer.tokenize(text)
+        readings = []
+        for token in tokens:
+            pos = token.part_of_speech()[0]
+            if pos in _STOP_POS:
+                continue
+            readings.append(token.reading_form())
+        return " ".join(readings)
+    except Exception as e:
+        logger.warning("sudachi_reading_failed", text_length=len(text), error=str(e))
+        return ""
+
+
+def hiragana_to_katakana(text: str) -> str:
+    """Convert hiragana to katakana for query normalization.
+
+    Args:
+        text: Text possibly containing hiragana
+
+    Returns:
+        Text with hiragana converted to katakana
+    """
+    return text.translate(_HIRA_TO_KATA)
+
+
 def tokenize_for_search(text: str) -> str:
     """Tokenize text for BM25 search. Returns space-separated lemmas.
 

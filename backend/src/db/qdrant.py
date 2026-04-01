@@ -35,7 +35,7 @@ from utils.exceptions import QdrantError
 from utils.logger import get_logger
 from utils.sparse_vector import build_query_sparse_vector
 from utils.synonyms import expand_query_tokens
-from utils.tokenizer import tokenize_for_search
+from utils.tokenizer import text_to_reading, tokenize_for_search
 
 logger = get_logger(__name__)
 
@@ -494,8 +494,15 @@ async def search_memories_fulltext(
         )
 
         # Build sparse query vector from Sudachi-tokenized + synonym-expanded query
+        # Issue #73: Include katakana reading of query for hiragana matching
         tokenized_query = tokenize_for_search(query)
-        expanded_query = expand_query_tokens(tokenized_query)
+        query_reading = text_to_reading(query)
+        combined_query = (
+            f"{tokenized_query} {query_reading}"
+            if query_reading != tokenized_query
+            else tokenized_query
+        )
+        expanded_query = expand_query_tokens(combined_query)
         query_indices, query_values = build_query_sparse_vector(expanded_query)
 
         if not query_indices:

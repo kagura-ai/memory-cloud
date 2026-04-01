@@ -37,16 +37,20 @@ def build_document_sparse_vector(
     summary_tokens: str,
     context_summary_tokens: str,
     content_tokens: str,
+    summary_reading: str = "",
 ) -> tuple[list[int], list[float]]:
     """Build combined sparse vector from all document fields.
 
-    Summary/context_summary weighted 2x vs content to prioritize
-    title-level matches over body matches.
+    Field weights:
+    - summary/context_summary: 2.0 (primary match)
+    - content: 1.0 (body match)
+    - summary_reading: 0.5 (hiragana query fallback, Issue #73)
 
     Args:
         summary_tokens: Sudachi-tokenized summary
         context_summary_tokens: Sudachi-tokenized context_summary
         content_tokens: Sudachi-tokenized content
+        summary_reading: Katakana reading of summary (for hiragana queries)
 
     Returns:
         (indices, values) tuple for SparseVector constructor
@@ -58,6 +62,9 @@ def build_document_sparse_vector(
         merged[idx] = merged.get(idx, 0.0) + val
     for idx, val in tokens_to_sparse_vector(content_tokens, weight=1.0).items():
         merged[idx] = merged.get(idx, 0.0) + val
+    if summary_reading:
+        for idx, val in tokens_to_sparse_vector(summary_reading, weight=0.5).items():
+            merged[idx] = merged.get(idx, 0.0) + val
 
     if not merged:
         return [], []
