@@ -636,12 +636,17 @@ async def handle_delete_context(
 
     from db.base import get_db
     from services.context_service import ContextService
-    from utils.exceptions import ValidationError
+    from services.permission_service import PermissionService
+    from utils.exceptions import AuthorizationError, NotFoundException, ValidationError
 
     start_time = time.time()
 
     async for db in get_db():
         try:
+            # Owner-only: verify before delete
+            perm_service = PermissionService(db)
+            await perm_service.check_context_owner(user_id, context_id)
+
             service = ContextService(db)
             context = await service.delete_context(user_id, context_id)
 
@@ -668,14 +673,16 @@ async def handle_delete_context(
                     ),
                 )
             ]
-        except _ContextNotFoundError as e:
+        except (NotFoundException, _ContextNotFoundError):
             await db.rollback()
-            return e.to_response()
-        except ValidationError as e:
+            return _error_response(
+                "context_not_found",
+                f"Context {context_id} not found or access denied.",
+            )
+        except (AuthorizationError, Exception) as e:
             await db.rollback()
-            return _error_response("validation_error", str(e))
-        except Exception as e:
-            await db.rollback()
+            if isinstance(e, (AuthorizationError, ValidationError)):
+                return _error_response("permission_denied", str(e))
             await _log_tool_usage(
                 db,
                 user_id,
