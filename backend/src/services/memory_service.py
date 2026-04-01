@@ -461,6 +461,7 @@ class MemoryService:
             k=candidates_k,
             use_rerank=request.use_rerank,
             filters=request.filters,
+            search_mode=request.search_mode,
         )
 
         # Get full memory data from PostgreSQL
@@ -479,8 +480,9 @@ class MemoryService:
         memories_list = list(result.scalars().all())
         memories = {str(m.id): m for m in memories_list}
 
-        # If Neural Memory disabled, use classic Hybrid Search
-        if not neural_enabled:
+        # Skip Neural Memory for keyword-only mode (no embeddings available)
+        # or when Neural Memory is disabled
+        if not neural_enabled or request.search_mode == "keyword":
             responses = []
             for search_result in search_results[: request.k]:
                 memory_id = search_result["id"]
@@ -543,12 +545,12 @@ class MemoryService:
         #          - MMR and redundancy calculations use correct query vector
         # ============================================================================
 
-        # 2. Generate query embedding (independent of search results)
+        # 2. Generate query embedding for Neural Memory
         query_embedding = await self.embedding_service.embed(
             request.query,
             user_id,
             context_id=current_context_id,
-            workspace_id=current_workspace_id,  # NEW: Issue #146
+            workspace_id=current_workspace_id,
         )
 
         # 3. Load user's graph

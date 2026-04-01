@@ -41,6 +41,11 @@ class PublicSearchRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=500, description="Search query")
     limit: int = Field(10, ge=1, le=100, description="Maximum results (default: 10, max: 100)")
     use_rerank: bool = Field(False, description="Enable reranking for better results")
+    search_mode: str = Field(
+        "hybrid",
+        pattern="^(hybrid|semantic|keyword)$",
+        description="Search mode: hybrid (default), semantic, keyword",
+    )
 
 
 class PublicSearchResult(BaseModel):
@@ -256,6 +261,7 @@ async def public_search(
             context_id=str(context_id),
             k=request.limit,
             use_rerank=request.use_rerank and user is not None,  # Rerank only for workspace members
+            search_mode=request.search_mode,
         )
 
         # 4. Load schema for response formatting (if resource-backed)

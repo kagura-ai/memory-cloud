@@ -119,6 +119,144 @@ class TestSearchService:
             assert len(results) == 0
 
 
+class TestSearchMode:
+    """Test search_mode parameter (Issue #17)."""
+
+    @pytest.fixture
+    def mock_db(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def service(self, mock_db):
+        return SearchService(mock_db)
+
+    @pytest.fixture
+    def default_search_config(self):
+        return type(
+            "DefaultConfig",
+            (),
+            {
+                "semantic_weight": 0.6,
+                "bm25_weight": 0.4,
+                "fetch_factor": 3,
+                "use_rerank": False,
+                "embedding_model": "text-embedding-3-small",
+                "embedding_dimensions": 512,
+            },
+        )()
+
+    def _setup_mocks(self, service, default_search_config):
+        """Common mock setup for search mode tests."""
+        service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+        service._get_search_config = AsyncMock(return_value=default_search_config)
+
+        mock_ctx_svc = MagicMock()
+        mock_ctx_svc.is_context_shared = AsyncMock(return_value=False)
+        return mock_ctx_svc
+
+    @pytest.mark.asyncio
+    async def test_keyword_mode_skips_embedding(self, service, default_search_config):
+        """keyword mode should not call embed() or search_memories_qdrant."""
+        mock_ctx_svc = self._setup_mocks(service, default_search_config)
+        fulltext_results = [{"id": "mem1", "score": 10.0, "payload": {"summary": "Test"}}]
+
+        mock_qdrant = AsyncMock(return_value=[])
+        mock_fulltext = AsyncMock(return_value=fulltext_results)
+
+        with (
+            patch("services.search_service.search_memories_qdrant", new=mock_qdrant),
+            patch("services.search_service.search_memories_fulltext", new=mock_fulltext),
+            patch("services.context_service.ContextService", return_value=mock_ctx_svc),
+        ):
+            results = await service.hybrid_search(
+                query="test",
+                user_id="user",
+                workspace_id="00000000-0000-0000-0000-000000000001",
+                context_id="00000000-0000-0000-0000-000000000002",
+                k=5,
+                search_mode="keyword",
+            )
+            mock_qdrant.assert_not_called()
+            mock_fulltext.assert_called_once()
+            service.embedding_service.embed.assert_not_called()
+            assert len(results) == 1
+            assert results[0]["id"] == "mem1"
+
+    @pytest.mark.asyncio
+    async def test_semantic_mode_skips_fulltext(self, service, default_search_config):
+        """semantic mode should not call search_memories_fulltext."""
+        mock_ctx_svc = self._setup_mocks(service, default_search_config)
+        semantic_results = [{"id": "mem1", "score": 0.9, "payload": {"summary": "Test"}}]
+
+        mock_qdrant = AsyncMock(return_value=semantic_results)
+        mock_fulltext = AsyncMock(return_value=[])
+
+        with (
+            patch("services.search_service.search_memories_qdrant", new=mock_qdrant),
+            patch("services.search_service.search_memories_fulltext", new=mock_fulltext),
+            patch("services.context_service.ContextService", return_value=mock_ctx_svc),
+        ):
+            results = await service.hybrid_search(
+                query="test",
+                user_id="user",
+                workspace_id="00000000-0000-0000-0000-000000000001",
+                context_id="00000000-0000-0000-0000-000000000002",
+                k=5,
+                search_mode="semantic",
+            )
+            mock_qdrant.assert_called_once()
+            mock_fulltext.assert_not_called()
+            assert len(results) == 1
+
+    @pytest.mark.asyncio
+    async def test_hybrid_mode_calls_both(self, service, default_search_config):
+        """hybrid mode should call both backends and merge."""
+        mock_ctx_svc = self._setup_mocks(service, default_search_config)
+
+        mock_qdrant = AsyncMock(return_value=[{"id": "mem1", "score": 0.9, "payload": {}}])
+        mock_fulltext = AsyncMock(return_value=[{"id": "mem2", "score": 0.8, "payload": {}}])
+
+        with (
+            patch("services.search_service.search_memories_qdrant", new=mock_qdrant),
+            patch("services.search_service.search_memories_fulltext", new=mock_fulltext),
+            patch("services.context_service.ContextService", return_value=mock_ctx_svc),
+        ):
+            results = await service.hybrid_search(
+                query="test",
+                user_id="user",
+                workspace_id="00000000-0000-0000-0000-000000000001",
+                context_id="00000000-0000-0000-0000-000000000002",
+                k=5,
+                search_mode="hybrid",
+            )
+            mock_qdrant.assert_called_once()
+            mock_fulltext.assert_called_once()
+            assert len(results) == 2
+
+    @pytest.mark.asyncio
+    async def test_default_mode_is_hybrid(self, service, default_search_config):
+        """Default search_mode should be hybrid (both backends called)."""
+        mock_ctx_svc = self._setup_mocks(service, default_search_config)
+
+        mock_qdrant = AsyncMock(return_value=[])
+        mock_fulltext = AsyncMock(return_value=[])
+
+        with (
+            patch("services.search_service.search_memories_qdrant", new=mock_qdrant),
+            patch("services.search_service.search_memories_fulltext", new=mock_fulltext),
+            patch("services.context_service.ContextService", return_value=mock_ctx_svc),
+        ):
+            await service.hybrid_search(
+                query="test",
+                user_id="user",
+                workspace_id="00000000-0000-0000-0000-000000000001",
+                context_id="00000000-0000-0000-0000-000000000002",
+                k=5,
+            )
+            mock_qdrant.assert_called_once()
+            mock_fulltext.assert_called_once()
+
+
 class TestSearchServiceMergeResults:
     """Test _merge_results method directly — no external deps needed."""
 
