@@ -384,21 +384,21 @@ class WorkspaceService:
                 f"Deleted {external_keys_count} external API keys for workspace {workspace.id}"
             )
 
-        # Issue #223: Delete Qdrant collections for all contexts in this workspace
+        # Delete Qdrant points for ALL contexts (including soft-deleted)
+        # Workspace deletion is permanent — clean up everything
         from services.context_service import ContextService
 
         contexts_result = await self.db.execute(
-            select(Context).where(
-                Context.workspace_id == workspace_id,
-                Context.deleted_at.is_(None),
-            )
+            select(Context).where(Context.workspace_id == workspace_id)
         )
         contexts = contexts_result.scalars().all()
 
         context_service = ContextService(self.db)
         for context in contexts:
             try:
-                await context_service._delete_context_collection(str(workspace_id), context.name)
+                await context_service._delete_context_collection(
+                    str(workspace_id), context.name, context_id=str(context.id)
+                )
                 logger.info(
                     "org_delete_qdrant_collection",
                     workspace_id=str(workspace_id),
