@@ -29,58 +29,81 @@ def _get_sudachi():
     return _sudachi_tokenizer
 
 
-# Hiragana → Katakana translation table (for query normalization)
-_HIRA_TO_KATA = str.maketrans(
-    "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほ"
-    "まみむめもやゆよらりるれろわをんがぎぐげござじずぜぞだぢづでど"
-    "ばびぶべぼぱぴぷぺぽぁぃぅぇぉっゃゅょー",
-    "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホ"
-    "マミムメモヤユヨラリルレロワヲンガギグゲゴザジズゼゾダヂヅデド"
-    "バビブベボパピプペポァィゥェォッャュョー",
-)
+def _sudachi_extract(text: str, extractor, error_label: str = "tokenization") -> str:
+    """Shared Sudachi extraction: tokenize, filter stop words, extract attribute.
+
+    Args:
+        text: Input CJK text
+        extractor: Function to call on each token (e.g., lambda t: t.dictionary_form())
+        error_label: Label for error logging
+
+    Returns:
+        Space-separated extracted tokens
+    """
+    try:
+        tokenizer = _get_sudachi()
+        tokens = tokenizer.tokenize(text)
+        result = []
+        for token in tokens:
+            if token.part_of_speech()[0] in _STOP_POS:
+                continue
+            result.append(extractor(token))
+        return " ".join(result)
+    except Exception as e:
+        logger.warning(f"sudachi_{error_label}_failed", text_length=len(text), error=str(e))
+        return text.lower()
+
+
+def tokenize_and_reading(text: str) -> tuple[str, str]:
+    """Tokenize text and extract readings in a single Sudachi pass.
+
+    Issue #73: Avoids double tokenization when both lemmas and readings
+    are needed (e.g., in BM25 search query building).
+
+    Args:
+        text: Input text
+
+    Returns:
+        (lemma_tokens, reading_tokens) tuple, both space-separated.
+        For non-CJK text: (lowercased text, "")
+    """
+    if not text:
+        return "", ""
+
+    if not _CJK_PATTERN.search(text):
+        return text.lower(), ""
+
+    try:
+        tokenizer = _get_sudachi()
+        tokens = tokenizer.tokenize(text)
+        lemmas = []
+        readings = []
+        for token in tokens:
+            if token.part_of_speech()[0] in _STOP_POS:
+                continue
+            lemmas.append(token.dictionary_form().lower())
+            readings.append(token.reading_form())
+        return " ".join(lemmas), " ".join(readings)
+    except Exception as e:
+        logger.warning("sudachi_tokenization_failed", text_length=len(text), error=str(e))
+        return text.lower(), ""
 
 
 def text_to_reading(text: str) -> str:
     """Convert text to space-separated katakana readings using Sudachi.
 
     Issue #73: For BM25 matching of full-hiragana queries (voice input, IME).
-    Returns token-level readings with stop words removed, matching the
-    tokenize_for_search() filtering for consistent BM25 matching.
 
     Args:
         text: Input text (any script)
 
     Returns:
-        Space-separated katakana reading tokens
+        Space-separated katakana reading tokens. Empty for non-CJK text.
     """
-    if not text:
+    if not text or not _CJK_PATTERN.search(text):
         return ""
 
-    try:
-        tokenizer = _get_sudachi()
-        tokens = tokenizer.tokenize(text)
-        readings = []
-        for token in tokens:
-            pos = token.part_of_speech()[0]
-            if pos in _STOP_POS:
-                continue
-            readings.append(token.reading_form())
-        return " ".join(readings)
-    except Exception as e:
-        logger.warning("sudachi_reading_failed", text_length=len(text), error=str(e))
-        return ""
-
-
-def hiragana_to_katakana(text: str) -> str:
-    """Convert hiragana to katakana for query normalization.
-
-    Args:
-        text: Text possibly containing hiragana
-
-    Returns:
-        Text with hiragana converted to katakana
-    """
-    return text.translate(_HIRA_TO_KATA)
+    return _sudachi_extract(text, lambda t: t.reading_form(), "reading")
 
 
 def tokenize_for_search(text: str) -> str:
@@ -101,22 +124,7 @@ def tokenize_for_search(text: str) -> str:
     if not text:
         return ""
 
-    # If no CJK characters, return as-is (let Qdrant handle English)
     if not _CJK_PATTERN.search(text):
         return text.lower()
 
-    try:
-        tokenizer = _get_sudachi()
-        tokens = tokenizer.tokenize(text)
-        lemmas = []
-        for token in tokens:
-            pos = token.part_of_speech()[0]
-            if pos in _STOP_POS:
-                continue
-            lemmas.append(token.dictionary_form().lower())
-        return " ".join(lemmas)
-    except Exception as e:
-        logger.warning(
-            "sudachi_tokenization_failed", text_length=len(text), error=str(e), exc_info=True
-        )
-        return text.lower()
+    return _sudachi_extract(text, lambda t: t.dictionary_form().lower(), "tokenization")
