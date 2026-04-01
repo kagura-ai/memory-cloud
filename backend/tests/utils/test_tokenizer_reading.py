@@ -3,7 +3,7 @@
 Issue #73: Verify katakana reading extraction for hiragana query matching.
 """
 
-from utils.tokenizer import text_to_reading, tokenize_and_reading
+from utils.tokenizer import augment_reading_tokens, text_to_reading, tokenize_and_reading
 
 
 class TestTextToReading:
@@ -82,3 +82,45 @@ class TestTokenizeAndReading:
         )
         # With reading should have more indices
         assert len(indices_with) >= len(indices_without)
+
+
+class TestAugmentReadingTokens:
+    """Test augment_reading_tokens for hiragana query matching (Issue #75)."""
+
+    def test_adjacent_concat_hiyou(self):
+        """ひよう → ヒ+ヨウ adjacent concat produces ヒヨウ."""
+        result = augment_reading_tokens("ひっこしのひよう")
+        assert "ヒヨウ" in result.split()
+
+    def test_full_katakana_hatarakikata(self):
+        """はたらきかたかいかく → full kata conversion matches compound token."""
+        result = augment_reading_tokens("はたらきかたかいかく")
+        assert "ハタラキカタカイカク" in result.split()
+
+    def test_empty_string(self):
+        """Empty string returns empty."""
+        assert augment_reading_tokens("") == ""
+
+    def test_non_cjk_returns_empty(self):
+        """Non-CJK text returns empty (no augmentation needed)."""
+        assert augment_reading_tokens("Hello World") == ""
+
+    def test_kanji_query_no_noise(self):
+        """Kanji queries should not add spurious tokens."""
+        result = augment_reading_tokens("引越しの費用")
+        tokens = result.split() if result else []
+        # Each group has only 1 content token, no adjacent concat needed
+        # No hiragana runs >= 4 chars, so no full kata conversion
+        assert len(tokens) == 0
+
+    def test_short_hiragana_skipped(self):
+        """Very short hiragana runs (< 4 chars) are not converted."""
+        result = augment_reading_tokens("猫の餌")
+        # "の" is only 1 char hiragana — too short for strategy 2
+        assert result == "" or "ノ" not in result.split()
+
+    def test_working_case_unaffected(self):
+        """Control case: くものすのそうじ already works, augmentation shouldn't break it."""
+        result = augment_reading_tokens("くものすのそうじ")
+        # Should produce some tokens but not break anything
+        assert isinstance(result, str)

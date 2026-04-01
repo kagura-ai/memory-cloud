@@ -111,6 +111,66 @@ def text_to_reading(text: str) -> str:
     return _sudachi_extract(text, lambda t: t.reading_form(), "reading", fallback="")
 
 
+_HIRAGANA_PATTERN = re.compile(r"[\u3041-\u3096]+")
+
+
+def _hira_to_kata(text: str) -> str:
+    """Convert hiragana characters to katakana (U+3041→U+30A1, +0x60 shift)."""
+    return "".join(chr(ord(c) + 0x60) if "\u3041" <= c <= "\u3096" else c for c in text)
+
+
+def augment_reading_tokens(text: str) -> str:
+    """Generate additional reading tokens for hiragana query matching.
+
+    Issue #75: Sudachi mis-segments continuous hiragana, producing different
+    morpheme boundaries than the corresponding kanji text. Two strategies:
+
+    1. Adjacent reading concatenation: group content tokens between stop-word
+       boundaries and concatenate their readings. Fixes cases like
+       ひよう → ヒ+ヨウ → ヒヨウ (matches doc's 費用 reading).
+
+    2. Full hiragana→katakana conversion: convert contiguous hiragana runs
+       directly to katakana without Sudachi. Fixes compound-word cases like
+       はたらきかたかいかく → ハタラキカタカイカク (matches doc's 働き方改革).
+
+    Args:
+        text: Input query text
+
+    Returns:
+        Space-separated additional tokens (may be empty)
+    """
+    if not text or not _CJK_PATTERN.search(text):
+        return ""
+
+    extra: list[str] = []
+
+    # Strategy 1: Adjacent reading concatenation
+    try:
+        tokenizer = _get_sudachi()
+        tokens = tokenizer.tokenize(text)
+        group: list[str] = []
+        for token in tokens:
+            if token.part_of_speech()[0] in _STOP_POS:
+                if len(group) >= 2:
+                    extra.append("".join(group))
+                group = []
+            else:
+                group.append(token.reading_form())
+        if len(group) >= 2:
+            extra.append("".join(group))
+    except Exception as e:
+        logger.warning("augment_reading_concat_failed", error=str(e))
+
+    # Strategy 2: Full hiragana→katakana conversion
+    for match in _HIRAGANA_PATTERN.finditer(text):
+        hira_run = match.group()
+        if len(hira_run) >= 4:  # Skip very short runs (particles etc.)
+            kata = _hira_to_kata(hira_run)
+            extra.append(kata)
+
+    return " ".join(extra)
+
+
 def tokenize_for_search(text: str) -> str:
     """Tokenize text for BM25 search. Returns space-separated lemmas.
 
