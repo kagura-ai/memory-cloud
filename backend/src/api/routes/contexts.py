@@ -179,6 +179,10 @@ class ContextUpdate(BaseModel):
         pattern=r"^[a-z0-9_-]+$",
         description="Resource ID for contexts (lowercase alphanumeric, underscore, and hyphen)",
     )
+    is_locked: bool | None = Field(
+        None,
+        description="Lock flag: TRUE=prevent deletion, FALSE=allow deletion (Issue #85)",
+    )
 
 
 class ContextResponse(BaseModel):
@@ -199,6 +203,7 @@ class ContextResponse(BaseModel):
     resource_id: str | None = Field(
         None, description="Resource ID for public contexts"
     )  # Issue #238
+    is_locked: bool = Field(False, description="Lock status: TRUE=deletion prevented")  # Issue #85
     created_by: str | None = Field(None, description="Creator user ID")  # Issue #165
     created_by_name: str | None = Field(None, description="Creator name")
     created_at: datetime = Field(..., description="Creation timestamp")
@@ -354,6 +359,7 @@ async def list_contexts(
                 is_private=context.is_private,  # Issue #165
                 is_public=context.is_public,  # Issue #238
                 resource_id=context.resource_id,  # Issue #238
+                is_locked=context.is_locked,  # Issue #85
                 created_by=context.created_by,  # Issue #165
                 created_by_name=creator_names.get(context.created_by)
                 if context.created_by
@@ -666,7 +672,8 @@ async def update_context(
         "is_private",
         "is_public",
         "resource_id",
-    ]  # Issue #238: is_public, resource_id are owner-only
+        "is_locked",
+    ]  # Issue #238: is_public, resource_id; Issue #85: is_locked — owner-only
     is_updating_owner_fields = any(
         getattr(request, field, None) is not None for field in owner_only_fields
     )
@@ -764,6 +771,7 @@ async def update_context(
             is_private=request.is_private,  # Migration 034
             is_public=request.is_public,  # Issue #238
             resource_id=request.resource_id,  # Issue #238
+            is_locked=request.is_locked,  # Issue #85
         )
 
         logger.info(
@@ -781,6 +789,7 @@ async def update_context(
             usage_guide=context.usage_guide,
             is_default=context.is_default,
             # Issue #246: is_current removed
+            is_locked=context.is_locked,
             is_private=context.is_private,
             created_by=context.created_by,
             created_at=context.created_at,
@@ -843,6 +852,13 @@ async def delete_context(
         perm_service = PermissionService(db)
         # Issue #272 M-3: Reuse context from permission check to avoid redundant DB query
         context = await perm_service.check_context_owner(user_id, context_id)
+
+        # Issue #85: Block deletion if context is locked
+        if context.is_locked:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Context is locked. Unlock it before deleting.",
+            )
 
         # Auto-revoke related resource tokens (Issue #242)
 

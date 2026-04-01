@@ -16,6 +16,7 @@ export interface Context {
   // Issue #246: is_current removed (context always explicit from URL)
   is_private: boolean;  // Issue #165: Privacy control (shared/private)
   is_public: boolean;  // Issue #238: Public context flag (external access)
+  is_locked: boolean;  // Issue #85: Lock flag (prevent deletion)
   resource_id: string | null;  // Issue #238: Resource-backed context
   created_by: string | null;  // Issue #165: Creator user_id
   created_by_name: string | null;  // Creator name
@@ -64,4 +65,5 @@ export interface UpdateContextRequest {
   is_private?: boolean;  // Issue #165: Privacy control (shared/private)
   is_public?: boolean;  // Issue #238: Public context flag (external access)
   resource_id?: string;  // Issue #238: Resource ID (auto-generated: prefix_contextId)
+  is_locked?: boolean;  // Issue #85: Lock flag (prevent deletion)
 }

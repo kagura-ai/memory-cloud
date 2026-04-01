@@ -379,6 +379,7 @@ class ContextService:
         is_private: bool | None = None,
         is_public: bool | None = None,  # Issue #238
         resource_id: str | None = None,  # Issue #238
+        is_locked: bool | None = None,  # Issue #85
     ) -> Context:
         """Update context display_name, description, summary, usage guide, and privacy.
 
@@ -397,6 +398,7 @@ class ContextService:
             is_private: New privacy setting (None to leave unchanged)
             is_public: New public access setting (None to leave unchanged)
             resource_id: Resource ID for public contexts (None to leave unchanged)
+            is_locked: Lock status (None to leave unchanged)
 
         Returns:
             Updated Context instance
@@ -444,6 +446,10 @@ class ContextService:
                 new_value=resource_id,
             )
             context.resource_id = resource_id
+
+        # Issue #85: Lock/unlock context
+        if is_locked is not None:
+            context.is_locked = is_locked
 
         await self.db.commit()
         await self.db.refresh(context)
@@ -559,6 +565,10 @@ class ContextService:
         # Cannot delete default context
         if context.is_default:
             raise ValidationError("Cannot delete default context")
+
+        # Issue #85: Cannot delete locked context
+        if context.is_locked:
+            raise ValidationError("Context is locked. Unlock it before deleting.")
 
         # Soft-delete memories
         from models.memory import Memory, NeuralMemoryEdge

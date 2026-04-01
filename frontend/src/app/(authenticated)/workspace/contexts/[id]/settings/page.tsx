@@ -40,6 +40,8 @@ import {
   Settings,
   Search,
   ExternalLink,
+  Lock,
+  Unlock,
 } from 'lucide-react';
 import { cn, typography, colors } from '@/styles/design-tokens';
 import { getContext, updateContext, deleteContext } from '@/lib/api/contexts';
@@ -75,6 +77,7 @@ export default function ContextSettingsPage() {
   const [usageGuide, setUsageGuide] = useState('');
   const [isPrivate, setIsPrivate] = useState(true);  // Migration 034
   const [isPublic, setIsPublic] = useState(false);  // Issue #238: Public context
+  const [isLocked, setIsLocked] = useState(false);  // Issue #85: Context lock
   const [resourceIdPrefix, setResourceIdPrefix] = useState('');  // Issue #238: Resource ID prefix
 
   // Delete dialog
@@ -96,6 +99,7 @@ export default function ContextSettingsPage() {
       setUsageGuide(data.usage_guide || '');
       setIsPrivate(data.is_private ?? true);  // Migration 034
       setIsPublic(data.is_public ?? false);  // Issue #238
+      setIsLocked(data.is_locked ?? false);  // Issue #85
     } catch (err) {
       console.error('Failed to fetch context:', err);
       setError('Failed to load context');
@@ -562,25 +566,66 @@ export default function ContextSettingsPage() {
         </div>
       </Section>
 
-      {/* Danger Zone */}
+      {/* Protection & Danger Zone */}
       {!context.is_default && (
         <Section
-          title="Danger Zone"
+          title="Protection & Danger Zone"
           className="border-red-200 dark:border-red-900"
         >
           <div className="space-y-4 max-w-2xl">
-            <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900 rounded">
+            {/* Issue #85: Context Lock Toggle */}
+            <div className="flex items-center justify-between p-4 border rounded-lg">
+              <div className="flex-1">
+                <h4 className="font-medium text-sm mb-1 flex items-center gap-2">
+                  {isLocked ? <Lock className="h-4 w-4 text-amber-600" /> : <Unlock className="h-4 w-4 text-gray-400" />}
+                  {isLocked ? 'Context Locked' : 'Context Unlocked'}
+                </h4>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  {isLocked
+                    ? 'This context is protected from accidental deletion'
+                    : 'This context can be deleted — lock it to prevent accidental deletion'}
+                </p>
+              </div>
+              <button
+                onClick={async () => {
+                  const newLocked = !isLocked;
+                  try {
+                    await updateContext(context.id, { is_locked: newLocked });
+                    setIsLocked(newLocked);
+                    setSuccessMessage(newLocked ? 'Context locked' : 'Context unlocked');
+                    setTimeout(() => setSuccessMessage(null), 3000);
+                  } catch (err) {
+                    setError('Failed to update lock status');
+                  }
+                }}
+                className={cn(
+                  'px-4 py-2 rounded font-medium text-sm transition-colors',
+                  isLocked
+                    ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 hover:bg-amber-200'
+                    : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300'
+                )}
+              >
+                {isLocked ? 'Unlock' : 'Lock'}
+              </button>
+            </div>
+
+            <div className={cn(
+              "p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900 rounded",
+              isLocked && "opacity-50"
+            )}>
               <h3 className="font-semibold text-red-900 dark:text-red-400 mb-2">
                 Delete Context
               </h3>
               <p className="text-sm text-red-700 dark:text-red-300 mb-4">
-                This will permanently delete "{context.name}" and all memories in this context.
-                This action cannot be undone.
+                {isLocked
+                  ? `Cannot delete "${context.name}" — context is locked. Unlock it first.`
+                  : `This will permanently delete "${context.name}" and all memories in this context. This action cannot be undone.`}
               </p>
               <ActionButton
                 onClick={() => setDeleteDialogOpen(true)}
                 icon={<Trash2 className="h-4 w-4" />}
                 variant="danger"
+                disabled={isLocked}
               >
                 Delete Context
               </ActionButton>

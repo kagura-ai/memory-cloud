@@ -113,12 +113,14 @@ def _context_response_fields(context: Any) -> dict[str, Any]:
             "context_name": None,
             "context_display_name": None,
             "context_is_private": None,
+            "context_is_locked": None,
         }
     return {
         "context_id": str(context.id),
         "context_name": context.name,
         "context_display_name": context.display_name,
         "context_is_private": context.is_private,
+        "context_is_locked": context.is_locked,
     }
 
 
