@@ -480,8 +480,9 @@ class MemoryService:
         memories_list = list(result.scalars().all())
         memories = {str(m.id): m for m in memories_list}
 
-        # If Neural Memory disabled, use classic Hybrid Search
-        if not neural_enabled:
+        # Skip Neural Memory for keyword/semantic-only mode (no meaningful embeddings)
+        # or when Neural Memory is disabled
+        if not neural_enabled or request.search_mode != "hybrid":
             responses = []
             for search_result in search_results[: request.k]:
                 memory_id = search_result["id"]
@@ -544,16 +545,13 @@ class MemoryService:
         #          - MMR and redundancy calculations use correct query vector
         # ============================================================================
 
-        # 2. Generate query embedding (skip for keyword-only mode)
-        if request.search_mode == "keyword":
-            query_embedding = [0.0] * self.embedding_service.dimensions
-        else:
-            query_embedding = await self.embedding_service.embed(
-                request.query,
-                user_id,
-                context_id=current_context_id,
-                workspace_id=current_workspace_id,
-            )
+        # 2. Generate query embedding for Neural Memory
+        query_embedding = await self.embedding_service.embed(
+            request.query,
+            user_id,
+            context_id=current_context_id,
+            workspace_id=current_workspace_id,
+        )
 
         # 3. Load user's graph
         graph_repo = GraphRepository(self.db)
