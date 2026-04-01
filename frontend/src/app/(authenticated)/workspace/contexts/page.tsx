@@ -1179,7 +1179,7 @@ export default function ContextsPage() {
                                   className="text-red-600 focus:text-red-600"
                                 >
                                   <Trash2 className="h-4 w-4 mr-2" />
-                                  {context.is_locked ? 'Locked' : tCommon('delete')}
+                                  {context.is_locked ? t('locked') : tCommon('delete')}
                                 </DropdownMenuItem>
                               </>
                             )}

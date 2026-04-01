@@ -1267,7 +1267,19 @@
     "resourceIdN1TokenB": "• Token B: Rakuten (300 events/h)",
     "resourceIdN1Result": "→ Both send data to the same Context",
     "resourceIdManagementNote": "Resource Tokens are managed in Workspace Settings > Resource Tokens",
-    "manageResourceTokensLink": "Manage Resource Tokens →"
+    "manageResourceTokensLink": "Manage Resource Tokens →",
+    "locked": "Locked",
+    "contextLocked": "Context Locked",
+    "contextUnlocked": "Context Unlocked",
+    "contextLockedDesc": "This context is protected from accidental deletion",
+    "contextUnlockedDesc": "This context can be deleted — lock it to prevent accidental deletion",
+    "lockContext": "Lock",
+    "unlockContext": "Unlock",
+    "contextLockedSuccess": "Context locked",
+    "contextUnlockedSuccess": "Context unlocked",
+    "failedToUpdateLock": "Failed to update lock status",
+    "cannotDeleteLocked": "Cannot delete \"{name}\" — context is locked. Unlock it first.",
+    "deleteContextUnlocked": "This will permanently delete \"{name}\" and all memories in this context. This action cannot be undone."
   },
   "memories": {
     "title": "Memories",
