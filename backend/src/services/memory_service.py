@@ -258,11 +258,12 @@ class MemoryService:
             )
 
             # Prepare Qdrant payload (use normalized values for consistent search)
-            from utils.tokenizer import tokenize_for_search
+            from utils.tokenizer import tokenize_and_reading, tokenize_for_search
 
-            # Tokenize fields for BM25 sparse vector (Issue #16)
+            # Tokenize fields for BM25 sparse vector (Issue #16 + #73)
             content_text = (request.content or "")[:2000]
-            summary_tokens_str = tokenize_for_search(normalized_summary)
+            # Single Sudachi pass for summary: lemmas + katakana reading
+            summary_tokens_str, summary_reading = tokenize_and_reading(normalized_summary)
             ctx_summary_tokens_str = tokenize_for_search(normalized_context_summary or "")
             content_tokens_str = tokenize_for_search(content_text) if content_text else ""
 
@@ -273,6 +274,7 @@ class MemoryService:
                 summary_tokens=summary_tokens_str,
                 context_summary_tokens=ctx_summary_tokens_str,
                 content_tokens=content_tokens_str,
+                summary_reading=summary_reading,
             )
 
             payload = {
@@ -282,6 +284,7 @@ class MemoryService:
                 "summary_tokens": summary_tokens_str,
                 "context_summary_tokens": ctx_summary_tokens_str,
                 "content_tokens": content_tokens_str,
+                "summary_reading": summary_reading,
                 "type": request.type,
                 "importance": request.importance,
                 "tags": request.tags,
