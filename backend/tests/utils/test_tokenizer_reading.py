@@ -45,28 +45,31 @@ class TestTokenizeAndReading:
     """Test tokenize_and_reading function."""
 
     def test_returns_tuple(self):
-        """Returns (lemmas, readings) tuple."""
-        lemmas, readings = tokenize_and_reading("引越し業者")
+        """Returns (lemmas, readings, tokens) tuple."""
+        lemmas, readings, tokens = tokenize_and_reading("引越し業者")
         assert isinstance(lemmas, str)
         assert isinstance(readings, str)
+        assert tokens is not None
         assert len(lemmas) > 0
         assert len(readings) > 0
 
     def test_non_cjk(self):
         """Non-CJK: lemmas are lowercased, readings are empty."""
-        lemmas, readings = tokenize_and_reading("Hello World")
+        lemmas, readings, tokens = tokenize_and_reading("Hello World")
         assert lemmas == "hello world"
         assert readings == ""
+        assert tokens is None
 
     def test_empty(self):
         """Empty input returns empty tuple."""
-        lemmas, readings = tokenize_and_reading("")
+        lemmas, readings, tokens = tokenize_and_reading("")
         assert lemmas == ""
         assert readings == ""
+        assert tokens is None
 
     def test_consistent_filtering(self):
         """Both lemmas and readings filter the same stop words."""
-        lemmas, readings = tokenize_and_reading("猫は魚を食べた")
+        lemmas, readings, _ = tokenize_and_reading("猫は魚を食べた")
         lemma_count = len(lemmas.split())
         reading_count = len(readings.split())
         # Same number of tokens (same stop words filtered)

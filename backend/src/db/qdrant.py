@@ -494,11 +494,10 @@ async def search_memories_fulltext(
         )
 
         # Build sparse query vector: single Sudachi pass for lemmas + readings
-        tokenized_query, query_reading = tokenize_and_reading(query)
+        tokenized_query, query_reading, sudachi_tokens = tokenize_and_reading(query)
         combined_query = f"{tokenized_query} {query_reading}" if query_reading else tokenized_query
 
-        # Issue #75: augment hiragana queries with reading variants
-        augmented = augment_reading_tokens(query)
+        augmented = augment_reading_tokens(query, sudachi_tokens=sudachi_tokens)
         if augmented:
             combined_query = f"{combined_query} {augmented}"
 
