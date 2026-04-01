@@ -125,7 +125,7 @@ async def handle_streamable_http_post(
                 "capabilities": {"tools": {}},
                 "serverInfo": {
                     "name": "kagura-memory-cloud",
-                    "version": "0.3.1",
+                    "version": "0.4.0",
                 },
             },
         }
