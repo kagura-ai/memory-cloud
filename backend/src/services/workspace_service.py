@@ -388,7 +388,10 @@ class WorkspaceService:
         from services.context_service import ContextService
 
         contexts_result = await self.db.execute(
-            select(Context).where(Context.workspace_id == workspace_id)
+            select(Context).where(
+                Context.workspace_id == workspace_id,
+                Context.deleted_at.is_(None),
+            )
         )
         contexts = contexts_result.scalars().all()
 

@@ -536,16 +536,16 @@ class ContextService:
         self,
         user_id: str,
         context_id: UUID,
-        delete_collection: bool = True,
     ) -> None:
-        """Delete context and optionally its collection.
+        """Soft-delete context and its memories.
 
-        Issue #115 Phase B: Updated to use workspace_id for collection deletion.
+        Issue #84: Changed from hard-delete to soft-delete. Sets deleted_at
+        timestamp instead of removing records, preserving data for recovery.
+        Qdrant points are intentionally kept (filtered out by API access checks).
 
         Args:
-            user_id: User ID (for access verification)
+            user_id: User ID (for access verification and audit trail)
             context_id: Context UUID
-            delete_collection: Whether to delete Qdrant collection (default: True)
 
         Raises:
             NotFoundException: If context not found
@@ -557,32 +557,24 @@ class ContextService:
         if context.is_default:
             raise ValidationError("Cannot delete default context")
 
-        # Delete Qdrant points for this context (single collection migration)
-        if delete_collection:
-            await self._delete_context_collection(
-                str(context.workspace_id),
-                context.name,
-                context_id=str(context.id),
-            )
-
-        # Single Collection Migration: Delete memories and edges by workspace_id/context_id
+        # Soft-delete memories
         from models.memory import Memory, NeuralMemoryEdge
 
-        # Delete memories (soft delete) - memories can be from any user in the workspace
-        # Use workspace_id and context_id (NOT collection_name)
         memories_result = await self.db.execute(
             select(Memory).where(
                 and_(
                     Memory.workspace_id == context.workspace_id,
                     Memory.context_id == context.id,
+                    Memory.deleted_at.is_(None),
                 )
             )
         )
         memories_to_delete = list(memories_result.scalars().all())
         for memory in memories_to_delete:
-            memory.deleted_at = utcnow()  # Soft delete
+            memory.deleted_at = utcnow()
+            memory.deleted_by = user_id
 
-        # Delete neural edges by workspace_id and context_id (3-level isolation)
+        # Hard-delete neural edges (no soft-delete needed, reconstructable)
         await self.db.execute(
             delete(NeuralMemoryEdge).where(
                 and_(
@@ -599,7 +591,7 @@ class ContextService:
             memories_deleted=len(memories_to_delete),
         )
 
-        # Issue #234: Remove context from all members' allowed_context_ids
+        # Remove context from all members' allowed_context_ids
         from sqlalchemy import func, update
 
         await self.db.execute(
@@ -616,17 +608,13 @@ class ContextService:
             )
         )
 
-        logger.info(
-            "context_removed_from_allowed_context_ids_on_delete",
-            context_id=str(context.id),
-        )
-
-        # Delete context record
-        await self.db.delete(context)
+        # Issue #84: Soft-delete context record (previously hard-deleted)
+        context.deleted_at = utcnow()
+        context.deleted_by = user_id
         await self.db.commit()
 
         logger.info(
-            "context_deleted",
+            "context_soft_deleted",
             user_id=user_id,
             workspace_id=str(context.workspace_id),
             context_id=str(context_id),
