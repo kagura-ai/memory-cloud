@@ -114,6 +114,105 @@ async def handle_remember(
     return _error_response("internal_error", "Database session unavailable")
 
 
+async def handle_update_memory(
+    args: dict[str, Any], user_id: str, workspace_id: UUID | None
+) -> list[TextContent]:
+    """Update an existing memory or upsert by external ID."""
+    memory_id = args.get("memory_id")
+    external_id = args.get("external_id")
+
+    # Validate upsert mode requires summary, content, type
+    if external_id and ("summary" not in args or "content" not in args or "type" not in args):
+        return _error_response(
+            "missing_fields",
+            "summary, content, and type are required for upsert mode (external_id)",
+        )
+
+    from db.base import get_db
+    from models.schemas import UpdateMemoryRequest
+    from services.memory_service import MemoryService
+
+    try:
+        request = UpdateMemoryRequest(
+            memory_id=UUID(memory_id) if memory_id else None,
+            external_id=external_id,
+            summary=args.get("summary"),
+            context_summary=args.get("context_summary"),
+            content=args.get("content"),
+            details=args.get("details"),
+            type=args.get("type"),
+            importance=args.get("importance"),
+            tags=args.get("tags"),
+            context=args.get("context"),
+        )
+    except (ValueError, Exception) as e:
+        return _error_response("validation_error", str(e))
+
+    start_time = time.time()
+    async for db in get_db():
+        try:
+            current_context_id = _resolve_context_id(args["context_id"])
+
+            perm_error = await _check_viewer_permission(
+                db, user_id, workspace_id, "update memories"
+            )
+            if perm_error:
+                return perm_error
+
+            current_context = await _resolve_context(db, user_id, current_context_id)
+
+            service = MemoryService(db)
+            result = await execute_with_timeout(
+                service.update_memory(
+                    request,
+                    user_id=user_id,
+                    client="mcp",
+                    current_context_id=current_context_id,
+                    current_workspace_id=workspace_id,
+                ),
+                operation_name="update_memory",
+            )
+
+            await _log_tool_usage(
+                db, user_id, "update_memory", start_time, 200, current_context_id, workspace_id
+            )
+            await db.commit()
+
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "status": "success",
+                            "memory_id": str(result.memory_id),
+                            "operation": result.operation,
+                            "re_embedded": result.re_embedded,
+                            "scope": result.scope,
+                            **_context_response_fields(current_context),
+                        }
+                    ),
+                )
+            ]
+        except _ContextNotFoundError as e:
+            await db.rollback()
+            return e.to_response()
+        except Exception:
+            await db.rollback()
+            await _log_tool_usage(
+                db,
+                user_id,
+                "update_memory",
+                start_time,
+                500,
+                args.get("context_id"),
+                workspace_id,
+            )
+            raise
+
+    # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")
+
+
 async def handle_recall(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:

@@ -17,6 +17,7 @@ from db.qdrant import (
     add_memory_to_qdrant,
     delete_memory_from_qdrant,
     get_collection_name,
+    update_memory_payload_in_qdrant,
 )
 from models.auth import Context
 from models.memory import Memory
@@ -34,6 +35,8 @@ from models.schemas import (
     RelatedTagItem,
     RememberRequest,
     RememberResponse,
+    UpdateMemoryRequest,
+    UpdateMemoryResponse,
 )
 from repositories.memory import MemoryRepository
 from services.context_service import ContextService
@@ -287,6 +290,220 @@ class MemoryService:
                 error=str(e),
             )
             raise
+
+    async def update_memory(
+        self,
+        request: UpdateMemoryRequest,
+        user_id: str,
+        client: str = "unknown",
+        current_context_id: UUID | None = None,
+        current_workspace_id: UUID | None = None,
+    ) -> UpdateMemoryResponse:
+        """Update existing memory in-place or upsert by external_id.
+
+        Issue #80: Two modes:
+        1. In-place (memory_id): preserves ID, graph edges, created_at
+        2. Upsert (external_id): forget + remember internally
+
+        Args:
+            request: Update request
+            user_id: User ID
+            client: Client name
+            current_context_id: Context UUID
+            current_workspace_id: Workspace UUID
+
+        Returns:
+            UpdateMemoryResponse
+        """
+        if request.external_id:
+            return await self._upsert_by_external_id(
+                request, user_id, client, current_context_id, current_workspace_id
+            )
+
+        return await self._update_in_place(
+            request, user_id, current_context_id, current_workspace_id
+        )
+
+    async def _update_in_place(
+        self,
+        request: UpdateMemoryRequest,
+        user_id: str,
+        current_context_id: UUID | None = None,
+        current_workspace_id: UUID | None = None,
+    ) -> UpdateMemoryResponse:
+        """In-place update by memory_id."""
+        from config.constants import MAX_CONTENT_SIZE
+        from services.permission_service import PermissionService
+        from utils.text import normalize_for_search
+
+        memory = await self.memory_repo.get(request.memory_id)
+        if not memory:
+            raise NotFoundException("Memory", str(request.memory_id))
+
+        if memory.deleted_at is not None:
+            raise NotFoundException("Memory", str(request.memory_id))
+
+        # Permission check
+        perm_service = PermissionService(self.db)
+        can_access = await perm_service.can_access_memory(
+            user_id=user_id,
+            memory_user_id=memory.user_id,
+            workspace_id=memory.workspace_id,
+            context_id=memory.context_id,
+        )
+        if not can_access:
+            raise NotFoundException("Memory", str(request.memory_id))
+
+        # Pre-compute normalized values (avoid double normalization)
+        normalized_summary = (
+            normalize_for_search(request.summary) if request.summary is not None else None
+        )
+        normalized_ctx_summary = (
+            normalize_for_search(request.context_summary)
+            if request.context_summary is not None
+            else None
+        )
+
+        # Determine what changed
+        needs_reembed = False
+        if normalized_summary is not None and normalized_summary != memory.summary:
+            needs_reembed = True
+        if request.content is not None and request.content != memory.content:
+            needs_reembed = True
+
+        # Validate content size
+        content_size = (
+            len(request.summary or memory.summary or "")
+            + len(request.context_summary or memory.context_summary or "")
+            + len(request.content or memory.content or "")
+            + len(str(request.details or memory.details or ""))
+        )
+        if content_size > MAX_CONTENT_SIZE:
+            from utils.exceptions import QuotaExceededError
+
+            raise QuotaExceededError(
+                f"Memory size {content_size:,} bytes exceeds limit {MAX_CONTENT_SIZE:,} bytes (1MB)."
+            )
+
+        # Apply field updates (only non-None fields)
+        if normalized_summary is not None:
+            memory.summary = normalized_summary
+        if normalized_ctx_summary is not None:
+            memory.context_summary = normalized_ctx_summary
+        if request.content is not None:
+            memory.content = request.content
+        if request.details is not None:
+            memory.details = request.details
+        if request.type is not None:
+            memory.type = request.type
+        if request.importance is not None:
+            memory.importance = request.importance
+        if request.tags is not None:
+            memory.tags = request.tags
+        if request.context is not None:
+            memory.context = request.context
+
+        memory.updated_at = utcnow()
+
+        if needs_reembed:
+            # Async embedding via create_task (same pattern as remember)
+            memory.embedding_status = "pending"
+            await self.db.flush()
+            await self.db.commit()
+
+            import asyncio
+
+            asyncio.create_task(process_pending_embedding(memory.id))
+        else:
+            # Metadata-only update: patch Qdrant payload without re-embedding
+            payload_updates: dict = {}
+            if request.tags is not None:
+                payload_updates["tags"] = request.tags
+            if request.importance is not None:
+                payload_updates["importance"] = request.importance
+            if request.type is not None:
+                payload_updates["type"] = request.type
+            if normalized_ctx_summary is not None:
+                payload_updates["context_summary"] = normalized_ctx_summary
+
+            if payload_updates:
+                collection = await self._get_context_collection_name(memory.context_id)
+                await update_memory_payload_in_qdrant(
+                    memory_id=memory.id,
+                    payload_updates=payload_updates,
+                    collection_name=collection,
+                )
+
+            await self.db.commit()
+
+        logger.info(
+            "memory_updated",
+            memory_id=str(memory.id),
+            user_id=user_id,
+            re_embedded=needs_reembed,
+        )
+
+        return UpdateMemoryResponse(
+            memory_id=memory.id,
+            operation="updated",
+            re_embedded=needs_reembed,
+            scope=memory.scope,
+        )
+
+    async def _upsert_by_external_id(
+        self,
+        request: UpdateMemoryRequest,
+        user_id: str,
+        client: str = "unknown",
+        current_context_id: UUID | None = None,
+        current_workspace_id: UUID | None = None,
+    ) -> UpdateMemoryResponse:
+        """Upsert by external_id: forget existing + remember new."""
+        existing = await self.memory_repo.get_by_resource_id(
+            resource_id=request.external_id,
+            context_id=current_context_id,
+            user_id=user_id,
+        )
+
+        operation = "created"
+        if existing:
+            # Forget existing memory
+            await self.forget(
+                ForgetRequest(memory_id=existing.id),
+                user_id=user_id,
+                current_context_id=current_context_id,
+            )
+            operation = "replaced"
+
+        # Build details with resource_id preserved (copy to avoid mutating request)
+        details = {**(request.details or {}), "resource_id": request.external_id}
+
+        # Remember new memory
+        remember_request = RememberRequest(
+            summary=request.summary,
+            context_summary=request.context_summary,
+            content=request.content,
+            details=details,
+            type=request.type,
+            importance=request.importance if request.importance is not None else 0.5,
+            tags=request.tags or [],
+            context=request.context,
+        )
+
+        result = await self.remember(
+            remember_request,
+            user_id=user_id,
+            client=client,
+            current_context_id=current_context_id,
+            current_workspace_id=current_workspace_id,
+        )
+
+        return UpdateMemoryResponse(
+            memory_id=result.memory_id,
+            operation=operation,
+            re_embedded=True,
+            scope=result.scope,
+        )
 
     async def reference(self, memory_id: UUID, user_id: str) -> ReferenceResponse:
         """Get full memory details (Layer 3).

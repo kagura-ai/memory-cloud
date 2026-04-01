@@ -104,6 +104,69 @@ IMPORTANT: Always specify context_id to ensure you're using the intended context
             },
         },
         {
+            "name": "update_memory",
+            "description": """Update an existing memory in-place or upsert by external ID.
+
+Two modes:
+1. **In-place update (memory_id)**: Modifies specific fields while preserving memory ID, graph edges, and creation timestamp. Only re-embeds if summary or content changes. Use when you have a memory_id from recall().
+2. **Upsert (external_id)**: Finds existing memory by external resource ID within the context. If found, replaces it (new memory_id). If not found, creates new. Requires summary, content, and type. Use for sync workflows with stable external identifiers.
+
+Provide exactly one of memory_id or external_id.
+
+IMPORTANT: Always specify context_id.""",
+            "inputSchema": {
+                "type": "object",
+                "required": ["context_id"],
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "description": "UUID of memory to update in-place.",
+                    },
+                    "external_id": {
+                        "type": "string",
+                        "description": "External resource ID for upsert lookup (stored in details.resource_id).",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Updated summary (10-500 chars). Required for upsert mode.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Updated content. Required for upsert mode.",
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "Updated memory type. Required for upsert mode.",
+                    },
+                    "context_summary": {
+                        "type": "string",
+                        "description": "Updated context summary (max 2000 chars).",
+                    },
+                    "details": {
+                        "type": "object",
+                        "description": "Updated structured details (JSON).",
+                    },
+                    "importance": {
+                        "type": "number",
+                        "description": "Updated importance (0.0-1.0).",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Updated tags.",
+                    },
+                    "context": {
+                        "type": "object",
+                        "description": "Updated context metadata.",
+                    },
+                    "context_id": {
+                        "type": "string",
+                        "description": "Target context UUID.",
+                    },
+                },
+            },
+        },
+        {
             "name": "recall",
             "readOnly": True,
             "description": """Search and retrieve memories using advanced Hybrid Search (60% semantic + 40% full-text) with Neural Memory boosting. Returns relevant past information, code examples, decisions, or context from previous conversations.

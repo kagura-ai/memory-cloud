@@ -246,6 +246,31 @@ class MemoryRepository(BaseRepository[Memory]):
 
         logger.info("memory_promoted_to_persistent", memory_id=str(memory_id))
 
+    async def get_by_resource_id(
+        self, resource_id: str, context_id: UUID, user_id: str
+    ) -> Memory | None:
+        """Find active memory by external resource_id within a context.
+
+        Uses the computed resource_id column (details->>'resource_id').
+
+        Args:
+            resource_id: External resource identifier
+            context_id: Context UUID
+            user_id: User ID (ownership check)
+
+        Returns:
+            Memory or None
+        """
+        result = await self.db.execute(
+            select(Memory).where(
+                Memory.resource_id == resource_id,
+                Memory.context_id == context_id,
+                Memory.user_id == user_id,
+                Memory.deleted_at.is_(None),
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def get_old_working_memories(self, user_id: str, age_days: int = 30) -> list[Memory]:
         """Get old working memories for cleanup.
 
