@@ -1075,7 +1075,7 @@ export default function ContextsPage() {
                         </Badge>
                       )}
                       {context.is_locked && (
-                        <Badge variant="outline" className="text-xs bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700" title="Locked" aria-label="Locked">
+                        <Badge variant="outline" className="text-xs bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700" title={t('locked')} aria-label={t('locked')}>
                           🔐
                         </Badge>
                       )}
@@ -1179,7 +1179,7 @@ export default function ContextsPage() {
                                   className="text-red-600 focus:text-red-600"
                                 >
                                   <Trash2 className="h-4 w-4 mr-2" />
-                                  {context.is_locked ? t('locked') : tCommon('delete')}
+                                  {tCommon('delete')}
                                 </DropdownMenuItem>
                               </>
                             )}

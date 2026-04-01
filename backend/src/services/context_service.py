@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.settings import get_settings
 from models.auth import Context, ContextMember, User, Workspace, WorkspaceMember
 from utils.datetime import utcnow
-from utils.exceptions import NotFoundException, ValidationError
+from utils.exceptions import ConflictError, NotFoundException, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -574,7 +574,7 @@ class ContextService:
 
         # Issue #85: Guard for non-HTTP callers (MCP tools call service directly)
         if context.is_locked:
-            raise ValidationError("Context is locked. Unlock it before deleting.")
+            raise ConflictError("Context is locked. Unlock it before deleting.")
 
         # Soft-delete memories
         from models.memory import Memory, NeuralMemoryEdge

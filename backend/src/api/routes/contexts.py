@@ -793,6 +793,8 @@ async def update_context(
             # Issue #246: is_current removed
             is_locked=context.is_locked,
             is_private=context.is_private,
+            is_public=context.is_public,
+            resource_id=context.resource_id,
             created_by=context.created_by,
             created_at=context.created_at,
             updated_at=context.updated_at,
@@ -897,6 +899,13 @@ async def delete_context(
 
     except ValidationError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+    except Exception as e:
+        from utils.exceptions import ConflictError
+
+        if isinstance(e, ConflictError):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e)) from e
+        raise
 
 
 # ============================================================================
