@@ -115,7 +115,7 @@ class VoyageReranker(RerankerProvider):
             import voyageai  # type: ignore[reportMissingImports]
 
             def _sync_rerank():
-                client = voyageai.Client(api_key=self.api_key)
+                client = voyageai.Client(api_key=self.api_key)  # pyright: ignore[reportPrivateImportUsage]
                 return client.rerank(
                     query=query,
                     documents=documents,
