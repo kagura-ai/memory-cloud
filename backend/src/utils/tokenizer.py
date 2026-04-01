@@ -93,7 +93,12 @@ def tokenize_and_reading(text: str) -> tuple[str, str, Any | None]:
             readings.append(token.reading_form())
         return " ".join(lemmas), " ".join(readings), tokens
     except Exception as e:
-        logger.warning("sudachi_tokenization_failed", text_length=len(text), error=str(e))
+        logger.warning(
+            "sudachi_tokenization_failed",
+            text_length=len(text),
+            error=str(e),
+            exc_info=True,
+        )
         return text.lower(), "", None
 
 

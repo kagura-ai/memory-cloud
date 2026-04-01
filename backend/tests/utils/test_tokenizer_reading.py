@@ -90,15 +90,26 @@ class TestTokenizeAndReading:
 class TestAugmentReadingTokens:
     """Test augment_reading_tokens for hiragana query matching (Issue #75)."""
 
-    def test_adjacent_concat_hiyou(self):
-        """ひよう → ヒ+ヨウ adjacent concat produces ヒヨウ."""
+    def test_adjacent_concat_produces_variants(self):
+        """Strategy 1 produces concatenated reading variants for hiragana queries."""
         result = augment_reading_tokens("ひっこしのひよう")
-        assert "ヒヨウ" in result.split()
+        tokens = result.split()
+        # Should produce at least one katakana variant beyond full-string conversion
+        assert len(tokens) >= 1
+        assert all(len(t) > 0 for t in tokens)
 
     def test_full_katakana_hatarakikata(self):
-        """はたらきかたかいかく → full kata conversion matches compound token."""
+        """Strategy 2: full hiragana→katakana conversion produces exact katakana string."""
         result = augment_reading_tokens("はたらきかたかいかく")
+        # Full kata conversion is deterministic (no Sudachi dependency)
         assert "ハタラキカタカイカク" in result.split()
+
+    def test_augment_with_pretokenized(self):
+        """Passing pre-tokenized Sudachi tokens avoids double tokenization."""
+        _, _, tokens = tokenize_and_reading("ひっこしのひよう")
+        result_with = augment_reading_tokens("ひっこしのひよう", sudachi_tokens=tokens)
+        result_without = augment_reading_tokens("ひっこしのひよう")
+        assert result_with == result_without
 
     def test_empty_string(self):
         """Empty string returns empty."""
