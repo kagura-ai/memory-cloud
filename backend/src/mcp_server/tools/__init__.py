@@ -40,6 +40,7 @@ def _build_registry() -> dict[str, Any]:
     """Build tool name → handler mapping."""
     from mcp_server.tools.context import (
         handle_create_context,
+        handle_delete_context,
         handle_get_context_info,
         handle_list_contexts,
         handle_update_context,
@@ -56,6 +57,7 @@ def _build_registry() -> dict[str, Any]:
         "get_context_info": handle_get_context_info,
         "create_context": handle_create_context,
         "update_context": handle_update_context,
+        "delete_context": handle_delete_context,
         "list_contexts": handle_list_contexts,
         "update_search_config": handle_update_search_config,
         "kagura_memory_usage_guide": handle_kagura_memory_usage_guide,
