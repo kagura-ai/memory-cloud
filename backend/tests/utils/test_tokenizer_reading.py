@@ -3,7 +3,7 @@
 Issue #73: Verify katakana reading extraction for hiragana query matching.
 """
 
-from utils.tokenizer import text_to_reading, tokenize_and_reading
+from utils.tokenizer import augment_reading_tokens, text_to_reading, tokenize_and_reading
 
 
 class TestTextToReading:
@@ -45,28 +45,31 @@ class TestTokenizeAndReading:
     """Test tokenize_and_reading function."""
 
     def test_returns_tuple(self):
-        """Returns (lemmas, readings) tuple."""
-        lemmas, readings = tokenize_and_reading("引越し業者")
+        """Returns (lemmas, readings, tokens) tuple."""
+        lemmas, readings, tokens = tokenize_and_reading("引越し業者")
         assert isinstance(lemmas, str)
         assert isinstance(readings, str)
+        assert tokens is not None
         assert len(lemmas) > 0
         assert len(readings) > 0
 
     def test_non_cjk(self):
         """Non-CJK: lemmas are lowercased, readings are empty."""
-        lemmas, readings = tokenize_and_reading("Hello World")
+        lemmas, readings, tokens = tokenize_and_reading("Hello World")
         assert lemmas == "hello world"
         assert readings == ""
+        assert tokens is None
 
     def test_empty(self):
         """Empty input returns empty tuple."""
-        lemmas, readings = tokenize_and_reading("")
+        lemmas, readings, tokens = tokenize_and_reading("")
         assert lemmas == ""
         assert readings == ""
+        assert tokens is None
 
     def test_consistent_filtering(self):
         """Both lemmas and readings filter the same stop words."""
-        lemmas, readings = tokenize_and_reading("猫は魚を食べた")
+        lemmas, readings, _ = tokenize_and_reading("猫は魚を食べた")
         lemma_count = len(lemmas.split())
         reading_count = len(readings.split())
         # Same number of tokens (same stop words filtered)
@@ -82,3 +85,56 @@ class TestTokenizeAndReading:
         )
         # With reading should have more indices
         assert len(indices_with) >= len(indices_without)
+
+
+class TestAugmentReadingTokens:
+    """Test augment_reading_tokens for hiragana query matching (Issue #75)."""
+
+    def test_adjacent_concat_produces_variants(self):
+        """Strategy 1 produces concatenated reading variants for hiragana queries."""
+        result = augment_reading_tokens("ひっこしのひよう")
+        tokens = result.split()
+        # Should produce at least one katakana variant beyond full-string conversion
+        assert len(tokens) >= 1
+        assert all(len(t) > 0 for t in tokens)
+
+    def test_full_katakana_hatarakikata(self):
+        """Strategy 2: full hiragana→katakana conversion produces exact katakana string."""
+        result = augment_reading_tokens("はたらきかたかいかく")
+        # Full kata conversion is deterministic (no Sudachi dependency)
+        assert "ハタラキカタカイカク" in result.split()
+
+    def test_augment_with_pretokenized(self):
+        """Passing pre-tokenized Sudachi tokens avoids double tokenization."""
+        _, _, tokens = tokenize_and_reading("ひっこしのひよう")
+        result_with = augment_reading_tokens("ひっこしのひよう", sudachi_tokens=tokens)
+        result_without = augment_reading_tokens("ひっこしのひよう")
+        assert result_with == result_without
+
+    def test_empty_string(self):
+        """Empty string returns empty."""
+        assert augment_reading_tokens("") == ""
+
+    def test_non_cjk_returns_empty(self):
+        """Non-CJK text returns empty (no augmentation needed)."""
+        assert augment_reading_tokens("Hello World") == ""
+
+    def test_kanji_query_no_noise(self):
+        """Kanji queries should not add spurious tokens."""
+        result = augment_reading_tokens("引越しの費用")
+        tokens = result.split() if result else []
+        # Each group has only 1 content token, no adjacent concat needed
+        # No hiragana runs >= 4 chars, so no full kata conversion
+        assert len(tokens) == 0
+
+    def test_short_hiragana_skipped(self):
+        """Very short hiragana runs (< 4 chars) are not converted."""
+        result = augment_reading_tokens("猫の餌")
+        # "の" is only 1 char hiragana — too short for strategy 2
+        assert result == "" or "ノ" not in result.split()
+
+    def test_working_case_unaffected(self):
+        """Control case: くものすのそうじ already works, augmentation shouldn't break it."""
+        result = augment_reading_tokens("くものすのそうじ")
+        # Should produce some tokens but not break anything
+        assert isinstance(result, str)
