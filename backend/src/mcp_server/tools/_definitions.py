@@ -126,7 +126,12 @@ Common workflow: Bug fix → recall("error message") → find similar past fixes
 
 Returns summaries and context (Layers 1-2) optimized for quick understanding.
 
-IMPORTANT: Always specify context_id to ensure you're searching the intended context. Use list_contexts() to discover available context IDs.""",
+IMPORTANT: Always specify context_id to ensure you're searching the intended context. Use list_contexts() to discover available context IDs.
+
+Search modes: Use search_mode to control the search strategy.
+• hybrid (default): Best for most queries — combines semantic understanding with keyword matching.
+• semantic: Vector similarity only — best when you know the exact concept but not the exact words.
+• keyword: BM25 only — best for hiragana queries, exact term matching, or when semantic search returns noise. Particularly effective for Japanese hiragana-only queries where embedding models struggle.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["query", "context_id"],
