@@ -1,6 +1,6 @@
 """MCP tool handlers: context operations.
 
-Handles get_context_info, create_context, update_context, list_contexts.
+Handles get_context_info, create_context, update_context, delete_context, list_contexts.
 Extracted from tools.py for modularity (Issue #7).
 """
 
@@ -619,4 +619,73 @@ async def handle_list_contexts(
             ]
 
     # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")
+
+
+async def handle_delete_context(
+    args: dict[str, Any], user_id: str, workspace_id: UUID | None
+) -> list[TextContent]:
+    """Soft-delete a context and its memories."""
+    if "context_id" not in args:
+        return _error_response("missing_fields", "Missing required field: context_id")
+
+    try:
+        context_id = _resolve_context_id(args["context_id"])
+    except ValueError:
+        return _error_response("invalid_context_id", f"Invalid UUID: {args['context_id']}")
+
+    from db.base import get_db
+    from services.context_service import ContextService
+    from utils.exceptions import ValidationError
+
+    start_time = time.time()
+
+    async for db in get_db():
+        try:
+            service = ContextService(db)
+            context = await service.delete_context(user_id, context_id)
+
+            await _log_tool_usage(
+                db,
+                user_id,
+                "delete_context",
+                start_time,
+                200,
+                str(context_id),
+                workspace_id,
+            )
+
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "status": "success",
+                            "message": f"Context '{context.name}' has been soft-deleted.",
+                            "context_id": str(context_id),
+                            "context_name": context.name,
+                        }
+                    ),
+                )
+            ]
+        except _ContextNotFoundError as e:
+            await db.rollback()
+            return e.to_response()
+        except ValidationError as e:
+            await db.rollback()
+            return _error_response("validation_error", str(e))
+        except Exception as e:
+            await db.rollback()
+            await _log_tool_usage(
+                db,
+                user_id,
+                "delete_context",
+                start_time,
+                500,
+                args.get("context_id"),
+                workspace_id,
+            )
+            logger.error("delete_context_failed", exc_info=True)
+            return _error_response("delete_context_error", str(e))
+
     return _error_response("internal_error", "Database session unavailable")

@@ -476,6 +476,27 @@ Use get_context_info() to see current values before updating.""",
             },
         },
         # =================================================================
+        # Tool: delete_context (Issue #77)
+        # =================================================================
+        {
+            "name": "delete_context",
+            "description": """Soft-delete a context and all its memories. The context will no longer appear in list_contexts() or be searchable, but data is retained for recovery.
+
+Only the context owner can delete. The default context cannot be deleted.
+
+IMPORTANT: This action soft-deletes all memories in the context. Use with caution.""",
+            "inputSchema": {
+                "type": "object",
+                "required": ["context_id"],
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "description": "Context UUID to delete. Use list_contexts() to find IDs.",
+                    },
+                },
+            },
+        },
+        # =================================================================
         # Usage Guide Tool
         # =================================================================
         # Tool: update_search_config (Issue #25)

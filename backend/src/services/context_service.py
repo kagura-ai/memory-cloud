@@ -536,7 +536,7 @@ class ContextService:
         self,
         user_id: str,
         context_id: UUID,
-    ) -> None:
+    ) -> "Context":
         """Soft-delete context and its memories.
 
         Issue #84: Changed from hard-delete to soft-delete. Sets deleted_at
@@ -546,6 +546,9 @@ class ContextService:
         Args:
             user_id: User ID (for access verification and audit trail)
             context_id: Context UUID
+
+        Returns:
+            The deleted Context object (with deleted_at set)
 
         Raises:
             NotFoundException: If context not found
@@ -620,6 +623,8 @@ class ContextService:
             context_id=str(context_id),
             context_name=context.name,
         )
+
+        return context
 
     # ========================================================================
     # Current Context Management
