@@ -245,104 +245,40 @@ class MemoryService:
         try:
             # Save to PostgreSQL first (with pending status)
             await self.memory_repo.create(memory)
-            await self.db.flush()  # Ensure memory exists before Qdrant operation
-
-            # Generate embedding for summary (Layer 1) using context's model
-            config = await self._get_context_search_config(context.id)
-            embed_svc = self._get_embedding_service_for_config(config)
-            vector = await embed_svc.embed(
-                request.summary,
-                user_id,
-                context_id=current_context_id,
-                workspace_id=current_workspace_id,
-            )
-
-            # Prepare Qdrant payload (use normalized values for consistent search)
-            from utils.tokenizer import tokenize_and_reading, tokenize_for_search
-
-            # Tokenize fields for BM25 sparse vector (Issue #16 + #73)
-            content_text = (request.content or "")[:2000]
-            # Single Sudachi pass for summary: lemmas + katakana reading
-            summary_tokens_str, summary_reading, _ = tokenize_and_reading(normalized_summary)
-            ctx_summary_tokens_str = tokenize_for_search(normalized_context_summary or "")
-            content_tokens_str = tokenize_for_search(content_text) if content_text else ""
-
-            # Build sparse vector for native BM25 (Issue #16)
-            from utils.sparse_vector import build_document_sparse_vector
-
-            sparse_indices, sparse_values = build_document_sparse_vector(
-                summary_tokens=summary_tokens_str,
-                context_summary_tokens=ctx_summary_tokens_str,
-                content_tokens=content_tokens_str,
-                summary_reading=summary_reading,
-            )
-
-            payload = {
-                "user_id": user_id,
-                "summary": normalized_summary,
-                "context_summary": normalized_context_summary,
-                "summary_tokens": summary_tokens_str,
-                "context_summary_tokens": ctx_summary_tokens_str,
-                "content_tokens": content_tokens_str,
-                "summary_reading": summary_reading,
-                "type": request.type,
-                "importance": request.importance,
-                "tags": request.tags,
-                "scope": "working",
-                "client": client,
-                "created_at": utcnow().isoformat(),
-            }
-
-            if request.context:
-                payload["context"] = request.context
-
-            # Add to Qdrant with 3-level isolation (per-model collection)
-            # Reuse config already fetched above (avoid double DB query)
-            if config:
-                collection = get_collection_name(
-                    config.embedding_model, config.embedding_dimensions
-                )
-            else:
-                collection = get_collection_name("text-embedding-3-small", 512)
-            await add_memory_to_qdrant(
-                user_id=user_id,
-                memory_id=memory_id,
-                vector=vector,
-                payload=payload,
-                workspace_id=workspace_id_str,
-                context_id=context_id_str,
-                sparse_indices=sparse_indices,
-                sparse_values=sparse_values,
-                collection_name=collection,
-            )
-
-            # Update embedding status to success
-            memory.embedding_status = "success"
             await self.db.commit()
 
             logger.info(
-                "memory_created",
+                "memory_created_pending",
                 memory_id=str(memory_id),
                 user_id=user_id,
                 type=request.type,
-                scope="working",
+            )
+
+            import asyncio
+
+            task = asyncio.create_task(process_pending_embedding(memory_id))
+            task.add_done_callback(
+                lambda t: (
+                    logger.error(
+                        "embedding_task_exception",
+                        memory_id=str(memory_id),
+                        error=str(t.exception()),
+                    )
+                    if t.exception()
+                    else None
+                )
             )
 
             return RememberResponse(memory_id=memory_id, scope="working")
 
         except Exception as e:
-            # Rollback PostgreSQL transaction
             await self.db.rollback()
-
-            # Log the failure (don't try to save failed status as it complicates recovery)
-            # The memory simply won't exist, which is the correct behavior
             logger.error(
                 "memory_creation_failed",
                 memory_id=str(memory_id),
                 user_id=user_id,
                 error=str(e),
             )
-
             raise
 
     async def reference(self, memory_id: UUID, user_id: str) -> ReferenceResponse:
@@ -1344,3 +1280,130 @@ class MemoryService:
         ]
 
         return related_tags
+
+
+async def process_pending_embedding(memory_id: UUID) -> None:
+    """Process embedding generation + Qdrant upsert for a pending memory.
+
+    Issue #76: Called via asyncio.create_task (fire-and-forget) or by the
+    periodic sweep task for crash recovery. Reads memory from DB to get
+    all needed fields — no parameter sprawl.
+    """
+
+    from sqlalchemy import select, update
+
+    from db.base import get_db
+    from db.qdrant import get_collection_name
+    from models.memory import Memory
+    from repositories.config_repository import ContextSearchConfigRepository
+    from services.embedding_service import EmbeddingService
+    from utils.sparse_vector import build_document_sparse_vector
+    from utils.text import normalize_for_search
+    from utils.tokenizer import tokenize_and_reading, tokenize_for_search
+
+    async for db in get_db():
+        try:
+            # Claim: atomically set pending → processing (prevents race with sweep)
+            result = await db.execute(
+                update(Memory)
+                .where(Memory.id == memory_id, Memory.embedding_status == "pending")
+                .values(embedding_status="processing")
+                .returning(Memory.id)
+            )
+            claimed = result.scalar_one_or_none()
+            if not claimed:
+                return  # Already claimed by another task or not pending
+
+            await db.commit()
+
+            # Load memory
+            mem_result = await db.execute(select(Memory).where(Memory.id == memory_id))
+            memory = mem_result.scalar_one_or_none()
+            if not memory:
+                return
+
+            # Get search config
+            config_repo = ContextSearchConfigRepository(db)
+            config = await config_repo.get_by_context(memory.context_id)
+            if not config:
+                config = await config_repo.create_or_get(memory.context_id)
+
+            # Generate embedding
+            embed_svc = EmbeddingService(
+                db, model=config.embedding_model, dimensions=config.embedding_dimensions
+            )
+            vector = await embed_svc.embed(
+                memory.summary,
+                memory.user_id,
+                context_id=memory.context_id,
+                workspace_id=memory.workspace_id,
+            )
+
+            # Tokenize for BM25
+            normalized_summary = normalize_for_search(memory.summary) or memory.summary
+            normalized_ctx = normalize_for_search(memory.context_summary)
+            content_text = (memory.content or "")[:2000]
+
+            summary_tokens, summary_reading, _ = tokenize_and_reading(normalized_summary)
+            ctx_tokens = tokenize_for_search(normalized_ctx or "")
+            content_tokens = tokenize_for_search(content_text) if content_text else ""
+
+            sparse_indices, sparse_values = build_document_sparse_vector(
+                summary_tokens=summary_tokens,
+                context_summary_tokens=ctx_tokens,
+                content_tokens=content_tokens,
+                summary_reading=summary_reading,
+            )
+
+            payload = {
+                "user_id": memory.user_id,
+                "summary": normalized_summary,
+                "context_summary": normalized_ctx,
+                "summary_tokens": summary_tokens,
+                "context_summary_tokens": ctx_tokens,
+                "content_tokens": content_tokens,
+                "summary_reading": summary_reading,
+                "type": memory.type,
+                "importance": memory.importance,
+                "tags": memory.tags or [],
+                "scope": memory.scope,
+                "client": memory.client or "unknown",
+                "created_at": (memory.created_at or utcnow()).isoformat(),
+            }
+            if memory.context:
+                payload["context"] = memory.context
+
+            collection = get_collection_name(config.embedding_model, config.embedding_dimensions)
+            await add_memory_to_qdrant(
+                user_id=memory.user_id,
+                memory_id=memory_id,
+                vector=vector,
+                payload=payload,
+                workspace_id=str(memory.workspace_id),
+                context_id=str(memory.context_id),
+                sparse_indices=sparse_indices,
+                sparse_values=sparse_values,
+                collection_name=collection,
+            )
+
+            # Mark success
+            await db.execute(
+                update(Memory).where(Memory.id == memory_id).values(embedding_status="success")
+            )
+            await db.commit()
+
+            logger.info("embedding_completed", memory_id=str(memory_id))
+
+        except Exception as e:
+            await db.rollback()
+            try:
+                await db.execute(
+                    update(Memory)
+                    .where(Memory.id == memory_id)
+                    .values(embedding_status="failed", embedding_error=str(e)[:500])
+                )
+                await db.commit()
+            except Exception:
+                logger.warning("embedding_status_update_failed", memory_id=str(memory_id))
+
+            logger.error("embedding_failed", memory_id=str(memory_id), error=str(e))
