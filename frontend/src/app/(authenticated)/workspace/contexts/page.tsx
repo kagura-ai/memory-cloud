@@ -1074,6 +1074,11 @@ export default function ContextsPage() {
                           🌍
                         </Badge>
                       )}
+                      {context.is_locked && (
+                        <Badge variant="outline" className="text-xs bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700" title={t('locked')} aria-label={t('locked')}>
+                          🔐
+                        </Badge>
+                      )}
                       {context.is_private ? (
                         <Badge variant="outline" className="text-xs bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-700" title={t('privateOption')} aria-label={t('privateOption')}>
                           🔒
@@ -1170,7 +1175,7 @@ export default function ContextsPage() {
                                 <DropdownMenuSeparator />
                                 <DropdownMenuItem
                                   onClick={() => handleDeleteClick(context)}
-                                  disabled={context.id === user?.current_context_id}
+                                  disabled={context.id === user?.current_context_id || context.is_locked}
                                   className="text-red-600 focus:text-red-600"
                                 >
                                   <Trash2 className="h-4 w-4 mr-2" />

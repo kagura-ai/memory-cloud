@@ -496,10 +496,10 @@ Use list_contexts() after creation to verify.""",
             "name": "update_context",
             "description": """Update an existing context's settings.
 
-Modify summary, usage_guide, description, display_name, resource_id, or is_public of a context.
+Modify summary, usage_guide, description, display_name, resource_id, is_public, or is_locked of a context.
 
 Requires owner or editor role in the context.
-- summary/usage_guide/resource_id/is_public: Owner-only fields
+- summary/usage_guide/resource_id/is_public/is_locked: Owner-only fields
 - display_name/description: Editor access sufficient
 
 Use get_context_info() to see current values before updating.""",
@@ -535,6 +535,10 @@ Use get_context_info() to see current values before updating.""",
                         "type": "boolean",
                         "description": "Make context publicly accessible via REST API. Requires owner permission and higher tier plan.",
                     },
+                    "is_locked": {
+                        "type": "boolean",
+                        "description": "Lock/unlock context. When locked (true), the context cannot be deleted. Owner-only.",
+                    },
                 },
             },
         },
@@ -546,6 +550,7 @@ Use get_context_info() to see current values before updating.""",
             "description": """Soft-delete a context and all its memories. The context will no longer appear in list_contexts() or be searchable, but data is retained for recovery.
 
 Only the context owner can delete. The default context cannot be deleted.
+Locked contexts (is_locked=true) must be unlocked first via update_context(is_locked=false).
 
 IMPORTANT: This action soft-deletes all memories in the context. Use with caution.""",
             "inputSchema": {

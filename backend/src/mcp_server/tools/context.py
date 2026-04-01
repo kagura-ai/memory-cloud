@@ -128,6 +128,7 @@ async def handle_get_context_info(
                     "usage_guide": current_context.usage_guide
                     or "No usage guide provided. Please add usage guidelines in the context settings.",
                     "is_private": current_context.is_private,
+                    "is_locked": current_context.is_locked,
                     "embedding_model": search_config.embedding_model
                     if search_config
                     else _settings.embedding_model,
@@ -352,7 +353,7 @@ async def handle_update_context(
             ctx_uuid = _UUID(args["context_id"])
 
             perm_service = PermissionService(db)
-            owner_fields = {"summary", "usage_guide", "resource_id", "is_public"}
+            owner_fields = {"summary", "usage_guide", "resource_id", "is_public", "is_locked"}
             requested_fields = {
                 k
                 for k in (
@@ -362,6 +363,7 @@ async def handle_update_context(
                     "description",
                     "resource_id",
                     "is_public",
+                    "is_locked",
                 )
                 if k in args
             }
@@ -369,7 +371,7 @@ async def handle_update_context(
             if not requested_fields:
                 return _error_response(
                     "no_changes",
-                    "No fields to update. Provide at least one of: summary, usage_guide, display_name, description, resource_id, is_public.",
+                    "No fields to update. Provide at least one of: summary, usage_guide, display_name, description, resource_id, is_public, is_locked.",
                 )
 
             # Permission check using PermissionService (same as REST API)
@@ -386,7 +388,7 @@ async def handle_update_context(
                 return _error_response(
                     "permission_denied",
                     str(perm_err),
-                    help="You need owner access for summary/usage_guide/resource_id/is_public, or editor access for display_name/description.",
+                    help="You need owner access for summary/usage_guide/resource_id/is_public/is_locked, or editor access for display_name/description.",
                 )
 
             # Apply updates
@@ -450,6 +452,10 @@ async def handle_update_context(
                         await token_mgr.revoke_token(token.id)
 
                 context.resource_id = rid
+
+            # Issue #85: Lock/unlock context
+            if "is_locked" in args:
+                context.is_locked = args["is_locked"]
 
             try:
                 await db.commit()
@@ -552,6 +558,7 @@ async def handle_list_contexts(
                     "name": ctx.name,
                     "summary": ctx.summary,
                     "is_private": ctx.is_private,
+                    "is_locked": ctx.is_locked,
                     "last_used_at": ctx.last_used_at.isoformat() if ctx.last_used_at else None,
                     "embedding_model": cfg.embedding_model if cfg else _settings2.embedding_model,
                 }

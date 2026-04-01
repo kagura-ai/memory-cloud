@@ -1267,7 +1267,19 @@
     "resourceIdN1TokenB": "• Token B: 楽天用（300 events/h）",
     "resourceIdN1Result": "→ 両方から同じContextにデータ送信",
     "resourceIdManagementNote": "Resource Tokenは、ワークスペース設定の「Resource Tokens」ページで管理します",
-    "manageResourceTokensLink": "Resource Tokensを管理 →"
+    "manageResourceTokensLink": "Resource Tokensを管理 →",
+    "locked": "ロック中",
+    "contextLocked": "コンテキストがロックされています",
+    "contextUnlocked": "コンテキストはロックされていません",
+    "contextLockedDesc": "このコンテキストは誤削除から保護されています",
+    "contextUnlockedDesc": "このコンテキストは削除可能です — ロックして誤削除を防止できます",
+    "lockContext": "ロック",
+    "unlockContext": "ロック解除",
+    "contextLockedSuccess": "コンテキストをロックしました",
+    "contextUnlockedSuccess": "コンテキストのロックを解除しました",
+    "failedToUpdateLock": "ロック状態の更新に失敗しました",
+    "cannotDeleteLocked": "「{name}」を削除できません — コンテキストがロックされています。先にロックを解除してください。",
+    "deleteContextUnlocked": "「{name}」とこのコンテキスト内のすべてのメモリーが完全に削除されます。この操作は取り消せません。"
   },
   "memories": {
     "title": "メモリー",

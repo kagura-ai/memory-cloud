@@ -956,6 +956,7 @@ class Context(Base):
         updated_at: Last modification timestamp
         deleted_at: Soft delete timestamp
         deleted_by: User ID who deleted this context
+        is_locked: Lock flag (prevents deletion when TRUE)
 
     Privacy (Issue #165):
         - is_private = TRUE: Only creator can access (default)
@@ -1007,6 +1008,9 @@ class Context(Base):
 
     # Issue #238: Resource linkage for public contexts
     resource_id = Column(String(255), nullable=True)
+
+    # Issue #85: Context lock to prevent accidental deletion
+    is_locked = Column(Boolean, nullable=False, server_default="false")
 
     # Constraints
     __table_args__ = (
