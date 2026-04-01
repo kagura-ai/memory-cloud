@@ -18,9 +18,12 @@ logger = get_logger(__name__)
 async def sweep_pending_embeddings() -> None:
     """Find and process memories stuck in pending/processing status.
 
-    Only processes memories older than 10 seconds to avoid racing with
-    the fire-and-forget create_task from remember().
+    - pending older than 10s: create_task likely failed or never fired
+    - processing older than 60s: worker crashed mid-processing (stale)
+    process_pending_embedding() handles both cases via its claim logic.
     """
+    from sqlalchemy import and_, or_
+
     from db.base import get_db
     from models.memory import Memory
     from services.memory_service import process_pending_embedding
@@ -28,13 +31,23 @@ async def sweep_pending_embeddings() -> None:
 
     async for db in get_db():
         try:
-            cutoff = utcnow() - timedelta(seconds=10)
+            now = utcnow()
+            pending_cutoff = now - timedelta(seconds=10)
+            stale_cutoff = now - timedelta(seconds=60)
             result = await db.execute(
                 select(Memory.id)
                 .where(
-                    Memory.embedding_status.in_(["pending", "processing"]),
-                    Memory.created_at < cutoff,
                     Memory.deleted_at.is_(None),
+                    or_(
+                        and_(
+                            Memory.embedding_status == "pending",
+                            Memory.created_at < pending_cutoff,
+                        ),
+                        and_(
+                            Memory.embedding_status == "processing",
+                            Memory.updated_at < stale_cutoff,
+                        ),
+                    ),
                 )
                 .limit(20)
             )

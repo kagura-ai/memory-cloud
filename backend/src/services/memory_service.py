@@ -256,18 +256,25 @@ class MemoryService:
 
             import asyncio
 
-            task = asyncio.create_task(process_pending_embedding(memory_id))
-            task.add_done_callback(
-                lambda t: (
+            def _log_embedding_task_result(t: asyncio.Task) -> None:
+                if t.cancelled():
+                    logger.warning(
+                        "embedding_task_cancelled",
+                        memory_id=str(memory_id),
+                    )
+                    return
+
+                exc = t.exception()
+                if exc is not None:
                     logger.error(
                         "embedding_task_exception",
                         memory_id=str(memory_id),
-                        error=str(t.exception()),
+                        error=str(exc),
+                        exc_info=exc,
                     )
-                    if t.exception()
-                    else None
-                )
-            )
+
+            task = asyncio.create_task(process_pending_embedding(memory_id))
+            task.add_done_callback(_log_embedding_task_result)
 
             return RememberResponse(memory_id=memory_id, scope="working")
 
@@ -1290,7 +1297,9 @@ async def process_pending_embedding(memory_id: UUID) -> None:
     all needed fields — no parameter sprawl.
     """
 
-    from sqlalchemy import select, update
+    from datetime import timedelta
+
+    from sqlalchemy import and_, or_, select, update
 
     from db.base import get_db
     from db.qdrant import get_collection_name
@@ -1303,21 +1312,40 @@ async def process_pending_embedding(memory_id: UUID) -> None:
 
     async for db in get_db():
         try:
-            # Claim: atomically set pending → processing (prevents race with sweep)
+            # Claim: atomically set pending/stale-processing → processing
+            # Stale processing: updated_at older than 60s (crash recovery)
+            from utils.datetime import utcnow as _utcnow
+
+            stale_cutoff = _utcnow() - timedelta(seconds=60)
             result = await db.execute(
                 update(Memory)
-                .where(Memory.id == memory_id, Memory.embedding_status == "pending")
-                .values(embedding_status="processing")
+                .where(
+                    Memory.id == memory_id,
+                    Memory.deleted_at.is_(None),
+                    or_(
+                        Memory.embedding_status == "pending",
+                        and_(
+                            Memory.embedding_status == "processing",
+                            Memory.updated_at < stale_cutoff,
+                        ),
+                    ),
+                )
+                .values(embedding_status="processing", updated_at=_utcnow())
                 .returning(Memory.id)
             )
             claimed = result.scalar_one_or_none()
             if not claimed:
-                return  # Already claimed by another task or not pending
+                return  # Already claimed, not pending, or soft-deleted
 
             await db.commit()
 
-            # Load memory
-            mem_result = await db.execute(select(Memory).where(Memory.id == memory_id))
+            # Load memory (verify not soft-deleted)
+            mem_result = await db.execute(
+                select(Memory).where(
+                    Memory.id == memory_id,
+                    Memory.deleted_at.is_(None),
+                )
+            )
             memory = mem_result.scalar_one_or_none()
             if not memory:
                 return

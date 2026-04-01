@@ -9,7 +9,7 @@ Revision ID: a76_processing
 from alembic import op
 
 revision = "a76_processing"
-down_revision = "a51_add_password_mfa_columns"
+down_revision = "a51_password_mfa"
 branch_labels = None
 depends_on = None
 
