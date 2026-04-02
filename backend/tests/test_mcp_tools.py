@@ -20,9 +20,9 @@ pytestmark = pytest.mark.skip(
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from db.base import get_db
-from models.schemas import ExploreRequest, RecallRequest, RememberRequest
-from services.memory_service import MemoryService
+from db.base import get_db  # noqa: E402
+from models.schemas import ExploreRequest, RecallRequest, RememberRequest  # noqa: E402
+from services.memory_service import MemoryService  # noqa: E402
 
 
 async def test_remember():

@@ -1,6 +1,5 @@
 """Pytest configuration and fixtures for Kagura Memory Cloud tests."""
 
-import asyncio
 import os
 from collections.abc import AsyncGenerator
 
