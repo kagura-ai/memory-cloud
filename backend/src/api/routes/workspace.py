@@ -15,7 +15,7 @@ from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes.usage import (
@@ -121,25 +121,15 @@ async def get_workspace_stats(
         raise HTTPException(status_code=401, detail="User ID not found in session")
 
     try:
-        # Issue #115 Phase B: Get user's current workspace
-        user_result = await db.execute(select(User).where(User.user_id == user_id))
-        user = user_result.scalar_one_or_none()
-
-        if not user or not user.current_workspace_id:
-            return WorkspaceStatsResponse(
-                total_memories=0,
-                context_count=0,
-                contexts=[],
-                plan_name="free",  # Default
-            )
-
-        # Get workspace for plan_name (Issue #149)
-        workspace_result = await db.execute(
-            select(Workspace).where(Workspace.id == user.current_workspace_id)
+        # Issue #65: Single JOIN replaces 2 sequential queries
+        user_workspace_result = await db.execute(
+            select(User, Workspace)
+            .join(Workspace, User.current_workspace_id == Workspace.id)
+            .where(User.user_id == user_id)
         )
-        workspace = workspace_result.scalar_one_or_none()
+        row = user_workspace_result.one_or_none()
 
-        if not workspace:
+        if not row:
             return WorkspaceStatsResponse(
                 total_memories=0,
                 context_count=0,
@@ -147,7 +137,8 @@ async def get_workspace_stats(
                 plan_name="free",
             )
 
-        # Query 1: Get all contexts for user's current workspace
+        user, workspace = row
+
         contexts_result = await db.execute(
             select(Context)
             .where(Context.workspace_id == user.current_workspace_id, Context.deleted_at.is_(None))
@@ -306,12 +297,6 @@ async def get_workspace_usage_current(
         if not workspace:
             raise HTTPException(status_code=404, detail="Workspace not found")
 
-        # Get all member user_ids for this workspace
-        members_result = await db.execute(
-            select(WorkspaceMember.user_id).where(WorkspaceMember.workspace_id == workspace_id)
-        )
-        member_ids = [row[0] for row in members_result.all()]
-
         # Calculate effective limits (base + addon bonuses) via shared service
         from services.effective_quota_service import EffectiveQuotaService
 
@@ -330,117 +315,53 @@ async def get_workspace_usage_current(
         )
         effective_weekly_api_limit = effective_daily_api_limit * 7
 
-        if not member_ids:
-            # Workspace has no members, return zero usage
-            return UsageCurrentResponse(
-                plan=PlanLimits(
-                    plan_name=workspace.plan_name,
-                    memory_limit=effective_memory_limit,
-                    daily_api_limit=effective_daily_api_limit,
-                    weekly_api_limit=effective_weekly_api_limit,
-                ),
-                usage=CurrentUsage(
-                    memory_count=0,
-                    api_calls_today=0,
-                    api_calls_this_week=0,
-                ),
-                memory_usage=calculate_usage_status(0, effective_memory_limit),
-                daily_api_usage=calculate_usage_status(0, effective_daily_api_limit),
-                weekly_api_usage=calculate_usage_status(0, effective_weekly_api_limit),
-            )
-
-        # Single Collection Migration: Count memories by workspace_id (memory count only)
-        memory_stats_result = await db.execute(
-            select(func.count(Memory.id).label("count")).where(
-                Memory.user_id.in_(member_ids),
-                Memory.workspace_id == workspace_id,  # Only this workspace
-                Memory.deleted_at.is_(None),  # Exclude deleted memories
+        # Issue #65: workspace_id scoping is sufficient — no need to fetch member_ids
+        memory_count_result = await db.execute(
+            select(func.count(Memory.id)).where(
+                Memory.workspace_id == workspace_id,
+                Memory.deleted_at.is_(None),
             )
         )
-        memory_stats = memory_stats_result.one()
-        memory_count = memory_stats.count
+        memory_count = memory_count_result.scalar() or 0
 
-        # Aggregate API calls for today across all members (Issue #238: Separate MCP/REST/Public)
+        # Issue #65: Single conditional aggregation query replaces 8 sequential COUNTs
         today = utcnow().date()
-        api_today_result = await db.execute(
-            select(func.count(UsageStatsModel.id)).where(
-                UsageStatsModel.workspace_id == workspace_id,
-                UsageStatsModel.date == today,
-            )
-        )
-        api_calls_today = api_today_result.scalar() or 0
-
-        # MCP calls today
-        mcp_today_result = await db.execute(
-            select(func.count(UsageStatsModel.id)).where(
-                UsageStatsModel.workspace_id == workspace_id,
-                UsageStatsModel.date == today,
-                UsageStatsModel.endpoint.like("mcp:%"),
-            )
-        )
-        mcp_calls_today = mcp_today_result.scalar() or 0
-
-        # Public REST calls today
-        public_today_result = await db.execute(
-            select(func.count(UsageStatsModel.id)).where(
-                UsageStatsModel.workspace_id == workspace_id,
-                UsageStatsModel.date == today,
-                UsageStatsModel.endpoint.like("/api/v1/public/%"),
-            )
-        )
-        public_calls_today = public_today_result.scalar() or 0
-
-        # REST calls today (non-public)
-        rest_today_result = await db.execute(
-            select(func.count(UsageStatsModel.id)).where(
-                UsageStatsModel.workspace_id == workspace_id,
-                UsageStatsModel.date == today,
-                UsageStatsModel.endpoint.like("/api/v1/%"),
-                UsageStatsModel.endpoint.notlike("/api/v1/public/%"),
-            )
-        )
-        rest_calls_today = rest_today_result.scalar() or 0
-
-        # Aggregate API calls this week (last 7 days) across all members
         week_ago = today - timedelta(days=7)
-        api_week_result = await db.execute(
-            select(func.count(UsageStatsModel.id)).where(
-                UsageStatsModel.workspace_id == workspace_id,
-                UsageStatsModel.date >= week_ago,
-            )
-        )
-        api_calls_week = api_week_result.scalar() or 0
 
-        # MCP calls this week
-        mcp_week_result = await db.execute(
-            select(func.count(UsageStatsModel.id)).where(
-                UsageStatsModel.workspace_id == workspace_id,
-                UsageStatsModel.date >= week_ago,
-                UsageStatsModel.endpoint.like("mcp:%"),
-            )
+        is_today = UsageStatsModel.date == today
+        is_mcp = UsageStatsModel.endpoint.like("mcp:%")
+        is_public = UsageStatsModel.endpoint.like("/api/v1/public/%")
+        is_rest = and_(
+            UsageStatsModel.endpoint.like("/api/v1/%"),
+            UsageStatsModel.endpoint.notlike("/api/v1/public/%"),
         )
-        mcp_calls_week = mcp_week_result.scalar() or 0
 
-        # Public REST calls this week
-        public_week_result = await db.execute(
-            select(func.count(UsageStatsModel.id)).where(
+        usage_result = await db.execute(
+            select(
+                func.count(UsageStatsModel.id).filter(is_today).label("total_today"),
+                func.count(UsageStatsModel.id).filter(and_(is_today, is_mcp)).label("mcp_today"),
+                func.count(UsageStatsModel.id)
+                .filter(and_(is_today, is_public))
+                .label("public_today"),
+                func.count(UsageStatsModel.id).filter(and_(is_today, is_rest)).label("rest_today"),
+                func.count(UsageStatsModel.id).label("total_week"),
+                func.count(UsageStatsModel.id).filter(is_mcp).label("mcp_week"),
+                func.count(UsageStatsModel.id).filter(is_public).label("public_week"),
+                func.count(UsageStatsModel.id).filter(is_rest).label("rest_week"),
+            ).where(
                 UsageStatsModel.workspace_id == workspace_id,
                 UsageStatsModel.date >= week_ago,
-                UsageStatsModel.endpoint.like("/api/v1/public/%"),
             )
         )
-        public_calls_week = public_week_result.scalar() or 0
-
-        # REST calls this week (non-public)
-        rest_week_result = await db.execute(
-            select(func.count(UsageStatsModel.id)).where(
-                UsageStatsModel.workspace_id == workspace_id,
-                UsageStatsModel.date >= week_ago,
-                UsageStatsModel.endpoint.like("/api/v1/%"),
-                UsageStatsModel.endpoint.notlike("/api/v1/public/%"),
-            )
-        )
-        rest_calls_week = rest_week_result.scalar() or 0
+        usage = usage_result.one()
+        api_calls_today = usage.total_today
+        mcp_calls_today = usage.mcp_today
+        public_calls_today = usage.public_today
+        rest_calls_today = usage.rest_today
+        api_calls_week = usage.total_week
+        mcp_calls_week = usage.mcp_week
+        public_calls_week = usage.public_week
+        rest_calls_week = usage.rest_week
 
         # Build response with aggregated data and effective limits (base + addons)
         return UsageCurrentResponse(
