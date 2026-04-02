@@ -48,12 +48,11 @@ cd ..
 echo "Installing kagura-memory SDK..."
 pip install kagura-memory
 
-# Step 3: Start Docker services
+# Step 3: Start infrastructure (postgres, qdrant, redis — NOT API yet)
 echo ""
 echo "==> Step 3/5: Start Docker services"
-docker compose up -d
-echo "Waiting for services to be healthy..."
-# Wait for postgres and qdrant to be healthy (up to 60s)
+docker compose up -d postgres qdrant redis
+echo "Waiting for infrastructure to be healthy..."
 for i in $(seq 1 60); do
   pg_healthy=$(docker compose ps postgres --format json 2>/dev/null | grep -c '"healthy"' || echo 0)
   qd_healthy=$(docker compose ps qdrant --format json 2>/dev/null | grep -c '"healthy"' || echo 0)
@@ -62,13 +61,24 @@ for i in $(seq 1 60); do
   fi
   sleep 1
 done
-docker compose ps
 
-# Step 4: Run migrations
+# Step 4: Run migrations BEFORE API starts
+# (API auto-creates tables on startup, which conflicts with alembic)
 echo ""
 echo "==> Step 4/5: Run database migrations"
-cd backend && alembic upgrade head
+cd backend && PYTHONPATH=src alembic upgrade head
 cd ..
+
+# Start API and web after migrations
+echo ""
+echo "Starting API and web..."
+docker compose up -d
+for i in $(seq 1 30); do
+  api_healthy=$(docker compose ps api --format json 2>/dev/null | grep -c '"healthy"' || echo 0)
+  if [ "$api_healthy" -ge 1 ]; then break; fi
+  sleep 1
+done
+docker compose ps
 
 # Step 5: Create admin
 echo ""
