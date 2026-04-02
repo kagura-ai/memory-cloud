@@ -53,6 +53,11 @@ class SearchService:
         Issue #17: search_mode parameter allows choosing the search strategy.
         Issue #81: context_id can be a single string or list of strings for cross-context recall.
 
+        Modes:
+        - hybrid (default): Semantic + BM25 blend with configurable weights
+        - semantic: Vector search only (embedding similarity)
+        - keyword: BM25 only (Sudachi tokenized, good for hiragana queries)
+
         Args:
             query: Search query
             user_id: User ID (required)

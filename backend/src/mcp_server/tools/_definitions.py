@@ -226,7 +226,9 @@ Search modes: Use search_mode to control the search strategy.
                     "context_ids": {
                         "type": "array",
                         "items": {"type": "string", "format": "uuid"},
-                        "description": "Search across multiple contexts (Issue #81). List of context UUIDs. All contexts must use the same embedding model. Overrides context_id when provided.",
+                        "minItems": 2,
+                        "maxItems": 20,
+                        "description": "Search across multiple contexts (Issue #81). List of 2-20 context UUIDs. All contexts must use the same embedding model. Overrides context_id when provided.",
                     },
                     "search_mode": {
                         "type": "string",
