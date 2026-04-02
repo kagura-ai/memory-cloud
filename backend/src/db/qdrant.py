@@ -169,7 +169,7 @@ def _build_date_filter_conditions(filters: dict[str, Any]) -> list[FieldConditio
 
 def _build_search_filter(
     workspace_id: str,
-    context_id: str,
+    context_id: str | list[str],
     user_id: str,
     is_shared_context: bool = False,
     filters: dict[str, Any] | None = None,
@@ -180,7 +180,7 @@ def _build_search_filter(
 
     Args:
         workspace_id: Workspace ID (isolation)
-        context_id: Context ID (isolation)
+        context_id: Single context ID or list of context IDs (Issue #81: cross-context recall)
         user_id: User ID (isolation, skipped for shared contexts)
         is_shared_context: If True, skip user_id filter
         filters: Optional metadata filters (scope, type, importance, tags, date ranges)
@@ -190,8 +190,13 @@ def _build_search_filter(
     """
     conditions: list[Condition] = [
         FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
-        FieldCondition(key="context_id", match=MatchValue(value=context_id)),
     ]
+
+    # Issue #81: Support single or multiple context IDs
+    if isinstance(context_id, list):
+        conditions.append(FieldCondition(key="context_id", match=MatchAny(any=context_id)))
+    else:
+        conditions.append(FieldCondition(key="context_id", match=MatchValue(value=context_id)))
 
     if not is_shared_context:
         conditions.append(FieldCondition(key="user_id", match=MatchValue(value=user_id)))

@@ -200,7 +200,7 @@ Search modes: Use search_mode to control the search strategy.
 • keyword: BM25 only — best for hiragana queries, exact term matching, or when semantic search returns noise. Particularly effective for Japanese hiragana-only queries where embedding models struggle.""",
             "inputSchema": {
                 "type": "object",
-                "required": ["query", "context_id"],
+                "required": ["query"],
                 "properties": {
                     "query": {
                         "type": "string",
@@ -221,7 +221,12 @@ Search modes: Use search_mode to control the search strategy.
                     "context_id": {
                         "type": "string",
                         "format": "uuid",
-                        "description": "Target context UUID (e.g. '550e8400-e29b-41d4-a716-446655440000'). MUST be a valid UUID from list_contexts(). Do NOT guess or fabricate IDs.",
+                        "description": "Target context UUID (e.g. '550e8400-e29b-41d4-a716-446655440000'). MUST be a valid UUID from list_contexts(). Do NOT guess or fabricate IDs. For cross-context search, use context_ids instead.",
+                    },
+                    "context_ids": {
+                        "type": "array",
+                        "items": {"type": "string", "format": "uuid"},
+                        "description": "Search across multiple contexts (Issue #81). List of context UUIDs. All contexts must use the same embedding model. Overrides context_id when provided.",
                     },
                     "search_mode": {
                         "type": "string",

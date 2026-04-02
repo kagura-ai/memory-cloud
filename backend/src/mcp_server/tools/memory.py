@@ -215,6 +215,13 @@ async def handle_recall(
     if "query" not in args:
         return _error_response("missing_fields", "Missing required field: query")
 
+    # Issue #81: Require either context_id or context_ids
+    if "context_id" not in args and "context_ids" not in args:
+        return _error_response(
+            "missing_fields",
+            "Missing required field: context_id or context_ids. Use list_contexts() to find available IDs.",
+        )
+
     from db.base import get_db
     from models.schemas import RecallRequest
     from services.memory_service import MemoryService
@@ -230,8 +237,23 @@ async def handle_recall(
     start_time = time.time()
     async for db in get_db():
         try:
-            current_context_id = _resolve_context_id(args["context_id"])
-            current_context = await _resolve_context(db, user_id, current_context_id)
+            # Issue #81: Cross-context recall — context_ids overrides context_id
+            context_ids_arg = args.get("context_ids")
+            cross_context_ids: list[UUID] | None = None
+
+            if context_ids_arg and isinstance(context_ids_arg, list) and len(context_ids_arg) > 0:
+                # Multi-context mode
+                cross_context_ids = [_resolve_context_id(cid) for cid in context_ids_arg]
+                # Use first context as primary (for config, permissions)
+                current_context_id = cross_context_ids[0]
+                # Validate access to all contexts
+                for cid in cross_context_ids:
+                    await _resolve_context(db, user_id, cid)
+                current_context = await _resolve_context(db, user_id, current_context_id)
+            else:
+                # Single context mode (backward compatible)
+                current_context_id = _resolve_context_id(args["context_id"])
+                current_context = await _resolve_context(db, user_id, current_context_id)
 
             service = MemoryService(db)
             result = await execute_with_timeout(
@@ -240,6 +262,7 @@ async def handle_recall(
                     user_id=user_id,
                     current_context_id=current_context_id,
                     current_workspace_id=workspace_id,
+                    context_ids=cross_context_ids,
                 ),
                 operation_name="recall",
             )

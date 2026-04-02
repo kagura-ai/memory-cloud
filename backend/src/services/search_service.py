@@ -42,7 +42,7 @@ class SearchService:
         query: str,
         user_id: str,
         workspace_id: str,
-        context_id: str,
+        context_id: str | list[str],
         k: int = 10,
         use_rerank: bool = False,
         filters: dict[str, Any] | None = None,
@@ -51,15 +51,13 @@ class SearchService:
         """Search with configurable mode: hybrid, semantic, or keyword.
 
         Issue #17: search_mode parameter allows choosing the search strategy.
-        - hybrid (default): Semantic + BM25 blend with configurable weights
-        - semantic: Vector search only (embedding similarity)
-        - keyword: BM25 only (Sudachi tokenized, good for hiragana queries)
+        Issue #81: context_id can be a single string or list of strings for cross-context recall.
 
         Args:
             query: Search query
             user_id: User ID (required)
             workspace_id: Workspace ID (required)
-            context_id: Context ID (required)
+            context_id: Context ID or list of context IDs (Issue #81)
             k: Number of results
             use_rerank: Use reranking if available
             filters: Optional filters
@@ -74,8 +72,11 @@ class SearchService:
         if search_mode not in ("hybrid", "semantic", "keyword"):
             raise ValueError(f"Invalid search_mode: {search_mode}")
 
+        # Issue #81: Normalize context_id to determine primary config context
+        primary_context_id = context_id[0] if isinstance(context_id, list) else context_id
+
         # Load context search configuration (Issue #130)
-        config = await self._get_search_config(context_id)
+        config = await self._get_search_config(primary_context_id)
         fetch_factor = config.fetch_factor
         # Issue #67: Double fetch size when reranker is active to compensate for
         # content-based BM25 length bias (reranker will re-score and trim)
@@ -90,20 +91,24 @@ class SearchService:
         from services.permission_service import PermissionService
         from utils.exceptions import AuthorizationError
 
-        # Check if context is shared
-        context_service = ContextService(self.db)
-        is_shared_context = await context_service.is_context_shared(UUID(context_id))
+        # Issue #81: For cross-context, skip shared-context optimization (use user_id filter)
+        is_shared_context = False
+        if not isinstance(context_id, list):
+            context_service = ContextService(self.db)
+            is_shared_context = await context_service.is_context_shared(UUID(context_id))
 
-        # For shared contexts, verify workspace membership
-        if is_shared_context:
-            perm_service = PermissionService(self.db)
-            is_member = await perm_service.is_workspace_member(user_id, UUID(workspace_id))
-            if not is_member:
-                raise AuthorizationError(f"Access denied: not a member of workspace {workspace_id}")
+            # For shared contexts, verify workspace membership
+            if is_shared_context:
+                perm_service = PermissionService(self.db)
+                is_member = await perm_service.is_workspace_member(user_id, UUID(workspace_id))
+                if not is_member:
+                    raise AuthorizationError(
+                        f"Access denied: not a member of workspace {workspace_id}"
+                    )
 
         logger.debug(
             "context_access_check",
-            context_id=context_id,
+            context_id=str(context_id),
             is_shared=is_shared_context,
             workspace_verified=is_shared_context,
         )
@@ -152,7 +157,7 @@ class SearchService:
                 "semantic_search_starting", query=normalized_query[:50], fetch_size=fetch_size
             )
             query_vector = await embed_svc.embed(
-                normalized_query, user_id, context_id=context_id, workspace_id=workspace_id
+                normalized_query, user_id, context_id=primary_context_id, workspace_id=workspace_id
             )
             semantic_results = await search_memories_qdrant(
                 user_id=user_id,
@@ -223,7 +228,7 @@ class SearchService:
                             ],  # Dynamic fetch size (Issue #130)
                             user_id=user_id,
                             k=k,
-                            context_id=context_id,
+                            context_id=primary_context_id,
                             workspace_id=workspace_id,  # NEW: Issue #146
                         )
                         logger.debug("reranking_completed", results=len(merged_results))
@@ -238,14 +243,14 @@ class SearchService:
                         candidates=merged_results[:fetch_size],
                         user_id=user_id,
                         k=k,
-                        context_id=context_id,
+                        context_id=primary_context_id,
                         workspace_id=workspace_id,
                     )
                     logger.debug("reranking_completed", results=len(merged_results))
                 except Exception as e:
                     logger.warning("reranking_failed", error=str(e))
         elif not config.use_rerank:
-            logger.debug("reranking_disabled_by_config", context_id=context_id)
+            logger.debug("reranking_disabled_by_config", context_id=primary_context_id)
 
         # Return top k results
         return merged_results[:k]
