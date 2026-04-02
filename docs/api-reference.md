@@ -260,7 +260,7 @@ Search memories using Hybrid Search (60% semantic + 40% BM25) with optional Neur
 | `query` | string | Yes | Natural language search query |
 | `k` | integer | No | Number of results (default: 5, max: 100) |
 | `filters` | object | No | Filter by type, tags, importance |
-| `use_rerank` | boolean | No | Enable reranking (default: false). Requires Voyage/Cohere API key. |
+| `use_rerank` | boolean | No | Request reranking (default: false). Only effective if reranking is also enabled in the context's search config and a provider (Voyage/Cohere) is configured. |
 
 **Response:**
 
