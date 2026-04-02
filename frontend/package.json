@@ -1,6 +1,6 @@
 {
   "name": "kagura-web",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "description": "Kagura Memory Cloud - Web Management UI",
   "license": "Apache-2.0",
