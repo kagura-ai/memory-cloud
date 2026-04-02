@@ -8,7 +8,7 @@ Manages workspaces, memberships, and workspace-level operations.
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import Context, ExternalAPIKey, UsageStats, Workspace, WorkspaceMember
@@ -1498,10 +1498,7 @@ class WorkspaceService:
             >>> # Member view: only accessible memories
             >>> stats = await service.get_collection_memory_stats(user_id, contexts, is_workspace_owner=False)
         """
-        from sqlalchemy import func, select
-
         # Separate private and shared contexts
-        # Issue #204: Owner sees all private contexts, members see only their own
         if is_workspace_owner:
             # Owner: All private contexts (count all members' memories)
             private_context_ids = [c.id for c in contexts if c.is_private]
@@ -1519,52 +1516,35 @@ class WorkspaceService:
 
         stats_by_context: dict[str, tuple[int, int]] = {}
 
-        # Query 1: Private contexts
-        # - Owner: Count ALL members' memories
-        # - Member: Count only user's own memories
-        if private_context_ids:
-            private_query_conditions = [
-                Memory.context_id.in_(private_context_ids),
+        # Issue #65: Single query for all contexts (was 2 sequential queries)
+        all_context_ids = private_context_ids + shared_context_ids
+        if all_context_ids:
+            conditions = [
+                Memory.context_id.in_(all_context_ids),
                 Memory.deleted_at.is_(None),
             ]
-            # Add user_id filter only for members (not owners)
-            if not is_workspace_owner:
-                private_query_conditions.append(Memory.user_id == user_id)
+            # Non-owner members can only count their own memories in private contexts
+            if not is_workspace_owner and private_context_ids:
+                conditions.append(
+                    or_(
+                        Memory.context_id.in_(shared_context_ids),
+                        and_(
+                            Memory.context_id.in_(private_context_ids),
+                            Memory.user_id == user_id,
+                        ),
+                    )
+                )
 
-            private_stats_query = (
+            result = await self.db.execute(
                 select(
                     Memory.context_id,
                     func.count(Memory.id).label("memory_count"),
                 )
-                .where(*private_query_conditions)
+                .where(*conditions)
                 .group_by(Memory.context_id)
             )
-            private_result = await self.db.execute(private_stats_query)
-            for row in private_result.all():
-                stats_by_context[str(row.context_id)] = (
-                    row.memory_count,
-                    0,
-                )  # storage_bytes removed
-
-        # Query 2: Shared contexts - all members' memories
-        if shared_context_ids:
-            shared_stats_query = (
-                select(
-                    Memory.context_id,
-                    func.count(Memory.id).label("memory_count"),
-                )
-                .where(
-                    Memory.context_id.in_(shared_context_ids),  # No user_id filter
-                    Memory.deleted_at.is_(None),
-                )
-                .group_by(Memory.context_id)
-            )
-            shared_result = await self.db.execute(shared_stats_query)
-            for row in shared_result.all():
-                stats_by_context[str(row.context_id)] = (
-                    row.memory_count,
-                    0,
-                )  # storage_bytes removed
+            for row in result.all():
+                stats_by_context[str(row.context_id)] = (row.memory_count, 0)
 
         logger.debug(
             "context_memory_stats_retrieved",
