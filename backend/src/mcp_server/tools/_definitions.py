@@ -98,7 +98,8 @@ IMPORTANT: Always specify context_id to ensure you're using the intended context
                     },
                     "context_id": {
                         "type": "string",
-                        "description": "Target context UUID. Use list_contexts() to discover available IDs.",
+                        "format": "uuid",
+                        "description": "Target context UUID (e.g. '550e8400-e29b-41d4-a716-446655440000'). MUST be a valid UUID from list_contexts(). Do NOT guess or fabricate IDs.",
                     },
                 },
             },
@@ -120,7 +121,8 @@ IMPORTANT: Always specify context_id.""",
                 "properties": {
                     "memory_id": {
                         "type": "string",
-                        "description": "UUID of memory to update in-place.",
+                        "format": "uuid",
+                        "description": "UUID of memory to update in-place (e.g. '550e8400-e29b-41d4-a716-446655440000'). Obtained from recall() results. Do NOT guess or fabricate IDs.",
                     },
                     "external_id": {
                         "type": "string",
@@ -161,7 +163,8 @@ IMPORTANT: Always specify context_id.""",
                     },
                     "context_id": {
                         "type": "string",
-                        "description": "Target context UUID.",
+                        "format": "uuid",
+                        "description": "Target context UUID (e.g. '550e8400-e29b-41d4-a716-446655440000'). MUST be a valid UUID from list_contexts(). Do NOT guess or fabricate IDs.",
                     },
                 },
             },
@@ -217,7 +220,8 @@ Search modes: Use search_mode to control the search strategy.
                     },
                     "context_id": {
                         "type": "string",
-                        "description": "Target context UUID. Use list_contexts() to discover available IDs.",
+                        "format": "uuid",
+                        "description": "Target context UUID (e.g. '550e8400-e29b-41d4-a716-446655440000'). MUST be a valid UUID from list_contexts(). Do NOT guess or fabricate IDs.",
                     },
                     "search_mode": {
                         "type": "string",
@@ -249,11 +253,13 @@ IMPORTANT: Always specify context_id to ensure you're retrieving from the intend
                 "properties": {
                     "memory_id": {
                         "type": "string",
-                        "description": "UUID of the memory to retrieve. Obtained from recall() results.",
+                        "format": "uuid",
+                        "description": "UUID of the memory to retrieve (e.g. '550e8400-e29b-41d4-a716-446655440000'). Obtained from recall() results. Do NOT guess or fabricate IDs.",
                     },
                     "context_id": {
                         "type": "string",
-                        "description": "Target context UUID. Use list_contexts() to discover available IDs.",
+                        "format": "uuid",
+                        "description": "Target context UUID (e.g. '550e8400-e29b-41d4-a716-446655440000'). MUST be a valid UUID from list_contexts(). Do NOT guess or fabricate IDs.",
                     },
                 },
             },
@@ -288,7 +294,8 @@ IMPORTANT: Always specify context_id to ensure you're deleting from the intended
                 "properties": {
                     "memory_id": {
                         "type": "string",
-                        "description": "UUID of specific memory to delete. Use this when you know exactly which memory to remove (e.g., from recall results).",
+                        "format": "uuid",
+                        "description": "UUID of specific memory to delete (e.g. '550e8400-e29b-41d4-a716-446655440000'). Obtained from recall() results. Do NOT guess or fabricate IDs.",
                     },
                     "query": {
                         "type": "string",
@@ -300,7 +307,8 @@ IMPORTANT: Always specify context_id to ensure you're deleting from the intended
                     },
                     "context_id": {
                         "type": "string",
-                        "description": "Target context UUID. Use list_contexts() to discover available IDs.",
+                        "format": "uuid",
+                        "description": "Target context UUID (e.g. '550e8400-e29b-41d4-a716-446655440000'). MUST be a valid UUID from list_contexts(). Do NOT guess or fabricate IDs.",
                     },
                 },
             },
@@ -341,7 +349,8 @@ IMPORTANT: Always specify context_id to ensure you're exploring the intended con
                 "properties": {
                     "memory_id": {
                         "type": "string",
-                        "description": "UUID of the starting memory (seed node). Usually obtained from recall results. Exploration radiates outward from this point.",
+                        "format": "uuid",
+                        "description": "UUID of the starting memory (seed node, e.g. '550e8400-e29b-41d4-a716-446655440000'). Obtained from recall() results. Do NOT guess or fabricate IDs.",
                     },
                     "depth": {
                         "type": "integer",
@@ -359,7 +368,8 @@ IMPORTANT: Always specify context_id to ensure you're exploring the intended con
                     },
                     "context_id": {
                         "type": "string",
-                        "description": "Target context UUID. Use list_contexts() to discover available IDs.",
+                        "format": "uuid",
+                        "description": "Target context UUID (e.g. '550e8400-e29b-41d4-a716-446655440000'). MUST be a valid UUID from list_contexts(). Do NOT guess or fabricate IDs.",
                     },
                 },
             },
@@ -397,7 +407,8 @@ IMPORTANT: Specify context_id to get info for a specific context. Use list_conte
                     },
                     "context_id": {
                         "type": "string",
-                        "description": "Context UUID to get info for. Use list_contexts() to discover available IDs.",
+                        "format": "uuid",
+                        "description": "Context UUID to get info for (e.g. '550e8400-e29b-41d4-a716-446655440000'). MUST be a valid UUID from list_contexts(). Do NOT guess or fabricate IDs.",
                     },
                 },
             },
@@ -509,7 +520,8 @@ Use get_context_info() to see current values before updating.""",
                 "properties": {
                     "context_id": {
                         "type": "string",
-                        "description": "Context UUID to update. Use list_contexts() to find IDs.",
+                        "format": "uuid",
+                        "description": "Context UUID to update (e.g. '550e8400-e29b-41d4-a716-446655440000'). MUST be a valid UUID from list_contexts(). Do NOT guess or fabricate IDs.",
                     },
                     "display_name": {
                         "type": "string",
@@ -559,7 +571,8 @@ IMPORTANT: This action soft-deletes all memories in the context. Use with cautio
                 "properties": {
                     "context_id": {
                         "type": "string",
-                        "description": "Context UUID to delete. Use list_contexts() to find IDs.",
+                        "format": "uuid",
+                        "description": "Context UUID to delete (e.g. '550e8400-e29b-41d4-a716-446655440000'). MUST be a valid UUID from list_contexts(). Do NOT guess or fabricate IDs.",
                     },
                 },
             },
@@ -589,7 +602,8 @@ Weights must sum to 1.0.""",
                 "properties": {
                     "context_id": {
                         "type": "string",
-                        "description": "Context UUID to configure.",
+                        "format": "uuid",
+                        "description": "Context UUID to configure (e.g. '550e8400-e29b-41d4-a716-446655440000'). MUST be a valid UUID from list_contexts(). Do NOT guess or fabricate IDs.",
                     },
                     "semantic_weight": {
                         "type": "number",
