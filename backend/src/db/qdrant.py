@@ -14,6 +14,7 @@ from uuid import UUID
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
+    Condition,
     Distance,
     FieldCondition,
     Filter,
@@ -94,25 +95,36 @@ def _validate_uuid_format(value: str, field_name: str) -> None:
         raise ValueError(ERROR_MSG_INVALID_UUID.format(field=field_name, value=value)) from e
 
 
-def _build_tag_filter_condition(filters: dict[str, Any]) -> FieldCondition | None:
-    """Build FieldCondition for tag filtering (match any).
+def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition]:
+    """Build FieldConditions for tag filtering.
 
     Issue #67: Exact-match tag filtering only. Tags are NOT added to
     BM25 text search to avoid score inflation for tag-heavy memories.
+    Issue #79: Support AND logic via tags_match="all".
 
     Args:
-        filters: Filter dict with optional tags list
+        filters: Filter dict with optional tags list and tags_match mode
 
     Returns:
-        FieldCondition for tag matching or None
+        List of FieldConditions for tag matching (empty if no tags)
     """
     filter_tags = filters.get("tags")
-    if isinstance(filter_tags, list) and filter_tags:
-        # Validate: only non-empty strings, bounded to 50 tags
-        valid_tags = [t for t in filter_tags if isinstance(t, str) and t][:50]
-        if valid_tags:
-            return FieldCondition(key="tags", match=MatchAny(any=valid_tags))
-    return None
+    if not isinstance(filter_tags, list) or not filter_tags:
+        return []
+
+    # Validate: only non-empty strings, bounded to 50 tags
+    valid_tags = [t for t in filter_tags if isinstance(t, str) and t][:50]
+    if not valid_tags:
+        return []
+
+    tags_match = filters.get("tags_match", "any")
+
+    if tags_match == "all":
+        # AND logic: memory must have ALL specified tags
+        return [FieldCondition(key="tags", match=MatchValue(value=tag)) for tag in valid_tags]
+    else:
+        # OR logic (default): memory must have ANY of the specified tags
+        return [FieldCondition(key="tags", match=MatchAny(any=valid_tags))]
 
 
 def _build_search_filter(
@@ -136,7 +148,7 @@ def _build_search_filter(
     Returns:
         Qdrant Filter or None
     """
-    conditions: list[FieldCondition] = [
+    conditions: list[Condition] = [
         FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
         FieldCondition(key="context_id", match=MatchValue(value=context_id)),
     ]
@@ -152,9 +164,8 @@ def _build_search_filter(
         importance_condition = _build_importance_range_condition(filters)
         if importance_condition:
             conditions.append(importance_condition)
-        tag_condition = _build_tag_filter_condition(filters)
-        if tag_condition:
-            conditions.append(tag_condition)
+        tag_conditions = _build_tag_filter_conditions(filters)
+        conditions.extend(tag_conditions)
 
     return Filter(must=conditions) if conditions else None
 
