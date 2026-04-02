@@ -54,9 +54,9 @@ echo "==> Step 3/5: Start Docker services"
 docker compose up -d postgres qdrant redis
 echo "Waiting for infrastructure to be healthy..."
 for i in $(seq 1 60); do
-  pg_healthy=$(docker compose ps postgres --format json 2>/dev/null | grep -c '"healthy"' || echo 0)
-  qd_healthy=$(docker compose ps qdrant --format json 2>/dev/null | grep -c '"healthy"' || echo 0)
-  if [ "$pg_healthy" -ge 1 ] && [ "$qd_healthy" -ge 1 ]; then
+  pg_health=$(docker compose ps postgres --format '{{.Health}}' 2>/dev/null || echo "")
+  qd_health=$(docker compose ps qdrant --format '{{.Health}}' 2>/dev/null || echo "")
+  if [ "$pg_health" = "healthy" ] && [ "$qd_health" = "healthy" ]; then
     break
   fi
   sleep 1
@@ -74,8 +74,8 @@ echo ""
 echo "Starting API and web..."
 docker compose up -d
 for i in $(seq 1 30); do
-  api_healthy=$(docker compose ps api --format json 2>/dev/null | grep -c '"healthy"' || echo 0)
-  if [ "$api_healthy" -ge 1 ]; then break; fi
+  api_health=$(docker compose ps api --format '{{.Health}}' 2>/dev/null || echo "")
+  if [ "$api_health" = "healthy" ]; then break; fi
   sleep 1
 done
 docker compose ps
