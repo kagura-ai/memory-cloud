@@ -36,7 +36,7 @@ class TestResourceTokenManager:
     async def test_create_token_success(self, manager, mock_db):
         """Test successful token creation."""
         # Execute
-        token = await manager.create_token(
+        token, token_obj = await manager.create_token(
             resource_id="ec_products",
             description="Test EC integration",
             quota_events_per_hour=500,
@@ -93,23 +93,19 @@ class TestResourceEventQuotaCheck:
     @pytest.mark.asyncio
     async def test_quota_within_limit(self):
         """Test quota check when within limit."""
-        with patch(
-            "api.routes.resource_ingest.increment_counter", new_callable=AsyncMock
-        ) as mock_incr:
-            mock_incr.return_value = 50  # 50/1000 events used
+        with patch("db.redis.get_cache", new_callable=AsyncMock) as mock_cache:
+            mock_cache.return_value = "50"  # 50/1000 events used
 
             # Should not raise
             await _check_event_quota("ec_products", token_id=1, quota_per_hour=1000)
 
-            mock_incr.assert_awaited_once()
+            mock_cache.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_quota_exceeded(self):
         """Test quota check when exceeded."""
-        with patch(
-            "api.routes.resource_ingest.increment_counter", new_callable=AsyncMock
-        ) as mock_incr:
-            mock_incr.return_value = 1001  # 1001/1000 events - exceeded!
+        with patch("db.redis.get_cache", new_callable=AsyncMock) as mock_cache:
+            mock_cache.return_value = "1001"  # 1001/1000 events - exceeded!
 
             # Should raise RateLimitError
             with pytest.raises(RateLimitError) as exc_info:
@@ -121,10 +117,8 @@ class TestResourceEventQuotaCheck:
     @pytest.mark.asyncio
     async def test_quota_batch_check(self):
         """Test quota check for batch (multiple events at once)."""
-        with patch(
-            "api.routes.resource_ingest.increment_counter", new_callable=AsyncMock
-        ) as mock_incr:
-            mock_incr.return_value = 990  # Current: 990, trying to add 20 more
+        with patch("db.redis.get_cache", new_callable=AsyncMock) as mock_cache:
+            mock_cache.return_value = "990"  # Current: 990, trying to add 20 more
 
             # Should raise RateLimitError (990 + 20 > 1000)
             with pytest.raises(RateLimitError):

@@ -72,6 +72,7 @@ class TestContextResponseFields:
                 "name": "test-ctx",
                 "display_name": "Test Context",
                 "is_private": False,
+                "is_locked": False,
             },
         )()
         fields = _context_response_fields(ctx)
@@ -79,6 +80,7 @@ class TestContextResponseFields:
         assert fields["context_name"] == "test-ctx"
         assert fields["context_display_name"] == "Test Context"
         assert fields["context_is_private"] is False
+        assert fields["context_is_locked"] is False
 
 
 class TestResolveContextId:

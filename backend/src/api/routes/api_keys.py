@@ -177,7 +177,6 @@ async def list_api_keys(
 
         keys = await manager.list_keys(
             user_id=user_id,
-            context_id=None,  # Issue #246: No context filtering
         )
         return [_format_key_response(key) for key in keys]
     except Exception as e:
@@ -207,13 +206,11 @@ async def create_api_key(
             name=data.name,
             user_id=user_id,
             expires_days=data.expires_days,
-            context_id=None,  # Issue #246: No context assignment
         )
 
         # Retrieve metadata
         keys = await manager.list_keys(
             user_id=user_id,
-            context_id=None,  # Issue #246: No context filtering
         )
         created_key = next((k for k in keys if k.name == data.name), None)
 

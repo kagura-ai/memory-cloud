@@ -1,17 +1,28 @@
 """MCP Tools integration test script.
 
 Direct test of MemoryService methods that MCP tools wrap.
+
+Note: This file is a standalone integration smoke-test script intended to be
+run directly (`python tests/test_mcp_tools.py`) against a live environment.
+It requires a real DB connection and a valid context_id, so it is skipped
+during normal pytest runs.
 """
 
 import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="Integration smoke-test script: requires live DB and context_id"
+)
+
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from db.base import get_db
-from models.schemas import ExploreRequest, RecallRequest, RememberRequest
-from services.memory_service import MemoryService
+from db.base import get_db  # noqa: E402
+from models.schemas import ExploreRequest, RecallRequest, RememberRequest  # noqa: E402
+from services.memory_service import MemoryService  # noqa: E402
 
 
 async def test_remember():

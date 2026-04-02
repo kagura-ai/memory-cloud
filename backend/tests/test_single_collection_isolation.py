@@ -6,65 +6,125 @@ Tests the most critical security feature: ensuring workspace/context/user bounda
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
 
 from db.qdrant import ensure_kagura_memories_collection
-from models.auth import Context, Workspace
+from models.auth import Context, Workspace, WorkspaceMember
 from models.memory import Memory
 from models.schemas import ExploreRequest, RecallRequest, RememberRequest
 from services.memory_service import MemoryService
 
 
-@pytest.fixture
+@pytest_asyncio.fixture(autouse=True)
+async def reset_redis_singleton():
+    """Reset Redis singleton before each test to avoid event loop mismatch.
+
+    The Redis async client binds to the event loop it was created in.
+    Resetting the singleton ensures it is recreated fresh in each test's loop.
+    """
+    import db.redis as redis_module
+
+    redis_module._redis_client = None
+    yield
+    # Close and reset after test to clean up
+    try:
+        await redis_module.close_redis()
+    except Exception as exc:
+        print(f"Warning: Redis cleanup failed: {exc}")
+    redis_module._redis_client = None
+
+
+@pytest_asyncio.fixture
 async def test_workspace1(db_session):
-    """Create test workspace 1."""
+    """Create test workspace 1 with user1 and user2 as members."""
     workspace = Workspace(
         id=uuid4(),
         name="Test Workspace 1",
         owner_user_id="owner1",
     )
     db_session.add(workspace)
+    await db_session.flush()
+
+    # Add user1 and user2 as members so get_context() access check passes
+    for uid in ("owner1", "user1", "user2"):
+        member = WorkspaceMember(
+            workspace_id=workspace.id,
+            user_id=uid,
+            role="owner" if uid == "owner1" else "member",
+        )
+        db_session.add(member)
+
     await db_session.commit()
     return workspace
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def test_workspace2(db_session):
-    """Create test workspace 2."""
+    """Create test workspace 2 with user2 as member."""
     workspace = Workspace(
         id=uuid4(),
         name="Test Workspace 2",
         owner_user_id="owner2",
     )
     db_session.add(workspace)
+    await db_session.flush()
+
+    # Add user2 as member so get_context() access check passes
+    for uid in ("owner2", "user2"):
+        member = WorkspaceMember(
+            workspace_id=workspace.id,
+            user_id=uid,
+            role="owner" if uid == "owner2" else "member",
+        )
+        db_session.add(member)
+
     await db_session.commit()
     return workspace
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def test_context1(db_session, test_workspace1):
-    """Create test context 1 in workspace1."""
+    """Create test context 1 in workspace1 (shared so all members can access)."""
     context = Context(
         id=uuid4(),
         workspace_id=test_workspace1.id,
         name="context1",
         display_name="Test Context 1",
         created_by="user1",
+        is_private=False,
     )
     db_session.add(context)
     await db_session.commit()
     return context
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def test_context2(db_session, test_workspace1):
-    """Create test context 2 in workspace1 (same workspace, different context)."""
+    """Create test context 2 in workspace1 (shared so all members can access)."""
     context = Context(
         id=uuid4(),
         workspace_id=test_workspace1.id,
         name="context2",
         display_name="Test Context 2",
         created_by="user1",
+        is_private=False,
+    )
+    db_session.add(context)
+    await db_session.commit()
+    return context
+
+
+@pytest_asyncio.fixture
+async def test_context_ws2(db_session, test_workspace2):
+    """Create test context in workspace2 (for cross-workspace isolation tests)."""
+    context = Context(
+        id=uuid4(),
+        workspace_id=test_workspace2.id,
+        name="context-ws2",
+        display_name="Test Context WS2",
+        created_by="owner2",
+        is_private=False,
     )
     db_session.add(context)
     await db_session.commit()
@@ -73,10 +133,42 @@ async def test_context2(db_session, test_workspace1):
 
 @pytest.mark.asyncio
 class TestSingleCollectionIsolation:
-    """Test 3-level isolation (workspace, context, user) in single collection design."""
+    """Test 3-level isolation (workspace, context, user) in single collection design.
+
+    Note: Tests that use remember→recall require DATABASE_URL to match the test DB,
+    because process_pending_embedding creates its own DB session via get_db().
+    """
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def patch_create_task(self, monkeypatch):
+        """Patch asyncio.create_task to track embedding tasks so tests can await them.
+
+        In test environment, asyncio.create_task fires a background coroutine (embedding).
+        Tests must await all pending embedding tasks before calling recall(), otherwise
+        the Qdrant points won't exist yet and recall() returns empty results.
+
+        This fixture replaces create_task with a version that collects tasks so that
+        tests can call await asyncio.gather(*pending_tasks) after remember().
+        """
+        import asyncio
+
+        original_create_task = asyncio.create_task
+        pending_tasks: list = []
+
+        def tracking_create_task(coro, **kwargs):
+            task = original_create_task(coro, **kwargs)
+            pending_tasks.append(task)
+            return task
+
+        monkeypatch.setattr(asyncio, "create_task", tracking_create_task)
+
+        # Expose pending_tasks via a helper stored on the fixture return value
+        self._pending_embedding_tasks = pending_tasks
+        yield
+        monkeypatch.setattr(asyncio, "create_task", original_create_task)
 
     async def test_cross_workspace_isolation(
-        self, db_session, test_workspace1, test_workspace2, test_context1, test_context2
+        self, db_session, test_workspace1, test_workspace2, test_context1, test_context_ws2
     ):
         """Test that workspace1 cannot see workspace2's memories.
 
@@ -101,7 +193,7 @@ class TestSingleCollectionIsolation:
             current_workspace_id=test_workspace1.id,
         )
 
-        # Workspace2 creates a memory in context2
+        # Workspace2 creates a memory in context_ws2
         request2 = RememberRequest(
             summary="Workspace2 secret data",
             content="Confidential information for workspace2",
@@ -111,9 +203,14 @@ class TestSingleCollectionIsolation:
             request2,
             user_id="user2",
             client="test",
-            current_context_id=test_context2.id,
+            current_context_id=test_context_ws2.id,
             current_workspace_id=test_workspace2.id,
         )
+
+        # Wait for all background embedding tasks to complete before recall
+        import asyncio
+
+        await asyncio.gather(*self._pending_embedding_tasks, return_exceptions=True)
 
         # Test: Workspace1 recalls - should NOT see workspace2's memory
         recall_request = RecallRequest(query="secret data", k=10)
@@ -179,6 +276,11 @@ class TestSingleCollectionIsolation:
             current_workspace_id=test_workspace1.id,
         )
 
+        # Wait for all background embedding tasks to complete before recall
+        import asyncio
+
+        await asyncio.gather(*self._pending_embedding_tasks, return_exceptions=True)
+
         # Test: Recall from context1 - should NOT see context2's memory
         recall_request = RecallRequest(query="data", k=10)
         recall_result = await service.recall(
@@ -195,12 +297,12 @@ class TestSingleCollectionIsolation:
             "ISOLATION FAIL: Saw context2 memory from context1!"
         )
 
-    async def test_cross_user_isolation_within_same_context(
+    async def test_shared_context_members_see_all_memories(
         self, db_session, test_workspace1, test_context1
     ):
-        """Test that user1 cannot see user2's memories (same context).
+        """Test that in shared contexts, all members see all memories.
 
-        CRITICAL: This tests user-level isolation.
+        Shared contexts are collaborative — no user-level isolation.
         """
         await ensure_kagura_memories_collection()
 
@@ -208,8 +310,8 @@ class TestSingleCollectionIsolation:
 
         # User1 creates a memory
         request1 = RememberRequest(
-            summary="User1 private note",
-            content="User1's private data",
+            summary="User1 shared note in context",
+            content="User1's shared data",
             type="note",
         )
         result1 = await service.remember(
@@ -220,10 +322,10 @@ class TestSingleCollectionIsolation:
             current_workspace_id=test_workspace1.id,
         )
 
-        # User2 creates a memory (same workspace, same context)
+        # User2 creates a memory (same workspace, same shared context)
         request2 = RememberRequest(
-            summary="User2 private note",
-            content="User2's private data",
+            summary="User2 shared note in context",
+            content="User2's shared data",
             type="note",
         )
         result2 = await service.remember(
@@ -234,8 +336,13 @@ class TestSingleCollectionIsolation:
             current_workspace_id=test_workspace1.id,
         )
 
-        # Test: User1 recalls - should NOT see user2's memory
-        recall_request = RecallRequest(query="private note", k=10)
+        # Wait for all background embedding tasks to complete before recall
+        import asyncio
+
+        await asyncio.gather(*self._pending_embedding_tasks, return_exceptions=True)
+
+        # Test: User1 recalls in shared context — should see both memories
+        recall_request = RecallRequest(query="shared note", k=10)
         recall_result = await service.recall(
             recall_request,
             user_id="user1",
@@ -243,10 +350,12 @@ class TestSingleCollectionIsolation:
             current_workspace_id=test_workspace1.id,
         )
 
-        # Assertions
+        # In shared contexts, all members' memories are visible
         memory_ids = [str(r.memory_id) for r in recall_result.results]
         assert str(result1.memory_id) in memory_ids, "User1 should see their own memory"
-        assert str(result2.memory_id) not in memory_ids, "ISOLATION FAIL: User1 saw user2's memory!"
+        assert str(result2.memory_id) in memory_ids, (
+            "User1 should also see user2's memory (shared context)"
+        )
 
     async def test_context_deletion_only_deletes_own_points(
         self, db_session, test_workspace1, test_context1, test_context2
@@ -277,6 +386,11 @@ class TestSingleCollectionIsolation:
             current_context_id=test_context2.id,
             current_workspace_id=test_workspace1.id,
         )
+
+        # Wait for all background embedding tasks to complete before deletion/recall
+        import asyncio
+
+        await asyncio.gather(*self._pending_embedding_tasks, return_exceptions=True)
 
         # Delete context1's points
         from db.qdrant import delete_context_points
@@ -311,7 +425,7 @@ class TestSingleCollectionIsolation:
         service = MemoryService(db_session)
 
         # Context1: Create 2 related memories
-        req1 = RememberRequest(summary="Node A", content="Content A", type="note")
+        req1 = RememberRequest(summary="Graph node A in context1", content="Content A", type="note")
         mem1 = await service.remember(
             req1,
             "user1",
@@ -320,7 +434,7 @@ class TestSingleCollectionIsolation:
             current_workspace_id=test_workspace1.id,
         )
 
-        req2 = RememberRequest(summary="Node B", content="Content B", type="note")
+        req2 = RememberRequest(summary="Graph node B in context1", content="Content B", type="note")
         mem2 = await service.remember(
             req2,
             "user1",
@@ -330,7 +444,7 @@ class TestSingleCollectionIsolation:
         )
 
         # Context2: Create a memory
-        req3 = RememberRequest(summary="Node C", content="Content C", type="note")
+        req3 = RememberRequest(summary="Graph node C in context2", content="Content C", type="note")
         mem3 = await service.remember(
             req3,
             "user1",
@@ -379,7 +493,7 @@ class TestSingleCollectionIsolation:
         from db.qdrant import search_memories_qdrant
 
         # Test: Missing workspace_id
-        with pytest.raises(ValueError, match="3-level isolation requires"):
+        with pytest.raises(ValueError, match="Isolation requires"):
             await search_memories_qdrant(
                 user_id="user1",
                 query_vector=[0.1] * 512,
@@ -388,7 +502,7 @@ class TestSingleCollectionIsolation:
             )
 
         # Test: Missing context_id
-        with pytest.raises(ValueError, match="3-level isolation requires"):
+        with pytest.raises(ValueError, match="Isolation requires"):
             await search_memories_qdrant(
                 user_id="user1",
                 query_vector=[0.1] * 512,
@@ -397,7 +511,7 @@ class TestSingleCollectionIsolation:
             )
 
         # Test: Missing user_id
-        with pytest.raises(ValueError, match="3-level isolation requires"):
+        with pytest.raises(ValueError, match="Isolation requires"):
             await search_memories_qdrant(
                 user_id="",  # Empty
                 query_vector=[0.1] * 512,

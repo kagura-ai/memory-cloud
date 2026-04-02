@@ -1,11 +1,14 @@
 """Tests for UserRepository."""
 
 from datetime import datetime
+from uuid import uuid4
 
 import pytest
 
 from models.auth import User
 from repositories.user import UserRepository
+
+pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 class TestUserRepository:
@@ -18,13 +21,13 @@ class TestUserRepository:
 
     @pytest.fixture
     async def sample_user(self, db_session):
-        """Create sample user in DB."""
+        """Create sample user in DB with unique identifiers to avoid collisions."""
+        uid = str(uuid4())
         user = User(
-            user_id="test_user_123",
-            email="test@example.com",
-            full_name="Test User",
+            user_id=f"test_user_{uid}",
+            email=f"test_{uid}@example.com",
+            name="Test User",
             role="user",
-            is_active=True,
             created_at=datetime.utcnow(),
         )
         db_session.add(user)
@@ -51,10 +54,10 @@ class TestUserRepository:
     @pytest.mark.asyncio
     async def test_get_by_email(self, repository, sample_user):
         """Test getting user by email."""
-        result = await repository.get_by_email("test@example.com")
+        result = await repository.get_by_email(sample_user.email)
 
         assert result is not None
-        assert result.email == "test@example.com"
+        assert result.email == sample_user.email
         assert result.id == sample_user.id
 
     @pytest.mark.asyncio
@@ -67,10 +70,10 @@ class TestUserRepository:
     @pytest.mark.asyncio
     async def test_get_by_oauth_id(self, repository, sample_user):
         """Test getting user by OAuth ID."""
-        result = await repository.get_by_oauth_id("test_user_123")
+        result = await repository.get_by_oauth_id(sample_user.user_id)
 
         assert result is not None
-        assert result.user_id == "test_user_123"
+        assert result.user_id == sample_user.user_id
         assert result.id == sample_user.id
 
     @pytest.mark.asyncio
@@ -91,14 +94,14 @@ class TestUserRepository:
     @pytest.mark.asyncio
     async def test_list_with_pagination(self, repository, db_session):
         """Test listing with pagination."""
-        # Create multiple users
+        # Create multiple users with unique IDs
         for i in range(3):
+            uid = str(uuid4())
             user = User(
-                user_id=f"user_{i}",
-                email=f"user{i}@example.com",
-                full_name=f"User {i}",
+                user_id=f"page_user_{uid}_{i}",
+                email=f"page_user_{uid}_{i}@example.com",
+                name=f"Page User {i}",
                 role="user",
-                is_active=True,
                 created_at=datetime.utcnow(),
             )
             db_session.add(user)
@@ -112,39 +115,39 @@ class TestUserRepository:
     @pytest.mark.asyncio
     async def test_create(self, repository, db_session):
         """Test creating new user."""
+        uid = str(uuid4())
         new_user = User(
-            user_id="new_user_456",
-            email="new@example.com",
-            full_name="New User",
+            user_id=f"new_user_{uid}",
+            email=f"new_{uid}@example.com",
+            name="New User",
             role="user",
-            is_active=True,
             created_at=datetime.utcnow(),
         )
 
         created = await repository.create(new_user)
 
         assert created.id is not None
-        assert created.email == "new@example.com"
+        assert created.email == new_user.email
 
         # Verify in DB
-        fetched = await repository.get_by_email("new@example.com")
+        fetched = await repository.get_by_email(new_user.email)
         assert fetched is not None
 
     @pytest.mark.asyncio
     async def test_update(self, repository, sample_user):
         """Test updating existing user."""
         # Update user
-        sample_user.full_name = "Updated Name"
+        sample_user.name = "Updated Name"
         sample_user.role = "admin"
 
-        updated = await repository.update(sample_user)
+        updated = await repository.update(sample_user.id, sample_user)
 
-        assert updated.full_name == "Updated Name"
+        assert updated.name == "Updated Name"
         assert updated.role == "admin"
 
         # Verify in DB
         fetched = await repository.get(sample_user.id)
-        assert fetched.full_name == "Updated Name"
+        assert fetched.name == "Updated Name"
 
     @pytest.mark.asyncio
     async def test_delete(self, repository, sample_user):
@@ -160,12 +163,12 @@ class TestUserRepository:
     @pytest.mark.asyncio
     async def test_email_uniqueness(self, repository, db_session):
         """Test that email must be unique."""
+        uid = str(uuid4())
         user1 = User(
-            user_id="unique_user_1",
-            email="duplicate@example.com",
-            full_name="User 1",
+            user_id=f"unique_user_1_{uid}",
+            email=f"duplicate_{uid}@example.com",
+            name="User 1",
             role="user",
-            is_active=True,
             created_at=datetime.utcnow(),
         )
         db_session.add(user1)
@@ -173,11 +176,10 @@ class TestUserRepository:
 
         # Try to create another user with same email
         user2 = User(
-            user_id="unique_user_2",
-            email="duplicate@example.com",  # Duplicate email
-            full_name="User 2",
+            user_id=f"unique_user_2_{uid}",
+            email=f"duplicate_{uid}@example.com",  # Duplicate email
+            name="User 2",
             role="user",
-            is_active=True,
             created_at=datetime.utcnow(),
         )
 
@@ -190,12 +192,12 @@ class TestUserRepository:
     @pytest.mark.asyncio
     async def test_user_id_uniqueness(self, repository, db_session):
         """Test that user_id (OAuth ID) must be unique."""
+        uid = str(uuid4())
         user1 = User(
-            user_id="duplicate_oauth_id",
-            email="user1@example.com",
-            full_name="User 1",
+            user_id=f"duplicate_oauth_{uid}",
+            email=f"user1_{uid}@example.com",
+            name="User 1",
             role="user",
-            is_active=True,
             created_at=datetime.utcnow(),
         )
         db_session.add(user1)
@@ -203,11 +205,10 @@ class TestUserRepository:
 
         # Try to create another user with same OAuth ID
         user2 = User(
-            user_id="duplicate_oauth_id",  # Duplicate OAuth ID
-            email="user2@example.com",
-            full_name="User 2",
+            user_id=f"duplicate_oauth_{uid}",  # Duplicate OAuth ID
+            email=f"user2_{uid}@example.com",
+            name="User 2",
             role="user",
-            is_active=True,
             created_at=datetime.utcnow(),
         )
 
@@ -218,30 +219,29 @@ class TestUserRepository:
             await db_session.commit()
 
     @pytest.mark.asyncio
-    async def test_active_inactive_users(self, repository, db_session):
-        """Test active and inactive users."""
-        active_user = User(
-            user_id="active_user",
-            email="active@example.com",
-            full_name="Active User",
-            role="user",
-            is_active=True,
+    async def test_users_with_different_roles(self, repository, db_session):
+        """Test users with different roles can be created and retrieved."""
+        uid = str(uuid4())
+        admin_user = User(
+            user_id=f"admin_user_{uid}",
+            email=f"admin_{uid}@example.com",
+            name="Admin User",
+            role="admin",
             created_at=datetime.utcnow(),
         )
-        inactive_user = User(
-            user_id="inactive_user",
-            email="inactive@example.com",
-            full_name="Inactive User",
+        regular_user = User(
+            user_id=f"regular_user_{uid}",
+            email=f"regular_{uid}@example.com",
+            name="Regular User",
             role="user",
-            is_active=False,
             created_at=datetime.utcnow(),
         )
-        db_session.add_all([active_user, inactive_user])
+        db_session.add_all([admin_user, regular_user])
         await db_session.commit()
 
         # Get both users
-        active = await repository.get_by_email("active@example.com")
-        inactive = await repository.get_by_email("inactive@example.com")
+        admin = await repository.get_by_email(admin_user.email)
+        regular = await repository.get_by_email(regular_user.email)
 
-        assert active.is_active is True
-        assert inactive.is_active is False
+        assert admin.role == "admin"
+        assert regular.role == "user"

@@ -66,6 +66,7 @@ async def test_remove_member_comprehensive_cleanup(db_session):
     workspace = Workspace(
         id=uuid4(),
         name=f"test-workspace-{uuid4().hex[:8]}",
+        owner_user_id=owner_id,
         plan_name="pro",
         memory_limit=100000,
         daily_api_limit=10000,
@@ -87,12 +88,14 @@ async def test_remove_member_comprehensive_cleanup(db_session):
     # 3. Create resources owned by member
 
     # 3a. Contexts created by member
+    member_resource_id = f"res-{uuid4().hex[:8]}"
     context_by_member = Context(
         id=uuid4(),
         workspace_id=workspace.id,
         name=f"member-context-{uuid4().hex[:8]}",
         created_by=member_id,
         is_private=False,
+        resource_id=member_resource_id,
     )
     context_by_owner = Context(
         id=uuid4(),
@@ -123,25 +126,27 @@ async def test_remove_member_comprehensive_cleanup(db_session):
             summary=f"Test memory {i}",
             content=f"Content {i}",
             type="note",
+            client="test",
         )
         db_session.add(memory)
 
-    # 3d. Resource token created by member
+    # 3d. Resource token created by member (resource_id matches context_by_member.resource_id
+    # so cleanup_member_resource_tokens can find and transfer it via Context.resource_id)
     resource_token = ResourceToken(
-        resource_id=f"res_{uuid4().hex[:8]}",
+        resource_id=member_resource_id,
         token_hash="test_hash_123",
         created_by=member_id,
         description="Test token",
     )
     db_session.add(resource_token)
 
-    # 3e. Pending invitation sent by member
+    # 3e. Pending invitation sent by member (token must be >= 20 chars per constraint)
     invitation = WorkspaceInvitation(
         workspace_id=workspace.id,
         email="invitee@example.com",
         role="member",
         invited_by=member_id,
-        token=f"invite_{uuid4().hex[:8]}",
+        token=f"invite_{uuid4().hex[:16]}",
     )
     db_session.add(invitation)
 
@@ -275,6 +280,7 @@ async def test_remove_member_with_no_context_memberships(db_session):
     workspace = Workspace(
         id=uuid4(),
         name=f"test-workspace-{uuid4().hex[:8]}",
+        owner_user_id=owner_id,
         plan_name="free",
         memory_limit=10000,
         daily_api_limit=1000,
@@ -333,6 +339,7 @@ async def test_remove_member_does_not_affect_other_members(db_session):
     workspace = Workspace(
         id=uuid4(),
         name=f"multi-member-workspace-{uuid4().hex[:8]}",
+        owner_user_id=owner_id,
         plan_name="pro",
         memory_limit=100000,
         daily_api_limit=10000,
@@ -412,6 +419,7 @@ async def test_cannot_remove_workspace_owner(db_session):
     workspace = Workspace(
         id=uuid4(),
         name=f"test-workspace-{uuid4().hex[:8]}",
+        owner_user_id=owner_id,
         plan_name="free",
         memory_limit=10000,
         daily_api_limit=1000,

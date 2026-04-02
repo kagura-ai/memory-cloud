@@ -93,7 +93,7 @@ class TestRateLimitMiddleware:
         mock_call_next,
     ):
         """Test tier-based rate limit for Free plan (100/min)."""
-        mock_get_plan.return_value = "free"
+        mock_get_plan.return_value = ("free", None)
         mock_increment.return_value = 50  # Within limit
         mock_check_daily.return_value = None
 
@@ -115,7 +115,7 @@ class TestRateLimitMiddleware:
         mock_call_next,
     ):
         """Test that exceeding rate limit returns 429."""
-        mock_get_plan.return_value = "free"
+        mock_get_plan.return_value = ("free", None)
         mock_increment.return_value = 101  # Exceeded (Free: 100/min)
 
         response = await middleware.dispatch(mock_request, mock_call_next)
@@ -141,7 +141,7 @@ class TestRateLimitMiddleware:
     ):
         """Test endpoint override for auth endpoints (10/min)."""
         mock_request.url.path = "/api/v1/auth/me"
-        mock_get_plan.return_value = "pro"  # Pro plan: 1000/min normally
+        mock_get_plan.return_value = ("pro", "ws-123")  # Pro plan: 1000/min normally
         mock_increment.return_value = 5  # Within auth limit (10/min)
         mock_check_daily.return_value = None
 
@@ -165,7 +165,7 @@ class TestRateLimitMiddleware:
     ):
         """Test endpoint override for context endpoints (50/min)."""
         mock_request.url.path = "/api/v1/contexts"
-        mock_get_plan.return_value = "free"  # Free plan: 100/min normally
+        mock_get_plan.return_value = ("free", None)  # Free plan: 100/min normally
         mock_increment.return_value = 30  # Within context limit (50/min)
         mock_check_daily.return_value = None
 
@@ -188,7 +188,7 @@ class TestRateLimitMiddleware:
         """Test that Redis failures don't block requests (fail-open)."""
         from utils.exceptions import RedisError
 
-        mock_get_plan.return_value = "free"
+        mock_get_plan.return_value = ("free", None)
         mock_increment.side_effect = RedisError("Redis connection failed")
 
         response = await middleware.dispatch(mock_request, mock_call_next)
@@ -199,12 +199,10 @@ class TestRateLimitMiddleware:
         assert "X-RateLimit-Limit" not in response.headers
 
     @pytest.mark.asyncio
-    @patch.object(RateLimitMiddleware, "_get_user_plan")
-    async def test_get_user_plan_with_workspace(self, mock_db):
-        """Test _get_user_plan retrieves workspace plan."""
+    async def test_get_user_plan_with_workspace(self):
+        """Test _get_user_plan retrieves workspace plan and workspace_id."""
         middleware = RateLimitMiddleware(MagicMock())
 
-        # Mock database query results
         with patch("api.middleware.rate_limit.get_db") as mock_get_db_func:
             mock_db_session = AsyncMock()
 
@@ -223,9 +221,9 @@ class TestRateLimitMiddleware:
 
             mock_get_db_func.return_value = mock_db_gen()
 
-            plan = await middleware._get_user_plan("test_user")
+            result = await middleware._get_user_plan("test_user")
 
-            assert plan == "pro"
+            assert result == ("pro", "workspace-uuid-123")
             assert mock_db_session.close.called
 
     @pytest.mark.asyncio
@@ -244,7 +242,9 @@ class TestRateLimitMiddleware:
         mock_increment.return_value = 500  # Within MCP limit (1000/day)
 
         # Should not raise
-        await middleware._check_daily_quota("user123", "/api/v1/memory/remember", PlanName.FREE)
+        await middleware._check_daily_quota(
+            "user123", "/api/v1/memory/remember", PlanName.FREE, None
+        )
 
         # Check that MCP key was used
         call_args = mock_increment.call_args
@@ -266,7 +266,7 @@ class TestRateLimitMiddleware:
 
         # Free plan: REST API disabled
         with pytest.raises(QuotaExceededError, match="REST API is not available on Free plan"):
-            await middleware._check_daily_quota("user123", "/api/v1/users/me", PlanName.FREE)
+            await middleware._check_daily_quota("user123", "/api/v1/users/me", PlanName.FREE, None)
 
     @pytest.mark.asyncio
     @patch("api.middleware.rate_limit.increment_counter")
@@ -284,4 +284,6 @@ class TestRateLimitMiddleware:
         mock_increment.return_value = 1001  # Exceeded MCP limit (1000/day)
 
         with pytest.raises(QuotaExceededError, match="Daily MCP quota exceeded"):
-            await middleware._check_daily_quota("user123", "/api/v1/memory/remember", PlanName.FREE)
+            await middleware._check_daily_quota(
+                "user123", "/api/v1/memory/remember", PlanName.FREE, None
+            )

@@ -4,6 +4,8 @@ Issue #335: Verify all migrations can be applied and rolled back cleanly.
 Requires a real PostgreSQL database (TEST_DATABASE_URL).
 """
 
+import os
+
 from alembic.config import Config
 
 from alembic import command
@@ -13,15 +15,41 @@ ALEMBIC_INI = "alembic.ini"
 
 def _get_alembic_config() -> Config:
     """Create Alembic config pointing to test database."""
-    import os
-
     config = Config(ALEMBIC_INI)
     # Override with test database URL if available
     test_url = os.getenv("TEST_DATABASE_URL")
     if test_url:
-        # Alembic needs the URL in its config
-        config.set_main_option("sqlalchemy.url", test_url)
+        # Alembic needs sync URL (not asyncpg)
+        sync_url = test_url.replace("+asyncpg", "")
+        config.set_main_option("sqlalchemy.url", sync_url)
     return config
+
+
+def _reset_alembic_state():
+    """Drop alembic_version and all tables so upgrade starts clean.
+
+    Needed when conftest.py create_all has already created tables
+    in the same pytest session (session-scoped fixture conflict).
+
+    Safety: refuses to run unless the DB name ends with '_test'.
+    """
+    from sqlalchemy import create_engine, text
+
+    test_url = os.getenv(
+        "TEST_DATABASE_URL",
+        "postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test",
+    )
+    # Safety guard: only allow DROP SCHEMA on databases ending with '_test'
+    db_name = test_url.rsplit("/", 1)[-1].split("?")[0]
+    if not db_name.endswith("_test"):
+        raise RuntimeError(f"Refusing to reset non-test database: {db_name}")
+
+    sync_url = test_url.replace("+asyncpg", "")
+    engine = create_engine(sync_url)
+    with engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+    engine.dispose()
 
 
 class TestAlembicMigrations:
@@ -29,6 +57,7 @@ class TestAlembicMigrations:
 
     def test_upgrade_to_head(self):
         """All migrations apply without error."""
+        _reset_alembic_state()
         config = _get_alembic_config()
         command.upgrade(config, "head")
 
@@ -49,7 +78,7 @@ class TestAlembicMigrations:
     def test_downgrade_to_base_and_upgrade(self):
         """Full rollback to baseline and re-apply works."""
         config = _get_alembic_config()
-        # Downgrade to baseline (first revision)
-        command.downgrade(config, "2c882a9c8c74")
+        # Downgrade to baseline (first revision: 157247e0df86)
+        command.downgrade(config, "157247e0df86")
         # Re-upgrade to head
         command.upgrade(config, "head")
