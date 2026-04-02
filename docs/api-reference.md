@@ -249,7 +249,7 @@ Search memories using Hybrid Search (60% semantic + 40% BM25) with optional Neur
     "tags": ["python", "auth"],
     "importance": {"gte": 0.7}
   },
-  "use_rerank": true
+  "use_rerank": false
 }
 ```
 
@@ -260,7 +260,7 @@ Search memories using Hybrid Search (60% semantic + 40% BM25) with optional Neur
 | `query` | string | Yes | Natural language search query |
 | `k` | integer | No | Number of results (default: 5, max: 100) |
 | `filters` | object | No | Filter by type, tags, importance |
-| `use_rerank` | boolean | No | Enable Cohere reranking (default: true) |
+| `use_rerank` | boolean | No | Enable reranking (default: false). Requires Voyage/Cohere API key. |
 
 **Response:**
 
@@ -288,7 +288,7 @@ curl -X POST http://localhost:8080/api/v1/memory/recall \
   -d '{
     "query": "neural memory implementation",
     "k": 5,
-    "use_rerank": true
+    "use_rerank": false
   }'
 ```
 
@@ -643,7 +643,7 @@ Search memories.
   "arguments": {
     "query": "How to implement OAuth2?",
     "k": 5,
-    "use_rerank": true
+    "use_rerank": false
   }
 }
 ```
