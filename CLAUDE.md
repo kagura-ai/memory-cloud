@@ -59,7 +59,7 @@ Comment `/review` on the PR to run AI review + quality checks via GitHub Actions
 - [SECURITY.md](SECURITY.md) — Vulnerability reporting, security design
 - `.claude/rules/` — Coding standards (auto-loaded by file path)
 - `.claude/rules/development-workflow.md` — Development flow, commit discipline, PR rules (auto-loaded)
-- `.claude/commands/` — Slash commands (`/test`, `/quality`, `/self-review`, `/recall`, `/remember`, `/issue-start`, `/self-maint`, `/api-docs-audit`, `/workflow`, `/release`, `/guide`, `/setup`, `/docker`, `/admin`, `/mcp-smoke-test`)
+- `.claude/commands/` — Slash commands (`/test`, `/quality`, `/self-review`, `/recall`, `/remember`, `/issue-start`, `/self-maint`, `/api-docs-audit`, `/workflow`, `/release`, `/guide`, `/setup`, `/docker`, `/admin`, `/mcp-smoke-test`, `/session-summary`)
 - `/simplify` — Built-in skill (not a local command file)
 - `.claude/agents/` — Specialized agents (`code-reviewer`, `test-runner`)
 - `docs/` — Detailed documentation (concepts, architecture, API reference)

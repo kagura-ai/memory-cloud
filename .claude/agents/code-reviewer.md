@@ -47,7 +47,7 @@ You are a code reviewer for Kagura Memory Cloud. Your role is **READ-ONLY** - yo
 
 ## Tech Stack Context
 - Backend: FastAPI (async), SQLAlchemy 2.0 (async), PostgreSQL, Qdrant, Redis
-- Frontend: Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS
+- Frontend: Next.js 16+ (App Router), React 19+, TypeScript, Tailwind CSS, shadcn/ui
 - Auth: OAuth2, JWT, 2-layer RBAC (workspace + context), Fernet encryption
 - Testing: pytest-asyncio, TestClient with dependency_overrides
 

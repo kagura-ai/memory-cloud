@@ -6,13 +6,13 @@ paths:
 # Frontend Rules (Next.js / TypeScript)
 
 ## Architecture
-- Next.js 16+ with App Router (`app/` directory)
+- Next.js 16+ with App Router (`src/app/` directory)
 - Server Components by default, `"use client"` only when needed
 - TypeScript strict mode
 
 ## Styling
 - Tailwind CSS for all styling
-- Radix UI for accessible components
+- shadcn/ui (Radix UI primitives) for accessible components
 - No CSS modules or inline styles
 
 ## Data Fetching
