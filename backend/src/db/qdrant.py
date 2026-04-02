@@ -169,7 +169,7 @@ def _build_date_filter_conditions(filters: dict[str, Any]) -> list[FieldConditio
 
 def _build_search_filter(
     workspace_id: str,
-    context_id: str,
+    context_id: str | list[str],
     user_id: str,
     is_shared_context: bool = False,
     filters: dict[str, Any] | None = None,
@@ -180,7 +180,7 @@ def _build_search_filter(
 
     Args:
         workspace_id: Workspace ID (isolation)
-        context_id: Context ID (isolation)
+        context_id: Single context ID or list of context IDs (Issue #81: cross-context recall)
         user_id: User ID (isolation, skipped for shared contexts)
         is_shared_context: If True, skip user_id filter
         filters: Optional metadata filters (scope, type, importance, tags, date ranges)
@@ -190,8 +190,13 @@ def _build_search_filter(
     """
     conditions: list[Condition] = [
         FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
-        FieldCondition(key="context_id", match=MatchValue(value=context_id)),
     ]
+
+    # Issue #81: Support single or multiple context IDs
+    if isinstance(context_id, list):
+        conditions.append(FieldCondition(key="context_id", match=MatchAny(any=context_id)))
+    else:
+        conditions.append(FieldCondition(key="context_id", match=MatchValue(value=context_id)))
 
     if not is_shared_context:
         conditions.append(FieldCondition(key="user_id", match=MatchValue(value=user_id)))
@@ -387,7 +392,7 @@ async def search_memories_qdrant(
     user_id: str,
     query_vector: list[float],
     workspace_id: str,
-    context_id: str,
+    context_id: str | list[str],
     limit: int = 10,
     filters: dict[str, Any] | None = None,
     is_shared_context: bool = False,  # NEW: Team collaboration support
@@ -396,12 +401,13 @@ async def search_memories_qdrant(
     """Semantic search in Qdrant with workspace-aware isolation.
 
     Single Collection Migration: Always uses "kagura_memories" collection.
+    Issue #81: context_id can be a single string or list for cross-context recall.
 
     Args:
         user_id: User ID (required for isolation)
         query_vector: Query embedding vector
         workspace_id: Workspace ID (required for isolation)
-        context_id: Context ID (required for isolation)
+        context_id: Context ID or list of context IDs (Issue #81)
         limit: Max results
         filters: Optional filters (scope, type, importance range, etc.)
         is_shared_context: If True, skip user_id filter (workspace members can access)
@@ -412,10 +418,6 @@ async def search_memories_qdrant(
     Raises:
         QdrantError: If search fails
         ValueError: If workspace_id, context_id, or user_id is missing
-
-    Note:
-        Single Collection Migration: workspace_id, context_id, user_id are required
-        for isolation filtering. user_id filter is skipped for shared contexts.
     """
     client = get_qdrant_client()
 
@@ -428,7 +430,11 @@ async def search_memories_qdrant(
 
     # Issue #273 H-4: Validate UUID format to prevent filter injection
     _validate_uuid_format(workspace_id, "workspace_id")
-    _validate_uuid_format(context_id, "context_id")
+    if isinstance(context_id, list):
+        for cid in context_id:
+            _validate_uuid_format(cid, "context_id")
+    else:
+        _validate_uuid_format(context_id, "context_id")
 
     # Build filter outside try/except so ValueError propagates as 4xx, not QdrantError
     qdrant_filter = _build_search_filter(
@@ -540,7 +546,7 @@ async def search_memories_fulltext(
     user_id: str,
     query: str,
     workspace_id: str,
-    context_id: str,
+    context_id: str | list[str],
     limit: int = 10,
     filters: dict[str, Any] | None = None,
     is_shared_context: bool = False,
@@ -549,13 +555,13 @@ async def search_memories_fulltext(
     """BM25 keyword search using Qdrant native sparse vectors.
 
     Issue #16: Replaces MatchText + manual TF scoring with native BM25.
-    Qdrant handles IDF, TF saturation, and document length normalization.
+    Issue #81: context_id can be a single string or list for cross-context recall.
 
     Args:
         user_id: User ID (required for isolation)
         query: Search query (natural language)
         workspace_id: Workspace ID (required for isolation)
-        context_id: Context ID (required for isolation)
+        context_id: Context ID or list of context IDs (Issue #81)
         limit: Max results
         filters: Optional filters (scope, type, importance, tags)
         is_shared_context: If True, skip user_id filter
@@ -577,7 +583,11 @@ async def search_memories_fulltext(
         )
 
     _validate_uuid_format(workspace_id, "workspace_id")
-    _validate_uuid_format(context_id, "context_id")
+    if isinstance(context_id, list):
+        for cid in context_id:
+            _validate_uuid_format(cid, "context_id")
+    else:
+        _validate_uuid_format(context_id, "context_id")
 
     # Build filter outside try/except so ValueError propagates as 4xx, not QdrantError
     qdrant_filter = _build_search_filter(

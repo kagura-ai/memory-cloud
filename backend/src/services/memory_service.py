@@ -581,6 +581,7 @@ class MemoryService:
         user_id: str,
         current_context_id: UUID | None = None,
         current_workspace_id: UUID | None = None,  # NEW: Workspace ID (Issue #146)
+        context_ids: list[UUID] | None = None,  # Issue #81: cross-context recall
     ) -> RecallResponse:
         """Search memories with Hybrid Search + Neural Memory.
 
@@ -629,13 +630,18 @@ class MemoryService:
         # Check if Neural Memory is enabled
         neural_enabled = os.getenv("ENABLE_NEURAL_MEMORY", "false").lower() == "true"
 
+        # Issue #81: Cross-context recall — pass list of context IDs to search service
+        search_context_id: str | list[str] = str(current_context_id)
+        if context_ids:
+            search_context_id = [str(cid) for cid in context_ids]
+
         # 1. Primary Retrieval: Hybrid Search (Semantic + BM25)
         candidates_k = request.k * 4 if neural_enabled else request.k
         search_results = await self.search_service.hybrid_search(
             query=request.query,
             user_id=user_id,
             workspace_id=str(current_workspace_id),
-            context_id=str(current_context_id),
+            context_id=search_context_id,
             k=candidates_k,
             use_rerank=request.use_rerank,
             filters=request.filters,

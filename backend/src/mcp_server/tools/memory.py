@@ -215,6 +215,13 @@ async def handle_recall(
     if "query" not in args:
         return _error_response("missing_fields", "Missing required field: query")
 
+    # Issue #81: Require either context_id or context_ids
+    if "context_id" not in args and "context_ids" not in args:
+        return _error_response(
+            "missing_fields",
+            "Missing required field: context_id or context_ids. Use list_contexts() to find available IDs.",
+        )
+
     from db.base import get_db
     from models.schemas import RecallRequest
     from services.memory_service import MemoryService
@@ -230,8 +237,42 @@ async def handle_recall(
     start_time = time.time()
     async for db in get_db():
         try:
-            current_context_id = _resolve_context_id(args["context_id"])
-            current_context = await _resolve_context(db, user_id, current_context_id)
+            # Issue #81: Cross-context recall — context_ids overrides context_id
+            context_ids_arg = args.get("context_ids")
+            cross_context_ids: list[UUID] | None = None
+
+            if isinstance(context_ids_arg, list) and context_ids_arg:
+                # Multi-context mode
+                cross_context_ids = [_resolve_context_id(cid) for cid in context_ids_arg]
+                current_context_id = cross_context_ids[0]
+                # Validate access to all contexts, keep primary context object
+                current_context = await _resolve_context(db, user_id, current_context_id)
+                for cid in cross_context_ids[1:]:
+                    await _resolve_context(db, user_id, cid)
+
+                # Validate all contexts use the same embedding model
+                from repositories.config_repository import ContextSearchConfigRepository
+
+                config_repo = ContextSearchConfigRepository(db)
+                primary_config = await config_repo.create_or_get(current_context_id)
+                for cid in cross_context_ids[1:]:
+                    cid_config = await config_repo.create_or_get(cid)
+                    if cid_config.embedding_model != primary_config.embedding_model:
+                        return _error_response(
+                            "embedding_model_mismatch",
+                            f"All contexts must use the same embedding model. "
+                            f"Context {cid} uses '{cid_config.embedding_model}' "
+                            f"but primary uses '{primary_config.embedding_model}'.",
+                        )
+            else:
+                # Single context mode (backward compatible)
+                if "context_id" not in args:
+                    return _error_response(
+                        "missing_fields",
+                        "Missing required field: context_id (or provide context_ids with 2+ UUIDs).",
+                    )
+                current_context_id = _resolve_context_id(args["context_id"])
+                current_context = await _resolve_context(db, user_id, current_context_id)
 
             service = MemoryService(db)
             result = await execute_with_timeout(
@@ -240,6 +281,7 @@ async def handle_recall(
                     user_id=user_id,
                     current_context_id=current_context_id,
                     current_workspace_id=workspace_id,
+                    context_ids=cross_context_ids,
                 ),
                 operation_name="recall",
             )
