@@ -908,6 +908,9 @@ async def copy_context_points(
                 new_id = memory_id_mapping.get(old_id)
                 if not new_id:
                     continue
+                if point.vector is None:
+                    logger.warning("skipping_point_without_vector", point_id=old_id)
+                    continue
 
                 new_payload = dict(point.payload) if point.payload else {}
                 new_payload["context_id"] = target_context_id

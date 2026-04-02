@@ -593,15 +593,15 @@ class ContextService:
                 "Source context is locked. Unlock it first via update_context(is_locked=false)."
             )
 
-        # Validate same embedding model
-        source_config = await self.db.execute(
-            select(ContextSearchConfig).where(ContextSearchConfig.context_id == source_context_id)
+        # Validate same embedding model (single query for both configs)
+        cfg_result = await self.db.execute(
+            select(ContextSearchConfig).where(
+                ContextSearchConfig.context_id.in_([source_context_id, target_context_id])
+            )
         )
-        target_config = await self.db.execute(
-            select(ContextSearchConfig).where(ContextSearchConfig.context_id == target_context_id)
-        )
-        src_cfg = source_config.scalar_one_or_none()
-        tgt_cfg = target_config.scalar_one_or_none()
+        configs = {row.context_id: row for row in cfg_result.scalars().all()}
+        src_cfg = configs.get(source_context_id)
+        tgt_cfg = configs.get(target_context_id)
 
         src_model = src_cfg.embedding_model if src_cfg else "text-embedding-3-small"
         tgt_model = tgt_cfg.embedding_model if tgt_cfg else "text-embedding-3-small"
@@ -661,19 +661,23 @@ class ContextService:
 
         await self.db.flush()
 
-        # Copy Qdrant points
+        # Copy Qdrant points — rollback PG on failure for consistency
         collection = get_collection_name(src_model, src_dims)
-        copied = await copy_context_points(
-            workspace_id=str(source.workspace_id),
-            source_context_id=str(source_context_id),
-            target_context_id=str(target_context_id),
-            memory_id_mapping=memory_id_mapping,
-            collection_name=collection,
-        )
+        try:
+            copied = await copy_context_points(
+                workspace_id=str(source.workspace_id),
+                source_context_id=str(source_context_id),
+                target_context_id=str(target_context_id),
+                memory_id_mapping=memory_id_mapping,
+                collection_name=collection,
+            )
+        except Exception:
+            await self.db.rollback()
+            raise
 
-        # Optional: delete source
+        # Optional: delete source (_commit=False for atomic transaction)
         if delete_source:
-            await self.delete_context(user_id, source_context_id)
+            await self.delete_context(user_id, source_context_id, _commit=False)
 
         await self.db.commit()
 
@@ -695,6 +699,7 @@ class ContextService:
         self,
         user_id: str,
         context_id: UUID,
+        _commit: bool = True,
     ) -> "Context":
         """Soft-delete context and its memories.
 
@@ -777,7 +782,8 @@ class ContextService:
         # Issue #84: Soft-delete context record (previously hard-deleted)
         context.deleted_at = utcnow()
         context.deleted_by = user_id
-        await self.db.commit()
+        if _commit:
+            await self.db.commit()
 
         logger.info(
             "context_soft_deleted",
