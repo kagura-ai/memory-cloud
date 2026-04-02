@@ -10,7 +10,11 @@ At the end of a development session, or when switching to a different task. Capt
 
 ## Steps
 
-### 1. Identify what to remember
+### 1. Identify related GitHub issues
+
+Review the conversation and collect all GitHub issue numbers that were worked on, referenced, or discussed. Use `gh issue view <number>` if needed to confirm titles.
+
+### 2. Identify what to remember
 
 Review the conversation and categorize knowledge into:
 
@@ -23,7 +27,7 @@ Review the conversation and categorize knowledge into:
 | `learning` | SDK benchmark results, performance findings, tool limitations | 0.6-0.8 |
 | `troubleshooting` | Error solutions, workarounds, environment-specific fixes | 0.5-0.7 |
 
-### 2. Get the target context
+### 3. Get the target context
 
 ```
 list_contexts()
@@ -31,7 +35,7 @@ list_contexts()
 
 Ask the user which context to save to if unclear. Default: the project's development context.
 
-### 3. Save each knowledge item
+### 4. Save each knowledge item
 
 For each item, use `remember` with:
 
@@ -39,10 +43,11 @@ For each item, use `remember` with:
 - **content**: Full details — what, why, how, evidence
 - **type**: From the table above
 - **importance**: Based on reusability across future sessions
-- **tags**: `category:{domain}` + entity tags + writing variations for Japanese
+- **tags**: `category:{domain}` + entity tags + writing variations for Japanese + `issue:#N` for each related issue
 - **context_summary**: Why this matters, when to recall it
+- **content**: Include a `Related issues: #N, #M` line at the end linking to relevant GitHub issues
 
-### 4. Guidelines
+### 5. Guidelines
 
 - **Write conclusions, not narratives** — "P2 failed because tags inflate BM25 scores" not "We tried P2 and it didn't work"
 - **Include numbers** — "P@1: 76% → 89%" not "significant improvement"
@@ -51,12 +56,14 @@ For each item, use `remember` with:
 - **Skip ephemeral details** — don't save "ran make lint", do save "lint requires ruff check from project root"
 - **Include rejected approaches** — knowing what NOT to do is as valuable as what to do
 
-### 5. Report
+### 6. Report
 
 After saving, print a summary:
 
 ```
 ## Session Knowledge Saved
+
+Related issues: #12, #34
 
 | # | Type | Summary | Importance |
 |---|------|---------|------------|
