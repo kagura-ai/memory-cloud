@@ -28,12 +28,11 @@ async def reset_redis_singleton():
     redis_module._redis_client = None
     yield
     # Close and reset after test to clean up
-    if redis_module._redis_client is not None:
-        try:
-            await redis_module._redis_client.aclose()
-        except Exception as exc:
-            print(f"Warning: Redis cleanup failed: {exc}")
-        redis_module._redis_client = None
+    try:
+        await redis_module.close_redis()
+    except Exception as exc:
+        print(f"Warning: Redis cleanup failed: {exc}")
+    redis_module._redis_client = None
 
 
 @pytest_asyncio.fixture

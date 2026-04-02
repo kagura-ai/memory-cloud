@@ -13,15 +13,20 @@ from models.memory import Base as MemoryBase
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Set asyncio_default_test_loop_scope to session to match fixture loop scope.
+    """Validate asyncio_default_test_loop_scope matches fixture loop scope.
 
-    Without this, async test methods run in function-scoped loops (default),
-    while session-scoped fixtures (async_engine, db_session) use the session loop.
-    This mismatch causes 'Future attached to a different loop' errors from asyncpg.
+    Session-scoped fixtures (async_engine, db_session) require session-scoped loops.
+    Configure via pyproject.toml: asyncio_default_test_loop_scope = "session"
     """
-    # Override the ini cache directly — config.override_ini is not available at configure time
-    if hasattr(config, "_inicache"):
-        config._inicache["asyncio_default_test_loop_scope"] = "session"
+    try:
+        scope = config.getini("asyncio_default_test_loop_scope")
+    except ValueError:
+        return
+    if scope != "session":
+        raise pytest.UsageError(
+            "asyncio_default_test_loop_scope must be 'session' in pyproject.toml "
+            "to match session-scoped async fixtures (async_engine, db_session)."
+        )
 
 
 # Test database URL — default to localhost (Docker port-mapped)

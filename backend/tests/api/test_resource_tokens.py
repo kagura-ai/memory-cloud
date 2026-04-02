@@ -10,10 +10,11 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# Skip all tests in this module — requires integration test fixtures
+# Mark as expected failure — requires integration test fixtures
 # (async_client, authenticated_user) that are not yet implemented.
-pytestmark = pytest.mark.skip(
-    reason="Integration test fixtures not available (async_client, authenticated_user)"
+pytestmark = pytest.mark.xfail(
+    strict=True,
+    reason="Integration test fixtures not available (async_client, authenticated_user)",
 )
 
 

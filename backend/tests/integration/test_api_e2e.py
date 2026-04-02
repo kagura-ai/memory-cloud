@@ -188,9 +188,10 @@ class TestAPIEndpoints:
         Without it the endpoint returns 422 (validation error), not 500.
         """
         # Make request without context_id — expect 422 (missing required query param)
+        # or 401/403 if auth middleware intercepts first
         response = client.get("/api/v1/graph/data")
-        assert response.status_code in [200, 401, 403, 404, 422], (
-            f"Unexpected status {response.status_code}: {response.text}"
+        assert response.status_code in [401, 403, 422], (
+            f"Expected auth or validation error, got {response.status_code}: {response.text}"
         )
 
     def test_graph_stats_degree_ranking_uses_edge_count(self, client):
@@ -202,8 +203,9 @@ class TestAPIEndpoints:
         """
         response = client.get("/api/v1/graph/stats")
 
-        assert response.status_code in [200, 401, 403, 404, 422], (
-            f"Unexpected status {response.status_code}: {response.text}"
+        # context_id is optional for stats, but auth middleware may intercept
+        assert response.status_code in [200, 401, 403, 422], (
+            f"Expected success or auth error, got {response.status_code}: {response.text}"
         )
 
         if response.status_code == 200:
