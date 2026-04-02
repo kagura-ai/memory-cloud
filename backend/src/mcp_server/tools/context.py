@@ -703,3 +703,76 @@ async def handle_delete_context(
             return _error_response("delete_context_error", str(e))
 
     return _error_response("internal_error", "Database session unavailable")
+
+
+async def handle_merge_contexts(
+    args: dict[str, Any], user_id: str, workspace_id: UUID | None
+) -> list[TextContent]:
+    """Merge memories from source context into target context (Issue #90)."""
+    if "source_id" not in args or "target_id" not in args:
+        return _error_response("missing_fields", "Missing required fields: source_id and target_id")
+
+    from db.base import get_db
+
+    start_time = time.time()
+    async for db in get_db():
+        try:
+            from services.context_service import ContextService
+
+            source_id = _resolve_context_id(args["source_id"])
+            target_id = _resolve_context_id(args["target_id"])
+            delete_source = args.get("delete_source", False)
+
+            service = ContextService(db)
+            result = await execute_with_timeout(
+                service.merge_contexts(
+                    user_id=user_id,
+                    source_context_id=source_id,
+                    target_context_id=target_id,
+                    delete_source=bool(delete_source),
+                ),
+                operation_name="merge_contexts",
+            )
+
+            await _log_tool_usage(
+                db,
+                user_id,
+                "merge_contexts",
+                start_time,
+                200,
+                str(source_id),
+                workspace_id,
+            )
+            await db.commit()
+
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "status": "success",
+                            "message": f"Merged {result['merged']} memories from source to target.",
+                            **result,
+                            "delete_source": delete_source,
+                        }
+                    ),
+                )
+            ]
+        except _ContextNotFoundError as e:
+            await db.rollback()
+            return e.to_response()
+        except Exception as e:
+            await db.rollback()
+            await _log_tool_usage(
+                db,
+                user_id,
+                "merge_contexts",
+                start_time,
+                500,
+                args.get("source_id"),
+                workspace_id,
+            )
+            logger.error("merge_contexts_failed", exc_info=True)
+            return _error_response("merge_contexts_error", str(e))
+
+    return _error_response("internal_error", "Database session unavailable")

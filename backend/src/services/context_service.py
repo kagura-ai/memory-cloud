@@ -544,6 +544,153 @@ class ContextService:
             new_is_private=new_is_private,
         )
 
+    async def merge_contexts(
+        self,
+        user_id: str,
+        source_context_id: UUID,
+        target_context_id: UUID,
+        delete_source: bool = False,
+    ) -> dict:
+        """Merge memories from source context into target context (Issue #90).
+
+        Direct copy approach: no re-embedding needed for same embedding model.
+        Copies memories in PostgreSQL and Qdrant points with updated context_id.
+
+        Args:
+            user_id: User ID (must own both contexts)
+            source_context_id: Context to copy memories from
+            target_context_id: Context to copy memories into
+            delete_source: Soft-delete source after merge
+
+        Returns:
+            Dict with merge stats (merged count)
+
+        Raises:
+            NotFoundException: If context not found
+            ValidationError: If contexts use different embedding models or other constraint violation
+        """
+        from uuid import uuid4
+
+        from db.qdrant import copy_context_points, get_collection_name
+        from models.config import ContextSearchConfig
+        from models.memory import Memory
+
+        # Validate access to both contexts
+        source = await self.get_context(user_id, source_context_id)
+        target = await self.get_context(user_id, target_context_id)
+
+        # Same workspace required
+        if source.workspace_id != target.workspace_id:
+            raise ValidationError("Source and target contexts must be in the same workspace.")
+
+        # Same context check
+        if source_context_id == target_context_id:
+            raise ValidationError("Source and target contexts must be different.")
+
+        # Locked source with delete_source
+        if delete_source and source.is_locked:
+            raise ValidationError(
+                "Source context is locked. Unlock it first via update_context(is_locked=false)."
+            )
+
+        # Validate same embedding model
+        source_config = await self.db.execute(
+            select(ContextSearchConfig).where(ContextSearchConfig.context_id == source_context_id)
+        )
+        target_config = await self.db.execute(
+            select(ContextSearchConfig).where(ContextSearchConfig.context_id == target_context_id)
+        )
+        src_cfg = source_config.scalar_one_or_none()
+        tgt_cfg = target_config.scalar_one_or_none()
+
+        src_model = src_cfg.embedding_model if src_cfg else "text-embedding-3-small"
+        tgt_model = tgt_cfg.embedding_model if tgt_cfg else "text-embedding-3-small"
+        src_dims = src_cfg.embedding_dimensions if src_cfg else 512
+        tgt_dims = tgt_cfg.embedding_dimensions if tgt_cfg else 512
+
+        if src_model != tgt_model or src_dims != tgt_dims:
+            raise ValidationError(
+                f"Embedding model mismatch: source uses {src_model}({src_dims}d), "
+                f"target uses {tgt_model}({tgt_dims}d). "
+                "Only same-model merge is supported."
+            )
+
+        # Fetch source memories (non-deleted, with successful embeddings)
+        result = await self.db.execute(
+            select(Memory).where(
+                Memory.context_id == source_context_id,
+                Memory.deleted_at.is_(None),
+                Memory.embedding_status == "success",
+            )
+        )
+        source_memories = result.scalars().all()
+
+        if not source_memories:
+            return {
+                "merged": 0,
+                "source_id": str(source_context_id),
+                "target_id": str(target_context_id),
+            }
+
+        # Build ID mapping and copy memories in PostgreSQL
+        memory_id_mapping: dict[str, str] = {}
+
+        for mem in source_memories:
+            new_id = uuid4()
+            memory_id_mapping[str(mem.id)] = str(new_id)
+
+            new_mem = Memory(
+                id=new_id,
+                user_id=mem.user_id,
+                workspace_id=mem.workspace_id,
+                context_id=target_context_id,
+                summary=mem.summary,
+                context_summary=mem.context_summary,
+                content=mem.content,
+                details=mem.details,
+                type=mem.type,
+                importance=mem.importance,
+                tags=mem.tags,
+                scope=mem.scope,
+                client=mem.client,
+                embedding_status="success",
+                created_at=mem.created_at,
+                updated_at=utcnow(),
+            )
+            self.db.add(new_mem)
+
+        await self.db.flush()
+
+        # Copy Qdrant points
+        collection = get_collection_name(src_model, src_dims)
+        copied = await copy_context_points(
+            workspace_id=str(source.workspace_id),
+            source_context_id=str(source_context_id),
+            target_context_id=str(target_context_id),
+            memory_id_mapping=memory_id_mapping,
+            collection_name=collection,
+        )
+
+        # Optional: delete source
+        if delete_source:
+            await self.delete_context(user_id, source_context_id)
+
+        await self.db.commit()
+
+        logger.info(
+            "contexts_merged",
+            source_context_id=str(source_context_id),
+            target_context_id=str(target_context_id),
+            merged=copied,
+            delete_source=delete_source,
+        )
+
+        return {
+            "merged": copied,
+            "source_id": str(source_context_id),
+            "target_id": str(target_context_id),
+        }
+
     async def delete_context(
         self,
         user_id: str,

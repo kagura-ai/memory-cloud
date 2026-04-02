@@ -854,6 +854,107 @@ async def ensure_kagura_memories_collection(
         raise QdrantError(f"Failed to create kagura_memories collection: {e}") from e
 
 
+async def copy_context_points(
+    workspace_id: str,
+    source_context_id: str,
+    target_context_id: str,
+    memory_id_mapping: dict[str, str],
+    collection_name: str = KAGURA_MEMORIES_COLLECTION,
+    batch_size: int = 100,
+) -> int:
+    """Copy Qdrant points from source context to target context (Issue #90).
+
+    Retrieves points by ID, creates new points with updated context_id and new IDs.
+    Processes in batches for memory efficiency.
+
+    Args:
+        workspace_id: Workspace ID
+        source_context_id: Source context ID
+        target_context_id: Target context ID
+        memory_id_mapping: {old_memory_id -> new_memory_id} mapping
+        collection_name: Qdrant collection name
+        batch_size: Points per batch
+
+    Returns:
+        Number of points copied
+
+    Raises:
+        QdrantError: If copy fails
+    """
+    client = get_qdrant_client()
+    copied = 0
+
+    try:
+        old_ids = list(memory_id_mapping.keys())
+
+        for i in range(0, len(old_ids), batch_size):
+            batch_ids = old_ids[i : i + batch_size]
+
+            # Fetch existing points with vectors
+            points = await client.retrieve(
+                collection_name=collection_name,
+                ids=batch_ids,
+                with_vectors=True,
+                with_payload=True,
+            )
+
+            if not points:
+                continue
+
+            # Build new points with updated context_id and new IDs
+            new_points = []
+            for point in points:
+                old_id = str(point.id)
+                new_id = memory_id_mapping.get(old_id)
+                if not new_id:
+                    continue
+
+                new_payload = dict(point.payload) if point.payload else {}
+                new_payload["context_id"] = target_context_id
+
+                new_points.append(
+                    PointStruct(
+                        id=new_id,
+                        vector=point.vector,
+                        payload=new_payload,
+                    )
+                )
+
+            if new_points:
+                await client.upsert(
+                    collection_name=collection_name,
+                    points=new_points,
+                )
+                copied += len(new_points)
+
+            logger.debug(
+                "context_points_copy_batch",
+                batch=i // batch_size + 1,
+                copied_in_batch=len(new_points),
+                total_copied=copied,
+            )
+
+        logger.info(
+            "context_points_copied",
+            collection=collection_name,
+            workspace_id=workspace_id,
+            source_context_id=source_context_id,
+            target_context_id=target_context_id,
+            count=copied,
+        )
+
+        return copied
+
+    except Exception as e:
+        logger.error(
+            "context_points_copy_failed",
+            source_context_id=source_context_id,
+            target_context_id=target_context_id,
+            error=str(e),
+        )
+        raise QdrantError(f"Failed to copy context points: {e}") from e
+
+
 async def delete_context_points(
     workspace_id: str, context_id: str, collection_name: str = KAGURA_MEMORIES_COLLECTION
 ) -> int:

@@ -585,6 +585,43 @@ IMPORTANT: This action soft-deletes all memories in the context. Use with cautio
             },
         },
         # =================================================================
+        # Tool: merge_contexts (Issue #90)
+        # =================================================================
+        {
+            "name": "merge_contexts",
+            "description": """Copy all memories from a source context into a target context.
+
+Both contexts must use the same embedding model (no re-embedding needed).
+Memories are copied, not moved — source context retains its memories unless delete_source=true.
+
+Use cases:
+- Consolidate a test context into production
+- Merge split contexts back into one
+- Clean up after project completion
+
+Requires owner access to both contexts. Same workspace required.""",
+            "inputSchema": {
+                "type": "object",
+                "required": ["source_id", "target_id"],
+                "properties": {
+                    "source_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Source context UUID to copy memories FROM. MUST be a valid UUID from list_contexts().",
+                    },
+                    "target_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Target context UUID to copy memories INTO. MUST be a valid UUID from list_contexts().",
+                    },
+                    "delete_source": {
+                        "type": "boolean",
+                        "description": "Soft-delete source context after successful merge (default: false). Locked contexts cannot be deleted.",
+                    },
+                },
+            },
+        },
+        # =================================================================
         # Usage Guide Tool
         # =================================================================
         # Tool: update_search_config (Issue #25)
