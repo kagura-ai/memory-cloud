@@ -259,7 +259,7 @@ Search memories using Hybrid Search (60% semantic + 40% BM25) with optional Neur
 |-------|------|----------|-------------|
 | `query` | string | Yes | Natural language search query |
 | `k` | integer | No | Number of results (default: 5, max: 100) |
-| `filters` | object | No | Filter by type, tags, importance. Use `tags_match: "all"` for AND logic (default: `"any"`) |
+| `filters` | object | No | Filter by type, tags, importance, date ranges. `tags_match: "all"` for AND logic. Date: `created_after`, `created_before`, `updated_after`, `updated_before` (ISO 8601) |
 | `use_rerank` | boolean | No | Request reranking (default: false). Only effective if reranking is also enabled in the context's search config and a provider (Voyage/Cohere) is configured. |
 
 **Response:**

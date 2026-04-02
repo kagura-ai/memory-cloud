@@ -9,12 +9,14 @@ Issue #1 specification:
 Based on: kagura-ai/src/kagura/core/memory/backends/qdrant_rag.py
 """
 
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
     Condition,
+    DatetimeRange,
     Distance,
     FieldCondition,
     Filter,
@@ -129,6 +131,46 @@ def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition
         return [FieldCondition(key="tags", match=MatchAny(any=valid_tags))]
 
 
+# Date filter field mapping: filter key → Qdrant payload field
+_DATE_FILTER_MAP = {
+    "created_after": ("created_at", "gte"),
+    "created_before": ("created_at", "lte"),
+    "updated_after": ("updated_at", "gte"),
+    "updated_before": ("updated_at", "lte"),
+}
+
+
+def _build_date_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition]:
+    """Build FieldConditions for date range filtering (Issue #78).
+
+    Supports created_after, created_before, updated_after, updated_before.
+    Values must be ISO 8601 datetime strings (e.g. "2026-03-01T00:00:00Z").
+
+    Returns:
+        List of FieldConditions for date filtering (empty if no date filters)
+    """
+    conditions: list[FieldCondition] = []
+
+    for filter_key, (field, operator) in _DATE_FILTER_MAP.items():
+        value = filters.get(filter_key)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ValueError(
+                f"{filter_key} must be an ISO 8601 datetime string, got {type(value).__name__}"
+            )
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Invalid datetime for {filter_key}: {value!r}") from e
+        range_kwargs = {operator: dt}
+        conditions.append(FieldCondition(key=field, range=DatetimeRange(**range_kwargs)))
+
+    return conditions
+
+
 def _build_search_filter(
     workspace_id: str,
     context_id: str,
@@ -145,7 +187,7 @@ def _build_search_filter(
         context_id: Context ID (isolation)
         user_id: User ID (isolation, skipped for shared contexts)
         is_shared_context: If True, skip user_id filter
-        filters: Optional metadata filters (scope, type, importance, tags)
+        filters: Optional metadata filters (scope, type, importance, tags, date ranges)
 
     Returns:
         Qdrant Filter or None
@@ -168,6 +210,8 @@ def _build_search_filter(
             conditions.append(importance_condition)
         tag_conditions = _build_tag_filter_conditions(filters)
         conditions.extend(tag_conditions)
+        date_conditions = _build_date_filter_conditions(filters)
+        conditions.extend(date_conditions)
 
     return Filter(must=conditions) if conditions else None
 
@@ -767,6 +811,14 @@ async def ensure_kagura_memories_collection(
             field_schema="keyword",  # type: ignore[arg-type]
         )
 
+        # Issue #78: Datetime indexes for date range filtering
+        for dt_field in ("created_at", "updated_at"):
+            await client.create_payload_index(
+                collection_name=collection_name,
+                field_name=dt_field,
+                field_schema="datetime",  # type: ignore[arg-type]
+            )
+
         logger.info(
             "single_collection_indexes_created",
             collection=collection_name,
@@ -780,6 +832,8 @@ async def ensure_kagura_memories_collection(
                 "type",
                 "importance",
                 "tags",
+                "created_at",
+                "updated_at",
             ],
         )
 
