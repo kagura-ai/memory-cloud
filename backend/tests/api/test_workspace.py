@@ -81,9 +81,8 @@ class TestWorkspaceStats:
         mock_workspace = MagicMock()
         mock_workspace.plan_name = "free"
 
-        # Mock JOIN result: one_or_none returns a row with (user, workspace)
-        mock_join_row = MagicMock()
-        mock_join_row.tuple.return_value = (mock_user_obj, mock_workspace)
+        # Mock JOIN result: one_or_none returns a row (directly unpackable)
+        mock_join_row = (mock_user_obj, mock_workspace)
 
         # Mock empty contexts result
         mock_contexts_result = MagicMock()
@@ -412,7 +411,7 @@ class TestWorkspaceUsageCurrent:
 
     @pytest.fixture
     def workspace_id(self):
-        return str(uuid4())
+        return uuid4()
 
     @pytest.fixture
     def mock_user(self, workspace_id):

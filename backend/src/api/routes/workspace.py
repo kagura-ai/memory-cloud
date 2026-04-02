@@ -137,7 +137,7 @@ async def get_workspace_stats(
                 plan_name="free",
             )
 
-        user, workspace = row.tuple()
+        user, workspace = row
 
         contexts_result = await db.execute(
             select(Context)
