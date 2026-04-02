@@ -1,11 +1,14 @@
 """Tests for GraphRepository."""
 
 from datetime import datetime
+from uuid import uuid4
 
 import pytest
 
 from models.memory import GraphMemory
 from repositories.graph import GraphRepository
+
+pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 class TestGraphRepository:
@@ -18,12 +21,13 @@ class TestGraphRepository:
 
     @pytest.fixture
     async def sample_graph(self, db_session):
-        """Create sample graph in DB."""
+        """Create sample graph in DB with unique user_id to avoid collisions."""
+        uid = str(uuid4())
         graph = GraphMemory(
-            user_id="test_user",
+            user_id=f"test_user_{uid}",
             graph_data={"nodes": [], "links": []},
-            node_count=0,
-            edge_count=0,
+            total_nodes=0,
+            total_edges=0,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
@@ -51,10 +55,10 @@ class TestGraphRepository:
     @pytest.mark.asyncio
     async def test_get_by_user_id(self, repository, sample_graph):
         """Test getting graph by user_id."""
-        result = await repository.get_by_user_id("test_user")
+        result = await repository.get_by_user_id(sample_graph.user_id)
 
         assert result is not None
-        assert result.user_id == "test_user"
+        assert result.user_id == sample_graph.user_id
         assert result.id == sample_graph.id
 
     @pytest.mark.asyncio
@@ -75,13 +79,14 @@ class TestGraphRepository:
     @pytest.mark.asyncio
     async def test_list_with_pagination(self, repository, db_session):
         """Test listing with pagination."""
-        # Create multiple graphs
+        # Create multiple graphs with unique user_ids
+        uid = str(uuid4())
         for i in range(3):
             graph = GraphMemory(
-                user_id=f"user_{i}",
+                user_id=f"page_user_{uid}_{i}",
                 graph_data={"nodes": [], "links": []},
-                node_count=0,
-                edge_count=0,
+                total_nodes=0,
+                total_edges=0,
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow(),
             )
@@ -96,16 +101,17 @@ class TestGraphRepository:
     @pytest.mark.asyncio
     async def test_create(self, repository, db_session):
         """Test creating new graph."""
+        uid = str(uuid4())
         graph_data = {
             "nodes": [{"id": "node1", "type": "memory"}],
             "links": [],
         }
 
         new_graph = GraphMemory(
-            user_id="new_user",
+            user_id=f"new_user_{uid}",
             graph_data=graph_data,
-            node_count=1,
-            edge_count=0,
+            total_nodes=1,
+            total_edges=0,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
@@ -113,11 +119,11 @@ class TestGraphRepository:
         created = await repository.create(new_graph)
 
         assert created.id is not None
-        assert created.user_id == "new_user"
-        assert created.node_count == 1
+        assert created.user_id == new_graph.user_id
+        assert created.total_nodes == 1
 
         # Verify in DB
-        fetched = await repository.get_by_user_id("new_user")
+        fetched = await repository.get_by_user_id(new_graph.user_id)
         assert fetched is not None
 
     @pytest.mark.asyncio
@@ -128,16 +134,16 @@ class TestGraphRepository:
             "nodes": [{"id": "node1", "type": "memory"}],
             "links": [],
         }
-        sample_graph.node_count = 1
+        sample_graph.total_nodes = 1
         sample_graph.updated_at = datetime.utcnow()
 
-        updated = await repository.update(sample_graph)
+        updated = await repository.update(sample_graph.id, sample_graph)
 
-        assert updated.node_count == 1
+        assert updated.total_nodes == 1
 
         # Verify in DB
         fetched = await repository.get(sample_graph.id)
-        assert fetched.node_count == 1
+        assert fetched.total_nodes == 1
 
     @pytest.mark.asyncio
     async def test_delete(self, repository, sample_graph):
@@ -153,6 +159,7 @@ class TestGraphRepository:
     @pytest.mark.asyncio
     async def test_graph_data_json_storage(self, repository, db_session):
         """Test that graph_data is stored as JSON."""
+        uid = str(uuid4())
         complex_graph = {
             "nodes": [
                 {"id": "n1", "type": "memory", "data": {"text": "test"}},
@@ -164,10 +171,10 @@ class TestGraphRepository:
         }
 
         graph = GraphMemory(
-            user_id="json_user",
+            user_id=f"json_user_{uid}",
             graph_data=complex_graph,
-            node_count=2,
-            edge_count=1,
+            total_nodes=2,
+            total_edges=1,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
@@ -184,10 +191,10 @@ class TestGraphRepository:
         """Test that each user can have only one graph (unique constraint)."""
         # Try to create another graph for same user
         duplicate_graph = GraphMemory(
-            user_id="test_user",  # Same user as sample_graph
+            user_id=sample_graph.user_id,  # Same user as sample_graph
             graph_data={"nodes": [], "links": []},
-            node_count=0,
-            edge_count=0,
+            total_nodes=0,
+            total_edges=0,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
@@ -202,10 +209,10 @@ class TestGraphRepository:
     @pytest.mark.asyncio
     async def test_stats_update(self, repository, sample_graph):
         """Test updating node/edge counts."""
-        sample_graph.node_count = 10
-        sample_graph.edge_count = 15
+        sample_graph.total_nodes = 10
+        sample_graph.total_edges = 15
 
-        updated = await repository.update(sample_graph)
+        updated = await repository.update(sample_graph.id, sample_graph)
 
-        assert updated.node_count == 10
-        assert updated.edge_count == 15
+        assert updated.total_nodes == 10
+        assert updated.total_edges == 15

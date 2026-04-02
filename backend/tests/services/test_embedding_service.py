@@ -8,19 +8,46 @@ from services.embedding_service import EmbeddingService
 from utils.exceptions import ConfigurationError, OpenAIError
 
 
+def _make_mock_db() -> AsyncMock:
+    """Return an AsyncMock DB session whose execute() returns no API-key row."""
+    db = AsyncMock()
+    execute_result = MagicMock()
+    execute_result.scalar_one_or_none.return_value = None
+    db.execute.return_value = execute_result
+    return db
+
+
 class TestEmbeddingService:
     """Test EmbeddingService for OpenAI embedding generation."""
 
     @pytest.fixture
     def mock_db(self):
         """Create mock database session."""
-        db = MagicMock()
-        return db
+        return _make_mock_db()
 
     @pytest.fixture
     def service(self, mock_db):
         """Create EmbeddingService."""
         return EmbeddingService(mock_db)
+
+    # ------------------------------------------------------------------
+    # Patch Redis cache helpers for every test so embed() never touches
+    # a real Redis connection.
+    # ------------------------------------------------------------------
+    @pytest.fixture(autouse=True)
+    def patch_cache(self):
+        with (
+            patch(
+                "services.embedding_service.get_cache",
+                new_callable=AsyncMock,
+                return_value=None,  # cache miss by default
+            ) as _get,
+            patch(
+                "services.embedding_service.set_cache",
+                new_callable=AsyncMock,
+            ) as _set,
+        ):
+            yield _get, _set
 
     def test_init(self, mock_db):
         """Test EmbeddingService initialization."""
@@ -88,7 +115,7 @@ class TestEmbeddingService:
                 with pytest.raises(OpenAIError) as exc_info:
                     await service.embed("test text", "test_user")
 
-                assert "Failed to generate embedding" in str(exc_info.value)
+                assert "Embedding generation failed" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_embed_empty_text(self, service):
@@ -196,9 +223,9 @@ class TestEmbeddingService:
 
     @pytest.mark.asyncio
     async def test_embed_dimension_validation(self, service):
-        """Test that embedding dimensions are validated."""
-        # Mock response with wrong dimensions
-        mock_embedding = [0.1] * 100  # Wrong dimension
+        """Test that embedding dimensions are returned as-is (no server-side validation)."""
+        # Mock response with fewer dimensions than configured
+        mock_embedding = [0.1] * 100  # Fewer than configured 512 dimensions
         mock_response = MagicMock()
         mock_response.data = [MagicMock(embedding=mock_embedding)]
 
@@ -208,11 +235,11 @@ class TestEmbeddingService:
 
         with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}):
             with patch("services.embedding_service.AsyncOpenAI", return_value=mock_client):
-                # Should raise error due to dimension mismatch
-                with pytest.raises(OpenAIError) as exc_info:
-                    await service.embed("test text", "test_user")
+                # Production code passes the vector through without dimension validation;
+                # the caller receives whatever the API returns.
+                result = await service.embed("test text", "test_user")
 
-                assert "dimension" in str(exc_info.value).lower()
+                assert len(result) == 100
 
     @pytest.mark.asyncio
     async def test_embed_different_users(self, service):

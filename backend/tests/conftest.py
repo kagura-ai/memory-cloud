@@ -1,8 +1,10 @@
 """Pytest configuration and fixtures for Kagura Memory Cloud tests."""
 
+import asyncio
 import os
 from collections.abc import AsyncGenerator
 
+import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -10,33 +12,47 @@ from sqlalchemy.pool import NullPool
 from models.auth import Base as AuthBase
 from models.memory import Base as MemoryBase
 
-# Test database URL
-# Use postgres service name in Docker, localhost for local testing
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Set asyncio_default_test_loop_scope to session to match fixture loop scope.
+
+    Without this, async test methods run in function-scoped loops (default),
+    while session-scoped fixtures (async_engine, db_session) use the session loop.
+    This mismatch causes 'Future attached to a different loop' errors from asyncpg.
+    """
+    # Override the ini cache directly — config.override_ini is not available at configure time
+    if hasattr(config, "_inicache"):
+        config._inicache["asyncio_default_test_loop_scope"] = "session"
+
+
+# Test database URL — default to localhost (Docker port-mapped)
 TEST_DATABASE_URL = os.getenv(
     "TEST_DATABASE_URL",
-    "postgresql+asyncpg://kagura:kagura_dev_password@postgres:5432/kagura_test",
+    "postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test",
 )
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def async_engine():
-    """Create async engine for tests."""
+    """Create async engine for tests. Skip if DB is unavailable."""
     engine = create_async_engine(
         TEST_DATABASE_URL,
         poolclass=NullPool,
         echo=False,
     )
 
-    # Create all tables
-    async with engine.begin() as conn:
-        await conn.run_sync(AuthBase.metadata.create_all)
-        await conn.run_sync(MemoryBase.metadata.create_all)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(AuthBase.metadata.create_all)
+            await conn.run_sync(MemoryBase.metadata.create_all)
+    except Exception as e:
+        await engine.dispose()
+        pytest.skip(f"Test database not available: {e}")
 
     yield engine
 
     # Cleanup
     try:
-        # Drop all tables
         async with engine.begin() as conn:
             await conn.run_sync(MemoryBase.metadata.drop_all)
             await conn.run_sync(AuthBase.metadata.drop_all)
@@ -46,7 +62,7 @@ async def async_engine():
         await engine.dispose()
 
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(loop_scope="session")
 async def db_session(async_engine) -> AsyncGenerator[AsyncSession, None]:
     """Create database session for tests."""
     async_session_maker = async_sessionmaker(

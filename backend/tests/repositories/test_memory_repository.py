@@ -8,6 +8,8 @@ import pytest
 from models.memory import Memory
 from repositories.memory import MemoryRepository
 
+pytestmark = pytest.mark.asyncio(loop_scope="session")
+
 
 class TestMemoryRepository:
     """Test MemoryRepository for PostgreSQL operations."""
@@ -27,6 +29,7 @@ class TestMemoryRepository:
             content="Test content",
             type="code",
             scope="working",
+            client="test",
             created_at=datetime.utcnow(),
         )
         db_session.add(memory)
@@ -72,6 +75,7 @@ class TestMemoryRepository:
                 content=f"Content {i}",
                 type="code",
                 scope="working",
+                client="test",
                 created_at=datetime.utcnow(),
             )
             db_session.add(memory)
@@ -99,6 +103,7 @@ class TestMemoryRepository:
             content="Content",
             type="code",
             scope="working",
+            client="test",
             created_at=datetime.utcnow(),
         )
         memory2 = Memory(
@@ -108,6 +113,7 @@ class TestMemoryRepository:
             content="Content",
             type="code",
             scope="working",
+            client="test",
             created_at=datetime.utcnow(),
         )
         db_session.add_all([memory1, memory2])
@@ -130,6 +136,7 @@ class TestMemoryRepository:
             content="Content",
             type="code",
             scope="working",
+            client="test",
             created_at=datetime.utcnow(),
         )
         persistent = Memory(
@@ -139,6 +146,7 @@ class TestMemoryRepository:
             content="Content",
             type="code",
             scope="persistent",
+            client="test",
             created_at=datetime.utcnow(),
         )
         db_session.add_all([working, persistent])
@@ -160,6 +168,7 @@ class TestMemoryRepository:
             content="Content",
             type="code",
             scope="working",
+            client="test",
             created_at=datetime.utcnow(),
         )
         note = Memory(
@@ -169,6 +178,7 @@ class TestMemoryRepository:
             content="Content",
             type="note",
             scope="working",
+            client="test",
             created_at=datetime.utcnow(),
         )
         db_session.add_all([code, note])
@@ -199,6 +209,7 @@ class TestMemoryRepository:
             content="New content",
             type="decision",
             scope="working",
+            client="test",
             created_at=datetime.utcnow(),
         )
 
@@ -219,7 +230,7 @@ class TestMemoryRepository:
         sample_memory.summary = "Updated summary"
         sample_memory.importance = 0.9
 
-        updated = await repository.update(sample_memory)
+        updated = await repository.update(sample_memory.id, sample_memory)
 
         assert updated.summary == "Updated summary"
         assert updated.importance == 0.9
@@ -252,6 +263,7 @@ class TestMemoryRepository:
                 content="Content",
                 type="code",
                 scope="working",
+                client="test",
                 created_at=datetime.utcnow(),
             )
             db_session.add(memory)
@@ -263,9 +275,9 @@ class TestMemoryRepository:
         assert count >= 3
 
     @pytest.mark.asyncio
-    async def test_get_by_id_alias(self, repository, sample_memory):
-        """Test get_by_id is alias for get."""
-        result = await repository.get_by_id(sample_memory.id)
+    async def test_get_by_id(self, repository, sample_memory):
+        """Test get() retrieves memory by UUID."""
+        result = await repository.get(sample_memory.id)
 
         assert result is not None
         assert result.id == sample_memory.id
