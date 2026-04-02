@@ -216,7 +216,7 @@ Search modes: Use search_mode to control the search strategy.
                     },
                     "filters": {
                         "type": "object",
-                        "description": "Optional filters as JSON. Tag filter matches ANY of the specified tags by default (exact match). Set tags_match='all' to require ALL tags (AND logic). Examples: {'type': 'code'}, {'tags': ['python', 'fastapi']}, {'tags': ['予算', '2026'], 'tags_match': 'all'}, {'importance': {'gte': 0.7}}",
+                        "description": "Optional filters as JSON. Tag filter matches ANY of the specified tags by default (exact match). Set tags_match='all' to require ALL tags (AND logic). Date filters: created_after, created_before, updated_after, updated_before (ISO 8601). Examples: {'type': 'code'}, {'tags': ['python', 'fastapi'], 'tags_match': 'all'}, {'importance': {'gte': 0.7}}, {'created_after': '2026-03-01T00:00:00Z'}",
                     },
                     "context_id": {
                         "type": "string",

@@ -15,6 +15,7 @@ from uuid import UUID
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
     Condition,
+    DatetimeRange,
     Distance,
     FieldCondition,
     Filter,
@@ -129,6 +130,43 @@ def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition
         return [FieldCondition(key="tags", match=MatchAny(any=valid_tags))]
 
 
+def _build_date_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition]:
+    """Build FieldConditions for date range filtering (Issue #78).
+
+    Args:
+        filters: Filter dict with optional date range keys
+
+    Returns:
+        List of FieldConditions for date filtering (empty if no date filters)
+
+    Raises:
+        ValueError: If a date value is not a valid ISO 8601 string
+    """
+    from utils.datetime import parse_iso8601_to_aware
+
+    date_filter_map = {
+        "created_after": ("created_at", "gte"),
+        "created_before": ("created_at", "lte"),
+        "updated_after": ("updated_at", "gte"),
+        "updated_before": ("updated_at", "lte"),
+    }
+
+    conditions: list[FieldCondition] = []
+
+    for filter_key, (field, operator) in date_filter_map.items():
+        value = filters.get(filter_key)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ValueError(
+                f"{filter_key} must be an ISO 8601 datetime string, got {type(value).__name__}"
+            )
+        dt = parse_iso8601_to_aware(value, filter_key)
+        conditions.append(FieldCondition(key=field, range=DatetimeRange(**{operator: dt})))
+
+    return conditions
+
+
 def _build_search_filter(
     workspace_id: str,
     context_id: str,
@@ -145,7 +183,7 @@ def _build_search_filter(
         context_id: Context ID (isolation)
         user_id: User ID (isolation, skipped for shared contexts)
         is_shared_context: If True, skip user_id filter
-        filters: Optional metadata filters (scope, type, importance, tags)
+        filters: Optional metadata filters (scope, type, importance, tags, date ranges)
 
     Returns:
         Qdrant Filter or None
@@ -168,6 +206,8 @@ def _build_search_filter(
             conditions.append(importance_condition)
         tag_conditions = _build_tag_filter_conditions(filters)
         conditions.extend(tag_conditions)
+        date_conditions = _build_date_filter_conditions(filters)
+        conditions.extend(date_conditions)
 
     return Filter(must=conditions) if conditions else None
 
@@ -390,11 +430,12 @@ async def search_memories_qdrant(
     _validate_uuid_format(workspace_id, "workspace_id")
     _validate_uuid_format(context_id, "context_id")
 
-    try:
-        qdrant_filter = _build_search_filter(
-            workspace_id, context_id, user_id, is_shared_context, filters
-        )
+    # Build filter outside try/except so ValueError propagates as 4xx, not QdrantError
+    qdrant_filter = _build_search_filter(
+        workspace_id, context_id, user_id, is_shared_context, filters
+    )
 
+    try:
         # Issue #16: Named vector "dense" for semantic search
         results = await client.query_points(
             collection_name=collection_name,
@@ -538,11 +579,12 @@ async def search_memories_fulltext(
     _validate_uuid_format(workspace_id, "workspace_id")
     _validate_uuid_format(context_id, "context_id")
 
-    try:
-        qdrant_filter = _build_search_filter(
-            workspace_id, context_id, user_id, is_shared_context, filters
-        )
+    # Build filter outside try/except so ValueError propagates as 4xx, not QdrantError
+    qdrant_filter = _build_search_filter(
+        workspace_id, context_id, user_id, is_shared_context, filters
+    )
 
+    try:
         # Build sparse query vector: single Sudachi pass for lemmas + readings
         tokenized_query, query_reading, sudachi_tokens = tokenize_and_reading(query)
         combined_query = f"{tokenized_query} {query_reading}" if query_reading else tokenized_query
@@ -767,6 +809,14 @@ async def ensure_kagura_memories_collection(
             field_schema="keyword",  # type: ignore[arg-type]
         )
 
+        # Issue #78: Datetime indexes for date range filtering
+        for dt_field in ("created_at", "updated_at"):
+            await client.create_payload_index(
+                collection_name=collection_name,
+                field_name=dt_field,
+                field_schema="datetime",  # type: ignore[arg-type]
+            )
+
         logger.info(
             "single_collection_indexes_created",
             collection=collection_name,
@@ -780,6 +830,8 @@ async def ensure_kagura_memories_collection(
                 "type",
                 "importance",
                 "tags",
+                "created_at",
+                "updated_at",
             ],
         )
 
