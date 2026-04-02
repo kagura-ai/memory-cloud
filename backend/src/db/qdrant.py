@@ -9,7 +9,6 @@ Issue #1 specification:
 Based on: kagura-ai/src/kagura/core/memory/backends/qdrant_rag.py
 """
 
-from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -131,27 +130,30 @@ def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition
         return [FieldCondition(key="tags", match=MatchAny(any=valid_tags))]
 
 
-# Date filter field mapping: filter key → Qdrant payload field
-_DATE_FILTER_MAP = {
-    "created_after": ("created_at", "gte"),
-    "created_before": ("created_at", "lte"),
-    "updated_after": ("updated_at", "gte"),
-    "updated_before": ("updated_at", "lte"),
-}
-
-
 def _build_date_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition]:
     """Build FieldConditions for date range filtering (Issue #78).
 
-    Supports created_after, created_before, updated_after, updated_before.
-    Values must be ISO 8601 datetime strings (e.g. "2026-03-01T00:00:00Z").
+    Args:
+        filters: Filter dict with optional date range keys
 
     Returns:
         List of FieldConditions for date filtering (empty if no date filters)
+
+    Raises:
+        ValueError: If a date value is not a valid ISO 8601 string
     """
+    from utils.datetime import parse_iso8601_to_aware
+
+    date_filter_map = {
+        "created_after": ("created_at", "gte"),
+        "created_before": ("created_at", "lte"),
+        "updated_after": ("updated_at", "gte"),
+        "updated_before": ("updated_at", "lte"),
+    }
+
     conditions: list[FieldCondition] = []
 
-    for filter_key, (field, operator) in _DATE_FILTER_MAP.items():
+    for filter_key, (field, operator) in date_filter_map.items():
         value = filters.get(filter_key)
         if value is None:
             continue
@@ -159,14 +161,8 @@ def _build_date_filter_conditions(filters: dict[str, Any]) -> list[FieldConditio
             raise ValueError(
                 f"{filter_key} must be an ISO 8601 datetime string, got {type(value).__name__}"
             )
-        try:
-            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=UTC)
-        except (ValueError, TypeError) as e:
-            raise ValueError(f"Invalid datetime for {filter_key}: {value!r}") from e
-        range_kwargs = {operator: dt}
-        conditions.append(FieldCondition(key=field, range=DatetimeRange(**range_kwargs)))
+        dt = parse_iso8601_to_aware(value, filter_key)
+        conditions.append(FieldCondition(key=field, range=DatetimeRange(**{operator: dt})))
 
     return conditions
 

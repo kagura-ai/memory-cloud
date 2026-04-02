@@ -442,10 +442,9 @@ class MemoryService:
             if normalized_ctx_summary is not None:
                 payload_updates["context_summary"] = normalized_ctx_summary
 
-            # Always sync updated_at to Qdrant for date range filtering (Issue #78)
-            payload_updates["updated_at"] = utcnow().isoformat()
-
             if payload_updates:
+                # Sync updated_at to Qdrant for date range filtering (Issue #78)
+                payload_updates["updated_at"] = utcnow().isoformat()
                 collection = await self._get_context_collection_name(memory.context_id)
                 await update_memory_payload_in_qdrant(
                     memory_id=memory.id,

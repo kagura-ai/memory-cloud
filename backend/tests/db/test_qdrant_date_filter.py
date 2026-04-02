@@ -3,7 +3,7 @@
 Issue #78: Verify created_after, created_before, updated_after, updated_before filters.
 """
 
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from qdrant_client.models import DatetimeRange, FieldCondition
@@ -77,7 +77,7 @@ class TestBuildDateFilterConditions:
         assert len(conditions) == 1
         # +09:00 = midnight UTC
         assert conditions[0].range.gte == datetime(
-            2026, 3, 1, 9, 0, 0, tzinfo=timezone(offset=__import__("datetime").timedelta(hours=9))
+            2026, 3, 1, 9, 0, 0, tzinfo=timezone(timedelta(hours=9))
         )
 
     def test_naive_datetime_gets_utc(self):
