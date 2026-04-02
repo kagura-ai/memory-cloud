@@ -266,6 +266,11 @@ async def handle_recall(
                         )
             else:
                 # Single context mode (backward compatible)
+                if "context_id" not in args:
+                    return _error_response(
+                        "missing_fields",
+                        "Missing required field: context_id (or provide context_ids with 2+ UUIDs).",
+                    )
                 current_context_id = _resolve_context_id(args["context_id"])
                 current_context = await _resolve_context(db, user_id, current_context_id)
 
