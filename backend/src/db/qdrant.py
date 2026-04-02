@@ -914,6 +914,12 @@ async def copy_context_points(
 
                 new_payload = dict(point.payload) if point.payload else {}
                 new_payload["context_id"] = target_context_id
+                # Keep nested context metadata consistent
+                if isinstance(new_payload.get("context"), dict):
+                    new_payload["context"] = {
+                        **new_payload["context"],
+                        "context_id": target_context_id,
+                    }
 
                 new_points.append(
                     PointStruct(

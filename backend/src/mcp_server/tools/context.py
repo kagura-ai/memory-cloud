@@ -721,7 +721,11 @@ async def handle_merge_contexts(
 
             source_id = _resolve_context_id(args["source_id"])
             target_id = _resolve_context_id(args["target_id"])
-            delete_source = args.get("delete_source", False)
+            delete_source_raw = args.get("delete_source", False)
+            if isinstance(delete_source_raw, str):
+                delete_source = delete_source_raw.lower() == "true"
+            else:
+                delete_source = bool(delete_source_raw)
 
             service = ContextService(db)
             result = await execute_with_timeout(
@@ -729,7 +733,7 @@ async def handle_merge_contexts(
                     user_id=user_id,
                     source_context_id=source_id,
                     target_context_id=target_id,
-                    delete_source=bool(delete_source),
+                    delete_source=delete_source,
                 ),
                 operation_name="merge_contexts",
             )

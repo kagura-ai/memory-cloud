@@ -574,10 +574,16 @@ class ContextService:
         from db.qdrant import copy_context_points, get_collection_name
         from models.config import ContextSearchConfig
         from models.memory import Memory
+        from services.permission_service import PermissionService
 
-        # Validate access to both contexts
+        # Validate owner access to both contexts
         source = await self.get_context(user_id, source_context_id)
         target = await self.get_context(user_id, target_context_id)
+
+        # Owner-only: merge is a privileged operation
+        perm_service = PermissionService(self.db)
+        await perm_service.check_context_owner(user_id, source_context_id)
+        await perm_service.check_context_owner(user_id, target_context_id)
 
         # Same workspace required
         if source.workspace_id != target.workspace_id:
@@ -594,6 +600,7 @@ class ContextService:
             )
 
         # Validate same embedding model (single query for both configs)
+        settings = get_settings()
         cfg_result = await self.db.execute(
             select(ContextSearchConfig).where(
                 ContextSearchConfig.context_id.in_([source_context_id, target_context_id])
@@ -603,10 +610,10 @@ class ContextService:
         src_cfg = configs.get(source_context_id)
         tgt_cfg = configs.get(target_context_id)
 
-        src_model = src_cfg.embedding_model if src_cfg else "text-embedding-3-small"
-        tgt_model = tgt_cfg.embedding_model if tgt_cfg else "text-embedding-3-small"
-        src_dims = src_cfg.embedding_dimensions if src_cfg else 512
-        tgt_dims = tgt_cfg.embedding_dimensions if tgt_cfg else 512
+        src_model = src_cfg.embedding_model if src_cfg else settings.embedding_model
+        tgt_model = tgt_cfg.embedding_model if tgt_cfg else settings.embedding_model
+        src_dims = src_cfg.embedding_dimensions if src_cfg else settings.embedding_dimensions
+        tgt_dims = tgt_cfg.embedding_dimensions if tgt_cfg else settings.embedding_dimensions
 
         if src_model != tgt_model or src_dims != tgt_dims:
             raise ValidationError(
@@ -639,22 +646,36 @@ class ContextService:
             new_id = uuid4()
             memory_id_mapping[str(mem.id)] = str(new_id)
 
-            # Copy all data fields; resource_id is a Computed column (auto-derived from details)
+            # Normalize nested context JSON to reference target context
+            ctx_json = mem.context
+            if isinstance(ctx_json, dict) and "context_id" in ctx_json:
+                ctx_json = {**ctx_json, "context_id": str(target_context_id)}
+
+            # Copy all data fields; resource_id/resource_doc_id/resource_version
+            # are Computed columns (auto-derived from details)
             new_mem = Memory(
                 id=new_id,
                 user_id=mem.user_id,
                 workspace_id=mem.workspace_id,
                 context_id=target_context_id,
                 summary=mem.summary,
+                summary_embedding_id=new_id,
                 context_summary=mem.context_summary,
                 content=mem.content,
-                context=mem.context,
+                context=ctx_json,
                 details=mem.details,
                 type=mem.type,
                 importance=mem.importance,
+                confidence=mem.confidence,
                 tags=mem.tags,
                 scope=mem.scope,
+                long_term=mem.long_term,
+                promoted_at=mem.promoted_at,
+                use_count=0,
+                access_count=0,
                 client=mem.client,
+                client_version=mem.client_version,
+                source=mem.source,
                 embedding_status="success",
                 created_at=mem.created_at,
                 updated_at=utcnow(),
