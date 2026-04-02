@@ -549,7 +549,7 @@ Use get_context_info() to see current values before updating.""",
                     },
                     "is_locked": {
                         "type": "boolean",
-                        "description": "Lock/unlock context. When locked (true), the context cannot be deleted. Owner-only.",
+                        "description": "Deletion protection only. When locked (true), the context cannot be deleted — but reading, writing, and searching memories still work normally. Owner-only.",
                     },
                 },
             },
