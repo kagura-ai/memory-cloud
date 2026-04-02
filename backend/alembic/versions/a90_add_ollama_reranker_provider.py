@@ -11,7 +11,7 @@ from alembic import op
 
 # revision identifiers
 revision = "a90_ollama_reranker"
-down_revision = None
+down_revision = "a85_context_lock"
 branch_labels = None
 depends_on = None
 

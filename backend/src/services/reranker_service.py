@@ -1,22 +1,25 @@
 """Reranker service with multi-provider support.
 
 Issue #105: Add multiple reranker options (Voyage AI, Cohere).
-Provides an abstract RerankerProvider base class and concrete implementations.
+Issue #70: Add Ollama as local reranker provider.
 
 Architecture:
 - RerankerProvider: Abstract base class for reranker providers
 - VoyageReranker: Voyage AI implementation (rerank-2.5-lite default)
 - CohereReranker: Cohere implementation (rerank-multilingual-v3.0)
+- OllamaReranker: Local Ollama reranker (no API key needed)
 - RerankerService: Factory pattern to select active provider from DB
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 from abc import ABC, abstractmethod
 from typing import Any
 from uuid import UUID
 
+import httpx
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,8 +33,9 @@ logger = get_logger(__name__)
 
 # Provider constants (must match external_keys.py for API-key providers)
 RERANKER_PROVIDERS = {"cohere", "voyage"}
-# All providers including local (no API key needed)
-ALL_RERANKER_PROVIDERS = {"cohere", "voyage", "ollama"}
+
+# Default Ollama reranker model
+DEFAULT_OLLAMA_RERANK_MODEL = "dengcao/Qwen3-Reranker-8B:Q5_K_M"
 
 
 class RerankerProvider(ABC):
@@ -226,7 +230,7 @@ class OllamaReranker(RerankerProvider):
 
     provider_name = "ollama"
 
-    def __init__(self, base_url: str, model: str = "dengcao/Qwen3-Reranker-8B:Q5_K_M"):
+    def __init__(self, base_url: str, model: str = DEFAULT_OLLAMA_RERANK_MODEL):
         """Initialize Ollama reranker.
 
         Args:
@@ -261,10 +265,6 @@ class OllamaReranker(RerankerProvider):
             return []
         if top_n <= 0:
             raise ValueError("top_n must be positive")
-
-        import asyncio
-
-        import httpx
 
         scored: list[dict[str, Any]] = []
 
@@ -329,8 +329,6 @@ def _parse_relevance_score(text: str) -> float:
     Returns:
         Float between 0.0 and 1.0
     """
-    import re
-
     text = text.strip()
     if not text:
         return 0.0
@@ -448,18 +446,15 @@ class RerankerService:
         if not api_key_entry:
             # Issue #70: Check if context uses Ollama reranker (no API key needed)
             if context_id:
-                model_name = await self._get_reranker_model(context_id, "ollama")
                 repo = ContextSearchConfigRepository(self.db)
                 config = await repo.create_or_get(UUID(context_id))
                 if config.reranker_provider == "ollama" and config.use_rerank:
                     from config.settings import get_settings
 
                     settings = get_settings()
-                    logger.debug("using_ollama_reranker", user_id=user_id, model=model_name)
-                    return OllamaReranker(
-                        base_url=settings.ollama_base_url,
-                        model=config.reranker_model or "dengcao/Qwen3-Reranker-8B:Q5_K_M",
-                    )
+                    model = config.reranker_model or DEFAULT_OLLAMA_RERANK_MODEL
+                    logger.debug("using_ollama_reranker", user_id=user_id, model=model)
+                    return OllamaReranker(base_url=settings.ollama_base_url, model=model)
 
             logger.debug("no_reranker_configured", user_id=user_id, context_id=context_id)
             return None
@@ -556,7 +551,7 @@ class RerankerService:
         default_models = {
             "voyage": "rerank-2",
             "cohere": "rerank-multilingual-v3.0",
-            "ollama": "dengcao/Qwen3-Reranker-8B:Q5_K_M",
+            "ollama": DEFAULT_OLLAMA_RERANK_MODEL,
         }
 
         if not context_id:

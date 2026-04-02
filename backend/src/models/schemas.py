@@ -497,7 +497,9 @@ class ContextSearchConfigUpdate(BaseModel):
     bm25_weight: float = Field(..., ge=0.0, le=1.0, description="BM25 keyword search weight")
     fetch_factor: int = Field(..., ge=1, le=10, description="Candidate retrieval multiplier")
     use_rerank: bool = Field(..., description="Enable/disable reranking")
-    reranker_provider: str = Field(..., description="Reranker provider: 'voyage' or 'cohere'")
+    reranker_provider: str = Field(
+        ..., description="Reranker provider: 'voyage', 'cohere', or 'ollama'"
+    )
     reranker_model: str = Field(..., description="Provider-specific model name")
 
     @model_validator(mode="after")
@@ -520,6 +522,10 @@ class ContextSearchConfigUpdate(BaseModel):
             "voyage": ["rerank-2", "rerank-2-lite"],
             "cohere": ["rerank-multilingual-v3.0", "rerank-english-v3.0"],
         }
+
+        # Ollama accepts any model name (user-configured)
+        if provider == "ollama":
+            return v
 
         if provider and v not in valid_models.get(provider, []):
             raise ValueError(
