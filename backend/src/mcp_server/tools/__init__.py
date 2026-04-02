@@ -28,6 +28,7 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
         "list_contexts",
         "create_context",
         "update_context",
+        "merge_contexts",
         "kagura_memory_usage_guide",
     }
 )
@@ -43,6 +44,7 @@ def _build_registry() -> dict[str, Any]:
         handle_delete_context,
         handle_get_context_info,
         handle_list_contexts,
+        handle_merge_contexts,
         handle_update_context,
     )
     from mcp_server.tools.guide import handle_kagura_memory_usage_guide
@@ -59,6 +61,7 @@ def _build_registry() -> dict[str, Any]:
         "create_context": handle_create_context,
         "update_context": handle_update_context,
         "delete_context": handle_delete_context,
+        "merge_contexts": handle_merge_contexts,
         "list_contexts": handle_list_contexts,
         "update_search_config": handle_update_search_config,
         "kagura_memory_usage_guide": handle_kagura_memory_usage_guide,
