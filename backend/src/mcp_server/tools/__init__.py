@@ -93,18 +93,21 @@ async def execute_tool_call(
     args = arguments or {}
 
     # Pre-dispatch: validate context_id for tools that require it
+    # Issue #81: Skip context_id check if context_ids is provided (cross-context recall)
     if tool_name not in _TOOLS_WITHOUT_CONTEXT_ID:
-        if "context_id" not in args:
+        has_context_ids = "context_ids" in args and isinstance(args.get("context_ids"), list)
+        if "context_id" not in args and not has_context_ids:
             return _error_response(
                 "context_id_required",
                 f"{tool_name} requires context_id argument.",
                 help="Use list_contexts() first to discover available context IDs.",
                 example=f'{tool_name}(..., context_id="<uuid-from-list_contexts>")',
             )
-        try:
-            _resolve_context_id(args["context_id"])
-        except ValueError as e:
-            return _error_response("invalid_context_id_format", str(e))
+        if "context_id" in args:
+            try:
+                _resolve_context_id(args["context_id"])
+            except ValueError as e:
+                return _error_response("invalid_context_id_format", str(e))
 
     # Dispatch to handler
     handler = _TOOL_REGISTRY.get(tool_name)
