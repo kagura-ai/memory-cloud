@@ -633,6 +633,9 @@ class ContextService:
         source_memories = result.scalars().all()
 
         if not source_memories:
+            # Still honor delete_source even if no memories to copy
+            if delete_source:
+                await self.delete_context(user_id, source_context_id)
             return {
                 "merged": 0,
                 "source_id": str(source_context_id),
