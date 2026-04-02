@@ -639,6 +639,7 @@ class ContextService:
             new_id = uuid4()
             memory_id_mapping[str(mem.id)] = str(new_id)
 
+            # Copy all data fields; resource_id is a Computed column (auto-derived from details)
             new_mem = Memory(
                 id=new_id,
                 user_id=mem.user_id,
@@ -647,6 +648,7 @@ class ContextService:
                 summary=mem.summary,
                 context_summary=mem.context_summary,
                 content=mem.content,
+                context=mem.context,
                 details=mem.details,
                 type=mem.type,
                 importance=mem.importance,
