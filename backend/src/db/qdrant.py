@@ -118,6 +118,8 @@ def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition
         return []
 
     tags_match = filters.get("tags_match", "any")
+    if tags_match not in ("any", "all"):
+        raise ValueError(f"Invalid tags_match value: {tags_match!r}. Must be 'any' or 'all'.")
 
     if tags_match == "all":
         # AND logic: memory must have ALL specified tags

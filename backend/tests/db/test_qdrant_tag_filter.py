@@ -111,6 +111,13 @@ class TestTagFilterAndLogic:
         assert isinstance(conditions[0].match, MatchValue)
         assert conditions[0].match.value == "python"
 
+    def test_tags_match_invalid_value(self):
+        """Invalid tags_match value should raise ValueError."""
+        import pytest
+
+        with pytest.raises(ValueError, match="Invalid tags_match value"):
+            _build_tag_filter_conditions({"tags": ["a"], "tags_match": "al"})
+
     def test_tags_match_all_japanese(self):
         """AND logic should work with Japanese tags."""
         filters = {"tags": ["予算", "2026"], "tags_match": "all"}
