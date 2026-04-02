@@ -444,7 +444,7 @@ class MemoryService:
 
             if payload_updates:
                 # Sync updated_at to Qdrant for date range filtering (Issue #78)
-                payload_updates["updated_at"] = utcnow().isoformat()
+                payload_updates["updated_at"] = utcnow().isoformat() + "Z"
                 collection = await self._get_context_collection_name(memory.context_id)
                 await update_memory_payload_in_qdrant(
                     memory_id=memory.id,
@@ -1631,8 +1631,9 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 "tags": memory.tags or [],
                 "scope": memory.scope,
                 "client": memory.client or "unknown",
-                "created_at": (memory.created_at or utcnow()).isoformat(),
-                "updated_at": (memory.updated_at or memory.created_at or utcnow()).isoformat(),
+                "created_at": (memory.created_at or utcnow()).isoformat() + "Z",
+                "updated_at": (memory.updated_at or memory.created_at or utcnow()).isoformat()
+                + "Z",
             }
             if memory.context:
                 payload["context"] = memory.context

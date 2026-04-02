@@ -430,11 +430,12 @@ async def search_memories_qdrant(
     _validate_uuid_format(workspace_id, "workspace_id")
     _validate_uuid_format(context_id, "context_id")
 
-    try:
-        qdrant_filter = _build_search_filter(
-            workspace_id, context_id, user_id, is_shared_context, filters
-        )
+    # Build filter outside try/except so ValueError propagates as 4xx, not QdrantError
+    qdrant_filter = _build_search_filter(
+        workspace_id, context_id, user_id, is_shared_context, filters
+    )
 
+    try:
         # Issue #16: Named vector "dense" for semantic search
         results = await client.query_points(
             collection_name=collection_name,
@@ -578,11 +579,12 @@ async def search_memories_fulltext(
     _validate_uuid_format(workspace_id, "workspace_id")
     _validate_uuid_format(context_id, "context_id")
 
-    try:
-        qdrant_filter = _build_search_filter(
-            workspace_id, context_id, user_id, is_shared_context, filters
-        )
+    # Build filter outside try/except so ValueError propagates as 4xx, not QdrantError
+    qdrant_filter = _build_search_filter(
+        workspace_id, context_id, user_id, is_shared_context, filters
+    )
 
+    try:
         # Build sparse query vector: single Sudachi pass for lemmas + readings
         tokenized_query, query_reading, sudachi_tokens = tokenize_and_reading(query)
         combined_query = f"{tokenized_query} {query_reading}" if query_reading else tokenized_query
