@@ -629,7 +629,7 @@ class MemoryService:
             search_context_id = [str(cid) for cid in context_ids]
 
         # 1. Primary Retrieval: Hybrid Search (Semantic + BM25)
-        # Issue #120: Fetch more candidates for better hybrid merge quality
+        # Fetch more candidates when neural is enabled for better hybrid merge
         # and to feed Hebbian learning with broader co-activation data
         candidates_k = request.k * 4 if neural_enabled else request.k
         search_results = await self.search_service.hybrid_search(
@@ -641,6 +641,7 @@ class MemoryService:
             use_rerank=request.use_rerank,
             filters=request.filters,
             search_mode=request.search_mode,
+            include_vectors=neural_enabled,
         )
 
         # Get full memory data from PostgreSQL
@@ -725,15 +726,18 @@ class MemoryService:
             coactivation_k = min(config.top_k_coactivation, len(search_results))
             top_results = search_results[:coactivation_k]
 
-            # Build NeuralMemoryNode list from top results only
+            # Build NeuralMemoryNode list and score map from top results
             nodes_dict: dict[str, NeuralMemoryNode] = {}
+            score_map: dict[str, float] = {}
             for search_result in top_results:
                 memory = memories.get(search_result["id"])
                 if not memory:
                     continue
+                mid = str(memory.id)
                 embedding = search_result.get("embedding", [])
-                nodes_dict[str(memory.id)] = NeuralMemoryNode(
-                    id=str(memory.id),
+                score_map[mid] = search_result.get("hybrid_score", search_result["score"])
+                nodes_dict[mid] = NeuralMemoryNode(
+                    id=mid,
                     user_id=user_id,
                     kind=memory.type,
                     text=memory.summary,
@@ -748,17 +752,11 @@ class MemoryService:
 
             # Score-weighted activation: high-scoring results form stronger edges
             activated_nodes = [
-                ActivationState(
-                    node_id=nid,
-                    activation=next(
-                        (r.get("hybrid_score", r["score"]) for r in top_results if r["id"] == nid),
-                        0.0,
-                    ),
-                )
+                ActivationState(node_id=nid, activation=score_map.get(nid, 0.0))
                 for nid in nodes_dict
             ]
 
-            # Co-activation tracking with semantic gating (#118)
+            # Co-activation tracking with semantic gating
             embedding_map = {
                 nid: node.embedding for nid, node in nodes_dict.items() if node.embedding
             }

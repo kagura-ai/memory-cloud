@@ -160,21 +160,25 @@ class TestUnifiedScorer:
         expected_score = 0.7 * 0.8
         assert abs(importance_score - expected_score) < 0.01
 
-    def test_cosine_similarity(self, scorer):
+    def test_cosine_similarity(self):
         """Test cosine similarity calculation."""
+        from neural.utils import cosine_similarity
+
         emb1 = [1.0, 0.0, 0.0]
         emb2 = [1.0, 0.0, 0.0]
-        assert abs(scorer._cosine_similarity(emb1, emb2) - 1.0) < 0.001
+        assert abs(cosine_similarity(emb1, emb2) - 1.0) < 0.001
 
         emb3 = [0.0, 1.0, 0.0]
-        assert abs(scorer._cosine_similarity(emb1, emb3) - 0.0) < 0.001
+        assert abs(cosine_similarity(emb1, emb3) - 0.0) < 0.001
 
         emb4 = [-1.0, 0.0, 0.0]
-        assert scorer._cosine_similarity(emb1, emb4) == 0.0
+        assert cosine_similarity(emb1, emb4) == 0.0
 
-    def test_cosine_similarity_zero_norm(self, scorer):
+    def test_cosine_similarity_zero_norm(self):
         """Test cosine similarity with zero-norm vector."""
-        assert scorer._cosine_similarity([1.0, 0.0], [0.0, 0.0]) == 0.0
+        from neural.utils import cosine_similarity
+
+        assert cosine_similarity([1.0, 0.0], [0.0, 0.0]) == 0.0
 
     def test_calculate_redundancy_penalty_no_selected(self, scorer, sample_node):
         """Test redundancy penalty with no selected nodes."""

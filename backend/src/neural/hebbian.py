@@ -25,6 +25,7 @@ from src.services.graph_service import GraphService as GraphMemory
 
 from .config import NeuralMemoryConfig
 from .models import ActivationState, HebbianUpdate, NeuralMemoryNode
+from .utils import cosine_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +69,6 @@ class HebbianLearner:
             activations: List of activated nodes in this retrieval
             nodes: Map of node_id -> NeuralMemoryNode (for confidence scores)
         """
-        from .utils import cosine_similarity
-
         threshold = self.config.min_similarity_for_edge
         skipped = 0
 
@@ -122,7 +121,7 @@ class HebbianLearner:
 
         if skipped > 0:
             logger.info(
-                f"Hebbian semantic gating: skipped {skipped} pairs below threshold {threshold}"
+                "hebbian_semantic_gating", extra={"skipped": skipped, "threshold": threshold}
             )
 
         logger.debug(

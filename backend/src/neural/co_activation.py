@@ -17,6 +17,7 @@ from utils.datetime import utcnow
 
 from .config import NeuralMemoryConfig
 from .models import ActivationState, CoActivationRecord
+from .utils import cosine_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -211,8 +212,6 @@ class CoActivationTracker:
         Returns:
             List of (node_1, node_2, activation_1, activation_2) tuples
         """
-        from .utils import cosine_similarity
-
         # Get all activated nodes in the window
         window_seconds = self.config.co_activation_window
         cutoff_time = current_time - timedelta(seconds=window_seconds)
@@ -225,8 +224,7 @@ class CoActivationTracker:
             if ts >= cutoff_time:
                 for node_id in node_embeddings:
                     all_activated[node_id].append(1.0)
-                    # Keep the latest embedding for each node
-                    if node_id in node_embeddings and node_embeddings[node_id]:
+                    if node_embeddings[node_id]:
                         all_embeddings[node_id] = node_embeddings[node_id]
 
         # Find pairs of nodes that were both activated
@@ -254,7 +252,9 @@ class CoActivationTracker:
                 co_activated_pairs.append((node_1, node_2, avg_act_1, avg_act_2))
 
         if skipped > 0:
-            logger.debug(f"Semantic gating: skipped {skipped} pairs below threshold {threshold}")
+            logger.debug(
+                "semantic_gating_skipped", extra={"skipped": skipped, "threshold": threshold}
+            )
 
         return co_activated_pairs
 

@@ -27,6 +27,7 @@ from .utils import (
     IMPORTANCE_STORED_WEIGHT,
     LOG_FREQUENCY_REFERENCE_COUNT,
     SECONDS_PER_DAY,
+    cosine_similarity,
 )
 
 logger = logging.getLogger(__name__)
@@ -115,7 +116,7 @@ class UnifiedScorer:
             semantic_score = sim_score
 
             # 2. Graph association (lookup from pre-computed map)
-            # Issue #120: Cap to prevent unbounded aggregate activation
+            # Cap to prevent unbounded aggregate activation
             assoc_score = min(assoc_map.get(node.id, 0.0), self.config.max_assoc_score)
 
             # 3. Recency (temporal decay)
@@ -278,28 +279,13 @@ class UnifiedScorer:
 
         # Calculate cosine similarity with all selected nodes
         similarities = [
-            self._cosine_similarity(node.embedding, selected_emb)
-            for selected_emb in selected_embeddings
+            cosine_similarity(node.embedding, selected_emb) for selected_emb in selected_embeddings
         ]
 
         # Max similarity = redundancy
         max_similarity = max(similarities)
 
         return max_similarity
-
-    def _cosine_similarity(self, emb1: list[float], emb2: list[float]) -> float:
-        """Calculate cosine similarity between two embeddings.
-
-        Args:
-            emb1: First embedding
-            emb2: Second embedding
-
-        Returns:
-            Cosine similarity clamped to [0, 1]
-        """
-        from .utils import cosine_similarity
-
-        return cosine_similarity(emb1, emb2)
 
     def mmr_rerank(
         self,
@@ -343,7 +329,7 @@ class UnifiedScorer:
                 # Diversity (max similarity to selected)
                 if selected:
                     max_sim = max(
-                        self._cosine_similarity(result.node.embedding, sel.node.embedding)
+                        cosine_similarity(result.node.embedding, sel.node.embedding)
                         for sel in selected
                     )
                 else:
