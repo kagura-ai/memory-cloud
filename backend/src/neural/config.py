@@ -75,6 +75,20 @@ class NeuralMemoryConfig:
         batch_update_size: Batch size for delayed Hebbian updates
         async_update_delay_ms: Delay (ms) before applying updates
         max_candidates_k: Maximum candidates for primary retrieval
+
+        # Sleep Maintenance (Issue #101)
+        sleep_enabled: Master switch for Sleep Maintenance (env-only)
+        sleep_cron_hour: UTC hour for scheduled sleep run (env-only)
+        sleep_cron_minute: UTC minute for scheduled sleep run (env-only)
+        sleep_llm_provider: LLM provider (openai / ollama)
+        sleep_llm_model: LLM model name for sleep judgments
+        sleep_max_memories_per_run: Max memories processed per run
+        sleep_max_llm_calls_per_run: LLM call budget per run
+        sleep_dedup_enabled: Enable dedup/merge phase
+        sleep_dedup_similarity_threshold: Cosine threshold for duplicate detection
+        sleep_edge_discovery_enabled: Enable edge discovery phase
+        sleep_edge_discovery_sample_size: Memories sampled for edge discovery
+        sleep_importance_reeval_enabled: Enable importance re-evaluation phase
     """
 
     # Class-level cache for from_db() (not serialized as instance fields)
@@ -131,6 +145,20 @@ class NeuralMemoryConfig:
     batch_update_size: int = 100
     async_update_delay_ms: int = 2000  # 2 seconds
     max_candidates_k: int = 64
+
+    # Sleep Maintenance (Issue #101)
+    sleep_enabled: bool = False  # Feature flag (env-only)
+    sleep_cron_hour: int = 2  # UTC hour for cron schedule (env-only)
+    sleep_cron_minute: int = 0  # UTC minute for cron schedule (env-only)
+    sleep_llm_provider: str = "openai"  # LLM provider: openai / ollama
+    sleep_llm_model: str = "gpt-4o-mini"  # LLM model name
+    sleep_max_memories_per_run: int = 200  # Batch size cap per run
+    sleep_max_llm_calls_per_run: int = 50  # LLM call budget per run
+    sleep_dedup_enabled: bool = True  # Phase 2 on/off
+    sleep_dedup_similarity_threshold: float = 0.92  # Cosine similarity for dedup
+    sleep_edge_discovery_enabled: bool = True  # Phase 1 on/off
+    sleep_edge_discovery_sample_size: int = 30  # Memories sampled per run
+    sleep_importance_reeval_enabled: bool = True  # Phase 3 on/off
 
     def __post_init__(self) -> None:
         """Validate configuration parameters."""
@@ -212,6 +240,36 @@ class NeuralMemoryConfig:
         if not self.max_candidates_k > 0:
             raise ValueError(f"max_candidates_k must be positive, got {self.max_candidates_k}")
 
+        # Sleep Maintenance validation
+        if not (0 <= self.sleep_cron_hour <= 23):
+            raise ValueError(f"sleep_cron_hour must be in [0, 23], got {self.sleep_cron_hour}")
+        if not (0 <= self.sleep_cron_minute <= 59):
+            raise ValueError(f"sleep_cron_minute must be in [0, 59], got {self.sleep_cron_minute}")
+        if self.sleep_llm_provider not in ("openai", "ollama"):
+            raise ValueError(
+                f"sleep_llm_provider must be 'openai' or 'ollama', got '{self.sleep_llm_provider}'"
+            )
+        if not self.sleep_max_memories_per_run > 0:
+            raise ValueError(
+                f"sleep_max_memories_per_run must be positive, "
+                f"got {self.sleep_max_memories_per_run}"
+            )
+        if not self.sleep_max_llm_calls_per_run > 0:
+            raise ValueError(
+                f"sleep_max_llm_calls_per_run must be positive, "
+                f"got {self.sleep_max_llm_calls_per_run}"
+            )
+        if not (0.5 <= self.sleep_dedup_similarity_threshold <= 1.0):
+            raise ValueError(
+                f"sleep_dedup_similarity_threshold must be in [0.5, 1.0], "
+                f"got {self.sleep_dedup_similarity_threshold}"
+            )
+        if not self.sleep_edge_discovery_sample_size > 0:
+            raise ValueError(
+                f"sleep_edge_discovery_sample_size must be positive, "
+                f"got {self.sleep_edge_discovery_sample_size}"
+            )
+
     @property
     def scoring_weights_normalized(self) -> dict[str, float]:
         """Get normalized scoring weights (sum=1.0)."""
@@ -286,6 +344,19 @@ class NeuralMemoryConfig:
             batch_update_size=get_int("BATCH_UPDATE_SIZE", 100),
             async_update_delay_ms=get_int("ASYNC_UPDATE_DELAY_MS", 2000),
             max_candidates_k=get_int("MAX_CANDIDATES_K", 64),
+            # Sleep Maintenance (env-only flags + DB-configurable params)
+            sleep_enabled=get_bool("SLEEP_ENABLED", False),
+            sleep_cron_hour=get_int("SLEEP_CRON_HOUR", 2),
+            sleep_cron_minute=get_int("SLEEP_CRON_MINUTE", 0),
+            sleep_llm_provider=os.getenv("SLEEP_LLM_PROVIDER", "openai"),
+            sleep_llm_model=os.getenv("SLEEP_LLM_MODEL", "gpt-4o-mini"),
+            sleep_max_memories_per_run=get_int("SLEEP_MAX_MEMORIES_PER_RUN", 200),
+            sleep_max_llm_calls_per_run=get_int("SLEEP_MAX_LLM_CALLS_PER_RUN", 50),
+            sleep_dedup_enabled=get_bool("SLEEP_DEDUP_ENABLED", True),
+            sleep_dedup_similarity_threshold=get_float("SLEEP_DEDUP_SIMILARITY_THRESHOLD", 0.92),
+            sleep_edge_discovery_enabled=get_bool("SLEEP_EDGE_DISCOVERY_ENABLED", True),
+            sleep_edge_discovery_sample_size=get_int("SLEEP_EDGE_DISCOVERY_SAMPLE_SIZE", 30),
+            sleep_importance_reeval_enabled=get_bool("SLEEP_IMPORTANCE_REEVAL_ENABLED", True),
         )
 
     @classmethod
@@ -379,6 +450,34 @@ class NeuralMemoryConfig:
                 "async_update_delay_ms", base_config.async_update_delay_ms
             ),
             max_candidates_k=configs.get("max_candidates_k", base_config.max_candidates_k),
+            # Sleep Maintenance (env-only flags use base_config, DB params use configs)
+            sleep_enabled=base_config.sleep_enabled,  # Feature flag (env-only)
+            sleep_cron_hour=base_config.sleep_cron_hour,  # Schedule (env-only)
+            sleep_cron_minute=base_config.sleep_cron_minute,  # Schedule (env-only)
+            sleep_llm_provider=configs.get("sleep_llm_provider", base_config.sleep_llm_provider),
+            sleep_llm_model=configs.get("sleep_llm_model", base_config.sleep_llm_model),
+            sleep_max_memories_per_run=configs.get(
+                "sleep_max_memories_per_run", base_config.sleep_max_memories_per_run
+            ),
+            sleep_max_llm_calls_per_run=configs.get(
+                "sleep_max_llm_calls_per_run", base_config.sleep_max_llm_calls_per_run
+            ),
+            sleep_dedup_enabled=configs.get("sleep_dedup_enabled", base_config.sleep_dedup_enabled),
+            sleep_dedup_similarity_threshold=configs.get(
+                "sleep_dedup_similarity_threshold",
+                base_config.sleep_dedup_similarity_threshold,
+            ),
+            sleep_edge_discovery_enabled=configs.get(
+                "sleep_edge_discovery_enabled", base_config.sleep_edge_discovery_enabled
+            ),
+            sleep_edge_discovery_sample_size=configs.get(
+                "sleep_edge_discovery_sample_size",
+                base_config.sleep_edge_discovery_sample_size,
+            ),
+            sleep_importance_reeval_enabled=configs.get(
+                "sleep_importance_reeval_enabled",
+                base_config.sleep_importance_reeval_enabled,
+            ),
         )
 
         # Store in cache
