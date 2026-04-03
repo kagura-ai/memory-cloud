@@ -459,9 +459,9 @@ async def search_memories_qdrant(
                 "score": point.score,
                 "payload": point.payload,
                 "embedding": (
-                    point.vector.get("dense", query_vector)
-                    if isinstance(point.vector, dict)
-                    else query_vector
+                    point.vector.get("dense", [])
+                    if include_vectors and isinstance(point.vector, dict)
+                    else []
                 ),
             }
             for point in results.points

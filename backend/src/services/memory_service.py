@@ -606,8 +606,6 @@ class MemoryService:
         """
         import os
 
-        from neural.config import NeuralMemoryConfig
-
         logger.info(
             "recall_request",
             user_id=user_id,
@@ -750,9 +748,11 @@ class MemoryService:
                         long_term=(memory.scope == "persistent"),
                     )
 
-                # Score-weighted activation: high-scoring results form stronger edges
+                # Score-weighted activation: clamp to [0, 1] for Hebbian stability
                 activated_nodes = [
-                    ActivationState(node_id=nid, activation=score_map.get(nid, 0.0))
+                    ActivationState(
+                        node_id=nid, activation=min(1.0, max(0.0, score_map.get(nid, 0.0)))
+                    )
                     for nid in nodes_dict
                 ]
 

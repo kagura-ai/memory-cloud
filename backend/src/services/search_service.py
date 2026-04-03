@@ -68,6 +68,7 @@ class SearchService:
             use_rerank: Use reranking if available
             filters: Optional filters
             search_mode: Search strategy (hybrid/semantic/keyword)
+            include_vectors: Return document embeddings from Qdrant (increases payload size)
 
         Returns:
             List of search results with scores

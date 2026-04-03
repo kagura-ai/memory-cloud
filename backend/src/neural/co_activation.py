@@ -37,11 +37,12 @@ class CoActivationTracker:
         """
         self.config = config
 
-        # Map: user_id -> list of (timestamp, {node_id: embedding})
-        # Embeddings are stored temporarily for semantic gating within the co-activation window
-        self._activation_history: dict[str, list[tuple[datetime, dict[str, list[float]]]]] = (
-            defaultdict(list)
-        )
+        # Map: user_id -> list of (timestamp, set of node IDs)
+        self._activation_history: dict[str, list[tuple[datetime, set[str]]]] = defaultdict(list)
+
+        # Separate embedding cache: user_id -> {node_id: embedding}
+        # Avoids duplicating large embedding vectors in history entries
+        self._embedding_cache: dict[str, dict[str, list[float]]] = defaultdict(dict)
 
         # Map: user_id -> {(node_1, node_2): CoActivationRecord}
         self._co_activation_records: dict[str, dict[tuple[str, str], CoActivationRecord]] = (
@@ -76,20 +77,19 @@ class CoActivationTracker:
 
         timestamp = utcnow()
 
-        # Store node_id -> embedding map for semantic gating
-        # When embeddings are not provided, store empty lists (gating will be skipped)
-        activated_embeddings: dict[str, list[float]] = {}
-        for act in activations:
-            if embeddings and act.node_id in embeddings:
-                activated_embeddings[act.node_id] = embeddings[act.node_id]
-            else:
-                activated_embeddings[act.node_id] = []
+        activated_ids = {act.node_id for act in activations}
+
+        # Update embedding cache (separate from history to avoid memory bloat)
+        if embeddings:
+            for node_id, emb in embeddings.items():
+                if emb:
+                    self._embedding_cache[user_id][node_id] = emb
 
         # Clean old history (outside time window)
         self._clean_old_history(user_id, timestamp)
 
-        # Add to history (with embeddings for semantic gating)
-        self._activation_history[user_id].append((timestamp, activated_embeddings))
+        # Add to history
+        self._activation_history[user_id].append((timestamp, activated_ids))
 
         # Detect co-activations within the time window
         co_activated_pairs = self._find_co_activations_in_window(user_id, timestamp)
@@ -194,7 +194,7 @@ class CoActivationTracker:
 
         # Filter history
         self._activation_history[user_id] = [
-            (ts, embs) for ts, embs in self._activation_history[user_id] if ts >= cutoff_time
+            (ts, ids) for ts, ids in self._activation_history[user_id] if ts >= cutoff_time
         ]
 
     def _find_co_activations_in_window(
@@ -216,16 +216,16 @@ class CoActivationTracker:
         window_seconds = self.config.co_activation_window
         cutoff_time = current_time - timedelta(seconds=window_seconds)
 
-        # Collect all node IDs and their embeddings from the window
+        # Collect all node IDs from the window
         all_activated: dict[str, list[float]] = defaultdict(list)
-        all_embeddings: dict[str, list[float]] = {}
 
-        for ts, node_embeddings in self._activation_history[user_id]:
+        for ts, node_ids in self._activation_history[user_id]:
             if ts >= cutoff_time:
-                for node_id in node_embeddings:
+                for node_id in node_ids:
                     all_activated[node_id].append(1.0)
-                    if node_embeddings[node_id]:
-                        all_embeddings[node_id] = node_embeddings[node_id]
+
+        # Get embeddings from cache (separate from history)
+        all_embeddings = self._embedding_cache.get(user_id, {})
 
         # Find pairs of nodes that were both activated
         co_activated_pairs = []
@@ -315,6 +315,9 @@ class CoActivationTracker:
         """
         if user_id in self._activation_history:
             del self._activation_history[user_id]
+
+        if user_id in self._embedding_cache:
+            del self._embedding_cache[user_id]
 
         if user_id in self._co_activation_records:
             del self._co_activation_records[user_id]
