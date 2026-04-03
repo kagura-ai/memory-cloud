@@ -109,7 +109,7 @@ class NeuralMemoryConfig:
     co_activation_window: int = 300  # 5 minutes
     min_co_activation_count: int = 2
     min_similarity_for_edge: float = 0.5  # Semantic gating threshold (Issue #118)
-    max_assoc_score: float = 0.15  # Cap graph association score per node (Issue #120)
+    max_assoc_score: float = 0.5  # Cap graph association score per node (Issue #120)
 
     # Forgetting/Decay
     enable_decay: bool = True
