@@ -115,7 +115,8 @@ class UnifiedScorer:
             semantic_score = sim_score
 
             # 2. Graph association (lookup from pre-computed map)
-            assoc_score = assoc_map.get(node.id, 0.0)
+            # Issue #120: Cap to prevent unbounded aggregate activation
+            assoc_score = min(assoc_map.get(node.id, 0.0), self.config.max_assoc_score)
 
             # 3. Recency (temporal decay)
             recency_score = self._calculate_recency_score(node, current_time)
