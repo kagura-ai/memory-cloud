@@ -110,7 +110,7 @@ class NeuralMemoryConfig:
     min_co_activation_count: int = 2
     min_similarity_for_edge: float = 0.5  # Semantic gating threshold (Issue #118)
     max_assoc_score: float = 0.5  # Cap graph association score per node (Issue #120)
-    top_k_coactivation: int = 5  # Only co-activate top-k results (Issue #120)
+    top_k_coactivation: int = 3  # Only co-activate top-k results (Issue #120)
 
     # Forgetting/Decay
     enable_decay: bool = True
@@ -269,7 +269,7 @@ class NeuralMemoryConfig:
             min_co_activation_count=get_int("MIN_CO_ACTIVATION_COUNT", 2),
             min_similarity_for_edge=get_float("MIN_SIMILARITY_FOR_EDGE", 0.5),
             max_assoc_score=get_float("MAX_ASSOC_SCORE", 0.5),
-            top_k_coactivation=get_int("TOP_K_COACTIVATION", 5),
+            top_k_coactivation=get_int("TOP_K_COACTIVATION", 3),
             # Forgetting/Decay
             enable_decay=get_bool("ENABLE_DECAY", True),
             decay_background_interval=get_int("DECAY_BACKGROUND_INTERVAL", 3600),
