@@ -798,6 +798,75 @@ class NeuralEdgeRepository:
 
         return deleted_count
 
+    async def transfer_edges(
+        self,
+        from_node_id: UUID,
+        to_node_id: UUID,
+        user_id: str,
+        workspace_id: str | None = None,
+        context_id: str | None = None,
+    ) -> int:
+        """Transfer all edges from one node to another.
+
+        Issue #101: Used by Sleep Maintenance dedup/merge to reassign
+        edges from a merged (loser) memory to the winner memory.
+        Self-loops (where the edge would connect to_node to itself) are deleted.
+
+        Args:
+            from_node_id: Source node (loser being merged)
+            to_node_id: Target node (winner keeping edges)
+            user_id: User identifier
+            workspace_id: Workspace ID (for isolation)
+            context_id: Context ID (for isolation)
+
+        Returns:
+            Number of edges transferred
+        """
+        self._validate_isolation_params(workspace_id, context_id)
+
+        transferred = 0
+
+        # Get all edges connected to from_node
+        conditions = [
+            NeuralMemoryEdge.user_id == user_id,
+            or_(
+                NeuralMemoryEdge.src_id == from_node_id,
+                NeuralMemoryEdge.dst_id == from_node_id,
+            ),
+        ]
+        if workspace_id:
+            conditions.append(NeuralMemoryEdge.workspace_id == UUID(workspace_id))
+        if context_id:
+            conditions.append(NeuralMemoryEdge.context_id == UUID(context_id))
+
+        stmt = select(NeuralMemoryEdge).where(and_(*conditions))
+        result = await self.db.execute(stmt)
+        edges = list(result.scalars().all())
+
+        for edge in edges:
+            new_src = to_node_id if edge.src_id == from_node_id else edge.src_id
+            new_dst = to_node_id if edge.dst_id == from_node_id else edge.dst_id
+
+            # Skip self-loops
+            if new_src == new_dst:
+                await self.db.delete(edge)
+                continue
+
+            # Update edge to point to winner
+            edge.src_id = new_src
+            edge.dst_id = new_dst
+            edge.updated_at = utcnow()
+            transferred += 1
+
+        logger.info(
+            "edges_transferred",
+            from_node=str(from_node_id),
+            to_node=str(to_node_id),
+            count=transferred,
+        )
+
+        return transferred
+
     async def delete_all_edges(self, user_id: str) -> int:
         """Delete all edges for a user (graph reset).
 
