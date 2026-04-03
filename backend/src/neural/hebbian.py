@@ -120,7 +120,7 @@ class HebbianLearner:
                 )
 
         if skipped > 0:
-            logger.info(
+            logger.debug(
                 "hebbian_semantic_gating", extra={"skipped": skipped, "threshold": threshold}
             )
 

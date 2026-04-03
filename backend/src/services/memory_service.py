@@ -697,103 +697,105 @@ class MemoryService:
                 )
             )
 
-        # Hebbian learning: build graph for explore() (when Neural Memory is enabled)
+        # Hebbian learning: build graph for explore() (best-effort, does not affect recall)
         if neural_enabled and request.search_mode != "keyword":
-            from neural.co_activation import CoActivationTracker
-            from neural.config import NeuralMemoryConfig
-            from neural.hebbian import HebbianLearner
-            from neural.models import ActivationState, NeuralMemoryNode
-            from repositories.graph import GraphRepository
-            from services.graph_service import GraphService
+            try:
+                from neural.co_activation import CoActivationTracker
+                from neural.config import NeuralMemoryConfig
+                from neural.hebbian import HebbianLearner
+                from neural.models import ActivationState, NeuralMemoryNode
+                from repositories.graph import GraphRepository
+                from services.graph_service import GraphService
 
-            config = await NeuralMemoryConfig.from_db(self.db)
-            graph_repo = GraphRepository(self.db)
-            await graph_repo.get_or_create(user_id)
+                config = await NeuralMemoryConfig.from_db(self.db)
+                graph_repo = GraphRepository(self.db)
+                await graph_repo.get_or_create(user_id)
 
-            graph_service = GraphService(
-                user_id=user_id,
-                db=self.db,
-                workspace_id=str(current_workspace_id) if current_workspace_id else None,
-                context_id=str(current_context_id) if current_context_id else None,
-            )
-
-            hebbian_learner = HebbianLearner(graph_service, config)
-            co_activation_tracker = CoActivationTracker(config)
-            await co_activation_tracker.load_from_redis(user_id)
-
-            # Issue #120: Only co-activate top-k results for higher-quality edges.
-            # C(20,2)=190 noise pairs → C(5,2)=10 high-quality pairs.
-            coactivation_k = min(config.top_k_coactivation, len(search_results))
-            top_results = search_results[:coactivation_k]
-
-            # Build NeuralMemoryNode list and score map from top results
-            nodes_dict: dict[str, NeuralMemoryNode] = {}
-            score_map: dict[str, float] = {}
-            for search_result in top_results:
-                memory = memories.get(search_result["id"])
-                if not memory:
-                    continue
-                mid = str(memory.id)
-                embedding = search_result.get("embedding", [])
-                score_map[mid] = search_result.get("hybrid_score", search_result["score"])
-                nodes_dict[mid] = NeuralMemoryNode(
-                    id=mid,
+                graph_service = GraphService(
                     user_id=user_id,
-                    kind=memory.type,
-                    text=memory.summary,
-                    embedding=embedding,
-                    created_at=memory.created_at,
-                    last_used_at=memory.last_used_at,
-                    use_count=memory.access_count or 0,
-                    importance=memory.importance,
-                    confidence=memory.confidence,
-                    long_term=(memory.scope == "persistent"),
+                    db=self.db,
+                    workspace_id=str(current_workspace_id) if current_workspace_id else None,
+                    context_id=str(current_context_id) if current_context_id else None,
                 )
 
-            # Score-weighted activation: high-scoring results form stronger edges
-            activated_nodes = [
-                ActivationState(node_id=nid, activation=score_map.get(nid, 0.0))
-                for nid in nodes_dict
-            ]
+                hebbian_learner = HebbianLearner(graph_service, config)
+                co_activation_tracker = CoActivationTracker(config)
+                await co_activation_tracker.load_from_redis(user_id)
 
-            # Co-activation tracking with semantic gating
-            embedding_map = {
-                nid: node.embedding for nid, node in nodes_dict.items() if node.embedding
-            }
-            co_activation_tracker.record_activation(
-                user_id, activated_nodes, embeddings=embedding_map
-            )
-            await co_activation_tracker.save_to_redis(user_id)
+                # Only co-activate top-k results for higher-quality edges
+                coactivation_k = min(config.top_k_coactivation, request.k, len(search_results))
+                top_results = search_results[:coactivation_k]
 
-            # Add nodes to graph
-            nodes_added = 0
-            for node_id, node in nodes_dict.items():
-                if not await graph_service.has_node(node_id):
-                    await graph_service.add_node(
-                        node_id=node_id,
-                        node_type="memory",
-                        data={
-                            "user_id": user_id,
-                            "kind": node.kind,
-                            "text": node.text,
-                            "created_at": node.created_at,
-                            "importance": node.importance,
-                            "confidence": node.confidence,
-                            "long_term": node.long_term,
-                        },
+                # Build NeuralMemoryNode list and score map from top results
+                nodes_dict: dict[str, NeuralMemoryNode] = {}
+                score_map: dict[str, float] = {}
+                for search_result in top_results:
+                    memory = memories.get(search_result["id"])
+                    if not memory:
+                        continue
+                    mid = str(memory.id)
+                    embedding = search_result.get("embedding", [])
+                    score_map[mid] = search_result.get("hybrid_score", search_result["score"])
+                    nodes_dict[mid] = NeuralMemoryNode(
+                        id=mid,
+                        user_id=user_id,
+                        kind=memory.type,
+                        text=memory.summary,
+                        embedding=embedding,
+                        created_at=memory.created_at,
+                        last_used_at=memory.last_used_at,
+                        use_count=memory.access_count or 0,
+                        importance=memory.importance,
+                        confidence=memory.confidence,
+                        long_term=(memory.scope == "persistent"),
                     )
-                    nodes_added += 1
 
-            # Hebbian updates
-            await hebbian_learner.queue_update(user_id, activated_nodes, nodes_dict)
-            edges_updated = await hebbian_learner.apply_updates(user_id)
+                # Score-weighted activation: high-scoring results form stronger edges
+                activated_nodes = [
+                    ActivationState(node_id=nid, activation=score_map.get(nid, 0.0))
+                    for nid in nodes_dict
+                ]
 
-            logger.info(
-                "graph_updated",
-                user_id=user_id,
-                nodes_added=nodes_added,
-                edges_updated=edges_updated,
-            )
+                # Co-activation tracking with semantic gating
+                embedding_map = {
+                    nid: node.embedding for nid, node in nodes_dict.items() if node.embedding
+                }
+                co_activation_tracker.record_activation(
+                    user_id, activated_nodes, embeddings=embedding_map
+                )
+                await co_activation_tracker.save_to_redis(user_id)
+
+                # Add nodes to graph
+                nodes_added = 0
+                for node_id, node in nodes_dict.items():
+                    if not await graph_service.has_node(node_id):
+                        await graph_service.add_node(
+                            node_id=node_id,
+                            node_type="memory",
+                            data={
+                                "user_id": user_id,
+                                "kind": node.kind,
+                                "text": node.text,
+                                "created_at": node.created_at,
+                                "importance": node.importance,
+                                "confidence": node.confidence,
+                                "long_term": node.long_term,
+                            },
+                        )
+                        nodes_added += 1
+
+                # Hebbian updates
+                await hebbian_learner.queue_update(user_id, activated_nodes, nodes_dict)
+                edges_updated = await hebbian_learner.apply_updates(user_id)
+
+                logger.info(
+                    "graph_updated",
+                    user_id=user_id,
+                    nodes_added=nodes_added,
+                    edges_updated=edges_updated,
+                )
+            except Exception as exc:
+                logger.warning("hebbian_update_failed", error=str(exc))
 
         await self.db.commit()
 
