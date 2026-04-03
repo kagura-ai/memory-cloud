@@ -256,6 +256,38 @@ All of these are designed to work together with Kagura Memory Cloud MCP tools. A
 
 </details>
 
+<details>
+<summary>Claude Code Plugin (use Kagura in any project)</summary>
+
+The **kagura-memory** plugin adds session management and memory workflow skills to Claude Code. Install it once and use it across all your projects.
+
+**Install:**
+
+```bash
+# From this repository
+claude --plugin-dir ./claude-plugin
+
+# Or install from marketplace (coming soon)
+/plugin install kagura-memory
+```
+
+**Available skills:**
+
+| Skill | Description |
+|-------|-------------|
+| `/kagura-memory:session-start` | Restore previous session context on start |
+| `/kagura-memory:session-summary` | Save session knowledge before ending |
+| `/kagura-memory:recall` | Search past knowledge |
+| `/kagura-memory:remember` | Save new knowledge |
+| `/kagura-memory:guide` | Usage guide, connection status, and setup help |
+| `/kagura-memory:smoke-test` | Verify all MCP tools work |
+
+The plugin also includes a **SessionStart hook** that automatically checks if Kagura Memory Cloud is connected and suggests restoring your previous session context.
+
+> **Prerequisite:** MCP connection must be configured (`.mcp.json` with API key). Run `/kagura-memory:setup` in your project to set it up.
+
+</details>
+
 ### Claude Desktop / Claude Chat (Web)
 
 **Claude Desktop**: Same `.mcp.json` format as Claude Code — place in your project root or `~/.claude/.mcp.json`.
