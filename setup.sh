@@ -62,30 +62,37 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
-# Start API (needed for migration inside container)
+# Start API and web
 echo ""
-echo "Starting API..."
+echo "Starting API and web..."
 docker compose up -d api web
-
-# Step 4: Run migrations INSIDE the API container
-# (Host alembic may connect to a different DB instance due to Docker networking)
-echo ""
-echo "==> Step 4/5: Run database migrations"
-docker compose exec api bash -c "cd /app && PYTHONPATH=src alembic upgrade head"
+echo "Waiting for API to be healthy..."
 for i in $(seq 1 30); do
   api_health=$(docker compose ps api --format '{{.Health}}' 2>/dev/null || echo "")
   if [ "$api_health" = "healthy" ]; then break; fi
   sleep 1
 done
+
+# Step 4: Run migrations INSIDE the API container
+# (Host Python may connect to a different DB instance due to Docker networking)
+echo ""
+echo "==> Step 4/5: Run database migrations"
+docker compose exec api bash -c "cd /app && PYTHONPATH=src alembic upgrade head"
 docker compose ps
 
-# Step 5: Create admin
+# Step 5: Create admin (inside container for consistent DB connection)
+# MCP_JSON_DIR=/app overrides .mcp.json output path for container environment
 echo ""
 echo "==> Step 5/5: Create admin account"
 echo "(Interactive — will prompt for login ID, password, and MFA)"
 echo ""
-cd backend && python3 -m src.cli.create_admin
-cd ..
+docker compose exec -e MCP_JSON_DIR=/app -it api python3 -m src.cli.create_admin
+# Copy .mcp.json from container to project root for Claude Code
+if docker compose cp api:/app/.mcp.json ./.mcp.json 2>/dev/null; then
+  echo "✓ .mcp.json copied to project root"
+else
+  echo "⚠ .mcp.json not found in container — run create_admin manually"
+fi
 
 echo ""
 echo "=================================================="

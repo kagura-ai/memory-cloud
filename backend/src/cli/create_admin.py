@@ -27,7 +27,12 @@ from cli.db import get_sync_database_url  # noqa: E402
 from models.auth import APIKey, ExternalAPIKey, User, Workspace, WorkspaceMember  # noqa: E402
 from utils.datetime import utcnow  # noqa: E402
 
-_project_root = Path(__file__).parent.parent.parent.parent
+# MCP_JSON_DIR env var allows override when running inside Docker container
+_project_root = (
+    Path(os.environ.get("MCP_JSON_DIR", ""))
+    if os.environ.get("MCP_JSON_DIR")
+    else Path(__file__).parent.parent.parent.parent
+)
 
 
 def _get_env_from_docker(key: str) -> str | None:
