@@ -1,43 +1,60 @@
 ---
-description: Show Kagura Memory Cloud usage guide and connection status
+description: Show Kagura Memory Cloud usage guide, connection status, and setup help
 ---
 
-Show the user how to use Kagura Memory Cloud, and check their current connection status.
+Show the user how to use Kagura Memory Cloud. If not connected, help them set up the MCP connection.
 
 ## Steps
 
 ### 1. Check MCP connection
 
 ```
-kagura_memory_usage_guide()
+list_contexts()
 ```
 
-If this succeeds, the MCP server is connected. Show the guide content returned.
+If this succeeds, MCP is connected. Skip to Step 3.
 
-If this fails, the MCP server is not connected. Guide the user through connection setup (Step 2).
+If this fails, guide the user through setup (Step 2).
 
 ### 2. MCP connection setup (if not connected)
 
-Tell the user they need:
+Check for existing config:
 
-1. **A running Kagura Memory Cloud instance** (self-hosted or cloud)
-2. **An API key** from the Kagura Memory Cloud web UI (Workspace > Integrations > API Keys)
-3. **MCP client configuration** — add to `.mcp.json` in their project root:
-   ```json
-   {
-     "mcpServers": {
-       "kagura-memory": {
-         "type": "streamable-http",
-         "url": "http://localhost:8080/mcp",
-         "headers": {
-           "X-Workspace-ID": "<your-workspace-id>",
-           "Authorization": "Bearer <your-api-key>"
-         }
-       }
-     }
-   }
-   ```
-4. Restart Claude Code to pick up the MCP config
+```bash
+cat .mcp.json 2>/dev/null || echo "No .mcp.json found"
+```
+
+If no config exists, ask the user for:
+- **Server URL**: Where their Kagura Memory Cloud instance is running (default: `http://localhost:8080`)
+- **Workspace ID**: Found in the web UI URL bar after login
+- **API key**: Created at Workspace > Integrations > API Keys (starts with `kagura_`)
+
+Create or update `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "kagura-memory": {
+      "type": "streamable-http",
+      "url": "{server_url}/mcp",
+      "headers": {
+        "X-Workspace-ID": "{workspace_id}",
+        "Authorization": "Bearer {api_key}"
+      }
+    }
+  }
+}
+```
+
+If `.mcp.json` already exists with other servers, merge the kagura-memory entry.
+
+Add to `.gitignore` (contains API key):
+
+```bash
+grep -q '.mcp.json' .gitignore 2>/dev/null || echo '.mcp.json' >> .gitignore
+```
+
+Tell the user to restart Claude Code to pick up the config.
 
 ### 3. Show recommended workflows
 

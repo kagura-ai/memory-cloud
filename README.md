@@ -279,8 +279,7 @@ claude --plugin-dir ./claude-plugin
 | `/kagura-memory:session-summary` | Save session knowledge before ending |
 | `/kagura-memory:recall` | Search past knowledge |
 | `/kagura-memory:remember` | Save new knowledge |
-| `/kagura-memory:guide` | Usage guide and connection status |
-| `/kagura-memory:setup` | Set up MCP connection for a new project |
+| `/kagura-memory:guide` | Usage guide, connection status, and setup help |
 | `/kagura-memory:smoke-test` | Verify all MCP tools work |
 
 The plugin also includes a **SessionStart hook** that automatically checks if Kagura Memory Cloud is connected and suggests restoring your previous session context.
