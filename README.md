@@ -282,9 +282,9 @@ claude --plugin-dir ./claude-plugin
 | `/kagura-memory:guide` | Usage guide, connection status, and setup help |
 | `/kagura-memory:smoke-test` | Verify all MCP tools work |
 
-The plugin also includes a **SessionStart hook** that automatically checks if Kagura Memory Cloud is connected and suggests restoring your previous session context.
+Run `/kagura-memory:guide` for setup help and an optional SessionStart hook you can add to your project.
 
-> **Prerequisite:** MCP connection must be configured (`.mcp.json` with API key). Run `/kagura-memory:setup` in your project to set it up.
+> **Prerequisite:** MCP connection must be configured (`.mcp.json` with API key). Run `/kagura-memory:guide` in your project to set it up.
 
 </details>
 
