@@ -629,13 +629,15 @@ class MemoryService:
             search_context_id = [str(cid) for cid in context_ids]
 
         # 1. Primary Retrieval: Hybrid Search (Semantic + BM25)
-        # Issue #120: Neural Memory graph is used for explore() only, not for recall scoring
+        # Issue #120: Fetch more candidates for better hybrid merge quality
+        # and to feed Hebbian learning with broader co-activation data
+        candidates_k = request.k * 4 if neural_enabled else request.k
         search_results = await self.search_service.hybrid_search(
             query=request.query,
             user_id=user_id,
             workspace_id=str(current_workspace_id),
             context_id=search_context_id,
-            k=request.k,
+            k=candidates_k,
             use_rerank=request.use_rerank,
             filters=request.filters,
             search_mode=request.search_mode,
