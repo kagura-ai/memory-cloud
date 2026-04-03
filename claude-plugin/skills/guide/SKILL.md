@@ -73,7 +73,31 @@ Tell the user to restart Claude Code to pick up the config.
 2. During work: `/kagura-memory:remember` and `/kagura-memory:recall` as needed
 3. End session: `/kagura-memory:session-summary` to save learnings
 
-### 4. Show available plugin skills
+### 4. Optional: SessionStart hook
+
+To automatically remind yourself to restore session context, add this hook to your project's `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Kagura Memory Cloud is connected. Run /kagura-memory:session-start to restore previous session context.' || true"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Merge this into your existing `hooks` object if you already have other hooks defined.
+
+### 5. Show available plugin skills
 
 | Skill | Description |
 |-------|-------------|
