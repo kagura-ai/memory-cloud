@@ -730,7 +730,13 @@ class MemoryService:
         # ============================================================================
 
         # 2. Generate query embedding for Neural Memory
-        query_embedding = await self.embedding_service.embed(
+        # Use context-specific embedding service (not default OpenAI)
+        from repositories.config_repository import ContextSearchConfigRepository
+
+        neural_config_repo = ContextSearchConfigRepository(self.db)
+        neural_ctx_config = await neural_config_repo.create_or_get(current_context_id)
+        neural_embed_svc = self._get_embedding_service_for_config(neural_ctx_config)
+        query_embedding = await neural_embed_svc.embed(
             request.query,
             user_id,
             context_id=current_context_id,
