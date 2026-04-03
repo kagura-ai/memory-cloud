@@ -62,17 +62,16 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
-# Step 4: Run migrations BEFORE API starts
-# (API auto-creates tables on startup, which conflicts with alembic)
+# Start API (needed for migration inside container)
+echo ""
+echo "Starting API..."
+docker compose up -d api web
+
+# Step 4: Run migrations INSIDE the API container
+# (Host alembic may connect to a different DB instance due to Docker networking)
 echo ""
 echo "==> Step 4/5: Run database migrations"
-cd backend && PYTHONPATH=src alembic upgrade head
-cd ..
-
-# Start API and web after migrations
-echo ""
-echo "Starting API and web..."
-docker compose up -d
+docker compose exec api bash -c "cd /app && PYTHONPATH=src alembic upgrade head"
 for i in $(seq 1 30); do
   api_health=$(docker compose ps api --format '{{.Health}}' 2>/dev/null || echo "")
   if [ "$api_health" = "healthy" ]; then break; fi
