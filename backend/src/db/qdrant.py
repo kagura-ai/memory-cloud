@@ -449,6 +449,7 @@ async def search_memories_qdrant(
             using="dense",
             limit=limit,
             query_filter=qdrant_filter,
+            with_vectors=["dense"],  # Issue #118: Return document embeddings for semantic gating
         )
 
         return [
@@ -456,7 +457,11 @@ async def search_memories_qdrant(
                 "id": point.id,
                 "score": point.score,
                 "payload": point.payload,
-                "embedding": query_vector,
+                "embedding": (
+                    point.vector.get("dense", query_vector)
+                    if isinstance(point.vector, dict)
+                    else query_vector
+                ),
             }
             for point in results.points
         ]
