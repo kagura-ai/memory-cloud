@@ -51,7 +51,8 @@ def upgrade() -> None:
             ('co_activation_window', '300', 'int', 'coactivation', 'Same-session time window (seconds)', 60, 3600),
             ('min_co_activation_count', '2', 'int', 'coactivation', 'Minimum count to strengthen edge', 1, 10),
             ('min_similarity_for_edge', '0.5', 'float', 'coactivation', 'Minimum cosine similarity for edge creation (semantic gating)', 0.0, 1.0),
-            ('max_assoc_score', '0.15', 'float', 'scoring', 'Maximum graph association score per node (activation cap)', 0.01, 1.0),
+            ('max_assoc_score', '0.5', 'float', 'scoring', 'Maximum graph association score per node (activation cap)', 0.01, 1.0),
+            ('top_k_coactivation', '5', 'int', 'coactivation', 'Only co-activate top-k results per recall (reduces noise edges)', 1, 50),
             -- Consolidation
             ('consolidation_use_count_min', '3', 'int', 'consolidation', 'Min use count for promotion', 1, 20),
             ('consolidation_importance_min', '0.65', 'float', 'consolidation', 'Min importance for promotion', 0.0, 1.0),

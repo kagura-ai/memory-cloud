@@ -720,9 +720,14 @@ class MemoryService:
             co_activation_tracker = CoActivationTracker(config)
             await co_activation_tracker.load_from_redis(user_id)
 
-            # Build NeuralMemoryNode list and embedding map from search results
+            # Issue #120: Only co-activate top-k results for higher-quality edges.
+            # C(20,2)=190 noise pairs → C(5,2)=10 high-quality pairs.
+            coactivation_k = min(config.top_k_coactivation, len(search_results))
+            top_results = search_results[:coactivation_k]
+
+            # Build NeuralMemoryNode list from top results only
             nodes_dict: dict[str, NeuralMemoryNode] = {}
-            for search_result in search_results[: request.k]:
+            for search_result in top_results:
                 memory = memories.get(search_result["id"])
                 if not memory:
                     continue
@@ -741,15 +746,12 @@ class MemoryService:
                     long_term=(memory.scope == "persistent"),
                 )
 
+            # Score-weighted activation: high-scoring results form stronger edges
             activated_nodes = [
                 ActivationState(
                     node_id=nid,
                     activation=next(
-                        (
-                            r.get("hybrid_score", r["score"])
-                            for r in search_results
-                            if r["id"] == nid
-                        ),
+                        (r.get("hybrid_score", r["score"]) for r in top_results if r["id"] == nid),
                         0.0,
                     ),
                 )
