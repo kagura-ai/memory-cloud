@@ -394,3 +394,108 @@ class TestCoActivationTracker:
         # Implementation uses 1.0 for all activations (not actual ActivationState values)
         # So product is always 1.0 * 1.0 = 1.0
         assert record.average_activation_product == 1.0
+
+
+class TestSemanticGating:
+    """Test semantic similarity gating for co-activation edges (Issue #118)."""
+
+    @pytest.fixture
+    def config(self):
+        """Create config with semantic gating enabled."""
+        return NeuralMemoryConfig(
+            track_co_activation=True,
+            co_activation_window=60,
+            min_co_activation_count=2,
+            min_similarity_for_edge=0.5,
+        )
+
+    @pytest.fixture
+    def tracker(self, config):
+        return CoActivationTracker(config)
+
+    def _make_embedding(self, values: list[float]) -> list[float]:
+        """Create a normalized embedding from a few values (padded to dim=8)."""
+        import numpy as np
+
+        emb = values + [0.0] * (8 - len(values))
+        norm = np.linalg.norm(emb)
+        return (np.array(emb) / norm).tolist() if norm > 0 else emb
+
+    def test_similar_pairs_create_edges(self, tracker):
+        """Pairs with high similarity should create co-activation edges."""
+        # Two similar embeddings (cosine sim > 0.5)
+        emb_a = self._make_embedding([1.0, 0.8, 0.1])
+        emb_b = self._make_embedding([0.9, 0.7, 0.2])
+
+        activations = [
+            ActivationState(node_id="a", activation=1.0),
+            ActivationState(node_id="b", activation=0.8),
+        ]
+        embeddings = {"a": emb_a, "b": emb_b}
+
+        records = tracker.record_activation("user1", activations, embeddings=embeddings)
+        assert len(records) == 1
+
+    def test_dissimilar_pairs_blocked(self, tracker):
+        """Pairs with low similarity should NOT create co-activation edges."""
+        # Two dissimilar embeddings (cosine sim < 0.5)
+        emb_a = self._make_embedding([1.0, 0.0, 0.0])
+        emb_b = self._make_embedding([0.0, 0.0, 1.0])
+
+        activations = [
+            ActivationState(node_id="a", activation=1.0),
+            ActivationState(node_id="b", activation=0.8),
+        ]
+        embeddings = {"a": emb_a, "b": emb_b}
+
+        records = tracker.record_activation("user1", activations, embeddings=embeddings)
+        assert len(records) == 0
+
+    def test_no_embeddings_skips_gating(self, tracker):
+        """When embeddings are not provided, all pairs should be co-activated (backward compat)."""
+        activations = [
+            ActivationState(node_id="a", activation=1.0),
+            ActivationState(node_id="b", activation=0.8),
+        ]
+
+        records = tracker.record_activation("user1", activations)
+        assert len(records) == 1
+
+    def test_mixed_embeddings_partial_gating(self, tracker):
+        """When only some nodes have embeddings, pairs without embeddings pass through."""
+        emb_a = self._make_embedding([1.0, 0.0, 0.0])
+        emb_b = self._make_embedding([0.0, 0.0, 1.0])  # dissimilar to a
+
+        activations = [
+            ActivationState(node_id="a", activation=1.0),
+            ActivationState(node_id="b", activation=0.8),
+            ActivationState(node_id="c", activation=0.6),  # no embedding
+        ]
+        embeddings = {"a": emb_a, "b": emb_b}
+
+        records = tracker.record_activation("user1", activations, embeddings=embeddings)
+
+        # (a, b) blocked by similarity < 0.5
+        # (a, c) and (b, c) pass through (c has no embedding)
+        assert len(records) == 2
+
+    def test_threshold_zero_disables_gating(self):
+        """Setting threshold to 0.0 effectively disables gating."""
+        config = NeuralMemoryConfig(
+            track_co_activation=True,
+            co_activation_window=60,
+            min_similarity_for_edge=0.0,
+        )
+        tracker = CoActivationTracker(config)
+
+        emb_a = self._make_embedding([1.0, 0.0, 0.0])
+        emb_b = self._make_embedding([0.0, 0.0, 1.0])
+
+        activations = [
+            ActivationState(node_id="a", activation=1.0),
+            ActivationState(node_id="b", activation=0.8),
+        ]
+        embeddings = {"a": emb_a, "b": emb_b}
+
+        records = tracker.record_activation("user1", activations, embeddings=embeddings)
+        assert len(records) == 1

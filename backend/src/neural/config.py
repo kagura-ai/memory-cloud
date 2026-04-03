@@ -108,6 +108,7 @@ class NeuralMemoryConfig:
     track_co_activation: bool = True
     co_activation_window: int = 300  # 5 minutes
     min_co_activation_count: int = 2
+    min_similarity_for_edge: float = 0.5  # Semantic gating threshold (Issue #118)
 
     # Forgetting/Decay
     enable_decay: bool = True
@@ -171,6 +172,10 @@ class NeuralMemoryConfig:
         if not self.min_co_activation_count > 0:
             raise ValueError(
                 f"min_co_activation_count must be positive, got {self.min_co_activation_count}"
+            )
+        if not (0.0 <= self.min_similarity_for_edge <= 1.0):
+            raise ValueError(
+                f"min_similarity_for_edge must be in [0, 1], got {self.min_similarity_for_edge}"
             )
 
         if not self.decay_rate >= 0:
@@ -256,6 +261,7 @@ class NeuralMemoryConfig:
             track_co_activation=get_bool("TRACK_CO_ACTIVATION", True),
             co_activation_window=get_int("CO_ACTIVATION_WINDOW", 300),
             min_co_activation_count=get_int("MIN_CO_ACTIVATION_COUNT", 2),
+            min_similarity_for_edge=get_float("MIN_SIMILARITY_FOR_EDGE", 0.5),
             # Forgetting/Decay
             enable_decay=get_bool("ENABLE_DECAY", True),
             decay_background_interval=get_int("DECAY_BACKGROUND_INTERVAL", 3600),
@@ -333,6 +339,9 @@ class NeuralMemoryConfig:
             ),
             min_co_activation_count=configs.get(
                 "min_co_activation_count", base_config.min_co_activation_count
+            ),
+            min_similarity_for_edge=configs.get(
+                "min_similarity_for_edge", base_config.min_similarity_for_edge
             ),
             # Forgetting/Decay
             enable_decay=base_config.enable_decay,

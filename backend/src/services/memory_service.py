@@ -835,7 +835,13 @@ class MemoryService:
             ActivationState(node_id=result.node.id, activation=result.score)
             for result in scored_results
         ]
-        co_activation_tracker.record_activation(user_id, activated_nodes)
+        # Build embedding map for semantic gating (Issue #118)
+        embedding_map = {
+            result.node.id: result.node.embedding
+            for result in scored_results
+            if result.node.embedding
+        }
+        co_activation_tracker.record_activation(user_id, activated_nodes, embeddings=embedding_map)
 
         # Issue #84 Phase 2C: Persist to Redis (7-day TTL, survives restarts)
         await co_activation_tracker.save_to_redis(user_id)

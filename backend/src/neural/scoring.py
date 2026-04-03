@@ -17,8 +17,6 @@ import logging
 import math
 from datetime import datetime
 
-import numpy as np
-
 from utils.datetime import utcnow
 
 from .activation import ActivationSpreader
@@ -296,29 +294,11 @@ class UnifiedScorer:
             emb2: Second embedding
 
         Returns:
-            Cosine similarity [-1, 1] (normalized to [0, 1])
+            Cosine similarity clamped to [0, 1]
         """
-        # Convert to numpy for efficiency
-        v1 = np.array(emb1)
-        v2 = np.array(emb2)
+        from .utils import cosine_similarity
 
-        # Cosine similarity
-        dot_product = np.dot(v1, v2)
-        norm_v1 = np.linalg.norm(v1)
-        norm_v2 = np.linalg.norm(v2)
-
-        if norm_v1 == 0 or norm_v2 == 0:
-            return 0.0
-
-        cosine_sim = dot_product / (norm_v1 * norm_v2)
-
-        # E5 embeddings (multilingual-e5-large) are normalized and typically produce
-        # cosine similarities in [0, 1] range for semantically reasonable queries.
-        # We return the raw cosine_sim without additional normalization to avoid
-        # mapping [0,1] → [0.5,1.0] which would reduce discrimination.
-        # If negative similarities occur, they represent semantic opposition
-        # (rare for E5).
-        return float(max(0.0, cosine_sim))  # Clamp to [0, 1] for safety
+        return cosine_similarity(emb1, emb2)
 
     def mmr_rerank(
         self,

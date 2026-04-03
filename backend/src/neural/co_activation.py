@@ -36,8 +36,11 @@ class CoActivationTracker:
         """
         self.config = config
 
-        # Map: user_id -> list of (timestamp, set of activated node IDs)
-        self._activation_history: dict[str, list[tuple[datetime, set[str]]]] = defaultdict(list)
+        # Map: user_id -> list of (timestamp, {node_id: embedding})
+        # Embeddings are stored temporarily for semantic gating within the co-activation window
+        self._activation_history: dict[str, list[tuple[datetime, dict[str, list[float]]]]] = (
+            defaultdict(list)
+        )
 
         # Map: user_id -> {(node_1, node_2): CoActivationRecord}
         self._co_activation_records: dict[str, dict[tuple[str, str], CoActivationRecord]] = (
@@ -49,6 +52,7 @@ class CoActivationTracker:
         user_id: str,
         activations: list[ActivationState],
         session_id: str | None = None,
+        embeddings: dict[str, list[float]] | None = None,
     ) -> list[CoActivationRecord]:
         """Record an activation event and detect co-activations.
 
@@ -56,6 +60,9 @@ class CoActivationTracker:
             user_id: User ID (for sharding)
             activations: List of activated nodes in this retrieval
             session_id: Optional session ID for grouping
+            embeddings: Map of node_id -> embedding for semantic gating.
+                When provided, only pairs with cosine similarity >=
+                config.min_similarity_for_edge will create edges.
 
         Returns:
             List of co-activation records updated/created in this event
@@ -67,13 +74,21 @@ class CoActivationTracker:
             return []
 
         timestamp = utcnow()
-        activated_ids = {act.node_id for act in activations}
+
+        # Store node_id -> embedding map for semantic gating
+        # When embeddings are not provided, store empty lists (gating will be skipped)
+        activated_embeddings: dict[str, list[float]] = {}
+        for act in activations:
+            if embeddings and act.node_id in embeddings:
+                activated_embeddings[act.node_id] = embeddings[act.node_id]
+            else:
+                activated_embeddings[act.node_id] = []
 
         # Clean old history (outside time window)
         self._clean_old_history(user_id, timestamp)
 
-        # Add to history
-        self._activation_history[user_id].append((timestamp, activated_ids))
+        # Add to history (with embeddings for semantic gating)
+        self._activation_history[user_id].append((timestamp, activated_embeddings))
 
         # Detect co-activations within the time window
         co_activated_pairs = self._find_co_activations_in_window(user_id, timestamp)
@@ -178,13 +193,16 @@ class CoActivationTracker:
 
         # Filter history
         self._activation_history[user_id] = [
-            (ts, ids) for ts, ids in self._activation_history[user_id] if ts >= cutoff_time
+            (ts, embs) for ts, embs in self._activation_history[user_id] if ts >= cutoff_time
         ]
 
     def _find_co_activations_in_window(
         self, user_id: str, current_time: datetime
     ) -> list[tuple[str, str, float, float]]:
         """Find all co-activated pairs within the time window.
+
+        Applies semantic gating: pairs with cosine similarity below
+        config.min_similarity_for_edge are skipped to prevent noise edges.
 
         Args:
             user_id: User ID
@@ -193,31 +211,50 @@ class CoActivationTracker:
         Returns:
             List of (node_1, node_2, activation_1, activation_2) tuples
         """
+        from .utils import cosine_similarity
+
         # Get all activated nodes in the window
         window_seconds = self.config.co_activation_window
         cutoff_time = current_time - timedelta(seconds=window_seconds)
 
-        # Collect all node IDs activated in this window
+        # Collect all node IDs and their embeddings from the window
         all_activated: dict[str, list[float]] = defaultdict(list)
+        all_embeddings: dict[str, list[float]] = {}
 
-        for ts, node_ids in self._activation_history[user_id]:
+        for ts, node_embeddings in self._activation_history[user_id]:
             if ts >= cutoff_time:
-                for node_id in node_ids:
-                    # For simplicity, assume activation = 1.0 (can be refined)
+                for node_id in node_embeddings:
                     all_activated[node_id].append(1.0)
+                    # Keep the latest embedding for each node
+                    if node_id in node_embeddings and node_embeddings[node_id]:
+                        all_embeddings[node_id] = node_embeddings[node_id]
 
         # Find pairs of nodes that were both activated
         co_activated_pairs = []
         node_ids = list(all_activated.keys())
+        threshold = self.config.min_similarity_for_edge
+        skipped = 0
 
         for i, node_1 in enumerate(node_ids):
             for node_2 in node_ids[i + 1 :]:  # Avoid duplicates
-                # Both nodes were activated in this window
+                # Semantic gating: skip pairs below similarity threshold
+                emb_1 = all_embeddings.get(node_1)
+                emb_2 = all_embeddings.get(node_2)
+
+                if emb_1 and emb_2:
+                    sim = cosine_similarity(emb_1, emb_2)
+                    if sim < threshold:
+                        skipped += 1
+                        continue
+
                 # Calculate average activation (for Hebbian update)
                 avg_act_1 = sum(all_activated[node_1]) / len(all_activated[node_1])
                 avg_act_2 = sum(all_activated[node_2]) / len(all_activated[node_2])
 
                 co_activated_pairs.append((node_1, node_2, avg_act_1, avg_act_2))
+
+        if skipped > 0:
+            logger.debug(f"Semantic gating: skipped {skipped} pairs below threshold {threshold}")
 
         return co_activated_pairs
 
