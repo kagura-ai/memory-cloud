@@ -373,3 +373,41 @@ class TestUnifiedScorer:
             query_embedding=[0.1] * 512, results=results, lambda_param=0.5, top_k=3
         )
         assert len(reranked) == 3
+
+    @pytest.mark.asyncio
+    async def test_max_assoc_score_cap(self, mock_graph):
+        """Test that graph association score is capped by max_assoc_score."""
+        config = NeuralMemoryConfig(
+            alpha=0.4,
+            beta=0.2,
+            gamma=0.15,
+            delta=0.15,
+            epsilon=0.1,
+            zeta=0.0,
+            max_assoc_score=0.1,
+            spread_hops=1,
+            spread_decay=0.8,
+            spread_threshold=0.01,
+        )
+        spreader = ActivationSpreader(mock_graph, config)
+        scorer = UnifiedScorer(config, spreader)
+
+        node = NeuralMemoryNode(
+            id="node1",
+            user_id="test_user",
+            kind=MemoryKind.FACT,
+            text="Memory",
+            embedding=[0.1] * 512,
+            created_at=datetime.utcnow(),
+            use_count=0,
+            importance=0.5,
+            confidence=1.0,
+        )
+
+        results = await scorer.score_candidates(
+            query_embedding=[0.1] * 512,
+            candidates=[(node, 0.5)],
+        )
+
+        # Association should be capped at max_assoc_score
+        assert results[0].components["association"] <= 0.1
