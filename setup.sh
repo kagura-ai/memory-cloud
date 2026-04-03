@@ -48,6 +48,21 @@ cd ..
 echo "Installing kagura-memory SDK..."
 pip install kagura-memory
 
+# Check for port conflicts before starting services
+echo ""
+echo "Checking for port conflicts..."
+for port in 5432 6333 6334 6379 8080; do
+  # Exclude our own kagura containers
+  conflict=$(docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | grep -v "^kagura-" | grep ":${port}->" || true)
+  if [ -n "$conflict" ]; then
+    echo "✗ Port $port is already in use by another container:"
+    echo "  $conflict"
+    echo "  Stop it first: docker stop <container-name>"
+    exit 1
+  fi
+done
+echo "✓ No port conflicts"
+
 # Step 3: Start infrastructure (postgres, qdrant, redis — NOT API yet)
 echo ""
 echo "==> Step 3/5: Start Docker services"
