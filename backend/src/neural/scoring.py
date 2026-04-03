@@ -17,8 +17,6 @@ import logging
 import math
 from datetime import datetime
 
-import numpy as np
-
 from utils.datetime import utcnow
 
 from .activation import ActivationSpreader
@@ -29,6 +27,7 @@ from .utils import (
     IMPORTANCE_STORED_WEIGHT,
     LOG_FREQUENCY_REFERENCE_COUNT,
     SECONDS_PER_DAY,
+    cosine_similarity,
 )
 
 logger = logging.getLogger(__name__)
@@ -117,7 +116,8 @@ class UnifiedScorer:
             semantic_score = sim_score
 
             # 2. Graph association (lookup from pre-computed map)
-            assoc_score = assoc_map.get(node.id, 0.0)
+            # Cap to prevent unbounded aggregate activation
+            assoc_score = min(assoc_map.get(node.id, 0.0), self.config.max_assoc_score)
 
             # 3. Recency (temporal decay)
             recency_score = self._calculate_recency_score(node, current_time)
@@ -279,46 +279,13 @@ class UnifiedScorer:
 
         # Calculate cosine similarity with all selected nodes
         similarities = [
-            self._cosine_similarity(node.embedding, selected_emb)
-            for selected_emb in selected_embeddings
+            cosine_similarity(node.embedding, selected_emb) for selected_emb in selected_embeddings
         ]
 
         # Max similarity = redundancy
         max_similarity = max(similarities)
 
         return max_similarity
-
-    def _cosine_similarity(self, emb1: list[float], emb2: list[float]) -> float:
-        """Calculate cosine similarity between two embeddings.
-
-        Args:
-            emb1: First embedding
-            emb2: Second embedding
-
-        Returns:
-            Cosine similarity [-1, 1] (normalized to [0, 1])
-        """
-        # Convert to numpy for efficiency
-        v1 = np.array(emb1)
-        v2 = np.array(emb2)
-
-        # Cosine similarity
-        dot_product = np.dot(v1, v2)
-        norm_v1 = np.linalg.norm(v1)
-        norm_v2 = np.linalg.norm(v2)
-
-        if norm_v1 == 0 or norm_v2 == 0:
-            return 0.0
-
-        cosine_sim = dot_product / (norm_v1 * norm_v2)
-
-        # E5 embeddings (multilingual-e5-large) are normalized and typically produce
-        # cosine similarities in [0, 1] range for semantically reasonable queries.
-        # We return the raw cosine_sim without additional normalization to avoid
-        # mapping [0,1] → [0.5,1.0] which would reduce discrimination.
-        # If negative similarities occur, they represent semantic opposition
-        # (rare for E5).
-        return float(max(0.0, cosine_sim))  # Clamp to [0, 1] for safety
 
     def mmr_rerank(
         self,
@@ -362,7 +329,7 @@ class UnifiedScorer:
                 # Diversity (max similarity to selected)
                 if selected:
                     max_sim = max(
-                        self._cosine_similarity(result.node.embedding, sel.node.embedding)
+                        cosine_similarity(result.node.embedding, sel.node.embedding)
                         for sel in selected
                     )
                 else:

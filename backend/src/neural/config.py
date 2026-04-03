@@ -108,6 +108,9 @@ class NeuralMemoryConfig:
     track_co_activation: bool = True
     co_activation_window: int = 300  # 5 minutes
     min_co_activation_count: int = 2
+    min_similarity_for_edge: float = 0.5  # Semantic gating threshold
+    max_assoc_score: float = 0.5  # Cap graph association score per node
+    top_k_coactivation: int = 3  # Only co-activate top-k results
 
     # Forgetting/Decay
     enable_decay: bool = True
@@ -172,6 +175,14 @@ class NeuralMemoryConfig:
             raise ValueError(
                 f"min_co_activation_count must be positive, got {self.min_co_activation_count}"
             )
+        if not (0.0 <= self.min_similarity_for_edge <= 1.0):
+            raise ValueError(
+                f"min_similarity_for_edge must be in [0, 1], got {self.min_similarity_for_edge}"
+            )
+        if not self.max_assoc_score > 0:
+            raise ValueError(f"max_assoc_score must be positive, got {self.max_assoc_score}")
+        if not self.top_k_coactivation > 0:
+            raise ValueError(f"top_k_coactivation must be positive, got {self.top_k_coactivation}")
 
         if not self.decay_rate >= 0:
             raise ValueError(f"decay_rate must be non-negative, got {self.decay_rate}")
@@ -256,6 +267,9 @@ class NeuralMemoryConfig:
             track_co_activation=get_bool("TRACK_CO_ACTIVATION", True),
             co_activation_window=get_int("CO_ACTIVATION_WINDOW", 300),
             min_co_activation_count=get_int("MIN_CO_ACTIVATION_COUNT", 2),
+            min_similarity_for_edge=get_float("MIN_SIMILARITY_FOR_EDGE", 0.5),
+            max_assoc_score=get_float("MAX_ASSOC_SCORE", 0.5),
+            top_k_coactivation=get_int("TOP_K_COACTIVATION", 3),
             # Forgetting/Decay
             enable_decay=get_bool("ENABLE_DECAY", True),
             decay_background_interval=get_int("DECAY_BACKGROUND_INTERVAL", 3600),
@@ -334,6 +348,11 @@ class NeuralMemoryConfig:
             min_co_activation_count=configs.get(
                 "min_co_activation_count", base_config.min_co_activation_count
             ),
+            min_similarity_for_edge=configs.get(
+                "min_similarity_for_edge", base_config.min_similarity_for_edge
+            ),
+            max_assoc_score=configs.get("max_assoc_score", base_config.max_assoc_score),
+            top_k_coactivation=configs.get("top_k_coactivation", base_config.top_k_coactivation),
             # Forgetting/Decay
             enable_decay=base_config.enable_decay,
             decay_background_interval=configs.get(

@@ -606,15 +606,6 @@ class MemoryService:
         """
         import os
 
-        from neural.activation import ActivationSpreader
-        from neural.co_activation import CoActivationTracker
-        from neural.config import NeuralMemoryConfig
-        from neural.hebbian import HebbianLearner
-        from neural.models import ActivationState, NeuralMemoryNode
-        from neural.scoring import UnifiedScorer
-        from repositories.graph import GraphRepository
-        from services.graph_service import GraphService
-
         logger.info(
             "recall_request",
             user_id=user_id,
@@ -636,6 +627,8 @@ class MemoryService:
             search_context_id = [str(cid) for cid in context_ids]
 
         # 1. Primary Retrieval: Hybrid Search (Semantic + BM25)
+        # Fetch more candidates when neural is enabled for better hybrid merge
+        # and to feed Hebbian learning with broader co-activation data
         candidates_k = request.k * 4 if neural_enabled else request.k
         search_results = await self.search_service.hybrid_search(
             query=request.query,
@@ -646,6 +639,7 @@ class MemoryService:
             use_rerank=request.use_rerank,
             filters=request.filters,
             search_mode=request.search_mode,
+            include_vectors=neural_enabled,
         )
 
         # Get full memory data from PostgreSQL
@@ -664,221 +658,15 @@ class MemoryService:
         memories_list = list(result.scalars().all())
         memories = {str(m.id): m for m in memories_list}
 
-        # Skip Neural Memory (UnifiedScorer) when:
-        # - Neural Memory is disabled
-        # - keyword-only mode (no embeddings available)
-        # - reranker is active (Issue #117: reranker scores get compressed by UnifiedScorer)
-        reranker_active = bool(
-            request.use_rerank and search_results and "rerank_score" in search_results[0]
-        )
-        if not neural_enabled or request.search_mode == "keyword" or reranker_active:
-            responses = []
-            for search_result in search_results[: request.k]:
-                memory_id = search_result["id"]
-                memory = memories.get(memory_id)
+        # === Issue #120: Neural Memory graph is for explore() only ===
+        # recall uses pure hybrid search scores (no UnifiedScorer).
+        # Hebbian learning still runs to build the graph for explore().
 
-                if not memory:
-                    continue
-
-                # Update access stats
-                await self.memory_repo.update_access_stats(
-                    memory.id,
-                    client=request.filters.get("client", "api") if request.filters else "api",
-                )
-
-                # Check for auto-promotion
-                await self._check_and_promote(memory)
-
-                responses.append(
-                    MemoryResponse(
-                        memory_id=memory.id,
-                        summary=memory.summary,
-                        context_summary=memory.context_summary,
-                        type=memory.type,
-                        importance=memory.importance,
-                        scope=memory.scope,
-                        created_at=memory.created_at,
-                        client=memory.client,
-                        tags=memory.tags or [],
-                        context=memory.context,
-                        score=search_result.get("hybrid_score", search_result["score"]),
-                    )
-                )
-
-            await self.db.commit()
-
-            # Issue #104: Aggregate related tags from results
-            related_tags = self._aggregate_related_tags(responses, limit=10)
-
-            logger.info("recall_completed", user_id=user_id, results=len(responses), neural=False)
-            return RecallResponse(results=responses, related_tags=related_tags)
-
-        # === Neural Memory Integration ===
-
-        # ============================================================================
-        # BUG FIX #83-2: Generate query embedding independently
-        # ============================================================================
-        # Problem: Query embedding was extracted from search_results[0]["embedding"],
-        #          which fails if:
-        #          1. search_results is empty (no RAG hits)
-        #          2. search_results doesn't include embedding field
-        #          This defeats the purpose of Neural Memory (graph exploration
-        #          should work even without RAG hits).
-        #
-        # Solution: Generate query embedding FIRST, before RAG search.
-        #           This ensures Neural Memory can always function.
-        #
-        # Benefits:
-        #          - Graph exploration works even with zero RAG results
-        #          - Query embedding is authentic (not borrowed from result)
-        #          - MMR and redundancy calculations use correct query vector
-        # ============================================================================
-
-        # 2. Generate query embedding for Neural Memory
-        # Use context-specific embedding service (not default OpenAI)
-        from repositories.config_repository import ContextSearchConfigRepository
-
-        neural_config_repo = ContextSearchConfigRepository(self.db)
-        neural_ctx_config = await neural_config_repo.create_or_get(current_context_id)
-        neural_embed_svc = self._get_embedding_service_for_config(neural_ctx_config)
-        query_embedding = await neural_embed_svc.embed(
-            request.query,
-            user_id,
-            context_id=current_context_id,
-            workspace_id=current_workspace_id,
-        )
-
-        # 3. Load user's graph
-        graph_repo = GraphRepository(self.db)
-        await graph_repo.get_or_create(user_id)
-
-        # Single Collection Migration: Pass workspace_id and context_id to GraphService
-        graph_service = GraphService(
-            user_id=user_id,
-            db=self.db,
-            workspace_id=str(current_workspace_id) if current_workspace_id else None,
-            context_id=str(current_context_id) if current_context_id else None,
-        )
-
-        # 4. Neural Memory components (Issue #107: DB-driven config)
-        config = await NeuralMemoryConfig.from_db(self.db)
-        activation_spreader = ActivationSpreader(graph_service, config)
-        hebbian_learner = HebbianLearner(graph_service, config)
-        co_activation_tracker = CoActivationTracker(config)
-
-        # Issue #84 Phase 2C: Load co-activations from Redis (warm start)
-        await co_activation_tracker.load_from_redis(user_id)
-
-        unified_scorer = UnifiedScorer(config, activation_spreader)
-
-        # 5. Convert candidates to NeuralMemoryNode format
-        neural_candidates = []
-        for memory in memories_list:
-            # Get embedding from search result
-            search_result = next((r for r in search_results if r["id"] == str(memory.id)), None)
-            if not search_result:
-                continue
-
-            embedding = search_result.get("embedding", [])
-
-            neural_node = NeuralMemoryNode(
-                id=str(memory.id),
-                user_id=user_id,
-                kind=memory.type,
-                text=memory.summary,
-                embedding=embedding,
-                created_at=memory.created_at,
-                last_used_at=memory.last_used_at,
-                use_count=memory.access_count or 0,
-                importance=memory.importance,
-                confidence=memory.confidence,
-                long_term=(memory.scope == "persistent"),
-            )
-
-            neural_candidates.append(
-                (neural_node, search_result.get("hybrid_score", search_result["score"]))
-            )
-
-        # ============================================================================
-        # BUG FIX #83-9: Use search_results order for seed nodes
-        # ============================================================================
-        # Problem: seed_node_ids was built from memories_list which comes from
-        #          SQL WHERE id IN (...) - order is NOT guaranteed.
-        #          This meant random 10 memories were used as seeds instead of
-        #          the top 10 by relevance score.
-        #
-        # Solution: Use search_results (ordered by hybrid_score) to select seeds.
-        #
-        # Impact: Activation spreading now starts from the most relevant memories,
-        #         improving Neural Memory quality.
-        # ============================================================================
-
-        # 6. Get seed nodes from top search results (ordered by relevance)
-        top_ids = [r["id"] for r in search_results[:10]]
-        seed_node_ids = [mid for mid in top_ids if mid in memories]
-
-        # 7. Unified Scoring (Semantic + Graph + Temporal + Trust)
-
-        scored_results = await unified_scorer.score_candidates(
-            query_embedding=query_embedding,
-            candidates=neural_candidates,
-            seed_nodes=seed_node_ids,
-            selected_nodes=None,
-        )
-
-        # 8. Sort and limit
-        scored_results.sort(key=lambda r: r.score, reverse=True)
-        scored_results = scored_results[: request.k]
-
-        # 9. Co-activation Tracking
-        activated_nodes = [
-            ActivationState(node_id=result.node.id, activation=result.score)
-            for result in scored_results
-        ]
-        co_activation_tracker.record_activation(user_id, activated_nodes)
-
-        # Issue #84 Phase 2C: Persist to Redis (7-day TTL, survives restarts)
-        await co_activation_tracker.save_to_redis(user_id)
-
-        # 10. Add nodes to graph (if not already present)
-        nodes_dict = {result.node.id: result.node for result in scored_results}
-        nodes_added = 0
-        for node_id, node in nodes_dict.items():
-            if not await graph_service.has_node(node_id):
-                await graph_service.add_node(
-                    node_id=node_id,
-                    node_type="memory",
-                    data={
-                        "user_id": user_id,
-                        "kind": node.kind,
-                        "text": node.text,
-                        "created_at": node.created_at,
-                        "importance": node.importance,
-                        "confidence": node.confidence,
-                        "long_term": node.long_term,
-                    },
-                )
-                nodes_added += 1
-
-        # 11. Queue and apply Hebbian updates (Issue #84: async)
-        # Single Collection Migration: collection_name removed (always "kagura_memories")
-        await hebbian_learner.queue_update(user_id, activated_nodes, nodes_dict)
-        edges_updated = await hebbian_learner.apply_updates(user_id)
-
-        # 12. Save graph - deprecated in SQL backend (Issue #84)
-        # Graph data now persisted directly in neural_memory_edges table
-        # No need to save JSON to graph_memory table
-        logger.info(
-            "graph_updated",
-            user_id=user_id,
-            nodes_added=nodes_added,
-            edges_updated=edges_updated,
-        )
-
-        # 12. Build response
         responses = []
-        for recall_result in scored_results:
-            memory = memories.get(recall_result.node.id)
+        for search_result in search_results[: request.k]:
+            memory_id = search_result["id"]
+            memory = memories.get(memory_id)
+
             if not memory:
                 continue
 
@@ -887,9 +675,6 @@ class MemoryService:
                 memory.id,
                 client=request.filters.get("client", "api") if request.filters else "api",
             )
-
-            # Issue #84 Phase 2B: Sync graph node (no-op in SQL backend, but ensures consistency)
-            await graph_service.sync_node_from_memory(memory.id)
 
             # Check for auto-promotion
             await self._check_and_promote(memory)
@@ -906,16 +691,118 @@ class MemoryService:
                     client=memory.client,
                     tags=memory.tags or [],
                     context=memory.context,
-                    score=recall_result.score,
+                    score=search_result.get("hybrid_score", search_result["score"]),
                 )
             )
+
+        # Hebbian learning: build graph for explore() (best-effort, does not affect recall)
+        if neural_enabled and request.search_mode != "keyword":
+            try:
+                from neural.co_activation import CoActivationTracker
+                from neural.config import NeuralMemoryConfig
+                from neural.hebbian import HebbianLearner
+                from neural.models import ActivationState, NeuralMemoryNode
+                from repositories.graph import GraphRepository
+                from services.graph_service import GraphService
+
+                config = await NeuralMemoryConfig.from_db(self.db)
+                graph_repo = GraphRepository(self.db)
+                await graph_repo.get_or_create(user_id)
+
+                graph_service = GraphService(
+                    user_id=user_id,
+                    db=self.db,
+                    workspace_id=str(current_workspace_id) if current_workspace_id else None,
+                    context_id=str(current_context_id) if current_context_id else None,
+                )
+
+                hebbian_learner = HebbianLearner(graph_service, config)
+                co_activation_tracker = CoActivationTracker(config)
+                await co_activation_tracker.load_from_redis(user_id)
+
+                # Only co-activate top-k results for higher-quality edges
+                coactivation_k = min(config.top_k_coactivation, request.k, len(search_results))
+                top_results = search_results[:coactivation_k]
+
+                # Build NeuralMemoryNode list and score map from top results
+                nodes_dict: dict[str, NeuralMemoryNode] = {}
+                score_map: dict[str, float] = {}
+                for search_result in top_results:
+                    memory = memories.get(search_result["id"])
+                    if not memory:
+                        continue
+                    mid = str(memory.id)
+                    embedding = search_result.get("embedding", [])
+                    score_map[mid] = search_result.get("hybrid_score", search_result["score"])
+                    nodes_dict[mid] = NeuralMemoryNode(
+                        id=mid,
+                        user_id=user_id,
+                        kind=memory.type,
+                        text=memory.summary,
+                        embedding=embedding,
+                        created_at=memory.created_at,
+                        last_used_at=memory.last_used_at,
+                        use_count=memory.access_count or 0,
+                        importance=memory.importance,
+                        confidence=memory.confidence,
+                        long_term=(memory.scope == "persistent"),
+                    )
+
+                # Score-weighted activation: clamp to [0, 1] for Hebbian stability
+                activated_nodes = [
+                    ActivationState(
+                        node_id=nid, activation=min(1.0, max(0.0, score_map.get(nid, 0.0)))
+                    )
+                    for nid in nodes_dict
+                ]
+
+                # Co-activation tracking with semantic gating
+                embedding_map = {
+                    nid: node.embedding for nid, node in nodes_dict.items() if node.embedding
+                }
+                co_activation_tracker.record_activation(
+                    user_id, activated_nodes, embeddings=embedding_map
+                )
+                await co_activation_tracker.save_to_redis(user_id)
+
+                # Add nodes to graph
+                nodes_added = 0
+                for node_id, node in nodes_dict.items():
+                    if not await graph_service.has_node(node_id):
+                        await graph_service.add_node(
+                            node_id=node_id,
+                            node_type="memory",
+                            data={
+                                "user_id": user_id,
+                                "kind": node.kind,
+                                "text": node.text,
+                                "created_at": node.created_at,
+                                "importance": node.importance,
+                                "confidence": node.confidence,
+                                "long_term": node.long_term,
+                            },
+                        )
+                        nodes_added += 1
+
+                # Hebbian updates
+                await hebbian_learner.queue_update(user_id, activated_nodes, nodes_dict)
+                edges_updated = await hebbian_learner.apply_updates(user_id)
+
+                logger.info(
+                    "graph_updated",
+                    user_id=user_id,
+                    nodes_added=nodes_added,
+                    edges_updated=edges_updated,
+                )
+            except Exception as exc:
+                logger.warning("hebbian_update_failed", error=str(exc))
 
         await self.db.commit()
 
         # Issue #104: Aggregate related tags from results
         related_tags = self._aggregate_related_tags(responses, limit=10)
 
-        logger.info("recall_completed", user_id=user_id, results=len(responses), neural=True)
+        logger.info("recall_completed", user_id=user_id, results=len(responses))
 
         return RecallResponse(results=responses, related_tags=related_tags)
 

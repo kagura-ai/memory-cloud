@@ -176,3 +176,116 @@ class TestHebbianLearner:
         assert abs(clipped[("n1", "n2")]) <= learner.config.gradient_clipping
         # Small delta should be preserved
         assert abs(clipped[("n3", "n4")] - 0.1) < 0.0001
+
+    @pytest.mark.asyncio
+    async def test_semantic_gating_skips_dissimilar_pairs(self, mock_graph):
+        """Test that Hebbian queue_update skips pairs below similarity threshold."""
+        config = NeuralMemoryConfig(
+            learning_rate=0.1,
+            decay_lambda=0.01,
+            weight_max=3.0,
+            gradient_clipping=1.0,
+            top_m_edges=10,
+            min_similarity_for_edge=0.5,
+        )
+        learner = HebbianLearner(mock_graph, config)
+
+        import numpy as np
+
+        # Create two dissimilar embeddings (cosine sim ≈ 0)
+        emb_a = np.zeros(8).tolist()
+        emb_a[0] = 1.0
+        emb_b = np.zeros(8).tolist()
+        emb_b[7] = 1.0
+
+        nodes = {
+            "a": NeuralMemoryNode(
+                id="a",
+                user_id="u",
+                kind=MemoryKind.FACT,
+                text="A",
+                embedding=emb_a,
+                created_at=datetime.utcnow(),
+                use_count=0,
+                importance=0.5,
+                confidence=1.0,
+            ),
+            "b": NeuralMemoryNode(
+                id="b",
+                user_id="u",
+                kind=MemoryKind.FACT,
+                text="B",
+                embedding=emb_b,
+                created_at=datetime.utcnow(),
+                use_count=0,
+                importance=0.5,
+                confidence=1.0,
+            ),
+        }
+        activations = [
+            ActivationState(node_id="a", activation=0.9),
+            ActivationState(node_id="b", activation=0.8),
+        ]
+
+        await learner.queue_update("u", activations, nodes)
+
+        # No updates should be queued (pair was gated)
+        assert len(learner._update_queue.get("u", [])) == 0
+
+    @pytest.mark.asyncio
+    async def test_semantic_gating_keeps_similar_pairs(self, mock_graph):
+        """Test that Hebbian queue_update keeps pairs above similarity threshold."""
+        config = NeuralMemoryConfig(
+            learning_rate=0.1,
+            decay_lambda=0.01,
+            weight_max=3.0,
+            gradient_clipping=1.0,
+            top_m_edges=10,
+            min_similarity_for_edge=0.5,
+        )
+        learner = HebbianLearner(mock_graph, config)
+
+        import numpy as np
+
+        # Create two similar embeddings (cosine sim ≈ 0.98)
+        emb_a = [1.0, 0.8, 0.1] + [0.0] * 5
+        norm_a = np.linalg.norm(emb_a)
+        emb_a = (np.array(emb_a) / norm_a).tolist()
+
+        emb_b = [0.9, 0.7, 0.2] + [0.0] * 5
+        norm_b = np.linalg.norm(emb_b)
+        emb_b = (np.array(emb_b) / norm_b).tolist()
+
+        nodes = {
+            "a": NeuralMemoryNode(
+                id="a",
+                user_id="u",
+                kind=MemoryKind.FACT,
+                text="A",
+                embedding=emb_a,
+                created_at=datetime.utcnow(),
+                use_count=0,
+                importance=0.5,
+                confidence=1.0,
+            ),
+            "b": NeuralMemoryNode(
+                id="b",
+                user_id="u",
+                kind=MemoryKind.FACT,
+                text="B",
+                embedding=emb_b,
+                created_at=datetime.utcnow(),
+                use_count=0,
+                importance=0.5,
+                confidence=1.0,
+            ),
+        }
+        activations = [
+            ActivationState(node_id="a", activation=0.9),
+            ActivationState(node_id="b", activation=0.8),
+        ]
+
+        await learner.queue_update("u", activations, nodes)
+
+        # Updates should be queued (pair passed gating)
+        assert len(learner._update_queue["u"]) == 2  # Bidirectional

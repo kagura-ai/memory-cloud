@@ -47,6 +47,7 @@ class SearchService:
         use_rerank: bool = False,
         filters: dict[str, Any] | None = None,
         search_mode: SearchMode = "hybrid",
+        include_vectors: bool = False,
     ) -> list[dict]:
         """Search with configurable mode: hybrid, semantic, or keyword.
 
@@ -67,6 +68,7 @@ class SearchService:
             use_rerank: Use reranking if available
             filters: Optional filters
             search_mode: Search strategy (hybrid/semantic/keyword)
+            include_vectors: Return document embeddings from Qdrant (increases payload size)
 
         Returns:
             List of search results with scores
@@ -173,6 +175,7 @@ class SearchService:
                 filters=filters,
                 is_shared_context=is_shared_context,
                 collection_name=collection,
+                include_vectors=include_vectors,
             )
 
         if search_mode in ("hybrid", "keyword"):

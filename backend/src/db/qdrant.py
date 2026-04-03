@@ -395,8 +395,9 @@ async def search_memories_qdrant(
     context_id: str | list[str],
     limit: int = 10,
     filters: dict[str, Any] | None = None,
-    is_shared_context: bool = False,  # NEW: Team collaboration support
+    is_shared_context: bool = False,
     collection_name: str = KAGURA_MEMORIES_COLLECTION,
+    include_vectors: bool = False,
 ) -> list[dict]:
     """Semantic search in Qdrant with workspace-aware isolation.
 
@@ -449,6 +450,7 @@ async def search_memories_qdrant(
             using="dense",
             limit=limit,
             query_filter=qdrant_filter,
+            with_vectors=["dense"] if include_vectors else False,
         )
 
         return [
@@ -456,7 +458,11 @@ async def search_memories_qdrant(
                 "id": point.id,
                 "score": point.score,
                 "payload": point.payload,
-                "embedding": query_vector,
+                "embedding": (
+                    point.vector.get("dense", [])
+                    if include_vectors and isinstance(point.vector, dict)
+                    else []
+                ),
             }
             for point in results.points
         ]

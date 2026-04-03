@@ -25,6 +25,7 @@ from src.services.graph_service import GraphService as GraphMemory
 
 from .config import NeuralMemoryConfig
 from .models import ActivationState, HebbianUpdate, NeuralMemoryNode
+from .utils import cosine_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -59,13 +60,17 @@ class HebbianLearner:
     ) -> None:
         """Queue Hebbian updates for co-activated nodes.
 
+        Applies semantic gating (Issue #118): pairs with cosine similarity
+        below config.min_similarity_for_edge are skipped to prevent noise
+        edges from accumulating.
+
         Args:
             user_id: User ID (for sharding)
             activations: List of activated nodes in this retrieval
             nodes: Map of node_id -> NeuralMemoryNode (for confidence scores)
         """
-        # Extract co-activation pairs (for logging/debugging)
-        # active_ids = [a.node_id for a in activations]  # Unused, kept for clarity
+        threshold = self.config.min_similarity_for_edge
+        skipped = 0
 
         for i, act_i in enumerate(activations):
             for act_j in activations[i + 1 :]:  # Avoid duplicates
@@ -74,6 +79,13 @@ class HebbianLearner:
 
                 if not node_i or not node_j:
                     continue
+
+                # Semantic gating: skip pairs below similarity threshold
+                if node_i.embedding and node_j.embedding:
+                    sim = cosine_similarity(node_i.embedding, node_j.embedding)
+                    if sim < threshold:
+                        skipped += 1
+                        continue
 
                 # Get current weight (Issue #84: async)
                 current_weight = await self._get_current_weight(
@@ -106,6 +118,11 @@ class HebbianLearner:
                         delta_weight=delta_w,
                     )
                 )
+
+        if skipped > 0:
+            logger.debug(
+                "hebbian_semantic_gating", extra={"skipped": skipped, "threshold": threshold}
+            )
 
         logger.debug(
             f"Queued {len(self._update_queue[user_id])} Hebbian updates for user {user_id}"
