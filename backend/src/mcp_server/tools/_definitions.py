@@ -664,7 +664,7 @@ Weights must sum to 1.0.""",
                     },
                     "use_rerank": {
                         "type": "boolean",
-                        "description": "Enable/disable reranking. Requires reranker API key.",
+                        "description": "Enable/disable reranking. Requires API key for Voyage/Cohere, or use 'ollama' for free local reranking.",
                     },
                     "reranker_provider": {
                         "type": "string",

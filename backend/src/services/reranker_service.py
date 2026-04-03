@@ -333,22 +333,21 @@ def _parse_relevance_score(text: str) -> float:
     if not text:
         return 0.0
 
-    # Try percentage: "80%" -> 0.8
-    pct_match = re.match(r"(\d+(?:\.\d+)?)\s*%", text)
+    # Try percentage anywhere: "80%" -> 0.8
+    pct_match = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
     if pct_match:
         return min(float(pct_match.group(1)) / 100.0, 1.0)
 
-    # Try fraction: "0.8/1" -> 0.8
-    frac_match = re.match(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", text)
+    # Try fraction anywhere: "0.8/1" -> 0.8
+    frac_match = re.search(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", text)
     if frac_match:
         num, den = float(frac_match.group(1)), float(frac_match.group(2))
         return min(num / den, 1.0) if den > 0 else 0.0
 
-    # Try plain number
-    num_match = re.match(r"(\d+(?:\.\d+)?)", text)
+    # Try plain number anywhere (clamp to 0.0-1.0)
+    num_match = re.search(r"(\d+(?:\.\d+)?)", text)
     if num_match:
-        val = float(num_match.group(1))
-        return min(val, 1.0) if val <= 1.0 else min(val / 100.0, 1.0)
+        return min(float(num_match.group(1)), 1.0)
 
     return 0.0
 
@@ -403,13 +402,34 @@ class RerankerService:
 
         from sqlalchemy import or_
 
+        # Issue #70: Check context config first — Ollama takes priority (no API key needed)
+        if context_id:
+            from config.settings import get_settings
+            from models.config import ContextSearchConfig
+
+            ctx_result = await self.db.execute(
+                select(ContextSearchConfig).where(
+                    ContextSearchConfig.context_id == UUID(context_id)
+                )
+            )
+            ctx_config = ctx_result.scalar_one_or_none()
+            if ctx_config and ctx_config.reranker_provider == "ollama" and ctx_config.use_rerank:
+                settings = get_settings()
+                # Avoid non-Ollama default models (e.g. "rerank-2" from previous provider)
+                non_ollama_defaults = {"rerank-2", "rerank-2-lite", "rerank-multilingual-v3.0"}
+                model = ctx_config.reranker_model
+                if not model or model in non_ollama_defaults:
+                    model = DEFAULT_OLLAMA_RERANK_MODEL
+                logger.debug("using_ollama_reranker", user_id=user_id, model=model)
+                return OllamaReranker(base_url=settings.ollama_base_url, model=model)
+
+        # API-key providers (Voyage, Cohere)
         conditions = [
             ExternalAPIKey.user_id == user_id,
             ExternalAPIKey.provider.in_(RERANKER_PROVIDERS),
             ExternalAPIKey.enabled.is_(True),
         ]
 
-        # Add scope filters with priority (context OR workspace OR user-only)
         scope_conditions = []
         if context_id:
             context_uuid = UUID(context_id) if isinstance(context_id, str) else context_id
@@ -419,7 +439,6 @@ class RerankerService:
             scope_conditions.append(ExternalAPIKey.workspace_id == workspace_uuid)
 
         if scope_conditions:
-            # Match: (project_id OR workspace_id) OR (no context AND no workspace = user-scoped)
             conditions.append(
                 or_(
                     *scope_conditions,
@@ -429,7 +448,6 @@ class RerankerService:
                 )
             )
 
-        # Priority ordering: context > workspace > user
         query = (
             select(ExternalAPIKey)
             .where(and_(*conditions))
@@ -444,18 +462,6 @@ class RerankerService:
         api_key_entry = result.scalar_one_or_none()
 
         if not api_key_entry:
-            # Issue #70: Check if context uses Ollama reranker (no API key needed)
-            if context_id:
-                repo = ContextSearchConfigRepository(self.db)
-                config = await repo.create_or_get(UUID(context_id))
-                if config.reranker_provider == "ollama" and config.use_rerank:
-                    from config.settings import get_settings
-
-                    settings = get_settings()
-                    model = config.reranker_model or DEFAULT_OLLAMA_RERANK_MODEL
-                    logger.debug("using_ollama_reranker", user_id=user_id, model=model)
-                    return OllamaReranker(base_url=settings.ollama_base_url, model=model)
-
             logger.debug("no_reranker_configured", user_id=user_id, context_id=context_id)
             return None
 

@@ -323,7 +323,7 @@ Kagura Memory Cloud organizes memories into "contexts" — isolated namespaces w
 Each context can have its own search configuration:
 - `update_search_config(context_id, semantic_weight=0.5, bm25_weight=0.5)` — Adjust hybrid search balance
 - Enable reranking: `update_search_config(context_id, use_rerank=true, reranker_provider="voyage")`
-- Local reranking (free): `update_search_config(context_id, use_rerank=true, reranker_provider="ollama")`
+- Local reranking (free): `update_search_config(context_id, use_rerank=true, reranker_provider="ollama", reranker_model="dengcao/Qwen3-Reranker-8B:Q5_K_M")`
 - Weights must sum to 1.0 (default: semantic 0.6 + BM25 0.4)
 
 ### Context Settings (Recommended)
