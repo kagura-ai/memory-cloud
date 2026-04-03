@@ -311,12 +311,15 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `remember` | Store a new memory (summary + content + type) | Member+ |
 | `recall` | Search memories with Hybrid Search | Viewer+ |
 | `reference` | Get full 3-layer details of a memory | Viewer+ |
+| `update_memory` | Update an existing memory in-place or upsert by external ID | Member+ |
 | `forget` | Soft-delete a memory (30-day retention) | Member+ |
 | `explore` | Discover related memories via Neural Memory graph | Viewer+ |
 | `get_context_info` | Get context metadata and guidelines | Viewer+ |
 | `list_contexts` | List available contexts in workspace | Viewer+ |
 | `create_context` | Create a new context | Owner/Admin |
-| `update_context` | Update context settings (summary, usage guide, resource_id, is_public) | Editor+ (Owner for summary/usage_guide/resource_id/is_public) |
+| `update_context` | Update context settings (summary, usage guide, resource_id, is_public) | Editor+ |
+| `delete_context` | Delete a context and all its memories | Owner/Admin |
+| `merge_contexts` | Merge memories from source context into target context | Owner/Admin |
 | `update_search_config` | Tune hybrid search weights and reranker settings per context | Editor+ |
 | `kagura_memory_usage_guide` | Get the usage guide | — |
 
@@ -434,7 +437,10 @@ This project is designed to be developed **with** Claude Code and Kagura Memory 
 - [Getting Started](docs/getting-started.md) — Detailed setup guide
 - [API Reference](docs/api-reference.md) — REST API documentation
 - [Chunking Guide](docs/chunking-guide.md) — Best practices for memory storage
+- [Resource Tokens Guide](docs/resource-tokens-guide.md) — External data ingestion via resource tokens
+- [Neural Memory Evaluation](docs/neural-memory-evaluation.md) — Benchmark results, architecture decisions
 - [Search Quality Benchmark](docs/search-quality-benchmark.md) — Accuracy tests, reranking, best practices
+- [Deployment](docs/deployment.md) — Production deployment with Caddy reverse proxy
 - [Contributing](CONTRIBUTING.md) — Development setup, code style, PR workflow
 - [Security](SECURITY.md) — Vulnerability reporting, security design
 - [Python SDK](https://github.com/kagura-ai/kagura-memory-python-sdk) — `KaguraClient` and `KaguraAgent` for Python

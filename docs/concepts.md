@@ -127,18 +127,23 @@ Starting from a seed memory, activation spreads outward through the graph, retur
 
 ## MCP Tools
 
-Kagura Memory Cloud exposes 9 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/):
+Kagura Memory Cloud exposes 14 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/):
 
 | Tool | Description | Read-only |
 |------|------------|-----------|
 | `remember` | Store a new memory | No |
 | `recall` | Search memories (Hybrid Search) | Yes |
 | `reference` | Get full details of a memory (all 3 layers) | Yes |
+| `update_memory` | Update an existing memory or upsert by external ID | No |
 | `forget` | Soft-delete a memory (30-day retention) | No |
 | `explore` | Discover related memories via Neural Memory graph | Yes |
 | `get_context_info` | Get context metadata and usage guidelines | Yes |
 | `list_contexts` | List available contexts in workspace | Yes |
 | `create_context` | Create a new context (owner/admin only) | No |
+| `update_context` | Update context settings | No |
+| `delete_context` | Delete a context and all its memories | No |
+| `merge_contexts` | Merge memories from source into target context | No |
+| `update_search_config` | Tune hybrid search weights and reranker per context | No |
 | `kagura_memory_usage_guide` | Get the usage guide | Yes |
 
 **Typical workflow:**
