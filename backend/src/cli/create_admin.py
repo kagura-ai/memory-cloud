@@ -27,7 +27,12 @@ from cli.db import get_sync_database_url  # noqa: E402
 from models.auth import APIKey, ExternalAPIKey, User, Workspace, WorkspaceMember  # noqa: E402
 from utils.datetime import utcnow  # noqa: E402
 
+# Project root for docker compose commands (always the repo root)
 _project_root = Path(__file__).parent.parent.parent.parent
+# MCP_JSON_DIR env var overrides .mcp.json output path (for Docker container use)
+_mcp_json_dir = (
+    Path(os.environ["MCP_JSON_DIR"]) if os.environ.get("MCP_JSON_DIR") else _project_root
+)
 
 
 def _get_env_from_docker(key: str) -> str | None:
@@ -112,7 +117,7 @@ def _create_api_key(db: Session, user_id: str, workspace_id) -> str:
 
 def _write_mcp_json(api_key: str, workspace_id: str):
     """Write .mcp.json to project root."""
-    mcp_path = _project_root / ".mcp.json"
+    mcp_path = _mcp_json_dir / ".mcp.json"
 
     mcp_config = {
         "mcpServers": {

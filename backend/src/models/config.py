@@ -114,7 +114,7 @@ class ContextSearchConfig(Base):
             name="weights_sum_check",
         ),
         CheckConstraint(
-            "reranker_provider IN ('voyage', 'cohere')",
+            "reranker_provider IN ('voyage', 'cohere', 'ollama')",
             name="reranker_provider_check",
         ),
     )

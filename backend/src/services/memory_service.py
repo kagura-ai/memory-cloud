@@ -664,9 +664,14 @@ class MemoryService:
         memories_list = list(result.scalars().all())
         memories = {str(m.id): m for m in memories_list}
 
-        # Skip Neural Memory for keyword-only mode (no embeddings available)
-        # or when Neural Memory is disabled
-        if not neural_enabled or request.search_mode == "keyword":
+        # Skip Neural Memory (UnifiedScorer) when:
+        # - Neural Memory is disabled
+        # - keyword-only mode (no embeddings available)
+        # - reranker is active (Issue #117: reranker scores get compressed by UnifiedScorer)
+        reranker_active = bool(
+            request.use_rerank and search_results and "rerank_score" in search_results[0]
+        )
+        if not neural_enabled or request.search_mode == "keyword" or reranker_active:
             responses = []
             for search_result in search_results[: request.k]:
                 memory_id = search_result["id"]
@@ -730,7 +735,13 @@ class MemoryService:
         # ============================================================================
 
         # 2. Generate query embedding for Neural Memory
-        query_embedding = await self.embedding_service.embed(
+        # Use context-specific embedding service (not default OpenAI)
+        from repositories.config_repository import ContextSearchConfigRepository
+
+        neural_config_repo = ContextSearchConfigRepository(self.db)
+        neural_ctx_config = await neural_config_repo.create_or_get(current_context_id)
+        neural_embed_svc = self._get_embedding_service_for_config(neural_ctx_config)
+        query_embedding = await neural_embed_svc.embed(
             request.query,
             user_id,
             context_id=current_context_id,

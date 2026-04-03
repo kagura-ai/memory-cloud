@@ -1,22 +1,25 @@
 """Reranker service with multi-provider support.
 
 Issue #105: Add multiple reranker options (Voyage AI, Cohere).
-Provides an abstract RerankerProvider base class and concrete implementations.
+Issue #70: Add Ollama as local reranker provider.
 
 Architecture:
 - RerankerProvider: Abstract base class for reranker providers
 - VoyageReranker: Voyage AI implementation (rerank-2.5-lite default)
 - CohereReranker: Cohere implementation (rerank-multilingual-v3.0)
+- OllamaReranker: Local Ollama reranker (no API key needed)
 - RerankerService: Factory pattern to select active provider from DB
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 from abc import ABC, abstractmethod
 from typing import Any
 from uuid import UUID
 
+import httpx
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,8 +31,11 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Provider constants (must match external_keys.py)
+# Provider constants (must match external_keys.py for API-key providers)
 RERANKER_PROVIDERS = {"cohere", "voyage"}
+
+# Default Ollama reranker model
+DEFAULT_OLLAMA_RERANK_MODEL = "dengcao/Qwen3-Reranker-8B:Q5_K_M"
 
 
 class RerankerProvider(ABC):
@@ -215,6 +221,137 @@ class CohereReranker(RerankerProvider):
             raise CohereError(f"Reranking failed for model {self.model}: {e}") from e
 
 
+class OllamaReranker(RerankerProvider):
+    """Ollama local reranker using prompt-based relevance scoring (Issue #70).
+
+    Uses a local LLM to score document relevance on a 0-1 scale.
+    No API key required — runs on local Ollama instance.
+    """
+
+    provider_name = "ollama"
+
+    def __init__(self, base_url: str, model: str = DEFAULT_OLLAMA_RERANK_MODEL):
+        """Initialize Ollama reranker.
+
+        Args:
+            base_url: Ollama API base URL (e.g. http://localhost:11434)
+            model: Ollama model name for reranking
+        """
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+
+    async def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        top_n: int,
+    ) -> list[dict[str, Any]]:
+        """Rerank using Ollama local model.
+
+        Scores each document individually via /api/generate with a relevance prompt.
+
+        Args:
+            query: Search query
+            documents: Documents to rerank
+            top_n: Number of results
+
+        Returns:
+            Reranked results with index and relevance_score
+
+        Raises:
+            Exception: If Ollama API call fails
+        """
+        if not documents:
+            return []
+        if top_n <= 0:
+            raise ValueError("top_n must be positive")
+
+        scored: list[dict[str, Any]] = []
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Score documents concurrently in batches
+            semaphore = asyncio.Semaphore(5)  # Limit concurrent Ollama requests
+
+            async def score_doc(idx: int, doc: str) -> dict[str, Any]:
+                async with semaphore:
+                    prompt = (
+                        f"Score the relevance of the document to the query "
+                        f"on a scale of 0 to 1.\n\n"
+                        f"Query: {query}\n"
+                        f"Document: {doc[:500]}\n\n"
+                        f"Score: "
+                    )
+                    try:
+                        resp = await client.post(
+                            f"{self.base_url}/api/generate",
+                            json={
+                                "model": self.model,
+                                "prompt": prompt,
+                                "stream": False,
+                                "options": {"temperature": 0, "num_predict": 5, "stop": ["\n"]},
+                            },
+                        )
+                        resp.raise_for_status()
+                        text = resp.json().get("response", "").strip()
+                        # Parse score — extract first float-like value
+                        score = _parse_relevance_score(text)
+                    except Exception as e:
+                        logger.warning(
+                            "ollama_rerank_score_failed",
+                            index=idx,
+                            error=str(e),
+                        )
+                        score = 0.0
+
+                    return {"index": idx, "relevance_score": score}
+
+            tasks = [score_doc(i, doc) for i, doc in enumerate(documents)]
+            scored = await asyncio.gather(*tasks)
+
+        # Sort by score descending and take top_n
+        scored.sort(key=lambda x: x["relevance_score"], reverse=True)
+
+        logger.debug(
+            "ollama_rerank_completed",
+            model=self.model,
+            doc_count=len(documents),
+            top_n=top_n,
+        )
+
+        return scored[:top_n]
+
+
+def _parse_relevance_score(text: str) -> float:
+    """Parse a relevance score from model output.
+
+    Handles formats: "0.8", "0.8/1", "80%", "0", "1", etc.
+
+    Returns:
+        Float between 0.0 and 1.0
+    """
+    text = text.strip()
+    if not text:
+        return 0.0
+
+    # Try percentage anywhere: "80%" -> 0.8
+    pct_match = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
+    if pct_match:
+        return min(float(pct_match.group(1)) / 100.0, 1.0)
+
+    # Try fraction anywhere: "0.8/1" -> 0.8
+    frac_match = re.search(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", text)
+    if frac_match:
+        num, den = float(frac_match.group(1)), float(frac_match.group(2))
+        return min(num / den, 1.0) if den > 0 else 0.0
+
+    # Try plain number anywhere (clamp to 0.0-1.0)
+    num_match = re.search(r"(\d+(?:\.\d+)?)", text)
+    if num_match:
+        return min(float(num_match.group(1)), 1.0)
+
+    return 0.0
+
+
 class RerankerService:
     """Service for dynamic reranker provider selection.
 
@@ -265,13 +402,34 @@ class RerankerService:
 
         from sqlalchemy import or_
 
+        # Issue #70: Check context config first — Ollama takes priority (no API key needed)
+        if context_id:
+            from config.settings import get_settings
+            from models.config import ContextSearchConfig
+
+            ctx_result = await self.db.execute(
+                select(ContextSearchConfig).where(
+                    ContextSearchConfig.context_id == UUID(context_id)
+                )
+            )
+            ctx_config = ctx_result.scalar_one_or_none()
+            if ctx_config and ctx_config.reranker_provider == "ollama" and ctx_config.use_rerank:
+                settings = get_settings()
+                # Avoid non-Ollama default models (e.g. "rerank-2" from previous provider)
+                non_ollama_defaults = {"rerank-2", "rerank-2-lite", "rerank-multilingual-v3.0"}
+                model = ctx_config.reranker_model
+                if not model or model in non_ollama_defaults:
+                    model = DEFAULT_OLLAMA_RERANK_MODEL
+                logger.debug("using_ollama_reranker", user_id=user_id, model=model)
+                return OllamaReranker(base_url=settings.ollama_base_url, model=model)
+
+        # API-key providers (Voyage, Cohere)
         conditions = [
             ExternalAPIKey.user_id == user_id,
             ExternalAPIKey.provider.in_(RERANKER_PROVIDERS),
             ExternalAPIKey.enabled.is_(True),
         ]
 
-        # Add scope filters with priority (context OR workspace OR user-only)
         scope_conditions = []
         if context_id:
             context_uuid = UUID(context_id) if isinstance(context_id, str) else context_id
@@ -281,7 +439,6 @@ class RerankerService:
             scope_conditions.append(ExternalAPIKey.workspace_id == workspace_uuid)
 
         if scope_conditions:
-            # Match: (project_id OR workspace_id) OR (no context AND no workspace = user-scoped)
             conditions.append(
                 or_(
                     *scope_conditions,
@@ -291,7 +448,6 @@ class RerankerService:
                 )
             )
 
-        # Priority ordering: context > workspace > user
         query = (
             select(ExternalAPIKey)
             .where(and_(*conditions))
@@ -401,6 +557,7 @@ class RerankerService:
         default_models = {
             "voyage": "rerank-2",
             "cohere": "rerank-multilingual-v3.0",
+            "ollama": DEFAULT_OLLAMA_RERANK_MODEL,
         }
 
         if not context_id:

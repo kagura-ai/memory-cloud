@@ -638,6 +638,7 @@ Examples:
 - Increase keyword matching: semantic_weight=0.5, bm25_weight=0.5
 - Semantic-heavy: semantic_weight=0.7, bm25_weight=0.3
 - Enable reranking: use_rerank=true, reranker_provider="voyage"
+- Local reranking (free): use_rerank=true, reranker_provider="ollama", reranker_model="dengcao/Qwen3-Reranker-8B:Q5_K_M"
 
 Weights must sum to 1.0.""",
             "inputSchema": {
@@ -663,11 +664,11 @@ Weights must sum to 1.0.""",
                     },
                     "use_rerank": {
                         "type": "boolean",
-                        "description": "Enable/disable reranking. Requires reranker API key.",
+                        "description": "Enable/disable reranking. Requires API key for Voyage/Cohere, or use 'ollama' for free local reranking.",
                     },
                     "reranker_provider": {
                         "type": "string",
-                        "description": "Reranker provider: 'voyage' or 'cohere'.",
+                        "description": "Reranker provider: 'voyage', 'cohere', or 'ollama' (local, no API key needed).",
                     },
                     "reranker_model": {
                         "type": "string",
