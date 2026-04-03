@@ -664,9 +664,14 @@ class MemoryService:
         memories_list = list(result.scalars().all())
         memories = {str(m.id): m for m in memories_list}
 
-        # Skip Neural Memory for keyword-only mode (no embeddings available)
-        # or when Neural Memory is disabled
-        if not neural_enabled or request.search_mode == "keyword":
+        # Skip Neural Memory (UnifiedScorer) when:
+        # - Neural Memory is disabled
+        # - keyword-only mode (no embeddings available)
+        # - reranker is active (Issue #117: reranker scores get compressed by UnifiedScorer)
+        reranker_active = bool(
+            request.use_rerank and search_results and "rerank_score" in search_results[0]
+        )
+        if not neural_enabled or request.search_mode == "keyword" or reranker_active:
             responses = []
             for search_result in search_results[: request.k]:
                 memory_id = search_result["id"]
