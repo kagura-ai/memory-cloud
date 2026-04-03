@@ -15,6 +15,7 @@ from .mcp_tasks import schedule_mcp_tasks
 from .neural_tasks import schedule_neural_tasks
 from .resource_indexer_job import schedule_resource_indexer_jobs
 from .scheduler import get_scheduler, shutdown_scheduler, start_scheduler
+from .sleep_tasks import schedule_sleep_tasks
 
 __all__ = [
     "get_scheduler",
@@ -25,4 +26,5 @@ __all__ = [
     "schedule_credentials_tasks",
     "schedule_embedding_tasks",
     "schedule_resource_indexer_jobs",
+    "schedule_sleep_tasks",
 ]
