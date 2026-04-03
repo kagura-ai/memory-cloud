@@ -3,6 +3,6 @@
   "description": "Kagura Memory Cloud plugin — session management, memory recall/save, and setup tools for AI-assisted development",
   "version": "0.1.0",
   "author": "Kagura Memory Cloud",
-  "repository": "https://github.com/jfkgustmhp/kagura-memory-cloud",
+  "repository": "https://github.com/kagura-ai/memory-cloud",
   "hooks": "./hooks/hooks.json"
 }
