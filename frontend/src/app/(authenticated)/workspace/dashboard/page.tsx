@@ -341,19 +341,20 @@ export default function WorkspaceStatsPage() {
   return (
     <PageContainer>
       <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-3">
-          <div>
+        <div>
+          <div className="flex items-center gap-2">
             <h1 className="text-3xl font-bold">{t("overview")}</h1>
-            <p className="text-muted-foreground">
-              {currentWorkspace?.description || t("overviewDesc")}
-            </p>
+            {stats && (
+              <PlanBadge
+                planName={stats.plan_name as "free" | "basic" | "pro"}
+                size="sm"
+                className="translate-y-0.5"
+              />
+            )}
           </div>
-          {stats && (
-            <PlanBadge
-              planName={stats.plan_name as "free" | "basic" | "pro"}
-              size="lg"
-            />
-          )}
+          <p className="text-muted-foreground mt-1">
+            {currentWorkspace?.description || t("overviewDesc")}
+          </p>
         </div>
         <div className="flex items-center gap-2">
           {stats?.contexts && stats.contexts.length > 0 && (
@@ -364,7 +365,7 @@ export default function WorkspaceStatsPage() {
                   e.target.value === "all" ? null : e.target.value,
                 )
               }
-              className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-sm"
+              className="max-w-[200px] truncate px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-sm"
               aria-label={t("filterByContext")}
             >
               <option value="all">{t("allContexts")}</option>
