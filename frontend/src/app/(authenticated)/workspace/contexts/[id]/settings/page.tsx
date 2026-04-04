@@ -801,20 +801,24 @@ export default function ContextSettingsPage() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Make Context Private?</AlertDialogTitle>
-            <AlertDialogDescription className="space-y-2">
-              <p>
-                Changing this context to <strong>Private</strong> will remove
-                all members except you (the owner).
-              </p>
-              <p className="text-yellow-600 dark:text-yellow-400 font-medium">
-                ⚠️ This action will immediately revoke access for all other
-                members.
-              </p>
-              <p className="text-sm text-gray-600 dark:text-gray-400">
-                This context will also be removed from any member&apos;s allowed
-                context list.
-              </p>
-              <p>You can re-add members later by changing back to Shared.</p>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <div>
+                  Changing this context to <strong>Private</strong> will remove
+                  all members except you (the owner).
+                </div>
+                <div className="text-yellow-600 dark:text-yellow-400 font-medium">
+                  ⚠️ This action will immediately revoke access for all other
+                  members.
+                </div>
+                <div className="text-sm text-gray-600 dark:text-gray-400">
+                  This context will also be removed from any member&apos;s
+                  allowed context list.
+                </div>
+                <div>
+                  You can re-add members later by changing back to Shared.
+                </div>
+              </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
