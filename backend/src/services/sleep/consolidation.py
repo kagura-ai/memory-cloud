@@ -88,7 +88,7 @@ class ConsolidationPhase:
             # Get neural metrics if graph exists
             neural_metrics = None
             if has_graph:
-                neural_metrics = graph_service.get_node_metrics(str(memory.id))
+                neural_metrics = await graph_service.get_node_metrics(str(memory.id))
 
             # === Fast path: rule-based (identical to legacy consolidation_task) ===
             should_promote = (
@@ -152,7 +152,7 @@ class ConsolidationPhase:
                             # Only archive truly isolated memories
                             neural = None
                             if has_graph:
-                                neural = graph_service.get_node_metrics(str(memory_id))
+                                neural = await graph_service.get_node_metrics(str(memory_id))
                             if not neural or neural["is_isolated"]:
                                 await delete_memory_from_qdrant(user_id, memory_id)
                                 await self.memory_repo.delete(memory_id)
