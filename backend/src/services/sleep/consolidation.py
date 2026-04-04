@@ -108,10 +108,16 @@ class ConsolidationPhase:
                 promoted += 1
                 result.changed_memory_ids.add(memory.id)
             elif should_delete:
-                # Bridge node protection: double-check isolation
-                await delete_memory_from_qdrant(user_id, memory.id)
-                await self.memory_repo.delete(memory.id)
-                deleted += 1
+                try:
+                    await delete_memory_from_qdrant(user_id, memory.id)
+                    await self.memory_repo.delete(memory.id)
+                    deleted += 1
+                except Exception as e:
+                    logger.warning(
+                        "consolidation_delete_failed",
+                        memory_id=str(memory.id),
+                        error=str(e),
+                    )
             else:
                 # Borderline: candidate for LLM judgment
                 borderline.append(memory)
@@ -174,8 +180,21 @@ class ConsolidationPhase:
         workspace_id: str | None,
         context_id: str | None,
     ) -> list[Memory]:
-        """Fetch working-scope memories."""
-        return await self.memory_repo.list(filters={"user_id": user_id, "scope": "working"})
+        """Fetch working-scope memories with workspace/context isolation."""
+        from sqlalchemy import select
+
+        stmt = select(Memory).where(
+            Memory.user_id == user_id,
+            Memory.scope == "working",
+            Memory.deleted_at.is_(None),
+        )
+        if workspace_id:
+            stmt = stmt.where(Memory.workspace_id == UUID(workspace_id))
+        if context_id:
+            stmt = stmt.where(Memory.context_id == UUID(context_id))
+
+        result = await self.db.execute(stmt)
+        return list(result.scalars().all())
 
     async def _llm_judge_batch(
         self,

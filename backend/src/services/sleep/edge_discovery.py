@@ -256,7 +256,7 @@ class EdgeDiscoveryPhase:
         for src_id, dst_id, score in candidates:
             existing = await self.edge_repo.get_outgoing_edges(
                 user_id=user_id,
-                node_id=src_id,
+                src_id=src_id,
                 workspace_id=workspace_id,
                 context_id=context_id,
             )

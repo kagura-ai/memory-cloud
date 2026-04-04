@@ -26,7 +26,7 @@ from uuid import UUID
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.qdrant import search_memories_qdrant
+from db.qdrant import delete_memory_from_qdrant, search_memories_qdrant
 from models.memory import Memory
 from repositories.neural_edge import NeuralEdgeRepository
 from services.embedding_service import EmbeddingService
@@ -160,7 +160,7 @@ class DedupMergePhase:
 
         # Step 4: Process each cluster
         memory_map = {m.id: m for m in memories}
-        pair_scores = {(a, b): s for a, b, s in pairs}
+        pair_scores = {tuple(sorted([a, b], key=str)): s for a, b, s in pairs}
         merged_count = 0
         flagged_count = 0
 
@@ -475,7 +475,7 @@ class DedupMergePhase:
             .values(tags=merged_tags, updated_at=utcnow())
         )
 
-        # Soft-delete loser
+        # Soft-delete loser in PostgreSQL
         await self.db.execute(
             update(Memory)
             .where(Memory.id == loser_id)
@@ -484,6 +484,16 @@ class DedupMergePhase:
                 deleted_by="sleep_maintenance",
             )
         )
+
+        # Delete loser from Qdrant to prevent orphan vectors (cf. BUG FIX #83-10)
+        try:
+            await delete_memory_from_qdrant(user_id, loser_id)
+        except Exception as e:
+            logger.warning(
+                "dedup_qdrant_delete_failed",
+                loser_id=str(loser_id),
+                error=str(e),
+            )
 
         # Transfer edges from loser to winner
         await self.edge_repo.transfer_edges(

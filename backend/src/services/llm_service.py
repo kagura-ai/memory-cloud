@@ -141,9 +141,13 @@ class LLMService:
             )
             return parsed, tokens_used + retry_tokens
 
-        except (json.JSONDecodeError, Exception) as e:
+        except json.JSONDecodeError as e:
             raise LLMServiceError(
                 f"LLM JSON parse failed after retry ({resolved_provider}/{resolved_model}): {e}"
+            ) from e
+        except Exception as e:
+            raise LLMServiceError(
+                f"LLM API call failed on retry ({resolved_provider}/{resolved_model}): {e}"
             ) from e
 
     async def _get_client(

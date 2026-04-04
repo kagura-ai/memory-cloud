@@ -855,7 +855,7 @@ class NeuralEdgeRepository:
             # Update edge to point to winner
             edge.src_id = new_src
             edge.dst_id = new_dst
-            edge.updated_at = utcnow()
+            edge.last_updated = utcnow()
             transferred += 1
 
         logger.info(

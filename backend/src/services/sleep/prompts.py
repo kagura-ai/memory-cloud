@@ -82,8 +82,7 @@ Rules:
 (causal, topical, temporal, or procedural).
 - Superficial similarity (e.g., both mention "Python") is NOT sufficient.
 - The relationship must be specific and nameable.
-- Assign edge_type from: "related_to", "caused_by", "depends_on", \
-"contradicts", "extends", "similar_to".
+- Assign edge_type from: "related_to", "depends_on", "learned_from".
 
 You MUST respond with valid JSON only.\
 """
@@ -103,7 +102,7 @@ Respond with this exact JSON schema:
     {{
       "pair": ["A", "B"],
       "related": true | false,
-      "edge_type": "related_to" | "caused_by" | "depends_on" | "contradicts" | "extends" | "similar_to",
+      "edge_type": "related_to" | "depends_on" | "learned_from",
       "confidence": 0.0-1.0,
       "reason": "brief explanation of the relationship"
     }}

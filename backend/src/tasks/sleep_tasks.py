@@ -73,8 +73,10 @@ async def sleep_maintenance_task():
                 try:
                     orchestrator = SleepOrchestrator(db)
                     await orchestrator.run(user_id, workspace_id, context_id, config=config)
+                    await db.commit()
                     total_runs += 1
                 except Exception as e:
+                    await db.rollback()
                     total_errors += 1
                     logger.error(
                         "sleep_maintenance_context_failed",
@@ -83,8 +85,6 @@ async def sleep_maintenance_task():
                         error=str(e),
                         exc_info=True,
                     )
-
-            await db.commit()
 
             logger.info(
                 "sleep_maintenance_task_completed",
