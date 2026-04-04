@@ -805,7 +805,14 @@ async def recover_context(
     context_id = request_body.context_id
     errors: list[str] = []
 
-    # Step 1: Scroll Qdrant for all points with this context_id
+    # Validate context_id is a valid UUID
+    try:
+        PyUUID(context_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid context_id format") from e
+
+    # Scroll Qdrant for all points with this context_id (capped at 10k)
+    max_points = 10_000
     all_points = []
     offset = None
     while True:
@@ -820,7 +827,9 @@ async def recover_context(
             with_vectors=False,
         )
         all_points.extend(points)
-        if next_offset is None:
+        if next_offset is None or len(all_points) >= max_points:
+            if len(all_points) >= max_points:
+                errors.append(f"Capped at {max_points} points. Context may have more.")
             break
         offset = next_offset
 
@@ -943,7 +952,7 @@ async def recover_context(
             )
             db.add(new_memory)
             memories_recovered += 1
-        except Exception as e:
+        except (ValueError, KeyError, TypeError) as e:
             errors.append(f"Failed to recover memory {mem_id}: {e!s}")
 
     await db.commit()
