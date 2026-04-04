@@ -444,23 +444,6 @@ export default function ContextSettingsPage() {
               {usageGuide.length}/2000
             </p>
           </div>
-
-          <div className="pt-4">
-            <ActionButton
-              onClick={handleSave}
-              icon={
-                saving ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Save className="h-4 w-4" />
-                )
-              }
-              variant="primary"
-              disabled={saving}
-            >
-              {saving ? "Saving..." : "Save Changes"}
-            </ActionButton>
-          </div>
         </div>
       </Section>
 
@@ -631,10 +614,19 @@ export default function ContextSettingsPage() {
                   🌍 Public Context Active
                 </AlertTitle>
                 <AlertDescription className="text-blue-700 dark:text-blue-300">
-                  This context is publicly accessible via REST API. To make it
-                  private again, use the <strong>Edit Context</strong> dialog.
+                  This context is publicly accessible via REST API.
                 </AlertDescription>
               </Alert>
+              <Button
+                variant="outline"
+                size="sm"
+                className="border-red-300 text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950"
+                onClick={() => {
+                  setIsPublic(false);
+                }}
+              >
+                Unpublish Context
+              </Button>
 
               <Alert className="border-purple-200 bg-purple-50 dark:bg-purple-900/20">
                 <AlertCircle className="h-4 w-4 text-purple-600" />
@@ -664,6 +656,24 @@ export default function ContextSettingsPage() {
           )}
         </div>
       </Section>
+
+      {/* Save All Changes */}
+      <div className="flex justify-end max-w-2xl">
+        <ActionButton
+          onClick={handleSave}
+          icon={
+            saving ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Save className="h-4 w-4" />
+            )
+          }
+          variant="primary"
+          disabled={saving}
+        >
+          {saving ? "Saving..." : "Save Changes"}
+        </ActionButton>
+      </div>
 
       {/* Protection & Danger Zone */}
       {!context.is_default && (

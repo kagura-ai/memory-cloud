@@ -19,8 +19,6 @@ import { useWorkspace } from "@/contexts/WorkspaceContext";
 import {
   Plus,
   RefreshCw,
-  Trash2,
-  Edit,
   FolderOpen,
   Brain,
   AlertCircle,
@@ -79,7 +77,6 @@ import { cn, typography, colors, transitions } from "@/styles/design-tokens";
 import {
   getContexts,
   createContext,
-  deleteContext,
   getContextStats,
   getContextSearchConfig,
   updateContextSearchConfig,
@@ -142,10 +139,6 @@ export default function ContextsPage() {
   const [quickCreateError, setQuickCreateError] = useState<string | null>(null);
   const [quickCreating, setQuickCreating] = useState(false);
 
-  // Delete dialog state
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [contextToDelete, setContextToDelete] = useState<Context | null>(null);
-
   // Context Members Dialog
   const [membersDialogOpen, setMembersDialogOpen] = useState(false);
   const [selectedContext, setSelectedContext] = useState<Context | null>(null);
@@ -159,7 +152,6 @@ export default function ContextsPage() {
   const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModel[]>([]);
   const [defaultEmbeddingModel, setDefaultEmbeddingModel] =
     useState<string>("");
-  const [deleting, setDeleting] = useState(false);
 
   // API Key setup dialog state
   const [apiKeyDialogOpen, setApiKeyDialogOpen] = useState(false);
@@ -382,34 +374,6 @@ export default function ContextsPage() {
 
   const handleViewGraph = async (context: Context) => {
     router.push(`/workspace/contexts/${context.id}/graph`);
-  };
-
-  const handleDeleteClick = (context: Context) => {
-    setContextToDelete(context);
-    setDeleteDialogOpen(true);
-  };
-
-  const handleConfirmDelete = async () => {
-    if (!contextToDelete) return;
-
-    try {
-      setDeleting(true);
-      await deleteContext(contextToDelete.id);
-      setDeleteDialogOpen(false);
-      setContextToDelete(null);
-      fetchContexts();
-    } catch (err: unknown) {
-      console.error("Failed to delete context:", err);
-      const apiError = err as {
-        details?: { detail?: string };
-        message?: string;
-      };
-      const errorMessage =
-        apiError?.details?.detail || apiError?.message || t("failedToDelete");
-      setError(errorMessage);
-    } finally {
-      setDeleting(false);
-    }
   };
 
   const handleLoadStats = async (context: Context) => {
@@ -1220,22 +1184,6 @@ export default function ContextsPage() {
                               <Settings2 className="h-4 w-4 mr-2" />
                               {t("searchSettings")}
                             </DropdownMenuItem>
-                            {!context.is_default && (
-                              <>
-                                <DropdownMenuSeparator />
-                                <DropdownMenuItem
-                                  onClick={() => handleDeleteClick(context)}
-                                  disabled={
-                                    context.id === user?.current_context_id ||
-                                    context.is_locked
-                                  }
-                                  className="text-red-600 focus:text-red-600"
-                                >
-                                  <Trash2 className="h-4 w-4 mr-2" />
-                                  {tCommon("delete")}
-                                </DropdownMenuItem>
-                              </>
-                            )}
                           </DropdownMenuContent>
                         </DropdownMenu>
                       )}
@@ -1322,28 +1270,6 @@ export default function ContextsPage() {
           </div>
         </DialogContent>
       </Dialog>
-
-      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t("deleteContextTitle")}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {t("deleteContextMessage", { name: contextToDelete?.name || "" })}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleConfirmDelete}
-              className="bg-red-600 hover:bg-red-700"
-              disabled={deleting}
-            >
-              {deleting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              {deleting ? t("deleting") : t("deleteContextTitle")}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
       {/* Issue #169: Quick Create Dialog */}
       <Dialog
