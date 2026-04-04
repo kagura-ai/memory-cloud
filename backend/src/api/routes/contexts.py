@@ -1367,27 +1367,16 @@ async def find_duplicates(
     """
     from sqlalchemy import select
 
-    from db.qdrant import search_memories_qdrant
-    from models.config import ContextSearchConfig
+    from config.settings import get_settings
+    from db.qdrant import get_qdrant_client, search_memories_qdrant
     from models.memory import Memory
-    from services.embedding_service import EmbeddingService
     from services.permission_service import PermissionService
 
     user = await get_current_user(request)
     perm_service = PermissionService(db)
     await perm_service.check_context_access(user["user_id"], context_id)
 
-    # Get embedding config for this context
-    config_result = await db.execute(
-        select(ContextSearchConfig).where(ContextSearchConfig.context_id == context_id)
-    )
-    search_config = config_result.scalar_one_or_none()
-
-    from config.settings import get_settings
-
     settings = get_settings()
-
-    embedding_model = search_config.embedding_model if search_config else settings.embedding_model
     collection_name = settings.qdrant_collection_name
 
     # Fetch recent memories (cap at 200 for performance)
@@ -1411,23 +1400,38 @@ async def find_duplicates(
     mem_map = {m.id: m for m in memories}
     memory_ids = set(mem_map.keys())
 
-    # Find similar pairs (same pattern as sleep/dedup_merge)
-    embedding_service = EmbeddingService(model=embedding_model)
+    # Retrieve existing vectors from Qdrant (no re-embedding needed)
+    client = get_qdrant_client()
+    point_ids = [str(m.id) for m in memories]
+    vectors: dict[UUID, list[float]] = {}
+    batch_size = 100
+    for i in range(0, len(point_ids), batch_size):
+        batch = point_ids[i : i + batch_size]
+        points = await client.retrieve(
+            collection_name=collection_name,
+            ids=batch,
+            with_vectors=True,
+            with_payload=False,
+        )
+        for point in points:
+            vec = point.vector
+            if isinstance(vec, dict):
+                vec = vec.get("dense", [])
+            if vec:
+                vectors[UUID(str(point.id))] = vec
+
+    # Find similar pairs using retrieved vectors
     pairs: list[DuplicatePair] = []
     seen: set[tuple[UUID, UUID]] = set()
-
     workspace_id = user.get("workspace_id", "")
 
     for memory in memories:
         if len(pairs) >= limit:
             break
+        vector = vectors.get(memory.id)
+        if not vector:
+            continue
         try:
-            vector = await embedding_service.embed(
-                memory.summary,
-                user_id=user["user_id"],
-                context_id=str(context_id),
-                workspace_id=str(workspace_id),
-            )
             results = await search_memories_qdrant(
                 user_id=user["user_id"],
                 query_vector=vector,
