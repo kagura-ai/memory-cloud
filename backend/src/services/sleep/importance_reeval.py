@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import update_memory_payload_in_qdrant
 from models.memory import Memory
-from services.llm_service import LLMService, LLMServiceError
+from services.llm_service import LLMService
 from services.sleep.prompts import IMPORTANCE_REEVAL_SYSTEM, IMPORTANCE_REEVAL_USER
 from services.sleep.reporter import PhaseResult, SleepBudget
 from utils.datetime import utcnow
@@ -62,6 +62,7 @@ class ImportanceReevalPhase:
     ) -> PhaseResult:
         """Run importance re-evaluation phase."""
         result = PhaseResult(phase_name="importance_reeval")
+        llm_calls_before = budget.llm_calls_used
 
         if not config.sleep_importance_reeval_enabled:
             result.skipped = True
@@ -126,6 +127,7 @@ class ImportanceReevalPhase:
                 updated_count += 1
 
         result.memories_processed = updated_count
+        result.llm_calls_used = budget.llm_calls_used - llm_calls_before
         result.details = {
             "candidates": len(candidates),
             "updated": updated_count,
@@ -202,7 +204,7 @@ class ImportanceReevalPhase:
                 provider=config.sleep_llm_provider,
             )
             budget.consume(llm_calls=1)
-        except (LLMServiceError, Exception) as e:
+        except Exception as e:
             logger.warning("importance_reeval_llm_failed", error=str(e))
             return {}
 

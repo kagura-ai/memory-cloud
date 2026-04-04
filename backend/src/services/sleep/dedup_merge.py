@@ -115,6 +115,7 @@ class DedupMergePhase:
             PhaseResult with merge statistics and changed memory IDs
         """
         result = PhaseResult(phase_name="dedup_merge")
+        llm_calls_before = budget.llm_calls_used
 
         if not config.sleep_dedup_enabled:
             result.skipped = True
@@ -125,7 +126,9 @@ class DedupMergePhase:
         threshold = config.sleep_dedup_similarity_threshold
 
         # Step 1: Fetch active memories
-        memories = await self._fetch_active_memories(user_id, workspace_id, context_id)
+        memories = await self._fetch_active_memories(
+            user_id, workspace_id, context_id, config.sleep_max_memories_per_run
+        )
         if len(memories) < 2:
             result.details = {"message": "not_enough_memories", "count": len(memories)}
             return result
@@ -195,11 +198,14 @@ class DedupMergePhase:
             "flagged": flagged_count,
         }
 
+        result.llm_calls_used = budget.llm_calls_used - llm_calls_before
+
         logger.info(
             "dedup_merge_phase_completed",
             candidates=len(pairs),
             merged=merged_count,
             flagged=flagged_count,
+            llm_calls=result.llm_calls_used,
         )
 
         return result
@@ -209,11 +215,17 @@ class DedupMergePhase:
         user_id: str,
         workspace_id: str | None,
         context_id: str | None,
+        limit: int = 500,
     ) -> list[Memory]:
-        """Fetch all active (non-deleted) memories for the user/context."""
-        stmt = select(Memory).where(
-            Memory.user_id == user_id,
-            Memory.deleted_at.is_(None),
+        """Fetch active (non-deleted) memories, capped by limit."""
+        stmt = (
+            select(Memory)
+            .where(
+                Memory.user_id == user_id,
+                Memory.deleted_at.is_(None),
+            )
+            .order_by(Memory.updated_at.desc())
+            .limit(limit)
         )
         if workspace_id:
             stmt = stmt.where(Memory.workspace_id == UUID(workspace_id))
@@ -342,7 +354,7 @@ class DedupMergePhase:
         ids = [m.id for m in cluster_memories]
         for i, id_a in enumerate(ids):
             for id_b in ids[i + 1 :]:
-                key = tuple(sorted([id_a, id_b]))
+                key = tuple(sorted([id_a, id_b], key=str))
                 score = pair_scores.get(key, 0.0)
                 pair_lines.append(
                     f"  ({id_to_label[id_a]}, {id_to_label[id_b]}): similarity={score:.3f}"
@@ -419,7 +431,7 @@ class DedupMergePhase:
 
         for i, id_a in enumerate(ids):
             for id_b in ids[i + 1 :]:
-                key = tuple(sorted([id_a, id_b]))
+                key = tuple(sorted([id_a, id_b], key=str))
                 score = pair_scores.get(key, 0.0)
                 if score >= AUTO_MERGE_THRESHOLD:
                     # Keep the one with higher importance or more content
@@ -441,13 +453,13 @@ class DedupMergePhase:
         context_id: str | None,
     ) -> None:
         """Execute a merge: soft-delete loser, transfer edges and tags to winner."""
-        # Merge tags from loser into winner
-        winner_stmt = select(Memory).where(Memory.id == winner_id)
-        loser_stmt = select(Memory).where(Memory.id == loser_id)
-        winner_result = await self.db.execute(winner_stmt)
-        loser_result = await self.db.execute(loser_stmt)
-        winner = winner_result.scalar_one_or_none()
-        loser = loser_result.scalar_one_or_none()
+        from sqlalchemy import or_
+
+        stmt = select(Memory).where(or_(Memory.id == winner_id, Memory.id == loser_id))
+        result = await self.db.execute(stmt)
+        rows = {m.id: m for m in result.scalars().all()}
+        winner = rows.get(winner_id)
+        loser = rows.get(loser_id)
 
         if not winner or not loser:
             return

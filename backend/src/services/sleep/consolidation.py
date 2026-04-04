@@ -26,7 +26,7 @@ from db.qdrant import delete_memory_from_qdrant
 from models.memory import Memory
 from repositories.memory import MemoryRepository
 from services.graph_service import GraphService
-from services.llm_service import LLMService, LLMServiceError
+from services.llm_service import LLMService
 from services.sleep.prompts import CONSOLIDATION_JUDGE_SYSTEM, CONSOLIDATION_JUDGE_USER
 from services.sleep.reporter import PhaseResult, SleepBudget
 from utils.datetime import utcnow
@@ -56,6 +56,7 @@ class ConsolidationPhase:
     ) -> PhaseResult:
         """Run consolidation phase."""
         result = PhaseResult(phase_name="consolidation")
+        llm_calls_before = budget.llm_calls_used
 
         # Fetch working memories
         working = await self._fetch_working_memories(user_id, workspace_id, context_id)
@@ -148,6 +149,7 @@ class ConsolidationPhase:
                                 llm_archived += 1
 
         result.memories_processed = len(working)
+        result.llm_calls_used = budget.llm_calls_used - llm_calls_before
         result.details = {
             "working_count": len(working),
             "rule_promoted": promoted,
@@ -216,7 +218,7 @@ class ConsolidationPhase:
                 provider=config.sleep_llm_provider,
             )
             budget.consume(llm_calls=1)
-        except (LLMServiceError, Exception) as e:
+        except Exception as e:
             logger.warning("consolidation_llm_failed", error=str(e))
             return {}
 

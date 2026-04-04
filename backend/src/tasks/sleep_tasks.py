@@ -3,34 +3,33 @@
 Issue #101/#103: Scheduled sleep maintenance for all users/contexts.
 """
 
-import logging
 import os
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from db.base import get_db
+from utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 async def sleep_maintenance_task():
     """Run sleep maintenance for all active users/contexts.
 
-    Iterates over all users with graph data, then for each user
-    finds distinct (workspace_id, context_id) pairs and runs
-    the SleepOrchestrator for each.
+    Iterates over distinct (user_id, workspace_id, context_id) tuples
+    and runs the SleepOrchestrator for each.
 
     Only runs when ENABLE_NEURAL_MEMORY=true AND SLEEP_ENABLED=true.
     """
     logger.info("sleep_maintenance_task_started")
 
     if os.getenv("ENABLE_NEURAL_MEMORY", "false").lower() != "true":
-        logger.info("sleep_maintenance_task_skipped: neural_memory_disabled")
+        logger.info("sleep_maintenance_task_skipped", reason="neural_memory_disabled")
         return
 
     if os.getenv("SLEEP_ENABLED", "false").lower() != "true":
-        logger.info("sleep_maintenance_task_skipped: sleep_disabled")
+        logger.info("sleep_maintenance_task_skipped", reason="sleep_disabled")
         return
 
     try:
@@ -38,7 +37,12 @@ async def sleep_maintenance_task():
             from sqlalchemy import distinct, select
 
             from models.memory import Memory
+            from neural.config import NeuralMemoryConfig
             from services.sleep.orchestrator import SleepOrchestrator
+
+            # Load config once for all contexts (not per-context)
+            NeuralMemoryConfig.invalidate_cache()
+            config = await NeuralMemoryConfig.from_db(db)
 
             # Find distinct (user_id, workspace_id, context_id) combinations
             stmt = (
@@ -68,26 +72,30 @@ async def sleep_maintenance_task():
 
                 try:
                     orchestrator = SleepOrchestrator(db)
-                    await orchestrator.run(user_id, workspace_id, context_id)
+                    await orchestrator.run(user_id, workspace_id, context_id, config=config)
                     total_runs += 1
                 except Exception as e:
                     total_errors += 1
                     logger.error(
-                        f"sleep_maintenance_context_failed: "
-                        f"user={user_id}, context={context_id}, error={e}",
+                        "sleep_maintenance_context_failed",
+                        user_id=user_id,
+                        context_id=context_id,
+                        error=str(e),
                         exc_info=True,
                     )
 
             await db.commit()
 
             logger.info(
-                f"sleep_maintenance_task_completed: "
-                f"contexts={len(contexts)}, runs={total_runs}, errors={total_errors}"
+                "sleep_maintenance_task_completed",
+                contexts=len(contexts),
+                runs=total_runs,
+                errors=total_errors,
             )
             return
 
     except Exception as e:
-        logger.error(f"sleep_maintenance_task_failed: {e}", exc_info=True)
+        logger.error("sleep_maintenance_task_failed", error=str(e), exc_info=True)
 
 
 def schedule_sleep_tasks(scheduler: AsyncIOScheduler) -> None:
@@ -99,7 +107,7 @@ def schedule_sleep_tasks(scheduler: AsyncIOScheduler) -> None:
         scheduler: APScheduler instance
     """
     if os.getenv("SLEEP_ENABLED", "false").lower() != "true":
-        logger.info("sleep_tasks_not_scheduled: sleep_disabled")
+        logger.info("sleep_tasks_not_scheduled", reason="sleep_disabled")
         return
 
     sleep_hour = int(os.getenv("SLEEP_CRON_HOUR", "2"))
@@ -112,4 +120,8 @@ def schedule_sleep_tasks(scheduler: AsyncIOScheduler) -> None:
         name="Sleep Maintenance",
         replace_existing=True,
     )
-    logger.info(f"scheduled_sleep_maintenance_task: hour={sleep_hour}, minute={sleep_minute}")
+    logger.info(
+        "scheduled_sleep_maintenance_task",
+        hour=sleep_hour,
+        minute=sleep_minute,
+    )

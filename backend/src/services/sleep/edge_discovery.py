@@ -30,7 +30,7 @@ from db.qdrant import search_memories_qdrant
 from models.memory import Memory
 from repositories.neural_edge import NeuralEdgeRepository
 from services.embedding_service import EmbeddingService
-from services.llm_service import LLMService, LLMServiceError
+from services.llm_service import LLMService
 from services.sleep.prompts import EDGE_DISCOVERY_SYSTEM, EDGE_DISCOVERY_USER
 from services.sleep.reporter import PhaseResult, SleepBudget
 from utils.logger import get_logger
@@ -69,6 +69,7 @@ class EdgeDiscoveryPhase:
     ) -> PhaseResult:
         """Run edge discovery phase."""
         result = PhaseResult(phase_name="edge_discovery")
+        llm_calls_before = budget.llm_calls_used
 
         if not config.sleep_edge_discovery_enabled:
             result.skipped = True
@@ -144,6 +145,7 @@ class EdgeDiscoveryPhase:
                     )
 
         result.memories_processed = len(sampled)
+        result.llm_calls_used = budget.llm_calls_used - llm_calls_before
         result.details = {
             "sampled": len(sampled),
             "candidates": len(candidates),
@@ -323,7 +325,7 @@ class EdgeDiscoveryPhase:
             )
             budget.consume(llm_calls=1)
 
-        except (LLMServiceError, Exception) as e:
+        except Exception as e:
             logger.warning("edge_discovery_llm_failed", error=str(e))
             return []
 
