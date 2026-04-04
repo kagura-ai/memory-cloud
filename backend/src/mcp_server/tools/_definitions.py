@@ -702,6 +702,27 @@ No parameters required - just call this tool to get the full guide.""",
             },
             "readOnly": True,  # This tool only returns static text, no side effects
         },
+        {
+            "name": "get_usage",
+            "readOnly": True,
+            "description": """Get current workspace usage and quota limits.
+
+Returns memory, context, and member usage against effective limits (plan tier + addons).
+Use this to check quota before bulk operations or to display usage in UIs.
+
+Response includes:
+- plan: Current plan tier name
+- memories: {used, limit, percentage}
+- contexts: {used, limit}
+- members: {used, limit}
+- mcp_calls_per_day: {limit}
+
+No parameters required — uses the current workspace.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        },
     ]
 
 

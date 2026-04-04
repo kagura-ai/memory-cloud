@@ -49,6 +49,7 @@ def _build_registry() -> dict[str, Any]:
     )
     from mcp_server.tools.guide import handle_kagura_memory_usage_guide
     from mcp_server.tools.search_config import handle_update_search_config
+    from mcp_server.tools.usage import handle_get_usage
 
     return {
         "remember": handle_remember,
@@ -65,6 +66,7 @@ def _build_registry() -> dict[str, Any]:
         "list_contexts": handle_list_contexts,
         "update_search_config": handle_update_search_config,
         "kagura_memory_usage_guide": handle_kagura_memory_usage_guide,
+        "get_usage": handle_get_usage,
     }
 
 
