@@ -43,8 +43,8 @@ import {
   Trash2,
   AlertCircle,
   Loader2,
-  Settings,
-  ExternalLink,
+  Brain,
+  Lock,
   ShieldCheck,
   ShieldOff,
   Copy,
@@ -394,7 +394,10 @@ export default function ContextSettingsPage() {
       {/* AI Configuration */}
       <Card>
         <CardHeader>
-          <CardTitle>AI Configuration</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Brain className="h-5 w-5" />
+            AI Configuration
+          </CardTitle>
           <CardDescription>
             Settings that help AI understand and use this context
           </CardDescription>
@@ -464,35 +467,13 @@ export default function ContextSettingsPage() {
         </CardContent>
       </Card>
 
-      {/* Search & Retrieval */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Settings className="h-5 w-5" />
-            Search & Retrieval
-          </CardTitle>
-          <CardDescription>
-            Configure how memories are searched and ranked
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Button
-            variant="outline"
-            onClick={() =>
-              router.push(`/workspace/contexts/${contextId}/search-settings`)
-            }
-          >
-            <Settings className="h-4 w-4 mr-2" />
-            Open Search Settings
-            <ExternalLink className="h-3 w-3 ml-2" />
-          </Button>
-        </CardContent>
-      </Card>
-
       {/* Privacy & Access Control */}
       <Card>
         <CardHeader>
-          <CardTitle>Privacy & Access Control</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Lock className="h-5 w-5" />
+            Privacy & Access Control
+          </CardTitle>
           <CardDescription>Control who can access this context</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
