@@ -188,19 +188,14 @@ export default function WorkspaceStatsPage() {
     try {
       setLoading(true);
       setError(null);
-      const [statsResponse, contextStatsResponse, timelineResponse] =
-        await Promise.all([
-          apiClient.get<WorkspaceStats>("/api/v1/workspace/stats"),
-          currentWorkspaceId
-            ? getContextStats(currentWorkspaceId)
-            : Promise.resolve(null),
-          currentWorkspaceId
-            ? getWorkspaceMemoryTimeline(currentWorkspaceId, timelineDays)
-            : Promise.resolve(null),
-        ]);
+      const [statsResponse, contextStatsResponse] = await Promise.all([
+        apiClient.get<WorkspaceStats>("/api/v1/workspace/stats"),
+        currentWorkspaceId
+          ? getContextStats(currentWorkspaceId)
+          : Promise.resolve(null),
+      ]);
       setStats(statsResponse);
       setContextStats(contextStatsResponse);
-      setMemoryTimeline(timelineResponse);
     } catch (err) {
       console.error("Failed to fetch workspace stats:", err);
       setError(err instanceof Error ? err.message : t("failedToLoadStats"));
