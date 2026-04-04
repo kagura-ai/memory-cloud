@@ -107,7 +107,7 @@ def _create_api_key(db: Session, user_id: str, workspace_id) -> str:
         name="admin-cli",
         user_id=user_id,
         workspace_id=workspace_id,
-        visibility_expires_at=utcnow() + timedelta(days=365 * 10),
+        visibility_expires_at=utcnow() + timedelta(minutes=10),
         plaintext_encrypted=plaintext_encrypted,
     )
     db.add(api_key)

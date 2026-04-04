@@ -473,17 +473,24 @@ export default function CustomAppsPage() {
                             const daysUntil =
                               (expiresAt.getTime() - Date.now()) /
                               (1000 * 60 * 60 * 24);
-                            if (daysUntil <= 0 || daysUntil > 30) return null;
+                            if (daysUntil <= 0) return null;
                             return (
                               <span className="text-xs text-yellow-600 dark:text-yellow-400 flex items-center gap-1">
                                 <AlertTriangle className="w-3 h-3" />
-                                {t("hideInTime", {
-                                  time: formatRelativeTime(
-                                    app.visibility_expires_at,
-                                    user?.timezone,
-                                    locale,
-                                  ),
-                                })}
+                                {daysUntil <= 30
+                                  ? t("hideInTime", {
+                                      time: formatRelativeTime(
+                                        app.visibility_expires_at,
+                                        user?.timezone,
+                                        locale,
+                                      ),
+                                    })
+                                  : t("hideAt", {
+                                      date: formatDateTime(
+                                        app.visibility_expires_at,
+                                        user?.timezone,
+                                      ),
+                                    })}
                               </span>
                             );
                           })()}
@@ -673,17 +680,24 @@ export default function CustomAppsPage() {
                               const daysUntil =
                                 (expiresAt.getTime() - Date.now()) /
                                 (1000 * 60 * 60 * 24);
-                              if (daysUntil <= 0 || daysUntil > 30) return null;
+                              if (daysUntil <= 0) return null;
                               return (
                                 <span className="text-xs text-yellow-600 dark:text-yellow-400 flex items-center gap-1">
                                   <AlertTriangle className="w-3 h-3" />
-                                  {t("hideInTime", {
-                                    time: formatRelativeTime(
-                                      app.visibility_expires_at,
-                                      user?.timezone,
-                                      locale,
-                                    ),
-                                  })}
+                                  {daysUntil <= 30
+                                    ? t("hideInTime", {
+                                        time: formatRelativeTime(
+                                          app.visibility_expires_at,
+                                          user?.timezone,
+                                          locale,
+                                        ),
+                                      })
+                                    : t("hideAt", {
+                                        date: formatDateTime(
+                                          app.visibility_expires_at,
+                                          user?.timezone,
+                                        ),
+                                      })}
                                 </span>
                               );
                             })()}

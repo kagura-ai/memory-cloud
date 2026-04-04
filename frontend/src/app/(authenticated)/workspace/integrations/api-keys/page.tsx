@@ -482,21 +482,27 @@ export default function APIKeysPage() {
                           const expiresAt = new Date(
                             apiKey.visibility_expires_at,
                           );
-                          const now = new Date();
                           const daysUntil =
-                            (expiresAt.getTime() - now.getTime()) /
+                            (expiresAt.getTime() - Date.now()) /
                             (1000 * 60 * 60 * 24);
-                          if (daysUntil <= 0 || daysUntil > 30) return null;
+                          if (daysUntil <= 0) return null;
                           return (
                             <span className="text-xs text-yellow-600 dark:text-yellow-400 flex items-center gap-1 whitespace-nowrap">
                               <AlertTriangle className="w-3 h-3" />
-                              {t("hideInTime", {
-                                time: formatRelativeTime(
-                                  apiKey.visibility_expires_at,
-                                  user?.timezone,
-                                  locale,
-                                ),
-                              })}
+                              {daysUntil <= 30
+                                ? t("hideInTime", {
+                                    time: formatRelativeTime(
+                                      apiKey.visibility_expires_at,
+                                      user?.timezone,
+                                      locale,
+                                    ),
+                                  })
+                                : t("hideAt", {
+                                    date: formatDateTime(
+                                      apiKey.visibility_expires_at,
+                                      user?.timezone,
+                                    ),
+                                  })}
                             </span>
                           );
                         })()}
