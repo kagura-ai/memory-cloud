@@ -12,7 +12,6 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import Link from "next/link";
 import { useTranslations, useLocale } from "next-intl";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
@@ -71,9 +70,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
-import { Section } from "@/components/common/Section";
 import { SpinnerLoading } from "@/components/common/LoadingState";
-import { cn, typography, colors, transitions } from "@/styles/design-tokens";
+import { cn, typography, colors } from "@/styles/design-tokens";
 import {
   getContexts,
   createContext,
@@ -136,9 +134,6 @@ export default function ContextsPage() {
   const [quickCreateName, setQuickCreateName] = useState("");
   const [quickCreateError, setQuickCreateError] = useState<string | null>(null);
   const [quickCreating, setQuickCreating] = useState(false);
-
-  // Resource ID copy state
-  const [copiedResourceId, setCopiedResourceId] = useState<string | null>(null);
 
   // Embedding models (Issue #49)
   const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModel[]>([]);

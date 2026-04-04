@@ -108,6 +108,7 @@ export default function ContextSettingsPage() {
     setIsPrivate(data.is_private ?? true);
     setIsPublic(data.is_public ?? false);
     setIsLocked(data.is_locked ?? false);
+    setResourceId("");
   }, []);
 
   const fetchContext = useCallback(async () => {
@@ -158,10 +159,10 @@ export default function ContextSettingsPage() {
       }
 
       await updateContext(context.id, {
-        display_name: displayName.trim() || undefined,
-        description: description.trim() || undefined,
-        summary: summary.trim() || undefined,
-        usage_guide: usageGuide.trim() || undefined,
+        display_name: displayName.trim(),
+        description: description.trim(),
+        summary: summary.trim(),
+        usage_guide: usageGuide.trim(),
         is_private: isPrivate,
         is_public: isPublic,
         resource_id: resource_id,
@@ -350,10 +351,17 @@ export default function ContextSettingsPage() {
                 variant="outline"
                 size="sm"
                 className="shrink-0"
-                onClick={() => {
-                  navigator.clipboard.writeText(context.id);
-                  setIdCopied(true);
-                  setTimeout(() => setIdCopied(false), 1500);
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(context.id);
+                    setIdCopied(true);
+                    setTimeout(() => setIdCopied(false), 1500);
+                  } catch {
+                    toast({
+                      title: "Failed to copy",
+                      variant: "destructive",
+                    });
+                  }
                 }}
               >
                 {idCopied ? (
