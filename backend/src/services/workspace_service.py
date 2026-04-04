@@ -819,7 +819,10 @@ class WorkspaceService:
 
         # Aggregate memories across all workspace members
         if member_ids:
-            memory_count_stmt = select(func.count(Memory.id)).where(Memory.user_id.in_(member_ids))
+            memory_count_stmt = select(func.count(Memory.id)).where(
+                Memory.user_id.in_(member_ids),
+                Memory.deleted_at.is_(None),
+            )
 
             memory_count_result = await self.db.execute(memory_count_stmt)
             total_memories = memory_count_result.scalar() or 0
