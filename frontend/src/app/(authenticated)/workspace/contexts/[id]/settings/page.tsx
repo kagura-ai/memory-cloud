@@ -45,6 +45,7 @@ import {
   Copy,
 } from "lucide-react";
 import { cn, typography, colors } from "@/styles/design-tokens";
+import { useToast } from "@/hooks/use-toast";
 import { getContext, updateContext, deleteContext } from "@/lib/api/contexts";
 import type { Context } from "@/lib/types/context";
 import { useAuth } from "@/contexts/AuthContext";
@@ -62,6 +63,7 @@ export default function ContextSettingsPage() {
   const params = useParams();
   const router = useRouter();
   const { refetchUser, user } = useAuth();
+  const { toast } = useToast();
   const searchParams = useSearchParams();
   const contextId = params.id as string;
   const contextIdFromUrl = searchParams?.get("context");
@@ -70,7 +72,6 @@ export default function ContextSettingsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   // Form state
   const [displayName, setDisplayName] = useState("");
@@ -126,17 +127,25 @@ export default function ContextSettingsPage() {
   const handleSave = async () => {
     if (!context) return;
 
+    // Validate: resource_id prefix required when making public
+    if (isPublic && !context.is_public && !resourceIdPrefix.trim()) {
+      toast({
+        title: "Resource ID required",
+        description:
+          "Enter a Resource ID Prefix before making this context public.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     try {
       setSaving(true);
       setError(null);
-      setSuccessMessage(null);
 
-      // Generate resource_id if making public
+      // Generate resource_id if making public for the first time
       let resource_id: string | undefined = undefined;
       if (isPublic && !context.is_public) {
-        // Making public for the first time
-        const prefix = resourceIdPrefix.trim() || context.name;
-        resource_id = `${prefix}_${context.id}`;
+        resource_id = resourceIdPrefix.trim();
       }
 
       await updateContext(context.id, {
@@ -144,19 +153,26 @@ export default function ContextSettingsPage() {
         description: description.trim() || undefined,
         summary: summary.trim() || undefined,
         usage_guide: usageGuide.trim() || undefined,
-        is_private: isPrivate, // Migration 034
-        is_public: isPublic, // Issue #238
-        resource_id: resource_id, // Issue #238: Auto-generated from prefix
+        is_private: isPrivate,
+        is_public: isPublic,
+        resource_id: resource_id,
       });
 
-      setSuccessMessage("Settings saved successfully");
-      setTimeout(() => setSuccessMessage(null), 3000);
+      toast({
+        title: "Settings saved",
+        description: "Context settings have been updated.",
+      });
 
-      // Refresh context data
       fetchContext();
-    } catch (err) {
-      console.error("Failed to save context:", err);
-      setError("Failed to save settings");
+    } catch (err: unknown) {
+      const apiError = err as { message?: string };
+      const errorMsg = apiError?.message || "Failed to save settings";
+      toast({
+        title: "Save failed",
+        description: errorMsg,
+        variant: "destructive",
+        duration: 6000,
+      });
     } finally {
       setSaving(false);
     }
@@ -189,10 +205,17 @@ export default function ContextSettingsPage() {
       setError(null);
       await updateContext(context.id, { is_locked: newLocked });
       setIsLocked(newLocked);
-      setSuccessMessage(newLocked ? "Context locked" : "Context unlocked");
-      setTimeout(() => setSuccessMessage(null), 3000);
+      toast({
+        title: newLocked ? "Context locked" : "Context unlocked",
+        description: newLocked
+          ? "This context is now protected from deletion"
+          : "This context can now be deleted",
+      });
     } catch {
-      setError("Failed to update lock status");
+      toast({
+        title: "Failed to update lock status",
+        variant: "destructive",
+      });
     } finally {
       setLockSaving(false);
     }
@@ -279,15 +302,6 @@ export default function ContextSettingsPage() {
           <AlertCircle className="h-4 w-4" />
           <AlertTitle>Error</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
-
-      {successMessage && (
-        <Alert className="mb-6 border-green-200 bg-green-50 dark:bg-green-900/20">
-          <AlertCircle className="h-4 w-4 text-green-600" />
-          <AlertDescription className="text-green-800 dark:text-green-200">
-            {successMessage}
-          </AlertDescription>
         </Alert>
       )}
 
@@ -535,66 +549,8 @@ export default function ContextSettingsPage() {
             </Alert>
           )}
 
-          {/* Public Access Toggle - Issue #238 */}
-          <div className="flex items-center justify-between p-4 border rounded-lg bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-950/20 dark:to-blue-950/20">
-            <div className="flex-1">
-              <h4 className="font-medium text-sm mb-1">
-                {isPublic ? "🌍 Public Context" : "🔐 Internal Only"}
-              </h4>
-              <p className="text-xs text-gray-500 dark:text-gray-400">
-                {isPublic
-                  ? "External systems can search this context via Public REST API"
-                  : "Context is only accessible within your workspace"}
-              </p>
-            </div>
-            {isPublic ? (
-              <Badge
-                variant="secondary"
-                className="bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200 px-4 py-2"
-              >
-                🌍 Public
-              </Badge>
-            ) : (
-              <button
-                onClick={() => setIsPublic(true)}
-                disabled={isPrivate}
-                className={cn(
-                  "px-4 py-2 rounded font-medium text-sm transition-colors",
-                  isPrivate && "opacity-50 cursor-not-allowed",
-                  "bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300",
-                )}
-              >
-                Make Public
-              </button>
-            )}
-          </div>
-
-          {/* Resource ID Prefix Input (only for non-public contexts) */}
-          {!isPublic && !isPrivate && (
-            <div className="p-4 border rounded-lg bg-blue-50 dark:bg-blue-950/20">
-              <label
-                className={cn(typography.bodySmall, "font-medium mb-2 block")}
-              >
-                Resource ID Prefix (optional)
-              </label>
-              <Input
-                placeholder={`e.g., "products" → products_${contextId.slice(0, 8)}...`}
-                value={resourceIdPrefix}
-                onChange={(e) => setResourceIdPrefix(e.target.value)}
-                className="font-mono text-sm"
-              />
-              <p className={cn(typography.caption, colors.text.muted, "mt-2")}>
-                Used for Resource Ingest API. Leave empty to use context name.
-                Final resource_id:{" "}
-                <code className="font-mono">
-                  {resourceIdPrefix.trim() || context?.name || "prefix"}_
-                  {contextId.slice(0, 8)}...
-                </code>
-              </p>
-            </div>
-          )}
-
-          {isPrivate && (
+          {/* Public Access - Issue #238 */}
+          {isPrivate ? (
             <Alert className="border-yellow-200 bg-yellow-50 dark:bg-yellow-900/20">
               <AlertCircle className="h-4 w-4 text-yellow-600" />
               <AlertTitle className="text-yellow-800 dark:text-yellow-200">
@@ -604,61 +560,136 @@ export default function ContextSettingsPage() {
                 Make this context Shared first to enable Public access.
               </AlertDescription>
             </Alert>
-          )}
+          ) : isPublic || context?.is_public ? (
+            /* Already public or pending public */
+            <div className="space-y-3">
+              <div className="flex items-center justify-between p-4 border rounded-lg bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-950/20 dark:to-blue-950/20">
+                <div className="flex-1">
+                  <h4 className="font-medium text-sm mb-1">
+                    ��� Public Context
+                  </h4>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    External systems can search this context via Public REST API
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="border-red-300 text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950"
+                  onClick={() => setIsPublic(false)}
+                >
+                  Unpublish
+                </Button>
+              </div>
 
-          {isPublic && (
-            <>
-              <Alert className="border-blue-200 bg-blue-50 dark:bg-blue-900/20">
-                <AlertCircle className="h-4 w-4 text-blue-600" />
-                <AlertTitle className="text-blue-800 dark:text-blue-200">
-                  🌍 Public Context Active
-                </AlertTitle>
-                <AlertDescription className="text-blue-700 dark:text-blue-300">
-                  This context is publicly accessible via REST API.
-                </AlertDescription>
-              </Alert>
-              <Button
-                variant="outline"
-                size="sm"
-                className="border-red-300 text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950"
-                onClick={() => {
-                  setIsPublic(false);
-                }}
-              >
-                Unpublish Context
-              </Button>
+              {!isPublic && context?.is_public && (
+                <Alert className="border-orange-200 bg-orange-50 dark:bg-orange-900/20">
+                  <AlertCircle className="h-4 w-4 text-orange-600" />
+                  <AlertDescription className="text-orange-700 dark:text-orange-300">
+                    Unpublish pending — click Save Changes to apply.
+                  </AlertDescription>
+                </Alert>
+              )}
 
-              <Alert className="border-purple-200 bg-purple-50 dark:bg-purple-900/20">
-                <AlertCircle className="h-4 w-4 text-purple-600" />
-                <AlertTitle className="text-purple-800 dark:text-purple-200">
-                  Public Search API Enabled
-                </AlertTitle>
-                <AlertDescription className="text-purple-700 dark:text-purple-300 space-y-2">
-                  {context?.resource_id && (
-                    <div className="mb-3">
+              {isPublic && context?.resource_id && (
+                <Alert className="border-purple-200 bg-purple-50 dark:bg-purple-900/20">
+                  <AlertCircle className="h-4 w-4 text-purple-600" />
+                  <AlertTitle className="text-purple-800 dark:text-purple-200">
+                    Public Search API
+                  </AlertTitle>
+                  <AlertDescription className="text-purple-700 dark:text-purple-300 space-y-2">
+                    <div className="mb-2">
                       <p className="text-xs font-medium mb-1">Resource ID:</p>
                       <code className="block p-2 bg-purple-100 dark:bg-purple-900/40 rounded text-xs font-mono break-all">
                         {context.resource_id}
                       </code>
                     </div>
+                    <p>External systems can search this context using:</p>
+                    <code className="block mt-2 p-2 bg-purple-100 dark:bg-purple-900/40 rounded text-xs font-mono break-all">
+                      POST /api/v1/public/{contextId}/search
+                    </code>
+                  </AlertDescription>
+                </Alert>
+              )}
+            </div>
+          ) : (
+            /* Not yet public — show prefix input + make public button */
+            <div className="space-y-3">
+              <div className="p-4 border-2 rounded-lg bg-blue-50 dark:bg-blue-950/20 border-blue-200 dark:border-blue-700">
+                <label
+                  className={cn(
+                    typography.bodySmall,
+                    "font-semibold mb-2 block",
                   )}
-                  <p>External systems can search this context using:</p>
-                  <code className="block mt-2 p-2 bg-purple-100 dark:bg-purple-900/40 rounded text-xs font-mono break-all">
-                    POST /api/v1/public/{contextId}/search
-                  </code>
-                  <p className="text-xs mt-2">
-                    Rate limit: 50 requests/min for public access. Workspace
-                    members have unlimited access.
-                  </p>
-                </AlertDescription>
-              </Alert>
-            </>
+                >
+                  Resource ID Prefix <span className="text-red-500">*</span>
+                </label>
+                <Input
+                  placeholder="e.g., products, docs_articles"
+                  value={resourceIdPrefix}
+                  onChange={(e) => {
+                    const value = e.target.value
+                      .toLowerCase()
+                      .replace(/[^a-z0-9_]/g, "");
+                    setResourceIdPrefix(value);
+                  }}
+                  className="font-mono text-sm"
+                />
+                <p
+                  className={cn(typography.caption, colors.text.muted, "mt-2")}
+                >
+                  Lowercase letters, numbers, underscores only. Used as the
+                  resource ID for Public Search API.
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  if (resourceIdPrefix.trim()) {
+                    setIsPublic(true);
+                  }
+                }}
+                disabled={!resourceIdPrefix.trim()}
+                className={cn(
+                  "w-full px-4 py-3 rounded-lg border-2 border-dashed transition-colors",
+                  !resourceIdPrefix.trim()
+                    ? "border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/20 opacity-50 cursor-not-allowed"
+                    : "border-purple-300 dark:border-purple-700 bg-purple-50 dark:bg-purple-950/20 hover:bg-purple-100 dark:hover:bg-purple-900/30 cursor-pointer",
+                )}
+              >
+                <div
+                  className={cn(
+                    "text-sm font-medium",
+                    !resourceIdPrefix.trim()
+                      ? "text-gray-500"
+                      : "text-purple-700 dark:text-purple-300",
+                  )}
+                >
+                  🌍 Make Public
+                </div>
+                <div
+                  className={cn(
+                    "text-xs mt-1",
+                    !resourceIdPrefix.trim()
+                      ? "text-gray-400"
+                      : "text-purple-600 dark:text-purple-400",
+                  )}
+                >
+                  {!resourceIdPrefix.trim()
+                    ? "Enter Resource ID Prefix first"
+                    : "Enable Public Search API for this context"}
+                </div>
+              </button>
+            </div>
           )}
         </div>
       </Section>
 
-      {/* Save All Changes */}
-      <div className="flex justify-end max-w-2xl">
+      {/* Save All Changes — covers Basic Info, AI Config, Privacy & Public */}
+      <div className="flex items-center justify-between max-w-2xl p-4 border rounded-lg bg-slate-50 dark:bg-slate-900/50">
+        <p className={cn(typography.caption, colors.text.muted)}>
+          Saves display name, description, AI settings, and privacy/public
+          changes.
+        </p>
         <ActionButton
           onClick={handleSave}
           icon={
@@ -671,7 +702,7 @@ export default function ContextSettingsPage() {
           variant="primary"
           disabled={saving}
         >
-          {saving ? "Saving..." : "Save Changes"}
+          {saving ? "Saving..." : "Save All Changes"}
         </ActionButton>
       </div>
 
