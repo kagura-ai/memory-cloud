@@ -79,8 +79,6 @@ class LLMService:
         resolved_model = model or os.getenv("SLEEP_LLM_MODEL", "gpt-5-nano")
         resolved_provider = provider or os.getenv("SLEEP_LLM_PROVIDER", "openai")
 
-        client = await self._get_client(user_id, resolved_provider, context_id, workspace_id)
-
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -90,6 +88,7 @@ class LLMService:
         content = ""
         tokens_used = 0
         try:
+            client = await self._get_client(user_id, resolved_provider, context_id, workspace_id)
             response = await client.chat.completions.create(
                 model=resolved_model,
                 messages=messages,

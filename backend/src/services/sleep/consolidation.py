@@ -64,6 +64,7 @@ class ConsolidationPhase:
         """Run consolidation phase."""
         result = PhaseResult(phase_name="consolidation")
         llm_calls_before = budget.llm_calls_used
+        self._tokens_used = 0
 
         # Fetch working memories
         working = await self._fetch_working_memories(user_id, workspace_id, context_id)
@@ -165,6 +166,7 @@ class ConsolidationPhase:
 
         result.memories_processed = len(working)
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
+        result.tokens_used = self._tokens_used
         result.details = {
             "working_count": len(working),
             "rule_promoted": promoted,
@@ -236,7 +238,7 @@ class ConsolidationPhase:
         prompt = CONSOLIDATION_JUDGE_USER.format(memories="\n".join(memory_lines))
 
         try:
-            response, _tokens = await self.llm_service.complete_json(
+            response, tokens = await self.llm_service.complete_json(
                 user_id=user_id,
                 prompt=prompt,
                 system_prompt=CONSOLIDATION_JUDGE_SYSTEM,
@@ -246,6 +248,7 @@ class ConsolidationPhase:
                 provider=config.sleep_llm_provider,
             )
             budget.consume(llm_calls=1)
+            self._tokens_used += tokens
         except Exception as e:
             logger.warning("consolidation_llm_failed", error=str(e))
             return {}

@@ -166,6 +166,20 @@ class SleepReporter:
         report.embedding_calls_made = total_embedding_calls
         report.memories_processed = total_memories
 
+        # Extract per-phase counters from details
+        for result in phase_results:
+            if not result.details:
+                continue
+            if result.phase_name == "edge_discovery":
+                report.edges_created = result.details.get("edges_created", 0)
+            elif result.phase_name == "dedup_merge":
+                report.memories_merged = result.details.get("merged", 0)
+            elif result.phase_name == "consolidation":
+                report.memories_promoted = result.details.get(
+                    "rule_promoted", 0
+                ) + result.details.get("llm_promoted", 0)
+                report.memories_flagged = result.details.get("borderline", 0)
+
         logger.info(
             "sleep_report_completed",
             report_id=str(report.id),

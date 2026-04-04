@@ -245,9 +245,9 @@ class NeuralMemoryConfig:
             raise ValueError(f"sleep_cron_hour must be in [0, 23], got {self.sleep_cron_hour}")
         if not (0 <= self.sleep_cron_minute <= 59):
             raise ValueError(f"sleep_cron_minute must be in [0, 59], got {self.sleep_cron_minute}")
-        if self.sleep_llm_provider not in ("openai", "ollama"):
+        if self.sleep_llm_provider not in ("openai", "ollama", ""):
             raise ValueError(
-                f"sleep_llm_provider must be 'openai' or 'ollama', got '{self.sleep_llm_provider}'"
+                f"sleep_llm_provider must be 'openai', 'ollama', or '', got '{self.sleep_llm_provider}'"
             )
         if not self.sleep_max_memories_per_run > 0:
             raise ValueError(

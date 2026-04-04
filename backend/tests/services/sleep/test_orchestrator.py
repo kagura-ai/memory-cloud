@@ -41,12 +41,6 @@ class TestSleepOrchestrator:
         config = _make_config()
         phase_names_executed = []
 
-        async def mock_execute(cfg, user_id, ws, ctx, budget):
-            return PhaseResult(phase_name="mock", memories_processed=1)
-
-        async def mock_reindex_execute(changed_ids, user_id, ws=None, ctx=None):
-            return PhaseResult(phase_name="reindex")
-
         with (
             patch("services.sleep.orchestrator.LLMService"),
             patch("services.sleep.orchestrator.SleepReporter") as MockReporter,

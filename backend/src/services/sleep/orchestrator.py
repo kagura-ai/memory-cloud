@@ -52,7 +52,6 @@ class SleepOrchestrator:
         context_id: str | None = None,
         *,
         config: NeuralMemoryConfig | None = None,
-        dry_run: bool = False,
     ) -> None:
         """Execute full sleep maintenance cycle for one user/context.
 
@@ -61,7 +60,6 @@ class SleepOrchestrator:
             workspace_id: Target workspace (for 3-level isolation)
             context_id: Target context (for 3-level isolation)
             config: Optional pre-loaded config (loaded from DB if None)
-            dry_run: If True, skip actual mutations (for testing)
         """
         # Load config if not provided
         if config is None:
@@ -133,6 +131,7 @@ class SleepOrchestrator:
                 )
                 phase_results.append(result)
                 changed_memory_ids.update(result.changed_memory_ids)
+                budget.consume(memories=result.memories_processed)
 
             # Phase 5: Reindex always runs if there are changes
             reindex = ReindexPhase(self.db, em, cn)
@@ -157,6 +156,7 @@ class SleepOrchestrator:
                 exc_info=True,
             )
             await self.reporter.fail_report(report, str(e))
+            raise
 
     async def _run_phase(
         self,

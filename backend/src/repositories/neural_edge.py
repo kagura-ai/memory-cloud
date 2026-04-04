@@ -852,6 +852,33 @@ class NeuralEdgeRepository:
                 await self.db.delete(edge)
                 continue
 
+            # Check for conflicting edge (unique_edge constraint)
+            conflict_conditions = [
+                NeuralMemoryEdge.user_id == user_id,
+                NeuralMemoryEdge.src_id == new_src,
+                NeuralMemoryEdge.dst_id == new_dst,
+                NeuralMemoryEdge.edge_type == edge.edge_type,
+            ]
+            if workspace_id:
+                conflict_conditions.append(NeuralMemoryEdge.workspace_id == UUID(workspace_id))
+            if context_id:
+                conflict_conditions.append(NeuralMemoryEdge.context_id == UUID(context_id))
+            conflict_stmt = select(NeuralMemoryEdge).where(and_(*conflict_conditions))
+            conflict_result = await self.db.execute(conflict_stmt)
+            existing_edge = conflict_result.scalar_one_or_none()
+
+            if existing_edge and existing_edge.id != edge.id:
+                # Keep the edge with higher weight, delete the other
+                if existing_edge.weight >= edge.weight:
+                    await self.db.delete(edge)
+                else:
+                    await self.db.delete(existing_edge)
+                    edge.src_id = new_src
+                    edge.dst_id = new_dst
+                    edge.last_updated = utcnow()
+                    transferred += 1
+                continue
+
             # Update edge to point to winner
             edge.src_id = new_src
             edge.dst_id = new_dst

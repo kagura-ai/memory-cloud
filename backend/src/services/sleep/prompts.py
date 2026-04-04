@@ -115,7 +115,7 @@ Example:
     {{
       "pair": ["A", "B"],
       "related": true,
-      "edge_type": "extends",
+      "edge_type": "related_to",
       "confidence": 0.85,
       "reason": "B describes the implementation of the pattern introduced in A"
     }}

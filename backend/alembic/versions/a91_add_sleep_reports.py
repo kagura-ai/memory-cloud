@@ -3,7 +3,7 @@
 Issue #101: Sleep Maintenance Foundation.
 
 Revision ID: a91_sleep_reports
-Revises: d18bcb6512e2
+Revises: a120_neural_gating
 """
 
 from alembic import op

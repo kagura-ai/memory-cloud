@@ -34,7 +34,7 @@ async def sleep_maintenance_task():
 
     try:
         async for db in get_db():
-            from sqlalchemy import distinct, select
+            from sqlalchemy import select
 
             from models.memory import Memory
             from neural.config import NeuralMemoryConfig
@@ -47,10 +47,11 @@ async def sleep_maintenance_task():
             # Find distinct (user_id, workspace_id, context_id) combinations
             stmt = (
                 select(
-                    distinct(Memory.user_id),
+                    Memory.user_id,
                     Memory.workspace_id,
                     Memory.context_id,
                 )
+                .distinct()
                 .where(Memory.deleted_at.is_(None))
                 .where(Memory.workspace_id.isnot(None))
                 .where(Memory.context_id.isnot(None))

@@ -81,6 +81,7 @@ class EdgeDiscoveryPhase:
         """Run edge discovery phase."""
         result = PhaseResult(phase_name="edge_discovery")
         llm_calls_before = budget.llm_calls_used
+        self._tokens_used = 0
 
         if not config.sleep_edge_discovery_enabled:
             result.skipped = True
@@ -157,6 +158,7 @@ class EdgeDiscoveryPhase:
 
         result.memories_processed = len(sampled)
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
+        result.tokens_used = self._tokens_used
         result.details = {
             "sampled": len(sampled),
             "candidates": len(candidates),
@@ -180,9 +182,10 @@ class EdgeDiscoveryPhase:
         context_id: str | None,
         sample_size: int,
     ) -> list[Memory]:
-        """Sample memories with recency bias (newer = more likely sampled).
+        """Sample memories via random sampling.
 
-        Uses SQL RANDOM() weighted by recency for efficient sampling.
+        Uses SQL RANDOM() for efficient uniform sampling.
+        Recency-weighted sampling is a future improvement.
         """
         stmt = (
             select(Memory)
@@ -264,6 +267,7 @@ class EdgeDiscoveryPhase:
         context_id: str | None,
     ) -> list[tuple[UUID, UUID, float]]:
         """Remove pairs that already have edges."""
+        # TODO: N+1 query per candidate — batch fetch edges for all src_ids in one query
         filtered = []
         for src_id, dst_id, score in candidates:
             existing = await self.edge_repo.get_outgoing_edges(
@@ -291,11 +295,16 @@ class EdgeDiscoveryPhase:
 
         Returns list of (src_id, dst_id, edge_type, confidence) for confirmed edges.
         """
-        # Collect all unique memories in batch
+        # Collect all unique memories in batch, skip IDs not in memory_map
         all_ids: set[UUID] = set()
         for src, dst, _ in batch:
-            all_ids.add(src)
-            all_ids.add(dst)
+            if src in memory_map:
+                all_ids.add(src)
+            if dst in memory_map:
+                all_ids.add(dst)
+
+        if not all_ids:
+            return []
 
         # Assign short labels
         id_list = list(all_ids)
@@ -336,6 +345,7 @@ class EdgeDiscoveryPhase:
                 provider=config.sleep_llm_provider,
             )
             budget.consume(llm_calls=1)
+            self._tokens_used += tokens
 
         except Exception as e:
             logger.warning("edge_discovery_llm_failed", error=str(e))
@@ -356,12 +366,14 @@ class EdgeDiscoveryPhase:
             raw_type = edge.get("edge_type", "related_to")
             edge_type = raw_type if raw_type in valid_edge_types else "related_to"
 
+            confidence = max(0.0, min(1.0, edge.get("confidence", 0.5)))
+
             confirmed.append(
                 (
                     label_to_id[pair[0]],
                     label_to_id[pair[1]],
                     edge_type,
-                    edge.get("confidence", 0.5),
+                    confidence,
                 )
             )
 

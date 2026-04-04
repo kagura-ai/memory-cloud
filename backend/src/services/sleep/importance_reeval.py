@@ -70,6 +70,7 @@ class ImportanceReevalPhase:
         """Run importance re-evaluation phase."""
         result = PhaseResult(phase_name="importance_reeval")
         llm_calls_before = budget.llm_calls_used
+        self._tokens_used = 0
 
         if not config.sleep_importance_reeval_enabled:
             result.skipped = True
@@ -133,6 +134,7 @@ class ImportanceReevalPhase:
 
         result.memories_processed = updated_count
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
+        result.tokens_used = self._tokens_used
         result.details = {
             "candidates": len(candidates),
             "updated": updated_count,
@@ -209,6 +211,7 @@ class ImportanceReevalPhase:
                 provider=config.sleep_llm_provider,
             )
             budget.consume(llm_calls=1)
+            self._tokens_used += tokens
         except Exception as e:
             logger.warning("importance_reeval_llm_failed", error=str(e))
             return {}
