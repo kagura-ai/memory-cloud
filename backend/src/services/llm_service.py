@@ -87,8 +87,8 @@ class LLMService:
         # First attempt
         content = ""
         tokens_used = 0
+        client = await self._get_client(user_id, resolved_provider, context_id, workspace_id)
         try:
-            client = await self._get_client(user_id, resolved_provider, context_id, workspace_id)
             response = await client.chat.completions.create(
                 model=resolved_model,
                 messages=messages,
