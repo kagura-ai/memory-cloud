@@ -686,3 +686,56 @@ async def delete_user(
                 "api_keys": api_key_count,
             },
         }
+
+
+# ============================================================================
+# Embedding Retry (Issue #93)
+# ============================================================================
+
+
+@router.post("/embedding/retry-failed")
+async def retry_failed_embeddings(
+    user: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    context_id: str | None = Query(None, description="Filter by context ID"),
+    workspace_id: str | None = Query(None, description="Filter by workspace ID"),
+) -> dict:
+    """Reset failed embeddings to pending for automatic retry.
+
+    Issue #93: Admin tool to recover from embedding failures.
+    """
+    from sqlalchemy import update
+
+    conditions = [
+        Memory.embedding_status == "failed",
+        Memory.deleted_at.is_(None),
+    ]
+    if context_id:
+        conditions.append(Memory.context_id == context_id)
+    if workspace_id:
+        member_ids_stmt = select(WorkspaceMember.user_id).where(
+            WorkspaceMember.workspace_id == workspace_id
+        )
+        member_ids_result = await db.execute(member_ids_stmt)
+        member_ids = [row[0] for row in member_ids_result.all()]
+        if member_ids:
+            conditions.append(Memory.user_id.in_(member_ids))
+        else:
+            return {"status": "success", "reset_count": 0}
+
+    stmt = (
+        update(Memory).where(*conditions).values(embedding_status="pending", embedding_error=None)
+    )
+    result = await db.execute(stmt)
+    await db.commit()
+
+    reset_count = result.rowcount
+    logger.info(
+        "Admin retry-failed embeddings",
+        reset_count=reset_count,
+        context_id=context_id,
+        workspace_id=workspace_id,
+        admin_user_id=get_user_id(user),
+    )
+
+    return {"status": "success", "reset_count": reset_count}
