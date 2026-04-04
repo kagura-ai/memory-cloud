@@ -33,15 +33,13 @@ async def handle_get_usage(
     if not workspace_id:
         return _error_response("workspace_required", "No active workspace")
 
-    async with get_db() as db:
-        # Get workspace
+    async for db in get_db():
         ws_result = await db.execute(select(Workspace).where(Workspace.id == workspace_id))
         workspace = ws_result.scalar_one_or_none()
 
         if not workspace:
             return _error_response("workspace_not_found", f"Workspace {workspace_id} not found")
 
-        # Memory count (workspace-scoped)
         mem_result = await db.execute(
             select(func.count(Memory.id)).where(
                 Memory.workspace_id == workspace_id,
@@ -50,7 +48,6 @@ async def handle_get_usage(
         )
         memory_count = mem_result.scalar() or 0
 
-        # Context count
         ctx_result = await db.execute(
             select(func.count(Context.id)).where(
                 Context.workspace_id == workspace_id,
@@ -59,7 +56,6 @@ async def handle_get_usage(
         )
         context_count = ctx_result.scalar() or 0
 
-        # Member count
         member_result = await db.execute(
             select(func.count(WorkspaceMember.id)).where(
                 WorkspaceMember.workspace_id == workspace_id
@@ -67,7 +63,6 @@ async def handle_get_usage(
         )
         member_count = member_result.scalar() or 0
 
-        # Build response using effective properties
         effective_memory = workspace.effective_memory_limit
         memory_pct = round(memory_count / effective_memory * 100, 1) if effective_memory > 0 else 0
 

@@ -56,11 +56,10 @@ class TestGetUsage:
             mock_member_result,
         ]
 
-        mock_db_ctx = AsyncMock()
-        mock_db_ctx.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_db_ctx.__aexit__ = AsyncMock(return_value=False)
+        async def mock_get_db():
+            yield mock_db
 
-        with patch("db.base.get_db", return_value=mock_db_ctx):
+        with patch("db.base.get_db", new=mock_get_db):
             result = await handle_get_usage({}, user_id, workspace_id)
 
         import json
@@ -91,11 +90,10 @@ class TestGetUsage:
         mock_ws_result.scalar_one_or_none.return_value = None
         mock_db.execute.return_value = mock_ws_result
 
-        mock_db_ctx = AsyncMock()
-        mock_db_ctx.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_db_ctx.__aexit__ = AsyncMock(return_value=False)
+        async def mock_get_db():
+            yield mock_db
 
-        with patch("db.base.get_db", return_value=mock_db_ctx):
+        with patch("db.base.get_db", new=mock_get_db):
             result = await handle_get_usage({}, user_id, workspace_id)
 
         import json
@@ -131,11 +129,10 @@ class TestGetUsage:
             mock_member_result,
         ]
 
-        mock_db_ctx = AsyncMock()
-        mock_db_ctx.__aenter__ = AsyncMock(return_value=mock_db)
-        mock_db_ctx.__aexit__ = AsyncMock(return_value=False)
+        async def mock_get_db():
+            yield mock_db
 
-        with patch("db.base.get_db", return_value=mock_db_ctx):
+        with patch("db.base.get_db", new=mock_get_db):
             result = await handle_get_usage({}, user_id, workspace_id)
 
         import json

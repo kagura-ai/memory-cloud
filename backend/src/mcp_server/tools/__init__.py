@@ -30,6 +30,7 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
         "update_context",
         "merge_contexts",
         "kagura_memory_usage_guide",
+        "get_usage",
     }
 )
 
