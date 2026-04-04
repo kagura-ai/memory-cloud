@@ -791,12 +791,13 @@ async def recover_context(
 
     Default is dry_run=True — shows what would be recovered without making changes.
     """
+    import re
     from uuid import UUID as PyUUID
 
     from qdrant_client.models import FieldCondition, Filter, MatchValue
 
     from config.settings import get_settings
-    from db.qdrant import get_qdrant_client
+    from db.qdrant import KAGURA_MEMORIES_COLLECTION, get_qdrant_client
     from models.config import ContextSearchConfig
 
     context_id = request_body.context_id
@@ -809,7 +810,7 @@ async def recover_context(
 
     settings = get_settings()
     client = get_qdrant_client()
-    collection_name = settings.qdrant_collection_name
+    collection_name = KAGURA_MEMORIES_COLLECTION
     errors: list[str] = []
 
     # Scroll Qdrant for all points with this context_id (capped at 10k)
@@ -829,7 +830,8 @@ async def recover_context(
         )
         all_points.extend(points)
         if next_offset is None or len(all_points) >= max_points:
-            if len(all_points) >= max_points:
+            if len(all_points) > max_points:
+                all_points = all_points[:max_points]
                 errors.append(f"Capped at {max_points} points. Context may have more.")
             break
         offset = next_offset
@@ -863,6 +865,12 @@ async def recover_context(
             errors=["Cannot determine workspace_id from Qdrant data. Please provide it."],
         )
 
+    # Validate workspace_id UUID format
+    try:
+        workspace_id = str(PyUUID(workspace_id))
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail="Invalid workspace_id format") from e
+
     if request_body.dry_run:
         # Just report what we found
         # Check if context record exists
@@ -874,6 +882,12 @@ async def recover_context(
         existing_result = await db.execute(select(Memory.id).where(Memory.id.in_(point_ids)))
         existing_mem_ids = {row[0] for row in existing_result.all()}
 
+        # Check if search config exists independently of context
+        existing_cfg = await db.execute(
+            select(ContextSearchConfig).where(ContextSearchConfig.context_id == PyUUID(context_id))
+        )
+        config_exists = existing_cfg.scalar_one_or_none() is not None
+
         return ContextRecoveryResponse(
             context_id=context_id,
             workspace_id=workspace_id,
@@ -881,7 +895,7 @@ async def recover_context(
             memories_recovered=len(all_points) - len(existing_mem_ids),
             memories_already_existed=len(existing_mem_ids),
             context_record_created=not context_exists,
-            search_config_restored=not context_exists,
+            search_config_restored=not config_exists,
             dry_run=True,
             errors=errors,
         )
@@ -890,12 +904,16 @@ async def recover_context(
     context_record_created = False
     existing_context = await db.execute(select(Context).where(Context.id == PyUUID(context_id)))
     if existing_context.scalar_one_or_none() is None:
-        context_name = request_body.context_name or f"recovered-{context_id[:8]}"
+        raw_name = request_body.context_name or f"recovered-{context_id[:8]}"
+        # Sanitize name to match DB constraint ^[a-z0-9_-]+$
+        context_name = re.sub(r"[^a-z0-9_-]", "-", raw_name.lower()).strip("-")
+        if not context_name:
+            context_name = f"recovered-{context_id[:8]}"
         new_context = Context(
             id=PyUUID(context_id),
             workspace_id=PyUUID(workspace_id),
             name=context_name,
-            display_name=context_name,
+            display_name=raw_name,
             created_by=get_user_id(user),
         )
         db.add(new_context)
@@ -937,6 +955,7 @@ async def recover_context(
         try:
             new_memory = Memory(
                 id=mem_id,
+                summary_embedding_id=mem_id,  # Qdrant point ID
                 user_id=payload.get("user_id", get_user_id(user)),
                 workspace_id=PyUUID(workspace_id),
                 context_id=PyUUID(context_id),

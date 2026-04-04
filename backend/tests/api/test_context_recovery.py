@@ -93,14 +93,17 @@ class TestRecoverContext:
         mock_existing_mems = MagicMock()
         mock_existing_mems.all.return_value = []
 
-        mock_db.execute.side_effect = [mock_context_result, mock_existing_mems]
+        # Mock: 3 queries — context check, memory ID check, search config check
+        mock_config_result = MagicMock()
+        mock_config_result.scalar_one_or_none.return_value = None
+
+        mock_db.execute.side_effect = [mock_context_result, mock_existing_mems, mock_config_result]
 
         with (
             patch("db.qdrant.get_qdrant_client", return_value=mock_client),
             patch("config.settings.get_settings") as mock_settings,
         ):
             mock_settings.return_value = MagicMock(
-                qdrant_collection_name="kagura_memories",
                 embedding_model="text-embedding-3-small",
                 embedding_dimensions=512,
             )
@@ -111,6 +114,7 @@ class TestRecoverContext:
         assert response.memories_recovered == 2
         assert response.memories_already_existed == 0
         assert response.context_record_created is True
+        assert response.search_config_restored is True
         # No db.add calls in dry_run
         mock_db.add.assert_not_called()
         mock_db.commit.assert_not_called()
