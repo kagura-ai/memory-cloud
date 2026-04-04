@@ -42,6 +42,7 @@ import {
   ExternalLink,
   Lock,
   Unlock,
+  Copy,
 } from "lucide-react";
 import { cn, typography, colors } from "@/styles/design-tokens";
 import { getContext, updateContext, deleteContext } from "@/lib/api/contexts";
@@ -80,6 +81,9 @@ export default function ContextSettingsPage() {
   const [isPublic, setIsPublic] = useState(false); // Issue #238: Public context
   const [isLocked, setIsLocked] = useState(false); // Issue #85: Context lock
   const [resourceIdPrefix, setResourceIdPrefix] = useState(""); // Issue #238: Resource ID prefix
+
+  // Copy feedback
+  const [idCopied, setIdCopied] = useState(false);
 
   // Lock toggle (Issue #85)
   const [lockSaving, setLockSaving] = useState(false);
@@ -295,6 +299,49 @@ export default function ContextSettingsPage() {
         <div className="space-y-4 max-w-2xl">
           <div className="space-y-2">
             <label className={cn(typography.bodySmall, "font-medium")}>
+              Context ID
+            </label>
+            <div className="flex items-center gap-2">
+              <Input
+                value={context.id}
+                disabled
+                className="font-mono text-xs"
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                className="shrink-0"
+                onClick={() => {
+                  navigator.clipboard.writeText(context.id);
+                  setIdCopied(true);
+                  setTimeout(() => setIdCopied(false), 1500);
+                }}
+              >
+                {idCopied ? (
+                  <span className="text-xs text-green-600">Copied!</span>
+                ) : (
+                  <Copy className="h-4 w-4" />
+                )}
+              </Button>
+            </div>
+            <p className={cn(typography.caption, colors.text.muted)}>
+              Use this ID in MCP tools (e.g.,{" "}
+              <code className="text-xs">context_id</code> parameter).
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <label className={cn(typography.bodySmall, "font-medium")}>
+              Context Name
+            </label>
+            <Input value={context.name} disabled className="font-mono" />
+            <p className={cn(typography.caption, colors.text.muted)}>
+              Internal identifier. Cannot be changed after creation.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <label className={cn(typography.bodySmall, "font-medium")}>
               Display Name
             </label>
             <Input
@@ -306,16 +353,6 @@ export default function ContextSettingsPage() {
             <p className={cn(typography.caption, colors.text.muted)}>
               Human-readable name shown in the dashboard. Leave empty to use the
               context name.
-            </p>
-          </div>
-
-          <div className="space-y-2">
-            <label className={cn(typography.bodySmall, "font-medium")}>
-              Context Name
-            </label>
-            <Input value={context.name} disabled className="font-mono" />
-            <p className={cn(typography.caption, colors.text.muted)}>
-              Internal identifier. Cannot be changed after creation.
             </p>
           </div>
 
