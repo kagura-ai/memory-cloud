@@ -748,3 +748,252 @@ async def retry_failed_embeddings(
     )
 
     return {"status": "success", "reset_count": reset_count}
+
+
+# ============================================================================
+# Context Recovery from Qdrant (Issue #86)
+# ============================================================================
+
+
+class ContextRecoveryRequest(BaseModel):
+    """Request to recover a deleted context from Qdrant data."""
+
+    context_id: str
+    workspace_id: str | None = None
+    context_name: str | None = None
+    dry_run: bool = True
+
+
+class ContextRecoveryResponse(BaseModel):
+    """Result of context recovery attempt."""
+
+    context_id: str
+    workspace_id: str
+    qdrant_points_found: int
+    memories_recovered: int
+    memories_already_existed: int
+    context_record_created: bool
+    search_config_restored: bool
+    dry_run: bool
+    errors: list[str]
+
+
+@router.post("/contexts/recover", response_model=ContextRecoveryResponse)
+async def recover_context(
+    request_body: ContextRecoveryRequest,
+    user: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> ContextRecoveryResponse:
+    """Recover a deleted context from surviving Qdrant data.
+
+    Issue #86: Admin endpoint to reconstruct context and memory records
+    from Qdrant point payloads when a context has been accidentally deleted.
+
+    Default is dry_run=True — shows what would be recovered without making changes.
+    """
+    import re
+    from uuid import UUID as PyUUID
+
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    from config.settings import get_settings
+    from db.qdrant import KAGURA_MEMORIES_COLLECTION, get_qdrant_client
+    from models.config import ContextSearchConfig
+
+    context_id = request_body.context_id
+
+    # Validate context_id is a valid UUID (before any external calls)
+    try:
+        PyUUID(context_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid context_id format") from e
+
+    settings = get_settings()
+    client = get_qdrant_client()
+    collection_name = KAGURA_MEMORIES_COLLECTION
+    errors: list[str] = []
+
+    # Scroll Qdrant for all points with this context_id (capped at 10k)
+    max_points = 10_000
+    all_points = []
+    offset = None
+    while True:
+        points, next_offset = await client.scroll(
+            collection_name=collection_name,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="context_id", match=MatchValue(value=context_id))]
+            ),
+            limit=100,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        all_points.extend(points)
+        if next_offset is None or len(all_points) >= max_points:
+            if len(all_points) > max_points:
+                all_points = all_points[:max_points]
+                errors.append(f"Capped at {max_points} points. Context may have more.")
+            break
+        offset = next_offset
+
+    if not all_points:
+        return ContextRecoveryResponse(
+            context_id=context_id,
+            workspace_id=request_body.workspace_id or "",
+            qdrant_points_found=0,
+            memories_recovered=0,
+            memories_already_existed=0,
+            context_record_created=False,
+            search_config_restored=False,
+            dry_run=request_body.dry_run,
+            errors=["No Qdrant points found for this context_id"],
+        )
+
+    # Step 2: Determine workspace_id from first point if not provided
+    first_payload = all_points[0].payload or {}
+    workspace_id = request_body.workspace_id or first_payload.get("workspace_id", "")
+    if not workspace_id:
+        return ContextRecoveryResponse(
+            context_id=context_id,
+            workspace_id="",
+            qdrant_points_found=len(all_points),
+            memories_recovered=0,
+            memories_already_existed=0,
+            context_record_created=False,
+            search_config_restored=False,
+            dry_run=request_body.dry_run,
+            errors=["Cannot determine workspace_id from Qdrant data. Please provide it."],
+        )
+
+    # Validate workspace_id UUID format
+    try:
+        workspace_id = str(PyUUID(workspace_id))
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail="Invalid workspace_id format") from e
+
+    if request_body.dry_run:
+        # Just report what we found
+        # Check if context record exists
+        existing_context = await db.execute(select(Context).where(Context.id == PyUUID(context_id)))
+        context_exists = existing_context.scalar_one_or_none() is not None
+
+        # Batch-check existing memory records (avoid N+1)
+        point_ids = [PyUUID(str(p.id)) for p in all_points]
+        existing_result = await db.execute(select(Memory.id).where(Memory.id.in_(point_ids)))
+        existing_mem_ids = {row[0] for row in existing_result.all()}
+
+        # Check if search config exists independently of context
+        existing_cfg = await db.execute(
+            select(ContextSearchConfig).where(ContextSearchConfig.context_id == PyUUID(context_id))
+        )
+        config_exists = existing_cfg.scalar_one_or_none() is not None
+
+        return ContextRecoveryResponse(
+            context_id=context_id,
+            workspace_id=workspace_id,
+            qdrant_points_found=len(all_points),
+            memories_recovered=len(all_points) - len(existing_mem_ids),
+            memories_already_existed=len(existing_mem_ids),
+            context_record_created=not context_exists,
+            search_config_restored=not config_exists,
+            dry_run=True,
+            errors=errors,
+        )
+
+    # Step 3: Create Context record if missing
+    context_record_created = False
+    existing_context = await db.execute(select(Context).where(Context.id == PyUUID(context_id)))
+    if existing_context.scalar_one_or_none() is None:
+        raw_name = request_body.context_name or f"recovered-{context_id[:8]}"
+        # Sanitize name to match DB constraint ^[a-z0-9_-]+$
+        context_name = re.sub(r"[^a-z0-9_-]", "-", raw_name.lower()).strip("-")
+        if not context_name:
+            context_name = f"recovered-{context_id[:8]}"
+        new_context = Context(
+            id=PyUUID(context_id),
+            workspace_id=PyUUID(workspace_id),
+            name=context_name,
+            display_name=raw_name,
+            created_by=get_user_id(user),
+        )
+        db.add(new_context)
+        await db.flush()
+        context_record_created = True
+        logger.info("context_recovered", context_id=context_id, name=context_name)
+
+    # Step 4: Create SearchConfig if missing
+    search_config_restored = False
+    existing_config = await db.execute(
+        select(ContextSearchConfig).where(ContextSearchConfig.context_id == PyUUID(context_id))
+    )
+    if existing_config.scalar_one_or_none() is None:
+        new_config = ContextSearchConfig(
+            context_id=PyUUID(context_id),
+            embedding_model=settings.embedding_model,
+            embedding_dimensions=settings.embedding_dimensions,
+        )
+        db.add(new_config)
+        await db.flush()
+        search_config_restored = True
+
+    # Step 5: Reconstruct Memory records from Qdrant payloads
+    # Batch-check existing memory IDs (avoid N+1)
+    point_ids = [PyUUID(str(p.id)) for p in all_points]
+    existing_ids_result = await db.execute(select(Memory.id).where(Memory.id.in_(point_ids)))
+    existing_ids = {row[0] for row in existing_ids_result.all()}
+
+    memories_recovered = 0
+    memories_already_existed = 0
+
+    for point in all_points:
+        mem_id = PyUUID(str(point.id))
+        if mem_id in existing_ids:
+            memories_already_existed += 1
+            continue
+
+        payload = point.payload or {}
+        try:
+            new_memory = Memory(
+                id=mem_id,
+                summary_embedding_id=mem_id,  # Qdrant point ID
+                user_id=payload.get("user_id", get_user_id(user)),
+                workspace_id=PyUUID(workspace_id),
+                context_id=PyUUID(context_id),
+                summary=payload.get("summary", ""),
+                context_summary=payload.get("context_summary"),
+                content=payload.get("summary", ""),  # Use summary as content fallback
+                type=payload.get("type", "note"),
+                importance=payload.get("importance", 0.5),
+                scope=payload.get("scope", "persistent"),
+                tags=payload.get("tags", []),
+                embedding_status="success",  # Already in Qdrant
+                client="admin-recovery",
+                source="admin_recovery",
+            )
+            db.add(new_memory)
+            memories_recovered += 1
+        except (ValueError, KeyError, TypeError) as e:
+            errors.append(f"Failed to recover memory {mem_id}: {e!s}")
+
+    await db.commit()
+
+    logger.info(
+        "context_recovery_complete",
+        context_id=context_id,
+        points_found=len(all_points),
+        memories_recovered=memories_recovered,
+        already_existed=memories_already_existed,
+        admin_user_id=get_user_id(user),
+    )
+
+    return ContextRecoveryResponse(
+        context_id=context_id,
+        workspace_id=workspace_id,
+        qdrant_points_found=len(all_points),
+        memories_recovered=memories_recovered,
+        memories_already_existed=memories_already_existed,
+        context_record_created=context_record_created,
+        search_config_restored=search_config_restored,
+        dry_run=False,
+        errors=errors,
+    )
