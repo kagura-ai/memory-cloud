@@ -13,7 +13,7 @@ from sqlalchemy.dialects.postgresql import UUID
 
 # revision identifiers, used by Alembic.
 revision = "a91_sleep_reports"
-down_revision = "d18bcb6512e2"
+down_revision = "a120_neural_gating"
 branch_labels = None
 depends_on = None
 
