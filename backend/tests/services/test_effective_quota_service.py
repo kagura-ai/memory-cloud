@@ -47,8 +47,9 @@ class TestEffectiveQuotaService:
         ws.addon_context_bonus = addon_context_bonus
         # Simulate @property behavior for effective quotas
         ws.effective_memory_limit = memory_limit + addon_memory_bonus
-        ws.effective_daily_api_limit = daily_api_limit + addon_mcp_quota_bonus
-        ws.effective_weekly_api_limit = (daily_api_limit + addon_mcp_quota_bonus) * 7
+        ws.effective_mcp_calls_per_day = 50000 + addon_mcp_quota_bonus  # pro tier base
+        ws.effective_max_contexts = 20 + addon_context_bonus  # pro tier base
+        ws.effective_max_members = 10 + addon_member_bonus  # pro tier base
         return ws
 
     @pytest.mark.asyncio
@@ -137,8 +138,9 @@ class TestDashboardAddonReflection:
         ws.addon_member_bonus = 3
         ws.addon_context_bonus = 5
         ws.effective_memory_limit = 1500
-        ws.effective_daily_api_limit = 1200
-        ws.effective_weekly_api_limit = 8400
+        ws.effective_mcp_calls_per_day = 50200  # pro 50000 + addon 200
+        ws.effective_max_contexts = 25  # pro 20 + addon 5
+        ws.effective_max_members = 13  # pro 10 + addon 3
 
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = ws

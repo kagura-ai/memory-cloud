@@ -89,18 +89,16 @@ class EffectiveQuotaService:
         # Get base quotas from plan tier
         plan_tier = get_plan_tier(workspace.plan_name)
 
-        # Calculate effective quotas (base + addons via model properties)
+        # Calculate effective quotas via model properties
         effective_quotas = {
             "memory_limit": workspace.effective_memory_limit,
-            "mcp_calls_per_day": workspace.effective_daily_api_limit,
+            "mcp_calls_per_day": workspace.effective_mcp_calls_per_day,
             "rest_calls_per_day": self._get_base_rest_quota(plan_tier)
             + (workspace.addon_rest_quota_bonus or 0),
             "public_calls_per_day": self._get_base_public_quota(plan_tier)
             + (workspace.addon_public_quota_bonus or 0),
-            "max_members": plan_tier.max_members_per_workspace
-            + (workspace.addon_member_bonus or 0),
-            "max_contexts": plan_tier.max_contexts_per_workspace
-            + (workspace.addon_context_bonus or 0),
+            "max_members": workspace.effective_max_members,
+            "max_contexts": workspace.effective_max_contexts,
         }
 
         logger.debug(

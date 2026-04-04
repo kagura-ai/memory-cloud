@@ -1090,21 +1090,32 @@ class Workspace(Base):
     addon_member_bonus = Column(Integer, nullable=False, server_default="0")
     addon_context_bonus = Column(Integer, nullable=False, server_default="0")  # Issue #15
 
-    # Issue #136: Effective quota properties (base + addon)
+    # Issue #136: Effective quota properties (base from plan tier + addon)
+    def _get_plan_tier(self):
+        """Lazy import to avoid circular dependency."""
+        from config.plan_tiers import get_plan_tier
+
+        return get_plan_tier(self.plan_name)
+
     @property
     def effective_memory_limit(self) -> int:
         """Memory limit including addon bonus."""
         return (self.memory_limit or 0) + (self.addon_memory_bonus or 0)
 
     @property
-    def effective_daily_api_limit(self) -> int:
-        """Daily API call limit including addon bonus."""
-        return (self.daily_api_limit or 0) + (self.addon_mcp_quota_bonus or 0)
+    def effective_mcp_calls_per_day(self) -> int:
+        """MCP API calls/day: plan tier base + addon."""
+        return self._get_plan_tier().mcp_calls_per_day + (self.addon_mcp_quota_bonus or 0)
 
     @property
-    def effective_weekly_api_limit(self) -> int:
-        """Weekly API call limit (derived from effective daily)."""
-        return self.effective_daily_api_limit * 7
+    def effective_max_contexts(self) -> int:
+        """Max contexts: plan tier base + addon."""
+        return self._get_plan_tier().max_contexts_per_workspace + (self.addon_context_bonus or 0)
+
+    @property
+    def effective_max_members(self) -> int:
+        """Max members: plan tier base + addon."""
+        return self._get_plan_tier().max_members_per_workspace + (self.addon_member_bonus or 0)
 
     # Stripe billing (Issue #351)
     stripe_customer_id = Column(String(255), nullable=True)

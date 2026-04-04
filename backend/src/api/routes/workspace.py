@@ -306,7 +306,7 @@ async def get_workspace_usage_current(
             # Shouldn't happen — workspace was validated above. Fallback to base limits.
             effective_quotas = {
                 "memory_limit": workspace.effective_memory_limit,
-                "mcp_calls_per_day": workspace.effective_daily_api_limit,
+                "mcp_calls_per_day": workspace.effective_mcp_calls_per_day,
                 "rest_calls_per_day": 0,
             }
         effective_memory_limit = effective_quotas["memory_limit"]

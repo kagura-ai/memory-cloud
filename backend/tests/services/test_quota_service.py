@@ -45,6 +45,7 @@ class TestQuotaServiceMemberQuota:
         workspace = MagicMock()
         workspace.id = workspace_id
         workspace.plan_name = plan_name
+        workspace.memory_limit = kwargs.get("memory_limit", 1000)
         workspace.addon_memory_bonus = 1  # non-zero: skips recalc branch
         workspace.addon_mcp_quota_bonus = 0
         workspace.addon_rest_quota_bonus = 0
@@ -53,6 +54,20 @@ class TestQuotaServiceMemberQuota:
         workspace.addon_context_bonus = 0
         for k, v in kwargs.items():
             setattr(workspace, k, v)
+        # Simulate @property effective quotas (plan tier lookup not available in mock)
+        from config.plan_tiers import get_plan_tier
+
+        tier = get_plan_tier(plan_name)
+        workspace.effective_memory_limit = workspace.memory_limit + workspace.addon_memory_bonus
+        workspace.effective_mcp_calls_per_day = (
+            tier.mcp_calls_per_day + workspace.addon_mcp_quota_bonus
+        )
+        workspace.effective_max_members = (
+            tier.max_members_per_workspace + workspace.addon_member_bonus
+        )
+        workspace.effective_max_contexts = (
+            tier.max_contexts_per_workspace + workspace.addon_context_bonus
+        )
         return workspace
 
     def _make_side_effects(self, workspace, member_count, pending_count):
