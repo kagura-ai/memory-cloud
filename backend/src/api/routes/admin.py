@@ -799,17 +799,18 @@ async def recover_context(
     from db.qdrant import get_qdrant_client
     from models.config import ContextSearchConfig
 
-    settings = get_settings()
-    client = get_qdrant_client()
-    collection_name = settings.qdrant_collection_name
     context_id = request_body.context_id
-    errors: list[str] = []
 
-    # Validate context_id is a valid UUID
+    # Validate context_id is a valid UUID (before any external calls)
     try:
         PyUUID(context_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail="Invalid context_id format") from e
+
+    settings = get_settings()
+    client = get_qdrant_client()
+    collection_name = settings.qdrant_collection_name
+    errors: list[str] = []
 
     # Scroll Qdrant for all points with this context_id (capped at 10k)
     max_points = 10_000
