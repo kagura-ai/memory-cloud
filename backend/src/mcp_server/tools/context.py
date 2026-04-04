@@ -135,6 +135,16 @@ async def handle_get_context_info(
                     "embedding_dimensions": search_config.embedding_dimensions
                     if search_config
                     else _settings.embedding_dimensions,
+                    "search_config": {
+                        "semantic_weight": float(search_config.semantic_weight),
+                        "bm25_weight": float(search_config.bm25_weight),
+                        "fetch_factor": search_config.fetch_factor,
+                        "use_rerank": search_config.use_rerank,
+                        "reranker_provider": search_config.reranker_provider,
+                        "reranker_model": search_config.reranker_model,
+                    }
+                    if search_config
+                    else None,
                 }
 
             workspace_data = None
