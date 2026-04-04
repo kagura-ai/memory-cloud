@@ -113,6 +113,16 @@ DEFAULT_VALUES: dict[str, str] = {
     "async_update_delay_ms": "2000",
     # Security
     "gradient_clipping": "0.5",
+    # Sleep Maintenance (DB-configurable params only)
+    "sleep_llm_provider": "openai",
+    "sleep_llm_model": "gpt-5-nano",
+    "sleep_max_memories_per_run": "200",
+    "sleep_max_llm_calls_per_run": "50",
+    "sleep_dedup_enabled": "true",
+    "sleep_dedup_similarity_threshold": "0.92",
+    "sleep_edge_discovery_enabled": "true",
+    "sleep_edge_discovery_sample_size": "30",
+    "sleep_importance_reeval_enabled": "true",
 }
 
 

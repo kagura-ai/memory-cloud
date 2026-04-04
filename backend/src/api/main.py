@@ -65,6 +65,7 @@ async def lifespan(app: FastAPI):
         schedule_mcp_tasks,
         schedule_neural_tasks,
         schedule_resource_indexer_jobs,
+        schedule_sleep_tasks,
         start_scheduler,
     )
 
@@ -74,6 +75,7 @@ async def lifespan(app: FastAPI):
     schedule_credentials_tasks(scheduler)
     schedule_embedding_tasks(scheduler)
     schedule_resource_indexer_jobs(scheduler)
+    schedule_sleep_tasks(scheduler)
     start_scheduler()
     logger.info("background_tasks_scheduled")
 

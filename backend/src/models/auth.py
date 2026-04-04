@@ -1012,6 +1012,12 @@ class Context(Base):
     # Issue #85: Context lock to prevent accidental deletion
     is_locked = Column(Boolean, nullable=False, server_default="false")
 
+    # Issue #101: Sleep Maintenance mode
+    # 'full' = all phases (personal AI memory)
+    # 'edges_only' = Edge Discovery + Reindex only (resource ingest contexts)
+    # 'skip' = no sleep maintenance (large-scale / externally managed)
+    sleep_mode = Column(String(20), nullable=False, server_default="full")
+
     # Constraints
     __table_args__ = (
         # Note: Index idx_contexts_workspace_name is created in migration with WHERE deleted_at IS NULL

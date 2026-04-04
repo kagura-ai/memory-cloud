@@ -292,14 +292,18 @@ def schedule_neural_tasks(scheduler: AsyncIOScheduler) -> None:
     logger.info("scheduled_weight_decay_task")
 
     # Consolidation: Daily at 3 AM UTC
-    scheduler.add_job(
-        consolidation_task,
-        trigger=CronTrigger(hour=3, minute=0),
-        id="consolidation",
-        name="Memory Consolidation",
-        replace_existing=True,
-    )
-    logger.info("scheduled_consolidation_task")
+    # When Sleep Maintenance is enabled, Phase 4 handles consolidation instead
+    if os.getenv("SLEEP_ENABLED", "false").lower() != "true":
+        scheduler.add_job(
+            consolidation_task,
+            trigger=CronTrigger(hour=3, minute=0),
+            id="consolidation",
+            name="Memory Consolidation",
+            replace_existing=True,
+        )
+        logger.info("scheduled_consolidation_task (legacy)")
+    else:
+        logger.info("consolidation_task_skipped (sleep_maintenance_handles_this)")
 
     # Cleanup Deleted Memories: Daily at 4 AM UTC
     scheduler.add_job(
