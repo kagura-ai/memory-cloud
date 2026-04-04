@@ -40,8 +40,8 @@ import {
   Settings,
   Search,
   ExternalLink,
-  Lock,
-  Unlock,
+  ShieldCheck,
+  ShieldOff,
   Copy,
 } from "lucide-react";
 import { cn, typography, colors } from "@/styles/design-tokens";
@@ -687,9 +687,9 @@ export default function ContextSettingsPage() {
               <div className="flex-1">
                 <h4 className="font-medium text-sm mb-1 flex items-center gap-2">
                   {isLocked ? (
-                    <Lock className="h-4 w-4 text-amber-600" />
+                    <ShieldCheck className="h-4 w-4 text-amber-600" />
                   ) : (
-                    <Unlock className="h-4 w-4 text-gray-400" />
+                    <ShieldOff className="h-4 w-4 text-gray-400" />
                   )}
                   {isLocked ? "Context Locked" : "Context Unlocked"}
                 </h4>
