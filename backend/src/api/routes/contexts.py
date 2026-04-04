@@ -1277,7 +1277,8 @@ async def get_memory_usage_stats(
 
     if sort_by not in VALID_SORT_FIELDS:
         raise HTTPException(
-            status_code=400, detail=f"Invalid sort_by. Must be one of: {VALID_SORT_FIELDS}"
+            status_code=400,
+            detail=f"Invalid sort_by. Must be one of: {', '.join(sorted(VALID_SORT_FIELDS))}",
         )
     if sort_order not in VALID_SORT_ORDERS:
         raise HTTPException(status_code=400, detail="Invalid sort_order. Must be 'asc' or 'desc'")
@@ -1307,7 +1308,7 @@ async def get_memory_usage_stats(
             id=str(m.id),
             summary=m.summary[:200] if m.summary else "",
             type=m.type or "note",
-            importance=float(m.importance) if m.importance else 0.5,
+            importance=float(m.importance) if m.importance is not None else 0.5,
             scope=m.scope or "persistent",
             use_count=m.use_count or 0,
             access_count=m.access_count or 0,
@@ -1367,8 +1368,7 @@ async def find_duplicates(
     """
     from sqlalchemy import select
 
-    from config.settings import get_settings
-    from db.qdrant import get_qdrant_client, search_memories_qdrant
+    from db.qdrant import KAGURA_MEMORIES_COLLECTION, get_qdrant_client, search_memories_qdrant
     from models.memory import Memory
     from services.permission_service import PermissionService
 
@@ -1376,8 +1376,7 @@ async def find_duplicates(
     perm_service = PermissionService(db)
     await perm_service.check_context_access(user["user_id"], context_id)
 
-    settings = get_settings()
-    collection_name = settings.qdrant_collection_name
+    collection_name = KAGURA_MEMORIES_COLLECTION
 
     # Fetch recent memories (cap at 200 for performance)
     mem_stmt = (
@@ -1423,7 +1422,7 @@ async def find_duplicates(
     # Find similar pairs using retrieved vectors
     pairs: list[DuplicatePair] = []
     seen: set[tuple[UUID, UUID]] = set()
-    workspace_id = user.get("workspace_id", "")
+    workspace_id = user.get("current_workspace_id", "")
 
     for memory in memories:
         if len(pairs) >= limit:
@@ -1438,10 +1437,11 @@ async def find_duplicates(
                 workspace_id=str(workspace_id),
                 context_id=str(context_id),
                 limit=5,
-                filters={"score_threshold": threshold},
                 collection_name=collection_name,
             )
             for hit in results:
+                if hit["score"] < threshold:
+                    continue
                 hit_id = UUID(str(hit["id"]))
                 if hit_id == memory.id or hit_id not in memory_ids:
                     continue
@@ -1473,9 +1473,10 @@ async def find_duplicates(
         except Exception as e:
             logger.warning("duplicate_scan_error", memory_id=str(memory.id), error=str(e))
 
+    returned_pairs = pairs[:limit]
     return DuplicatesResponse(
-        pairs=pairs[:limit],
-        total_pairs=len(pairs),
+        pairs=returned_pairs,
+        total_pairs=len(returned_pairs),
         threshold=threshold,
         memories_scanned=len(memories),
     )
