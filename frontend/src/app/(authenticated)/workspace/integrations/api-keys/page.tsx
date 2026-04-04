@@ -9,21 +9,21 @@
  * - Create/Regenerate/Delete API keys
  */
 
-'use client';
+"use client";
 
-import { useEffect, useState, useCallback, useRef } from 'react';
-import { useRouter } from 'next/navigation';
-import Link from 'next/link';
-import { useTranslations, useLocale } from 'next-intl';
-import { PageHeader } from '@/components/common/PageHeader';
-import { PageContainer } from '@/components/common/PageContainer';
-import { Section } from '@/components/common/Section';
-import { FeatureGuide } from '@/components/common/FeatureGuide';
-import { ActionButton } from '@/components/common/ActionButton';
-import { LoadingState } from '@/components/common/LoadingState';
-import { ErrorBanner } from '@/components/common/ErrorBanner';
-import { useWorkspace } from '@/contexts/WorkspaceContext';
-import { useAuth } from '@/contexts/AuthContext';
+import { useEffect, useState, useCallback, useRef } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { useTranslations, useLocale } from "next-intl";
+import { PageHeader } from "@/components/common/PageHeader";
+import { PageContainer } from "@/components/common/PageContainer";
+import { Section } from "@/components/common/Section";
+import { FeatureGuide } from "@/components/common/FeatureGuide";
+import { ActionButton } from "@/components/common/ActionButton";
+import { LoadingState } from "@/components/common/LoadingState";
+import { ErrorBanner } from "@/components/common/ErrorBanner";
+import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useAuth } from "@/contexts/AuthContext";
 import {
   getMemberCredentials,
   hideAPIKey,
@@ -31,10 +31,18 @@ import {
   deleteWorkspaceMemberAPIKey,
   createAPIKey,
   MemberCredentials,
-} from '@/lib/api/member-credentials';
-import { Copy, Check, EyeOff, RefreshCw, Trash2, AlertTriangle, Plus } from 'lucide-react';
-import { formatDateTime, formatRelativeTime } from '@/lib/utils/datetime';
-import { useToast } from '@/hooks/use-toast';
+} from "@/lib/api/member-credentials";
+import {
+  Copy,
+  Check,
+  EyeOff,
+  RefreshCw,
+  Trash2,
+  AlertTriangle,
+  Plus,
+} from "lucide-react";
+import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
+import { useToast } from "@/hooks/use-toast";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -44,14 +52,14 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
+} from "@/components/ui/alert-dialog";
 
 // Auto-refresh interval: 5 minutes (refresh before 10-minute visibility expiry)
 const CREDENTIALS_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
 export default function APIKeysPage() {
-  const t = useTranslations('apiKeys');
-  const tCommon = useTranslations('common');
+  const t = useTranslations("apiKeys");
+  const tCommon = useTranslations("common");
   const locale = useLocale();
   const router = useRouter();
 
@@ -62,24 +70,27 @@ export default function APIKeysPage() {
   const userId = user?.id;
 
   // URLs
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
-  const baseUrl = apiUrl.replace(/\/api\/v1$/, '');
-  const mcpBaseUrl = baseUrl + '/mcp';
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+  const baseUrl = apiUrl.replace(/\/api\/v1$/, "");
+  const mcpBaseUrl = baseUrl + "/mcp";
   const workspaceScopedMcpUrl = currentWorkspaceId
     ? `${baseUrl}/mcp/w/${currentWorkspaceId}`
     : null;
 
-  const [credentials, setCredentials] = useState<MemberCredentials | null>(null);
+  const [credentials, setCredentials] = useState<MemberCredentials | null>(
+    null,
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copiedItems, setCopiedItems] = useState<Record<string, boolean>>({});
 
   // Dialog states
   const [showCreateKeyDialog, setShowCreateKeyDialog] = useState(false);
-  const [newKeyName, setNewKeyName] = useState('');
+  const [newKeyName, setNewKeyName] = useState("");
   const [createKeyError, setCreateKeyError] = useState<string | null>(null);
   const [showHideApiKeyDialog, setShowHideApiKeyDialog] = useState(false);
-  const [showRegenerateApiKeyDialog, setShowRegenerateApiKeyDialog] = useState(false);
+  const [showRegenerateApiKeyDialog, setShowRegenerateApiKeyDialog] =
+    useState(false);
   const [showDeleteApiKeyDialog, setShowDeleteApiKeyDialog] = useState(false);
   const [selectedKeyId, setSelectedKeyId] = useState<number | null>(null);
   const [regenerating, setRegenerating] = useState(false);
@@ -110,7 +121,7 @@ export default function APIKeysPage() {
         setCredentials(data);
       }
     } catch (err: any) {
-      console.error('Failed to load credentials:', err);
+      console.error("Failed to load credentials:", err);
       if (isMountedRef.current) {
         setError(err.message);
       }
@@ -143,7 +154,7 @@ export default function APIKeysPage() {
   const handleCopy = async (text: string, key: string) => {
     try {
       await navigator.clipboard.writeText(text);
-      setCopiedItems(prev => ({ ...prev, [key]: true }));
+      setCopiedItems((prev) => ({ ...prev, [key]: true }));
 
       // Clear previous timeout
       if (copyTimeoutRef.current) {
@@ -152,11 +163,11 @@ export default function APIKeysPage() {
 
       copyTimeoutRef.current = setTimeout(() => {
         if (isMountedRef.current) {
-          setCopiedItems(prev => ({ ...prev, [key]: false }));
+          setCopiedItems((prev) => ({ ...prev, [key]: false }));
         }
       }, 2000);
     } catch (err) {
-      console.error('Failed to copy:', err);
+      console.error("Failed to copy:", err);
     }
   };
 
@@ -174,9 +185,9 @@ export default function APIKeysPage() {
       setShowHideApiKeyDialog(false);
     } catch (err: any) {
       toast({
-        title: tCommon('error'),
+        title: tCommon("error"),
         description: err.message,
-        variant: 'destructive',
+        variant: "destructive",
       });
     }
   };
@@ -195,8 +206,8 @@ export default function APIKeysPage() {
       await loadCredentials();
       setShowRegenerateApiKeyDialog(false);
       toast({
-        title: tCommon('success'),
-        description: t('regenerateSuccess'),
+        title: tCommon("success"),
+        description: t("regenerateSuccess"),
       });
     } catch (err: any) {
       setError(`Failed to regenerate API key: ${err.message}`);
@@ -215,12 +226,16 @@ export default function APIKeysPage() {
 
     try {
       setDeleting(true);
-      await deleteWorkspaceMemberAPIKey(currentWorkspaceId, userId, selectedKeyId);
+      await deleteWorkspaceMemberAPIKey(
+        currentWorkspaceId,
+        userId,
+        selectedKeyId,
+      );
       await loadCredentials();
       setShowDeleteApiKeyDialog(false);
       toast({
-        title: tCommon('success'),
-        description: t('deleteSuccess'),
+        title: tCommon("success"),
+        description: t("deleteSuccess"),
       });
     } catch (err: any) {
       setError(`Failed to delete API key: ${err.message}`);
@@ -236,21 +251,21 @@ export default function APIKeysPage() {
       setCreateKeyError(null);
 
       if (!newKeyName.trim()) {
-        setCreateKeyError(t('keyNameRequired'));
+        setCreateKeyError(t("keyNameRequired"));
         return;
       }
 
       await createAPIKey(currentWorkspaceId, userId, { name: newKeyName });
       await loadCredentials();
       setShowCreateKeyDialog(false);
-      setNewKeyName('');
+      setNewKeyName("");
 
       toast({
-        title: tCommon('success'),
-        description: t('createSuccess'),
+        title: tCommon("success"),
+        description: t("createSuccess"),
       });
     } catch (err: any) {
-      setCreateKeyError(err.message || 'Failed to create API key');
+      setCreateKeyError(err.message || "Failed to create API key");
     }
   };
 
@@ -262,15 +277,12 @@ export default function APIKeysPage() {
 
   return (
     <PageContainer>
-      <PageHeader
-        title={t('title')}
-        description={t('description')}
-      />
+      <PageHeader title={t("title")} description={t("description")} />
 
-      <FeatureGuide storageKey="api-keys" title={t('featureGuide.title')}>
-        <p>{t('featureGuide.overview')}</p>
-        <p>{t('featureGuide.useCases')}</p>
-        <p className="font-medium">{t('featureGuide.howItWorks')}</p>
+      <FeatureGuide storageKey="api-keys" title={t("featureGuide.title")}>
+        <p>{t("featureGuide.overview")}</p>
+        <p>{t("featureGuide.useCases")}</p>
+        <p className="font-medium">{t("featureGuide.howItWorks")}</p>
       </FeatureGuide>
 
       <ErrorBanner error={error} />
@@ -278,42 +290,43 @@ export default function APIKeysPage() {
       {/* MCP OAuth Setup Link */}
       <div className="mb-6 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
         <p className="text-sm font-medium text-blue-900 dark:text-blue-100 mb-2">
-          🔗 {t('mcpOAuthSetup')}
+          🔗 {t("mcpOAuthSetup")}
         </p>
         <p className="text-xs text-blue-700 dark:text-blue-300 mb-3">
-          {t('mcpOAuthSetupDesc')}
+          {t("mcpOAuthSetupDesc")}
         </p>
         <Link href="/workspace/integrations/oauth-apps">
           <button className="text-sm text-blue-600 dark:text-blue-400 hover:underline font-medium">
-            {t('goToOAuthApps')}
+            {t("goToOAuthApps")}
           </button>
         </Link>
       </div>
 
       {/* API Keys Section */}
-      <Section
-        title={t('apiKeysTitle')}
-        description={t('apiKeysDesc')}
-      >
+      <Section title={t("apiKeysTitle")} description={t("apiKeysDesc")}>
         <div className="space-y-4">
           {/* MCP Setup Guide (Collapsible) */}
           <details className="border border-blue-200 dark:border-blue-800 rounded-lg">
             <summary className="cursor-pointer px-4 py-3 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded-lg font-medium text-blue-900 dark:text-blue-100 text-sm">
-              📖 {t('mcpSetupGuide')}
+              📖 {t("mcpSetupGuide")}
             </summary>
             <div className="p-4 bg-blue-50 dark:bg-blue-900/20 space-y-4">
               {/* MCP URL */}
               <div className="flex items-center gap-2">
-                <span className="text-sm font-medium text-gray-700 dark:text-gray-300">MCP URL:</span>
+                <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  MCP URL:
+                </span>
                 <code className="flex-1 bg-blue-100 dark:bg-blue-900/40 px-2 py-1 rounded border border-blue-200 dark:border-blue-800 text-xs font-mono text-blue-800 dark:text-blue-200">
                   {workspaceScopedMcpUrl || mcpBaseUrl}
                 </code>
                 <button
-                  onClick={() => handleCopy(workspaceScopedMcpUrl || mcpBaseUrl, 'mcp-url')}
+                  onClick={() =>
+                    handleCopy(workspaceScopedMcpUrl || mcpBaseUrl, "mcp-url")
+                  }
                   className="p-1.5 text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-800 rounded transition-colors"
-                  title={t('copyMcpUrl')}
+                  title={t("copyMcpUrl")}
                 >
-                  {copiedItems['mcp-url'] ? (
+                  {copiedItems["mcp-url"] ? (
                     <Check className="w-3.5 h-3.5 text-green-600" />
                   ) : (
                     <Copy className="w-3.5 h-3.5" />
@@ -323,9 +336,11 @@ export default function APIKeysPage() {
 
               {/* Config Example */}
               <div>
-                <p className="font-semibold text-gray-900 dark:text-gray-100 mb-2 text-sm">{t('mcpConfigTitle')}</p>
+                <p className="font-semibold text-gray-900 dark:text-gray-100 mb-2 text-sm">
+                  {t("mcpConfigTitle")}
+                </p>
                 <pre className="bg-gray-900 text-gray-100 p-3 rounded overflow-x-auto text-xs">
-{`{
+                  {`{
   "mcpServers": {
     "kagura-memory": {
       "type": "http",
@@ -338,7 +353,7 @@ export default function APIKeysPage() {
 }`}
                 </pre>
                 <p className="text-xs text-blue-700 dark:text-blue-300 mt-2">
-                  💡 {t('mcpConfigHint')}
+                  💡 {t("mcpConfigHint")}
                 </p>
               </div>
             </div>
@@ -354,20 +369,28 @@ export default function APIKeysPage() {
             >
               <span className="text-lg">🐍</span>
               <div>
-                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{t('sdkLinks.pythonSdk')}</p>
-                <p className="text-xs text-gray-500 dark:text-gray-400">pip install kagura-memory</p>
+                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                  {t("sdkLinks.pythonSdk")}
+                </p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  pip install kagura-memory
+                </p>
               </div>
             </a>
             <a
-              href={`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/redoc`}
+              href={`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"}/redoc`}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-3 p-3 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
             >
               <span className="text-lg">📘</span>
               <div>
-                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{t('sdkLinks.restApi')}</p>
-                <p className="text-xs text-gray-500 dark:text-gray-400">ReDoc / OpenAPI</p>
+                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                  {t("sdkLinks.restApi")}
+                </p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  ReDoc / OpenAPI
+                </p>
               </div>
             </a>
             <a
@@ -378,8 +401,12 @@ export default function APIKeysPage() {
             >
               <span className="text-lg">🤖</span>
               <div>
-                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{t('sdkLinks.claudeCode')}</p>
-                <p className="text-xs text-gray-500 dark:text-gray-400">.mcp.json</p>
+                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                  {t("sdkLinks.claudeCode")}
+                </p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  .mcp.json
+                </p>
               </div>
             </a>
           </div>
@@ -391,7 +418,7 @@ export default function APIKeysPage() {
               icon={<Plus className="w-4 h-4" />}
               variant="primary"
             >
-              {t('createApiKey')}
+              {t("createApiKey")}
             </ActionButton>
           </div>
 
@@ -399,18 +426,23 @@ export default function APIKeysPage() {
           {apiKeys.length === 0 ? (
             <div className="bg-gray-50 dark:bg-gray-800 p-6 rounded border border-gray-200 dark:border-gray-700 text-center">
               <p className="text-gray-500 dark:text-gray-400">
-                {t('noApiKeys')}
+                {t("noApiKeys")}
               </p>
             </div>
           ) : (
             apiKeys.map((apiKey) => (
-              <div key={apiKey.id} className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-3">
+              <div
+                key={apiKey.id}
+                className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-3"
+              >
                 {/* Key Name */}
                 <div className="flex items-center justify-between">
-                  <h4 className="font-semibold text-gray-900 dark:text-gray-100">{apiKey.name}</h4>
+                  <h4 className="font-semibold text-gray-900 dark:text-gray-100">
+                    {apiKey.name}
+                  </h4>
                   {apiKey.revoked_at && (
                     <span className="text-xs text-red-600 dark:text-red-400 bg-red-100 dark:bg-red-900/20 px-2 py-1 rounded">
-                      {t('revoked')}
+                      {t("revoked")}
                     </span>
                   )}
                 </div>
@@ -423,9 +455,14 @@ export default function APIKeysPage() {
                         {apiKey.plaintext_key}
                       </code>
                       <button
-                        onClick={() => handleCopy(apiKey.plaintext_key!, `api-key-${apiKey.id}`)}
+                        onClick={() =>
+                          handleCopy(
+                            apiKey.plaintext_key!,
+                            `api-key-${apiKey.id}`,
+                          )
+                        }
                         className="p-2 text-gray-600 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-colors"
-                        title={t('copyToClipboard')}
+                        title={t("copyToClipboard")}
                       >
                         {copiedItems[`api-key-${apiKey.id}`] ? (
                           <Check className="w-4 h-4 text-green-600" />
@@ -436,27 +473,47 @@ export default function APIKeysPage() {
                       <button
                         onClick={() => handleHideAPIKeyClick(apiKey.id)}
                         className="p-2 text-gray-600 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-colors"
-                        title={t('hideSecretNow')}
+                        title={t("hideSecretNow")}
                       >
                         <EyeOff className="w-4 h-4" />
                       </button>
-                      {apiKey.visibility_expires_at && new Date(apiKey.visibility_expires_at) > new Date() && (
-                        <span className="text-xs text-yellow-600 dark:text-yellow-400 flex items-center gap-1 whitespace-nowrap">
-                          <AlertTriangle className="w-3 h-3" />
-                          {t('hideInTime', { time: formatRelativeTime(apiKey.visibility_expires_at, user?.timezone, locale) })}
-                        </span>
-                      )}
+                      {apiKey.visibility_expires_at &&
+                        (() => {
+                          const expiresAt = new Date(
+                            apiKey.visibility_expires_at,
+                          );
+                          const now = new Date();
+                          const daysUntil =
+                            (expiresAt.getTime() - now.getTime()) /
+                            (1000 * 60 * 60 * 24);
+                          if (daysUntil <= 0 || daysUntil > 30) return null;
+                          return (
+                            <span className="text-xs text-yellow-600 dark:text-yellow-400 flex items-center gap-1 whitespace-nowrap">
+                              <AlertTriangle className="w-3 h-3" />
+                              {t("hideInTime", {
+                                time: formatRelativeTime(
+                                  apiKey.visibility_expires_at,
+                                  user?.timezone,
+                                  locale,
+                                ),
+                              })}
+                            </span>
+                          );
+                        })()}
                     </div>
                   </div>
                 ) : (
                   <div className="bg-gray-50 dark:bg-gray-800 p-3 rounded border border-gray-200 dark:border-gray-700">
                     <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400">
                       <EyeOff className="w-4 h-4" />
-                      <span className="text-sm">{t('apiKeyHidden')}</span>
+                      <span className="text-sm">{t("apiKeyHidden")}</span>
                     </div>
                     {apiKey.key_prefix && (
                       <div className="mt-2 text-xs text-gray-400">
-                        {t('prefix')}: <code className="bg-gray-100 dark:bg-gray-900 px-1 py-0.5 rounded">{apiKey.key_prefix}</code>
+                        {t("prefix")}:{" "}
+                        <code className="bg-gray-100 dark:bg-gray-900 px-1 py-0.5 rounded">
+                          {apiKey.key_prefix}
+                        </code>
                       </div>
                     )}
                   </div>
@@ -468,7 +525,7 @@ export default function APIKeysPage() {
                     onClick={() => handleRegenerateAPIKeyClick(apiKey.id)}
                     icon={<RefreshCw className="w-4 h-4" />}
                   >
-                    {t('regenerate')}
+                    {t("regenerate")}
                   </ActionButton>
 
                   {!apiKey.revoked_at && (
@@ -477,17 +534,21 @@ export default function APIKeysPage() {
                       variant="danger"
                       icon={<Trash2 className="w-4 h-4" />}
                     >
-                      {tCommon('delete')}
+                      {tCommon("delete")}
                     </ActionButton>
                   )}
                 </div>
 
                 {/* Metadata */}
                 <div className="text-xs text-gray-500 dark:text-gray-400 space-y-1">
-                  <p>{t('created')}: {formatDateTime(apiKey.created_at, user?.timezone)}</p>
+                  <p>
+                    {t("created")}:{" "}
+                    {formatDateTime(apiKey.created_at, user?.timezone)}
+                  </p>
                   {apiKey.revoked_at && (
                     <p className="text-red-600 dark:text-red-400">
-                      {t('revoked')}: {formatDateTime(apiKey.revoked_at, user?.timezone)}
+                      {t("revoked")}:{" "}
+                      {formatDateTime(apiKey.revoked_at, user?.timezone)}
                     </p>
                   )}
                 </div>
@@ -498,90 +559,127 @@ export default function APIKeysPage() {
       </Section>
 
       {/* Create API Key Dialog */}
-      <AlertDialog open={showCreateKeyDialog} onOpenChange={setShowCreateKeyDialog}>
+      <AlertDialog
+        open={showCreateKeyDialog}
+        onOpenChange={setShowCreateKeyDialog}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t('createApiKeyTitle')}</AlertDialogTitle>
+            <AlertDialogTitle>{t("createApiKeyTitle")}</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium mb-1">{t('keyName')}</label>
+                  <label className="block text-sm font-medium mb-1">
+                    {t("keyName")}
+                  </label>
                   <input
                     type="text"
                     value={newKeyName}
                     onChange={(e) => setNewKeyName(e.target.value)}
-                    placeholder={t('keyNamePlaceholder')}
+                    placeholder={t("keyNamePlaceholder")}
                     className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
                   />
                 </div>
                 {createKeyError && (
-                  <p className="text-sm text-red-600 dark:text-red-400">{createKeyError}</p>
+                  <p className="text-sm text-red-600 dark:text-red-400">
+                    {createKeyError}
+                  </p>
                 )}
                 <p className="text-xs text-yellow-700 dark:text-yellow-300">
-                  💡 {t('securityNote')}
+                  💡 {t("securityNote")}
                 </p>
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel onClick={() => { setShowCreateKeyDialog(false); setNewKeyName(''); setCreateKeyError(null); }}>
-              {tCommon('cancel')}
+            <AlertDialogCancel
+              onClick={() => {
+                setShowCreateKeyDialog(false);
+                setNewKeyName("");
+                setCreateKeyError(null);
+              }}
+            >
+              {tCommon("cancel")}
             </AlertDialogCancel>
             <AlertDialogAction onClick={handleCreateAPIKey}>
-              {t('createKey')}
+              {t("createKey")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
       {/* Hide API Key Dialog */}
-      <AlertDialog open={showHideApiKeyDialog} onOpenChange={setShowHideApiKeyDialog}>
+      <AlertDialog
+        open={showHideApiKeyDialog}
+        onOpenChange={setShowHideApiKeyDialog}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t('hideApiKeyTitle')}</AlertDialogTitle>
+            <AlertDialogTitle>{t("hideApiKeyTitle")}</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-2">
-                <p>{t('hideApiKeyWarning')}</p>
-                <p>{t('hideApiKeyNote')}</p>
+                <p>{t("hideApiKeyWarning")}</p>
+                <p>{t("hideApiKeyNote")}</p>
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>{tCommon('cancel')}</AlertDialogCancel>
+            <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
             <AlertDialogAction onClick={handleConfirmHideAPIKey}>
-              {t('hideApiKey')}
+              {t("hideApiKey")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
       {/* Regenerate API Key Dialog */}
-      <AlertDialog open={showRegenerateApiKeyDialog} onOpenChange={setShowRegenerateApiKeyDialog}>
+      <AlertDialog
+        open={showRegenerateApiKeyDialog}
+        onOpenChange={setShowRegenerateApiKeyDialog}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t('regenerateApiKeyTitle')}</AlertDialogTitle>
-            <AlertDialogDescription>{t('regenerateApiKeyDesc')}</AlertDialogDescription>
+            <AlertDialogTitle>{t("regenerateApiKeyTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("regenerateApiKeyDesc")}
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={regenerating}>{tCommon('cancel')}</AlertDialogCancel>
-            <AlertDialogAction onClick={handleConfirmRegenerateAPIKey} disabled={regenerating}>
-              {regenerating ? tCommon('saving') : t('regenerate')}
+            <AlertDialogCancel disabled={regenerating}>
+              {tCommon("cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleConfirmRegenerateAPIKey}
+              disabled={regenerating}
+            >
+              {regenerating ? tCommon("saving") : t("regenerate")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
       {/* Delete API Key Dialog */}
-      <AlertDialog open={showDeleteApiKeyDialog} onOpenChange={setShowDeleteApiKeyDialog}>
+      <AlertDialog
+        open={showDeleteApiKeyDialog}
+        onOpenChange={setShowDeleteApiKeyDialog}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t('deleteApiKeyTitle')}</AlertDialogTitle>
-            <AlertDialogDescription>{t('deleteApiKeyDesc')}</AlertDialogDescription>
+            <AlertDialogTitle>{t("deleteApiKeyTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("deleteApiKeyDesc")}
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleting}>{tCommon('cancel')}</AlertDialogCancel>
-            <AlertDialogAction onClick={handleConfirmDeleteAPIKey} disabled={deleting} className="bg-red-600 hover:bg-red-700">
-              {deleting ? tCommon('saving') : tCommon('delete')}
+            <AlertDialogCancel disabled={deleting}>
+              {tCommon("cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleConfirmDeleteAPIKey}
+              disabled={deleting}
+              className="bg-red-600 hover:bg-red-700"
+            >
+              {deleting ? tCommon("saving") : tCommon("delete")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
