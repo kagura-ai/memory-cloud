@@ -859,12 +859,10 @@ async def recover_context(
         existing_context = await db.execute(select(Context).where(Context.id == PyUUID(context_id)))
         context_exists = existing_context.scalar_one_or_none() is not None
 
-        # Check how many memory records already exist
-        existing_mem_ids = set()
-        for point in all_points:
-            existing = await db.execute(select(Memory.id).where(Memory.id == PyUUID(str(point.id))))
-            if existing.scalar_one_or_none() is not None:
-                existing_mem_ids.add(str(point.id))
+        # Batch-check existing memory records (avoid N+1)
+        point_ids = [PyUUID(str(p.id)) for p in all_points]
+        existing_result = await db.execute(select(Memory.id).where(Memory.id.in_(point_ids)))
+        existing_mem_ids = {row[0] for row in existing_result.all()}
 
         return ContextRecoveryResponse(
             context_id=context_id,
@@ -911,13 +909,17 @@ async def recover_context(
         search_config_restored = True
 
     # Step 5: Reconstruct Memory records from Qdrant payloads
+    # Batch-check existing memory IDs (avoid N+1)
+    point_ids = [PyUUID(str(p.id)) for p in all_points]
+    existing_ids_result = await db.execute(select(Memory.id).where(Memory.id.in_(point_ids)))
+    existing_ids = {row[0] for row in existing_ids_result.all()}
+
     memories_recovered = 0
     memories_already_existed = 0
 
     for point in all_points:
         mem_id = PyUUID(str(point.id))
-        existing_mem = await db.execute(select(Memory.id).where(Memory.id == mem_id))
-        if existing_mem.scalar_one_or_none() is not None:
+        if mem_id in existing_ids:
             memories_already_existed += 1
             continue
 
