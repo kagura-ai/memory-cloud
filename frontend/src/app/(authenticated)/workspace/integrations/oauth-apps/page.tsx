@@ -10,31 +10,40 @@
  * - Claude, ChatGPT, and Custom app support
  */
 
-'use client';
+"use client";
 
-import { useEffect, useState, useCallback, useRef } from 'react';
-import { useRouter } from 'next/navigation';
-import { useTranslations, useLocale } from 'next-intl';
-import { PageHeader } from '@/components/common/PageHeader';
-import { PageContainer } from '@/components/common/PageContainer';
-import { Section } from '@/components/common/Section';
-import { FeatureGuide } from '@/components/common/FeatureGuide';
-import { ActionButton } from '@/components/common/ActionButton';
-import { LoadingState } from '@/components/common/LoadingState';
-import { ErrorBanner } from '@/components/common/ErrorBanner';
-import { useWorkspace } from '@/contexts/WorkspaceContext';
-import { useAuth } from '@/contexts/AuthContext';
+import { useEffect, useState, useCallback, useRef } from "react";
+import { useRouter } from "next/navigation";
+import { useTranslations, useLocale } from "next-intl";
+import { PageHeader } from "@/components/common/PageHeader";
+import { PageContainer } from "@/components/common/PageContainer";
+import { Section } from "@/components/common/Section";
+import { FeatureGuide } from "@/components/common/FeatureGuide";
+import { ActionButton } from "@/components/common/ActionButton";
+import { LoadingState } from "@/components/common/LoadingState";
+import { ErrorBanner } from "@/components/common/ErrorBanner";
+import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useAuth } from "@/contexts/AuthContext";
 import {
   getOAuth2Clients,
   createOAuth2Client,
   deleteOAuth2Client,
   regenerateOAuth2ClientSecret,
   OAuth2Client,
-} from '@/lib/api/oauth';
-import { hideOAuthClientSecret } from '@/lib/api/member-credentials';
-import { Copy, Check, EyeOff, RefreshCw, Trash2, AlertTriangle, Plus, X } from 'lucide-react';
-import { formatDateTime, formatRelativeTime } from '@/lib/utils/datetime';
-import { useToast } from '@/hooks/use-toast';
+} from "@/lib/api/oauth";
+import { hideOAuthClientSecret } from "@/lib/api/member-credentials";
+import {
+  Copy,
+  Check,
+  EyeOff,
+  RefreshCw,
+  Trash2,
+  AlertTriangle,
+  Plus,
+  X,
+} from "lucide-react";
+import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
+import { useToast } from "@/hooks/use-toast";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -44,14 +53,14 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
+} from "@/components/ui/alert-dialog";
 
 // Auto-refresh interval: 5 minutes (refresh before 10-minute visibility expiry)
 const OAUTH_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
 export default function CustomAppsPage() {
-  const t = useTranslations('customApps');
-  const tCommon = useTranslations('common');
+  const t = useTranslations("customApps");
+  const tCommon = useTranslations("common");
   const locale = useLocale();
   const router = useRouter();
 
@@ -60,14 +69,14 @@ export default function CustomAppsPage() {
   const { toast } = useToast();
 
   // URLs
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
-  const baseUrl = apiUrl.replace(/\/api\/v1$/, '');
-  const mcpBaseUrl = baseUrl + '/mcp';
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+  const baseUrl = apiUrl.replace(/\/api\/v1$/, "");
+  const mcpBaseUrl = baseUrl + "/mcp";
   const workspaceScopedMcpUrl = currentWorkspaceId
     ? `${baseUrl}/mcp/w/${currentWorkspaceId}`
     : null;
-  const oauthAuthorizeUrl = baseUrl + '/oauth/authorize';
-  const oauthTokenUrl = baseUrl + '/oauth/token';
+  const oauthAuthorizeUrl = baseUrl + "/oauth/authorize";
+  const oauthTokenUrl = baseUrl + "/oauth/token";
 
   const [oauthClients, setOauthClients] = useState<OAuth2Client[]>([]);
   const [loading, setLoading] = useState(true);
@@ -76,15 +85,21 @@ export default function CustomAppsPage() {
 
   // Custom OAuth App dialog state
   const [showCustomDialog, setShowCustomDialog] = useState(false);
-  const [customAppName, setCustomAppName] = useState('');
-  const [customRedirectUris, setCustomRedirectUris] = useState<string[]>(['']);
-  const [customDialogError, setCustomDialogError] = useState<string | null>(null);
+  const [customAppName, setCustomAppName] = useState("");
+  const [customRedirectUris, setCustomRedirectUris] = useState<string[]>([""]);
+  const [customDialogError, setCustomDialogError] = useState<string | null>(
+    null,
+  );
 
   // Confirmation dialog states
   const [showHideOAuthDialog, setShowHideOAuthDialog] = useState(false);
   const [oauthToHide, setOauthToHide] = useState<string | null>(null);
-  const [showRegenerateOAuthDialog, setShowRegenerateOAuthDialog] = useState(false);
-  const [oauthToRegenerate, setOauthToRegenerate] = useState<{ clientId: string; provider: string } | null>(null);
+  const [showRegenerateOAuthDialog, setShowRegenerateOAuthDialog] =
+    useState(false);
+  const [oauthToRegenerate, setOauthToRegenerate] = useState<{
+    clientId: string;
+    provider: string;
+  } | null>(null);
   const [showDeleteOAuthDialog, setShowDeleteOAuthDialog] = useState(false);
   const [oauthToDelete, setOauthToDelete] = useState<string | null>(null);
 
@@ -111,7 +126,7 @@ export default function CustomAppsPage() {
         setOauthClients(clients);
       }
     } catch (err: any) {
-      console.error('Failed to load OAuth clients:', err);
+      console.error("Failed to load OAuth clients:", err);
       if (isMountedRef.current) {
         setError(err.message);
       }
@@ -144,7 +159,7 @@ export default function CustomAppsPage() {
   const handleCopy = async (text: string, key: string) => {
     try {
       await navigator.clipboard.writeText(text);
-      setCopiedItems(prev => ({ ...prev, [key]: true }));
+      setCopiedItems((prev) => ({ ...prev, [key]: true }));
 
       // Clear previous timeout
       if (copyTimeoutRef.current) {
@@ -153,16 +168,18 @@ export default function CustomAppsPage() {
 
       copyTimeoutRef.current = setTimeout(() => {
         if (isMountedRef.current) {
-          setCopiedItems(prev => ({ ...prev, [key]: false }));
+          setCopiedItems((prev) => ({ ...prev, [key]: false }));
         }
       }, 2000);
     } catch (err) {
-      console.error('Failed to copy:', err);
+      console.error("Failed to copy:", err);
     }
   };
 
-  const handleCreateOAuthApp = async (provider: 'claude' | 'chatgpt' | 'custom') => {
-    if (provider === 'custom') {
+  const handleCreateOAuthApp = async (
+    provider: "claude" | "chatgpt" | "custom",
+  ) => {
+    if (provider === "custom") {
       setShowCustomDialog(true);
       return;
     }
@@ -170,21 +187,25 @@ export default function CustomAppsPage() {
     try {
       setError(null);
       const result = await createOAuth2Client({
-        provider: provider,  // バックエンドはproviderフィールドを期待
-        client_name: provider === 'claude' ? 'Claude' : 'ChatGPT',  // client_nameが正しい
-        redirect_uris: provider === 'claude'
-          ? ['https://claude.ai/api/mcp/auth_callback']
-          : ['https://chatgpt.com/connector_platform_oauth_redirect'],
+        provider: provider, // バックエンドはproviderフィールドを期待
+        client_name: provider === "claude" ? "Claude" : "ChatGPT", // client_nameが正しい
+        redirect_uris:
+          provider === "claude"
+            ? ["https://claude.ai/api/mcp/auth_callback"]
+            : ["https://chatgpt.com/connector_platform_oauth_redirect"],
       });
 
       await loadOAuthClients();
 
       toast({
-        title: tCommon('success'),
-        description: t('createSuccess', { provider: provider === 'claude' ? 'Claude' : 'ChatGPT' }),
+        title: tCommon("success"),
+        description: t("createSuccess", {
+          provider: provider === "claude" ? "Claude" : "ChatGPT",
+        }),
       });
     } catch (err: any) {
-      const errorMsg = err?.message || err?.details?.detail || JSON.stringify(err);
+      const errorMsg =
+        err?.message || err?.details?.detail || JSON.stringify(err);
       setError(`Failed to create OAuth app: ${errorMsg}`);
     }
   };
@@ -194,33 +215,33 @@ export default function CustomAppsPage() {
       setCustomDialogError(null);
 
       if (!customAppName.trim()) {
-        setCustomDialogError(t('appNameRequired'));
+        setCustomDialogError(t("appNameRequired"));
         return;
       }
 
-      const validUris = customRedirectUris.filter(uri => uri.trim());
+      const validUris = customRedirectUris.filter((uri) => uri.trim());
       if (validUris.length === 0) {
-        setCustomDialogError(t('redirectUriRequired'));
+        setCustomDialogError(t("redirectUriRequired"));
         return;
       }
 
       await createOAuth2Client({
-        provider: 'custom',  // バックエンドはproviderフィールドを期待
-        client_name: customAppName,  // client_nameが正しい
+        provider: "custom", // バックエンドはproviderフィールドを期待
+        client_name: customAppName, // client_nameが正しい
         redirect_uris: validUris,
       });
 
       await loadOAuthClients();
       setShowCustomDialog(false);
-      setCustomAppName('');
-      setCustomRedirectUris(['']);
+      setCustomAppName("");
+      setCustomRedirectUris([""]);
 
       toast({
-        title: tCommon('success'),
-        description: 'Custom OAuth app created successfully',
+        title: tCommon("success"),
+        description: "Custom OAuth app created successfully",
       });
     } catch (err: any) {
-      setCustomDialogError(err.message || 'Failed to create OAuth app');
+      setCustomDialogError(err.message || "Failed to create OAuth app");
     }
   };
 
@@ -255,7 +276,7 @@ export default function CustomAppsPage() {
       setShowRegenerateOAuthDialog(false);
 
       toast({
-        title: tCommon('success'),
+        title: tCommon("success"),
         description: `OAuth secret regenerated successfully`,
       });
     } catch (err: any) {
@@ -277,8 +298,8 @@ export default function CustomAppsPage() {
       setShowDeleteOAuthDialog(false);
 
       toast({
-        title: tCommon('success'),
-        description: 'OAuth app deleted successfully',
+        title: tCommon("success"),
+        description: "OAuth app deleted successfully",
       });
     } catch (err: any) {
       setError(`Failed to delete OAuth app: ${err.message}`);
@@ -289,29 +310,31 @@ export default function CustomAppsPage() {
     return <LoadingState lines={3} />;
   }
 
-  const claudeApp = oauthClients.find(c => c.provider === 'claude');
-  const chatgptApp = oauthClients.find(c => c.provider === 'chatgpt');
-  const customApps = oauthClients.filter(c => c.provider === 'custom');
+  const claudeApp = oauthClients.find((c) => c.provider === "claude");
+  const chatgptApp = oauthClients.find((c) => c.provider === "chatgpt");
+  const customApps = oauthClients.filter((c) => c.provider === "custom");
 
   return (
     <PageContainer>
       <PageHeader
-        title={t('title', { default: 'App Authentication' })}
-        description={t('description')}
+        title={t("title", { default: "App Authentication" })}
+        description={t("description")}
       />
 
-      <FeatureGuide storageKey="oauth-apps" title={t('featureGuide.title')}>
-        <p>{t('featureGuide.overview')}</p>
-        <p>{t('featureGuide.useCases')}</p>
-        <p className="font-medium">{t('featureGuide.howItWorks')}</p>
+      <FeatureGuide storageKey="oauth-apps" title={t("featureGuide.title")}>
+        <p>{t("featureGuide.overview")}</p>
+        <p>{t("featureGuide.useCases")}</p>
+        <p className="font-medium">{t("featureGuide.howItWorks")}</p>
       </FeatureGuide>
 
       <ErrorBanner error={error} />
 
       {/* MCP Connection URL */}
       <Section
-        title={`🔗 ${t('mcpConnection', { default: 'MCP Connection' })}`}
-        description={t('mcpConnectionDesc', { default: 'MCP endpoint URL for all clients' })}
+        title={`🔗 ${t("mcpConnection", { default: "MCP Connection" })}`}
+        description={t("mcpConnectionDesc", {
+          default: "MCP endpoint URL for all clients",
+        })}
       >
         <div className="space-y-3">
           {/* Main: Workspace-Scoped URL */}
@@ -321,11 +344,13 @@ export default function CustomAppsPage() {
                 {workspaceScopedMcpUrl}
               </code>
               <button
-                onClick={() => handleCopy(workspaceScopedMcpUrl, 'workspace-mcp-url')}
+                onClick={() =>
+                  handleCopy(workspaceScopedMcpUrl, "workspace-mcp-url")
+                }
                 className="p-3 text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-800 rounded transition-colors"
-                title={t('copyMcpUrl', { default: 'Copy MCP URL' })}
+                title={t("copyMcpUrl", { default: "Copy MCP URL" })}
               >
-                {copiedItems['workspace-mcp-url'] ? (
+                {copiedItems["workspace-mcp-url"] ? (
                   <Check className="w-4 h-4 text-green-600" />
                 ) : (
                   <Copy className="w-4 h-4" />
@@ -338,11 +363,11 @@ export default function CustomAppsPage() {
                 {mcpBaseUrl}
               </code>
               <button
-                onClick={() => handleCopy(mcpBaseUrl, 'mcp-url')}
+                onClick={() => handleCopy(mcpBaseUrl, "mcp-url")}
                 className="p-3 text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-800 rounded transition-colors"
-                title={t('copyMcpUrl', { default: 'Copy MCP URL' })}
+                title={t("copyMcpUrl", { default: "Copy MCP URL" })}
               >
-                {copiedItems['mcp-url'] ? (
+                {copiedItems["mcp-url"] ? (
                   <Check className="w-4 h-4 text-green-600" />
                 ) : (
                   <Copy className="w-4 h-4" />
@@ -358,15 +383,36 @@ export default function CustomAppsPage() {
         <div className="space-y-6">
           {/* Claude & ChatGPT Apps */}
           {[
-            { provider: 'claude', app: claudeApp, icon: '🧠', title: t('claude'), subtitle: t('claudeSubtitle'), color: 'orange' },
-            { provider: 'chatgpt', app: chatgptApp, icon: '🤖', title: t('chatgpt'), subtitle: t('chatgptSubtitle'), color: 'emerald' },
+            {
+              provider: "claude",
+              app: claudeApp,
+              icon: "🧠",
+              title: t("claude"),
+              subtitle: t("claudeSubtitle"),
+              color: "orange",
+            },
+            {
+              provider: "chatgpt",
+              app: chatgptApp,
+              icon: "🤖",
+              title: t("chatgpt"),
+              subtitle: t("chatgptSubtitle"),
+              color: "emerald",
+            },
           ].map(({ provider, app, icon, title, subtitle }) => (
-            <div key={provider} className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+            <div
+              key={provider}
+              className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4"
+            >
               <div className="flex items-center gap-2 mb-3">
                 <span className="text-2xl">{icon}</span>
                 <div>
-                  <h3 className="font-semibold text-gray-900 dark:text-gray-100">{title}</h3>
-                  <p className="text-xs text-gray-500 dark:text-gray-400">{subtitle}</p>
+                  <h3 className="font-semibold text-gray-900 dark:text-gray-100">
+                    {title}
+                  </h3>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    {subtitle}
+                  </p>
                 </div>
               </div>
 
@@ -375,16 +421,20 @@ export default function CustomAppsPage() {
                   {/* Client ID */}
                   <div className="bg-gray-50 dark:bg-gray-800 p-3 rounded border border-gray-200 dark:border-gray-700">
                     <div className="flex items-center justify-between mb-1">
-                      <span className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('clientId')}</span>
+                      <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                        {t("clientId")}
+                      </span>
                     </div>
                     <div className="flex items-center gap-2">
                       <code className="flex-1 bg-white dark:bg-gray-900 px-2 py-1 rounded text-xs font-mono break-all">
                         {app.client_id}
                       </code>
                       <button
-                        onClick={() => handleCopy(app.client_id, `${provider}-id`)}
+                        onClick={() =>
+                          handleCopy(app.client_id, `${provider}-id`)
+                        }
                         className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
-                        title={t('copyClientId')}
+                        title={t("copyClientId")}
                       >
                         {copiedItems[`${provider}-id`] ? (
                           <Check className="w-4 h-4 text-green-600" />
@@ -394,9 +444,14 @@ export default function CustomAppsPage() {
                       </button>
                     </div>
                     <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
-                      <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">{t('redirectUri')}:</p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
+                        {t("redirectUri")}:
+                      </p>
                       {app.redirect_uris.map((uri, idx) => (
-                        <p key={idx} className="text-xs text-gray-600 dark:text-gray-400 font-mono break-all">
+                        <p
+                          key={idx}
+                          className="text-xs text-gray-600 dark:text-gray-400 font-mono break-all"
+                        >
                           {uri}
                         </p>
                       ))}
@@ -407,22 +462,52 @@ export default function CustomAppsPage() {
                   {app.is_visible && app.plaintext_secret ? (
                     <div className="bg-green-50 dark:bg-green-900/20 p-3 rounded border border-green-200 dark:border-green-800">
                       <div className="flex items-center justify-between mb-1">
-                        <span className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('clientSecret')}</span>
-                        {app.visibility_expires_at && new Date(app.visibility_expires_at) > new Date() && (
-                          <span className="text-xs text-yellow-600 dark:text-yellow-400 flex items-center gap-1">
-                            <AlertTriangle className="w-3 h-3" />
-                            {t('hideInTime', { time: formatRelativeTime(app.visibility_expires_at, user?.timezone, locale) })}
-                          </span>
-                        )}
+                        <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                          {t("clientSecret")}
+                        </span>
+                        {app.visibility_expires_at &&
+                          (() => {
+                            const expiresAt = new Date(
+                              app.visibility_expires_at,
+                            );
+                            const daysUntil =
+                              (expiresAt.getTime() - Date.now()) /
+                              (1000 * 60 * 60 * 24);
+                            if (daysUntil <= 0) return null;
+                            return (
+                              <span className="text-xs text-yellow-600 dark:text-yellow-400 flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3" />
+                                {daysUntil <= 30
+                                  ? t("hideInTime", {
+                                      time: formatRelativeTime(
+                                        app.visibility_expires_at,
+                                        user?.timezone,
+                                        locale,
+                                      ),
+                                    })
+                                  : t("hideAt", {
+                                      date: formatDateTime(
+                                        app.visibility_expires_at,
+                                        user?.timezone,
+                                      ),
+                                    })}
+                              </span>
+                            );
+                          })()}
                       </div>
                       <div className="flex items-center gap-2">
                         <code className="flex-1 bg-white dark:bg-gray-900 px-2 py-1 rounded text-xs font-mono break-all">
                           {app.plaintext_secret}
                         </code>
                         <button
-                          onClick={() => handleCopy(app.plaintext_secret!, `${provider}-secret`)}
+                          onClick={() =>
+                            handleCopy(
+                              app.plaintext_secret!,
+                              `${provider}-secret`,
+                            )
+                          }
                           className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
-                          title={t('copyClientSecret')}
+                          title={t("copyClientSecret")}
                         >
                           {copiedItems[`${provider}-secret`] ? (
                             <Check className="w-4 h-4 text-green-600" />
@@ -433,7 +518,7 @@ export default function CustomAppsPage() {
                         <button
                           onClick={() => handleHideOAuthAppClick(app.client_id)}
                           className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
-                          title={t('hideSecretNow')}
+                          title={t("hideSecretNow")}
                         >
                           <EyeOff className="w-4 h-4" />
                         </button>
@@ -443,7 +528,9 @@ export default function CustomAppsPage() {
                     <div className="bg-gray-50 dark:bg-gray-800 p-3 rounded border border-gray-200 dark:border-gray-700">
                       <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400">
                         <EyeOff className="w-4 h-4" />
-                        <span className="text-sm">{t('secretHiddenOwner')}</span>
+                        <span className="text-sm">
+                          {t("secretHiddenOwner")}
+                        </span>
                       </div>
                     </div>
                   )}
@@ -451,35 +538,44 @@ export default function CustomAppsPage() {
                   {/* Actions */}
                   <div className="flex gap-2">
                     <ActionButton
-                      onClick={() => handleRegenerateOAuthClick(app.client_id, title)}
+                      onClick={() =>
+                        handleRegenerateOAuthClick(app.client_id, title)
+                      }
                       icon={<RefreshCw className="w-4 h-4" />}
                     >
-                      {t('regenerate')}
+                      {t("regenerate")}
                     </ActionButton>
                     <ActionButton
-                      onClick={() => handleDeleteOAuthClientClick(app.client_id)}
+                      onClick={() =>
+                        handleDeleteOAuthClientClick(app.client_id)
+                      }
                       variant="danger"
                       icon={<Trash2 className="w-4 h-4" />}
                     >
-                      {tCommon('delete')}
+                      {tCommon("delete")}
                     </ActionButton>
                   </div>
 
                   {/* Metadata */}
                   <div className="text-xs text-gray-500 dark:text-gray-400">
-                    <p>{t('created')}: {formatDateTime(app.created_at, user?.timezone)}</p>
+                    <p>
+                      {t("created")}:{" "}
+                      {formatDateTime(app.created_at, user?.timezone)}
+                    </p>
                   </div>
                 </div>
               ) : (
                 <div className="bg-gray-50 dark:bg-gray-800 p-3 rounded border border-gray-200 dark:border-gray-700">
                   <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">
-                    {t('noOAuthApp', { provider: title })}
+                    {t("noOAuthApp", { provider: title })}
                   </p>
                   <ActionButton
-                    onClick={() => handleCreateOAuthApp(provider as 'claude' | 'chatgpt')}
+                    onClick={() =>
+                      handleCreateOAuthApp(provider as "claude" | "chatgpt")
+                    }
                     icon={<Plus className="w-4 h-4" />}
                   >
-                    {t('createOAuthApp', { provider: title })}
+                    {t("createOAuthApp", { provider: title })}
                   </ActionButton>
                 </div>
               )}
@@ -492,44 +588,60 @@ export default function CustomAppsPage() {
               <div className="flex items-center gap-2">
                 <span className="text-2xl">🔧</span>
                 <div>
-                  <h3 className="font-semibold text-gray-900 dark:text-gray-100">{t('customOAuthApps')}</h3>
-                  <p className="text-xs text-gray-500 dark:text-gray-400">{t('customOAuthAppsDesc')}</p>
+                  <h3 className="font-semibold text-gray-900 dark:text-gray-100">
+                    {t("customOAuthApps")}
+                  </h3>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    {t("customOAuthAppsDesc")}
+                  </p>
                 </div>
               </div>
               <ActionButton
-                onClick={() => handleCreateOAuthApp('custom')}
+                onClick={() => handleCreateOAuthApp("custom")}
                 icon={<Plus className="w-4 h-4" />}
                 variant="primary"
               >
-                {t('createCustomApp')}
+                {t("createCustomApp")}
               </ActionButton>
             </div>
 
             {customApps.length === 0 ? (
               <p className="text-sm text-gray-500 dark:text-gray-400 text-center py-4">
-                {t('noCustomApps')}
+                {t("noCustomApps")}
               </p>
             ) : (
               <div className="space-y-4">
                 {customApps.map((app) => (
-                  <div key={app.client_id} className="border-t border-gray-200 dark:border-gray-700 pt-4 first:border-t-0 first:pt-0">
+                  <div
+                    key={app.client_id}
+                    className="border-t border-gray-200 dark:border-gray-700 pt-4 first:border-t-0 first:pt-0"
+                  >
                     <div className="flex items-center justify-between mb-2">
-                      <h4 className="font-semibold text-gray-900 dark:text-gray-100">{app.client_name}</h4>
+                      <h4 className="font-semibold text-gray-900 dark:text-gray-100">
+                        {app.client_name}
+                      </h4>
                     </div>
 
                     {/* Client ID */}
                     <div className="bg-gray-50 dark:bg-gray-800 p-3 rounded border border-gray-200 dark:border-gray-700 mb-2">
                       <div className="flex items-center justify-between mb-1">
-                        <span className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('clientId')}</span>
+                        <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                          {t("clientId")}
+                        </span>
                       </div>
                       <div className="flex items-center gap-2">
                         <code className="flex-1 bg-white dark:bg-gray-900 px-2 py-1 rounded text-xs font-mono break-all">
                           {app.client_id}
                         </code>
                         <button
-                          onClick={() => handleCopy(app.client_id, `custom-${app.client_id}-id`)}
+                          onClick={() =>
+                            handleCopy(
+                              app.client_id,
+                              `custom-${app.client_id}-id`,
+                            )
+                          }
                           className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
-                          title={t('copyClientId')}
+                          title={t("copyClientId")}
                         >
                           {copiedItems[`custom-${app.client_id}-id`] ? (
                             <Check className="w-4 h-4 text-green-600" />
@@ -539,9 +651,14 @@ export default function CustomAppsPage() {
                         </button>
                       </div>
                       <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
-                        <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">{t('redirectUri')}:</p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
+                          {t("redirectUri")}:
+                        </p>
                         {app.redirect_uris.map((uri, idx) => (
-                          <p key={idx} className="text-xs text-gray-600 dark:text-gray-400 font-mono break-all">
+                          <p
+                            key={idx}
+                            className="text-xs text-gray-600 dark:text-gray-400 font-mono break-all"
+                          >
                             {uri}
                           </p>
                         ))}
@@ -552,22 +669,52 @@ export default function CustomAppsPage() {
                     {app.is_visible && app.plaintext_secret ? (
                       <div className="bg-green-50 dark:bg-green-900/20 p-3 rounded border border-green-200 dark:border-green-800 mb-2">
                         <div className="flex items-center justify-between mb-1">
-                          <span className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('clientSecret')}</span>
-                          {app.visibility_expires_at && new Date(app.visibility_expires_at) > new Date() && (
-                            <span className="text-xs text-yellow-600 dark:text-yellow-400 flex items-center gap-1">
-                              <AlertTriangle className="w-3 h-3" />
-                              {t('hideInTime', { time: formatRelativeTime(app.visibility_expires_at, user?.timezone, locale) })}
-                            </span>
-                          )}
+                          <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                            {t("clientSecret")}
+                          </span>
+                          {app.visibility_expires_at &&
+                            (() => {
+                              const expiresAt = new Date(
+                                app.visibility_expires_at,
+                              );
+                              const daysUntil =
+                                (expiresAt.getTime() - Date.now()) /
+                                (1000 * 60 * 60 * 24);
+                              if (daysUntil <= 0) return null;
+                              return (
+                                <span className="text-xs text-yellow-600 dark:text-yellow-400 flex items-center gap-1">
+                                  <AlertTriangle className="w-3 h-3" />
+                                  {daysUntil <= 30
+                                    ? t("hideInTime", {
+                                        time: formatRelativeTime(
+                                          app.visibility_expires_at,
+                                          user?.timezone,
+                                          locale,
+                                        ),
+                                      })
+                                    : t("hideAt", {
+                                        date: formatDateTime(
+                                          app.visibility_expires_at,
+                                          user?.timezone,
+                                        ),
+                                      })}
+                                </span>
+                              );
+                            })()}
                         </div>
                         <div className="flex items-center gap-2">
                           <code className="flex-1 bg-white dark:bg-gray-900 px-2 py-1 rounded text-xs font-mono break-all">
                             {app.plaintext_secret}
                           </code>
                           <button
-                            onClick={() => handleCopy(app.plaintext_secret!, `custom-${app.client_id}-secret`)}
+                            onClick={() =>
+                              handleCopy(
+                                app.plaintext_secret!,
+                                `custom-${app.client_id}-secret`,
+                              )
+                            }
                             className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
-                            title={t('copyClientSecret')}
+                            title={t("copyClientSecret")}
                           >
                             {copiedItems[`custom-${app.client_id}-secret`] ? (
                               <Check className="w-4 h-4 text-green-600" />
@@ -576,9 +723,11 @@ export default function CustomAppsPage() {
                             )}
                           </button>
                           <button
-                            onClick={() => handleHideOAuthAppClick(app.client_id)}
+                            onClick={() =>
+                              handleHideOAuthAppClick(app.client_id)
+                            }
                             className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
-                            title={t('hideSecretNow')}
+                            title={t("hideSecretNow")}
                           >
                             <EyeOff className="w-4 h-4" />
                           </button>
@@ -588,7 +737,9 @@ export default function CustomAppsPage() {
                       <div className="bg-gray-50 dark:bg-gray-800 p-3 rounded border border-gray-200 dark:border-gray-700 mb-2">
                         <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400">
                           <EyeOff className="w-4 h-4" />
-                          <span className="text-sm">{t('secretHiddenOwner')}</span>
+                          <span className="text-sm">
+                            {t("secretHiddenOwner")}
+                          </span>
                         </div>
                       </div>
                     )}
@@ -596,23 +747,33 @@ export default function CustomAppsPage() {
                     {/* Actions */}
                     <div className="flex gap-2">
                       <ActionButton
-                        onClick={() => handleRegenerateOAuthClick(app.client_id, app.client_name)}
+                        onClick={() =>
+                          handleRegenerateOAuthClick(
+                            app.client_id,
+                            app.client_name,
+                          )
+                        }
                         icon={<RefreshCw className="w-4 h-4" />}
                       >
-                        {t('regenerate')}
+                        {t("regenerate")}
                       </ActionButton>
                       <ActionButton
-                        onClick={() => handleDeleteOAuthClientClick(app.client_id)}
+                        onClick={() =>
+                          handleDeleteOAuthClientClick(app.client_id)
+                        }
                         variant="danger"
                         icon={<Trash2 className="w-4 h-4" />}
                       >
-                        {tCommon('delete')}
+                        {tCommon("delete")}
                       </ActionButton>
                     </div>
 
                     {/* Metadata */}
                     <div className="text-xs text-gray-500 dark:text-gray-400">
-                      <p>{t('created')}: {formatDateTime(app.created_at, user?.timezone)}</p>
+                      <p>
+                        {t("created")}:{" "}
+                        {formatDateTime(app.created_at, user?.timezone)}
+                      </p>
                     </div>
                   </div>
                 ))}
@@ -626,22 +787,26 @@ export default function CustomAppsPage() {
       <AlertDialog open={showCustomDialog} onOpenChange={setShowCustomDialog}>
         <AlertDialogContent className="max-w-2xl">
           <AlertDialogHeader>
-            <AlertDialogTitle>{t('createCustomOAuthTitle')}</AlertDialogTitle>
+            <AlertDialogTitle>{t("createCustomOAuthTitle")}</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium mb-1">{t('appNameLabel')}</label>
+                  <label className="block text-sm font-medium mb-1">
+                    {t("appNameLabel")}
+                  </label>
                   <input
                     type="text"
                     value={customAppName}
                     onChange={(e) => setCustomAppName(e.target.value)}
-                    placeholder={t('appNamePlaceholder')}
+                    placeholder={t("appNamePlaceholder")}
                     className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium mb-1">{t('redirectUris')}</label>
+                  <label className="block text-sm font-medium mb-1">
+                    {t("redirectUris")}
+                  </label>
                   {customRedirectUris.map((uri, index) => (
                     <div key={index} className="flex items-center gap-2 mb-2">
                       <input
@@ -652,17 +817,19 @@ export default function CustomAppsPage() {
                           newUris[index] = e.target.value;
                           setCustomRedirectUris(newUris);
                         }}
-                        placeholder={t('redirectUriPlaceholder')}
+                        placeholder={t("redirectUriPlaceholder")}
                         className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-sm"
                       />
                       {customRedirectUris.length > 1 && (
                         <button
                           onClick={() => {
-                            const newUris = customRedirectUris.filter((_, i) => i !== index);
+                            const newUris = customRedirectUris.filter(
+                              (_, i) => i !== index,
+                            );
                             setCustomRedirectUris(newUris);
                           }}
                           className="p-2 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded"
-                          title={t('removeUri')}
+                          title={t("removeUri")}
                         >
                           <X className="w-4 h-4" />
                         </button>
@@ -670,88 +837,110 @@ export default function CustomAppsPage() {
                     </div>
                   ))}
                   <button
-                    onClick={() => setCustomRedirectUris([...customRedirectUris, ''])}
+                    onClick={() =>
+                      setCustomRedirectUris([...customRedirectUris, ""])
+                    }
                     className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
                   >
-                    + {t('addRedirectUri')}
+                    + {t("addRedirectUri")}
                   </button>
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                    💡 {t('redirectUriHint')}
+                    💡 {t("redirectUriHint")}
                   </p>
                 </div>
 
                 {customDialogError && (
-                  <p className="text-sm text-red-600 dark:text-red-400">{customDialogError}</p>
+                  <p className="text-sm text-red-600 dark:text-red-400">
+                    {customDialogError}
+                  </p>
                 )}
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel onClick={() => {
-              setShowCustomDialog(false);
-              setCustomAppName('');
-              setCustomRedirectUris(['']);
-              setCustomDialogError(null);
-            }}>
-              {tCommon('cancel')}
+            <AlertDialogCancel
+              onClick={() => {
+                setShowCustomDialog(false);
+                setCustomAppName("");
+                setCustomRedirectUris([""]);
+                setCustomDialogError(null);
+              }}
+            >
+              {tCommon("cancel")}
             </AlertDialogCancel>
             <AlertDialogAction onClick={handleCreateCustomOAuthApp}>
-              {t('createApp')}
+              {t("createApp")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
       {/* Hide OAuth Secret Dialog */}
-      <AlertDialog open={showHideOAuthDialog} onOpenChange={setShowHideOAuthDialog}>
+      <AlertDialog
+        open={showHideOAuthDialog}
+        onOpenChange={setShowHideOAuthDialog}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t('hideOAuthTitle')}</AlertDialogTitle>
+            <AlertDialogTitle>{t("hideOAuthTitle")}</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-2">
-                <p>{t('hideOAuthWarning')}</p>
-                <p>{t('hideOAuthNote')}</p>
+                <p>{t("hideOAuthWarning")}</p>
+                <p>{t("hideOAuthNote")}</p>
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>{tCommon('cancel')}</AlertDialogCancel>
+            <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
             <AlertDialogAction onClick={handleConfirmHideOAuthApp}>
-              {t('hideSecret')}
+              {t("hideSecret")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
       {/* Regenerate OAuth Secret Dialog */}
-      <AlertDialog open={showRegenerateOAuthDialog} onOpenChange={setShowRegenerateOAuthDialog}>
+      <AlertDialog
+        open={showRegenerateOAuthDialog}
+        onOpenChange={setShowRegenerateOAuthDialog}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t('regenerateOAuthTitle')}</AlertDialogTitle>
+            <AlertDialogTitle>{t("regenerateOAuthTitle")}</AlertDialogTitle>
             <AlertDialogDescription>
-              {t('regenerateOAuthDesc', { provider: oauthToRegenerate?.provider || '' })}
+              {t("regenerateOAuthDesc", {
+                provider: oauthToRegenerate?.provider || "",
+              })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>{tCommon('cancel')}</AlertDialogCancel>
+            <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
             <AlertDialogAction onClick={handleConfirmRegenerateOAuth}>
-              {t('regenerate')}
+              {t("regenerate")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
       {/* Delete OAuth App Dialog */}
-      <AlertDialog open={showDeleteOAuthDialog} onOpenChange={setShowDeleteOAuthDialog}>
+      <AlertDialog
+        open={showDeleteOAuthDialog}
+        onOpenChange={setShowDeleteOAuthDialog}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t('deleteOAuthTitle')}</AlertDialogTitle>
-            <AlertDialogDescription>{t('deleteOAuthDesc')}</AlertDialogDescription>
+            <AlertDialogTitle>{t("deleteOAuthTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("deleteOAuthDesc")}
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>{tCommon('cancel')}</AlertDialogCancel>
-            <AlertDialogAction onClick={handleConfirmDeleteOAuthClient} className="bg-red-600 hover:bg-red-700">
-              {tCommon('delete')}
+            <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleConfirmDeleteOAuthClient}
+              className="bg-red-600 hover:bg-red-700"
+            >
+              {tCommon("delete")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
