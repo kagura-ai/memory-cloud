@@ -1090,6 +1090,22 @@ class Workspace(Base):
     addon_member_bonus = Column(Integer, nullable=False, server_default="0")
     addon_context_bonus = Column(Integer, nullable=False, server_default="0")  # Issue #15
 
+    # Issue #136: Effective quota properties (base + addon)
+    @property
+    def effective_memory_limit(self) -> int:
+        """Memory limit including addon bonus."""
+        return (self.memory_limit or 0) + (self.addon_memory_bonus or 0)
+
+    @property
+    def effective_daily_api_limit(self) -> int:
+        """Daily API call limit including addon bonus."""
+        return (self.daily_api_limit or 0) + (self.addon_mcp_quota_bonus or 0)
+
+    @property
+    def effective_weekly_api_limit(self) -> int:
+        """Weekly API call limit (derived from effective daily)."""
+        return self.effective_daily_api_limit * 7
+
     # Stripe billing (Issue #351)
     stripe_customer_id = Column(String(255), nullable=True)
     stripe_subscription_id = Column(String(255), nullable=True)
