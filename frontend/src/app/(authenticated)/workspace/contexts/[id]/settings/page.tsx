@@ -321,20 +321,6 @@ export default function ContextSettingsPage() {
 
           <div className="space-y-2">
             <label className={cn(typography.bodySmall, "font-medium")}>
-              Collection Name
-            </label>
-            <Input
-              value={context.collection_name}
-              disabled
-              className="font-mono"
-            />
-            <p className={cn(typography.caption, colors.text.muted)}>
-              Qdrant collection name (auto-generated).
-            </p>
-          </div>
-
-          <div className="space-y-2">
-            <label className={cn(typography.bodySmall, "font-medium")}>
               Description
             </label>
             <Textarea
