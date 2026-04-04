@@ -35,6 +35,15 @@ class TestMaskSecret:
         assert result.endswith("90")
         assert "****" in result
 
+    def test_fixed_length_mask(self):
+        """Test that mask length is fixed, not proportional to value length (#132)."""
+        short_result = mask_secret("sk-proj-abc123")
+        long_result = mask_secret("sk-proj-abc123def456ghi789jkl012mno345pqr678stu901vwx")
+        # Both should have same number of mask chars (default min_mask_length=4)
+        short_stars = short_result.count("*")
+        long_stars = long_result.count("*")
+        assert short_stars == long_stars == 4
+
 
 class TestMaskPrefixOnly:
     """Test mask_prefix_only function."""
