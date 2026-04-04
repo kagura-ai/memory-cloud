@@ -28,7 +28,6 @@ import {
   Settings2,
   ChevronDown,
   BarChart,
-  Users,
   MoreVertical,
   ShieldCheck,
 } from "lucide-react";
@@ -81,9 +80,7 @@ import {
   getContextStats,
   getContextSearchConfig,
   updateContextSearchConfig,
-  listContextMembers,
   getEmbeddingModels,
-  type ContextMember,
   type EmbeddingModel,
 } from "@/lib/api/contexts";
 import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
@@ -140,12 +137,6 @@ export default function ContextsPage() {
   const [quickCreateError, setQuickCreateError] = useState<string | null>(null);
   const [quickCreating, setQuickCreating] = useState(false);
 
-  // Context Members Dialog
-  const [membersDialogOpen, setMembersDialogOpen] = useState(false);
-  const [selectedContext, setSelectedContext] = useState<Context | null>(null);
-  const [contextMembers, setContextMembers] = useState<ContextMember[]>([]);
-  const [membersLoading, setMembersLoading] = useState(false);
-
   // Resource ID copy state
   const [copiedResourceId, setCopiedResourceId] = useState<string | null>(null);
 
@@ -177,7 +168,6 @@ export default function ContextsPage() {
       const response = await getContexts();
       setContexts(response.contexts);
     } catch (err) {
-      console.error("Failed to fetch contexts:", err);
       setError("Failed to load contexts");
     } finally {
       setLoading(false);
@@ -191,7 +181,6 @@ export default function ContextsPage() {
       const status = await checkOpenAIKeyStatus(user.current_workspace_id);
       setHasOpenAIKey(status.has_key);
     } catch (err) {
-      console.error("Failed to check API key status:", err);
       setHasOpenAIKey(null);
     }
   }, [user?.current_workspace_id]);
@@ -261,7 +250,6 @@ export default function ContextsPage() {
       await refetchUser();
       fetchContexts();
     } catch (err: unknown) {
-      console.error("Failed to create context:", err);
       const apiError = err as {
         message?: string;
         details?: { detail?: string };
@@ -334,12 +322,11 @@ export default function ContextsPage() {
       // Refresh user data to get updated current_context_id
       await refetchUser();
       fetchContexts();
-    } catch (err: any) {
-      console.error("Failed to create context:", err);
-
-      // apiClient now extracts detail from FastAPI errors into message
+    } catch (err: unknown) {
+      const apiErr = err as { message?: string };
       let errorMessage =
-        err?.message || (typeof err === "string" ? err : t("failedToCreate"));
+        apiErr?.message ||
+        (typeof err === "string" ? err : t("failedToCreate"));
 
       // Translate common error messages (but keep resource_id duplicates as-is)
       if (errorMessage.includes("already used")) {
@@ -373,10 +360,6 @@ export default function ContextsPage() {
     router.push(`/workspace/contexts/${context.id}/stats`);
   };
 
-  const handleViewGraph = async (context: Context) => {
-    router.push(`/workspace/contexts/${context.id}/graph`);
-  };
-
   const handleLoadStats = async (context: Context) => {
     if (loadingStats[context.id]) return;
 
@@ -385,33 +368,8 @@ export default function ContextsPage() {
       const stats = await getContextStats(context.id);
       setContextStats((prev) => ({ ...prev, [context.id]: stats }));
     } catch (err) {
-      console.error("Failed to load context stats:", err);
     } finally {
       setLoadingStats((prev) => ({ ...prev, [context.id]: false }));
-    }
-  };
-
-  // Context Members Management
-  const handleMembersClick = async (context: Context) => {
-    setSelectedContext(context);
-    setMembersDialogOpen(true);
-    await loadContextMembers(context.id);
-  };
-
-  const loadContextMembers = async (contextId: string) => {
-    setMembersLoading(true);
-    try {
-      const members = await listContextMembers(contextId);
-      setContextMembers(members);
-    } catch (error) {
-      console.error("Failed to load context members:", error);
-      toast({
-        title: tCommon("error"),
-        description: "Failed to load members",
-        variant: "destructive",
-      });
-    } finally {
-      setMembersLoading(false);
     }
   };
 
@@ -451,19 +409,20 @@ export default function ContextsPage() {
       setApiKeyDialogOpen(false);
       setApiKeyValue("");
       setApiKeyError(null);
-    } catch (err: any) {
-      console.error("Failed to save API key:", err);
-
-      // Handle specific error codes
+    } catch (err: unknown) {
+      const apiErr = err as {
+        status?: number;
+        details?: { detail?: string };
+      };
       let errorMessage = t("failedToSaveApiKey");
       if (
-        err?.status === 409 ||
-        err?.details?.detail?.includes("already exists")
+        apiErr?.status === 409 ||
+        apiErr?.details?.detail?.includes("already exists")
       ) {
         errorMessage = t("apiKeyAlreadyExists");
-      } else if (err?.details?.detail) {
-        errorMessage = err.details.detail;
-      } else if (err?.message) {
+      } else if (apiErr?.details?.detail) {
+        errorMessage = apiErr.details.detail;
+      } else if (err instanceof Error) {
         errorMessage = err.message;
       }
 
@@ -1196,81 +1155,6 @@ export default function ContextsPage() {
           </table>
         </div>
       )}
-
-      {/* Delete Confirmation Dialog */}
-      {/* Context Members Dialog */}
-      <Dialog open={membersDialogOpen} onOpenChange={setMembersDialogOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Users className="h-5 w-5 text-purple-500" />
-              {t("contextMembers")} (
-              {t("membersCount", { count: contextMembers.length })})
-            </DialogTitle>
-            <DialogDescription>
-              {selectedContext?.display_name || selectedContext?.name}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="py-4">
-            {membersLoading ? (
-              <div className="flex justify-center py-8">
-                <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
-              </div>
-            ) : contextMembers.length === 0 ? (
-              <div className="text-center py-8 text-gray-500">
-                <Users className="h-12 w-12 mx-auto mb-2 opacity-20" />
-                <p className="text-sm">{t("noMembersAssigned")}</p>
-                <p className="text-xs mt-1">{t("onlyOwnerHasAccess")}</p>
-                <p className="text-xs mt-2 text-blue-600 dark:text-blue-400">
-                  {t("ownerAdminAutoAccess")}
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {contextMembers.map((member) => (
-                  <div
-                    key={member.user_id}
-                    className="flex items-center justify-between p-3 border border-gray-200 dark:border-gray-700 rounded-lg"
-                  >
-                    <div className="flex-1">
-                      <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                        {member.user_name ||
-                          member.user_email ||
-                          member.user_id}
-                      </p>
-                      <p className="text-xs text-gray-500">
-                        ID: {member.user_id}
-                      </p>
-                      <p className="text-xs text-gray-600 dark:text-gray-400 capitalize mt-0.5">
-                        {member.role === "owner"
-                          ? t("owner")
-                          : member.role === "admin"
-                            ? t("admin")
-                            : member.role === "member"
-                              ? t("member")
-                              : member.role === "viewer"
-                                ? t("viewer")
-                                : member.role}
-                      </p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Link to workspace members page */}
-            <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
-              <a
-                href="/workspace/members"
-                className="text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 flex items-center gap-1"
-              >
-                <Settings2 className="h-4 w-4" />
-                {t("manageWorkspaceMembers")}
-              </a>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
 
       {/* Issue #169: Quick Create Dialog */}
       <Dialog

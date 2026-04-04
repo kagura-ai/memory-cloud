@@ -9,7 +9,7 @@
  * UI pattern: Card-based layout matching search-settings page
  */
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -241,6 +241,28 @@ export default function ContextSettingsPage() {
     setPendingPrivacyChange(null);
   };
 
+  const isOwner = currentWorkspace?.current_user_role === "owner";
+
+  const isDirty = useMemo(() => {
+    if (!context) return false;
+    return (
+      displayName !== (context.display_name || "") ||
+      description !== (context.description || "") ||
+      summary !== (context.summary || "") ||
+      usageGuide !== (context.usage_guide || "") ||
+      isPrivate !== (context.is_private ?? true) ||
+      isPublic !== (context.is_public ?? false)
+    );
+  }, [
+    displayName,
+    description,
+    summary,
+    usageGuide,
+    isPrivate,
+    isPublic,
+    context,
+  ]);
+
   if (loading) {
     return (
       <PageContainer>
@@ -271,16 +293,6 @@ export default function ContextSettingsPage() {
       </PageContainer>
     );
   }
-
-  const isOwner = currentWorkspace?.current_user_role === "owner";
-
-  const isDirty =
-    displayName !== (context.display_name || "") ||
-    description !== (context.description || "") ||
-    summary !== (context.summary || "") ||
-    usageGuide !== (context.usage_guide || "") ||
-    isPrivate !== (context.is_private ?? true) ||
-    isPublic !== (context.is_public ?? false);
 
   return (
     <PageContainer>
@@ -345,7 +357,9 @@ export default function ContextSettingsPage() {
                 }}
               >
                 {idCopied ? (
-                  <span className="text-xs text-green-600">Copied!</span>
+                  <span className="text-xs text-green-600 dark:text-green-400">
+                    Copied!
+                  </span>
                 ) : (
                   <Copy className="h-4 w-4" />
                 )}
@@ -421,7 +435,7 @@ export default function ContextSettingsPage() {
                 {CONTEXT_TEMPLATES.map((t) => (
                   <SelectItem key={t.id} value={t.id}>
                     <div className="flex items-center gap-2">
-                      <span className="text-xs px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800">
+                      <span className="text-xs px-2 py-0.5 rounded bg-muted">
                         {t.category}
                       </span>
                       <span className="font-medium">{t.name}</span>
@@ -734,29 +748,29 @@ export default function ContextSettingsPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Sticky Save Bar — visible only when there are unsaved changes */}
-      {isDirty && (
-        <div className="fixed bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-          <div className="container flex items-center justify-between py-3 px-4 max-w-4xl mx-auto">
-            <p className="text-sm text-muted-foreground">
-              You have unsaved changes
-            </p>
-            <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={refreshContext}>
-                Discard
-              </Button>
-              <Button size="sm" onClick={handleSave} disabled={saving}>
-                {saving ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : (
-                  <Save className="h-4 w-4 mr-2" />
-                )}
-                {saving ? "Saving..." : "Save Changes"}
-              </Button>
-            </div>
+      {/* Sticky Save Bar — always mounted, visibility toggled via CSS to avoid CLS */}
+      <div
+        className={`fixed bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 transition-transform duration-200 ${isDirty ? "translate-y-0" : "translate-y-full"}`}
+      >
+        <div className="container flex items-center justify-between py-3 px-4 max-w-4xl mx-auto">
+          <p className="text-sm text-muted-foreground">
+            You have unsaved changes
+          </p>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={refreshContext}>
+              Discard
+            </Button>
+            <Button size="sm" onClick={handleSave} disabled={saving}>
+              {saving ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <Save className="h-4 w-4 mr-2" />
+              )}
+              {saving ? "Saving..." : "Save Changes"}
+            </Button>
           </div>
         </div>
-      )}
+      </div>
     </PageContainer>
   );
 }
