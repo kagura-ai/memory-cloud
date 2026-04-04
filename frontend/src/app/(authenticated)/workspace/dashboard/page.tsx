@@ -7,17 +7,10 @@
  * Shows aggregated statistics across all user's contexts.
  */
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { PageContainer } from "@/components/common/PageContainer";
-import { PageHeader } from "@/components/common/PageHeader";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -29,9 +22,6 @@ import {
 } from "@/components/ui/table";
 import {
   RefreshCw,
-  Database,
-  HardDrive,
-  FolderOpen,
   AlertCircle,
   Lock,
   Users,
