@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from __init__ import __version__
 from auth.dependencies import APIKeyOrSessionUser
 from db.base import get_db
 
@@ -71,7 +72,7 @@ async def system_info():
 
     return {
         "name": "Kagura Memory Cloud",
-        "version": "0.6.0",
+        "version": __version__,
         "description": "Remote MCP Server + Web Management",
         "environment": settings.environment,
         "features": {
@@ -251,7 +252,7 @@ async def get_system_telemetry(
             },
             neural_memory=neural_stats,
             uptime_seconds=uptime_seconds,
-            version="0.6.0",
+            version=__version__,
         )
 
     except Exception as e:
