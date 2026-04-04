@@ -189,7 +189,7 @@ async def list_users(
                     Memory.user_id,
                     func.count(Memory.id).label("memory_count"),
                 )
-                .where(Memory.user_id.in_(user_ids))
+                .where(Memory.user_id.in_(user_ids), Memory.deleted_at.is_(None))
                 .group_by(Memory.user_id)
             )
 
