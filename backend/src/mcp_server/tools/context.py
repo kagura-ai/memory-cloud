@@ -136,15 +136,19 @@ async def handle_get_context_info(
                     if search_config
                     else _settings.embedding_dimensions,
                     "search_config": {
-                        "semantic_weight": float(search_config.semantic_weight),
-                        "bm25_weight": float(search_config.bm25_weight),
-                        "fetch_factor": search_config.fetch_factor,
-                        "use_rerank": search_config.use_rerank,
-                        "reranker_provider": search_config.reranker_provider,
-                        "reranker_model": search_config.reranker_model,
-                    }
-                    if search_config
-                    else None,
+                        "semantic_weight": float(search_config.semantic_weight)
+                        if search_config
+                        else 0.60,
+                        "bm25_weight": float(search_config.bm25_weight) if search_config else 0.40,
+                        "fetch_factor": search_config.fetch_factor if search_config else 3,
+                        "use_rerank": search_config.use_rerank if search_config else False,
+                        "reranker_provider": (
+                            search_config.reranker_provider if search_config else None
+                        )
+                        or "voyage",
+                        "reranker_model": (search_config.reranker_model if search_config else None)
+                        or "rerank-2",
+                    },
                 }
 
             workspace_data = None
