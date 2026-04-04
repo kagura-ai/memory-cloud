@@ -27,6 +27,7 @@ async def handle_get_usage(
     from models.auth import Context, Workspace, WorkspaceMember
     from models.memory import Memory
     from services.effective_quota_service import EffectiveQuotaService
+    from services.quota_service import QuotaService
 
     start_time = time.time()
 
@@ -70,6 +71,9 @@ async def handle_get_usage(
                 round(memory_count / effective_memory * 100, 1) if effective_memory > 0 else 0
             )
 
+            # Reuse QuotaService to avoid duplicating the COUNT query
+            _, mcp_used_today, _ = await QuotaService(db).check_mcp_rate_limit(workspace_id)
+
             await _log_tool_usage(db, user_id, "get_usage", start_time, 200, None, workspace_id)
 
             return _success_response(
@@ -88,6 +92,7 @@ async def handle_get_usage(
                     "limit": quotas["max_members"],
                 },
                 mcp_calls_per_day={
+                    "used": mcp_used_today,
                     "limit": quotas["mcp_calls_per_day"],
                 },
             )

@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.plan_tiers import PLAN_TIERS, get_plan_tier, has_feature
 from models.auth import (
     Context,
+    UsageStats,
     Workspace,
     WorkspaceInvitation,
     WorkspaceMember,
@@ -401,6 +402,65 @@ class QuotaService:
             return False, error
 
         return True, None
+
+    # ========================================================================
+    # MCP Rate Limit (Issue #149)
+    # ========================================================================
+
+    async def check_mcp_rate_limit(
+        self,
+        workspace_id: UUID,
+    ) -> tuple[bool, int, int]:
+        """Check if workspace has remaining MCP calls for today.
+
+        Counts today's MCP tool calls from usage_stats and compares
+        against effective_mcp_calls_per_day quota.
+
+        Uses existing idx_usage_stats_workspace_date index.
+
+        Args:
+            workspace_id: Workspace ID
+
+        Returns:
+            Tuple of (allowed, used_today, daily_limit).
+            allowed=False when used_today >= daily_limit.
+
+        Raises:
+            ValueError: If workspace not found
+        """
+        # Fetch workspace first to short-circuit on missing workspace before COUNT
+        workspace_result = await self.db.execute(
+            select(Workspace).where(Workspace.id == workspace_id)
+        )
+        workspace = workspace_result.scalar_one_or_none()
+
+        if not workspace:
+            raise ValueError(f"Workspace {workspace_id} not found")
+
+        today = utcnow().date()
+
+        count_result = await self.db.execute(
+            select(func.count(UsageStats.id)).where(
+                UsageStats.workspace_id == workspace_id,
+                UsageStats.date == today,
+                UsageStats.method == "MCP",
+            )
+        )
+        used_today = count_result.scalar() or 0
+
+        daily_limit = workspace.effective_mcp_calls_per_day
+
+        if used_today >= daily_limit:
+            logger.warning(
+                "mcp_rate_limit_exceeded",
+                workspace_id=str(workspace_id),
+                used_today=used_today,
+                daily_limit=daily_limit,
+                plan=workspace.plan_name,
+            )
+            return False, used_today, daily_limit
+
+        return True, used_today, daily_limit
 
     # ========================================================================
     # Quota Status
