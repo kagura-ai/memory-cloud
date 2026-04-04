@@ -28,11 +28,11 @@ def mask_secret(
         min_mask_length: Minimum number of mask characters
 
     Returns:
-        Masked value (e.g., "sk-p***f456")
+        Masked value (e.g., "sk-p****f456")
 
     Example:
         >>> mask_secret("sk-proj-abc123def456")
-        'sk-p***f456'
+        'sk-p****f456'
 
         >>> mask_secret("short")
         '*****'
@@ -49,8 +49,9 @@ def mask_secret(
     if len(value) <= total_shown:
         return mask_char * len(value)
 
-    # Fixed-length mask (don't reveal original length)
-    mask_length = min_mask_length
+    # Fixed-length mask, but never exceed original length
+    available = len(value) - total_shown
+    mask_length = min(min_mask_length, available)
 
     return f"{value[:show_start]}{mask_char * mask_length}{value[-show_end:]}"
 
