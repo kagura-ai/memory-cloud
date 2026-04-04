@@ -1,4 +1,4 @@
-"""Tests for get_usage MCP tool handler (Issue #82)."""
+"""Tests for get_usage MCP tool handler."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -20,18 +20,20 @@ class TestGetUsage:
         return "test_user_123"
 
     def _mock_workspace(self, workspace_id, plan_name="pro"):
-        """Create a mock workspace with effective properties."""
-        from config.plan_tiers import get_plan_tier
-
-        tier = get_plan_tier(plan_name)
+        """Create a mock workspace."""
         ws = MagicMock()
         ws.id = workspace_id
         ws.plan_name = plan_name
-        ws.effective_memory_limit = 11000
-        ws.effective_mcp_calls_per_day = tier.mcp_calls_per_day
-        ws.effective_max_contexts = tier.max_contexts_per_workspace
-        ws.effective_max_members = tier.max_members_per_workspace
         return ws
+
+    def _mock_quotas(self, memory_limit=11000, mcp_calls=1000, max_contexts=20, max_members=10):
+        """Create mock effective quotas dict."""
+        return {
+            "memory_limit": memory_limit,
+            "mcp_calls_per_day": mcp_calls,
+            "max_contexts": max_contexts,
+            "max_members": max_members,
+        }
 
     @pytest.mark.asyncio
     async def test_returns_usage(self, workspace_id, user_id):
@@ -59,7 +61,16 @@ class TestGetUsage:
         async def mock_get_db():
             yield mock_db
 
-        with patch("db.base.get_db", new=mock_get_db):
+        mock_quota_service = AsyncMock()
+        mock_quota_service.get_effective_quotas.return_value = self._mock_quotas()
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "services.effective_quota_service.EffectiveQuotaService",
+                return_value=mock_quota_service,
+            ),
+        ):
             result = await handle_get_usage({}, user_id, workspace_id)
 
         import json
@@ -104,13 +115,7 @@ class TestGetUsage:
     @pytest.mark.asyncio
     async def test_zero_memory_limit(self, workspace_id, user_id):
         """Test that zero effective_memory_limit doesn't cause ZeroDivisionError."""
-        ws = MagicMock()
-        ws.id = workspace_id
-        ws.plan_name = "free"
-        ws.effective_memory_limit = 0
-        ws.effective_mcp_calls_per_day = 0
-        ws.effective_max_contexts = 0
-        ws.effective_max_members = 0
+        ws = self._mock_workspace(workspace_id, plan_name="free")
 
         mock_db = AsyncMock()
         mock_ws_result = MagicMock()
@@ -132,7 +137,18 @@ class TestGetUsage:
         async def mock_get_db():
             yield mock_db
 
-        with patch("db.base.get_db", new=mock_get_db):
+        mock_quota_service = AsyncMock()
+        mock_quota_service.get_effective_quotas.return_value = self._mock_quotas(
+            memory_limit=0, mcp_calls=0, max_contexts=0, max_members=0
+        )
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "services.effective_quota_service.EffectiveQuotaService",
+                return_value=mock_quota_service,
+            ),
+        ):
             result = await handle_get_usage({}, user_id, workspace_id)
 
         import json
@@ -140,3 +156,21 @@ class TestGetUsage:
         data = json.loads(result[0].text)
         assert data["status"] == "success"
         assert data["memories"]["percentage"] == 0
+
+    @pytest.mark.asyncio
+    async def test_db_error_returns_structured_error(self, workspace_id, user_id):
+        """Test that DB exceptions return structured error, not unhandled exception."""
+        mock_db = AsyncMock()
+        mock_db.execute.side_effect = RuntimeError("connection lost")
+
+        async def mock_get_db():
+            yield mock_db
+
+        with patch("db.base.get_db", new=mock_get_db):
+            result = await handle_get_usage({}, user_id, workspace_id)
+
+        import json
+
+        data = json.loads(result[0].text)
+        assert data["status"] == "error"
+        assert "connection lost" in data["message"]
