@@ -49,6 +49,7 @@ import { useToast } from "@/hooks/use-toast";
 import { getContext, updateContext, deleteContext } from "@/lib/api/contexts";
 import type { Context } from "@/lib/types/context";
 import { useAuth } from "@/contexts/AuthContext";
+import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useSearchParams } from "next/navigation";
 import {
   Select,
@@ -63,6 +64,7 @@ export default function ContextSettingsPage() {
   const params = useParams();
   const router = useRouter();
   const { refetchUser, user } = useAuth();
+  const { currentWorkspace } = useWorkspace();
   const { toast } = useToast();
   const searchParams = useSearchParams();
   const contextId = params.id as string;
@@ -549,8 +551,9 @@ export default function ContextSettingsPage() {
             </Alert>
           )}
 
-          {/* Public Access - Issue #238 */}
-          {isPrivate ? (
+          {/* Public Access - Issue #238 (Owner only) */}
+          {currentWorkspace?.current_user_role !==
+          "owner" ? null : isPrivate ? (
             <Alert className="border-yellow-200 bg-yellow-50 dark:bg-yellow-900/20">
               <AlertCircle className="h-4 w-4 text-yellow-600" />
               <AlertTitle className="text-yellow-800 dark:text-yellow-200">
@@ -566,7 +569,7 @@ export default function ContextSettingsPage() {
               <div className="flex items-center justify-between p-4 border rounded-lg bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-950/20 dark:to-blue-950/20">
                 <div className="flex-1">
                   <h4 className="font-medium text-sm mb-1">
-                    ��� Public Context
+                    🌍 Public Context
                   </h4>
                   <p className="text-xs text-gray-500 dark:text-gray-400">
                     External systems can search this context via Public REST API
@@ -608,6 +611,22 @@ export default function ContextSettingsPage() {
                     <code className="block mt-2 p-2 bg-purple-100 dark:bg-purple-900/40 rounded text-xs font-mono break-all">
                       POST /api/v1/public/{contextId}/search
                     </code>
+                    <div className="flex gap-3 mt-3 text-xs">
+                      <a
+                        href="/workspace/integrations/resource-tokens"
+                        className="text-purple-600 dark:text-purple-400 underline hover:text-purple-700"
+                      >
+                        Manage Resource Tokens →
+                      </a>
+                      <a
+                        href="https://github.com/kagura-ai/kagura-memory-python-sdk"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-purple-600 dark:text-purple-400 underline hover:text-purple-700"
+                      >
+                        Python SDK →
+                      </a>
+                    </div>
                   </AlertDescription>
                 </Alert>
               )}
