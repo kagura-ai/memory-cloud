@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import SessionUser, get_current_user
+from auth.dependencies import SessionUser, get_current_user, get_user_from_api_key_or_session
 from db.base import get_db
 from services.context_service import ContextService
 from utils.exceptions import NotFoundException, ValidationError
@@ -1252,11 +1252,11 @@ VALID_SORT_ORDERS = {"asc", "desc"}
 @router.get("/{context_id}/memory-stats", response_model=MemoryUsageStatsResponse)
 async def get_memory_usage_stats(
     context_id: UUID,
-    request: Request,
     sort_by: str = Query("use_count", description="Sort field"),
     sort_order: str = Query("desc", description="Sort order: asc or desc"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    user: dict = Depends(get_user_from_api_key_or_session),
     db: AsyncSession = Depends(get_db),
 ) -> MemoryUsageStatsResponse:
     """Get per-memory recall statistics for a context.
@@ -1271,7 +1271,6 @@ async def get_memory_usage_stats(
     from models.memory import Memory
     from services.permission_service import PermissionService
 
-    user = await get_current_user(request)
     perm_service = PermissionService(db)
     await perm_service.check_context_access(user["user_id"], context_id)
 
@@ -1356,9 +1355,9 @@ class DuplicatesResponse(BaseModel):
 @router.get("/{context_id}/duplicates", response_model=DuplicatesResponse)
 async def find_duplicates(
     context_id: UUID,
-    request: Request,
     threshold: float = Query(0.90, ge=0.5, le=1.0),
     limit: int = Query(50, ge=1, le=200),
+    user: dict = Depends(get_user_from_api_key_or_session),
     db: AsyncSession = Depends(get_db),
 ) -> DuplicatesResponse:
     """Find duplicate memory pairs using Qdrant vector similarity.
@@ -1372,7 +1371,6 @@ async def find_duplicates(
     from models.memory import Memory
     from services.permission_service import PermissionService
 
-    user = await get_current_user(request)
     perm_service = PermissionService(db)
     await perm_service.check_context_access(user["user_id"], context_id)
 
