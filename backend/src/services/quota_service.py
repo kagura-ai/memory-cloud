@@ -407,6 +407,28 @@ class QuotaService:
     # MCP Rate Limit (Issue #149)
     # ========================================================================
 
+    async def count_mcp_calls_today(self, workspace_id: UUID) -> int:
+        """Count today's MCP tool calls for a workspace.
+
+        Lightweight helper — only runs the COUNT query without fetching workspace.
+        Used by get_usage to avoid redundant workspace lookup.
+
+        Args:
+            workspace_id: Workspace ID
+
+        Returns:
+            Number of MCP calls today
+        """
+        today = utcnow().date()
+        count_result = await self.db.execute(
+            select(func.count(UsageStats.id)).where(
+                UsageStats.workspace_id == workspace_id,
+                UsageStats.date == today,
+                UsageStats.method == "MCP",
+            )
+        )
+        return count_result.scalar() or 0
+
     async def check_mcp_rate_limit(
         self,
         workspace_id: UUID,

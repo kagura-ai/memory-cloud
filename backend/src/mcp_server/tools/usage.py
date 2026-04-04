@@ -71,8 +71,7 @@ async def handle_get_usage(
                 round(memory_count / effective_memory * 100, 1) if effective_memory > 0 else 0
             )
 
-            # Reuse QuotaService to avoid duplicating the COUNT query
-            _, mcp_used_today, _ = await QuotaService(db).check_mcp_rate_limit(workspace_id)
+            mcp_used_today = await QuotaService(db).count_mcp_calls_today(workspace_id)
 
             await _log_tool_usage(db, user_id, "get_usage", start_time, 200, None, workspace_id)
 

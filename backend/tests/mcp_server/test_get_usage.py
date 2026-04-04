@@ -71,9 +71,9 @@ class TestGetUsage:
                 return_value=mock_effective_quota,
             ),
             patch(
-                "services.quota_service.QuotaService.check_mcp_rate_limit",
+                "services.quota_service.QuotaService.count_mcp_calls_today",
                 new_callable=AsyncMock,
-                return_value=(True, 42, 1000),
+                return_value=42,
             ),
         ):
             result = await handle_get_usage({}, user_id, workspace_id)
@@ -156,9 +156,9 @@ class TestGetUsage:
                 return_value=mock_effective_quota,
             ),
             patch(
-                "services.quota_service.QuotaService.check_mcp_rate_limit",
+                "services.quota_service.QuotaService.count_mcp_calls_today",
                 new_callable=AsyncMock,
-                return_value=(True, 0, 0),
+                return_value=0,
             ),
         ):
             result = await handle_get_usage({}, user_id, workspace_id)

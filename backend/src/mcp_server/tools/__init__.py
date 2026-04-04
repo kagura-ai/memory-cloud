@@ -88,10 +88,11 @@ def _build_registry() -> dict[str, Any]:
 
 
 async def _check_rate_limit(workspace_id: UUID) -> tuple[bool, int, int]:
-    """Check MCP rate limit with TTL cache.
+    """Check MCP rate limit with TTL cache and in-memory counter.
 
-    Caches the DB query result for 60 seconds per workspace
-    to avoid a COUNT query on every tool call.
+    On cache miss: queries DB for today's count and caches (used, limit, expires_at).
+    On cache hit: increments in-memory used counter to track calls within the TTL window,
+    preventing limit overshoot between DB refreshes.
 
     Args:
         workspace_id: Workspace ID
@@ -104,7 +105,11 @@ async def _check_rate_limit(workspace_id: UUID) -> tuple[bool, int, int]:
     if cached is not None:
         allowed, used, limit, expires_at = cached
         if now < expires_at:
-            return allowed, used, limit
+            # Increment in-memory counter to prevent overshoot within TTL
+            used += 1
+            new_allowed = used < limit
+            _RATE_LIMIT_CACHE[workspace_id] = (new_allowed, used, limit, expires_at)
+            return new_allowed, used, limit
 
     from db.base import get_db
     from services.quota_service import QuotaService
@@ -116,7 +121,6 @@ async def _check_rate_limit(workspace_id: UUID) -> tuple[bool, int, int]:
             expired = [k for k, v in _RATE_LIMIT_CACHE.items() if v[3] <= now]
             for k in expired:
                 del _RATE_LIMIT_CACHE[k]
-            # If still full after evicting expired, drop oldest
             if len(_RATE_LIMIT_CACHE) >= _RATE_LIMIT_CACHE_MAX_SIZE:
                 oldest_key = min(_RATE_LIMIT_CACHE, key=lambda wid: _RATE_LIMIT_CACHE[wid][3])
                 del _RATE_LIMIT_CACHE[oldest_key]
@@ -167,6 +171,11 @@ async def execute_tool_call(
 
     args = arguments or {}
 
+    # Validate tool exists before expensive checks (avoids DB query for unknown tools)
+    handler = _TOOL_REGISTRY.get(tool_name)
+    if handler is None:
+        return _error_response("unknown_tool", f"Unknown tool: {tool_name}")
+
     # Rate limit check (exempt read-only info tools)
     if workspace_id and tool_name not in _RATE_LIMIT_EXEMPT_TOOLS:
         try:
@@ -200,11 +209,6 @@ async def execute_tool_call(
                 _resolve_context_id(args["context_id"])
             except ValueError as e:
                 return _error_response("invalid_context_id_format", str(e))
-
-    # Dispatch to handler
-    handler = _TOOL_REGISTRY.get(tool_name)
-    if handler is None:
-        return _error_response("unknown_tool", f"Unknown tool: {tool_name}")
 
     try:
         return await handler(args, user_id, workspace_id)
