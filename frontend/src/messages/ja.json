@@ -828,6 +828,7 @@
     "saving": "保存中...",
     "deleteWorkspaceDialogDesc": "{workspaceName}と以下のデータが完全に削除されます：",
     "allContexts": "すべてのコンテキスト",
+    "filterByContext": "コンテキストで絞り込み",
     "allMemories": "すべてのメモリー",
     "allMembers": "すべてのメンバー",
     "deleting": "削除中...",
