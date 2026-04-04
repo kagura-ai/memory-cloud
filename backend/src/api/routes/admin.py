@@ -686,3 +686,65 @@ async def delete_user(
                 "api_keys": api_key_count,
             },
         }
+
+
+# ============================================================================
+# Embedding Retry (Issue #93)
+# ============================================================================
+
+
+@router.post("/embedding/retry-failed")
+async def retry_failed_embeddings(
+    user: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    context_id: str | None = Query(None, description="Filter by context ID (UUID)"),
+    workspace_id: str | None = Query(None, description="Filter by workspace ID (UUID)"),
+) -> dict:
+    """Reset failed embeddings to pending for automatic retry.
+
+    Issue #93: Admin tool to recover from embedding failures.
+    """
+    from uuid import UUID as PyUUID
+
+    from sqlalchemy import update
+
+    # Require at least one filter to prevent accidental mass retry
+    if not context_id and not workspace_id:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of context_id or workspace_id is required",
+        )
+
+    # Validate UUID formats
+    for param_name, param_val in [("context_id", context_id), ("workspace_id", workspace_id)]:
+        if param_val:
+            try:
+                PyUUID(param_val)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=f"Invalid {param_name} format") from e
+
+    conditions = [
+        Memory.embedding_status == "failed",
+        Memory.deleted_at.is_(None),
+    ]
+    if context_id:
+        conditions.append(Memory.context_id == context_id)
+    if workspace_id:
+        conditions.append(Memory.workspace_id == workspace_id)
+
+    stmt = (
+        update(Memory).where(*conditions).values(embedding_status="pending", embedding_error=None)
+    )
+    result = await db.execute(stmt)
+    await db.commit()
+
+    reset_count = result.rowcount
+    logger.info(
+        "admin_retry_failed_embeddings",
+        reset_count=reset_count,
+        context_id=context_id,
+        workspace_id=workspace_id,
+        admin_user_id=get_user_id(user),
+    )
+
+    return {"status": "success", "reset_count": reset_count}

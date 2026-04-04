@@ -630,3 +630,105 @@ async def get_workspace_member_usage(
         entries.sort(key=lambda e: e.memory_count, reverse=True)
 
         return MemberUsageResponse(members=entries, total_members=len(entries))
+
+
+# ============================================================================
+# Embedding Queue Status (Issue #93)
+# ============================================================================
+
+
+class FailedMemoryInfo(BaseModel):
+    """Info about a failed embedding memory."""
+
+    id: str
+    summary: str
+    embedding_error: str | None
+    created_at: str
+    updated_at: str | None
+
+
+class EmbeddingStatusResponse(BaseModel):
+    """Embedding queue status response."""
+
+    total: int
+    by_status: dict[str, int]
+    failed_memories: list[FailedMemoryInfo]
+
+
+@router.get("/embedding-status", response_model=EmbeddingStatusResponse)
+async def get_embedding_status(
+    user: dict = Depends(get_user_from_api_key_or_session),
+    db: AsyncSession = Depends(get_db),
+    context_id: str | None = Query(None, description="Filter by context ID (UUID)"),
+) -> EmbeddingStatusResponse:
+    """Get embedding processing queue status.
+
+    Issue #93: Visibility into embedding pipeline status.
+    Returns counts by status and details of any failed memories.
+    """
+    from uuid import UUID as PyUUID
+
+    # Validate context_id is a valid UUID if provided
+    if context_id:
+        try:
+            PyUUID(context_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail="Invalid context_id format") from e
+
+    workspace_id = user.get("current_workspace_id")
+    if not workspace_id:
+        raise HTTPException(status_code=400, detail="No active workspace")
+
+    # Use indexed Memory.workspace_id directly (no member_ids round-trip)
+    conditions = [
+        Memory.workspace_id == workspace_id,
+        Memory.deleted_at.is_(None),
+    ]
+    if context_id:
+        conditions.append(Memory.context_id == context_id)
+
+    # Count by status
+    status_stmt = (
+        select(
+            Memory.embedding_status,
+            func.count(Memory.id).label("count"),
+        )
+        .where(*conditions)
+        .group_by(Memory.embedding_status)
+    )
+    status_result = await db.execute(status_stmt)
+    by_status: dict[str, int] = {}
+    total = 0
+    for row in status_result.all():
+        by_status[row[0]] = row[1]
+        total += row[1]
+
+    # Get failed memory details (max 50)
+    failed_memories: list[FailedMemoryInfo] = []
+    if by_status.get("failed", 0) > 0:
+        failed_stmt = (
+            select(Memory)
+            .where(
+                *conditions,
+                Memory.embedding_status == "failed",
+            )
+            .order_by(Memory.updated_at.desc())
+            .limit(50)
+        )
+        failed_result = await db.execute(failed_stmt)
+        for mem in failed_result.scalars().all():
+            failed_memories.append(
+                FailedMemoryInfo(
+                    id=str(mem.id),
+                    summary=mem.summary[:200] if mem.summary else "",
+                    embedding_error=mem.embedding_error,
+                    created_at=mem.created_at.isoformat() if mem.created_at else "",
+                    updated_at=mem.updated_at.isoformat() if mem.updated_at else None,
+                )
+            )
+
+    return EmbeddingStatusResponse(
+        total=total,
+        by_status=by_status,
+        failed_memories=failed_memories,
+    )
