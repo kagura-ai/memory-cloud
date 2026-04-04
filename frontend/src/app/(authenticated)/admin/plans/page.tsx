@@ -53,8 +53,6 @@ import { PlanBadge } from "@/components/common/PlanBadge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
-  CreditCard,
-  Users,
   RefreshCw,
   Edit,
   CheckCircle,
@@ -431,20 +429,14 @@ export default function AdminPlansPage() {
                                             )}
                                           </div>
                                           <div className="text-right">
-                                            {row.usage !== null ? (
-                                              <>
-                                                <span className="font-medium">
-                                                  {row.usage.toLocaleString()}
-                                                </span>
-                                                <span className="text-muted-foreground">
-                                                  {" "}
-                                                  /{" "}
-                                                  {row.effective.toLocaleString()}
-                                                </span>
-                                              </>
-                                            ) : (
-                                              <span className="font-medium">
-                                                {row.effective.toLocaleString()}
+                                            <span className="font-medium">
+                                              {row.effective.toLocaleString()}
+                                            </span>
+                                            {row.usage !== null && (
+                                              <span className="text-muted-foreground">
+                                                {" "}
+                                                / {row.usage.toLocaleString()}{" "}
+                                                used
                                               </span>
                                             )}
                                           </div>

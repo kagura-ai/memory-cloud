@@ -1110,8 +1110,8 @@ class Workspace(Base):
 
     @property
     def effective_mcp_calls_per_week(self) -> int:
-        """Weekly MCP API call limit (7x daily)."""
-        return self.effective_mcp_calls_per_day * 7
+        """Weekly MCP API call limit: plan tier base + addon."""
+        return self._plan_tier.mcp_calls_per_week + (self.addon_mcp_quota_bonus or 0)
 
     @property
     def effective_max_contexts(self) -> int:
