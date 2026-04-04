@@ -99,25 +99,38 @@ export default function ContextSettingsPage() {
     boolean | null
   >(null);
 
+  const applyContextData = useCallback((data: Context) => {
+    setContext(data);
+    setDisplayName(data.display_name || "");
+    setDescription(data.description || "");
+    setSummary(data.summary || "");
+    setUsageGuide(data.usage_guide || "");
+    setIsPrivate(data.is_private ?? true);
+    setIsPublic(data.is_public ?? false);
+    setIsLocked(data.is_locked ?? false);
+  }, []);
+
   const fetchContext = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
       const data = await getContext(contextId);
-      setContext(data);
-      setDisplayName(data.display_name || "");
-      setDescription(data.description || "");
-      setSummary(data.summary || "");
-      setUsageGuide(data.usage_guide || "");
-      setIsPrivate(data.is_private ?? true);
-      setIsPublic(data.is_public ?? false);
-      setIsLocked(data.is_locked ?? false);
+      applyContextData(data);
     } catch {
       setError("Failed to load context");
     } finally {
       setLoading(false);
     }
-  }, [contextId]);
+  }, [contextId, applyContextData]);
+
+  const refreshContext = useCallback(async () => {
+    try {
+      const data = await getContext(contextId);
+      applyContextData(data);
+    } catch {
+      // Silent refresh — don't show error
+    }
+  }, [contextId, applyContextData]);
 
   useEffect(() => {
     fetchContext();
@@ -158,7 +171,7 @@ export default function ContextSettingsPage() {
         title: "Settings saved",
         description: "Context settings have been updated.",
       });
-      fetchContext();
+      await refreshContext();
     } catch (err: unknown) {
       const apiError = err as { message?: string };
       toast({
@@ -748,7 +761,7 @@ export default function ContextSettingsPage() {
               You have unsaved changes
             </p>
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={fetchContext}>
+              <Button variant="outline" size="sm" onClick={refreshContext}>
                 Discard
               </Button>
               <Button size="sm" onClick={handleSave} disabled={saving}>
