@@ -454,14 +454,13 @@ class QuotaService:
             memory_count = 0
 
         # Calculate percentages
-        memory_percentage = (
-            (memory_count / workspace.memory_limit * 100) if workspace.memory_limit > 0 else 0
-        )
+        effective_limit = workspace.effective_memory_limit
+        memory_percentage = (memory_count / effective_limit * 100) if effective_limit > 0 else 0
 
         return {
             "memory": {
                 "current": memory_count,
-                "limit": workspace.memory_limit,
+                "limit": effective_limit,
                 "percentage": round(memory_percentage, 2),
                 "warning": memory_percentage >= 80,
                 "exceeded": memory_percentage >= 100,

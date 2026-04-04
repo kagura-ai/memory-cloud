@@ -205,9 +205,9 @@ async def list_workspaces_with_plans(
                     owner_name=owner.name if owner else None,
                     owner_email=owner.email if owner else None,
                     total_memories=total_memories,
-                    memory_limit=workspace.memory_limit + workspace.addon_memory_bonus,
-                    daily_api_limit=workspace.daily_api_limit,
-                    weekly_api_limit=workspace.weekly_api_limit,
+                    memory_limit=workspace.effective_memory_limit,
+                    daily_api_limit=workspace.effective_mcp_calls_per_day,
+                    weekly_api_limit=workspace.effective_mcp_calls_per_week,
                 )
             )
 

@@ -26,6 +26,7 @@ class TestEffectiveQuotaService:
         self,
         plan_name="pro",
         memory_limit=1000,
+        daily_api_limit=1000,
         addon_memory_bonus=500,
         addon_mcp_quota_bonus=200,
         addon_rest_quota_bonus=100,
@@ -33,16 +34,24 @@ class TestEffectiveQuotaService:
         addon_member_bonus=3,
         addon_context_bonus=5,
     ):
-        """Create a mock workspace with addon bonuses."""
+        """Create a mock workspace with addon bonuses and effective properties."""
         ws = MagicMock()
         ws.plan_name = plan_name
         ws.memory_limit = memory_limit
+        ws.daily_api_limit = daily_api_limit
         ws.addon_memory_bonus = addon_memory_bonus
         ws.addon_mcp_quota_bonus = addon_mcp_quota_bonus
         ws.addon_rest_quota_bonus = addon_rest_quota_bonus
         ws.addon_public_quota_bonus = addon_public_quota_bonus
         ws.addon_member_bonus = addon_member_bonus
         ws.addon_context_bonus = addon_context_bonus
+        from config.plan_tiers import get_plan_tier
+
+        tier = get_plan_tier(plan_name)
+        ws.effective_memory_limit = memory_limit + addon_memory_bonus
+        ws.effective_mcp_calls_per_day = tier.mcp_calls_per_day + addon_mcp_quota_bonus
+        ws.effective_max_contexts = tier.max_contexts_per_workspace + addon_context_bonus
+        ws.effective_max_members = tier.max_members_per_workspace + addon_member_bonus
         return ws
 
     @pytest.mark.asyncio
@@ -123,12 +132,20 @@ class TestDashboardAddonReflection:
         ws = MagicMock()
         ws.plan_name = "pro"
         ws.memory_limit = 1000
+        ws.daily_api_limit = 1000
         ws.addon_memory_bonus = 500
         ws.addon_mcp_quota_bonus = 200
         ws.addon_rest_quota_bonus = 100
         ws.addon_public_quota_bonus = 50
         ws.addon_member_bonus = 3
         ws.addon_context_bonus = 5
+        from config.plan_tiers import get_plan_tier
+
+        tier = get_plan_tier("pro")
+        ws.effective_memory_limit = 1000 + 500
+        ws.effective_mcp_calls_per_day = tier.mcp_calls_per_day + 200
+        ws.effective_max_contexts = tier.max_contexts_per_workspace + 5
+        ws.effective_max_members = tier.max_members_per_workspace + 3
 
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = ws

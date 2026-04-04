@@ -156,12 +156,12 @@ async def get_workspace_plan(
             "contexts": context_count,
         },
         quotas={
-            "memory_limit": workspace.memory_limit,
-            "max_contexts": plan_tier.max_contexts_per_workspace,
+            "memory_limit": workspace.effective_memory_limit,
+            "max_contexts": workspace.effective_max_contexts,
             "max_resource_tokens": plan_tier.max_resource_tokens,  # Issue #242
             "max_quota_capacity": plan_tier.max_resource_tokens * 10000,  # Issue #242: events/hour
-            "daily_api_limit": workspace.daily_api_limit,
-            "weekly_api_limit": workspace.weekly_api_limit,
+            "daily_api_limit": workspace.effective_mcp_calls_per_day,
+            "weekly_api_limit": workspace.effective_mcp_calls_per_week,
         },
         can_upgrade=current_index < len(plan_order) - 1,
         can_downgrade=current_index > 0,
