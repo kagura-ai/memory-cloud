@@ -4,22 +4,27 @@
  * Context Settings Page
  *
  * Issue #169: Context-specific settings page
- * - Basic info (name, description, summary, usage_guide)
- * - Search settings link
- * - Danger zone (delete)
+ * Issue #96: Unified from edit modal — single source for all context editing
+ *
+ * UI pattern: Card-based layout matching search-settings page
  */
 
 import { useEffect, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
-import { Section } from "@/components/common/Section";
-import { ActionButton } from "@/components/common/ActionButton";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -31,6 +36,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Label } from "@/components/ui/label";
 import {
   ArrowLeft,
   Save,
@@ -38,13 +44,12 @@ import {
   AlertCircle,
   Loader2,
   Settings,
-  Search,
   ExternalLink,
   ShieldCheck,
   ShieldOff,
   Copy,
+  Info,
 } from "lucide-react";
-import { cn, typography, colors } from "@/styles/design-tokens";
 import { useToast } from "@/hooks/use-toast";
 import { getContext, updateContext, deleteContext } from "@/lib/api/contexts";
 import type { Context } from "@/lib/types/context";
@@ -80,22 +85,15 @@ export default function ContextSettingsPage() {
   const [description, setDescription] = useState("");
   const [summary, setSummary] = useState("");
   const [usageGuide, setUsageGuide] = useState("");
-  const [isPrivate, setIsPrivate] = useState(true); // Migration 034
-  const [isPublic, setIsPublic] = useState(false); // Issue #238: Public context
-  const [isLocked, setIsLocked] = useState(false); // Issue #85: Context lock
-  const [resourceIdPrefix, setResourceIdPrefix] = useState(""); // Issue #238: Resource ID prefix
+  const [isPrivate, setIsPrivate] = useState(true);
+  const [isPublic, setIsPublic] = useState(false);
+  const [isLocked, setIsLocked] = useState(false);
+  const [resourceId, setResourceId] = useState("");
 
-  // Copy feedback
   const [idCopied, setIdCopied] = useState(false);
-
-  // Lock toggle (Issue #85)
   const [lockSaving, setLockSaving] = useState(false);
-
-  // Delete dialog
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
-
-  // Privacy confirmation dialog (Migration 034)
   const [privacyDialogOpen, setPrivacyDialogOpen] = useState(false);
   const [pendingPrivacyChange, setPendingPrivacyChange] = useState<
     boolean | null
@@ -111,11 +109,10 @@ export default function ContextSettingsPage() {
       setDescription(data.description || "");
       setSummary(data.summary || "");
       setUsageGuide(data.usage_guide || "");
-      setIsPrivate(data.is_private ?? true); // Migration 034
-      setIsPublic(data.is_public ?? false); // Issue #238
-      setIsLocked(data.is_locked ?? false); // Issue #85
-    } catch (err) {
-      console.error("Failed to fetch context:", err);
+      setIsPrivate(data.is_private ?? true);
+      setIsPublic(data.is_public ?? false);
+      setIsLocked(data.is_locked ?? false);
+    } catch {
       setError("Failed to load context");
     } finally {
       setLoading(false);
@@ -129,8 +126,7 @@ export default function ContextSettingsPage() {
   const handleSave = async () => {
     if (!context) return;
 
-    // Validate: resource_id prefix required when making public
-    if (isPublic && !context.is_public && !resourceIdPrefix.trim()) {
+    if (isPublic && !context.is_public && !resourceId.trim()) {
       toast({
         title: "Resource ID required",
         description: "Enter a Resource ID before making this context public.",
@@ -143,10 +139,9 @@ export default function ContextSettingsPage() {
       setSaving(true);
       setError(null);
 
-      // Generate resource_id if making public for the first time
       let resource_id: string | undefined = undefined;
       if (isPublic && !context.is_public) {
-        resource_id = resourceIdPrefix.trim();
+        resource_id = resourceId.trim();
       }
 
       await updateContext(context.id, {
@@ -163,14 +158,12 @@ export default function ContextSettingsPage() {
         title: "Settings saved",
         description: "Context settings have been updated.",
       });
-
       fetchContext();
     } catch (err: unknown) {
       const apiError = err as { message?: string };
-      const errorMsg = apiError?.message || "Failed to save settings";
       toast({
         title: "Save failed",
-        description: errorMsg,
+        description: apiError?.message || "Failed to save settings",
         variant: "destructive",
         duration: 6000,
       });
@@ -181,14 +174,12 @@ export default function ContextSettingsPage() {
 
   const handleDelete = async () => {
     if (!context) return;
-
     try {
       setDeleting(true);
       await deleteContext(context.id);
       await refetchUser();
       router.push("/workspace/contexts");
     } catch (err: unknown) {
-      console.error("Failed to delete context:", err);
       const apiError = err as { details?: { detail?: string } };
       setError(apiError?.details?.detail || "Failed to delete context");
       setDeleteDialogOpen(false);
@@ -197,13 +188,11 @@ export default function ContextSettingsPage() {
     }
   };
 
-  // Issue #85: Handle lock toggle
   const handleLockToggle = async () => {
     if (!context) return;
     const newLocked = !isLocked;
     try {
       setLockSaving(true);
-      setError(null);
       await updateContext(context.id, { is_locked: newLocked });
       setIsLocked(newLocked);
       toast({
@@ -222,14 +211,11 @@ export default function ContextSettingsPage() {
     }
   };
 
-  // Migration 034: Handle privacy toggle with confirmation
   const handlePrivacyToggle = (newIsPrivate: boolean) => {
-    // Shared → Private: Show confirmation (will remove members)
     if (!context?.is_private && newIsPrivate) {
       setPendingPrivacyChange(newIsPrivate);
       setPrivacyDialogOpen(true);
     } else {
-      // Private → Shared: Just update
       setIsPrivate(newIsPrivate);
     }
   };
@@ -257,8 +243,8 @@ export default function ContextSettingsPage() {
           <AlertCircle className="h-4 w-4" />
           <AlertTitle>Context Not Found</AlertTitle>
           <AlertDescription>
-            The context you're looking for doesn't exist or you don't have
-            access.
+            The context you&apos;re looking for doesn&apos;t exist or you
+            don&apos;t have access.
           </AlertDescription>
         </Alert>
         <Button
@@ -273,10 +259,12 @@ export default function ContextSettingsPage() {
     );
   }
 
+  const isOwner = currentWorkspace?.current_user_role === "owner";
+
   return (
     <PageContainer>
       <PageHeader
-        title={`${context.name} - Settings`}
+        title={`${context.display_name || context.name} — Settings`}
         description="Manage context settings and configurations"
         actions={
           <div className="flex items-center gap-2">
@@ -292,30 +280,41 @@ export default function ContextSettingsPage() {
               onClick={() => router.push("/workspace/contexts")}
             >
               <ArrowLeft className="h-4 w-4 mr-2" />
-              Back to Contexts
+              Back
+            </Button>
+            <Button onClick={handleSave} disabled={saving}>
+              {saving ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <Save className="h-4 w-4 mr-2" />
+              )}
+              {saving ? "Saving..." : "Save Changes"}
             </Button>
           </div>
         }
       />
 
       {error && (
-        <Alert variant="destructive" className="mb-6">
+        <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Error</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
-      {/* Basic Info Section */}
-      <Section
-        title="Basic Information"
-        description="Core context details visible in the dashboard"
-      >
-        <div className="space-y-4 max-w-2xl">
+      {/* Basic Information */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Info className="h-5 w-5" />
+            Basic Information
+          </CardTitle>
+          <CardDescription>
+            Core context details visible in the dashboard
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
           <div className="space-y-2">
-            <label className={cn(typography.bodySmall, "font-medium")}>
-              Context ID
-            </label>
+            <Label>Context ID</Label>
             <div className="flex items-center gap-2">
               <Input
                 value={context.id}
@@ -339,42 +338,36 @@ export default function ContextSettingsPage() {
                 )}
               </Button>
             </div>
-            <p className={cn(typography.caption, colors.text.muted)}>
+            <p className="text-sm text-muted-foreground">
               Use this ID in MCP tools (e.g.,{" "}
               <code className="text-xs">context_id</code> parameter).
             </p>
           </div>
 
           <div className="space-y-2">
-            <label className={cn(typography.bodySmall, "font-medium")}>
-              Context Name
-            </label>
+            <Label>Context Name</Label>
             <Input value={context.name} disabled className="font-mono" />
-            <p className={cn(typography.caption, colors.text.muted)}>
+            <p className="text-sm text-muted-foreground">
               Internal identifier. Cannot be changed after creation.
             </p>
           </div>
 
           <div className="space-y-2">
-            <label className={cn(typography.bodySmall, "font-medium")}>
-              Display Name
-            </label>
+            <Label>Display Name</Label>
             <Input
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
               placeholder={context.name}
               maxLength={200}
             />
-            <p className={cn(typography.caption, colors.text.muted)}>
+            <p className="text-sm text-muted-foreground">
               Human-readable name shown in the dashboard. Leave empty to use the
               context name.
             </p>
           </div>
 
           <div className="space-y-2">
-            <label className={cn(typography.bodySmall, "font-medium")}>
-              Description
-            </label>
+            <Label>Description</Label>
             <Textarea
               placeholder="What is this context for?"
               value={description}
@@ -382,20 +375,20 @@ export default function ContextSettingsPage() {
               rows={2}
             />
           </div>
-        </div>
-      </Section>
+        </CardContent>
+      </Card>
 
-      {/* AI Configuration Section */}
-      <Section
-        title="AI Configuration"
-        description="Settings that help AI understand and use this context"
-      >
-        <div className="space-y-4 max-w-2xl">
-          {/* Template Selector */}
+      {/* AI Configuration */}
+      <Card>
+        <CardHeader>
+          <CardTitle>AI Configuration</CardTitle>
+          <CardDescription>
+            Settings that help AI understand and use this context
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
           <div className="space-y-2">
-            <label className={cn(typography.bodySmall, "font-medium")}>
-              Template (optional)
-            </label>
+            <Label>Template (optional)</Label>
             <Select
               onValueChange={(templateId) => {
                 const template = getTemplate(templateId);
@@ -405,7 +398,7 @@ export default function ContextSettingsPage() {
                 }
               }}
             >
-              <SelectTrigger className="w-full">
+              <SelectTrigger>
                 <SelectValue placeholder="Choose a template to auto-fill Summary and Usage Guide..." />
               </SelectTrigger>
               <SelectContent>
@@ -421,15 +414,13 @@ export default function ContextSettingsPage() {
                 ))}
               </SelectContent>
             </Select>
-            <p className={cn(typography.caption, colors.text.muted)}>
+            <p className="text-sm text-muted-foreground">
               Or customize the fields below manually.
             </p>
           </div>
 
           <div className="space-y-2">
-            <label className={cn(typography.bodySmall, "font-medium")}>
-              Summary (for AI)
-            </label>
+            <Label>Summary (for AI)</Label>
             <Textarea
               placeholder="Brief description of this context's purpose (200-500 chars)"
               value={summary}
@@ -437,16 +428,14 @@ export default function ContextSettingsPage() {
               maxLength={500}
               rows={3}
             />
-            <p className={cn(typography.caption, colors.text.muted)}>
+            <p className="text-sm text-muted-foreground">
               Helps AI understand the purpose of this context. {summary.length}
               /500
             </p>
           </div>
 
           <div className="space-y-2">
-            <label className={cn(typography.bodySmall, "font-medium")}>
-              Usage Guide (for AI)
-            </label>
+            <Label>Usage Guide (for AI)</Label>
             <Textarea
               placeholder="Guidelines for how AI should use memories in this context..."
               value={usageGuide}
@@ -454,339 +443,236 @@ export default function ContextSettingsPage() {
               maxLength={2000}
               rows={6}
             />
-            <p className={cn(typography.caption, colors.text.muted)}>
+            <p className="text-sm text-muted-foreground">
               Instructions for AI on how to store and retrieve memories.{" "}
               {usageGuide.length}/2000
             </p>
           </div>
-        </div>
-      </Section>
+        </CardContent>
+      </Card>
 
-      {/* Search & Retrieval Section */}
-      <Section
-        title="Search & Retrieval"
-        description="Configure how memories are searched and ranked in this context"
-      >
-        <div className="space-y-4 max-w-2xl">
-          <div className="p-4 border rounded-lg bg-slate-50 dark:bg-slate-900/50">
-            <div className="flex items-start gap-4">
-              <div className="p-2 bg-blue-100 dark:bg-blue-900/30 rounded-lg">
-                <Search className="h-5 w-5 text-blue-600" />
-              </div>
-              <div className="flex-1">
-                <h4 className={cn(typography.bodySmall, "font-semibold mb-1")}>
-                  Search Settings
-                </h4>
-                <p
-                  className={cn(typography.caption, colors.text.muted, "mb-3")}
-                >
-                  Configure hybrid search weights, fetch factor, and reranking
-                  options.
-                </p>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() =>
-                    router.push(
-                      `/workspace/contexts/${contextId}/search-settings`,
-                    )
-                  }
-                >
-                  <Settings className="h-4 w-4 mr-2" />
-                  Open Search Settings
-                  <ExternalLink className="h-3 w-3 ml-2" />
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </Section>
+      {/* Search & Retrieval */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Settings className="h-5 w-5" />
+            Search & Retrieval
+          </CardTitle>
+          <CardDescription>
+            Configure how memories are searched and ranked
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button
+            variant="outline"
+            onClick={() =>
+              router.push(`/workspace/contexts/${contextId}/search-settings`)
+            }
+          >
+            <Settings className="h-4 w-4 mr-2" />
+            Open Search Settings
+            <ExternalLink className="h-3 w-3 ml-2" />
+          </Button>
+        </CardContent>
+      </Card>
 
-      {/* Privacy & Access Control - Migration 034 + Issue #238 */}
-      <Section
-        title="Privacy & Access Control"
-        description="Control who can access this context"
-      >
-        <div className="space-y-4 max-w-2xl">
+      {/* Privacy & Access Control */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Privacy & Access Control</CardTitle>
+          <CardDescription>Control who can access this context</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
           {/* Private/Shared Toggle */}
           <div className="flex items-center justify-between p-4 border rounded-lg">
             <div className="flex-1">
-              <h4 className="font-medium text-sm mb-1">
+              <p className="font-medium text-sm">
                 {isPrivate ? "🔒 Private Context" : "👥 Shared Context"}
-              </h4>
-              <p className="text-xs text-gray-500 dark:text-gray-400">
+              </p>
+              <p className="text-sm text-muted-foreground">
                 {isPrivate
                   ? "Only you can access this context"
                   : "Workspace members can be added to access this context"}
               </p>
             </div>
-            <button
+            <Button
+              variant={isPrivate ? "outline" : "default"}
+              size="sm"
               onClick={() => handlePrivacyToggle(!isPrivate)}
-              className={cn(
-                "px-4 py-2 rounded font-medium text-sm transition-colors",
-                isPrivate
-                  ? "bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300"
-                  : "bg-blue-600 text-white hover:bg-blue-700",
-              )}
             >
               {isPrivate ? "Make Shared" : "Make Private"}
-            </button>
+            </Button>
           </div>
 
-          {!isPrivate && (
-            <Alert>
-              <AlertCircle className="h-4 w-4" />
-              <AlertTitle>Shared Context</AlertTitle>
-              <AlertDescription>
-                This context is shared. You can manage members from the{" "}
-                <a
-                  href={`/contexts/${contextId}/members`}
-                  className="text-blue-600 hover:underline"
-                >
-                  Members page
-                </a>
-                .
-              </AlertDescription>
-            </Alert>
-          )}
+          {/* Public Access (Owner only) */}
+          {isOwner &&
+            (isPrivate ? (
+              <Alert>
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>
+                  Make this context Shared first to enable Public access.
+                </AlertDescription>
+              </Alert>
+            ) : isPublic || context.is_public ? (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between p-4 border rounded-lg">
+                  <div className="flex-1">
+                    <p className="font-medium text-sm">🌍 Public Context</p>
+                    <p className="text-sm text-muted-foreground">
+                      External systems can search via Public REST API
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="border-red-300 text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950"
+                    onClick={() => setIsPublic(false)}
+                  >
+                    Unpublish
+                  </Button>
+                </div>
 
-          {/* Public Access - Issue #238 (Owner only) */}
-          {currentWorkspace?.current_user_role !==
-          "owner" ? null : isPrivate ? (
-            <Alert className="border-yellow-200 bg-yellow-50 dark:bg-yellow-900/20">
-              <AlertCircle className="h-4 w-4 text-yellow-600" />
-              <AlertTitle className="text-yellow-800 dark:text-yellow-200">
-                Private Context Cannot Be Public
-              </AlertTitle>
-              <AlertDescription className="text-yellow-700 dark:text-yellow-300">
-                Make this context Shared first to enable Public access.
-              </AlertDescription>
-            </Alert>
-          ) : isPublic || context?.is_public ? (
-            /* Already public or pending public */
-            <div className="space-y-3">
-              <div className="flex items-center justify-between p-4 border rounded-lg bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-950/20 dark:to-blue-950/20">
-                <div className="flex-1">
-                  <h4 className="font-medium text-sm mb-1">
-                    🌍 Public Context
-                  </h4>
-                  <p className="text-xs text-gray-500 dark:text-gray-400">
-                    External systems can search this context via Public REST API
+                {!isPublic && context.is_public && (
+                  <Alert>
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>
+                      Unpublish pending — click Save Changes to apply.
+                    </AlertDescription>
+                  </Alert>
+                )}
+
+                {isPublic && context.resource_id && (
+                  <Alert>
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertTitle>Public Search API</AlertTitle>
+                    <AlertDescription className="space-y-2">
+                      <div>
+                        <p className="text-xs font-medium mb-1">Resource ID:</p>
+                        <code className="block p-2 bg-muted rounded text-xs font-mono break-all">
+                          {context.resource_id}
+                        </code>
+                      </div>
+                      <div>
+                        <p className="text-xs font-medium mb-1">Endpoint:</p>
+                        <code className="block p-2 bg-muted rounded text-xs font-mono break-all">
+                          POST /api/v1/public/{contextId}/search
+                        </code>
+                      </div>
+                      <div className="flex gap-3 mt-2 text-xs">
+                        <a
+                          href="/workspace/integrations/resource-tokens"
+                          className="text-primary underline hover:text-primary/80"
+                        >
+                          Manage Resource Tokens →
+                        </a>
+                        <a
+                          href="https://github.com/kagura-ai/kagura-memory-python-sdk"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-primary underline hover:text-primary/80"
+                        >
+                          Python SDK →
+                        </a>
+                      </div>
+                    </AlertDescription>
+                  </Alert>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label>
+                    Resource ID <span className="text-red-500">*</span>
+                  </Label>
+                  <Input
+                    placeholder="e.g., products, docs_articles"
+                    value={resourceId}
+                    onChange={(e) => {
+                      const value = e.target.value
+                        .toLowerCase()
+                        .replace(/[^a-z0-9_]/g, "");
+                      setResourceId(value);
+                    }}
+                    className="font-mono text-sm"
+                  />
+                  <p className="text-sm text-muted-foreground">
+                    Lowercase letters, numbers, underscores only. Used as the
+                    resource ID for Public Search API.
                   </p>
                 </div>
                 <Button
                   variant="outline"
-                  size="sm"
-                  className="border-red-300 text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950"
-                  onClick={() => setIsPublic(false)}
-                >
-                  Unpublish
-                </Button>
-              </div>
-
-              {!isPublic && context?.is_public && (
-                <Alert className="border-orange-200 bg-orange-50 dark:bg-orange-900/20">
-                  <AlertCircle className="h-4 w-4 text-orange-600" />
-                  <AlertDescription className="text-orange-700 dark:text-orange-300">
-                    Unpublish pending — click Save Changes to apply.
-                  </AlertDescription>
-                </Alert>
-              )}
-
-              {isPublic && context?.resource_id && (
-                <Alert className="border-purple-200 bg-purple-50 dark:bg-purple-900/20">
-                  <AlertCircle className="h-4 w-4 text-purple-600" />
-                  <AlertTitle className="text-purple-800 dark:text-purple-200">
-                    Public Search API
-                  </AlertTitle>
-                  <AlertDescription className="text-purple-700 dark:text-purple-300 space-y-2">
-                    <div className="mb-2">
-                      <p className="text-xs font-medium mb-1">Resource ID:</p>
-                      <code className="block p-2 bg-purple-100 dark:bg-purple-900/40 rounded text-xs font-mono break-all">
-                        {context.resource_id}
-                      </code>
-                    </div>
-                    <p>External systems can search this context using:</p>
-                    <code className="block mt-2 p-2 bg-purple-100 dark:bg-purple-900/40 rounded text-xs font-mono break-all">
-                      POST /api/v1/public/{contextId}/search
-                    </code>
-                    <div className="flex gap-3 mt-3 text-xs">
-                      <a
-                        href="/workspace/integrations/resource-tokens"
-                        className="text-purple-600 dark:text-purple-400 underline hover:text-purple-700"
-                      >
-                        Manage Resource Tokens →
-                      </a>
-                      <a
-                        href="https://github.com/kagura-ai/kagura-memory-python-sdk"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-purple-600 dark:text-purple-400 underline hover:text-purple-700"
-                      >
-                        Python SDK →
-                      </a>
-                    </div>
-                  </AlertDescription>
-                </Alert>
-              )}
-            </div>
-          ) : (
-            /* Not yet public — show prefix input + make public button */
-            <div className="space-y-3">
-              <div className="p-4 border-2 rounded-lg bg-blue-50 dark:bg-blue-950/20 border-blue-200 dark:border-blue-700">
-                <label
-                  className={cn(
-                    typography.bodySmall,
-                    "font-semibold mb-2 block",
-                  )}
-                >
-                  Resource ID <span className="text-red-500">*</span>
-                </label>
-                <Input
-                  placeholder="e.g., products, docs_articles"
-                  value={resourceIdPrefix}
-                  onChange={(e) => {
-                    const value = e.target.value
-                      .toLowerCase()
-                      .replace(/[^a-z0-9_]/g, "");
-                    setResourceIdPrefix(value);
+                  className="w-full"
+                  disabled={!resourceId.trim()}
+                  onClick={() => {
+                    if (resourceId.trim()) setIsPublic(true);
                   }}
-                  className="font-mono text-sm"
-                />
-                <p
-                  className={cn(typography.caption, colors.text.muted, "mt-2")}
-                >
-                  Lowercase letters, numbers, underscores only. Used as the
-                  resource ID for Public Search API.
-                </p>
-              </div>
-              <button
-                onClick={() => {
-                  if (resourceIdPrefix.trim()) {
-                    setIsPublic(true);
-                  }
-                }}
-                disabled={!resourceIdPrefix.trim()}
-                className={cn(
-                  "w-full px-4 py-3 rounded-lg border-2 border-dashed transition-colors",
-                  !resourceIdPrefix.trim()
-                    ? "border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/20 opacity-50 cursor-not-allowed"
-                    : "border-purple-300 dark:border-purple-700 bg-purple-50 dark:bg-purple-950/20 hover:bg-purple-100 dark:hover:bg-purple-900/30 cursor-pointer",
-                )}
-              >
-                <div
-                  className={cn(
-                    "text-sm font-medium",
-                    !resourceIdPrefix.trim()
-                      ? "text-gray-500"
-                      : "text-purple-700 dark:text-purple-300",
-                  )}
                 >
                   🌍 Make Public
-                </div>
-                <div
-                  className={cn(
-                    "text-xs mt-1",
-                    !resourceIdPrefix.trim()
-                      ? "text-gray-400"
-                      : "text-purple-600 dark:text-purple-400",
-                  )}
-                >
-                  {!resourceIdPrefix.trim()
-                    ? "Enter Resource ID first"
-                    : "Enable Public Search API for this context"}
-                </div>
-              </button>
-            </div>
-          )}
-        </div>
-      </Section>
-
-      {/* Save All Changes — covers Basic Info, AI Config, Privacy & Public */}
-      <div className="flex items-center justify-between max-w-2xl p-4 border rounded-lg bg-slate-50 dark:bg-slate-900/50">
-        <p className={cn(typography.caption, colors.text.muted)}>
-          Saves display name, description, AI settings, and privacy/public
-          changes.
-        </p>
-        <ActionButton
-          onClick={handleSave}
-          icon={
-            saving ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Save className="h-4 w-4" />
-            )
-          }
-          variant="primary"
-          disabled={saving}
-        >
-          {saving ? "Saving..." : "Save All Changes"}
-        </ActionButton>
-      </div>
+                </Button>
+              </div>
+            ))}
+        </CardContent>
+      </Card>
 
       {/* Protection & Danger Zone */}
       {!context.is_default && (
-        <Section
-          title="Protection & Danger Zone"
-          className="border-red-200 dark:border-red-900"
-        >
-          <div className="space-y-4 max-w-2xl">
-            {/* Issue #85: Context Lock Toggle */}
+        <Card className="border-red-200 dark:border-red-900">
+          <CardHeader>
+            <CardTitle className="text-red-900 dark:text-red-400">
+              Protection & Danger Zone
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
             <div className="flex items-center justify-between p-4 border rounded-lg">
               <div className="flex-1">
-                <h4 className="font-medium text-sm mb-1 flex items-center gap-2">
+                <p className="font-medium text-sm flex items-center gap-2">
                   {isLocked ? (
                     <ShieldCheck className="h-4 w-4 text-amber-600" />
                   ) : (
-                    <ShieldOff className="h-4 w-4 text-gray-400" />
+                    <ShieldOff className="h-4 w-4 text-muted-foreground" />
                   )}
                   {isLocked ? "Context Locked" : "Context Unlocked"}
-                </h4>
-                <p className="text-xs text-gray-500 dark:text-gray-400">
+                </p>
+                <p className="text-sm text-muted-foreground">
                   {isLocked
                     ? "This context is protected from accidental deletion"
-                    : "This context can be deleted — lock it to prevent accidental deletion"}
+                    : "Lock to prevent accidental deletion"}
                 </p>
               </div>
-              <button
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={handleLockToggle}
                 disabled={lockSaving}
-                className={cn(
-                  "px-4 py-2 rounded font-medium text-sm transition-colors",
-                  isLocked
-                    ? "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 hover:bg-amber-200"
-                    : "bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300",
-                )}
               >
                 {lockSaving ? "Saving..." : isLocked ? "Unlock" : "Lock"}
-              </button>
+              </Button>
             </div>
 
             <div
-              className={cn(
-                "p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900 rounded",
-                isLocked && "opacity-50",
-              )}
+              className={`p-4 border border-red-200 dark:border-red-900 rounded-lg ${isLocked ? "opacity-50" : ""}`}
             >
-              <h3 className="font-semibold text-red-900 dark:text-red-400 mb-2">
+              <p className="font-semibold text-red-900 dark:text-red-400 mb-2">
                 Delete Context
-              </h3>
-              <p className="text-sm text-red-700 dark:text-red-300 mb-4">
-                {isLocked
-                  ? `Cannot delete "${context.name}" — context is locked. Unlock it first.`
-                  : `This will permanently delete "${context.name}" and all memories in this context. This action cannot be undone.`}
               </p>
-              <ActionButton
+              <p className="text-sm text-muted-foreground mb-4">
+                {isLocked
+                  ? `Cannot delete "${context.name}" — context is locked.`
+                  : `Permanently delete "${context.name}" and all memories. This cannot be undone.`}
+              </p>
+              <Button
+                variant="destructive"
+                size="sm"
                 onClick={() => setDeleteDialogOpen(true)}
-                icon={<Trash2 className="h-4 w-4" />}
-                variant="danger"
                 disabled={isLocked}
               >
+                <Trash2 className="h-4 w-4 mr-2" />
                 Delete Context
-              </ActionButton>
+              </Button>
             </div>
-          </div>
-        </Section>
+          </CardContent>
+        </Card>
       )}
 
       {/* Delete Confirmation Dialog */}
@@ -795,9 +681,9 @@ export default function ContextSettingsPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete Context</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete "{context.name}"? This will
-              permanently delete all memories in this context's collection. This
-              action cannot be undone.
+              Are you sure you want to delete &quot;{context.name}&quot;? This
+              will permanently delete all memories in this context. This action
+              cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -814,7 +700,7 @@ export default function ContextSettingsPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Privacy Change Confirmation Dialog - Migration 034 */}
+      {/* Privacy Change Confirmation Dialog */}
       <AlertDialog open={privacyDialogOpen} onOpenChange={setPrivacyDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -826,12 +712,8 @@ export default function ContextSettingsPage() {
                   all members except you (the owner).
                 </div>
                 <div className="text-yellow-600 dark:text-yellow-400 font-medium">
-                  ⚠️ This action will immediately revoke access for all other
+                  This action will immediately revoke access for all other
                   members.
-                </div>
-                <div className="text-sm text-gray-600 dark:text-gray-400">
-                  This context will also be removed from any member&apos;s
-                  allowed context list.
                 </div>
                 <div>
                   You can re-add members later by changing back to Shared.
