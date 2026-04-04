@@ -63,24 +63,21 @@ class ReindexPhase:
         failed = 0
         failed_ids: list[str] = []
 
+        # Batch-fetch all changed memories in one query (avoid N+1)
+        stmt = select(Memory).where(
+            Memory.id.in_(changed_memory_ids),
+            Memory.deleted_at.is_(None),
+        )
+        row = await self.db.execute(stmt)
+        memory_map = {m.id: m for m in row.scalars().all()}
+
         for memory_id in changed_memory_ids:
+            memory = memory_map.get(memory_id)
+            if not memory:
+                logger.debug("reindex_skip_deleted", memory_id=str(memory_id))
+                continue
+
             try:
-                # Fetch current memory state
-                stmt = select(Memory).where(
-                    Memory.id == memory_id,
-                    Memory.deleted_at.is_(None),
-                )
-                row = await self.db.execute(stmt)
-                memory = row.scalar_one_or_none()
-
-                if not memory:
-                    logger.debug(
-                        "reindex_skip_deleted",
-                        memory_id=str(memory_id),
-                    )
-                    continue
-
-                # Re-embed summary text
                 vector = await self.embedding_service.embed(
                     memory.summary,
                     user_id=user_id,
@@ -89,18 +86,23 @@ class ReindexPhase:
                 )
                 result.embedding_calls_used += 1
 
-                # Build payload for Qdrant
+                # Payload aligned with memory_service.py canonical format
                 payload = {
+                    "user_id": user_id,
                     "summary": memory.summary,
+                    "context_summary": memory.context_summary or "",
                     "type": memory.type,
                     "importance": memory.importance,
                     "scope": memory.scope,
                     "tags": memory.tags or [],
-                    "created_at": memory.created_at.isoformat() if memory.created_at else None,
-                    "updated_at": memory.updated_at.isoformat() if memory.updated_at else None,
+                    "created_at": (
+                        memory.created_at.isoformat() + "Z" if memory.created_at else None
+                    ),
+                    "updated_at": (
+                        memory.updated_at.isoformat() + "Z" if memory.updated_at else None
+                    ),
                 }
 
-                # Upsert to Qdrant
                 await add_memory_to_qdrant(
                     user_id=user_id,
                     memory_id=memory.id,

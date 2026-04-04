@@ -30,6 +30,7 @@ def _make_memory(memory_id=None, summary="test summary", importance=0.7):
     m = MagicMock()
     m.id = memory_id or uuid4()
     m.summary = summary
+    m.context_summary = "test context"
     m.type = "note"
     m.importance = importance
     m.scope = "persistent"
@@ -40,6 +41,15 @@ def _make_memory(memory_id=None, summary="test summary", importance=0.7):
     m.updated_at.isoformat.return_value = "2026-01-02T00:00:00"
     m.deleted_at = None
     return m
+
+
+def _mock_batch_fetch(mock_db, memories):
+    """Mock the batch SELECT ... WHERE id IN (...) pattern."""
+    mock_scalars = MagicMock()
+    mock_scalars.all.return_value = memories
+    mock_result = MagicMock()
+    mock_result.scalars.return_value = mock_scalars
+    mock_db.execute = AsyncMock(return_value=mock_result)
 
 
 class TestReindexPhase:
@@ -65,13 +75,7 @@ class TestReindexPhase:
         mem2 = _make_memory()
         changed_ids = {mem1.id, mem2.id}
 
-        # Mock DB to return memories
-        mock_result = MagicMock()
-        side_effects = [mem1, mem2]
-        mock_result.scalar_one_or_none = MagicMock(side_effect=side_effects)
-        mock_db.execute = AsyncMock(return_value=mock_result)
-
-        # Mock embedding
+        _mock_batch_fetch(mock_db, [mem1, mem2])
         reindex_phase.embedding_service.embed = AsyncMock(return_value=[0.1] * 768)
 
         result = await reindex_phase.execute(
@@ -91,12 +95,10 @@ class TestReindexPhase:
     @pytest.mark.asyncio
     @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
     async def test_skips_deleted_memories(self, mock_qdrant, reindex_phase, mock_db):
-        """Deleted memories are skipped without error."""
+        """Deleted memories (not in batch result) are skipped."""
         changed_ids = {uuid4()}
 
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None
-        mock_db.execute = AsyncMock(return_value=mock_result)
+        _mock_batch_fetch(mock_db, [])  # No memories returned
 
         result = await reindex_phase.execute(
             changed_memory_ids=changed_ids,
@@ -115,11 +117,7 @@ class TestReindexPhase:
         mem_fail = _make_memory()
         changed_ids = {mem_ok.id, mem_fail.id}
 
-        # First call returns mem that will fail embed, second returns ok
-        mock_result = MagicMock()
-        returns = [mem_fail, mem_ok]
-        mock_result.scalar_one_or_none = MagicMock(side_effect=returns)
-        mock_db.execute = AsyncMock(return_value=mock_result)
+        _mock_batch_fetch(mock_db, [mem_fail, mem_ok])
 
         # First embed fails, second succeeds
         reindex_phase.embedding_service.embed = AsyncMock(
@@ -144,9 +142,7 @@ class TestReindexPhase:
         mem = _make_memory()
         changed_ids = {mem.id}
 
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mem
-        mock_db.execute = AsyncMock(return_value=mock_result)
+        _mock_batch_fetch(mock_db, [mem])
 
         reindex_phase.embedding_service.embed = AsyncMock(side_effect=RuntimeError("embed failed"))
 

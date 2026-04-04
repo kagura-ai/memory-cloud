@@ -21,7 +21,11 @@ from __future__ import annotations
 
 import random
 import string
+from typing import TYPE_CHECKING
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from neural.config import NeuralMemoryConfig
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -96,7 +100,7 @@ class DedupMergePhase:
 
     async def execute(
         self,
-        config,
+        config: NeuralMemoryConfig,
         user_id: str,
         workspace_id: str | None,
         context_id: str | None,
@@ -162,7 +166,6 @@ class DedupMergePhase:
         memory_map = {m.id: m for m in memories}
         pair_scores = {tuple(sorted([a, b], key=str)): s for a, b, s in pairs}
         merged_count = 0
-        flagged_count = 0
 
         for cluster in processable:
             if not budget.can_afford(llm_calls=1 if llm_enabled else 0):
@@ -184,7 +187,13 @@ class DedupMergePhase:
             )
 
             for winner_id, loser_id in merge_decisions:
-                await self._execute_merge(winner_id, loser_id, user_id, workspace_id, context_id)
+                await self._execute_merge(
+                    memory_map.get(winner_id),
+                    memory_map.get(loser_id),
+                    user_id,
+                    workspace_id,
+                    context_id,
+                )
                 result.changed_memory_ids.add(winner_id)
                 merged_count += 1
 
@@ -195,7 +204,6 @@ class DedupMergePhase:
             "clusters": len(processable),
             "deferred_clusters": len(deferred),
             "merged": merged_count,
-            "flagged": flagged_count,
         }
 
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
@@ -204,7 +212,6 @@ class DedupMergePhase:
             "dedup_merge_phase_completed",
             candidates=len(pairs),
             merged=merged_count,
-            flagged=flagged_count,
             llm_calls=result.llm_calls_used,
         )
 
@@ -298,7 +305,7 @@ class DedupMergePhase:
         context_id: str | None,
         workspace_id: str | None,
         budget: SleepBudget,
-        config,
+        config: NeuralMemoryConfig,
     ) -> list[tuple[UUID, UUID]]:
         """Judge a cluster and return merge decisions as (winner_id, loser_id) pairs."""
         decisions: list[tuple[UUID, UUID]] = []
@@ -327,7 +334,7 @@ class DedupMergePhase:
         context_id: str | None,
         workspace_id: str | None,
         budget: SleepBudget,
-        config,
+        config: NeuralMemoryConfig,
     ) -> list[tuple[UUID, UUID]]:
         """Use LLM to judge duplicates in a cluster."""
         # Build label map (A, B, C...) — mitigates ID hallucination
@@ -446,39 +453,30 @@ class DedupMergePhase:
 
     async def _execute_merge(
         self,
-        winner_id: UUID,
-        loser_id: UUID,
+        winner: Memory | None,
+        loser: Memory | None,
         user_id: str,
         workspace_id: str | None,
         context_id: str | None,
     ) -> None:
         """Execute a merge: soft-delete loser, transfer edges and tags to winner."""
-        from sqlalchemy import or_
-
-        stmt = select(Memory).where(or_(Memory.id == winner_id, Memory.id == loser_id))
-        result = await self.db.execute(stmt)
-        rows = {m.id: m for m in result.scalars().all()}
-        winner = rows.get(winner_id)
-        loser = rows.get(loser_id)
-
         if not winner or not loser:
             return
 
-        # Merge tags (union)
         winner_tags = set(winner.tags or [])
         loser_tags = set(loser.tags or [])
         merged_tags = list(winner_tags | loser_tags)
 
         await self.db.execute(
             update(Memory)
-            .where(Memory.id == winner_id)
+            .where(Memory.id == winner.id)
             .values(tags=merged_tags, updated_at=utcnow())
         )
 
         # Soft-delete loser in PostgreSQL
         await self.db.execute(
             update(Memory)
-            .where(Memory.id == loser_id)
+            .where(Memory.id == loser.id)
             .values(
                 deleted_at=utcnow(),
                 deleted_by="sleep_maintenance",
@@ -487,18 +485,18 @@ class DedupMergePhase:
 
         # Delete loser from Qdrant to prevent orphan vectors (cf. BUG FIX #83-10)
         try:
-            await delete_memory_from_qdrant(user_id, loser_id)
+            await delete_memory_from_qdrant(user_id, loser.id)
         except Exception as e:
             logger.warning(
                 "dedup_qdrant_delete_failed",
-                loser_id=str(loser_id),
+                loser_id=str(loser.id),
                 error=str(e),
             )
 
         # Transfer edges from loser to winner
         await self.edge_repo.transfer_edges(
-            from_node_id=loser_id,
-            to_node_id=winner_id,
+            from_node_id=loser.id,
+            to_node_id=winner.id,
             user_id=user_id,
             workspace_id=workspace_id,
             context_id=context_id,
@@ -506,7 +504,7 @@ class DedupMergePhase:
 
         logger.info(
             "dedup_merge_executed",
-            winner_id=str(winner_id),
-            loser_id=str(loser_id),
+            winner_id=str(winner.id),
+            loser_id=str(loser.id),
             merged_tags=len(merged_tags),
         )

@@ -21,7 +21,11 @@ from __future__ import annotations
 
 import random
 import string
+from typing import TYPE_CHECKING
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from neural.config import NeuralMemoryConfig
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,7 +65,7 @@ class EdgeDiscoveryPhase:
 
     async def execute(
         self,
-        config,
+        config: NeuralMemoryConfig,
         user_id: str,
         workspace_id: str | None,
         context_id: str | None,
@@ -273,7 +277,7 @@ class EdgeDiscoveryPhase:
         context_id: str | None,
         workspace_id: str | None,
         budget: SleepBudget,
-        config,
+        config: NeuralMemoryConfig,
     ) -> list[tuple[UUID, UUID, str, float]]:
         """Use LLM to judge edge candidates.
 

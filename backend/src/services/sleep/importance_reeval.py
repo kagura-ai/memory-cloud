@@ -18,7 +18,11 @@ from __future__ import annotations
 import random
 import string
 from datetime import timedelta
+from typing import TYPE_CHECKING
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from neural.config import NeuralMemoryConfig
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,7 +58,7 @@ class ImportanceReevalPhase:
 
     async def execute(
         self,
-        config,
+        config: NeuralMemoryConfig,
         user_id: str,
         workspace_id: str | None,
         context_id: str | None,
@@ -173,7 +177,7 @@ class ImportanceReevalPhase:
         context_id: str | None,
         workspace_id: str | None,
         budget: SleepBudget,
-        config,
+        config: NeuralMemoryConfig,
     ) -> dict[UUID, float]:
         """Evaluate a batch of memories via LLM. Returns {memory_id: score}."""
         # Assign short labels and shuffle for positional bias mitigation

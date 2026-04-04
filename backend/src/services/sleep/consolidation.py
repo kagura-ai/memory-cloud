@@ -18,7 +18,11 @@ from __future__ import annotations
 import os
 import random
 import string
+from typing import TYPE_CHECKING
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from neural.config import NeuralMemoryConfig
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,7 +52,7 @@ class ConsolidationPhase:
 
     async def execute(
         self,
-        config,
+        config: NeuralMemoryConfig,
         user_id: str,
         workspace_id: str | None,
         context_id: str | None,
@@ -203,7 +207,7 @@ class ConsolidationPhase:
         context_id: str | None,
         workspace_id: str | None,
         budget: SleepBudget,
-        config,
+        config: NeuralMemoryConfig,
     ) -> dict[UUID, str]:
         """Use LLM to judge borderline working memories.
 
