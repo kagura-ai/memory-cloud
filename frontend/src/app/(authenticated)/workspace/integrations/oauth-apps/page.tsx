@@ -238,7 +238,7 @@ export default function CustomAppsPage() {
 
       toast({
         title: tCommon("success"),
-        description: "Custom OAuth app created successfully",
+        description: t("createCustomSuccess"),
       });
     } catch (err: any) {
       setCustomDialogError(err.message || "Failed to create OAuth app");
@@ -277,7 +277,7 @@ export default function CustomAppsPage() {
 
       toast({
         title: tCommon("success"),
-        description: `OAuth secret regenerated successfully`,
+        description: t("regenerateSecretSuccess"),
       });
     } catch (err: any) {
       setError(`Failed to regenerate OAuth secret: ${err.message}`);

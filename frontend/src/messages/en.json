@@ -1510,6 +1510,8 @@
     "regenerateOAuthDesc": "Regenerate {provider} OAuth secret? This will invalidate the old secret.",
     "deleteOAuthTitle": "Delete OAuth App?",
     "deleteOAuthDesc": "This will revoke all tokens and permanently delete the OAuth application. This action cannot be undone.",
+    "createCustomSuccess": "Custom OAuth app created successfully",
+    "regenerateSecretSuccess": "OAuth secret regenerated successfully",
     "copyAuthUrl": "Copy Authorization URL",
     "copyTokenUrl": "Copy Token URL",
     "copyClientId": "Copy Client ID",

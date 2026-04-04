@@ -1516,6 +1516,8 @@
     "regenerateOAuthDesc": "{provider}のOAuthシークレットを再生成しますか？古いシークレットは無効になります。",
     "deleteOAuthTitle": "OAuthアプリを削除しますか？",
     "deleteOAuthDesc": "すべてのトークンが取り消され、OAuthアプリケーションが完全に削除されます。この操作は元に戻せません。",
+    "createCustomSuccess": "カスタムOAuthアプリが正常に作成されました",
+    "regenerateSecretSuccess": "OAuthシークレットが正常に再生成されました",
     "copyAuthUrl": "認可URLをコピー",
     "copyTokenUrl": "トークンURLをコピー",
     "copyClientId": "クライアントIDをコピー",
