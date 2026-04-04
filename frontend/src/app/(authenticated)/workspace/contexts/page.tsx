@@ -30,6 +30,7 @@ import {
   BarChart,
   Users,
   MoreVertical,
+  ShieldCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1057,7 +1058,7 @@ export default function ContextsPage() {
                           title={t("locked")}
                           aria-label={t("locked")}
                         >
-                          🔐
+                          <ShieldCheck className="h-3 w-3" />
                         </Badge>
                       )}
                       {context.is_private ? (
