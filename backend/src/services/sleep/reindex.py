@@ -24,9 +24,15 @@ logger = get_logger(__name__)
 class ReindexPhase:
     """Re-embed and upsert changed memories to Qdrant."""
 
-    def __init__(self, db: AsyncSession):
+    def __init__(
+        self,
+        db: AsyncSession,
+        embedding_model: str | None = None,
+        collection_name: str | None = None,
+    ):
         self.db = db
-        self.embedding_service = EmbeddingService(db)
+        self.embedding_service = EmbeddingService(db, model=embedding_model)
+        self.collection_name = collection_name or "kagura_memories"
 
     async def execute(
         self,
@@ -110,6 +116,7 @@ class ReindexPhase:
                     payload=payload,
                     workspace_id=workspace_id,
                     context_id=context_id,
+                    collection_name=self.collection_name,
                 )
 
                 reindexed += 1

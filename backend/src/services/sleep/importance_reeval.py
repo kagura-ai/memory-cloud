@@ -52,9 +52,12 @@ BATCH_SIZE = 10
 class ImportanceReevalPhase:
     """Re-evaluate memory importance using LLM + EMA smoothing."""
 
-    def __init__(self, db: AsyncSession, llm_service: LLMService):
+    def __init__(
+        self, db: AsyncSession, llm_service: LLMService, collection_name: str | None = None
+    ):
         self.db = db
         self.llm_service = llm_service
+        self.collection_name = collection_name
 
     async def execute(
         self,
@@ -114,11 +117,9 @@ class ImportanceReevalPhase:
                 # Update Qdrant payload
                 try:
                     await update_memory_payload_in_qdrant(
-                        user_id=user_id,
                         memory_id=memory_id,
-                        payload={"importance": smoothed},
-                        workspace_id=workspace_id,
-                        context_id=context_id,
+                        payload_updates={"importance": smoothed},
+                        collection_name=self.collection_name or "kagura_memories",
                     )
                 except Exception as e:
                     logger.warning(

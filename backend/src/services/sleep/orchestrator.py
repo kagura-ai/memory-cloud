@@ -85,6 +85,9 @@ class SleepOrchestrator:
         else:
             allowed_phases = FULL_PHASES
 
+        # Get context's embedding model and Qdrant collection name
+        embedding_model, collection_name = await self._get_context_embedding_info(context_id)
+
         budget = SleepBudget(
             max_llm_calls=config.sleep_max_llm_calls_per_run,
             max_memories=config.sleep_max_memories_per_run,
@@ -97,11 +100,13 @@ class SleepOrchestrator:
         changed_memory_ids: set[UUID] = set()
 
         # Phase definitions: (name, factory)
+        em = embedding_model
+        cn = collection_name
         phases = [
-            ("edge_discovery", lambda: EdgeDiscoveryPhase(self.db, self.llm_service)),
-            ("dedup_merge", lambda: DedupMergePhase(self.db, self.llm_service)),
-            ("importance_reeval", lambda: ImportanceReevalPhase(self.db, self.llm_service)),
-            ("consolidation", lambda: ConsolidationPhase(self.db, self.llm_service)),
+            ("edge_discovery", lambda: EdgeDiscoveryPhase(self.db, self.llm_service, em, cn)),
+            ("dedup_merge", lambda: DedupMergePhase(self.db, self.llm_service, em, cn)),
+            ("importance_reeval", lambda: ImportanceReevalPhase(self.db, self.llm_service, cn)),
+            ("consolidation", lambda: ConsolidationPhase(self.db, self.llm_service, cn)),
         ]
 
         try:
@@ -130,7 +135,7 @@ class SleepOrchestrator:
                 changed_memory_ids.update(result.changed_memory_ids)
 
             # Phase 5: Reindex always runs if there are changes
-            reindex = ReindexPhase(self.db)
+            reindex = ReindexPhase(self.db, em, cn)
             reindex_result = await self._run_reindex(
                 reindex,
                 changed_memory_ids,
@@ -219,6 +224,38 @@ class SleepOrchestrator:
                 error=str(e),
             )
         return "full"
+
+    async def _get_context_embedding_info(self, context_id: str | None) -> tuple[str | None, str]:
+        """Get embedding model and Qdrant collection name for a context.
+
+        Returns:
+            Tuple of (embedding_model, collection_name)
+        """
+        from db.qdrant import KAGURA_MEMORIES_COLLECTION, get_collection_name
+
+        if not context_id:
+            return None, KAGURA_MEMORIES_COLLECTION
+        try:
+            from models.config import ContextSearchConfig
+
+            stmt = select(ContextSearchConfig).where(
+                ContextSearchConfig.context_id == UUID(context_id)
+            )
+            result = await self.db.execute(stmt)
+            search_config = result.scalar_one_or_none()
+            if search_config and search_config.embedding_model:
+                collection = get_collection_name(
+                    search_config.embedding_model,
+                    search_config.embedding_dimensions,
+                )
+                return search_config.embedding_model, collection
+        except Exception as e:
+            logger.warning(
+                "embedding_info_lookup_failed",
+                context_id=context_id,
+                error=str(e),
+            )
+        return None, KAGURA_MEMORIES_COLLECTION
 
     async def _run_reindex(
         self,

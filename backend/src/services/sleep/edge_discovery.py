@@ -57,11 +57,18 @@ BATCH_SIZE = 5
 class EdgeDiscoveryPhase:
     """Discover missing edges between semantically related memories."""
 
-    def __init__(self, db: AsyncSession, llm_service: LLMService):
+    def __init__(
+        self,
+        db: AsyncSession,
+        llm_service: LLMService,
+        embedding_model: str | None = None,
+        collection_name: str | None = None,
+    ):
         self.db = db
         self.llm_service = llm_service
         self.edge_repo = NeuralEdgeRepository(db)
-        self.embedding_service = EmbeddingService(db)
+        self.collection_name = collection_name
+        self.embedding_service = EmbeddingService(db, model=embedding_model)
 
     async def execute(
         self,
@@ -137,7 +144,7 @@ class EdgeDiscoveryPhase:
                         confidence=confidence,
                         workspace_id=workspace_id,
                         context_id=context_id,
-                        metadata={"source": "sleep_edge_discovery"},
+                        edge_metadata={"source": "sleep_edge_discovery"},
                     )
                     edges_created += 1
                 except Exception as e:
@@ -222,6 +229,7 @@ class EdgeDiscoveryPhase:
                     context_id=context_id or "",
                     limit=10,
                     filters={"score_threshold": SIMILARITY_MIN},
+                    collection_name=self.collection_name or "kagura_memories",
                 )
 
                 for hit in results:
@@ -343,11 +351,16 @@ class EdgeDiscoveryPhase:
             if len(pair) != 2 or pair[0] not in label_to_id or pair[1] not in label_to_id:
                 continue
 
+            # Validate edge_type against DB CHECK constraint
+            valid_edge_types = {"related_to", "depends_on", "learned_from"}
+            raw_type = edge.get("edge_type", "related_to")
+            edge_type = raw_type if raw_type in valid_edge_types else "related_to"
+
             confirmed.append(
                 (
                     label_to_id[pair[0]],
                     label_to_id[pair[1]],
-                    edge.get("edge_type", "related_to"),
+                    edge_type,
                     edge.get("confidence", 0.5),
                 )
             )

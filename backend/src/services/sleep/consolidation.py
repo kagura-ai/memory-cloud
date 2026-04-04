@@ -45,10 +45,13 @@ BATCH_SIZE = 5
 class ConsolidationPhase:
     """Consolidate working memories with optional LLM judgment."""
 
-    def __init__(self, db: AsyncSession, llm_service: LLMService):
+    def __init__(
+        self, db: AsyncSession, llm_service: LLMService, collection_name: str | None = None
+    ):
         self.db = db
         self.llm_service = llm_service
         self.memory_repo = MemoryRepository(db)
+        self.collection_name = collection_name or "kagura_memories"
 
     async def execute(
         self,
@@ -113,7 +116,7 @@ class ConsolidationPhase:
                 result.changed_memory_ids.add(memory.id)
             elif should_delete:
                 try:
-                    await delete_memory_from_qdrant(user_id, memory.id)
+                    await delete_memory_from_qdrant(user_id, memory.id, self.collection_name)
                     await self.memory_repo.delete(memory.id)
                     deleted += 1
                 except Exception as e:
@@ -154,7 +157,9 @@ class ConsolidationPhase:
                             if has_graph:
                                 neural = await graph_service.get_node_metrics(str(memory_id))
                             if not neural or neural["is_isolated"]:
-                                await delete_memory_from_qdrant(user_id, memory_id)
+                                await delete_memory_from_qdrant(
+                                    user_id, memory_id, self.collection_name
+                                )
                                 await self.memory_repo.delete(memory_id)
                                 llm_archived += 1
 

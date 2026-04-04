@@ -92,11 +92,18 @@ class UnionFind:
 class DedupMergePhase:
     """Detect and merge duplicate memories."""
 
-    def __init__(self, db: AsyncSession, llm_service: LLMService):
+    def __init__(
+        self,
+        db: AsyncSession,
+        llm_service: LLMService,
+        embedding_model: str | None = None,
+        collection_name: str | None = None,
+    ):
         self.db = db
         self.llm_service = llm_service
         self.edge_repo = NeuralEdgeRepository(db)
-        self.embedding_service = EmbeddingService(db)
+        self.embedding_service = EmbeddingService(db, model=embedding_model)
+        self.collection_name = collection_name
 
     async def execute(
         self,
@@ -275,6 +282,7 @@ class DedupMergePhase:
                     context_id=context_id or "",
                     limit=10,
                     filters={"score_threshold": threshold},
+                    collection_name=self.collection_name or "kagura_memories",
                 )
                 for hit in results:
                     hit_id = UUID(str(hit["id"]))
@@ -485,7 +493,9 @@ class DedupMergePhase:
 
         # Delete loser from Qdrant to prevent orphan vectors (cf. BUG FIX #83-10)
         try:
-            await delete_memory_from_qdrant(user_id, loser.id)
+            await delete_memory_from_qdrant(
+                user_id, loser.id, self.collection_name or "kagura_memories"
+            )
         except Exception as e:
             logger.warning(
                 "dedup_qdrant_delete_failed",
