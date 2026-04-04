@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1214,3 +1214,264 @@ async def remove_context_member(
     await db.commit()
 
     logger.info(f"Removed context member: {user_id} from context {context_id}")
+
+
+# ============================================================================
+# Memory Usage Stats & Duplicate Detection (Issue #83)
+# ============================================================================
+
+
+class MemoryStatItem(BaseModel):
+    """Per-memory usage statistics."""
+
+    id: str
+    summary: str
+    type: str
+    importance: float
+    scope: str
+    use_count: int
+    access_count: int
+    last_used_at: str | None
+    embedding_status: str
+    created_at: str
+
+
+class MemoryUsageStatsResponse(BaseModel):
+    """Response for per-memory stats endpoint."""
+
+    memories: list[MemoryStatItem]
+    total: int
+    sort_by: str
+    sort_order: str
+
+
+VALID_SORT_FIELDS = {"use_count", "access_count", "importance", "created_at", "last_used_at"}
+VALID_SORT_ORDERS = {"asc", "desc"}
+
+
+@router.get("/{context_id}/memory-stats", response_model=MemoryUsageStatsResponse)
+async def get_memory_usage_stats(
+    context_id: UUID,
+    request: Request,
+    sort_by: str = Query("use_count", description="Sort field"),
+    sort_order: str = Query("desc", description="Sort order: asc or desc"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+) -> MemoryUsageStatsResponse:
+    """Get per-memory recall statistics for a context.
+
+    Issue #83: Memory usage stats for context cleanup workflows.
+    Supports sorting by use_count, access_count, importance, created_at, last_used_at.
+    """
+    from sqlalchemy import asc as sa_asc
+    from sqlalchemy import desc as sa_desc
+    from sqlalchemy import func, select
+
+    from models.memory import Memory
+    from services.permission_service import PermissionService
+
+    user = await get_current_user(request)
+    perm_service = PermissionService(db)
+    await perm_service.check_context_access(user["user_id"], context_id)
+
+    if sort_by not in VALID_SORT_FIELDS:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid sort_by. Must be one of: {VALID_SORT_FIELDS}"
+        )
+    if sort_order not in VALID_SORT_ORDERS:
+        raise HTTPException(status_code=400, detail="Invalid sort_order. Must be 'asc' or 'desc'")
+
+    sort_col = getattr(Memory, sort_by)
+    order_fn = sa_desc if sort_order == "desc" else sa_asc
+
+    # Total count
+    count_stmt = select(func.count(Memory.id)).where(
+        Memory.context_id == context_id, Memory.deleted_at.is_(None)
+    )
+    total = (await db.execute(count_stmt)).scalar() or 0
+
+    # Paginated query
+    stmt = (
+        select(Memory)
+        .where(Memory.context_id == context_id, Memory.deleted_at.is_(None))
+        .order_by(order_fn(sort_col).nulls_last())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await db.execute(stmt)
+    memories = result.scalars().all()
+
+    items = [
+        MemoryStatItem(
+            id=str(m.id),
+            summary=m.summary[:200] if m.summary else "",
+            type=m.type or "note",
+            importance=float(m.importance) if m.importance else 0.5,
+            scope=m.scope or "persistent",
+            use_count=m.use_count or 0,
+            access_count=m.access_count or 0,
+            last_used_at=m.last_used_at.isoformat() if m.last_used_at else None,
+            embedding_status=m.embedding_status or "pending",
+            created_at=m.created_at.isoformat() if m.created_at else "",
+        )
+        for m in memories
+    ]
+
+    return MemoryUsageStatsResponse(
+        memories=items,
+        total=total,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+
+
+class DuplicateMemoryInfo(BaseModel):
+    """Memory info for duplicate pair display."""
+
+    id: str
+    summary: str
+    type: str
+    created_at: str
+
+
+class DuplicatePair(BaseModel):
+    """A pair of similar memories."""
+
+    memory_a: DuplicateMemoryInfo
+    memory_b: DuplicateMemoryInfo
+    similarity: float
+
+
+class DuplicatesResponse(BaseModel):
+    """Response for duplicate detection endpoint."""
+
+    pairs: list[DuplicatePair]
+    total_pairs: int
+    threshold: float
+    memories_scanned: int
+
+
+@router.get("/{context_id}/duplicates", response_model=DuplicatesResponse)
+async def find_duplicates(
+    context_id: UUID,
+    request: Request,
+    threshold: float = Query(0.90, ge=0.5, le=1.0),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+) -> DuplicatesResponse:
+    """Find duplicate memory pairs using Qdrant vector similarity.
+
+    Issue #83: Duplicate detection for context cleanup.
+    Scans recent memories (max 200) and finds pairs above similarity threshold.
+    """
+    from sqlalchemy import select
+
+    from db.qdrant import search_memories_qdrant
+    from models.config import ContextSearchConfig
+    from models.memory import Memory
+    from services.embedding_service import EmbeddingService
+    from services.permission_service import PermissionService
+
+    user = await get_current_user(request)
+    perm_service = PermissionService(db)
+    await perm_service.check_context_access(user["user_id"], context_id)
+
+    # Get embedding config for this context
+    config_result = await db.execute(
+        select(ContextSearchConfig).where(ContextSearchConfig.context_id == context_id)
+    )
+    search_config = config_result.scalar_one_or_none()
+
+    from config.settings import get_settings
+
+    settings = get_settings()
+
+    embedding_model = search_config.embedding_model if search_config else settings.embedding_model
+    collection_name = settings.qdrant_collection_name
+
+    # Fetch recent memories (cap at 200 for performance)
+    mem_stmt = (
+        select(Memory)
+        .where(
+            Memory.context_id == context_id,
+            Memory.deleted_at.is_(None),
+            Memory.embedding_status == "success",
+        )
+        .order_by(Memory.created_at.desc())
+        .limit(200)
+    )
+    mem_result = await db.execute(mem_stmt)
+    memories = list(mem_result.scalars().all())
+
+    if not memories:
+        return DuplicatesResponse(pairs=[], total_pairs=0, threshold=threshold, memories_scanned=0)
+
+    # Build ID→Memory lookup
+    mem_map = {m.id: m for m in memories}
+    memory_ids = set(mem_map.keys())
+
+    # Find similar pairs (same pattern as sleep/dedup_merge)
+    embedding_service = EmbeddingService(model=embedding_model)
+    pairs: list[DuplicatePair] = []
+    seen: set[tuple[UUID, UUID]] = set()
+
+    workspace_id = user.get("workspace_id", "")
+
+    for memory in memories:
+        if len(pairs) >= limit:
+            break
+        try:
+            vector = await embedding_service.embed(
+                memory.summary,
+                user_id=user["user_id"],
+                context_id=str(context_id),
+                workspace_id=str(workspace_id),
+            )
+            results = await search_memories_qdrant(
+                user_id=user["user_id"],
+                query_vector=vector,
+                workspace_id=str(workspace_id),
+                context_id=str(context_id),
+                limit=5,
+                filters={"score_threshold": threshold},
+                collection_name=collection_name,
+            )
+            for hit in results:
+                hit_id = UUID(str(hit["id"]))
+                if hit_id == memory.id or hit_id not in memory_ids:
+                    continue
+                a, b = sorted([memory.id, hit_id], key=str)
+                pair_key = (a, b)
+                if pair_key in seen:
+                    continue
+                seen.add(pair_key)
+
+                mem_a = mem_map[a]
+                mem_b = mem_map[b]
+                pairs.append(
+                    DuplicatePair(
+                        memory_a=DuplicateMemoryInfo(
+                            id=str(a),
+                            summary=mem_a.summary[:200] if mem_a.summary else "",
+                            type=mem_a.type or "note",
+                            created_at=mem_a.created_at.isoformat() if mem_a.created_at else "",
+                        ),
+                        memory_b=DuplicateMemoryInfo(
+                            id=str(b),
+                            summary=mem_b.summary[:200] if mem_b.summary else "",
+                            type=mem_b.type or "note",
+                            created_at=mem_b.created_at.isoformat() if mem_b.created_at else "",
+                        ),
+                        similarity=hit["score"],
+                    )
+                )
+        except Exception as e:
+            logger.warning("duplicate_scan_error", memory_id=str(memory.id), error=str(e))
+
+    return DuplicatesResponse(
+        pairs=pairs[:limit],
+        total_pairs=len(pairs),
+        threshold=threshold,
+        memories_scanned=len(memories),
+    )
