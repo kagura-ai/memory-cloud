@@ -12,10 +12,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from __init__ import __version__
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from config.constants import APP_VERSION
 from config.settings import get_settings
 from utils.exceptions import MemoryCloudException
 from utils.logger import get_logger, setup_logger
@@ -149,7 +148,7 @@ openapi_tags = [
 app = FastAPI(
     title="Kagura Memory Cloud",
     description="Universal AI Memory Platform - Remote MCP Server + Web Management",
-    version=__version__,
+    version=APP_VERSION,
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_tags=openapi_tags,
