@@ -19,6 +19,9 @@ def _mock_perm_service():
     return mock_cls
 
 
+MOCK_USER = {"user_id": "test_user_123"}
+
+
 class TestGetMemoryUsageStats:
     """Test GET /contexts/{context_id}/memory-stats endpoint."""
 
@@ -27,19 +30,12 @@ class TestGetMemoryUsageStats:
         return AsyncMock()
 
     @pytest.fixture
-    def mock_request(self):
-        return MagicMock()
-
-    @pytest.fixture
     def context_id(self):
         return uuid4()
 
     @pytest.mark.asyncio
-    @patch("api.routes.contexts.get_current_user", new_callable=AsyncMock)
-    async def test_returns_paginated_stats(self, mock_auth, mock_db, mock_request, context_id):
+    async def test_returns_paginated_stats(self, mock_db, context_id):
         """Test that endpoint returns paginated memory stats."""
-        mock_auth.return_value = {"user_id": "test_user_123"}
-
         mem = MagicMock()
         mem.id = uuid4()
         mem.summary = "Test memory"
@@ -65,11 +61,11 @@ class TestGetMemoryUsageStats:
         with patch("services.permission_service.PermissionService", _mock_perm_service()):
             response = await get_memory_usage_stats(
                 context_id=context_id,
-                request=mock_request,
                 sort_by="use_count",
                 sort_order="desc",
                 limit=50,
                 offset=0,
+                user=MOCK_USER,
                 db=mock_db,
             )
 
@@ -80,22 +76,17 @@ class TestGetMemoryUsageStats:
         assert response.sort_by == "use_count"
 
     @pytest.mark.asyncio
-    @patch("api.routes.contexts.get_current_user", new_callable=AsyncMock)
-    async def test_invalid_sort_field_raises_400(
-        self, mock_auth, mock_db, mock_request, context_id
-    ):
+    async def test_invalid_sort_field_raises_400(self, mock_db, context_id):
         """Test that invalid sort_by field returns 400."""
-        mock_auth.return_value = {"user_id": "test_user_123"}
-
         with patch("services.permission_service.PermissionService", _mock_perm_service()):
             with pytest.raises(HTTPException) as exc:
                 await get_memory_usage_stats(
                     context_id=context_id,
-                    request=mock_request,
                     sort_by="invalid_field",
                     sort_order="desc",
                     limit=50,
                     offset=0,
+                    user=MOCK_USER,
                     db=mock_db,
                 )
 
@@ -103,11 +94,8 @@ class TestGetMemoryUsageStats:
         assert "Invalid sort_by" in str(exc.value.detail)
 
     @pytest.mark.asyncio
-    @patch("api.routes.contexts.get_current_user", new_callable=AsyncMock)
-    async def test_empty_context_returns_empty(self, mock_auth, mock_db, mock_request, context_id):
+    async def test_empty_context_returns_empty(self, mock_db, context_id):
         """Test that empty context returns zero results."""
-        mock_auth.return_value = {"user_id": "test_user_123"}
-
         mock_count_result = MagicMock()
         mock_count_result.scalar.return_value = 0
 
@@ -121,11 +109,11 @@ class TestGetMemoryUsageStats:
         with patch("services.permission_service.PermissionService", _mock_perm_service()):
             response = await get_memory_usage_stats(
                 context_id=context_id,
-                request=mock_request,
                 sort_by="use_count",
                 sort_order="desc",
                 limit=50,
                 offset=0,
+                user=MOCK_USER,
                 db=mock_db,
             )
 
