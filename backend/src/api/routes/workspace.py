@@ -659,13 +659,22 @@ class EmbeddingStatusResponse(BaseModel):
 async def get_embedding_status(
     user: dict = Depends(get_user_from_api_key_or_session),
     db: AsyncSession = Depends(get_db),
-    context_id: str | None = Query(None, description="Filter by context ID"),
+    context_id: str | None = Query(None, description="Filter by context ID (UUID)"),
 ) -> EmbeddingStatusResponse:
     """Get embedding processing queue status.
 
     Issue #93: Visibility into embedding pipeline status.
     Returns counts by status and details of any failed memories.
     """
+    from uuid import UUID as PyUUID
+
+    # Validate context_id is a valid UUID if provided
+    if context_id:
+        try:
+            PyUUID(context_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail="Invalid context_id format") from e
+
     workspace_id = user.get("workspace_id")
     if not workspace_id:
         raise HTTPException(status_code=400, detail="No active workspace")

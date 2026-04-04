@@ -697,14 +697,24 @@ async def delete_user(
 async def retry_failed_embeddings(
     user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    context_id: str | None = Query(None, description="Filter by context ID"),
-    workspace_id: str | None = Query(None, description="Filter by workspace ID"),
+    context_id: str | None = Query(None, description="Filter by context ID (UUID)"),
+    workspace_id: str | None = Query(None, description="Filter by workspace ID (UUID)"),
 ) -> dict:
     """Reset failed embeddings to pending for automatic retry.
 
     Issue #93: Admin tool to recover from embedding failures.
     """
+    from uuid import UUID as PyUUID
+
     from sqlalchemy import update
+
+    # Validate UUID formats
+    for param_name, param_val in [("context_id", context_id), ("workspace_id", workspace_id)]:
+        if param_val:
+            try:
+                PyUUID(param_val)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=f"Invalid {param_name} format") from e
 
     conditions = [
         Memory.embedding_status == "failed",
