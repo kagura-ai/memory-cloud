@@ -133,8 +133,7 @@ export default function ContextSettingsPage() {
     if (isPublic && !context.is_public && !resourceIdPrefix.trim()) {
       toast({
         title: "Resource ID required",
-        description:
-          "Enter a Resource ID Prefix before making this context public.",
+        description: "Enter a Resource ID before making this context public.",
         variant: "destructive",
       });
       return;
@@ -641,7 +640,7 @@ export default function ContextSettingsPage() {
                     "font-semibold mb-2 block",
                   )}
                 >
-                  Resource ID Prefix <span className="text-red-500">*</span>
+                  Resource ID <span className="text-red-500">*</span>
                 </label>
                 <Input
                   placeholder="e.g., products, docs_articles"
@@ -694,7 +693,7 @@ export default function ContextSettingsPage() {
                   )}
                 >
                   {!resourceIdPrefix.trim()
-                    ? "Enter Resource ID Prefix first"
+                    ? "Enter Resource ID first"
                     : "Enable Public Search API for this context"}
                 </div>
               </button>
