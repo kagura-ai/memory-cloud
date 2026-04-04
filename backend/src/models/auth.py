@@ -17,6 +17,7 @@ Provides ORM models for:
 
 import secrets
 from datetime import datetime
+from functools import cached_property
 
 from sqlalchemy import (
     JSON,
@@ -1090,9 +1091,9 @@ class Workspace(Base):
     addon_member_bonus = Column(Integer, nullable=False, server_default="0")
     addon_context_bonus = Column(Integer, nullable=False, server_default="0")  # Issue #15
 
-    # Issue #136: Effective quota properties (base from plan tier + addon)
-    def _get_plan_tier(self):
-        """Lazy import to avoid circular dependency."""
+    @cached_property
+    def _plan_tier(self):
+        """Cached plan tier lookup (lazy import to avoid circular dependency)."""
         from config.plan_tiers import get_plan_tier
 
         return get_plan_tier(self.plan_name)
@@ -1105,17 +1106,22 @@ class Workspace(Base):
     @property
     def effective_mcp_calls_per_day(self) -> int:
         """MCP API calls/day: plan tier base + addon."""
-        return self._get_plan_tier().mcp_calls_per_day + (self.addon_mcp_quota_bonus or 0)
+        return self._plan_tier.mcp_calls_per_day + (self.addon_mcp_quota_bonus or 0)
+
+    @property
+    def effective_mcp_calls_per_week(self) -> int:
+        """Weekly MCP API call limit (7x daily)."""
+        return self.effective_mcp_calls_per_day * 7
 
     @property
     def effective_max_contexts(self) -> int:
         """Max contexts: plan tier base + addon."""
-        return self._get_plan_tier().max_contexts_per_workspace + (self.addon_context_bonus or 0)
+        return self._plan_tier.max_contexts_per_workspace + (self.addon_context_bonus or 0)
 
     @property
     def effective_max_members(self) -> int:
         """Max members: plan tier base + addon."""
-        return self._get_plan_tier().max_members_per_workspace + (self.addon_member_bonus or 0)
+        return self._plan_tier.max_members_per_workspace + (self.addon_member_bonus or 0)
 
     # Stripe billing (Issue #351)
     stripe_customer_id = Column(String(255), nullable=True)

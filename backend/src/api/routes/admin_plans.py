@@ -207,7 +207,7 @@ async def list_workspaces_with_plans(
                     total_memories=total_memories,
                     memory_limit=workspace.effective_memory_limit,
                     daily_api_limit=workspace.effective_mcp_calls_per_day,
-                    weekly_api_limit=workspace.effective_mcp_calls_per_day * 7,
+                    weekly_api_limit=workspace.effective_mcp_calls_per_week,
                 )
             )
 

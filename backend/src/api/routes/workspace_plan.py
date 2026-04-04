@@ -161,7 +161,7 @@ async def get_workspace_plan(
             "max_resource_tokens": plan_tier.max_resource_tokens,  # Issue #242
             "max_quota_capacity": plan_tier.max_resource_tokens * 10000,  # Issue #242: events/hour
             "daily_api_limit": workspace.effective_mcp_calls_per_day,
-            "weekly_api_limit": workspace.effective_mcp_calls_per_day * 7,
+            "weekly_api_limit": workspace.effective_mcp_calls_per_week,
         },
         can_upgrade=current_index < len(plan_order) - 1,
         can_downgrade=current_index > 0,
