@@ -655,7 +655,7 @@ class EmbeddingStatusResponse(BaseModel):
     failed_memories: list[FailedMemoryInfo]
 
 
-@router.get("/workspace/embedding-status", response_model=EmbeddingStatusResponse)
+@router.get("/embedding-status", response_model=EmbeddingStatusResponse)
 async def get_embedding_status(
     user: dict = Depends(get_user_from_api_key_or_session),
     db: AsyncSession = Depends(get_db),
@@ -675,7 +675,7 @@ async def get_embedding_status(
         except ValueError as e:
             raise HTTPException(status_code=400, detail="Invalid context_id format") from e
 
-    workspace_id = user.get("workspace_id")
+    workspace_id = user.get("current_workspace_id")
     if not workspace_id:
         raise HTTPException(status_code=400, detail="No active workspace")
 

@@ -708,6 +708,13 @@ async def retry_failed_embeddings(
 
     from sqlalchemy import update
 
+    # Require at least one filter to prevent accidental mass retry
+    if not context_id and not workspace_id:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of context_id or workspace_id is required",
+        )
+
     # Validate UUID formats
     for param_name, param_val in [("context_id", context_id), ("workspace_id", workspace_id)]:
         if param_val:
@@ -723,15 +730,7 @@ async def retry_failed_embeddings(
     if context_id:
         conditions.append(Memory.context_id == context_id)
     if workspace_id:
-        member_ids_stmt = select(WorkspaceMember.user_id).where(
-            WorkspaceMember.workspace_id == workspace_id
-        )
-        member_ids_result = await db.execute(member_ids_stmt)
-        member_ids = [row[0] for row in member_ids_result.all()]
-        if member_ids:
-            conditions.append(Memory.user_id.in_(member_ids))
-        else:
-            return {"status": "success", "reset_count": 0}
+        conditions.append(Memory.workspace_id == workspace_id)
 
     stmt = (
         update(Memory).where(*conditions).values(embedding_status="pending", embedding_error=None)

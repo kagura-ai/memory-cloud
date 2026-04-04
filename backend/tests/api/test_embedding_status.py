@@ -21,7 +21,7 @@ class TestGetEmbeddingStatus:
     def mock_user(self):
         return {
             "user_id": "test_user_123",
-            "workspace_id": str(uuid4()),
+            "current_workspace_id": str(uuid4()),
         }
 
     @pytest.mark.asyncio
