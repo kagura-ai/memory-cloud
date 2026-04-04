@@ -12,6 +12,7 @@ Handler re-exports (used by test_mcp_server_e2e.py):
 
 import json
 import logging
+import time
 from typing import Any
 from uuid import UUID
 
@@ -33,6 +34,21 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
         "get_usage",
     }
 )
+
+# Read-only info tools exempt from rate limiting
+_RATE_LIMIT_EXEMPT_TOOLS = frozenset(
+    {
+        "get_usage",
+        "list_contexts",
+        "kagura_memory_usage_guide",
+        "get_context_info",  # Must remain callable so agents can inspect context even when rate-limited
+    }
+)
+
+# Per-workspace rate limit cache {workspace_id: (allowed, used, limit, expires_at)}
+_RATE_LIMIT_CACHE: dict[UUID, tuple[bool, int, int, float]] = {}
+_RATE_LIMIT_CACHE_TTL = 60  # seconds
+_RATE_LIMIT_CACHE_MAX_SIZE = 1000
 
 # Lazy-initialized registry (avoids circular imports at module load time)
 _TOOL_REGISTRY: dict[str, Any] | None = None
@@ -71,6 +87,62 @@ def _build_registry() -> dict[str, Any]:
     }
 
 
+async def _check_rate_limit(workspace_id: UUID) -> tuple[bool, int, int]:
+    """Check MCP rate limit with TTL cache and in-memory counter.
+
+    On cache miss: queries DB for today's count and caches (used, limit, expires_at).
+    On cache hit: increments in-memory used counter to track calls within the TTL window,
+    preventing limit overshoot between DB refreshes.
+
+    Args:
+        workspace_id: Workspace ID
+
+    Returns:
+        Tuple of (allowed, used_today, daily_limit)
+    """
+    now = time.monotonic()
+    cached = _RATE_LIMIT_CACHE.get(workspace_id)
+    if cached is not None:
+        allowed, used, limit, expires_at = cached
+        if now < expires_at:
+            # Increment in-memory counter to prevent overshoot within TTL
+            used += 1
+            new_allowed = used < limit
+            _RATE_LIMIT_CACHE[workspace_id] = (new_allowed, used, limit, expires_at)
+            return new_allowed, used, limit
+
+    from db.base import get_db
+    from services.quota_service import QuotaService
+
+    async for db in get_db():
+        allowed, used, limit = await QuotaService(db).check_mcp_rate_limit(workspace_id)
+        # Evict expired entries when cache is full
+        if len(_RATE_LIMIT_CACHE) >= _RATE_LIMIT_CACHE_MAX_SIZE:
+            expired = [k for k, v in _RATE_LIMIT_CACHE.items() if v[3] <= now]
+            for k in expired:
+                del _RATE_LIMIT_CACHE[k]
+            if len(_RATE_LIMIT_CACHE) >= _RATE_LIMIT_CACHE_MAX_SIZE:
+                oldest_key = min(_RATE_LIMIT_CACHE, key=lambda wid: _RATE_LIMIT_CACHE[wid][3])
+                del _RATE_LIMIT_CACHE[oldest_key]
+        _RATE_LIMIT_CACHE[workspace_id] = (allowed, used, limit, now + _RATE_LIMIT_CACHE_TTL)
+        return allowed, used, limit
+
+    logger.warning("rate_limit_db_unavailable: allowing request as fallback")
+    return True, 0, 0
+
+
+def invalidate_rate_limit_cache(workspace_id: UUID | None = None) -> None:
+    """Invalidate rate limit cache. For testing and admin use.
+
+    Args:
+        workspace_id: Specific workspace to invalidate, or None for all
+    """
+    if workspace_id is None:
+        _RATE_LIMIT_CACHE.clear()
+    else:
+        _RATE_LIMIT_CACHE.pop(workspace_id, None)
+
+
 async def execute_tool_call(
     tool_name: str,
     arguments: dict[str, Any],
@@ -82,6 +154,7 @@ async def execute_tool_call(
     Issue #172: Refactored to extract common boilerplate into helpers.
     Issue #245: context_id is now obtained from arguments["context_id"] (required).
     Issue #7: Registry-based dispatch replaces if/elif chain.
+    Issue #149: Rate limit check before dispatch.
 
     Args:
         tool_name: Tool name (remember, recall, forget, etc.)
@@ -97,6 +170,28 @@ async def execute_tool_call(
         _TOOL_REGISTRY = _build_registry()
 
     args = arguments or {}
+
+    # Validate tool exists before expensive checks (avoids DB query for unknown tools)
+    handler = _TOOL_REGISTRY.get(tool_name)
+    if handler is None:
+        return _error_response("unknown_tool", f"Unknown tool: {tool_name}")
+
+    # Rate limit check (exempt read-only info tools)
+    if workspace_id and tool_name not in _RATE_LIMIT_EXEMPT_TOOLS:
+        try:
+            allowed, used, limit = await _check_rate_limit(workspace_id)
+            if not allowed:
+                return _error_response(
+                    "rate_limit_exceeded",
+                    f"Daily MCP call limit reached ({used}/{limit}). Resets at midnight UTC.",
+                    used_today=used,
+                    daily_limit=limit,
+                    help="Use get_usage() to check your current quota. "
+                    "Upgrade your plan for higher limits.",
+                )
+        except Exception as e:
+            # Don't block tool execution if rate limit check fails
+            logger.warning(f"rate_limit_check_failed: {e}")
 
     # Pre-dispatch: validate context_id for tools that require it
     # Issue #81: Skip context_id check if context_ids is provided (cross-context recall)
@@ -114,11 +209,6 @@ async def execute_tool_call(
                 _resolve_context_id(args["context_id"])
             except ValueError as e:
                 return _error_response("invalid_context_id_format", str(e))
-
-    # Dispatch to handler
-    handler = _TOOL_REGISTRY.get(tool_name)
-    if handler is None:
-        return _error_response("unknown_tool", f"Unknown tool: {tool_name}")
 
     try:
         return await handler(args, user_id, workspace_id)

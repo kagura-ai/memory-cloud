@@ -61,14 +61,19 @@ class TestGetUsage:
         async def mock_get_db():
             yield mock_db
 
-        mock_quota_service = AsyncMock()
-        mock_quota_service.get_effective_quotas.return_value = self._mock_quotas()
+        mock_effective_quota = AsyncMock()
+        mock_effective_quota.get_effective_quotas.return_value = self._mock_quotas()
 
         with (
             patch("db.base.get_db", new=mock_get_db),
             patch(
                 "services.effective_quota_service.EffectiveQuotaService",
-                return_value=mock_quota_service,
+                return_value=mock_effective_quota,
+            ),
+            patch(
+                "services.quota_service.QuotaService.count_mcp_calls_today",
+                new_callable=AsyncMock,
+                return_value=42,
             ),
         ):
             result = await handle_get_usage({}, user_id, workspace_id)
@@ -82,6 +87,8 @@ class TestGetUsage:
         assert data["memories"]["limit"] == 11000
         assert data["contexts"]["used"] == 3
         assert data["members"]["used"] == 1
+        assert data["mcp_calls_per_day"]["used"] == 42
+        assert data["mcp_calls_per_day"]["limit"] == 1000
 
     @pytest.mark.asyncio
     async def test_no_workspace_returns_error(self, user_id):
@@ -137,8 +144,8 @@ class TestGetUsage:
         async def mock_get_db():
             yield mock_db
 
-        mock_quota_service = AsyncMock()
-        mock_quota_service.get_effective_quotas.return_value = self._mock_quotas(
+        mock_effective_quota = AsyncMock()
+        mock_effective_quota.get_effective_quotas.return_value = self._mock_quotas(
             memory_limit=0, mcp_calls=0, max_contexts=0, max_members=0
         )
 
@@ -146,7 +153,12 @@ class TestGetUsage:
             patch("db.base.get_db", new=mock_get_db),
             patch(
                 "services.effective_quota_service.EffectiveQuotaService",
-                return_value=mock_quota_service,
+                return_value=mock_effective_quota,
+            ),
+            patch(
+                "services.quota_service.QuotaService.count_mcp_calls_today",
+                new_callable=AsyncMock,
+                return_value=0,
             ),
         ):
             result = await handle_get_usage({}, user_id, workspace_id)
