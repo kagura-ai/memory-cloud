@@ -40,7 +40,7 @@ def edge_phase(mock_db, mock_llm):
     return phase
 
 
-def _make_config(enabled=True, sample_size=10, provider="openai", model="gpt-4o-mini"):
+def _make_config(enabled=True, sample_size=10, provider="openai", model="gpt-5-nano"):
     config = MagicMock()
     config.sleep_edge_discovery_enabled = enabled
     config.sleep_edge_discovery_sample_size = sample_size

@@ -35,7 +35,7 @@ def reeval_phase(mock_db, mock_llm):
     return phase
 
 
-def _make_config(enabled=True, alpha=0.3, provider="openai", model="gpt-4o-mini"):
+def _make_config(enabled=True, alpha=0.3, provider="openai", model="gpt-5-nano"):
     config = MagicMock()
     config.sleep_importance_reeval_enabled = enabled
     config.importance_ema_alpha = alpha

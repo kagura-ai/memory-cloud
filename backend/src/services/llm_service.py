@@ -76,7 +76,7 @@ class LLMService:
         Raises:
             LLMServiceError: On API error or JSON parse failure after retry
         """
-        resolved_model = model or os.getenv("SLEEP_LLM_MODEL", "gpt-4o-mini")
+        resolved_model = model or os.getenv("SLEEP_LLM_MODEL", "gpt-5-nano")
         resolved_provider = provider or os.getenv("SLEEP_LLM_PROVIDER", "openai")
 
         client = await self._get_client(user_id, resolved_provider, context_id, workspace_id)

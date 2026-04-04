@@ -151,7 +151,7 @@ class NeuralMemoryConfig:
     sleep_cron_hour: int = 2  # UTC hour for cron schedule (env-only)
     sleep_cron_minute: int = 0  # UTC minute for cron schedule (env-only)
     sleep_llm_provider: str = "openai"  # LLM provider: openai / ollama
-    sleep_llm_model: str = "gpt-4o-mini"  # LLM model name
+    sleep_llm_model: str = "gpt-5-nano"  # LLM model name
     sleep_max_memories_per_run: int = 200  # Batch size cap per run
     sleep_max_llm_calls_per_run: int = 50  # LLM call budget per run
     sleep_dedup_enabled: bool = True  # Phase 2 on/off
@@ -349,7 +349,7 @@ class NeuralMemoryConfig:
             sleep_cron_hour=get_int("SLEEP_CRON_HOUR", 2),
             sleep_cron_minute=get_int("SLEEP_CRON_MINUTE", 0),
             sleep_llm_provider=os.getenv("SLEEP_LLM_PROVIDER", "openai"),
-            sleep_llm_model=os.getenv("SLEEP_LLM_MODEL", "gpt-4o-mini"),
+            sleep_llm_model=os.getenv("SLEEP_LLM_MODEL", "gpt-5-nano"),
             sleep_max_memories_per_run=get_int("SLEEP_MAX_MEMORIES_PER_RUN", 200),
             sleep_max_llm_calls_per_run=get_int("SLEEP_MAX_LLM_CALLS_PER_RUN", 50),
             sleep_dedup_enabled=get_bool("SLEEP_DEDUP_ENABLED", True),

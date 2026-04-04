@@ -73,7 +73,7 @@ class TestSleepMaintenanceConfig:
         assert config.sleep_cron_hour == 2
         assert config.sleep_cron_minute == 0
         assert config.sleep_llm_provider == "openai"
-        assert config.sleep_llm_model == "gpt-4o-mini"
+        assert config.sleep_llm_model == "gpt-5-nano"
         assert config.sleep_max_memories_per_run == 200
         assert config.sleep_max_llm_calls_per_run == 50
         assert config.sleep_dedup_enabled is True

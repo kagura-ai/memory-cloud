@@ -98,7 +98,7 @@ def upgrade() -> None:
     op.execute("""
         INSERT INTO neural_config (key, value, value_type, category, description, min_value, max_value) VALUES
             ('sleep_llm_provider', 'openai', 'string', 'sleep', 'LLM provider for sleep maintenance (openai/ollama)', NULL, NULL),
-            ('sleep_llm_model', 'gpt-4o-mini', 'string', 'sleep', 'LLM model for sleep maintenance', NULL, NULL),
+            ('sleep_llm_model', 'gpt-5-nano', 'string', 'sleep', 'LLM model for sleep maintenance', NULL, NULL),
             ('sleep_max_memories_per_run', '200', 'int', 'sleep', 'Max memories processed per sleep run', 10, 5000),
             ('sleep_max_llm_calls_per_run', '50', 'int', 'sleep', 'Max LLM API calls per sleep run', 1, 500),
             ('sleep_dedup_enabled', 'true', 'bool', 'sleep', 'Enable dedup/merge phase', NULL, NULL),

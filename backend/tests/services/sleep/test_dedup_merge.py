@@ -105,7 +105,7 @@ def dedup_phase(mock_db, mock_llm):
     return phase
 
 
-def _make_config(dedup_enabled=True, threshold=0.92, provider="openai", model="gpt-4o-mini"):
+def _make_config(dedup_enabled=True, threshold=0.92, provider="openai", model="gpt-5-nano"):
     config = MagicMock()
     config.sleep_dedup_enabled = dedup_enabled
     config.sleep_dedup_similarity_threshold = threshold

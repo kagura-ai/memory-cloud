@@ -35,7 +35,7 @@ def consolidation_phase(mock_db, mock_llm):
     return phase
 
 
-def _make_config(provider="openai", model="gpt-4o-mini"):
+def _make_config(provider="openai", model="gpt-5-nano"):
     config = MagicMock()
     config.sleep_llm_provider = provider
     config.sleep_llm_model = model

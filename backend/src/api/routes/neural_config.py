@@ -115,7 +115,7 @@ DEFAULT_VALUES: dict[str, str] = {
     "gradient_clipping": "0.5",
     # Sleep Maintenance (DB-configurable params only)
     "sleep_llm_provider": "openai",
-    "sleep_llm_model": "gpt-4o-mini",
+    "sleep_llm_model": "gpt-5-nano",
     "sleep_max_memories_per_run": "200",
     "sleep_max_llm_calls_per_run": "50",
     "sleep_dedup_enabled": "true",

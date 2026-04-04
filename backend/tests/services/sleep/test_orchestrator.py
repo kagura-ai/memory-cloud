@@ -25,7 +25,7 @@ def _make_config():
     config.sleep_edge_discovery_enabled = True
     config.sleep_importance_reeval_enabled = True
     config.sleep_llm_provider = "openai"
-    config.sleep_llm_model = "gpt-4o-mini"
+    config.sleep_llm_model = "gpt-5-nano"
     config.sleep_dedup_similarity_threshold = 0.92
     config.sleep_edge_discovery_sample_size = 30
     config.importance_ema_alpha = 0.3
