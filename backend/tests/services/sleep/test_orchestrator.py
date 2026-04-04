@@ -233,3 +233,88 @@ class TestSleepOrchestrator:
 
         assert mem_id_1 in reindex_received
         assert mem_id_2 in reindex_received
+
+
+class TestSleepMode:
+    """Test context-level sleep_mode dispatch."""
+
+    @pytest.mark.asyncio
+    async def test_skip_mode_does_nothing(self, mock_db):
+        """sleep_mode='skip' should return immediately without running any phases."""
+        config = _make_config()
+
+        with (
+            patch("services.sleep.orchestrator.LLMService"),
+            patch("services.sleep.orchestrator.SleepReporter") as MockReporter,
+        ):
+            reporter = AsyncMock()
+            MockReporter.return_value = reporter
+
+            orchestrator = SleepOrchestrator(mock_db)
+            orchestrator._get_sleep_mode = AsyncMock(return_value="skip")
+
+            await orchestrator.run("user-1", "ws-1", "ctx-1", config=config)
+
+        # No report should be created for skip mode
+        reporter.create_report.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_edges_only_mode_skips_dedup_importance_consolidation(self, mock_db):
+        """sleep_mode='edges_only' should only run edge_discovery + reindex."""
+        config = _make_config()
+        phases_run = []
+
+        with (
+            patch("services.sleep.orchestrator.LLMService"),
+            patch("services.sleep.orchestrator.SleepReporter") as MockReporter,
+            patch("services.sleep.orchestrator.EdgeDiscoveryPhase") as MockED,
+            patch("services.sleep.orchestrator.DedupMergePhase") as MockDM,
+            patch("services.sleep.orchestrator.ImportanceReevalPhase") as MockIR,
+            patch("services.sleep.orchestrator.ConsolidationPhase") as MockCP,
+            patch("services.sleep.orchestrator.ReindexPhase") as MockRI,
+        ):
+            reporter = AsyncMock()
+            report = MagicMock()
+            report.id = uuid4()
+            reporter.create_report = AsyncMock(return_value=report)
+            reporter.complete_report = AsyncMock()
+            MockReporter.return_value = reporter
+
+            # Track which phases actually execute
+            for MockPhase, name in [
+                (MockED, "edge_discovery"),
+                (MockDM, "dedup_merge"),
+                (MockIR, "importance_reeval"),
+                (MockCP, "consolidation"),
+            ]:
+                inst = AsyncMock()
+
+                async def make_result(cfg, uid, ws, ctx, budget, n=name):
+                    phases_run.append(n)
+                    return PhaseResult(phase_name=n)
+
+                inst.execute = make_result
+                MockPhase.return_value = inst
+
+            ri_inst = AsyncMock()
+            ri_inst.execute = AsyncMock(return_value=PhaseResult(phase_name="reindex"))
+            MockRI.return_value = ri_inst
+
+            orchestrator = SleepOrchestrator(mock_db)
+            orchestrator._get_sleep_mode = AsyncMock(return_value="edges_only")
+
+            await orchestrator.run("user-1", "ws-1", "ctx-1", config=config)
+
+        # Only edge_discovery should have executed
+        assert "edge_discovery" in phases_run
+        assert "dedup_merge" not in phases_run
+        assert "importance_reeval" not in phases_run
+        assert "consolidation" not in phases_run
+
+        # Report should include skipped phases
+        reporter.complete_report.assert_awaited_once()
+        results = reporter.complete_report.call_args[0][1]
+        skipped_names = [r.phase_name for r in results if r.skipped]
+        assert "dedup_merge" in skipped_names
+        assert "importance_reeval" in skipped_names
+        assert "consolidation" in skipped_names

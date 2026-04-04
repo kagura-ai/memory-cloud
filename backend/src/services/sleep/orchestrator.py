@@ -16,8 +16,10 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from models.auth import Context
 from neural.config import NeuralMemoryConfig
 from services.llm_service import LLMService
 from services.sleep.consolidation import ConsolidationPhase
@@ -29,6 +31,10 @@ from services.sleep.reporter import PhaseResult, SleepBudget, SleepReporter
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Phase sets for each sleep mode
+FULL_PHASES = {"edge_discovery", "dedup_merge", "importance_reeval", "consolidation"}
+EDGES_ONLY_PHASES = {"edge_discovery"}
 
 
 class SleepOrchestrator:
@@ -62,6 +68,23 @@ class SleepOrchestrator:
             NeuralMemoryConfig.invalidate_cache()
             config = await NeuralMemoryConfig.from_db(self.db)
 
+        # Determine sleep mode for this context
+        sleep_mode = await self._get_sleep_mode(context_id)
+        if sleep_mode == "skip":
+            logger.info(
+                "sleep_orchestrator_skipped",
+                user_id=user_id,
+                context_id=context_id,
+                reason="context_sleep_mode_skip",
+            )
+            return
+
+        # Determine which phases to run based on sleep_mode
+        if sleep_mode == "edges_only":
+            allowed_phases = EDGES_ONLY_PHASES
+        else:
+            allowed_phases = FULL_PHASES
+
         budget = SleepBudget(
             max_llm_calls=config.sleep_max_llm_calls_per_run,
             max_memories=config.sleep_max_memories_per_run,
@@ -73,60 +96,40 @@ class SleepOrchestrator:
         phase_results: list[PhaseResult] = []
         changed_memory_ids: set[UUID] = set()
 
+        # Phase definitions: (name, factory)
+        phases = [
+            ("edge_discovery", lambda: EdgeDiscoveryPhase(self.db, self.llm_service)),
+            ("dedup_merge", lambda: DedupMergePhase(self.db, self.llm_service)),
+            ("importance_reeval", lambda: ImportanceReevalPhase(self.db, self.llm_service)),
+            ("consolidation", lambda: ConsolidationPhase(self.db, self.llm_service)),
+        ]
+
         try:
-            # Phase 1: Edge Discovery
-            result = await self._run_phase(
-                "edge_discovery",
-                EdgeDiscoveryPhase(self.db, self.llm_service),
-                config,
-                user_id,
-                workspace_id,
-                context_id,
-                budget,
-            )
-            phase_results.append(result)
-            changed_memory_ids.update(result.changed_memory_ids)
+            # Run phases 1-4 based on sleep_mode
+            for phase_name, phase_factory in phases:
+                if phase_name not in allowed_phases:
+                    phase_results.append(
+                        PhaseResult(
+                            phase_name=phase_name,
+                            skipped=True,
+                            skip_reason=f"sleep_mode_{sleep_mode}",
+                        )
+                    )
+                    continue
 
-            # Phase 2: Dedup/Merge
-            result = await self._run_phase(
-                "dedup_merge",
-                DedupMergePhase(self.db, self.llm_service),
-                config,
-                user_id,
-                workspace_id,
-                context_id,
-                budget,
-            )
-            phase_results.append(result)
-            changed_memory_ids.update(result.changed_memory_ids)
+                result = await self._run_phase(
+                    phase_name,
+                    phase_factory(),
+                    config,
+                    user_id,
+                    workspace_id,
+                    context_id,
+                    budget,
+                )
+                phase_results.append(result)
+                changed_memory_ids.update(result.changed_memory_ids)
 
-            # Phase 3: Importance Re-eval
-            result = await self._run_phase(
-                "importance_reeval",
-                ImportanceReevalPhase(self.db, self.llm_service),
-                config,
-                user_id,
-                workspace_id,
-                context_id,
-                budget,
-            )
-            phase_results.append(result)
-            changed_memory_ids.update(result.changed_memory_ids)
-
-            # Phase 4: Consolidation
-            result = await self._run_phase(
-                "consolidation",
-                ConsolidationPhase(self.db, self.llm_service),
-                config,
-                user_id,
-                workspace_id,
-                context_id,
-                budget,
-            )
-            phase_results.append(result)
-            changed_memory_ids.update(result.changed_memory_ids)
-
-            # Phase 5: Reindex (uses accumulated changed_memory_ids)
+            # Phase 5: Reindex always runs if there are changes
             reindex = ReindexPhase(self.db)
             reindex_result = await self._run_reindex(
                 reindex,
@@ -198,6 +201,24 @@ class SleepOrchestrator:
                 success=False,
                 error=str(e),
             )
+
+    async def _get_sleep_mode(self, context_id: str | None) -> str:
+        """Get sleep_mode for a context. Defaults to 'full' if not found."""
+        if not context_id:
+            return "full"
+        try:
+            stmt = select(Context).where(Context.id == UUID(context_id))
+            result = await self.db.execute(stmt)
+            context = result.scalar_one_or_none()
+            if context and context.sleep_mode:
+                return context.sleep_mode
+        except Exception as e:
+            logger.warning(
+                "sleep_mode_lookup_failed",
+                context_id=context_id,
+                error=str(e),
+            )
+        return "full"
 
     async def _run_reindex(
         self,
