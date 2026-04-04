@@ -465,7 +465,11 @@ export default function ContextSettingsPage() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => router.push("/context/search-settings")}
+                  onClick={() =>
+                    router.push(
+                      `/workspace/contexts/${contextId}/search-settings`,
+                    )
+                  }
                 >
                   <Settings className="h-4 w-4 mr-2" />
                   Open Search Settings
