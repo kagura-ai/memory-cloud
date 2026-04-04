@@ -4,12 +4,12 @@
  * Issue #115 Phase B-5: Workspace-level Multi-tenancy Frontend
  */
 
-import { apiClient } from './base';
+import { apiClient } from "./base";
 import type {
   UsageCurrentResponse,
   UsageHistoryResponse,
   UsageBreakdownResponse,
-} from './usage';
+} from "./usage";
 
 export interface Workspace {
   id: string;
@@ -20,7 +20,7 @@ export interface Workspace {
   member_count: number;
   context_count: number;
   created_at: string;
-  current_user_role?: string | null;  // Current user's role in this workspace
+  current_user_role?: string | null; // Current user's role in this workspace
 }
 
 export interface CredentialsStatusInfo {
@@ -35,9 +35,9 @@ export interface WorkspaceMember {
   user_id: string;
   user_name: string | null;
   user_email: string | null;
-  role: 'owner' | 'admin' | 'member' | 'viewer';
+  role: "owner" | "admin" | "member" | "viewer";
   joined_at: string | null;
-  credentials_status?: CredentialsStatusInfo | null;  // New: credentials info
+  credentials_status?: CredentialsStatusInfo | null; // New: credentials info
 
   // User activity fields
   last_login_at?: string | null;
@@ -55,7 +55,9 @@ export interface CreateWorkspaceRequest {
   default_context_name?: string;
   default_context_summary?: string;
   default_context_usage_guide?: string;
-  default_context_embedding_model?: 'text-embedding-3-small' | 'text-embedding-3-large';
+  default_context_embedding_model?:
+    | "text-embedding-3-small"
+    | "text-embedding-3-large";
 }
 
 export interface UpdateWorkspaceRequest {
@@ -65,11 +67,11 @@ export interface UpdateWorkspaceRequest {
 
 export interface AddMemberRequest {
   user_id: string;
-  role: 'owner' | 'admin' | 'member' | 'viewer';
+  role: "owner" | "admin" | "member" | "viewer";
 }
 
 export interface UpdateMemberRoleRequest {
-  role: 'owner' | 'admin' | 'member' | 'viewer';
+  role: "owner" | "admin" | "member" | "viewer";
 }
 
 // Issue #249: Context usage statistics
@@ -127,16 +129,16 @@ export interface ContextUserActivityResponse {
  * List all workspaces user belongs to
  */
 export async function listWorkspaces(): Promise<Workspace[]> {
-  return apiClient.get<Workspace[]>('/api/v1/workspaces');
+  return apiClient.get<Workspace[]>("/api/v1/workspaces");
 }
 
 /**
  * Create a new workspace
  */
 export async function createWorkspace(
-  data: CreateWorkspaceRequest
+  data: CreateWorkspaceRequest,
 ): Promise<Workspace> {
-  return apiClient.post<Workspace>('/api/v1/workspaces', data);
+  return apiClient.post<Workspace>("/api/v1/workspaces", data);
 }
 
 /**
@@ -151,7 +153,7 @@ export async function getWorkspace(workspaceId: string): Promise<Workspace> {
  */
 export async function updateWorkspace(
   workspaceId: string,
-  data: UpdateWorkspaceRequest
+  data: UpdateWorkspaceRequest,
 ): Promise<Workspace> {
   return apiClient.put<Workspace>(`/api/v1/workspaces/${workspaceId}`, data);
 }
@@ -166,8 +168,12 @@ export async function deleteWorkspace(workspaceId: string): Promise<void> {
 /**
  * List workspace members
  */
-export async function listMembers(workspaceId: string): Promise<WorkspaceMember[]> {
-  return apiClient.get<WorkspaceMember[]>(`/api/v1/workspaces/${workspaceId}/members`);
+export async function listMembers(
+  workspaceId: string,
+): Promise<WorkspaceMember[]> {
+  return apiClient.get<WorkspaceMember[]>(
+    `/api/v1/workspaces/${workspaceId}/members`,
+  );
 }
 
 /**
@@ -175,9 +181,12 @@ export async function listMembers(workspaceId: string): Promise<WorkspaceMember[
  */
 export async function addMember(
   workspaceId: string,
-  data: AddMemberRequest
+  data: AddMemberRequest,
 ): Promise<WorkspaceMember> {
-  return apiClient.post<WorkspaceMember>(`/api/v1/workspaces/${workspaceId}/members`, data);
+  return apiClient.post<WorkspaceMember>(
+    `/api/v1/workspaces/${workspaceId}/members`,
+    data,
+  );
 }
 
 /**
@@ -186,16 +195,24 @@ export async function addMember(
 export async function updateMemberRole(
   workspaceId: string,
   userId: string,
-  data: UpdateMemberRoleRequest
+  data: UpdateMemberRoleRequest,
 ): Promise<WorkspaceMember> {
-  return apiClient.put<WorkspaceMember>(`/api/v1/workspaces/${workspaceId}/members/${userId}`, data);
+  return apiClient.put<WorkspaceMember>(
+    `/api/v1/workspaces/${workspaceId}/members/${userId}`,
+    data,
+  );
 }
 
 /**
  * Remove member from workspace
  */
-export async function removeMember(workspaceId: string, userId: string): Promise<void> {
-  return apiClient.delete<void>(`/api/v1/workspaces/${workspaceId}/members/${userId}`);
+export async function removeMember(
+  workspaceId: string,
+  userId: string,
+): Promise<void> {
+  return apiClient.delete<void>(
+    `/api/v1/workspaces/${workspaceId}/members/${userId}`,
+  );
 }
 
 /**
@@ -207,11 +224,18 @@ export async function removeMember(workspaceId: string, userId: string): Promise
 export async function updateMemberContextAccess(
   workspaceId: string,
   userId: string,
-  allowedContextIds: string[] | null
-): Promise<{ status: string; user_id: string; allowed_context_ids: string[] | null }> {
-  return apiClient.put(`/api/v1/workspaces/${workspaceId}/members/${userId}/context-access`, {
-    allowed_context_ids: allowedContextIds,
-  });
+  allowedContextIds: string[] | null,
+): Promise<{
+  status: string;
+  user_id: string;
+  allowed_context_ids: string[] | null;
+}> {
+  return apiClient.put(
+    `/api/v1/workspaces/${workspaceId}/members/${userId}/context-access`,
+    {
+      allowed_context_ids: allowedContextIds,
+    },
+  );
 }
 
 /**
@@ -238,23 +262,31 @@ export async function switchWorkspace(workspaceId: string): Promise<void> {
  * Aggregates usage across all workspace members
  */
 export async function getWorkspaceUsageCurrent(): Promise<UsageCurrentResponse> {
-  return apiClient.get<UsageCurrentResponse>('/api/v1/workspace/usage/current');
+  return apiClient.get<UsageCurrentResponse>("/api/v1/workspace/usage/current");
 }
 
 /**
  * Get workspace-wide historical usage data
  * Aggregates daily API calls across all workspace members
  */
-export async function getWorkspaceUsageHistory(days: number = 7): Promise<UsageHistoryResponse> {
-  return apiClient.get<UsageHistoryResponse>(`/api/v1/workspace/usage/history?days=${days}`);
+export async function getWorkspaceUsageHistory(
+  days: number = 7,
+): Promise<UsageHistoryResponse> {
+  return apiClient.get<UsageHistoryResponse>(
+    `/api/v1/workspace/usage/history?days=${days}`,
+  );
 }
 
 /**
  * Get workspace-wide usage breakdown by endpoint
  * Aggregates endpoint usage across all workspace members
  */
-export async function getWorkspaceUsageBreakdown(days: number = 30): Promise<UsageBreakdownResponse> {
-  return apiClient.get<UsageBreakdownResponse>(`/api/v1/workspace/usage/breakdown?days=${days}`);
+export async function getWorkspaceUsageBreakdown(
+  days: number = 30,
+): Promise<UsageBreakdownResponse> {
+  return apiClient.get<UsageBreakdownResponse>(
+    `/api/v1/workspace/usage/breakdown?days=${days}`,
+  );
 }
 
 // ============================================================================
@@ -298,8 +330,12 @@ export interface AvailablePlanInfo {
  * Get workspace plan information
  * Issue #164: Workspace plan management
  */
-export async function getWorkspacePlan(workspaceId: string): Promise<WorkspacePlanInfo> {
-  return apiClient.get<WorkspacePlanInfo>(`/api/v1/workspaces/${workspaceId}/plan`);
+export async function getWorkspacePlan(
+  workspaceId: string,
+): Promise<WorkspacePlanInfo> {
+  return apiClient.get<WorkspacePlanInfo>(
+    `/api/v1/workspaces/${workspaceId}/plan`,
+  );
 }
 
 /**
@@ -309,12 +345,15 @@ export async function getWorkspacePlan(workspaceId: string): Promise<WorkspacePl
 export async function updateWorkspacePlan(
   workspaceId: string,
   planName: string,
-  reason?: string
+  reason?: string,
 ): Promise<{ message: string }> {
-  return apiClient.put<{ message: string }>(`/api/v1/workspaces/${workspaceId}/plan`, {
-    plan_name: planName,
-    reason,
-  });
+  return apiClient.put<{ message: string }>(
+    `/api/v1/workspaces/${workspaceId}/plan`,
+    {
+      plan_name: planName,
+      reason,
+    },
+  );
 }
 
 /**
@@ -322,15 +361,21 @@ export async function updateWorkspacePlan(
  * Issue #164: Plan selection
  */
 export async function getAvailablePlans(): Promise<AvailablePlanInfo[]> {
-  return apiClient.get<AvailablePlanInfo[]>('/api/v1/workspaces/plans/available');
+  return apiClient.get<AvailablePlanInfo[]>(
+    "/api/v1/workspaces/plans/available",
+  );
 }
 
 /**
  * Get context usage statistics for workspace
  * Issue #249: Context usage overview
  */
-export async function getContextStats(workspaceId: string): Promise<ContextStatsResponse> {
-  return apiClient.get<ContextStatsResponse>(`/api/v1/workspaces/${workspaceId}/contexts/stats`);
+export async function getContextStats(
+  workspaceId: string,
+): Promise<ContextStatsResponse> {
+  return apiClient.get<ContextStatsResponse>(
+    `/api/v1/workspaces/${workspaceId}/contexts/stats`,
+  );
 }
 
 /**
@@ -340,10 +385,10 @@ export async function getContextStats(workspaceId: string): Promise<ContextStats
 export async function getContextUsageTimeline(
   workspaceId: string,
   contextId: string,
-  days: number = 7
+  days: number = 7,
 ): Promise<ContextUsageTimelineResponse> {
   return apiClient.get<ContextUsageTimelineResponse>(
-    `/api/v1/workspaces/${workspaceId}/contexts/${contextId}/usage-timeline?days=${days}`
+    `/api/v1/workspaces/${workspaceId}/contexts/${contextId}/usage-timeline?days=${days}`,
   );
 }
 
@@ -354,10 +399,10 @@ export async function getContextUsageTimeline(
 export async function getContextUserActivity(
   workspaceId: string,
   contextId: string,
-  days: number = 7
+  days: number = 7,
 ): Promise<ContextUserActivityResponse> {
   return apiClient.get<ContextUserActivityResponse>(
-    `/api/v1/workspaces/${workspaceId}/contexts/${contextId}/user-activity?days=${days}`
+    `/api/v1/workspaces/${workspaceId}/contexts/${contextId}/user-activity?days=${days}`,
   );
 }
 
@@ -374,17 +419,20 @@ export interface MemoryTimelineResponse {
   workspace_id: string;
   workspace_name: string;
   daily_counts: DailyMemoryCount[];
-  memories_created_in_period: number;  // Renamed for clarity
+  memories_created_in_period: number; // Renamed for clarity
   period_start: string;
   period_end: string;
 }
 
 export async function getWorkspaceMemoryTimeline(
   workspaceId: string,
-  days: number = 30
+  days: number = 30,
+  contextId?: string,
 ): Promise<MemoryTimelineResponse> {
+  const params = new URLSearchParams({ days: days.toString() });
+  if (contextId) params.set("context_id", contextId);
   return apiClient.get<MemoryTimelineResponse>(
-    `/api/v1/workspaces/${workspaceId}/memory-timeline?days=${days}`
+    `/api/v1/workspaces/${workspaceId}/memory-timeline?${params.toString()}`,
   );
 }
 
@@ -433,10 +481,10 @@ export interface PublicAPIStatsResponse {
 export async function getContextPublicAPIStats(
   workspaceId: string,
   contextId: string,
-  days: number = 7
+  days: number = 7,
 ): Promise<PublicAPIStatsResponse> {
   return apiClient.get<PublicAPIStatsResponse>(
-    `/api/v1/workspaces/${workspaceId}/contexts/${contextId}/public-api-stats?days=${days}`
+    `/api/v1/workspaces/${workspaceId}/contexts/${contextId}/public-api-stats?days=${days}`,
   );
 }
 
@@ -455,10 +503,10 @@ export interface OpenAIKeyStatus {
  * Issue #181: Prevent context creation errors
  */
 export async function checkOpenAIKeyStatus(
-  workspaceId: string
+  workspaceId: string,
 ): Promise<OpenAIKeyStatus> {
   return apiClient.get<OpenAIKeyStatus>(
-    `/api/v1/workspaces/${workspaceId}/openai-key-status`
+    `/api/v1/workspaces/${workspaceId}/openai-key-status`,
   );
 }
 
@@ -481,5 +529,5 @@ export interface MemberUsageResponse {
 }
 
 export async function getWorkspaceMemberUsage(): Promise<MemberUsageResponse> {
-  return apiClient.get<MemberUsageResponse>('/api/v1/workspace/usage/members');
+  return apiClient.get<MemberUsageResponse>("/api/v1/workspace/usage/members");
 }

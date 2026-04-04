@@ -983,11 +983,13 @@ async def get_workspace_memory_timeline(
     workspace_id: UUID,
     request: Request,
     days: int = 30,
+    context_id: UUID | None = None,
     db: AsyncSession = Depends(get_db),
 ) -> MemoryTimelineResponse:
     """Get workspace memory creation timeline.
 
     Issue #275 Task 6: Memory count timeline visualization.
+    Issue #134: Optional context_id filter for dashboard global filter.
     """
     user = await get_current_user(request)
     workspace_service = WorkspaceService(db)
@@ -997,7 +999,9 @@ async def get_workspace_memory_timeline(
 
     days = min(days, 90)  # Performance limit
 
-    timeline = await workspace_service.get_workspace_memory_timeline(workspace_id, days)
+    timeline = await workspace_service.get_workspace_memory_timeline(
+        workspace_id, days, context_id=context_id
+    )
 
     return MemoryTimelineResponse(**timeline)
 

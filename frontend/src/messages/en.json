@@ -828,6 +828,7 @@
     "saving": "Saving...",
     "deleteWorkspaceDialogDesc": "This will permanently delete {workspaceName} and:",
     "allContexts": "All contexts",
+    "filterByContext": "Filter by context",
     "allMemories": "All memories",
     "allMembers": "All members",
     "deleting": "Deleting...",

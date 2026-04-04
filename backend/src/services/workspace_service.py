@@ -1112,15 +1112,17 @@ class WorkspaceService:
         }
 
     async def get_workspace_memory_timeline(
-        self, workspace_id: UUID, days: int = 30
+        self, workspace_id: UUID, days: int = 30, context_id: UUID | None = None
     ) -> dict[str, Any]:
         """Get time-series memory creation statistics for workspace.
 
         Issue #275 Task 6: Memory count timeline for visualization.
+        Issue #134: Optional context_id filter.
 
         Args:
             workspace_id: Workspace ID
             days: Number of days to include (default: 30, max: 90)
+            context_id: Optional context ID to filter by
 
         Returns:
             Dict with daily memory counts and period info
@@ -1154,17 +1156,21 @@ class WorkspaceService:
         if member_ids:
             # Issue #275 Performance: Use datetime range filter (idx_created_at)
             # instead of func.date() which prevents index usage
+            conditions = [
+                Memory.user_id.in_(member_ids),
+                Memory.deleted_at.is_(None),  # CRITICAL: Exclude soft-deleted
+                Memory.created_at >= start_datetime,  # ✅ Uses idx_created_at
+                Memory.created_at <= end_datetime,
+            ]
+            if context_id:
+                conditions.append(Memory.context_id == context_id)
+
             daily_counts_stmt = (
                 select(
                     func.date(Memory.created_at).label("date"),
                     func.count(Memory.id).label("count"),
                 )
-                .where(
-                    Memory.user_id.in_(member_ids),
-                    Memory.deleted_at.is_(None),  # CRITICAL: Exclude soft-deleted
-                    Memory.created_at >= start_datetime,  # ✅ Uses idx_created_at
-                    Memory.created_at <= end_datetime,
-                )
+                .where(*conditions)
                 .group_by(func.date(Memory.created_at))
                 .order_by(func.date(Memory.created_at))
             )
