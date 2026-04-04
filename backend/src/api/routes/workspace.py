@@ -679,19 +679,9 @@ async def get_embedding_status(
     if not workspace_id:
         raise HTTPException(status_code=400, detail="No active workspace")
 
-    # Get workspace member IDs for boundary check
-    members_stmt = select(WorkspaceMember.user_id).where(
-        WorkspaceMember.workspace_id == workspace_id
-    )
-    members_result = await db.execute(members_stmt)
-    member_ids = [row[0] for row in members_result.all()]
-
-    if not member_ids:
-        return EmbeddingStatusResponse(total=0, by_status={}, failed_memories=[])
-
-    # Base conditions: workspace boundary + not soft-deleted
+    # Use indexed Memory.workspace_id directly (no member_ids round-trip)
     conditions = [
-        Memory.user_id.in_(member_ids),
+        Memory.workspace_id == workspace_id,
         Memory.deleted_at.is_(None),
     ]
     if context_id:

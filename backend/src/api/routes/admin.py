@@ -741,7 +741,7 @@ async def retry_failed_embeddings(
 
     reset_count = result.rowcount
     logger.info(
-        "Admin retry-failed embeddings",
+        "admin_retry_failed_embeddings",
         reset_count=reset_count,
         context_id=context_id,
         workspace_id=workspace_id,
