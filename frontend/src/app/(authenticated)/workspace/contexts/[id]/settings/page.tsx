@@ -261,6 +261,14 @@ export default function ContextSettingsPage() {
 
   const isOwner = currentWorkspace?.current_user_role === "owner";
 
+  const isDirty =
+    displayName !== (context.display_name || "") ||
+    description !== (context.description || "") ||
+    summary !== (context.summary || "") ||
+    usageGuide !== (context.usage_guide || "") ||
+    isPrivate !== (context.is_private ?? true) ||
+    isPublic !== (context.is_public ?? false);
+
   return (
     <PageContainer>
       <PageHeader
@@ -281,14 +289,6 @@ export default function ContextSettingsPage() {
             >
               <ArrowLeft className="h-4 w-4 mr-2" />
               Back
-            </Button>
-            <Button onClick={handleSave} disabled={saving}>
-              {saving ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <Save className="h-4 w-4 mr-2" />
-              )}
-              {saving ? "Saving..." : "Save Changes"}
             </Button>
           </div>
         }
@@ -739,6 +739,30 @@ export default function ContextSettingsPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Sticky Save Bar — visible only when there are unsaved changes */}
+      {isDirty && (
+        <div className="fixed bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+          <div className="container flex items-center justify-between py-3 px-4 max-w-4xl mx-auto">
+            <p className="text-sm text-muted-foreground">
+              You have unsaved changes
+            </p>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={fetchContext}>
+                Discard
+              </Button>
+              <Button size="sm" onClick={handleSave} disabled={saving}>
+                {saving ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Save className="h-4 w-4 mr-2" />
+                )}
+                {saving ? "Saving..." : "Save Changes"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </PageContainer>
   );
 }
