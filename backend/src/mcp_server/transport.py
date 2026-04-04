@@ -13,6 +13,7 @@ from uuid import UUID
 from starlette.responses import Response
 from starlette.types import Receive, Scope, Send
 
+from __init__ import __version__
 from mcp_server.auth import authenticate_mcp_request
 from mcp_server.session import get_session_manager
 
@@ -125,7 +126,7 @@ async def handle_streamable_http_post(
                 "capabilities": {"tools": {}},
                 "serverInfo": {
                     "name": "kagura-memory-cloud",
-                    "version": "0.6.1",
+                    "version": __version__,
                 },
             },
         }
