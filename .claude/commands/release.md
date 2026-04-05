@@ -63,6 +63,11 @@ gh release create vX.Y.Z --generate-notes --title "vX.Y.Z"
 
 Review the auto-generated notes. If needed, edit to add a summary section at the top.
 
+**Breaking changes check**: If any merged PR contains breaking API/MCP changes (field renames, tool removals, endpoint changes), add a `## Migration` section at the top of the release notes with:
+- What changed (before → after)
+- What clients/users need to update
+- Example of the new usage
+
 ### 8. Upload coverage
 
 ```bash
