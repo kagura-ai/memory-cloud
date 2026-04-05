@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "kagura-memory",
+  "description": "Kagura Memory Cloud plugin — persistent AI memory with session management, recall/save, and setup tools",
+  "owner": {
+    "name": "Kagura AI",
+    "email": "fumikazu.kiyota@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "kagura-memory",
+      "source": "./",
+      "version": "0.1.0",
+      "category": "productivity",
+      "homepage": "https://github.com/kagura-ai/memory-cloud"
+    }
+  ]
+}

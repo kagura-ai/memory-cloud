@@ -24,7 +24,7 @@ import {
   YAxis,
   CartesianGrid,
 } from "recharts";
-import { Database, Search, TrendingUp } from "lucide-react";
+import { Database, Search } from "lucide-react";
 import type { PublicAPIStatsResponse } from "@/lib/api/workspaces";
 import { formatDate } from "@/lib/utils/datetime";
 import { useAuth } from "@/contexts/AuthContext";

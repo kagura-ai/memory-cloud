@@ -488,6 +488,7 @@ export default function ContextStatsPage() {
                         ? formatRelativeTime(
                             user.last_activity,
                             authUser?.timezone,
+                            locale,
                           )
                         : "Never"}
                     </TableCell>

@@ -6,5 +6,15 @@
     "name": "Kagura AI",
     "url": "https://github.com/kagura-ai"
   },
-  "repository": "https://github.com/kagura-ai/memory-cloud"
+  "repository": "https://github.com/kagura-ai/memory-cloud",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "mcp",
+    "ai-memory",
+    "session-management",
+    "knowledge-base",
+    "claude-code-plugin"
+  ],
+  "skills": ["./skills/"]
 }

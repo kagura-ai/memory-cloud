@@ -530,6 +530,7 @@ export default function WorkspaceStatsPage() {
                                     ? formatRelativeTime(
                                         contextDetail.last_activity,
                                         authUser?.timezone,
+                                        locale,
                                       )
                                     : "Never"}
                                 </TableCell>
@@ -668,10 +669,9 @@ export default function WorkspaceStatsPage() {
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis
                         dataKey="date"
-                        tickFormatter={(date) => {
-                          const d = new Date(date);
-                          return `${d.getMonth() + 1}/${d.getDate()}`;
-                        }}
+                        tickFormatter={(date) =>
+                          formatDate(date, authUser?.timezone, locale)
+                        }
                       />
                       <YAxis />
                       <Tooltip
@@ -784,6 +784,7 @@ export default function WorkspaceStatsPage() {
                                     ? formatRelativeTime(
                                         user.last_activity,
                                         authUser?.timezone,
+                                        locale,
                                       )
                                     : "Never"}
                                 </TableCell>

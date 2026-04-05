@@ -31,14 +31,7 @@ import {
   YAxis,
   CartesianGrid,
 } from "recharts";
-import {
-  Brain,
-  Database,
-  Zap,
-  TrendingUp,
-  AlertTriangle,
-  XCircle,
-} from "lucide-react";
+import { Brain, Zap, TrendingUp, XCircle } from "lucide-react";
 import { apiClient } from "@/lib/api";
 import {
   getWorkspaceUsageCurrent,
@@ -217,13 +210,6 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
         </Alert>
       );
     }
-
-    const getProgressColor = (status: UsageStatus) => {
-      if (status.is_exceeded) return "bg-red-600";
-      if (status.is_critical) return "bg-orange-600";
-      if (status.is_warning) return "bg-yellow-500";
-      return "bg-brand-green-600";
-    };
 
     return (
       <div className="space-y-6">
