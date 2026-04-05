@@ -137,6 +137,10 @@ Kagura Memory Cloud exposes 14 tools via the [Model Context Protocol (MCP)](http
 | `update_memory` | Update an existing memory or upsert by external ID | No |
 | `forget` | Soft-delete a memory (30-day retention) | No |
 | `explore` | Discover related memories via Neural Memory graph | Yes |
+| `list_edges` | List edges connected to a memory | Yes |
+| `create_edge` | Create an edge between two memories | No |
+| `update_edge` | Update edge weight or type | No |
+| `delete_edge` | Delete an edge between two memories | No |
 | `get_context_info` | Get context metadata and usage guidelines | Yes |
 | `list_contexts` | List available contexts in workspace | Yes |
 | `create_context` | Create a new context (owner/admin only) | No |

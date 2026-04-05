@@ -75,7 +75,24 @@ recall(context_id=..., query="smoke test UPDATED", k=5)
 -> Verify: returns updated memory with new summary
 ```
 
-### 6. Cleanup
+### 6. Edge CRUD tools
+
+```
+create_edge(context_id=..., source_id=<memory_id>, target_id=<memory_id>, edge_type="related_to")
+-> Verify: returns edge with weight=0.5, edge_type="related_to"
+-> Save source_id and target_id for subsequent steps
+
+list_edges(context_id=..., memory_id=<memory_id>)
+-> Verify: returns edges array with count >= 1
+
+update_edge(context_id=..., source_id=<source_id>, target_id=<target_id>, weight=0.8)
+-> Verify: returns updated edge with weight=0.8
+
+delete_edge(context_id=..., source_id=<source_id>, target_id=<target_id>)
+-> Verify: success response (edge deleted)
+```
+
+### 7. Cleanup
 
 ```
 forget(memory_id=..., context_id=...)
@@ -105,10 +122,14 @@ Print a summary table:
 | 9 | explore | Graph traversal | PASS/FAIL |
 | 10 | update_memory | Update memory | PASS/FAIL |
 | 11 | recall (verify) | Verify update | PASS/FAIL |
-| 12 | forget | Delete memory | PASS/FAIL |
-| 13 | delete_context | Delete test context | PASS/FAIL |
+| 12 | create_edge | Create test edge | PASS/FAIL |
+| 13 | list_edges | List edges | PASS/FAIL |
+| 14 | update_edge | Update edge weight | PASS/FAIL |
+| 15 | delete_edge | Delete edge | PASS/FAIL |
+| 16 | forget | Delete memory | PASS/FAIL |
+| 17 | delete_context | Delete test context | PASS/FAIL |
 
-**Result: N/13 passed**
+**Result: N/17 passed**
 
 Test context: smoke-test-{timestamp} (cleaned up)
 ```

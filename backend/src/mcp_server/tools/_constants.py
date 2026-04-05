@@ -28,6 +28,10 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "create_context": _get_timeout("create_context", 15.0),
     "update_context": _get_timeout("update_context", 15.0),
     "update_search_config": _get_timeout("update_search_config", 10.0),
+    "list_edges": _get_timeout("list_edges", 10.0),
+    "create_edge": _get_timeout("create_edge", 10.0),
+    "update_edge": _get_timeout("update_edge", 10.0),
+    "delete_edge": _get_timeout("delete_edge", 10.0),
 }
 DEFAULT_TOOL_TIMEOUT = float(os.getenv("MCP_TIMEOUT_DEFAULT", 60.0))
 
@@ -386,7 +390,7 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 
 ---
 
-## Available Tools (13 tools)
+## Available Tools (17 tools)
 
 | Tool | Purpose |
 |------|---------|
@@ -396,6 +400,10 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 | `forget` | Delete memories (soft delete, recoverable) |
 | `reference` | Get full memory details (Layer 3) by ID |
 | `explore` | Discover related memories via Neural Memory graph |
+| `list_edges` | List edges connected to a memory |
+| `create_edge` | Create an edge between two memories |
+| `update_edge` | Update edge weight or type |
+| `delete_edge` | Delete an edge between two memories |
 | `get_context_info` | Get context settings, stats, and usage guide |
 | `list_contexts` | List all contexts with quota info |
 | `create_context` | Create a new context namespace |

@@ -357,6 +357,10 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `update_memory` | Update an existing memory in-place or upsert by external ID | Member+ |
 | `forget` | Soft-delete a memory (30-day retention) | Member+ |
 | `explore` | Discover related memories via Neural Memory graph | Viewer+ |
+| `list_edges` | List edges connected to a memory | Viewer+ |
+| `create_edge` | Create an edge between two memories | Member+ |
+| `update_edge` | Update edge weight or type | Member+ |
+| `delete_edge` | Delete an edge between two memories | Member+ |
 | `get_context_info` | Get context metadata and guidelines | Viewer+ |
 | `list_contexts` | List available contexts in workspace | Viewer+ |
 | `create_context` | Create a new context | Owner/Admin |

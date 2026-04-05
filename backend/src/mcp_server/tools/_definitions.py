@@ -381,6 +381,177 @@ IMPORTANT: Always specify context_id to ensure you're exploring the intended con
                 },
             },
         },
+        # =================================================================
+        # Edge CRUD tools (Issue #163)
+        # =================================================================
+        {
+            "name": "list_edges",
+            "readOnly": True,
+            "description": """List all Neural Memory graph edges connected to a specific memory.
+
+Returns both outgoing and incoming edges, showing how this memory relates to others in the knowledge graph.
+
+Use this to:
+- Inspect a memory's connections before deciding to remove noisy edges
+- Understand the graph structure around a specific memory
+- Audit edges created by Sleep Maintenance's Edge Discovery
+
+Response includes: edge_id, source_id, target_id, edge_type, weight, confidence, timestamps.""",
+            "inputSchema": {
+                "type": "object",
+                "required": ["memory_id", "context_id"],
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "UUID of the memory to list edges for. Obtained from recall() or explore() results.",
+                    },
+                    "min_weight": {
+                        "type": "number",
+                        "description": "Minimum edge weight threshold (default: 0.0). Set higher to filter weak edges.",
+                        "default": 0.0,
+                    },
+                    "edge_types": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter by edge types: 'neural_association', 'related_to', 'depends_on', 'learned_from'. Omit to list all.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of edges to return per direction (outgoing/incoming).",
+                    },
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Target context UUID. MUST be a valid UUID from list_contexts().",
+                    },
+                },
+            },
+        },
+        {
+            "name": "create_edge",
+            "description": """Create a manual edge between two memories in the Neural Memory graph.
+
+Use this when you know two memories are related but the automatic Edge Discovery hasn't connected them.
+The default weight of 0.5 is suitable for most manually created edges — you only need to specify source and target.
+
+Edge types:
+- 'related_to' (default): General relationship between memories
+- 'depends_on': Target memory depends on source
+- 'learned_from': Knowledge derived from source
+- 'neural_association': Auto-created by Hebbian learning (prefer 'related_to' for manual edges)
+
+Weight range: 0.0 (weakest) to 3.0 (strongest). Default: 0.5 (moderate manual connection).""",
+            "inputSchema": {
+                "type": "object",
+                "required": ["source_id", "target_id", "context_id"],
+                "properties": {
+                    "source_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "UUID of the source memory.",
+                    },
+                    "target_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "UUID of the target memory.",
+                    },
+                    "edge_type": {
+                        "type": "string",
+                        "enum": ["neural_association", "related_to", "depends_on", "learned_from"],
+                        "description": "Type of relationship (default: 'related_to').",
+                        "default": "related_to",
+                    },
+                    "weight": {
+                        "type": "number",
+                        "description": "Edge weight 0.0-3.0 (default: 0.5). Higher = stronger connection.",
+                        "default": 0.5,
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "Confidence score 0.0-1.0 (default: 1.0).",
+                        "default": 1.0,
+                    },
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Target context UUID. MUST be a valid UUID from list_contexts().",
+                    },
+                },
+            },
+        },
+        {
+            "name": "update_edge",
+            "description": """Update an existing edge's weight or type.
+
+Use this to:
+- Strengthen an edge: increase weight when memories are confirmed related
+- Weaken an edge: decrease weight for less relevant connections
+- Change edge type: reclassify the relationship
+
+Identify edges using source_id + target_id (from list_edges or explore results).""",
+            "inputSchema": {
+                "type": "object",
+                "required": ["source_id", "target_id", "context_id"],
+                "properties": {
+                    "source_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "UUID of the source memory.",
+                    },
+                    "target_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "UUID of the target memory.",
+                    },
+                    "weight": {
+                        "type": "number",
+                        "description": "New edge weight 0.0-3.0.",
+                    },
+                    "edge_type": {
+                        "type": "string",
+                        "enum": ["neural_association", "related_to", "depends_on", "learned_from"],
+                        "description": "New edge type.",
+                    },
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Target context UUID. MUST be a valid UUID from list_contexts().",
+                    },
+                },
+            },
+        },
+        {
+            "name": "delete_edge",
+            "description": """Delete an edge between two memories.
+
+Use this to remove noisy or incorrect connections from the Neural Memory graph.
+Typical workflow: explore() → list_edges() → identify bad edge → delete_edge().
+
+This is a hard delete — the edge is permanently removed. If the memories are still co-accessed,
+Hebbian learning may recreate a neural_association edge automatically.""",
+            "inputSchema": {
+                "type": "object",
+                "required": ["source_id", "target_id", "context_id"],
+                "properties": {
+                    "source_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "UUID of the source memory.",
+                    },
+                    "target_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "UUID of the target memory.",
+                    },
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Target context UUID. MUST be a valid UUID from list_contexts().",
+                    },
+                },
+            },
+        },
         {
             "name": "get_context_info",
             "readOnly": True,
