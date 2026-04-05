@@ -1,11 +1,12 @@
 {
   "name": "kagura-memory",
-  "description": "Kagura Memory Cloud plugin — session management, memory recall/save, and setup tools for AI-assisted development",
   "version": "0.1.0",
+  "description": "Kagura Memory Cloud plugin — session management, memory recall/save, and setup tools",
   "author": {
     "name": "Kagura AI",
     "url": "https://github.com/kagura-ai"
   },
+  "homepage": "https://github.com/kagura-ai/memory-cloud",
   "repository": "https://github.com/kagura-ai/memory-cloud",
   "license": "MIT",
   "keywords": [
@@ -13,8 +14,6 @@
     "mcp",
     "ai-memory",
     "session-management",
-    "knowledge-base",
-    "claude-code-plugin"
-  ],
-  "skills": ["./skills/"]
+    "knowledge-base"
+  ]
 }
