@@ -30,7 +30,6 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
         "create_context",
         "update_context",
         "merge_contexts",
-        "kagura_memory_usage_guide",
         "get_usage",
     }
 )
@@ -40,7 +39,6 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
     {
         "get_usage",
         "list_contexts",
-        "kagura_memory_usage_guide",
         "get_context_info",  # Must remain callable so agents can inspect context even when rate-limited
     }
 )
@@ -64,7 +62,6 @@ def _build_registry() -> dict[str, Any]:
         handle_merge_contexts,
         handle_update_context,
     )
-    from mcp_server.tools.guide import handle_kagura_memory_usage_guide
     from mcp_server.tools.search_config import handle_update_search_config
     from mcp_server.tools.usage import handle_get_usage
 
@@ -82,7 +79,6 @@ def _build_registry() -> dict[str, Any]:
         "merge_contexts": handle_merge_contexts,
         "list_contexts": handle_list_contexts,
         "update_search_config": handle_update_search_config,
-        "kagura_memory_usage_guide": handle_kagura_memory_usage_guide,
         "get_usage": handle_get_usage,
     }
 
