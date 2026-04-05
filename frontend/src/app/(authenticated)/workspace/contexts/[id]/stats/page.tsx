@@ -1,4 +1,4 @@
-'use client';
+"use client";
 
 /**
  * Individual Context Memory Statistics Page
@@ -8,15 +8,24 @@
  * Issue #223: i18n support
  */
 
-import { useEffect, useRef, useState } from 'react';
-import { useTranslations } from 'next-intl';
-import { useParams } from 'next/navigation';
-import Link from 'next/link';
-import { RichMemoryOverview, RichMemoryOverviewRef } from '@/components/dashboard/RichMemoryOverview';
-import { PageContainer } from '@/components/common/PageContainer';
-import { PageHeader } from '@/components/common/PageHeader';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { useEffect, useRef, useState } from "react";
+import { useTranslations, useLocale } from "next-intl";
+import { useParams } from "next/navigation";
+import Link from "next/link";
+import {
+  RichMemoryOverview,
+  RichMemoryOverviewRef,
+} from "@/components/dashboard/RichMemoryOverview";
+import { PageContainer } from "@/components/common/PageContainer";
+import { PageHeader } from "@/components/common/PageHeader";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import {
   Table,
   TableBody,
@@ -24,7 +33,7 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from '@/components/ui/table';
+} from "@/components/ui/table";
 import {
   LineChart,
   Line,
@@ -33,12 +42,22 @@ import {
   XAxis,
   YAxis,
   CartesianGrid,
-} from 'recharts';
-import { RefreshCw, Lock, Users, ChevronRight, Network, Check, ArrowRightCircle, TrendingUp, UserCircle } from 'lucide-react';
-import { InlineSpinner } from '@/components/common/LoadingState';
-import { useMemoryContext } from '@/contexts/MemoryContextContext';
-import { useWorkspace } from '@/contexts/WorkspaceContext';
-import { getContext } from '@/lib/api/contexts';
+} from "recharts";
+import {
+  RefreshCw,
+  Lock,
+  Users,
+  ChevronRight,
+  Network,
+  Check,
+  ArrowRightCircle,
+  TrendingUp,
+  UserCircle,
+} from "lucide-react";
+import { InlineSpinner } from "@/components/common/LoadingState";
+import { useMemoryContext } from "@/contexts/MemoryContextContext";
+import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { getContext } from "@/lib/api/contexts";
 import {
   getContextUsageTimeline,
   getContextUserActivity,
@@ -46,15 +65,16 @@ import {
   type ContextUsageTimelineResponse,
   type ContextUserActivityResponse,
   type PublicAPIStatsResponse,
-} from '@/lib/api/workspaces';
-import { PublicAPIStats } from '@/components/dashboard/PublicAPIStats';
-import { formatRelativeTime } from '@/lib/utils/datetime';
-import type { Context } from '@/lib/types/context';
-import { useAuth } from '@/contexts/AuthContext';
+} from "@/lib/api/workspaces";
+import { PublicAPIStats } from "@/components/dashboard/PublicAPIStats";
+import { formatRelativeTime, formatDate } from "@/lib/utils/datetime";
+import type { Context } from "@/lib/types/context";
+import { useAuth } from "@/contexts/AuthContext";
 
 export default function ContextStatsPage() {
-  const t = useTranslations('contextStats');
-  const { user } = useAuth();
+  const t = useTranslations("contextStats");
+  const { user: authUser } = useAuth();
+  const locale = useLocale();
 
   const params = useParams();
   const contextId = params.id as string;
@@ -64,9 +84,13 @@ export default function ContextStatsPage() {
   const [context, setContext] = useState<Context | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [timeline, setTimeline] = useState<ContextUsageTimelineResponse | null>(null);
-  const [userActivity, setUserActivity] = useState<ContextUserActivityResponse | null>(null);
-  const [publicAPIStats, setPublicAPIStats] = useState<PublicAPIStatsResponse | null>(null);
+  const [timeline, setTimeline] = useState<ContextUsageTimelineResponse | null>(
+    null,
+  );
+  const [userActivity, setUserActivity] =
+    useState<ContextUserActivityResponse | null>(null);
+  const [publicAPIStats, setPublicAPIStats] =
+    useState<PublicAPIStatsResponse | null>(null);
   const [timelineDays, setTimelineDays] = useState<7 | 30>(7);
   const { currentContext } = useMemoryContext();
   const { currentWorkspace, currentWorkspaceId } = useWorkspace();
@@ -80,8 +104,8 @@ export default function ContextStatsPage() {
         const ctx = await getContext(contextId);
         setContext(ctx);
       } catch (err) {
-        console.error('Failed to fetch context:', err);
-        setError(t('failedToLoadContext'));
+        console.error("Failed to fetch context:", err);
+        setError(t("failedToLoadContext"));
       } finally {
         setLoading(false);
       }
@@ -98,17 +122,25 @@ export default function ContextStatsPage() {
       if (!contextId || !currentWorkspaceId) return;
 
       try {
-        const timelineData = await getContextUsageTimeline(currentWorkspaceId, contextId, timelineDays);
+        const timelineData = await getContextUsageTimeline(
+          currentWorkspaceId,
+          contextId,
+          timelineDays,
+        );
         setTimeline(timelineData);
 
         // Try to fetch user activity (Admin/Owner only)
         try {
-          const activityData = await getContextUserActivity(currentWorkspaceId, contextId, timelineDays);
+          const activityData = await getContextUserActivity(
+            currentWorkspaceId,
+            contextId,
+            timelineDays,
+          );
           setUserActivity(activityData);
           // P0-2: Removed development console.log
         } catch (activityErr: any) {
-          if (process.env.NODE_ENV === 'development') {
-            console.error('User activity fetch failed:', activityErr);
+          if (process.env.NODE_ENV === "development") {
+            console.error("User activity fetch failed:", activityErr);
           }
           setUserActivity(null);
         }
@@ -116,19 +148,23 @@ export default function ContextStatsPage() {
         // Issue #265: Fetch public API stats if context is public
         if (context?.is_public) {
           try {
-            const publicStats = await getContextPublicAPIStats(currentWorkspaceId, contextId, timelineDays);
+            const publicStats = await getContextPublicAPIStats(
+              currentWorkspaceId,
+              contextId,
+              timelineDays,
+            );
             setPublicAPIStats(publicStats);
           } catch (err) {
-            if (process.env.NODE_ENV === 'development') {
-              console.error('Failed to fetch public API stats:', err);
+            if (process.env.NODE_ENV === "development") {
+              console.error("Failed to fetch public API stats:", err);
             }
             // P1-4: Keep null for graceful degradation (no toast to avoid noise)
             setPublicAPIStats(null);
           }
         }
       } catch (err) {
-        if (process.env.NODE_ENV === 'development') {
-          console.error('Failed to fetch usage stats:', err);
+        if (process.env.NODE_ENV === "development") {
+          console.error("Failed to fetch usage stats:", err);
         }
       }
     };
@@ -139,7 +175,7 @@ export default function ContextStatsPage() {
   }, [context, contextId, currentWorkspaceId, timelineDays]);
 
   useEffect(() => {
-    const title = context?.display_name || context?.name || t('title');
+    const title = context?.display_name || context?.name || t("title");
     document.title = `${title} - Kagura Memory Cloud`;
   }, [context, t]);
 
@@ -149,15 +185,23 @@ export default function ContextStatsPage() {
       await overviewRef.current?.refresh();
       // Refresh usage stats too
       if (currentWorkspaceId && contextId) {
-        const timelineData = await getContextUsageTimeline(currentWorkspaceId, contextId, timelineDays);
+        const timelineData = await getContextUsageTimeline(
+          currentWorkspaceId,
+          contextId,
+          timelineDays,
+        );
         setTimeline(timelineData);
 
         try {
-          const activityData = await getContextUserActivity(currentWorkspaceId, contextId, timelineDays);
+          const activityData = await getContextUserActivity(
+            currentWorkspaceId,
+            contextId,
+            timelineDays,
+          );
           setUserActivity(activityData);
         } catch (activityErr) {
-          if (process.env.NODE_ENV === 'development') {
-            console.error('User activity refresh failed:', activityErr);
+          if (process.env.NODE_ENV === "development") {
+            console.error("User activity refresh failed:", activityErr);
           }
           setUserActivity(null);
         }
@@ -165,11 +209,15 @@ export default function ContextStatsPage() {
         // P1-5: Re-fetch public API stats if context is public
         if (context?.is_public) {
           try {
-            const publicStats = await getContextPublicAPIStats(currentWorkspaceId, contextId, timelineDays);
+            const publicStats = await getContextPublicAPIStats(
+              currentWorkspaceId,
+              contextId,
+              timelineDays,
+            );
             setPublicAPIStats(publicStats);
           } catch (err) {
-            if (process.env.NODE_ENV === 'development') {
-              console.error('Failed to refresh public API stats:', err);
+            if (process.env.NODE_ENV === "development") {
+              console.error("Failed to refresh public API stats:", err);
             }
             setPublicAPIStats(null);
           }
@@ -185,7 +233,9 @@ export default function ContextStatsPage() {
       <PageContainer>
         <div className="flex items-center justify-center py-12">
           <InlineSpinner size="lg" />
-          <span className="ml-2 text-sm text-gray-500">{t('loadingContext')}</span>
+          <span className="ml-2 text-sm text-gray-500">
+            {t("loadingContext")}
+          </span>
         </div>
       </PageContainer>
     );
@@ -195,10 +245,10 @@ export default function ContextStatsPage() {
     return (
       <PageContainer>
         <div className="text-center py-12">
-          <p className="text-red-600">{error || t('contextNotFound')}</p>
+          <p className="text-red-600">{error || t("contextNotFound")}</p>
           <Link href="/workspace/contexts">
             <Button variant="outline" className="mt-4">
-              {t('backToContexts')}
+              {t("backToContexts")}
             </Button>
           </Link>
         </div>
@@ -211,26 +261,32 @@ export default function ContextStatsPage() {
 
   // Build enhanced title with privacy indicator
   const privacyIcon = context.is_private ? (
-    <Lock className="h-5 w-5 text-gray-400 inline-block mr-2" aria-label={t('privateContext')} />
+    <Lock
+      className="h-5 w-5 text-gray-400 inline-block mr-2"
+      aria-label={t("privateContext")}
+    />
   ) : (
-    <Users className="h-5 w-5 text-blue-500 inline-block mr-2" aria-label={t('sharedContext')} />
+    <Users
+      className="h-5 w-5 text-blue-500 inline-block mr-2"
+      aria-label={t("sharedContext")}
+    />
   );
 
   const pageTitle = (
     <div className="flex items-center gap-2">
       {privacyIcon}
-      <span>{t('titleWithContext', { contextName: displayName })}</span>
+      <span>{t("titleWithContext", { contextName: displayName })}</span>
     </div>
   );
 
   // Build detailed description with workspace and privacy info
   const privacyLabel = context.is_private
-    ? `🔒 ${t('privateContext')} - ${t('privateContextDesc')}`
-    : `👥 ${t('sharedContext')} - ${t('sharedContextDesc')}`;
+    ? `🔒 ${t("privateContext")} - ${t("privateContextDesc")}`
+    : `👥 ${t("sharedContext")} - ${t("sharedContextDesc")}`;
 
   const workspaceInfo = currentWorkspace?.name
-    ? `${t('workspace')}: ${currentWorkspace.name}${currentWorkspace.description ? ` - ${currentWorkspace.description}` : ''}`
-    : '';
+    ? `${t("workspace")}: ${currentWorkspace.name}${currentWorkspace.description ? ` - ${currentWorkspace.description}` : ""}`
+    : "";
 
   const pageDescription = workspaceInfo
     ? `${privacyLabel} | ${workspaceInfo}`
@@ -240,16 +296,21 @@ export default function ContextStatsPage() {
     <PageContainer>
       {/* Breadcrumb */}
       <nav className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 mb-4">
-        <Link href="/workspace/contexts" className="hover:text-gray-900 dark:hover:text-gray-200 hover:underline">
-          {t('breadcrumbContexts')}
+        <Link
+          href="/workspace/contexts"
+          className="hover:text-gray-900 dark:hover:text-gray-200 hover:underline"
+        >
+          {t("breadcrumbContexts")}
         </Link>
         <ChevronRight className="h-4 w-4" />
         <div className="flex items-center gap-2">
-          <span className="text-gray-900 dark:text-gray-100">{displayName}</span>
+          <span className="text-gray-900 dark:text-gray-100">
+            {displayName}
+          </span>
           {isCurrent && (
             <span className="px-2 py-0.5 text-xs bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300 rounded-full font-medium flex items-center gap-1">
               <Check className="h-3 w-3" />
-              {t('current')}
+              {t("current")}
             </span>
           )}
         </div>
@@ -263,12 +324,21 @@ export default function ContextStatsPage() {
             <Link href={`/workspace/contexts/${contextId}/graph`}>
               <Button variant="outline" size="sm">
                 <Network className="h-4 w-4 mr-2" />
-                {t('viewGraph')}
+                {t("viewGraph")}
               </Button>
             </Link>
-            <Button onClick={handleRefresh} variant="outline" size="sm" disabled={isRefreshing}>
-              {isRefreshing ? <InlineSpinner size="sm" className="mr-2" /> : <RefreshCw className="h-4 w-4 mr-2" />}
-              {t('refresh')}
+            <Button
+              onClick={handleRefresh}
+              variant="outline"
+              size="sm"
+              disabled={isRefreshing}
+            >
+              {isRefreshing ? (
+                <InlineSpinner size="sm" className="mr-2" />
+              ) : (
+                <RefreshCw className="h-4 w-4 mr-2" />
+              )}
+              {t("refresh")}
             </Button>
           </div>
         }
@@ -282,26 +352,28 @@ export default function ContextStatsPage() {
               <div>
                 <CardTitle className="flex items-center gap-2">
                   <TrendingUp className="h-5 w-5" />
-                  {t('usageTimeline')}
+                  {t("usageTimeline")}
                 </CardTitle>
                 <CardDescription>
-                  {timelineDays === 7 ? t('apiCallsLast7Days') : t('apiCallsLast30Days')}
+                  {timelineDays === 7
+                    ? t("apiCallsLast7Days")
+                    : t("apiCallsLast30Days")}
                 </CardDescription>
               </div>
               <div className="flex gap-2">
                 <Button
-                  variant={timelineDays === 7 ? 'default' : 'outline'}
+                  variant={timelineDays === 7 ? "default" : "outline"}
                   size="sm"
                   onClick={() => setTimelineDays(7)}
                 >
-                  7{t('days')}
+                  7{t("days")}
                 </Button>
                 <Button
-                  variant={timelineDays === 30 ? 'default' : 'outline'}
+                  variant={timelineDays === 30 ? "default" : "outline"}
                   size="sm"
                   onClick={() => setTimelineDays(30)}
                 >
-                  30{t('days')}
+                  30{t("days")}
                 </Button>
               </div>
             </div>
@@ -312,14 +384,18 @@ export default function ContextStatsPage() {
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis
                   dataKey="date"
-                  tickFormatter={(date) => new Date(date).toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' })}
+                  tickFormatter={(date) =>
+                    formatDate(date, authUser?.timezone, locale)
+                  }
                 />
                 <YAxis />
                 <Tooltip
-                  labelFormatter={(date) => new Date(date).toLocaleDateString()}
+                  labelFormatter={(date) =>
+                    formatDate(date, authUser?.timezone, locale)
+                  }
                   formatter={(value: number, name: string) => [
                     value,
-                    name === 'API Calls' ? t('apiCalls') : t('uniqueUsers')
+                    name === "API Calls" ? t("apiCalls") : t("uniqueUsers"),
                   ]}
                 />
                 <Line
@@ -339,7 +415,13 @@ export default function ContextStatsPage() {
               </LineChart>
             </ResponsiveContainer>
             <div className="mt-4 text-sm text-gray-500">
-              {timelineDays === 7 ? t('totalCallsLast7Days') : t('totalCallsLast30Days')}: <span className="font-semibold text-green-600">{timeline.total_calls.toLocaleString()}</span>
+              {timelineDays === 7
+                ? t("totalCallsLast7Days")
+                : t("totalCallsLast30Days")}
+              :{" "}
+              <span className="font-semibold text-green-600">
+                {timeline.total_calls.toLocaleString()}
+              </span>
             </div>
           </CardContent>
         </Card>
@@ -348,7 +430,7 @@ export default function ContextStatsPage() {
       {/* Issue #265: Public API Usage Stats (Public contexts only) */}
       {context?.is_public && publicAPIStats && (
         <div className="mt-6">
-          <h2 className="text-xl font-semibold mb-4">{t('publicAPIUsage')}</h2>
+          <h2 className="text-xl font-semibold mb-4">{t("publicAPIUsage")}</h2>
           <PublicAPIStats stats={publicAPIStats} days={timelineDays} />
         </div>
       )}
@@ -361,10 +443,12 @@ export default function ContextStatsPage() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <UserCircle className="h-5 w-5" />
-            {t('userActivity')}
+            {t("userActivity")}
           </CardTitle>
           <CardDescription>
-            {timelineDays === 7 ? t('topUsersLast7Days') : t('topUsersLast30Days')}
+            {timelineDays === 7
+              ? t("topUsersLast7Days")
+              : t("topUsersLast30Days")}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -372,9 +456,11 @@ export default function ContextStatsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>{t('user')}</TableHead>
-                  <TableHead className="text-right">{t('apiCalls')}</TableHead>
-                  <TableHead className="text-right">{t('lastActivity')}</TableHead>
+                  <TableHead>{t("user")}</TableHead>
+                  <TableHead className="text-right">{t("apiCalls")}</TableHead>
+                  <TableHead className="text-right">
+                    {t("lastActivity")}
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -382,9 +468,13 @@ export default function ContextStatsPage() {
                   <TableRow key={user.user_id}>
                     <TableCell>
                       <div>
-                        <div className="font-medium">{user.user_name || user.user_email}</div>
+                        <div className="font-medium">
+                          {user.user_name || user.user_email}
+                        </div>
                         {user.user_name && user.user_email && (
-                          <div className="text-sm text-gray-500">{user.user_email}</div>
+                          <div className="text-sm text-gray-500">
+                            {user.user_email}
+                          </div>
                         )}
                       </div>
                     </TableCell>
@@ -395,8 +485,12 @@ export default function ContextStatsPage() {
                     </TableCell>
                     <TableCell className="text-right text-sm text-gray-500">
                       {user.last_activity
-                        ? formatRelativeTime(user.last_activity, user?.timezone)
-                        : 'Never'}
+                        ? formatRelativeTime(
+                            user.last_activity,
+                            authUser?.timezone,
+                            locale,
+                          )
+                        : "Never"}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -406,17 +500,16 @@ export default function ContextStatsPage() {
             <div className="text-center py-8 text-gray-500">
               {userActivity === null ? (
                 <div>
-                  <p>{t('userActivityNotAvailable')}</p>
-                  <p className="text-sm mt-2">{t('requiresAdminRole')}</p>
+                  <p>{t("userActivityNotAvailable")}</p>
+                  <p className="text-sm mt-2">{t("requiresAdminRole")}</p>
                 </div>
               ) : (
-                <p>{t('noActivityData')}</p>
+                <p>{t("noActivityData")}</p>
               )}
             </div>
           )}
         </CardContent>
       </Card>
-
     </PageContainer>
   );
 }

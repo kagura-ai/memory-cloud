@@ -495,6 +495,7 @@ export default function APIKeysPage() {
                                       apiKey.visibility_expires_at,
                                       user?.timezone,
                                       locale,
+                                      false,
                                     ),
                                   })
                                 : t("hideAt", {

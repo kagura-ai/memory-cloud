@@ -1418,6 +1418,9 @@
     "workspaceScopedUrl": "Workspace-Scoped URL",
     "workspaceScopedUrlDesc": "Use this URL to register multiple workspaces in Claude Desktop",
     "copyWorkspaceScopedUrl": "Copy Workspace URL",
+    "mcpOAuthSetup": "MCP OAuth Setup",
+    "mcpOAuthSetupDesc": "Configure OAuth applications for MCP integration with Claude, ChatGPT, etc.",
+    "goToOAuthApps": "Go to OAuth Apps →",
     "apiKeysTitle": "API Keys",
     "apiKeysDesc": "For Claude Code and other MCP clients",
     "mcpSetupGuide": "MCP Setup Guide",
@@ -1448,7 +1451,10 @@
     "deleteApiKeyDesc": "This will permanently delete the API key. This action cannot be undone.",
     "copyToClipboard": "Copy to clipboard",
     "copySecret": "Copy secret",
-    "hideSecretNow": "Hide secret now (cannot be shown again)"
+    "hideSecretNow": "Hide secret now (cannot be shown again)",
+    "createSuccess": "API key created successfully",
+    "deleteSuccess": "API key deleted successfully",
+    "regenerateSuccess": "API key regenerated successfully"
   },
   "customApps": {
     "title": "App Authentication",
@@ -1517,7 +1523,10 @@
     "copyClientId": "Copy Client ID",
     "copyClientSecret": "Copy Client Secret",
     "copySecret": "Copy secret",
-    "hideSecretNow": "Hide secret now (cannot be shown again)"
+    "hideSecretNow": "Hide secret now (cannot be shown again)",
+    "createSuccess": "{provider} app created successfully",
+    "deleteSuccess": "OAuth app deleted successfully",
+    "regenerateSuccess": "OAuth secret regenerated successfully"
   },
   "systemSettings": {
     "title": "System Settings",

@@ -5,8 +5,8 @@
  * Issue #223: i18n support
  */
 
-import { formatDistanceToNow } from 'date-fns';
-import { ja } from 'date-fns/locale';
+import { formatDistanceToNow } from "date-fns";
+import { ja } from "date-fns/locale";
 
 /**
  * Format UTC datetime to user's timezone
@@ -22,23 +22,25 @@ import { ja } from 'date-fns/locale';
  */
 export function formatDateTime(
   utcTime: string,
-  timezone: string = 'UTC',
-  options?: Intl.DateTimeFormatOptions
+  timezone: string = "UTC",
+  locale: string = "ja",
+  options?: Intl.DateTimeFormatOptions,
 ): string {
   const date = new Date(utcTime);
+  const bcp47 = locale === "ja" ? "ja-JP" : "en-US";
 
   const defaultOptions: Intl.DateTimeFormatOptions = {
     timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: locale !== "ja",
   };
 
-  return new Intl.DateTimeFormat('ja-JP', {
+  return new Intl.DateTimeFormat(bcp47, {
     ...defaultOptions,
     ...options,
   }).format(date);
@@ -57,15 +59,17 @@ export function formatDateTime(
  */
 export function formatDate(
   utcTime: string,
-  timezone: string = 'UTC'
+  timezone: string = "UTC",
+  locale: string = "ja",
 ): string {
   const date = new Date(utcTime);
+  const bcp47 = locale === "ja" ? "ja-JP" : "en-US";
 
-  return new Intl.DateTimeFormat('ja-JP', {
+  return new Intl.DateTimeFormat(bcp47, {
     timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
   }).format(date);
 }
 
@@ -82,16 +86,18 @@ export function formatDate(
  */
 export function formatTime(
   utcTime: string,
-  timezone: string = 'UTC'
+  timezone: string = "UTC",
+  locale: string = "ja",
 ): string {
   const date = new Date(utcTime);
+  const bcp47 = locale === "ja" ? "ja-JP" : "en-US";
 
-  return new Intl.DateTimeFormat('ja-JP', {
+  return new Intl.DateTimeFormat(bcp47, {
     timeZone: timezone,
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: locale !== "ja",
   }).format(date);
 }
 
@@ -100,23 +106,25 @@ export function formatTime(
  *
  * @param utcTime - ISO datetime string (UTC)
  * @param timezone - IANA timezone
- * @returns Relative time string (e.g., '5 minutes ago', 'in 2 hours')
+ * @returns Relative time string (e.g., '5 minutes ago', 'about 3 hours')
  *
  * @example
  * formatRelativeTime('2025-12-09T17:15:30', 'Asia/Tokyo')
- * // => 'about 9 minutes'
+ * // => 'about 9 minutes ago'
+ * formatRelativeTime('2025-12-09T17:15:30', 'Asia/Tokyo', 'en', false)
+ * // => 'about 9 minutes'  (no suffix, for embedding in other strings)
  */
 export function formatRelativeTime(
   utcTime: string,
-  timezone: string = 'UTC',
-  locale: string = 'en'
+  timezone: string = "UTC",
+  locale: string = "en",
+  addSuffix: boolean = true,
 ): string {
-  // Use date-fns with locale support (Issue #223)
   const date = new Date(utcTime);
-  const localeObj = locale === 'ja' ? ja : undefined;
+  const localeObj = locale === "ja" ? ja : undefined;
 
   return formatDistanceToNow(date, {
-    addSuffix: false,  // We add suffix in the UI translation
+    addSuffix,
     locale: localeObj,
   });
 }
@@ -125,14 +133,14 @@ export function formatRelativeTime(
  * Common IANA timezones
  */
 export const COMMON_TIMEZONES = [
-  { value: 'UTC', label: 'UTC (Coordinated Universal Time)' },
-  { value: 'Asia/Tokyo', label: 'Asia/Tokyo (Japan, JST)' },
-  { value: 'America/New_York', label: 'America/New_York (US Eastern)' },
-  { value: 'America/Los_Angeles', label: 'America/Los_Angeles (US Pacific)' },
-  { value: 'America/Chicago', label: 'America/Chicago (US Central)' },
-  { value: 'Europe/London', label: 'Europe/London (UK)' },
-  { value: 'Europe/Paris', label: 'Europe/Paris (Central Europe)' },
-  { value: 'Asia/Shanghai', label: 'Asia/Shanghai (China)' },
-  { value: 'Asia/Singapore', label: 'Asia/Singapore' },
-  { value: 'Australia/Sydney', label: 'Australia/Sydney' },
+  { value: "UTC", label: "UTC (Coordinated Universal Time)" },
+  { value: "Asia/Tokyo", label: "Asia/Tokyo (Japan, JST)" },
+  { value: "America/New_York", label: "America/New_York (US Eastern)" },
+  { value: "America/Los_Angeles", label: "America/Los_Angeles (US Pacific)" },
+  { value: "America/Chicago", label: "America/Chicago (US Central)" },
+  { value: "Europe/London", label: "Europe/London (UK)" },
+  { value: "Europe/Paris", label: "Europe/Paris (Central Europe)" },
+  { value: "Asia/Shanghai", label: "Asia/Shanghai (China)" },
+  { value: "Asia/Singapore", label: "Asia/Singapore" },
+  { value: "Australia/Sydney", label: "Australia/Sydney" },
 ] as const;

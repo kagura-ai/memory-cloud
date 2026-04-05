@@ -5,9 +5,9 @@
  * Issue #666: Phase 2 - Added bulk delete checkbox support
  */
 
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Checkbox } from '@/components/ui/checkbox';
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Table,
   TableBody,
@@ -15,11 +15,13 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from '@/components/ui/table';
-import { Eye, Pencil, Trash2 } from 'lucide-react';
-import type { Memory } from '@/lib/types/memory';
-import { formatDistanceToNow } from 'date-fns';
-import { SpinnerLoading } from '@/components/common/LoadingState';
+} from "@/components/ui/table";
+import { Eye, Pencil, Trash2 } from "lucide-react";
+import type { Memory } from "@/lib/types/memory";
+import { formatRelativeTime } from "@/lib/utils/datetime";
+import { SpinnerLoading } from "@/components/common/LoadingState";
+import { useAuth } from "@/contexts/AuthContext";
+import { useLocale } from "next-intl";
 
 interface MemoriesTableProps {
   memories: Memory[];
@@ -49,6 +51,8 @@ export function MemoriesTable({
   selectedKeys = [],
   onSelectionChange,
 }: MemoriesTableProps) {
+  const { user } = useAuth();
+  const locale = useLocale();
   const totalPages = Math.ceil(total / pageSize);
   const bulkDeleteEnabled = !!onSelectionChange;
 
@@ -57,9 +61,9 @@ export function MemoriesTable({
     `${memory.key}:${memory.scope}:${memory.agent_name}`;
 
   // Check if all visible memories are selected
-  const allVisibleSelected = memories.length > 0 && memories.every(m =>
-    selectedKeys.includes(getMemoryUniqueKey(m))
-  );
+  const allVisibleSelected =
+    memories.length > 0 &&
+    memories.every((m) => selectedKeys.includes(getMemoryUniqueKey(m)));
 
   // Handle select all toggle
   const handleSelectAll = (checked: boolean) => {
@@ -73,7 +77,7 @@ export function MemoriesTable({
     } else {
       // Remove all visible memories from selection
       const visibleKeys = new Set(memories.map(getMemoryUniqueKey));
-      const newSelection = selectedKeys.filter(k => !visibleKeys.has(k));
+      const newSelection = selectedKeys.filter((k) => !visibleKeys.has(k));
       onSelectionChange(newSelection);
     }
   };
@@ -86,7 +90,7 @@ export function MemoriesTable({
     if (checked) {
       onSelectionChange([...selectedKeys, key]);
     } else {
-      onSelectionChange(selectedKeys.filter(k => k !== key));
+      onSelectionChange(selectedKeys.filter((k) => k !== key));
     }
   };
 
@@ -97,7 +101,7 @@ export function MemoriesTable({
   };
 
   const getScopeBadge = (scope: string) => {
-    return scope === 'persistent' ? (
+    return scope === "persistent" ? (
       <Badge variant="default">Persistent</Badge>
     ) : (
       <Badge variant="outline">Working</Badge>
@@ -116,7 +120,9 @@ export function MemoriesTable({
     return (
       <div className="flex items-center justify-center h-64 border border-dashed rounded-lg">
         <div className="text-center">
-          <p className="text-lg font-medium text-slate-900 dark:text-white">No memories found</p>
+          <p className="text-lg font-medium text-slate-900 dark:text-white">
+            No memories found
+          </p>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
             Try adjusting your search or filters
           </p>
@@ -158,7 +164,9 @@ export function MemoriesTable({
                     <TableCell>
                       <Checkbox
                         checked={isSelected}
-                        onCheckedChange={(checked) => handleRowToggle(memory, checked as boolean)}
+                        onCheckedChange={(checked) =>
+                          handleRowToggle(memory, checked as boolean)
+                        }
                         aria-label={`Select ${memory.key}`}
                       />
                     </TableCell>
@@ -174,7 +182,11 @@ export function MemoriesTable({
                   </TableCell>
                   <TableCell>{getImportanceBadge(memory.importance)}</TableCell>
                   <TableCell className="text-sm text-slate-500">
-                    {formatDistanceToNow(new Date(memory.updated_at), { addSuffix: true })}
+                    {formatRelativeTime(
+                      memory.updated_at,
+                      user?.timezone,
+                      locale,
+                    )}
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex items-center justify-end gap-2">
@@ -216,7 +228,8 @@ export function MemoriesTable({
       {totalPages > 1 && (
         <div className="flex items-center justify-between">
           <p className="text-sm text-slate-500">
-            Showing {(page - 1) * pageSize + 1} to {Math.min(page * pageSize, total)} of {total} memories
+            Showing {(page - 1) * pageSize + 1} to{" "}
+            {Math.min(page * pageSize, total)} of {total} memories
           </p>
           <div className="flex items-center gap-2">
             <Button
