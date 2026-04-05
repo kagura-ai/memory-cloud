@@ -127,7 +127,7 @@ Starting from a seed memory, activation spreads outward through the graph, retur
 
 ## MCP Tools
 
-Kagura Memory Cloud exposes 14 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/):
+Kagura Memory Cloud exposes 17 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/):
 
 | Tool | Description | Read-only |
 |------|------------|-----------|

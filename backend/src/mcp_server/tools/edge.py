@@ -28,7 +28,6 @@ VALID_EDGE_TYPES = frozenset({"neural_association", "related_to", "depends_on", 
 def _edge_to_dict(edge: Any) -> dict[str, Any]:
     """Convert NeuralMemoryEdge to JSON-serializable dict."""
     return {
-        "edge_id": edge.id,
         "source_id": str(edge.src_id),
         "target_id": str(edge.dst_id),
         "edge_type": edge.edge_type,
@@ -65,6 +64,23 @@ def _validate_edge_endpoints(
     return (source_uuid, target_uuid), None
 
 
+def _parse_float(
+    value: Any, name: str, min_val: float, max_val: float, default: float
+) -> tuple[float | None, list[TextContent] | None]:
+    """Parse and validate a float parameter."""
+    if value is None:
+        return default, None
+    try:
+        f = float(value)
+    except (ValueError, TypeError):
+        return None, _error_response("validation_error", f"{name} must be a number.")
+    if f < min_val or f > max_val:
+        return None, _error_response(
+            "validation_error", f"{name} must be between {min_val} and {max_val}."
+        )
+    return f, None
+
+
 async def handle_list_edges(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -76,7 +92,10 @@ async def handle_list_edges(
     from db.base import get_db
     from repositories.neural_edge import NeuralEdgeRepository
 
-    min_weight = float(args.get("min_weight", 0.0))
+    min_weight, error = _parse_float(args.get("min_weight"), "min_weight", 0.0, 3.0, 0.0)
+    if error:
+        return error
+
     edge_types = args.get("edge_types")
     limit = args.get("limit")
 
@@ -84,11 +103,13 @@ async def handle_list_edges(
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
-            await _resolve_context(db, user_id, current_context_id)
+            context = await _resolve_context(db, user_id, current_context_id)
+
+            # Use context's workspace_id for isolation (fallback from MCP session)
+            ws_id = str(workspace_id) if workspace_id else str(context.workspace_id)
+            ctx_id = str(current_context_id)
 
             repo = NeuralEdgeRepository(db)
-            ws_id = str(workspace_id) if workspace_id else None
-            ctx_id = str(current_context_id)
 
             outgoing = await execute_with_timeout(
                 repo.get_outgoing_edges(
@@ -162,8 +183,13 @@ async def handle_create_edge(
             f"edge_type must be one of: {', '.join(sorted(VALID_EDGE_TYPES))}",
         )
 
-    weight = float(args.get("weight", 0.5))
-    confidence = float(args.get("confidence", 1.0))
+    weight, error = _parse_float(args.get("weight"), "weight", 0.0, 3.0, 0.5)
+    if error:
+        return error
+
+    confidence, error = _parse_float(args.get("confidence"), "confidence", 0.0, 1.0, 1.0)
+    if error:
+        return error
 
     from db.base import get_db
     from repositories.neural_edge import NeuralEdgeRepository
@@ -172,11 +198,14 @@ async def handle_create_edge(
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
-            await _resolve_context(db, user_id, current_context_id)
+            context = await _resolve_context(db, user_id, current_context_id)
 
             perm_error = await _check_viewer_permission(db, user_id, workspace_id, "create edges")
             if perm_error:
                 return perm_error
+
+            ws_id = str(workspace_id) if workspace_id else str(context.workspace_id)
+            ctx_id = str(current_context_id)
 
             repo = NeuralEdgeRepository(db)
             edge = await execute_with_timeout(
@@ -187,8 +216,8 @@ async def handle_create_edge(
                     edge_type=edge_type,
                     weight=weight,
                     confidence=confidence,
-                    workspace_id=str(workspace_id) if workspace_id else None,
-                    context_id=str(current_context_id),
+                    workspace_id=ws_id,
+                    context_id=ctx_id,
                 ),
                 operation_name="create_edge",
             )
@@ -222,10 +251,10 @@ async def handle_update_edge(
         return error or _error_response("validation_error", "Invalid edge endpoints")
     source_uuid, target_uuid = endpoints
 
-    new_weight = args.get("weight")
+    new_weight_raw = args.get("weight")
     new_edge_type = args.get("edge_type")
 
-    if new_weight is None and new_edge_type is None:
+    if new_weight_raw is None and new_edge_type is None:
         return _error_response(
             "no_fields_to_update",
             "Provide at least one of: weight, edge_type.",
@@ -237,6 +266,12 @@ async def handle_update_edge(
             f"edge_type must be one of: {', '.join(sorted(VALID_EDGE_TYPES))}",
         )
 
+    new_weight = None
+    if new_weight_raw is not None:
+        new_weight, error = _parse_float(new_weight_raw, "weight", 0.0, 3.0, 0.5)
+        if error:
+            return error
+
     from db.base import get_db
     from repositories.neural_edge import NeuralEdgeRepository
 
@@ -244,19 +279,24 @@ async def handle_update_edge(
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
-            await _resolve_context(db, user_id, current_context_id)
+            context = await _resolve_context(db, user_id, current_context_id)
 
             perm_error = await _check_viewer_permission(db, user_id, workspace_id, "update edges")
             if perm_error:
                 return perm_error
 
-            repo = NeuralEdgeRepository(db)
-            ws_id = str(workspace_id) if workspace_id else None
+            ws_id = str(workspace_id) if workspace_id else str(context.workspace_id)
             ctx_id = str(current_context_id)
 
-            # Use create_or_update_edge for all updates (handles both weight and edge_type)
-            # First fetch existing edge to get current values for unchanged fields
-            existing = await repo.get_edge(user_id, source_uuid, target_uuid)
+            repo = NeuralEdgeRepository(db)
+
+            existing = await repo.get_edge(
+                user_id,
+                source_uuid,
+                target_uuid,
+                workspace_id=ws_id,
+                context_id=ctx_id,
+            )
             if existing is None:
                 await db.rollback()
                 return _error_response(
@@ -270,7 +310,7 @@ async def handle_update_edge(
                     src_id=source_uuid,
                     dst_id=target_uuid,
                     edge_type=new_edge_type or existing.edge_type,
-                    weight=float(new_weight) if new_weight is not None else existing.weight,
+                    weight=new_weight if new_weight is not None else existing.weight,
                     confidence=existing.confidence,
                     workspace_id=ws_id,
                     context_id=ctx_id,
@@ -314,11 +354,14 @@ async def handle_delete_edge(
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
-            await _resolve_context(db, user_id, current_context_id)
+            context = await _resolve_context(db, user_id, current_context_id)
 
             perm_error = await _check_viewer_permission(db, user_id, workspace_id, "delete edges")
             if perm_error:
                 return perm_error
+
+            ws_id = str(workspace_id) if workspace_id else str(context.workspace_id)
+            ctx_id = str(current_context_id)
 
             repo = NeuralEdgeRepository(db)
             deleted = await execute_with_timeout(
@@ -326,6 +369,8 @@ async def handle_delete_edge(
                     user_id=user_id,
                     src_id=source_uuid,
                     dst_id=target_uuid,
+                    workspace_id=ws_id,
+                    context_id=ctx_id,
                 ),
                 operation_name="delete_edge",
             )
