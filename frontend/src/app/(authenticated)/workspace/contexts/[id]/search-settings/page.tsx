@@ -277,10 +277,12 @@ export default function SearchSettingsPage() {
   }, [contextId, t, tCommon, toast, refreshConfig]);
 
   const handleWeightChange = (semantic: number) => {
+    if (isNaN(semantic)) return;
+    const clamped = Math.max(0, Math.min(1, semantic));
     setEditedConfig({
       ...editedConfig,
-      semantic_weight: semantic,
-      bm25_weight: parseFloat((1.0 - semantic).toFixed(2)),
+      semantic_weight: clamped,
+      bm25_weight: parseFloat((1.0 - clamped).toFixed(2)),
     });
   };
 
@@ -489,12 +491,14 @@ export default function SearchSettingsPage() {
               min="1"
               max="10"
               value={getCurrentValue("fetch_factor")}
-              onChange={(e) =>
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                if (isNaN(val)) return;
                 setEditedConfig({
                   ...editedConfig,
-                  fetch_factor: parseInt(e.target.value),
-                })
-              }
+                  fetch_factor: Math.max(1, Math.min(10, val)),
+                });
+              }}
               className="font-mono"
             />
             <p className="text-sm text-muted-foreground">
