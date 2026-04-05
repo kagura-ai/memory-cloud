@@ -8,7 +8,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { useTranslations } from "next-intl";
+import { useTranslations, useLocale } from "next-intl";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -155,6 +155,7 @@ export default function WorkspaceStatsPage() {
   const tCommon = useTranslations("common");
   const { currentWorkspace, currentWorkspaceId } = useWorkspace();
   const { user: authUser } = useAuth();
+  const locale = useLocale();
   const [stats, setStats] = useState<WorkspaceStats | null>(null);
   const [contextStats, setContextStats] = useState<ContextStatsResponse | null>(
     null,
@@ -675,7 +676,7 @@ export default function WorkspaceStatsPage() {
                       <YAxis />
                       <Tooltip
                         labelFormatter={(date) =>
-                          formatDate(date, authUser?.timezone)
+                          formatDate(date, authUser?.timezone, locale)
                         }
                       />
                       <Line

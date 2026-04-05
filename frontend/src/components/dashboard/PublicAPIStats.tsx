@@ -7,7 +7,7 @@
  * Issue #265 - Public API usage stats for public contexts
  */
 
-import { useTranslations } from "next-intl";
+import { useTranslations, useLocale } from "next-intl";
 import {
   Card,
   CardContent,
@@ -26,7 +26,7 @@ import {
 } from "recharts";
 import { Database, Search, TrendingUp } from "lucide-react";
 import type { PublicAPIStatsResponse } from "@/lib/api/workspaces";
-import { formatDate as formatDateUtil } from "@/lib/utils/datetime";
+import { formatDate } from "@/lib/utils/datetime";
 import { useAuth } from "@/contexts/AuthContext";
 
 interface PublicAPIStatsProps {
@@ -37,14 +37,7 @@ interface PublicAPIStatsProps {
 export function PublicAPIStats({ stats, days }: PublicAPIStatsProps) {
   const t = useTranslations("contextStats.publicAPI");
   const { user } = useAuth();
-
-  const formatDate = (dateStr: string) => {
-    try {
-      return formatDateUtil(dateStr, user?.timezone);
-    } catch {
-      return dateStr;
-    }
-  };
+  const locale = useLocale();
 
   return (
     <div className="space-y-6">
@@ -110,13 +103,17 @@ export function PublicAPIStats({ stats, days }: PublicAPIStatsProps) {
                     />
                     <XAxis
                       dataKey="date"
-                      tickFormatter={formatDate}
+                      tickFormatter={(date) =>
+                        formatDate(date, user?.timezone, locale)
+                      }
                       className="text-xs"
                       aria-label="Date"
                     />
                     <YAxis className="text-xs" aria-label="Event count" />
                     <Tooltip
-                      labelFormatter={(date) => formatDate(date)}
+                      labelFormatter={(date) =>
+                        formatDate(date, user?.timezone, locale)
+                      }
                       formatter={(value: number) => [value, t("events")]}
                       aria-label="Chart tooltip"
                     />
@@ -201,13 +198,17 @@ export function PublicAPIStats({ stats, days }: PublicAPIStatsProps) {
                     />
                     <XAxis
                       dataKey="date"
-                      tickFormatter={formatDate}
+                      tickFormatter={(date) =>
+                        formatDate(date, user?.timezone, locale)
+                      }
                       className="text-xs"
                       aria-label="Date"
                     />
                     <YAxis className="text-xs" aria-label="Search count" />
                     <Tooltip
-                      labelFormatter={(date) => formatDate(date)}
+                      labelFormatter={(date) =>
+                        formatDate(date, user?.timezone, locale)
+                      }
                       formatter={(value: number, name: string) => {
                         const labels: Record<string, string> = {
                           total: t("total"),

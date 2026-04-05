@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { useTranslations } from "next-intl";
+import { useTranslations, useLocale } from "next-intl";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import {
@@ -73,7 +73,8 @@ import { useAuth } from "@/contexts/AuthContext";
 
 export default function ContextStatsPage() {
   const t = useTranslations("contextStats");
-  const { user } = useAuth();
+  const { user: authUser } = useAuth();
+  const locale = useLocale();
 
   const params = useParams();
   const contextId = params.id as string;
@@ -383,11 +384,15 @@ export default function ContextStatsPage() {
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis
                   dataKey="date"
-                  tickFormatter={(date) => formatDate(date, user?.timezone)}
+                  tickFormatter={(date) =>
+                    formatDate(date, authUser?.timezone, locale)
+                  }
                 />
                 <YAxis />
                 <Tooltip
-                  labelFormatter={(date) => formatDate(date, user?.timezone)}
+                  labelFormatter={(date) =>
+                    formatDate(date, authUser?.timezone, locale)
+                  }
                   formatter={(value: number, name: string) => [
                     value,
                     name === "API Calls" ? t("apiCalls") : t("uniqueUsers"),
@@ -480,7 +485,10 @@ export default function ContextStatsPage() {
                     </TableCell>
                     <TableCell className="text-right text-sm text-gray-500">
                       {user.last_activity
-                        ? formatRelativeTime(user.last_activity, user?.timezone)
+                        ? formatRelativeTime(
+                            user.last_activity,
+                            authUser?.timezone,
+                          )
                         : "Never"}
                     </TableCell>
                   </TableRow>

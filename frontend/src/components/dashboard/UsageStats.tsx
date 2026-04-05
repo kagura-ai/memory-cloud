@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useState, forwardRef, useImperativeHandle } from "react";
-import { useTranslations } from "next-intl";
+import { useTranslations, useLocale } from "next-intl";
 import {
   Card,
   CardContent,
@@ -136,6 +136,7 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
     const { contextId } = useMemoryContext(); // For user-scoped (context)
     const { currentWorkspaceId } = useWorkspace(); // For workspace-scoped
     const { user } = useAuth();
+    const locale = useLocale();
     const [currentUsage, setCurrentUsage] = useState<UsageCurrentData | null>(
       null,
     );
@@ -391,11 +392,15 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis
                     dataKey="date"
-                    tickFormatter={(date) => formatDate(date, user?.timezone)}
+                    tickFormatter={(date) =>
+                      formatDate(date, user?.timezone, locale)
+                    }
                   />
                   <YAxis />
                   <Tooltip
-                    labelFormatter={(date) => formatDate(date, user?.timezone)}
+                    labelFormatter={(date) =>
+                      formatDate(date, user?.timezone, locale)
+                    }
                   />
                   <Line
                     type="monotone"

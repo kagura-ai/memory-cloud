@@ -483,6 +483,7 @@ export default function CustomAppsPage() {
                                         app.visibility_expires_at,
                                         user?.timezone,
                                         locale,
+                                        false,
                                       ),
                                     })
                                   : t("hideAt", {
@@ -690,6 +691,7 @@ export default function CustomAppsPage() {
                                           app.visibility_expires_at,
                                           user?.timezone,
                                           locale,
+                                          false,
                                         ),
                                       })
                                     : t("hideAt", {

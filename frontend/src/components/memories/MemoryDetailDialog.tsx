@@ -20,6 +20,7 @@ import type { Memory } from "@/lib/types/memory";
 import { formatDateTime } from "@/lib/utils/datetime";
 import { useState } from "react";
 import { useAuth } from "@/contexts/AuthContext";
+import { useLocale } from "next-intl";
 
 interface MemoryDetailDialogProps {
   memory: Memory;
@@ -37,6 +38,7 @@ export function MemoryDetailDialog({
   onDelete,
 }: MemoryDetailDialogProps) {
   const { user } = useAuth();
+  const locale = useLocale();
   const [copied, setCopied] = useState(false);
 
   const copyValue = async () => {
@@ -146,7 +148,7 @@ export function MemoryDetailDialog({
                 Created At
               </label>
               <p className="mt-1 text-sm">
-                {formatDateTime(memory.created_at, user?.timezone)}
+                {formatDateTime(memory.created_at, user?.timezone, locale)}
               </p>
             </div>
 
@@ -155,7 +157,7 @@ export function MemoryDetailDialog({
                 Updated At
               </label>
               <p className="mt-1 text-sm">
-                {formatDateTime(memory.updated_at, user?.timezone)}
+                {formatDateTime(memory.updated_at, user?.timezone, locale)}
               </p>
             </div>
           </div>

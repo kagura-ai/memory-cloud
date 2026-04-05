@@ -12,7 +12,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useTranslations } from "next-intl";
+import { useTranslations, useLocale } from "next-intl";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { formatDateTime } from "@/lib/utils/datetime";
@@ -105,6 +105,7 @@ export default function ContextsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { user, refetchUser } = useAuth();
+  const locale = useLocale();
   const { currentWorkspace } = useWorkspace();
   const [contexts, setContexts] = useState<Context[]>([]);
   const [loading, setLoading] = useState(true);
@@ -433,7 +434,7 @@ export default function ContextsPage() {
   };
 
   const formatDate = (dateString: string) =>
-    formatDateTime(dateString, user?.timezone);
+    formatDateTime(dateString, user?.timezone, locale);
 
   return (
     <PageContainer>
