@@ -60,8 +60,8 @@ Comment `/review` on the PR to run AI review + quality checks via GitHub Actions
 - `.claude/rules/` — Coding standards (auto-loaded by file path)
 - `.claude/rules/development-workflow.md` — Development flow, commit discipline, PR rules (auto-loaded)
 - `.claude/commands/` — Project-specific slash commands (`/test-unit`, `/test-e2e`, `/quality`, `/self-review`, `/issue-start`, `/self-maint`, `/api-docs-audit`, `/workflow`, `/release`, `/docker`, `/admin`)
-- `claude-plugin/` — Kagura Memory Cloud plugin (marketplace-compatible, installable in other projects)
-  - Skills: `/kagura-memory:session-start`, `/kagura-memory:session-summary`, `/kagura-memory:recall`, `/kagura-memory:remember`, `/kagura-memory:guide`, `/kagura-memory:smoke-test`
+- `.claude-plugin/` + `claude-skills/` — Kagura Memory Cloud plugin (marketplace-compatible)
+  - Commands: `/kagura-memory:session-start`, `/kagura-memory:session-summary`, `/kagura-memory:recall`, `/kagura-memory:remember`, `/kagura-memory:guide`, `/kagura-memory:smoke-test`
 - `/simplify` — Built-in skill (not a local command file)
 - `.claude/agents/` — Specialized agents (`code-reviewer`, `test-runner`)
 - `docs/` — Detailed documentation (concepts, architecture, API reference)

@@ -15,5 +15,6 @@
     "ai-memory",
     "session-management",
     "knowledge-base"
-  ]
+  ],
+  "commands": ["./claude-skills/"]
 }
