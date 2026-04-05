@@ -5,12 +5,14 @@
  *
  * Issue #169: Context-specific settings page
  * Issue #96: Unified from edit modal — single source for all context editing
+ * Issue #161: i18n support
  *
  * UI pattern: Card-based layout matching search-settings page
  */
 
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SpinnerLoading } from "@/components/common/LoadingState";
@@ -72,6 +74,8 @@ export default function ContextSettingsPage() {
   const { currentWorkspace } = useWorkspace();
   const { toast } = useToast();
   const searchParams = useSearchParams();
+  const t = useTranslations("contextSettings");
+  const tCommon = useTranslations("common");
   const contextId = params.id as string;
   const contextIdFromUrl = searchParams?.get("context");
 
@@ -118,11 +122,11 @@ export default function ContextSettingsPage() {
       const data = await getContext(contextId);
       applyContextData(data);
     } catch {
-      setError("Failed to load context");
+      setError(t("failedToLoad"));
     } finally {
       setLoading(false);
     }
-  }, [contextId, applyContextData]);
+  }, [contextId, applyContextData, t]);
 
   const refreshContext = useCallback(async () => {
     try {
@@ -142,8 +146,8 @@ export default function ContextSettingsPage() {
 
     if (isPublic && !context.is_public && !resourceId.trim()) {
       toast({
-        title: "Resource ID required",
-        description: "Enter a Resource ID before making this context public.",
+        title: t("resourceIdRequired"),
+        description: t("resourceIdRequiredDesc"),
         variant: "destructive",
       });
       return;
@@ -169,15 +173,15 @@ export default function ContextSettingsPage() {
       });
 
       toast({
-        title: "Settings saved",
-        description: "Context settings have been updated.",
+        title: t("savedTitle"),
+        description: t("savedDesc"),
       });
       await refreshContext();
     } catch (err: unknown) {
       const apiError = err as { message?: string };
       toast({
-        title: "Save failed",
-        description: apiError?.message || "Failed to save settings",
+        title: t("saveFailedTitle"),
+        description: apiError?.message || t("saveFailedDesc"),
         variant: "destructive",
         duration: 6000,
       });
@@ -195,7 +199,7 @@ export default function ContextSettingsPage() {
       router.push("/workspace/contexts");
     } catch (err: unknown) {
       const apiError = err as { details?: { detail?: string } };
-      setError(apiError?.details?.detail || "Failed to delete context");
+      setError(apiError?.details?.detail || t("deleteFailed"));
       setDeleteDialogOpen(false);
     } finally {
       setDeleting(false);
@@ -210,14 +214,12 @@ export default function ContextSettingsPage() {
       await updateContext(context.id, { is_locked: newLocked });
       setIsLocked(newLocked);
       toast({
-        title: newLocked ? "Context locked" : "Context unlocked",
-        description: newLocked
-          ? "This context is now protected from deletion"
-          : "This context can now be deleted",
+        title: newLocked ? t("lockedToast") : t("unlockedToast"),
+        description: newLocked ? t("lockedToastDesc") : t("unlockedToastDesc"),
       });
     } catch {
       toast({
-        title: "Failed to update lock status",
+        title: t("lockFailed"),
         variant: "destructive",
       });
     } finally {
@@ -267,7 +269,7 @@ export default function ContextSettingsPage() {
   if (loading) {
     return (
       <PageContainer>
-        <SpinnerLoading size="lg" message="Loading context settings..." />
+        <SpinnerLoading size="lg" message={t("loading")} />
       </PageContainer>
     );
   }
@@ -277,11 +279,8 @@ export default function ContextSettingsPage() {
       <PageContainer>
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Context Not Found</AlertTitle>
-          <AlertDescription>
-            The context you&apos;re looking for doesn&apos;t exist or you
-            don&apos;t have access.
-          </AlertDescription>
+          <AlertTitle>{t("notFoundTitle")}</AlertTitle>
+          <AlertDescription>{t("notFoundDescription")}</AlertDescription>
         </Alert>
         <Button
           variant="outline"
@@ -289,7 +288,7 @@ export default function ContextSettingsPage() {
           className="mt-4"
         >
           <ArrowLeft className="h-4 w-4 mr-2" />
-          Back to Contexts
+          {t("backToContexts")}
         </Button>
       </PageContainer>
     );
@@ -298,23 +297,27 @@ export default function ContextSettingsPage() {
   return (
     <PageContainer>
       <PageHeader
-        title={`${context.display_name || context.name} — Settings`}
-        description="Manage context settings and configurations"
+        title={t("title", {
+          contextName: context.display_name || context.name,
+        })}
+        description={t("description")}
         actions={
           <div className="flex items-center gap-2">
             {(contextId === user?.current_context_id ||
               contextId === contextIdFromUrl) && (
               <Badge variant="default" className="bg-brand-green-600">
-                Current
+                {t("badgeCurrent")}
               </Badge>
             )}
-            {context.is_default && <Badge variant="secondary">Default</Badge>}
+            {context.is_default && (
+              <Badge variant="secondary">{t("badgeDefault")}</Badge>
+            )}
             <Button
               variant="outline"
               onClick={() => router.push("/workspace/contexts")}
             >
               <ArrowLeft className="h-4 w-4 mr-2" />
-              Back
+              {tCommon("back")}
             </Button>
           </div>
         }
@@ -332,15 +335,13 @@ export default function ContextSettingsPage() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Info className="h-5 w-5" />
-            Basic Information
+            {t("basicInfoTitle")}
           </CardTitle>
-          <CardDescription>
-            Core context details visible in the dashboard
-          </CardDescription>
+          <CardDescription>{t("basicInfoDesc")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <Label>Context ID</Label>
+            <Label>{t("contextId")}</Label>
             <div className="flex items-center gap-2">
               <Input
                 value={context.id}
@@ -358,7 +359,7 @@ export default function ContextSettingsPage() {
                     setTimeout(() => setIdCopied(false), 1500);
                   } catch {
                     toast({
-                      title: "Failed to copy",
+                      title: t("copyFailed"),
                       variant: "destructive",
                     });
                   }
@@ -366,7 +367,7 @@ export default function ContextSettingsPage() {
               >
                 {idCopied ? (
                   <span className="text-xs text-green-600 dark:text-green-400">
-                    Copied!
+                    {t("copied")}
                   </span>
                 ) : (
                   <Copy className="h-4 w-4" />
@@ -374,21 +375,20 @@ export default function ContextSettingsPage() {
               </Button>
             </div>
             <p className="text-sm text-muted-foreground">
-              Use this ID in MCP tools (e.g.,{" "}
-              <code className="text-xs">context_id</code> parameter).
+              {t("contextIdHelp")}
             </p>
           </div>
 
           <div className="space-y-2">
-            <Label>Context Name</Label>
+            <Label>{t("contextName")}</Label>
             <Input value={context.name} disabled className="font-mono" />
             <p className="text-sm text-muted-foreground">
-              Internal identifier. Cannot be changed after creation.
+              {t("contextNameHelp")}
             </p>
           </div>
 
           <div className="space-y-2">
-            <Label>Display Name</Label>
+            <Label>{t("displayName")}</Label>
             <Input
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
@@ -396,15 +396,14 @@ export default function ContextSettingsPage() {
               maxLength={200}
             />
             <p className="text-sm text-muted-foreground">
-              Human-readable name shown in the dashboard. Leave empty to use the
-              context name.
+              {t("displayNameHelp")}
             </p>
           </div>
 
           <div className="space-y-2">
-            <Label>Description</Label>
+            <Label>{t("descriptionLabel")}</Label>
             <Textarea
-              placeholder="What is this context for?"
+              placeholder={t("descriptionPlaceholder")}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               rows={2}
@@ -418,15 +417,13 @@ export default function ContextSettingsPage() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Brain className="h-5 w-5" />
-            AI Configuration
+            {t("aiConfigTitle")}
           </CardTitle>
-          <CardDescription>
-            Settings that help AI understand and use this context
-          </CardDescription>
+          <CardDescription>{t("aiConfigDesc")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <Label>Template (optional)</Label>
+            <Label>{t("templateLabel")}</Label>
             <Select
               onValueChange={(templateId) => {
                 const template = getTemplate(templateId);
@@ -437,53 +434,49 @@ export default function ContextSettingsPage() {
               }}
             >
               <SelectTrigger>
-                <SelectValue placeholder="Choose a template to auto-fill Summary and Usage Guide..." />
+                <SelectValue placeholder={t("templatePlaceholder")} />
               </SelectTrigger>
               <SelectContent>
-                {CONTEXT_TEMPLATES.map((t) => (
-                  <SelectItem key={t.id} value={t.id}>
+                {CONTEXT_TEMPLATES.map((tpl) => (
+                  <SelectItem key={tpl.id} value={tpl.id}>
                     <div className="flex items-center gap-2">
                       <span className="text-xs px-2 py-0.5 rounded bg-muted">
-                        {t.category}
+                        {tpl.category}
                       </span>
-                      <span className="font-medium">{t.name}</span>
+                      <span className="font-medium">{tpl.name}</span>
                     </div>
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
-            <p className="text-sm text-muted-foreground">
-              Or customize the fields below manually.
-            </p>
+            <p className="text-sm text-muted-foreground">{t("templateHelp")}</p>
           </div>
 
           <div className="space-y-2">
-            <Label>Summary (for AI)</Label>
+            <Label>{t("summaryLabel")}</Label>
             <Textarea
-              placeholder="Brief description of this context's purpose (200-500 chars)"
+              placeholder={t("summaryPlaceholder")}
               value={summary}
               onChange={(e) => setSummary(e.target.value)}
               maxLength={500}
               rows={3}
             />
             <p className="text-sm text-muted-foreground">
-              Helps AI understand the purpose of this context. {summary.length}
-              /500
+              {t("summaryHelp", { count: summary.length })}
             </p>
           </div>
 
           <div className="space-y-2">
-            <Label>Usage Guide (for AI)</Label>
+            <Label>{t("usageGuideLabel")}</Label>
             <Textarea
-              placeholder="Guidelines for how AI should use memories in this context..."
+              placeholder={t("usageGuidePlaceholder")}
               value={usageGuide}
               onChange={(e) => setUsageGuide(e.target.value)}
               maxLength={2000}
               rows={6}
             />
             <p className="text-sm text-muted-foreground">
-              Instructions for AI on how to store and retrieve memories.{" "}
-              {usageGuide.length}/2000
+              {t("usageGuideHelp", { count: usageGuide.length })}
             </p>
           </div>
         </CardContent>
@@ -494,21 +487,21 @@ export default function ContextSettingsPage() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Lock className="h-5 w-5" />
-            Privacy & Access Control
+            {t("privacyTitle")}
           </CardTitle>
-          <CardDescription>Control who can access this context</CardDescription>
+          <CardDescription>{t("privacyDesc")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           {/* Private/Shared Toggle */}
           <div className="flex items-center justify-between p-4 border rounded-lg">
             <div className="flex-1">
               <p className="font-medium text-sm">
-                {isPrivate ? "🔒 Private Context" : "👥 Shared Context"}
+                {isPrivate
+                  ? `🔒 ${t("privateContext")}`
+                  : `👥 ${t("sharedContext")}`}
               </p>
               <p className="text-sm text-muted-foreground">
-                {isPrivate
-                  ? "Only you can access this context"
-                  : "Workspace members can be added to access this context"}
+                {isPrivate ? t("privateContextDesc") : t("sharedContextDesc")}
               </p>
             </div>
             <Button
@@ -516,7 +509,7 @@ export default function ContextSettingsPage() {
               size="sm"
               onClick={() => handlePrivacyToggle(!isPrivate)}
             >
-              {isPrivate ? "Make Shared" : "Make Private"}
+              {isPrivate ? t("makeShared") : t("makePrivate")}
             </Button>
           </div>
 
@@ -525,17 +518,17 @@ export default function ContextSettingsPage() {
             (isPrivate ? (
               <Alert>
                 <AlertCircle className="h-4 w-4" />
-                <AlertDescription>
-                  Make this context Shared first to enable Public access.
-                </AlertDescription>
+                <AlertDescription>{t("makeSharedFirst")}</AlertDescription>
               </Alert>
             ) : isPublic || context.is_public ? (
               <div className="space-y-3">
                 <div className="flex items-center justify-between p-4 border rounded-lg">
                   <div className="flex-1">
-                    <p className="font-medium text-sm">🌍 Public Context</p>
+                    <p className="font-medium text-sm">
+                      🌍 {t("publicContext")}
+                    </p>
                     <p className="text-sm text-muted-foreground">
-                      External systems can search via Public REST API
+                      {t("publicContextDesc")}
                     </p>
                   </div>
                   <Button
@@ -544,32 +537,34 @@ export default function ContextSettingsPage() {
                     className="border-red-300 text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950"
                     onClick={() => setIsPublic(false)}
                   >
-                    Unpublish
+                    {t("unpublish")}
                   </Button>
                 </div>
 
                 {!isPublic && context.is_public && (
                   <Alert>
                     <AlertCircle className="h-4 w-4" />
-                    <AlertDescription>
-                      Unpublish pending — click Save Changes to apply.
-                    </AlertDescription>
+                    <AlertDescription>{t("unpublishPending")}</AlertDescription>
                   </Alert>
                 )}
 
                 {isPublic && context.resource_id && (
                   <Alert>
                     <AlertCircle className="h-4 w-4" />
-                    <AlertTitle>Public Search API</AlertTitle>
+                    <AlertTitle>{t("publicSearchApi")}</AlertTitle>
                     <AlertDescription className="space-y-2">
                       <div>
-                        <p className="text-xs font-medium mb-1">Resource ID:</p>
+                        <p className="text-xs font-medium mb-1">
+                          {t("resourceIdLabel")}:
+                        </p>
                         <code className="block p-2 bg-muted rounded text-xs font-mono break-all">
                           {context.resource_id}
                         </code>
                       </div>
                       <div>
-                        <p className="text-xs font-medium mb-1">Endpoint:</p>
+                        <p className="text-xs font-medium mb-1">
+                          {t("resourceIdEndpoint")}
+                        </p>
                         <code className="block p-2 bg-muted rounded text-xs font-mono break-all">
                           POST /api/v1/public/{contextId}/search
                         </code>
@@ -579,7 +574,7 @@ export default function ContextSettingsPage() {
                           href="/workspace/integrations/resource-tokens"
                           className="text-primary underline hover:text-primary/80"
                         >
-                          Manage Resource Tokens →
+                          {t("manageResourceTokens")}
                         </a>
                         <a
                           href="https://github.com/kagura-ai/kagura-memory-python-sdk"
@@ -587,7 +582,7 @@ export default function ContextSettingsPage() {
                           rel="noopener noreferrer"
                           className="text-primary underline hover:text-primary/80"
                         >
-                          Python SDK →
+                          {t("pythonSdk")}
                         </a>
                       </div>
                     </AlertDescription>
@@ -598,10 +593,11 @@ export default function ContextSettingsPage() {
               <div className="space-y-3">
                 <div className="space-y-2">
                   <Label>
-                    Resource ID <span className="text-red-500">*</span>
+                    {t("resourceIdLabel")}{" "}
+                    <span className="text-red-500">*</span>
                   </Label>
                   <Input
-                    placeholder="e.g., products, docs_articles"
+                    placeholder={t("resourceIdPlaceholder")}
                     value={resourceId}
                     onChange={(e) => {
                       const value = e.target.value
@@ -612,8 +608,7 @@ export default function ContextSettingsPage() {
                     className="font-mono text-sm"
                   />
                   <p className="text-sm text-muted-foreground">
-                    Lowercase letters, numbers, underscores only. Used as the
-                    resource ID for Public Search API.
+                    {t("resourceIdHelp")}
                   </p>
                 </div>
                 <Button
@@ -624,7 +619,7 @@ export default function ContextSettingsPage() {
                     if (resourceId.trim()) setIsPublic(true);
                   }}
                 >
-                  🌍 Make Public
+                  🌍 {t("makePublic")}
                 </Button>
               </div>
             ))}
@@ -636,7 +631,7 @@ export default function ContextSettingsPage() {
         <Card className="border-red-200 dark:border-red-900">
           <CardHeader>
             <CardTitle className="text-red-900 dark:text-red-400">
-              Protection & Danger Zone
+              {t("protectionTitle")}
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -648,12 +643,10 @@ export default function ContextSettingsPage() {
                   ) : (
                     <ShieldOff className="h-4 w-4 text-muted-foreground" />
                   )}
-                  {isLocked ? "Context Locked" : "Context Unlocked"}
+                  {isLocked ? t("contextLocked") : t("contextUnlocked")}
                 </p>
                 <p className="text-sm text-muted-foreground">
-                  {isLocked
-                    ? "This context is protected from accidental deletion"
-                    : "Lock to prevent accidental deletion"}
+                  {isLocked ? t("lockedDesc") : t("unlockedDesc")}
                 </p>
               </div>
               <Button
@@ -662,7 +655,7 @@ export default function ContextSettingsPage() {
                 onClick={handleLockToggle}
                 disabled={lockSaving}
               >
-                {lockSaving ? "Saving..." : isLocked ? "Unlock" : "Lock"}
+                {lockSaving ? t("saving") : isLocked ? t("unlock") : t("lock")}
               </Button>
             </div>
 
@@ -670,12 +663,12 @@ export default function ContextSettingsPage() {
               className={`p-4 border border-red-200 dark:border-red-900 rounded-lg ${isLocked ? "opacity-50" : ""}`}
             >
               <p className="font-semibold text-red-900 dark:text-red-400 mb-2">
-                Delete Context
+                {t("deleteContext")}
               </p>
               <p className="text-sm text-muted-foreground mb-4">
                 {isLocked
-                  ? `Cannot delete "${context.name}" — context is locked.`
-                  : `Permanently delete "${context.name}" and all memories. This cannot be undone.`}
+                  ? t("deleteLockedDesc", { name: context.name })
+                  : t("deleteDesc", { name: context.name })}
               </p>
               <Button
                 variant="destructive"
@@ -684,7 +677,7 @@ export default function ContextSettingsPage() {
                 disabled={isLocked}
               >
                 <Trash2 className="h-4 w-4 mr-2" />
-                Delete Context
+                {t("deleteContext")}
               </Button>
             </div>
           </CardContent>
@@ -695,22 +688,20 @@ export default function ContextSettingsPage() {
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete Context</AlertDialogTitle>
+            <AlertDialogTitle>{t("deleteConfirmTitle")}</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete &quot;{context.name}&quot;? This
-              will permanently delete all memories in this context. This action
-              cannot be undone.
+              {t("deleteConfirmDesc", { name: context.name })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={handleDelete}
               className="bg-red-600 hover:bg-red-700"
               disabled={deleting}
             >
               {deleting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              Delete Context
+              {t("deleteContext")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -720,20 +711,14 @@ export default function ContextSettingsPage() {
       <AlertDialog open={privacyDialogOpen} onOpenChange={setPrivacyDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Make Context Private?</AlertDialogTitle>
+            <AlertDialogTitle>{t("makePrivateTitle")}</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-2 text-sm text-muted-foreground">
-                <div>
-                  Changing this context to <strong>Private</strong> will remove
-                  all members except you (the owner).
-                </div>
+                <div>{t("makePrivateDesc")}</div>
                 <div className="text-yellow-600 dark:text-yellow-400 font-medium">
-                  This action will immediately revoke access for all other
-                  members.
+                  {t("makePrivateWarning")}
                 </div>
-                <div>
-                  You can re-add members later by changing back to Shared.
-                </div>
+                <div>{t("makePrivateReaddNote")}</div>
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -744,13 +729,13 @@ export default function ContextSettingsPage() {
                 setPendingPrivacyChange(null);
               }}
             >
-              Cancel
+              {tCommon("cancel")}
             </AlertDialogCancel>
             <AlertDialogAction
               onClick={confirmPrivacyChange}
               className="bg-yellow-600 hover:bg-yellow-700"
             >
-              Make Private
+              {t("makePrivate")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -761,12 +746,10 @@ export default function ContextSettingsPage() {
         className={`fixed bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 transition-transform duration-200 ${isDirty ? "translate-y-0" : "translate-y-full"}`}
       >
         <div className="container flex items-center justify-between py-3 px-4 max-w-4xl mx-auto">
-          <p className="text-sm text-muted-foreground">
-            You have unsaved changes
-          </p>
+          <p className="text-sm text-muted-foreground">{t("unsavedChanges")}</p>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={refreshContext}>
-              Discard
+              {t("discard")}
             </Button>
             <Button size="sm" onClick={handleSave} disabled={saving}>
               {saving ? (
@@ -774,7 +757,7 @@ export default function ContextSettingsPage() {
               ) : (
                 <Save className="h-4 w-4 mr-2" />
               )}
-              {saving ? "Saving..." : "Save Changes"}
+              {saving ? t("saving") : t("saveChanges")}
             </Button>
           </div>
         </div>
