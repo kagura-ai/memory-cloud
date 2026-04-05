@@ -206,7 +206,7 @@ export default function SearchSettingsPage() {
         const ctx = await getContext(paramContextId);
         setContext(ctx);
       } catch {
-        setError("Failed to load context");
+        setError(t("failedToLoad"));
       } finally {
         setLoadingContext(false);
       }
@@ -630,7 +630,9 @@ export default function SearchSettingsPage() {
                                 : "text-muted-foreground",
                             )}
                           >
-                            {ollamaAvailable ? "Local" : "Unavailable"}
+                            {ollamaAvailable
+                              ? t("ollamaAvailable")
+                              : t("ollamaUnavailable")}
                           </Badge>
                         </span>
                       </SelectItem>
@@ -649,24 +651,30 @@ export default function SearchSettingsPage() {
                     <Alert>
                       <AlertCircle className="h-4 w-4" />
                       <AlertDescription>
-                        <p className="text-sm">
-                          {
-                            t("configureRerankerKeys").split(
-                              "External API Keys",
-                            )[0]
-                          }
-                          <Link
-                            href="/workspace/settings/external-keys"
-                            className="underline font-medium"
-                          >
-                            External API Keys
-                          </Link>
-                          {
-                            t("configureRerankerKeys").split(
-                              "External API Keys",
-                            )[1]
-                          }
-                        </p>
+                        {currentProvider === "ollama" ? (
+                          <p className="text-sm">
+                            {t("ollamaUnavailableDetail")}
+                          </p>
+                        ) : (
+                          <p className="text-sm">
+                            {
+                              t("configureRerankerKeys").split(
+                                "External API Keys",
+                              )[0]
+                            }
+                            <Link
+                              href="/workspace/settings/external-keys"
+                              className="underline font-medium"
+                            >
+                              External API Keys
+                            </Link>
+                            {
+                              t("configureRerankerKeys").split(
+                                "External API Keys",
+                              )[1]
+                            }
+                          </p>
+                        )}
                       </AlertDescription>
                     </Alert>
                   )}
