@@ -10,7 +10,7 @@
  * Issue #223: i18n support
  */
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useTranslations } from "next-intl";
 import Link from "next/link";
 import { PageContainer } from "@/components/common/PageContainer";
@@ -86,6 +86,38 @@ interface TelemetryResponse {
   services: Record<string, TelemetryServiceStatus>;
 }
 
+// Static model lists — no runtime deps, defined once at module level
+const VOYAGE_MODELS = [
+  { value: "rerank-2", label: "rerank-2 (Best quality)" },
+  { value: "rerank-2-lite", label: "rerank-2-lite (Faster, cheaper)" },
+];
+
+const COHERE_MODELS = [
+  { value: "rerank-multilingual-v3.0", label: "Multilingual v3.0" },
+  { value: "rerank-english-v3.0", label: "English v3.0" },
+];
+
+const OLLAMA_MODELS = [
+  {
+    value: "dengcao/Qwen3-Reranker-8B:Q5_K_M",
+    label: "Qwen3-Reranker-8B (Best quality)",
+  },
+  {
+    value: "bge-reranker-v2-m3",
+    label: "BGE Reranker v2 M3 (Multilingual)",
+  },
+];
+
+const DEFAULT_RERANKER_MODELS: Record<string, string> = {
+  voyage: "rerank-2",
+  cohere: "rerank-multilingual-v3.0",
+  ollama: "dengcao/Qwen3-Reranker-8B:Q5_K_M",
+};
+
+function getErrorMessage(err: unknown, fallback: string): string {
+  return (err as { message?: string })?.message ?? fallback;
+}
+
 export default function SearchSettingsPage() {
   const t = useTranslations("searchSettings");
   const tCommon = useTranslations("common");
@@ -111,14 +143,8 @@ export default function SearchSettingsPage() {
 
   const contextId = paramContextId;
   const contextName = context?.display_name || context?.name;
-
-  // Issue #149: Check if Free plan (reranking not available)
   const isFree = currentWorkspace?.plan_name === "free";
-
-  // Memoize isDirty: compare editedConfig against saved config
-  const isDirty = useMemo(() => {
-    return Object.keys(editedConfig).length > 0;
-  }, [editedConfig]);
+  const isDirty = Object.keys(editedConfig).length > 0;
 
   const loadExternalKeys = useCallback(async () => {
     try {
@@ -150,8 +176,7 @@ export default function SearchSettingsPage() {
       setConfig(data);
       setEditedConfig({});
     } catch (err: unknown) {
-      const apiError = err as { message?: string };
-      const errorMsg = apiError?.message || t("errorLoad");
+      const errorMsg = getErrorMessage(err, t("errorLoad"));
       setError(errorMsg);
       toast({
         title: tCommon("error"),
@@ -174,7 +199,6 @@ export default function SearchSettingsPage() {
     }
   }, [contextId]);
 
-  // Fetch context info
   useEffect(() => {
     const fetchContext = async () => {
       try {
@@ -194,12 +218,10 @@ export default function SearchSettingsPage() {
   }, [paramContextId]);
 
   useEffect(() => {
-    if (contextId && !loadingContext) {
-      loadConfig();
-      loadExternalKeys();
-      loadTelemetry();
-    }
-  }, [contextId, loadingContext, loadConfig, loadExternalKeys, loadTelemetry]);
+    if (!contextId || loadingContext) return;
+    Promise.all([loadConfig(), loadExternalKeys(), loadTelemetry()]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contextId, loadingContext]);
 
   const handleSave = useCallback(async () => {
     if (!contextId || Object.keys(editedConfig).length === 0) return;
@@ -223,8 +245,7 @@ export default function SearchSettingsPage() {
       toast({ title: tCommon("success"), description: t("configSaved") });
       await refreshConfig();
     } catch (err: unknown) {
-      const apiError = err as { message?: string };
-      const errorMsg = apiError?.message || t("errorSave");
+      const errorMsg = getErrorMessage(err, t("errorSave"));
       setError(errorMsg);
       toast({
         title: tCommon("error"),
@@ -245,8 +266,7 @@ export default function SearchSettingsPage() {
       toast({ title: tCommon("success"), description: t("configReset") });
       await refreshConfig();
     } catch (err: unknown) {
-      const apiError = err as { message?: string };
-      const errorMsg = apiError?.message || t("errorReset");
+      const errorMsg = getErrorMessage(err, t("errorReset"));
       setError(errorMsg);
       toast({
         title: tCommon("error"),
@@ -265,30 +285,21 @@ export default function SearchSettingsPage() {
   };
 
   const handleProviderChange = (provider: "voyage" | "cohere" | "ollama") => {
-    const defaultModels: Record<string, string> = {
-      voyage: "rerank-2",
-      cohere: "rerank-multilingual-v3.0",
-      ollama: "dengcao/Qwen3-Reranker-8B:Q5_K_M",
-    };
     setEditedConfig({
       ...editedConfig,
       reranker_provider: provider,
-      reranker_model: defaultModels[provider],
+      reranker_model: DEFAULT_RERANKER_MODELS[provider],
     });
   };
 
   const getCurrentValue = <K extends keyof ContextSearchConfig>(
     key: K,
   ): ContextSearchConfig[K] => {
-    if (
-      key in editedConfig &&
-      editedConfig[key as keyof ContextSearchConfigUpdate] !== undefined
-    ) {
-      return editedConfig[
-        key as keyof ContextSearchConfigUpdate
-      ] as ContextSearchConfig[K];
-    }
-    return config?.[key] as ContextSearchConfig[K];
+    return (
+      (editedConfig[key as keyof ContextSearchConfigUpdate] as
+        | ContextSearchConfig[K]
+        | undefined) ?? (config?.[key] as ContextSearchConfig[K])
+    );
   };
 
   if (loadingContext || loading) {
@@ -321,7 +332,6 @@ export default function SearchSettingsPage() {
     );
   }
 
-  // Check which providers have API keys configured
   const hasVoyageKey = externalKeys.some(
     (k) => k.provider.toLowerCase() === "voyage" && k.enabled,
   );
@@ -331,46 +341,22 @@ export default function SearchSettingsPage() {
   const hasAnyRerankerAvailable =
     hasVoyageKey || hasCohereKey || ollamaAvailable;
 
-  const voyageModels = [
-    { value: "rerank-2", label: "rerank-2 (Best quality)" },
-    { value: "rerank-2-lite", label: "rerank-2-lite (Faster, cheaper)" },
-  ];
-
-  const cohereModels = [
-    { value: "rerank-multilingual-v3.0", label: "Multilingual v3.0" },
-    { value: "rerank-english-v3.0", label: "English v3.0" },
-  ];
-
-  const ollamaModels = [
-    {
-      value: "dengcao/Qwen3-Reranker-8B:Q5_K_M",
-      label: "Qwen3-Reranker-8B (Best quality)",
-    },
-    {
-      value: "bge-reranker-v2-m3",
-      label: "BGE Reranker v2 M3 (Multilingual)",
-    },
-  ];
-
   const currentProvider = getCurrentValue("reranker_provider");
   const availableModels =
     currentProvider === "voyage"
-      ? voyageModels
+      ? VOYAGE_MODELS
       : currentProvider === "ollama"
-        ? ollamaModels
-        : cohereModels;
+        ? OLLAMA_MODELS
+        : COHERE_MODELS;
 
-  // Determine if the selected provider is unavailable (missing key or not connected)
   const selectedProviderUnavailable =
     (currentProvider === "voyage" && !hasVoyageKey) ||
     (currentProvider === "cohere" && !hasCohereKey) ||
     (currentProvider === "ollama" && !ollamaAvailable);
 
-  // Block save when reranking is enabled but provider is unavailable
   const useRerank = getCurrentValue("use_rerank");
   const cannotSave = isDirty && useRerank && selectedProviderUnavailable;
 
-  // Provider availability description
   const getProviderDescription = () => {
     if (ollamaAvailable && hasVoyageKey && hasCohereKey)
       return t("allProvidersAvailable");
@@ -382,6 +368,30 @@ export default function SearchSettingsPage() {
     if (hasCohereKey) return t("cohereConfigured");
     return "";
   };
+
+  // Helper to render API-key-based provider SelectItem (Voyage / Cohere)
+  const renderApiProviderItem = (
+    value: string,
+    label: string,
+    hasKey: boolean,
+  ) => (
+    <SelectItem value={value} disabled={!hasKey}>
+      <span className="flex items-center gap-2">
+        {label}
+        <Badge
+          variant="outline"
+          className={cn(
+            "ml-1 text-xs",
+            hasKey
+              ? "border-green-500 text-green-700 dark:text-green-400"
+              : "text-muted-foreground",
+          )}
+        >
+          {hasKey ? t("apiKeyConfigured") : t("apiKeyRequired")}
+        </Badge>
+      </span>
+    </SelectItem>
+  );
 
   const pageTitle = contextName
     ? t("titleWithContext", { contextName })
@@ -413,7 +423,7 @@ export default function SearchSettingsPage() {
         </Alert>
       )}
 
-      {/* 1. Hybrid Search Weights Card */}
+      {/* Hybrid Search Weights */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -512,7 +522,7 @@ export default function SearchSettingsPage() {
         </CardContent>
       </Card>
 
-      {/* 2. Reranker Configuration Card */}
+      {/* Reranker Configuration */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -522,7 +532,6 @@ export default function SearchSettingsPage() {
           <CardDescription>{t("rerankerConfigDesc")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
-          {/* Issue #149: Free plan restriction */}
           {isFree && (
             <Alert>
               <Lock className="h-4 w-4" />
@@ -544,7 +553,6 @@ export default function SearchSettingsPage() {
             </Alert>
           )}
 
-          {/* Show warning only when no providers are available at all */}
           {!isFree && !hasAnyRerankerAvailable && (
             <Alert>
               <AlertCircle className="h-4 w-4" />
@@ -606,68 +614,28 @@ export default function SearchSettingsPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {ollamaAvailable && (
-                        <SelectItem value="ollama">
-                          <span className="flex items-center gap-2">
-                            {t("ollamaLocal")}
-                            <Badge
-                              variant="outline"
-                              className="ml-1 text-xs border-green-500 text-green-700 dark:text-green-400"
-                            >
-                              Local
-                            </Badge>
-                          </span>
-                        </SelectItem>
-                      )}
-                      {!ollamaAvailable && (
-                        <SelectItem value="ollama" disabled>
-                          <span className="flex items-center gap-2">
-                            {t("ollamaLocal")}
-                            <Badge
-                              variant="outline"
-                              className="ml-1 text-xs text-muted-foreground"
-                            >
-                              Unavailable
-                            </Badge>
-                          </span>
-                        </SelectItem>
-                      )}
-                      <SelectItem value="voyage" disabled={!hasVoyageKey}>
+                      <SelectItem value="ollama" disabled={!ollamaAvailable}>
                         <span className="flex items-center gap-2">
-                          Voyage AI
+                          {t("ollamaLocal")}
                           <Badge
                             variant="outline"
                             className={cn(
                               "ml-1 text-xs",
-                              hasVoyageKey
+                              ollamaAvailable
                                 ? "border-green-500 text-green-700 dark:text-green-400"
                                 : "text-muted-foreground",
                             )}
                           >
-                            {hasVoyageKey
-                              ? t("apiKeyConfigured")
-                              : t("apiKeyRequired")}
+                            {ollamaAvailable ? "Local" : "Unavailable"}
                           </Badge>
                         </span>
                       </SelectItem>
-                      <SelectItem value="cohere" disabled={!hasCohereKey}>
-                        <span className="flex items-center gap-2">
-                          Cohere
-                          <Badge
-                            variant="outline"
-                            className={cn(
-                              "ml-1 text-xs",
-                              hasCohereKey
-                                ? "border-green-500 text-green-700 dark:text-green-400"
-                                : "text-muted-foreground",
-                            )}
-                          >
-                            {hasCohereKey
-                              ? t("apiKeyConfigured")
-                              : t("apiKeyRequired")}
-                          </Badge>
-                        </span>
-                      </SelectItem>
+                      {renderApiProviderItem(
+                        "voyage",
+                        "Voyage AI",
+                        hasVoyageKey,
+                      )}
+                      {renderApiProviderItem("cohere", "Cohere", hasCohereKey)}
                     </SelectContent>
                   </Select>
                   <p className="text-sm text-muted-foreground">
@@ -736,7 +704,7 @@ export default function SearchSettingsPage() {
         </CardContent>
       </Card>
 
-      {/* 3. Embedding Configuration (Read-only) */}
+      {/* Embedding Configuration (Read-only) */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -771,7 +739,7 @@ export default function SearchSettingsPage() {
         </CardContent>
       </Card>
 
-      {/* 4. Reset to Defaults */}
+      {/* Reset to Defaults */}
       <div className="flex justify-start">
         <Button onClick={() => setResetDialogOpen(true)} variant="outline">
           <RotateCcw className="h-4 w-4 mr-2" />
@@ -779,7 +747,6 @@ export default function SearchSettingsPage() {
         </Button>
       </div>
 
-      {/* Reset Confirmation Dialog */}
       <AlertDialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -800,7 +767,7 @@ export default function SearchSettingsPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Sticky Save Bar — always mounted, visibility toggled via CSS */}
+      {/* Sticky Save Bar */}
       <div
         className={cn(
           "fixed bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 transition-transform duration-200",
