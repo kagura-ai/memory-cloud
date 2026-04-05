@@ -677,31 +677,6 @@ Weights must sum to 1.0.""",
                 },
             },
         },
-        # =================================================================
-        {
-            "name": "kagura_memory_usage_guide",
-            "description": """Get the comprehensive usage guide for Kagura Memory Cloud.
-
-Use this tool when users ask:
-- "How do I use Kagura Memory Cloud?"
-- "What can this memory system do?"
-- "Show me examples of using memory tools"
-- "How should I save/search memories?"
-
-Returns a complete guide including:
-- Tool explanations (remember, recall, forget, reference, explore)
-- How the system works (3-layer architecture, Neural Memory, Hybrid Search)
-- Business and personal use case examples
-- Prompt examples for asking the AI
-- Best practices and tips
-
-No parameters required - just call this tool to get the full guide.""",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-            },
-            "readOnly": True,  # This tool only returns static text, no side effects
-        },
         {
             "name": "get_usage",
             "readOnly": True,

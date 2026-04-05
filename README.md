@@ -364,7 +364,6 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `delete_context` | Delete a context and all its memories | Owner/Admin |
 | `merge_contexts` | Merge memories from source context into target context | Owner/Admin |
 | `update_search_config` | Tune hybrid search weights and reranker settings per context | Editor+ |
-| `kagura_memory_usage_guide` | Get the usage guide | — |
 
 Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
 

@@ -85,14 +85,7 @@ delete_context(context_id=...)
 -> Verify: success response (context deleted)
 ```
 
-### 7. Static tools
-
-```
-kagura_memory_usage_guide()
--> Verify: returns non-empty guide text
-```
-
-### 8. Report
+### 7. Report
 
 Print a summary table:
 
@@ -114,9 +107,8 @@ Print a summary table:
 | 11 | recall (verify) | Verify update | PASS/FAIL |
 | 12 | forget | Delete memory | PASS/FAIL |
 | 13 | delete_context | Delete test context | PASS/FAIL |
-| 14 | kagura_memory_usage_guide | Get usage guide | PASS/FAIL |
 
-**Result: N/14 passed**
+**Result: N/13 passed**
 
 Test context: smoke-test-{timestamp} (cleaned up)
 ```

@@ -144,7 +144,6 @@ Kagura Memory Cloud exposes 14 tools via the [Model Context Protocol (MCP)](http
 | `delete_context` | Delete a context and all its memories | No |
 | `merge_contexts` | Merge memories from source into target context | No |
 | `update_search_config` | Tune hybrid search weights and reranker per context | No |
-| `kagura_memory_usage_guide` | Get the usage guide | Yes |
 
 **Typical workflow:**
 

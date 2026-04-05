@@ -31,7 +31,7 @@ Audit the FastAPI OpenAPI configuration against actual router endpoints. Report 
 ### 5. MCP ↔ REST Parity
 - List all MCP tools from `mcp_server/tools/_definitions.py`
 - Verify each MCP tool has a corresponding REST API endpoint
-- Flag MCP tools without REST equivalents (acceptable for MCP-only tools like usage_guide)
+- Flag MCP tools without REST equivalents (acceptable for MCP-only tools like get_usage)
 
 ## Output Format
 

@@ -28,7 +28,6 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "create_context": _get_timeout("create_context", 15.0),
     "update_context": _get_timeout("update_context", 15.0),
     "update_search_config": _get_timeout("update_search_config", 10.0),
-    "kagura_memory_usage_guide": _get_timeout("kagura_memory_usage_guide", 5.0),
 }
 DEFAULT_TOOL_TIMEOUT = float(os.getenv("MCP_TIMEOUT_DEFAULT", 60.0))
 
@@ -85,7 +84,7 @@ Response includes context_id, context_name, context_display_name to confirm whic
 Never store: passwords, API keys, PII, secrets
 """
 
-# Usage guide for kagura_memory_usage_guide tool
+# Usage guide (embedded in tool descriptions and get_context_info response)
 KAGURA_MEMORY_USAGE_GUIDE = """# Kagura Memory Cloud - Usage Guide
 
 ## Overview
@@ -387,7 +386,7 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 
 ---
 
-## Available Tools (12 tools)
+## Available Tools (13 tools)
 
 | Tool | Purpose |
 |------|---------|
@@ -402,9 +401,10 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 | `create_context` | Create a new context namespace |
 | `update_context` | Update context settings (summary, usage_guide, etc.) |
 | `update_search_config` | Tune hybrid search weights and reranker |
-| `kagura_memory_usage_guide` | Show this usage guide |
+| `delete_context` | Delete a context and all its memories |
+| `get_usage` | Get workspace quota and usage information |
 
-All tools except `list_contexts`, `create_context`, and `kagura_memory_usage_guide` require `context_id`.
+All tools except `list_contexts`, `create_context`, and `get_usage` require `context_id`.
 
 ---
 

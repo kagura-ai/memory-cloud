@@ -12,7 +12,7 @@ This project uses **Kagura Memory Cloud itself** as a knowledge base. Static doc
 - **Before implementing**: `recall(context_id="kagura-dev", query="...", k=10, use_rerank=false)` to find past patterns
 - **After implementing**: `remember(context_id="kagura-dev", summary="...", type="pattern", importance=0.8, tags=[...])` to save learnings
 - **On errors**: `recall(context_id="kagura-dev", query="{error message}", filters={"type": "troubleshooting"})` to check for known solutions
-- **For detailed usage**: Call `kagura_memory_usage_guide` tool or `get_context_info(context_id="kagura-dev")`
+- **For detailed usage**: Call `get_context_info(context_id="kagura-dev")` or use `/kagura-memory:guide` skill
 - **Coding standards**: Auto-loaded from `.claude/rules/` — no need to reference this file
 
 ## Development Workflow
