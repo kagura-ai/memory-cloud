@@ -62,9 +62,21 @@ export function formatDate(
   timezone: string = "UTC",
   locale: string = "ja",
 ): string {
-  const date = new Date(utcTime);
   const bcp47 = locale === "ja" ? "ja-JP" : "en-US";
 
+  // Date-only strings (YYYY-MM-DD): display as-is without timezone conversion
+  // Backend timeline API returns date-only strings already computed in UTC
+  if (/^\d{4}-\d{2}-\d{2}$/.test(utcTime)) {
+    const [year, month, day] = utcTime.split("-").map(Number);
+    const date = new Date(year, month - 1, day);
+    return new Intl.DateTimeFormat(bcp47, {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(date);
+  }
+
+  const date = new Date(utcTime);
   return new Intl.DateTimeFormat(bcp47, {
     timeZone: timezone,
     year: "numeric",
