@@ -293,6 +293,19 @@ The **kagura-memory** plugin adds session management and memory workflow skills 
 | `/kagura-memory:guide` | Usage guide, connection status, and setup help |
 | `/kagura-memory:smoke-test` | Verify all MCP tools work |
 
+**Recommended workflow:**
+
+```
+/kagura-memory:session-start       # ← Start here: restore context from last session
+  ... work normally ...
+/kagura-memory:recall              # Search past decisions, patterns, fixes
+/kagura-memory:remember            # Save important learnings as you go
+  ... finish work ...
+/kagura-memory:session-summary     # ← End here: save session knowledge for next time
+```
+
+Skills wrap the raw MCP tools (`recall`, `remember`, etc.) with workflow logic — context selection, git state analysis, and structured prompts. Use skills for session management and guided workflows; use MCP tools directly for fine-grained operations.
+
 Run `/kagura-memory:guide` for setup help and an optional SessionStart hook you can add to your project.
 
 > **Prerequisite:** MCP connection must be configured (`.mcp.json` with API key). Run `/kagura-memory:guide` in your project to set it up.
@@ -490,6 +503,47 @@ This project is designed to be developed **with** Claude Code and Kagura Memory 
 - [Contributing](CONTRIBUTING.md) — Development setup, code style, PR workflow
 - [Security](SECURITY.md) — Vulnerability reporting, security design
 - [Python SDK](https://github.com/kagura-ai/kagura-memory-python-sdk) — `KaguraClient` and `KaguraAgent` for Python
+
+## 🇯🇵 日本語ガイド / Japanese Guide
+
+<details>
+<summary>Claude Code プラグインの使い方</summary>
+
+### インストール
+
+```bash
+# マーケットプレイスから追加
+/plugin marketplace add kagura-ai/memory-cloud
+/plugin install kagura-memory@kagura-memory-cloud
+```
+
+### 利用可能なスキル
+
+| スキル | 説明 |
+|--------|------|
+| `/kagura-memory:session-start` | 前回のセッションコンテキストを復元 |
+| `/kagura-memory:session-summary` | セッション終了前に知識を保存 |
+| `/kagura-memory:recall` | 過去の知識を検索 |
+| `/kagura-memory:remember` | 新しい知識を保存 |
+| `/kagura-memory:guide` | 使い方ガイド・接続確認・セットアップ |
+| `/kagura-memory:smoke-test` | 全MCPツールの動作確認 |
+
+### 推奨ワークフロー
+
+```
+/kagura-memory:session-start       # ← ここから：前回のコンテキストを復元
+  ... 通常の作業 ...
+/kagura-memory:recall              # 過去の設計判断・パターン・修正を検索
+/kagura-memory:remember            # 重要な学びを都度保存
+  ... 作業完了 ...
+/kagura-memory:session-summary     # ← ここで終了：次回のためにセッション知識を保存
+```
+
+スキルは MCP ツール（`recall`, `remember` など）をワークフローロジックで包んだものです。コンテキスト選択、git 状態の分析、構造化プロンプトが組み込まれています。セッション管理やガイド付きワークフローにはスキルを、細かい操作には MCP ツールを直接使ってください。
+
+> **前提条件:** MCP接続の設定が必要です（`.mcp.json` に API キーを設定）。プロジェクトで `/kagura-memory:guide` を実行してセットアップしてください。
+
+</details>
 
 ## Contributing
 
