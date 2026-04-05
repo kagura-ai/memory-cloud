@@ -4,11 +4,13 @@
  * Search Settings Page
  *
  * Configure context-level hybrid search and reranker settings.
- * Issue #130 → #160: Context-scoped Search & Reranker Settings UI
+ * Issue #130 / #160: Context-scoped Search & Reranker Settings UI
+ * Issue #158: Unified UX with context settings pattern
+ * Issue #157: Ollama reranker support
  * Issue #223: i18n support
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { useTranslations } from "next-intl";
 import Link from "next/link";
 import { PageContainer } from "@/components/common/PageContainer";
@@ -33,17 +35,28 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import {
   ArrowLeft,
   Settings,
   Save,
-  RefreshCw,
   RotateCcw,
   AlertCircle,
   Info,
   Database,
   Lock,
+  Loader2,
+  Sparkles,
 } from "lucide-react";
 import {
   getContextSearchConfig,
@@ -56,13 +69,22 @@ import {
   listExternalAPIKeys,
   type ExternalAPIKey,
 } from "@/lib/api/external-keys";
+import { apiClient } from "@/lib/api/base";
 import { useToast } from "@/hooks/use-toast";
 import { useParams, useRouter } from "next/navigation";
-import { useMemoryContext } from "@/contexts/MemoryContextContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { getContext } from "@/lib/api/contexts";
 import type { Context } from "@/lib/types/context";
 import { cn } from "@/styles/design-tokens";
+
+interface TelemetryServiceStatus {
+  status: string;
+  details?: Record<string, unknown>;
+}
+
+interface TelemetryResponse {
+  services: Record<string, TelemetryServiceStatus>;
+}
 
 export default function SearchSettingsPage() {
   const t = useTranslations("searchSettings");
@@ -82,8 +104,9 @@ export default function SearchSettingsPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [externalKeys, setExternalKeys] = useState<ExternalAPIKey[]>([]);
+  const [ollamaAvailable, setOllamaAvailable] = useState(false);
+  const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const { toast } = useToast();
-  const { currentContext } = useMemoryContext();
   const { currentWorkspace } = useWorkspace();
 
   const contextId = paramContextId;
@@ -92,6 +115,65 @@ export default function SearchSettingsPage() {
   // Issue #149: Check if Free plan (reranking not available)
   const isFree = currentWorkspace?.plan_name === "free";
 
+  // Memoize isDirty: compare editedConfig against saved config
+  const isDirty = useMemo(() => {
+    return Object.keys(editedConfig).length > 0;
+  }, [editedConfig]);
+
+  const loadExternalKeys = useCallback(async () => {
+    try {
+      const keys = await listExternalAPIKeys();
+      setExternalKeys(keys.filter((k) => k.enabled));
+    } catch {
+      setExternalKeys([]);
+    }
+  }, []);
+
+  const loadTelemetry = useCallback(async () => {
+    try {
+      const telemetry = await apiClient.get<TelemetryResponse>(
+        "/api/v1/system/telemetry",
+      );
+      setOllamaAvailable(telemetry.services?.ollama?.status === "ok");
+    } catch {
+      setOllamaAvailable(false);
+    }
+  }, []);
+
+  const loadConfig = useCallback(async () => {
+    if (!contextId) return;
+
+    try {
+      setLoading(true);
+      setError(null);
+      const data = await getContextSearchConfig(contextId);
+      setConfig(data);
+      setEditedConfig({});
+    } catch (err: unknown) {
+      const apiError = err as { message?: string };
+      const errorMsg = apiError?.message || t("errorLoad");
+      setError(errorMsg);
+      toast({
+        title: tCommon("error"),
+        description: errorMsg,
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, [contextId, t, tCommon, toast]);
+
+  const refreshConfig = useCallback(async () => {
+    if (!contextId) return;
+    try {
+      const data = await getContextSearchConfig(contextId);
+      setConfig(data);
+      setEditedConfig({});
+    } catch {
+      // Silent refresh — don't show error
+    }
+  }, [contextId]);
+
   // Fetch context info
   useEffect(() => {
     const fetchContext = async () => {
@@ -99,8 +181,7 @@ export default function SearchSettingsPage() {
         setLoadingContext(true);
         const ctx = await getContext(paramContextId);
         setContext(ctx);
-      } catch (err) {
-        console.error("Failed to fetch context:", err);
+      } catch {
         setError("Failed to load context");
       } finally {
         setLoadingContext(false);
@@ -116,43 +197,11 @@ export default function SearchSettingsPage() {
     if (contextId && !loadingContext) {
       loadConfig();
       loadExternalKeys();
+      loadTelemetry();
     }
-  }, [contextId, loadingContext]);
+  }, [contextId, loadingContext, loadConfig, loadExternalKeys, loadTelemetry]);
 
-  const loadConfig = async () => {
-    if (!contextId) return;
-
-    try {
-      setLoading(true);
-      setError(null);
-      const data = await getContextSearchConfig(contextId);
-      setConfig(data);
-      setEditedConfig({});
-    } catch (err: any) {
-      const errorMsg = err.response?.data?.detail || t("errorLoad");
-      setError(errorMsg);
-      toast({
-        title: tCommon("error"),
-        description: errorMsg,
-        variant: "destructive",
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadExternalKeys = async () => {
-    try {
-      const keys = await listExternalAPIKeys();
-      setExternalKeys(keys.filter((k) => k.enabled)); // Only enabled keys
-    } catch (err: any) {
-      console.error("Failed to load external keys:", err);
-      // Don't show error toast - this is optional information
-      setExternalKeys([]);
-    }
-  };
-
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
     if (!contextId || Object.keys(editedConfig).length === 0) return;
 
     try {
@@ -172,9 +221,10 @@ export default function SearchSettingsPage() {
 
       await updateContextSearchConfig(contextId, updateData);
       toast({ title: tCommon("success"), description: t("configSaved") });
-      await loadConfig();
-    } catch (err: any) {
-      const errorMsg = err.response?.data?.detail || t("errorSave");
+      await refreshConfig();
+    } catch (err: unknown) {
+      const apiError = err as { message?: string };
+      const errorMsg = apiError?.message || t("errorSave");
       setError(errorMsg);
       toast({
         title: tCommon("error"),
@@ -184,22 +234,19 @@ export default function SearchSettingsPage() {
     } finally {
       setSaving(false);
     }
-  };
+  }, [contextId, editedConfig, config, t, tCommon, toast, refreshConfig]);
 
-  const handleReset = async () => {
+  const handleReset = useCallback(async () => {
     if (!contextId) return;
-
-    if (!confirm(t("confirmReset"))) {
-      return;
-    }
 
     try {
       setError(null);
       await resetContextSearchConfig(contextId);
       toast({ title: tCommon("success"), description: t("configReset") });
-      await loadConfig();
-    } catch (err: any) {
-      const errorMsg = err.response?.data?.detail || t("errorReset");
+      await refreshConfig();
+    } catch (err: unknown) {
+      const apiError = err as { message?: string };
+      const errorMsg = apiError?.message || t("errorReset");
       setError(errorMsg);
       toast({
         title: tCommon("error"),
@@ -207,7 +254,7 @@ export default function SearchSettingsPage() {
         variant: "destructive",
       });
     }
-  };
+  }, [contextId, t, tCommon, toast, refreshConfig]);
 
   const handleWeightChange = (semantic: number) => {
     setEditedConfig({
@@ -217,10 +264,11 @@ export default function SearchSettingsPage() {
     });
   };
 
-  const handleProviderChange = (provider: "voyage" | "cohere") => {
-    const defaultModels = {
+  const handleProviderChange = (provider: "voyage" | "cohere" | "ollama") => {
+    const defaultModels: Record<string, string> = {
       voyage: "rerank-2",
       cohere: "rerank-multilingual-v3.0",
+      ollama: "dengcao/Qwen3-Reranker-8B:Q5_K_M",
     };
     setEditedConfig({
       ...editedConfig,
@@ -242,8 +290,6 @@ export default function SearchSettingsPage() {
     }
     return config?.[key] as ContextSearchConfig[K];
   };
-
-  const hasChanges = Object.keys(editedConfig).length > 0;
 
   if (loadingContext || loading) {
     return (
@@ -282,7 +328,8 @@ export default function SearchSettingsPage() {
   const hasCohereKey = externalKeys.some(
     (k) => k.provider.toLowerCase() === "cohere" && k.enabled,
   );
-  const hasAnyRerankerKey = hasVoyageKey || hasCohereKey;
+  const hasAnyRerankerAvailable =
+    hasVoyageKey || hasCohereKey || ollamaAvailable;
 
   const voyageModels = [
     { value: "rerank-2", label: "rerank-2 (Best quality)" },
@@ -294,9 +341,42 @@ export default function SearchSettingsPage() {
     { value: "rerank-english-v3.0", label: "English v3.0" },
   ];
 
+  const ollamaModels = [
+    {
+      value: "dengcao/Qwen3-Reranker-8B:Q5_K_M",
+      label: "Qwen3-Reranker-8B (Best quality)",
+    },
+    {
+      value: "bge-reranker-v2-m3",
+      label: "BGE Reranker v2 M3 (Multilingual)",
+    },
+  ];
+
   const currentProvider = getCurrentValue("reranker_provider");
   const availableModels =
-    currentProvider === "voyage" ? voyageModels : cohereModels;
+    currentProvider === "voyage"
+      ? voyageModels
+      : currentProvider === "ollama"
+        ? ollamaModels
+        : cohereModels;
+
+  // Determine if the selected provider is missing its required key
+  const selectedProviderMissingKey =
+    (currentProvider === "voyage" && !hasVoyageKey) ||
+    (currentProvider === "cohere" && !hasCohereKey);
+
+  // Provider availability description
+  const getProviderDescription = () => {
+    if (ollamaAvailable && hasVoyageKey && hasCohereKey)
+      return t("allProvidersAvailable");
+    if (ollamaAvailable && hasVoyageKey) return t("ollamaAndVoyage");
+    if (ollamaAvailable && hasCohereKey) return t("ollamaAndCohere");
+    if (ollamaAvailable) return t("ollamaOnly");
+    if (hasVoyageKey && hasCohereKey) return t("bothAvailable");
+    if (hasVoyageKey) return t("voyageConfigured");
+    if (hasCohereKey) return t("cohereConfigured");
+    return "";
+  };
 
   const pageTitle = contextName
     ? t("titleWithContext", { contextName })
@@ -317,26 +397,9 @@ export default function SearchSettingsPage() {
               <ArrowLeft className="h-4 w-4 mr-2" />
               {tCommon("back")}
             </Button>
-            <Button onClick={loadConfig} variant="outline" size="sm">
-              <RefreshCw className="h-4 w-4 mr-2" />
-              {t("refresh")}
-            </Button>
-            {hasChanges && (
-              <Button onClick={handleSave} disabled={saving} size="sm">
-                <Save className="h-4 w-4 mr-2" />
-                {saving ? t("saving") : t("saveChanges")}
-              </Button>
-            )}
           </div>
         }
       />
-
-      {hasChanges && (
-        <Alert>
-          <Info className="h-4 w-4" />
-          <AlertDescription>{t("unsavedChanges")}</AlertDescription>
-        </Alert>
-      )}
 
       {error && (
         <Alert variant="destructive">
@@ -345,257 +408,7 @@ export default function SearchSettingsPage() {
         </Alert>
       )}
 
-      {/* Reranker Configuration Card */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Database className="h-5 w-5" />
-            {t("rerankerConfig")}
-          </CardTitle>
-          <CardDescription>{t("rerankerConfigDesc")}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          {/* Issue #149: Free plan restriction */}
-          {isFree && (
-            <Alert>
-              <Lock className="h-4 w-4" />
-              <AlertDescription>
-                <p className="font-medium mb-1">
-                  {t("rerankerNotAvailableFree")}
-                </p>
-                <p className="text-sm">
-                  {t("upgradeToBasic").split("Basic plan")[0]}
-                  <Link
-                    href="/workspace/plan"
-                    className="underline font-medium"
-                  >
-                    Basic plan
-                  </Link>
-                  {t("upgradeToBasic").split("Basic plan")[1]}
-                </p>
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {/* Issue #217: Show API key warning before toggle (not inside use_rerank conditional) */}
-          {!isFree && !hasAnyRerankerKey && (
-            <Alert>
-              <AlertCircle className="h-4 w-4" />
-              <AlertDescription>
-                <p className="font-medium mb-2">{t("noRerankerKeys")}</p>
-                <p className="text-sm">
-                  {t("configureRerankerKeys").split("External API Keys")[0]}
-                  <Link
-                    href="/workspace/settings/external-keys"
-                    className="underline font-medium"
-                  >
-                    External API Keys
-                  </Link>
-                  {t("configureRerankerKeys").split("External API Keys")[1]}
-                </p>
-              </AlertDescription>
-            </Alert>
-          )}
-
-          <div
-            className={cn(
-              "space-y-6",
-              (isFree || !hasAnyRerankerKey) &&
-                "opacity-50 pointer-events-none",
-            )}
-          >
-            <div className="flex items-center justify-between">
-              <div className="space-y-0.5">
-                <Label htmlFor="use_rerank" className="text-base">
-                  {t("enableReranking")}
-                </Label>
-                <p className="text-sm text-muted-foreground">
-                  {t("enableRerankingDesc")}
-                </p>
-              </div>
-              <Switch
-                id="use_rerank"
-                checked={getCurrentValue("use_rerank")}
-                onCheckedChange={(checked) =>
-                  setEditedConfig({ ...editedConfig, use_rerank: checked })
-                }
-                disabled={isFree || !hasAnyRerankerKey}
-              />
-            </div>
-
-            {getCurrentValue("use_rerank") && (
-              <>
-                {hasAnyRerankerKey && (
-                  <div className="space-y-3">
-                    <Label htmlFor="reranker_provider">{t("provider")}</Label>
-                    <Select
-                      value={getCurrentValue("reranker_provider")}
-                      onValueChange={(value) =>
-                        handleProviderChange(value as "voyage" | "cohere")
-                      }
-                    >
-                      <SelectTrigger id="reranker_provider">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {hasVoyageKey && (
-                          <SelectItem value="voyage">Voyage AI</SelectItem>
-                        )}
-                        {hasCohereKey && (
-                          <SelectItem value="cohere">Cohere</SelectItem>
-                        )}
-                      </SelectContent>
-                    </Select>
-                    <p className="text-sm text-muted-foreground">
-                      {hasVoyageKey && hasCohereKey
-                        ? t("bothAvailable")
-                        : hasVoyageKey
-                          ? t("voyageConfigured")
-                          : t("cohereConfigured")}
-                    </p>
-                  </div>
-                )}
-
-                {hasAnyRerankerKey && (
-                  <div className="space-y-3">
-                    <Label htmlFor="reranker_model">{t("model")}</Label>
-                    <Select
-                      value={getCurrentValue("reranker_model")}
-                      onValueChange={(value) =>
-                        setEditedConfig({
-                          ...editedConfig,
-                          reranker_model: value,
-                        })
-                      }
-                    >
-                      <SelectTrigger id="reranker_model">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {availableModels.map((model) => (
-                          <SelectItem key={model.value} value={model.value}>
-                            {model.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <p className="text-sm text-muted-foreground">
-                      {currentProvider === "voyage"
-                        ? t("voyageBestQuality")
-                        : t("cohereMultilingual")}
-                    </p>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Embedding Configuration (Read-only) */}
-      {config && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Database className="h-5 w-5" />
-              {t("embeddingConfig")}
-            </CardTitle>
-            <CardDescription>{t("embeddingConfigDesc")}</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Alert>
-              <Info className="h-4 w-4" />
-              <AlertDescription>{t("embeddingImmutable")}</AlertDescription>
-            </Alert>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-              <div className="p-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
-                <p className="text-sm text-muted-foreground mb-1">
-                  {t("embeddingModel")}
-                </p>
-                <p className="font-mono font-semibold">
-                  {config.embedding_model || "text-embedding-3-small"}
-                </p>
-              </div>
-              <div className="p-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
-                <p className="text-sm text-muted-foreground mb-1">
-                  {t("vectorDimensions")}
-                </p>
-                <p className="font-mono font-semibold">
-                  {config.embedding_dimensions || 512}
-                </p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Current Configuration Summary */}
-      <Card>
-        <CardHeader>
-          <CardTitle>{t("configSummary")}</CardTitle>
-          <CardDescription>{t("configSummaryDesc")}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
-            <div>
-              <p className="text-muted-foreground">{t("semanticWeight")}</p>
-              <p className="font-mono font-semibold">
-                {getCurrentValue("semantic_weight")?.toFixed(2)}
-              </p>
-            </div>
-            <div>
-              <p className="text-muted-foreground">{t("bm25Weight")}</p>
-              <p className="font-mono font-semibold">
-                {getCurrentValue("bm25_weight")?.toFixed(2)}
-              </p>
-            </div>
-            <div>
-              <p className="text-muted-foreground">{t("fetchFactor")}</p>
-              <p className="font-mono font-semibold">
-                {getCurrentValue("fetch_factor")}x
-              </p>
-            </div>
-            <div>
-              <p className="text-muted-foreground">{t("reranking")}</p>
-              <p className="font-semibold">
-                {getCurrentValue("use_rerank") ? (
-                  <span className="text-green-600">{t("enabled")}</span>
-                ) : (
-                  <span className="text-gray-500">{t("disabled")}</span>
-                )}
-              </p>
-            </div>
-            {getCurrentValue("use_rerank") && (
-              <>
-                <div>
-                  <p className="text-muted-foreground">{t("provider")}</p>
-                  <p className="font-semibold capitalize">
-                    {getCurrentValue("reranker_provider")}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-muted-foreground">{t("model")}</p>
-                  <p className="font-mono text-xs">
-                    {getCurrentValue("reranker_model")}
-                  </p>
-                </div>
-              </>
-            )}
-          </div>
-
-          {config && (
-            <div className="mt-4 pt-4 border-t text-xs text-muted-foreground">
-              <p>
-                {t("lastUpdated", {
-                  date: new Date(config.updated_at).toLocaleString(),
-                })}
-              </p>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Hybrid Search Weights Card */}
+      {/* 1. Hybrid Search Weights Card */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -694,18 +507,319 @@ export default function SearchSettingsPage() {
         </CardContent>
       </Card>
 
-      {/* Actions */}
-      <div className="flex justify-between items-center">
-        <Button onClick={handleReset} variant="outline">
+      {/* 2. Reranker Configuration Card */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Sparkles className="h-5 w-5" />
+            {t("rerankerConfig")}
+          </CardTitle>
+          <CardDescription>{t("rerankerConfigDesc")}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          {/* Issue #149: Free plan restriction */}
+          {isFree && (
+            <Alert>
+              <Lock className="h-4 w-4" />
+              <AlertDescription>
+                <p className="font-medium mb-1">
+                  {t("rerankerNotAvailableFree")}
+                </p>
+                <p className="text-sm">
+                  {t("upgradeToBasic").split("Basic plan")[0]}
+                  <Link
+                    href="/workspace/plan"
+                    className="underline font-medium"
+                  >
+                    Basic plan
+                  </Link>
+                  {t("upgradeToBasic").split("Basic plan")[1]}
+                </p>
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {/* Show warning only when no providers are available at all */}
+          {!isFree && !hasAnyRerankerAvailable && (
+            <Alert>
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>
+                <p className="font-medium mb-2">{t("noRerankerKeys")}</p>
+                <p className="text-sm">
+                  {t("configureRerankerKeys").split("External API Keys")[0]}
+                  <Link
+                    href="/workspace/settings/external-keys"
+                    className="underline font-medium"
+                  >
+                    External API Keys
+                  </Link>
+                  {t("configureRerankerKeys").split("External API Keys")[1]}
+                </p>
+              </AlertDescription>
+            </Alert>
+          )}
+
+          <div
+            className={cn(
+              "space-y-6",
+              (isFree || !hasAnyRerankerAvailable) &&
+                "opacity-50 pointer-events-none",
+            )}
+          >
+            <div className="flex items-center justify-between">
+              <div className="space-y-0.5">
+                <Label htmlFor="use_rerank" className="text-base">
+                  {t("enableReranking")}
+                </Label>
+                <p className="text-sm text-muted-foreground">
+                  {t("enableRerankingDesc")}
+                </p>
+              </div>
+              <Switch
+                id="use_rerank"
+                checked={getCurrentValue("use_rerank")}
+                onCheckedChange={(checked) =>
+                  setEditedConfig({ ...editedConfig, use_rerank: checked })
+                }
+                disabled={isFree || !hasAnyRerankerAvailable}
+              />
+            </div>
+
+            {getCurrentValue("use_rerank") && (
+              <>
+                <div className="space-y-3">
+                  <Label htmlFor="reranker_provider">{t("provider")}</Label>
+                  <Select
+                    value={getCurrentValue("reranker_provider")}
+                    onValueChange={(value) =>
+                      handleProviderChange(
+                        value as "voyage" | "cohere" | "ollama",
+                      )
+                    }
+                  >
+                    <SelectTrigger id="reranker_provider">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {ollamaAvailable && (
+                        <SelectItem value="ollama">
+                          <span className="flex items-center gap-2">
+                            {t("ollamaLocal")}
+                            <Badge
+                              variant="outline"
+                              className="ml-1 text-xs border-green-500 text-green-700 dark:text-green-400"
+                            >
+                              Local
+                            </Badge>
+                          </span>
+                        </SelectItem>
+                      )}
+                      {!ollamaAvailable && (
+                        <SelectItem value="ollama" disabled>
+                          <span className="flex items-center gap-2">
+                            {t("ollamaLocal")}
+                            <Badge
+                              variant="outline"
+                              className="ml-1 text-xs text-muted-foreground"
+                            >
+                              Unavailable
+                            </Badge>
+                          </span>
+                        </SelectItem>
+                      )}
+                      <SelectItem value="voyage" disabled={!hasVoyageKey}>
+                        <span className="flex items-center gap-2">
+                          Voyage AI
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              "ml-1 text-xs",
+                              hasVoyageKey
+                                ? "border-green-500 text-green-700 dark:text-green-400"
+                                : "text-muted-foreground",
+                            )}
+                          >
+                            {hasVoyageKey
+                              ? t("apiKeyConfigured")
+                              : t("apiKeyRequired")}
+                          </Badge>
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="cohere" disabled={!hasCohereKey}>
+                        <span className="flex items-center gap-2">
+                          Cohere
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              "ml-1 text-xs",
+                              hasCohereKey
+                                ? "border-green-500 text-green-700 dark:text-green-400"
+                                : "text-muted-foreground",
+                            )}
+                          >
+                            {hasCohereKey
+                              ? t("apiKeyConfigured")
+                              : t("apiKeyRequired")}
+                          </Badge>
+                        </span>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-sm text-muted-foreground">
+                    {getProviderDescription()}
+                  </p>
+                  {selectedProviderMissingKey && (
+                    <Alert>
+                      <AlertCircle className="h-4 w-4" />
+                      <AlertDescription>
+                        <p className="text-sm">
+                          {
+                            t("configureRerankerKeys").split(
+                              "External API Keys",
+                            )[0]
+                          }
+                          <Link
+                            href="/workspace/settings/external-keys"
+                            className="underline font-medium"
+                          >
+                            External API Keys
+                          </Link>
+                          {
+                            t("configureRerankerKeys").split(
+                              "External API Keys",
+                            )[1]
+                          }
+                        </p>
+                      </AlertDescription>
+                    </Alert>
+                  )}
+                </div>
+
+                <div className="space-y-3">
+                  <Label htmlFor="reranker_model">{t("model")}</Label>
+                  <Select
+                    value={getCurrentValue("reranker_model")}
+                    onValueChange={(value) =>
+                      setEditedConfig({
+                        ...editedConfig,
+                        reranker_model: value,
+                      })
+                    }
+                  >
+                    <SelectTrigger id="reranker_model">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableModels.map((model) => (
+                        <SelectItem key={model.value} value={model.value}>
+                          {model.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-sm text-muted-foreground">
+                    {currentProvider === "voyage"
+                      ? t("voyageBestQuality")
+                      : currentProvider === "ollama"
+                        ? t("qwen3BestQuality")
+                        : t("cohereMultilingual")}
+                  </p>
+                </div>
+              </>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* 3. Embedding Configuration (Read-only) */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Database className="h-5 w-5" />
+            {t("embeddingConfig")}
+          </CardTitle>
+          <CardDescription>{t("embeddingConfigDesc")}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Alert>
+            <Info className="h-4 w-4" />
+            <AlertDescription>{t("embeddingImmutable")}</AlertDescription>
+          </Alert>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+            <div className="p-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
+              <p className="text-sm text-muted-foreground mb-1">
+                {t("embeddingModel")}
+              </p>
+              <p className="font-mono font-semibold">
+                {config.embedding_model || "text-embedding-3-small"}
+              </p>
+            </div>
+            <div className="p-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
+              <p className="text-sm text-muted-foreground mb-1">
+                {t("vectorDimensions")}
+              </p>
+              <p className="font-mono font-semibold">
+                {config.embedding_dimensions || 512}
+              </p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* 4. Reset to Defaults */}
+      <div className="flex justify-start">
+        <Button onClick={() => setResetDialogOpen(true)} variant="outline">
           <RotateCcw className="h-4 w-4 mr-2" />
           {t("resetToDefaults")}
         </Button>
-        {hasChanges && (
-          <Button onClick={handleSave} disabled={saving}>
-            <Save className="h-4 w-4 mr-2" />
-            {saving ? t("saving") : t("saveChanges")}
-          </Button>
+      </div>
+
+      {/* Reset Confirmation Dialog */}
+      <AlertDialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("resetToDefaults")}</AlertDialogTitle>
+            <AlertDialogDescription>{t("confirmReset")}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setResetDialogOpen(false);
+                handleReset();
+              }}
+            >
+              {t("resetToDefaults")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Sticky Save Bar — always mounted, visibility toggled via CSS */}
+      <div
+        className={cn(
+          "fixed bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 transition-transform duration-200",
+          isDirty ? "translate-y-0" : "translate-y-full",
         )}
+      >
+        <div className="container flex items-center justify-between py-3 px-4 max-w-4xl mx-auto">
+          <p className="text-sm text-muted-foreground">
+            {t("unsavedChangesBar")}
+          </p>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={refreshConfig}>
+              {t("discardChanges")}
+            </Button>
+            <Button size="sm" onClick={handleSave} disabled={saving}>
+              {saving ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <Save className="h-4 w-4 mr-2" />
+              )}
+              {saving ? t("saving") : t("saveChanges")}
+            </Button>
+          </div>
+        </div>
       </div>
     </PageContainer>
   );

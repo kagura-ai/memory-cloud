@@ -4,14 +4,14 @@
  * Issue #82 → #160: Context-based Multi-Collection Support (renamed from Projects)
  */
 
-import { apiClient } from './base';
+import { apiClient } from "./base";
 import type {
   Context,
   ContextListResponse,
   ContextStats,
   CreateContextRequest,
   UpdateContextRequest,
-} from '@/lib/types/context';
+} from "@/lib/types/context";
 
 // Re-export types for consumers
 export type { Context, ContextListResponse, ContextStats };
@@ -20,7 +20,7 @@ export type { Context, ContextListResponse, ContextStats };
  * Get all contexts for the current user
  */
 export async function getContexts(): Promise<ContextListResponse> {
-  return apiClient.get<ContextListResponse>('/api/v1/contexts');
+  return apiClient.get<ContextListResponse>("/api/v1/contexts");
 }
 
 // Issue #246: getCurrentContext() removed (context always explicit from URL)
@@ -35,15 +35,19 @@ export async function getContext(contextId: string): Promise<Context> {
 /**
  * Get context statistics
  */
-export async function getContextStats(contextId: string): Promise<ContextStats> {
+export async function getContextStats(
+  contextId: string,
+): Promise<ContextStats> {
   return apiClient.get<ContextStats>(`/api/v1/contexts/${contextId}/stats`);
 }
 
 /**
  * Create a new context
  */
-export async function createContext(data: CreateContextRequest): Promise<Context> {
-  return apiClient.post<Context>('/api/v1/contexts', data);
+export async function createContext(
+  data: CreateContextRequest,
+): Promise<Context> {
+  return apiClient.post<Context>("/api/v1/contexts", data);
 }
 
 /**
@@ -51,7 +55,7 @@ export async function createContext(data: CreateContextRequest): Promise<Context
  */
 export async function updateContext(
   contextId: string,
-  data: UpdateContextRequest
+  data: UpdateContextRequest,
 ): Promise<Context> {
   return apiClient.put<Context>(`/api/v1/contexts/${contextId}`, data);
 }
@@ -75,7 +79,7 @@ export interface ContextSearchConfig {
   bm25_weight: number;
   fetch_factor: number;
   use_rerank: boolean;
-  reranker_provider: 'voyage' | 'cohere';
+  reranker_provider: "voyage" | "cohere" | "ollama";
   reranker_model: string;
   embedding_model?: string;
   embedding_dimensions?: number;
@@ -88,7 +92,7 @@ export interface ContextSearchConfigUpdate {
   bm25_weight: number;
   fetch_factor: number;
   use_rerank: boolean;
-  reranker_provider: 'voyage' | 'cohere';
+  reranker_provider: "voyage" | "cohere" | "ollama";
   reranker_model: string;
 }
 
@@ -96,9 +100,11 @@ export interface ContextSearchConfigUpdate {
  * Get context search configuration
  */
 export async function getContextSearchConfig(
-  contextId: string
+  contextId: string,
 ): Promise<ContextSearchConfig> {
-  return apiClient.get<ContextSearchConfig>(`/api/v1/contexts/${contextId}/search-config`);
+  return apiClient.get<ContextSearchConfig>(
+    `/api/v1/contexts/${contextId}/search-config`,
+  );
 }
 
 /**
@@ -106,11 +112,11 @@ export async function getContextSearchConfig(
  */
 export async function updateContextSearchConfig(
   contextId: string,
-  data: ContextSearchConfigUpdate
+  data: ContextSearchConfigUpdate,
 ): Promise<ContextSearchConfig> {
   return apiClient.put<ContextSearchConfig>(
     `/api/v1/contexts/${contextId}/search-config`,
-    data
+    data,
   );
 }
 
@@ -118,13 +124,12 @@ export async function updateContextSearchConfig(
  * Reset context search configuration to defaults
  */
 export async function resetContextSearchConfig(
-  contextId: string
+  contextId: string,
 ): Promise<ContextSearchConfig> {
   return apiClient.post<ContextSearchConfig>(
-    `/api/v1/contexts/${contextId}/search-config/reset`
+    `/api/v1/contexts/${contextId}/search-config/reset`,
   );
 }
-
 
 // ============================================================================
 // Context Members Management (Issue #165)
@@ -134,27 +139,29 @@ export interface ContextMember {
   user_id: string;
   user_name: string | null;
   user_email: string | null;
-  role: 'owner' | 'admin' | 'member' | 'viewer' | 'editor';
-  added_at: string | null;  // null for workspace owners/admins with automatic access
-  is_workspace_admin: boolean;  // true if access is via workspace role
+  role: "owner" | "admin" | "member" | "viewer" | "editor";
+  added_at: string | null; // null for workspace owners/admins with automatic access
+  is_workspace_admin: boolean; // true if access is via workspace role
 }
 
 export interface AddContextMemberRequest {
   user_id: string;
-  role: 'owner' | 'editor' | 'viewer';
+  role: "owner" | "editor" | "viewer";
 }
 
 export interface UpdateContextMemberRoleRequest {
-  role: 'owner' | 'editor' | 'viewer';
+  role: "owner" | "editor" | "viewer";
 }
 
 /**
  * List all members of a context
  */
 export async function listContextMembers(
-  contextId: string
+  contextId: string,
 ): Promise<ContextMember[]> {
-  return apiClient.get<ContextMember[]>(`/api/v1/contexts/${contextId}/members`);
+  return apiClient.get<ContextMember[]>(
+    `/api/v1/contexts/${contextId}/members`,
+  );
 }
 
 /**
@@ -162,11 +169,11 @@ export async function listContextMembers(
  */
 export async function addContextMember(
   contextId: string,
-  data: AddContextMemberRequest
+  data: AddContextMemberRequest,
 ): Promise<ContextMember> {
   return apiClient.post<ContextMember>(
     `/api/v1/contexts/${contextId}/members`,
-    data
+    data,
   );
 }
 
@@ -176,11 +183,11 @@ export async function addContextMember(
 export async function updateContextMemberRole(
   contextId: string,
   userId: string,
-  data: UpdateContextMemberRoleRequest
+  data: UpdateContextMemberRoleRequest,
 ): Promise<ContextMember> {
   return apiClient.put<ContextMember>(
     `/api/v1/contexts/${contextId}/members/${userId}`,
-    data
+    data,
   );
 }
 
@@ -189,9 +196,11 @@ export async function updateContextMemberRole(
  */
 export async function removeContextMember(
   contextId: string,
-  userId: string
+  userId: string,
 ): Promise<void> {
-  return apiClient.delete<void>(`/api/v1/contexts/${contextId}/members/${userId}`);
+  return apiClient.delete<void>(
+    `/api/v1/contexts/${contextId}/members/${userId}`,
+  );
 }
 
 // ============================================================================
@@ -214,5 +223,7 @@ export interface EmbeddingModelsResponse {
  * Get available embedding models with availability status
  */
 export async function getEmbeddingModels(): Promise<EmbeddingModelsResponse> {
-  return apiClient.get<EmbeddingModelsResponse>('/api/v1/system/embedding/models');
+  return apiClient.get<EmbeddingModelsResponse>(
+    "/api/v1/system/embedding/models",
+  );
 }
