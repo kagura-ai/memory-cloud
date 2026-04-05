@@ -1,7 +1,7 @@
-import { type Memory } from '@/lib/types/memory';
-import { Card, CardContent } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
+import { type Memory } from "@/lib/types/memory";
+import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Eye,
   Edit,
@@ -11,8 +11,10 @@ import {
   Activity,
   Database,
   HardDrive,
-} from 'lucide-react';
-import { formatDistanceToNow } from 'date-fns';
+} from "lucide-react";
+import { formatRelativeTime } from "@/lib/utils/datetime";
+import { useAuth } from "@/contexts/AuthContext";
+import { useLocale } from "next-intl";
 
 interface MemoryCardProps {
   memory: Memory;
@@ -21,18 +23,30 @@ interface MemoryCardProps {
   onDelete?: (memory: Memory) => void;
 }
 
-export function MemoryCard({ memory, onView, onEdit, onDelete }: MemoryCardProps) {
+export function MemoryCard({
+  memory,
+  onView,
+  onEdit,
+  onDelete,
+}: MemoryCardProps) {
+  const { user } = useAuth();
+  const locale = useLocale();
   const scopeGradient =
-    memory.scope === 'working'
-      ? 'from-blue-500 to-cyan-500'
-      : 'from-purple-500 to-pink-500';
+    memory.scope === "working"
+      ? "from-blue-500 to-cyan-500"
+      : "from-purple-500 to-pink-500";
 
-  const scopeColor = memory.scope === 'working' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700';
+  const scopeColor =
+    memory.scope === "working"
+      ? "bg-blue-100 text-blue-700"
+      : "bg-purple-100 text-purple-700";
 
   return (
     <Card className="group relative overflow-hidden border-gray-200 bg-white transition-all hover:border-brand-green-300 hover:shadow-xl hover:-translate-y-1">
       {/* Gradient overlay on hover */}
-      <div className={`pointer-events-none absolute inset-0 bg-gradient-to-br ${scopeGradient} opacity-0 transition-opacity group-hover:opacity-5`} />
+      <div
+        className={`pointer-events-none absolute inset-0 bg-gradient-to-br ${scopeGradient} opacity-0 transition-opacity group-hover:opacity-5`}
+      />
 
       <CardContent className="relative p-6">
         {/* Header */}
@@ -40,7 +54,7 @@ export function MemoryCard({ memory, onView, onEdit, onDelete }: MemoryCardProps
           <div className="flex-1">
             <div className="mb-2 flex items-center gap-2">
               <div className={`inline-flex rounded-lg p-2 ${scopeColor}`}>
-                {memory.scope === 'working' ? (
+                {memory.scope === "working" ? (
                   <Activity className="h-4 w-4" />
                 ) : (
                   <Database className="h-4 w-4" />
@@ -55,7 +69,9 @@ export function MemoryCard({ memory, onView, onEdit, onDelete }: MemoryCardProps
               {memory.key}
             </h3>
 
-            <p className="mb-3 line-clamp-3 text-sm text-gray-600">{memory.value}</p>
+            <p className="mb-3 line-clamp-3 text-sm text-gray-600">
+              {memory.value}
+            </p>
           </div>
         </div>
 
@@ -68,7 +84,9 @@ export function MemoryCard({ memory, onView, onEdit, onDelete }: MemoryCardProps
 
           <div className="flex items-center gap-2">
             <Calendar className="h-3.5 w-3.5" />
-            <span>{formatDistanceToNow(new Date(memory.created_at), { addSuffix: true })}</span>
+            <span>
+              {formatRelativeTime(memory.created_at, user?.timezone, locale)}
+            </span>
           </div>
 
           {memory.access_count !== undefined && (
@@ -93,7 +111,10 @@ export function MemoryCard({ memory, onView, onEdit, onDelete }: MemoryCardProps
               </Badge>
             ))}
             {memory.tags.length > 3 && (
-              <Badge variant="secondary" className="bg-gray-100 text-xs text-gray-600">
+              <Badge
+                variant="secondary"
+                className="bg-gray-100 text-xs text-gray-600"
+              >
                 +{memory.tags.length - 3}
               </Badge>
             )}
@@ -104,7 +125,9 @@ export function MemoryCard({ memory, onView, onEdit, onDelete }: MemoryCardProps
         <div className="mb-4">
           <div className="mb-1 flex items-center justify-between text-xs">
             <span className="text-gray-600">Importance</span>
-            <span className="font-medium text-gray-900">{(memory.importance * 10).toFixed(1)}/10</span>
+            <span className="font-medium text-gray-900">
+              {(memory.importance * 10).toFixed(1)}/10
+            </span>
           </div>
           <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200">
             <div

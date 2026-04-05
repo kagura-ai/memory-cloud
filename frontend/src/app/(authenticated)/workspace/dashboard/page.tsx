@@ -54,7 +54,8 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
-import { formatDistanceToNow } from "date-fns";
+import { formatRelativeTime, formatDate } from "@/lib/utils/datetime";
+import { useAuth } from "@/contexts/AuthContext";
 import Link from "next/link";
 
 interface PrivateContextAggregation {
@@ -153,6 +154,7 @@ export default function WorkspaceStatsPage() {
   const t = useTranslations("workspace");
   const tCommon = useTranslations("common");
   const { currentWorkspace, currentWorkspaceId } = useWorkspace();
+  const { user: authUser } = useAuth();
   const [stats, setStats] = useState<WorkspaceStats | null>(null);
   const [contextStats, setContextStats] = useState<ContextStatsResponse | null>(
     null,
@@ -524,9 +526,9 @@ export default function WorkspaceStatsPage() {
                                 </TableCell>
                                 <TableCell className="text-right text-sm text-gray-500">
                                   {contextDetail?.last_activity
-                                    ? formatDistanceToNow(
-                                        new Date(contextDetail.last_activity),
-                                        { addSuffix: true },
+                                    ? formatRelativeTime(
+                                        contextDetail.last_activity,
+                                        authUser?.timezone,
                                       )
                                     : "Never"}
                                 </TableCell>
@@ -673,7 +675,7 @@ export default function WorkspaceStatsPage() {
                       <YAxis />
                       <Tooltip
                         labelFormatter={(date) =>
-                          new Date(date).toLocaleDateString()
+                          formatDate(date, authUser?.timezone)
                         }
                       />
                       <Line
@@ -778,9 +780,9 @@ export default function WorkspaceStatsPage() {
                                 </TableCell>
                                 <TableCell className="text-right text-sm text-gray-500">
                                   {user.last_activity
-                                    ? formatDistanceToNow(
-                                        new Date(user.last_activity),
-                                        { addSuffix: true },
+                                    ? formatRelativeTime(
+                                        user.last_activity,
+                                        authUser?.timezone,
                                       )
                                     : "Never"}
                                 </TableCell>

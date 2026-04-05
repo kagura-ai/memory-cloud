@@ -12,9 +12,10 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useTranslations, useLocale } from "next-intl";
+import { useTranslations } from "next-intl";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { formatDateTime } from "@/lib/utils/datetime";
 import {
   Plus,
   RefreshCw,
@@ -101,7 +102,6 @@ const CONTEXT_NAME_PATTERN = /^[a-z0-9_-]+$/;
 export default function ContextsPage() {
   const t = useTranslations("contexts");
   const tCommon = useTranslations("common");
-  const locale = useLocale();
   const router = useRouter();
   const searchParams = useSearchParams();
   const { user, refetchUser } = useAuth();
@@ -432,27 +432,8 @@ export default function ContextsPage() {
     }
   };
 
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
-    if (locale === "ja") {
-      // Japanese format: 2025/12/20 22:30
-      return date.toLocaleString("ja-JP", {
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-    }
-    // English format: Dec 20, 2025, 10:30 PM
-    return date.toLocaleString("en-US", {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  };
+  const formatDate = (dateString: string) =>
+    formatDateTime(dateString, user?.timezone);
 
   return (
     <PageContainer>

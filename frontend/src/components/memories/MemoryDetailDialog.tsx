@@ -11,14 +11,15 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/ui/dialog';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { Separator } from '@/components/ui/separator';
-import { Pencil, Trash2, Copy, Check } from 'lucide-react';
-import type { Memory } from '@/lib/types/memory';
-import { format } from 'date-fns';
-import { useState } from 'react';
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Separator } from "@/components/ui/separator";
+import { Pencil, Trash2, Copy, Check } from "lucide-react";
+import type { Memory } from "@/lib/types/memory";
+import { formatDateTime } from "@/lib/utils/datetime";
+import { useState } from "react";
+import { useAuth } from "@/contexts/AuthContext";
 
 interface MemoryDetailDialogProps {
   memory: Memory;
@@ -35,6 +36,7 @@ export function MemoryDetailDialog({
   onEdit,
   onDelete,
 }: MemoryDetailDialogProps) {
+  const { user } = useAuth();
   const [copied, setCopied] = useState(false);
 
   const copyValue = async () => {
@@ -43,7 +45,7 @@ export function MemoryDetailDialog({
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (error) {
-      console.error('Failed to copy:', error);
+      console.error("Failed to copy:", error);
     }
   };
 
@@ -53,13 +55,13 @@ export function MemoryDetailDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {memory.key}
-            <Badge variant={memory.scope === 'persistent' ? 'default' : 'outline'}>
+            <Badge
+              variant={memory.scope === "persistent" ? "default" : "outline"}
+            >
               {memory.scope}
             </Badge>
           </DialogTitle>
-          <DialogDescription>
-            Memory details and metadata
-          </DialogDescription>
+          <DialogDescription>Memory details and metadata</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
@@ -118,10 +120,15 @@ export function MemoryDetailDialog({
                 Importance
               </label>
               <p className="mt-1">
-                <Badge variant={
-                  memory.importance >= 0.8 ? 'destructive' :
-                  memory.importance >= 0.5 ? 'default' : 'secondary'
-                }>
+                <Badge
+                  variant={
+                    memory.importance >= 0.8
+                      ? "destructive"
+                      : memory.importance >= 0.5
+                        ? "default"
+                        : "secondary"
+                  }
+                >
                   {memory.importance.toFixed(2)}
                 </Badge>
               </p>
@@ -139,7 +146,7 @@ export function MemoryDetailDialog({
                 Created At
               </label>
               <p className="mt-1 text-sm">
-                {format(new Date(memory.created_at), 'PPpp')}
+                {formatDateTime(memory.created_at, user?.timezone)}
               </p>
             </div>
 
@@ -148,7 +155,7 @@ export function MemoryDetailDialog({
                 Updated At
               </label>
               <p className="mt-1 text-sm">
-                {format(new Date(memory.updated_at), 'PPpp')}
+                {formatDateTime(memory.updated_at, user?.timezone)}
               </p>
             </div>
           </div>
