@@ -371,7 +371,7 @@ IMPORTANT: Always specify context_id to ensure you're exploring the intended con
                     "relation_types": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Optional filter for specific relation types. Examples: ['related_to', 'caused_by', 'implements']. Omit to explore all connections.",
+                        "description": "Optional filter for specific relation types: 'neural_association', 'related_to', 'depends_on', 'learned_from'. Omit to explore all connections.",
                     },
                     "context_id": {
                         "type": "string",

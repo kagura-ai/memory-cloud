@@ -124,6 +124,7 @@ class NeuralEdgeRepository:
         stmt = stmt.on_conflict_do_update(
             constraint="unique_edge",  # (user_id, src_id, dst_id)
             set_={
+                "edge_type": stmt.excluded.edge_type,
                 "weight": stmt.excluded.weight,
                 "confidence": stmt.excluded.confidence,
                 "metadata": stmt.excluded.metadata,

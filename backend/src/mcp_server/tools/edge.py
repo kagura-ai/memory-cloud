@@ -3,25 +3,24 @@
 Issue #163: Neural Memory edge management tools.
 """
 
-import json
-import logging
 import time
+from itertools import chain
 from typing import Any
 from uuid import UUID
 
 from mcp.types import TextContent
 
 from mcp_server.tools._helpers import (
+    _check_viewer_permission,
     _ContextNotFoundError,
     _error_response,
     _log_tool_usage,
     _resolve_context,
     _resolve_context_id,
+    _success_response,
     _validate_memory_id,
     execute_with_timeout,
 )
-
-logger = logging.getLogger(__name__)
 
 VALID_EDGE_TYPES = frozenset({"neural_association", "related_to", "depends_on", "learned_from"})
 
@@ -38,6 +37,32 @@ def _edge_to_dict(edge: Any) -> dict[str, Any]:
         "created_at": edge.created_at.isoformat() if edge.created_at else None,
         "last_updated": edge.last_updated.isoformat() if edge.last_updated else None,
     }
+
+
+def _validate_edge_endpoints(
+    args: dict[str, Any],
+) -> tuple[tuple[UUID, UUID] | None, list[TextContent] | None]:
+    """Validate and parse source_id/target_id from args."""
+    source_id = args.get("source_id")
+    target_id = args.get("target_id")
+    if not source_id or not target_id:
+        return None, _error_response(
+            "missing_required_fields",
+            "source_id and target_id are required.",
+        )
+    try:
+        source_uuid = UUID(str(source_id))
+        target_uuid = UUID(str(target_id))
+    except (ValueError, AttributeError):
+        return None, _error_response(
+            "invalid_uuid_format", "source_id and target_id must be valid UUIDs."
+        )
+    if source_uuid == target_uuid:
+        return None, _error_response(
+            "self_loop_not_allowed",
+            "source_id and target_id must be different (self-loops are not supported).",
+        )
+    return (source_uuid, target_uuid), None
 
 
 async def handle_list_edges(
@@ -90,10 +115,9 @@ async def handle_list_edges(
                 operation_name="list_edges_incoming",
             )
 
-            # Deduplicate (an edge appears in both if self-referencing)
             seen_ids: set[int] = set()
             edges = []
-            for edge in [*outgoing, *incoming]:
+            for edge in chain(outgoing, incoming):
                 if edge.id not in seen_ids:
                     seen_ids.add(edge.id)
                     edges.append(_edge_to_dict(edge))
@@ -103,19 +127,11 @@ async def handle_list_edges(
             )
             await db.commit()
 
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps(
-                        {
-                            "status": "success",
-                            "memory_id": str(memory_uuid),
-                            "edges": edges,
-                            "count": len(edges),
-                        }
-                    ),
-                )
-            ]
+            return _success_response(
+                memory_id=str(memory_uuid),
+                edges=edges,
+                count=len(edges),
+            )
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
@@ -126,6 +142,7 @@ async def handle_list_edges(
             )
             raise
 
+    # Safety: should never reach here (get_db always yields)
     return _error_response("internal_error", "Database session unavailable")
 
 
@@ -133,21 +150,10 @@ async def handle_create_edge(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
     """Create a new edge between two memories."""
-    source_id = args.get("source_id")
-    target_id = args.get("target_id")
-    if not source_id or not target_id:
-        return _error_response(
-            "missing_required_fields",
-            "source_id and target_id are required.",
-        )
-
-    try:
-        source_uuid = UUID(str(source_id))
-        target_uuid = UUID(str(target_id))
-    except (ValueError, AttributeError):
-        return _error_response(
-            "invalid_uuid_format", "source_id and target_id must be valid UUIDs."
-        )
+    endpoints, error = _validate_edge_endpoints(args)
+    if error or endpoints is None:
+        return error or _error_response("validation_error", "Invalid edge endpoints")
+    source_uuid, target_uuid = endpoints
 
     edge_type = args.get("edge_type", "related_to")
     if edge_type not in VALID_EDGE_TYPES:
@@ -167,6 +173,10 @@ async def handle_create_edge(
         try:
             current_context_id = _resolve_context_id(args["context_id"])
             await _resolve_context(db, user_id, current_context_id)
+
+            perm_error = await _check_viewer_permission(db, user_id, workspace_id, "create edges")
+            if perm_error:
+                return perm_error
 
             repo = NeuralEdgeRepository(db)
             edge = await execute_with_timeout(
@@ -188,17 +198,7 @@ async def handle_create_edge(
             )
             await db.commit()
 
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps(
-                        {
-                            "status": "success",
-                            "edge": _edge_to_dict(edge),
-                        }
-                    ),
-                )
-            ]
+            return _success_response(edge=_edge_to_dict(edge))
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
@@ -209,6 +209,7 @@ async def handle_create_edge(
             )
             raise
 
+    # Safety: should never reach here (get_db always yields)
     return _error_response("internal_error", "Database session unavailable")
 
 
@@ -216,21 +217,10 @@ async def handle_update_edge(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
     """Update an existing edge's weight or type."""
-    source_id = args.get("source_id")
-    target_id = args.get("target_id")
-    if not source_id or not target_id:
-        return _error_response(
-            "missing_required_fields",
-            "source_id and target_id are required.",
-        )
-
-    try:
-        source_uuid = UUID(str(source_id))
-        target_uuid = UUID(str(target_id))
-    except (ValueError, AttributeError):
-        return _error_response(
-            "invalid_uuid_format", "source_id and target_id must be valid UUIDs."
-        )
+    endpoints, error = _validate_edge_endpoints(args)
+    if error or endpoints is None:
+        return error or _error_response("validation_error", "Invalid edge endpoints")
+    source_uuid, target_uuid = endpoints
 
     new_weight = args.get("weight")
     new_edge_type = args.get("edge_type")
@@ -256,65 +246,44 @@ async def handle_update_edge(
             current_context_id = _resolve_context_id(args["context_id"])
             await _resolve_context(db, user_id, current_context_id)
 
+            perm_error = await _check_viewer_permission(db, user_id, workspace_id, "update edges")
+            if perm_error:
+                return perm_error
+
             repo = NeuralEdgeRepository(db)
             ws_id = str(workspace_id) if workspace_id else None
             ctx_id = str(current_context_id)
 
-            edge = None
-
-            # Update weight if specified
-            if new_weight is not None:
-                edge = await execute_with_timeout(
-                    repo.update_edge_weight(
-                        user_id=user_id,
-                        src_id=source_uuid,
-                        dst_id=target_uuid,
-                        new_weight=float(new_weight),
-                        workspace_id=ws_id,
-                        context_id=ctx_id,
-                    ),
-                    operation_name="update_edge_weight",
-                )
-
-            # Update edge_type via upsert (preserves existing weight if not changing)
-            if new_edge_type is not None:
-                current_weight = edge.weight if edge else float(new_weight or 0.5)
-                edge = await execute_with_timeout(
-                    repo.create_or_update_edge(
-                        user_id=user_id,
-                        src_id=source_uuid,
-                        dst_id=target_uuid,
-                        edge_type=new_edge_type,
-                        weight=current_weight,
-                        workspace_id=ws_id,
-                        context_id=ctx_id,
-                    ),
-                    operation_name="update_edge_type",
-                )
-
-            if edge is None:
+            # Use create_or_update_edge for all updates (handles both weight and edge_type)
+            # First fetch existing edge to get current values for unchanged fields
+            existing = await repo.get_edge(user_id, source_uuid, target_uuid)
+            if existing is None:
                 await db.rollback()
                 return _error_response(
                     "edge_not_found",
-                    f"No edge found from {source_id} to {target_id}.",
+                    f"No edge found from {args.get('source_id')} to {args.get('target_id')}.",
                 )
+
+            edge = await execute_with_timeout(
+                repo.create_or_update_edge(
+                    user_id=user_id,
+                    src_id=source_uuid,
+                    dst_id=target_uuid,
+                    edge_type=new_edge_type or existing.edge_type,
+                    weight=float(new_weight) if new_weight is not None else existing.weight,
+                    confidence=existing.confidence,
+                    workspace_id=ws_id,
+                    context_id=ctx_id,
+                ),
+                operation_name="update_edge",
+            )
 
             await _log_tool_usage(
                 db, user_id, "update_edge", start_time, 200, current_context_id, workspace_id
             )
             await db.commit()
 
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps(
-                        {
-                            "status": "success",
-                            "edge": _edge_to_dict(edge),
-                        }
-                    ),
-                )
-            ]
+            return _success_response(edge=_edge_to_dict(edge))
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
@@ -325,6 +294,7 @@ async def handle_update_edge(
             )
             raise
 
+    # Safety: should never reach here (get_db always yields)
     return _error_response("internal_error", "Database session unavailable")
 
 
@@ -332,21 +302,10 @@ async def handle_delete_edge(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
     """Delete an edge between two memories."""
-    source_id = args.get("source_id")
-    target_id = args.get("target_id")
-    if not source_id or not target_id:
-        return _error_response(
-            "missing_required_fields",
-            "source_id and target_id are required.",
-        )
-
-    try:
-        source_uuid = UUID(str(source_id))
-        target_uuid = UUID(str(target_id))
-    except (ValueError, AttributeError):
-        return _error_response(
-            "invalid_uuid_format", "source_id and target_id must be valid UUIDs."
-        )
+    endpoints, error = _validate_edge_endpoints(args)
+    if error or endpoints is None:
+        return error or _error_response("validation_error", "Invalid edge endpoints")
+    source_uuid, target_uuid = endpoints
 
     from db.base import get_db
     from repositories.neural_edge import NeuralEdgeRepository
@@ -356,6 +315,10 @@ async def handle_delete_edge(
         try:
             current_context_id = _resolve_context_id(args["context_id"])
             await _resolve_context(db, user_id, current_context_id)
+
+            perm_error = await _check_viewer_permission(db, user_id, workspace_id, "delete edges")
+            if perm_error:
+                return perm_error
 
             repo = NeuralEdgeRepository(db)
             deleted = await execute_with_timeout(
@@ -373,21 +336,13 @@ async def handle_delete_edge(
             await db.commit()
 
             if deleted:
-                return [
-                    TextContent(
-                        type="text",
-                        text=json.dumps(
-                            {
-                                "status": "success",
-                                "message": f"Edge deleted: {source_id} → {target_id}",
-                            }
-                        ),
-                    )
-                ]
+                return _success_response(
+                    message=f"Edge deleted: {args.get('source_id')} → {args.get('target_id')}",
+                )
             else:
                 return _error_response(
                     "edge_not_found",
-                    f"No edge found from {source_id} to {target_id}.",
+                    f"No edge found from {args.get('source_id')} to {args.get('target_id')}.",
                 )
         except _ContextNotFoundError as e:
             await db.rollback()
@@ -399,4 +354,5 @@ async def handle_delete_edge(
             )
             raise
 
+    # Safety: should never reach here (get_db always yields)
     return _error_response("internal_error", "Database session unavailable")
