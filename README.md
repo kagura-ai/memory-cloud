@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <strong>Universal AI Memory Platform</strong> — Self-hosted, open source.<br>
-  Give your AI assistants persistent memory across conversations.
+  <strong>Adaptive AI Memory Platform</strong> — Self-hosted, open source.<br>
+  Give your AI assistants persistent memory that gets smarter as you use it.
 </p>
 
 <p align="center">
@@ -24,16 +24,20 @@
 
 ## Why Kagura Memory Cloud?
 
-> **Your AI forgets everything after each conversation. Kagura fixes that.**
+> **Your AI forgets everything after each conversation. Kagura fixes that — and gets smarter every time you search.**
+
+Most AI memory tools are just vector databases with a chat wrapper. Kagura is different:
 
 | Feature | Description |
 |---------|-------------|
-| **11 MCP Tools** | remember, recall, forget, reference, explore, and 6 more |
+| **Adaptive Memory** | Every search automatically strengthens connections between related memories. The more you use it, the better `explore()` discovers hidden relationships. |
 | **Hybrid Search** | Semantic (OpenAI/Ollama) + BM25 keyword — 96% top-1 accuracy |
-| **Neural Memory** | Hebbian learning auto-connects related memories |
-| **Multi-Provider** | OpenAI or Ollama (local, private, zero cost) |
-| **Team Ready** | Workspaces, RBAC, context isolation |
-| **Web UI** | Next.js dashboard for managing memories |
+| **AI Reranking** | Ollama (local, free), Voyage AI, or Cohere — cross-encoder reranking for precision |
+| **Neural Memory Graph** | Hebbian learning builds a knowledge graph in the background. `explore()` traverses it for serendipitous discovery. |
+| **14 MCP Tools** | remember, recall, forget, reference, explore, merge_contexts, and 8 more |
+| **Multi-Provider** | OpenAI or Ollama (local, private, zero cost) for embeddings |
+| **Team Ready** | Workspaces, RBAC, context isolation, shared memory |
+| **Web UI** | Next.js dashboard — contexts, search settings, member management |
 | **5-Minute Setup** | `./setup.sh` and you're done |
 
 ## Architecture
@@ -49,14 +53,23 @@ Workspace (team/org)
 └── Members (Owner/Admin/Member/Viewer)
 ```
 
-**Search pipeline:**
+### Adaptive Memory: Two Search Paths
+
+Kagura separates **precision search** and **discovery** into two independent paths, each optimized for its purpose:
 
 ```
-Query → OpenAI Embedding → Qdrant Hybrid Search (semantic 60% + BM25 40%)
-                         → Optional AI Reranking
-                         → Neural Memory boosting
-                         → Results (ranked by relevance)
+recall()  ──→ Hybrid Search (semantic + BM25) ──→ [Reranker] ──→ Precise results
+                      │
+                      └──→ Hebbian Learning (background) ──→ Graph edges grow
+                                                                │
+explore() ──→ Graph Traversal (Neural Memory) ←─────────────────┘  Related discoveries
 ```
+
+- **`recall()`** — Precision search. Hybrid (semantic 60% + BM25 40%) with optional AI reranking. Returns the most relevant memories.
+- **`explore()`** — Discovery. Traverses the Neural Memory graph to find related memories that keyword search would miss.
+- **Hebbian learning** — Every `recall()` silently strengthens edges between co-retrieved memories. No explicit training needed — the graph grows organically as you use the system.
+
+This separation is intentional: mixing graph signals into recall degrades precision ([validated via benchmarks](docs/neural-memory-evaluation.md)). Instead, each path does what it's best at.
 
 **Data isolation:** All data is filtered by `workspace_id → context_id → user_id`. Memories never leak across boundaries. Single Qdrant collection with payload filtering.
 
