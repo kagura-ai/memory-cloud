@@ -429,6 +429,14 @@ class ContextService:
                 old_value=context.is_public,
                 new_value=is_public,
             )
+            # Issue #156: Clear resource_id when unpublishing
+            if not is_public and context.is_public and context.resource_id:
+                logger.info(
+                    "clearing_resource_id_on_unpublish",
+                    context_id=str(context_id),
+                    old_resource_id=context.resource_id,
+                )
+                context.resource_id = None
             context.is_public = is_public
         if resource_id is not None:
             # Validate resource_id format (lowercase alphanumeric + underscore)
