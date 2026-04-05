@@ -278,11 +278,8 @@ The **kagura-memory** plugin adds session management and memory workflow skills 
 
 ```bash
 # From marketplace
-/plugin marketplace add kagura-ai/memory-cloud --sparse claude-plugin
+/plugin marketplace add kagura-ai/memory-cloud
 /plugin install kagura-memory@kagura-memory-cloud
-
-# Or load directly for a single session
-claude --plugin-dir ./claude-plugin
 ```
 
 **Available skills:**
