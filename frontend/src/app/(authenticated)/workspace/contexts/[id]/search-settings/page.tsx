@@ -360,10 +360,15 @@ export default function SearchSettingsPage() {
         ? ollamaModels
         : cohereModels;
 
-  // Determine if the selected provider is missing its required key
-  const selectedProviderMissingKey =
+  // Determine if the selected provider is unavailable (missing key or not connected)
+  const selectedProviderUnavailable =
     (currentProvider === "voyage" && !hasVoyageKey) ||
-    (currentProvider === "cohere" && !hasCohereKey);
+    (currentProvider === "cohere" && !hasCohereKey) ||
+    (currentProvider === "ollama" && !ollamaAvailable);
+
+  // Block save when reranking is enabled but provider is unavailable
+  const useRerank = getCurrentValue("use_rerank");
+  const cannotSave = isDirty && useRerank && selectedProviderUnavailable;
 
   // Provider availability description
   const getProviderDescription = () => {
@@ -668,7 +673,7 @@ export default function SearchSettingsPage() {
                   <p className="text-sm text-muted-foreground">
                     {getProviderDescription()}
                   </p>
-                  {selectedProviderMissingKey && (
+                  {selectedProviderUnavailable && (
                     <Alert>
                       <AlertCircle className="h-4 w-4" />
                       <AlertDescription>
@@ -804,13 +809,19 @@ export default function SearchSettingsPage() {
       >
         <div className="container flex items-center justify-between py-3 px-4 max-w-4xl mx-auto">
           <p className="text-sm text-muted-foreground">
-            {t("unsavedChangesBar")}
+            {cannotSave
+              ? t("providerUnavailableCannotSave")
+              : t("unsavedChangesBar")}
           </p>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={refreshConfig}>
               {t("discardChanges")}
             </Button>
-            <Button size="sm" onClick={handleSave} disabled={saving}>
+            <Button
+              size="sm"
+              onClick={handleSave}
+              disabled={saving || cannotSave}
+            >
               {saving ? (
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
               ) : (

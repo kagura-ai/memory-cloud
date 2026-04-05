@@ -1809,6 +1809,7 @@
     "qwen3BestQuality": "Qwen3-Reranker-8B: 最高品質 | BGE v2 M3: 多言語対応",
     "discardChanges": "破棄",
     "unsavedChangesBar": "未保存の変更があります",
+    "providerUnavailableCannotSave": "保存できません — 選択中のリランカープロバイダーが利用できません",
     "embeddingConfig": "埋め込み設定",
     "embeddingConfigDesc": "コンテキスト作成時に設定。変更不可。",
     "embeddingImmutable": "埋め込み設定は不変で、コンテキスト作成後は変更できません。これらを変更するには新しいコンテキストを作成する必要があります。",

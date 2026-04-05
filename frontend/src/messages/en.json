@@ -1800,6 +1800,7 @@
     "qwen3BestQuality": "Qwen3-Reranker-8B: Best quality | BGE v2 M3: Multilingual",
     "discardChanges": "Discard",
     "unsavedChangesBar": "You have unsaved changes",
+    "providerUnavailableCannotSave": "Cannot save — selected reranker provider is unavailable",
     "embeddingConfig": "Embedding Configuration",
     "embeddingConfigDesc": "Set during context creation. Cannot be changed.",
     "embeddingImmutable": "Embedding settings are immutable and cannot be modified after context creation. Changing these would require creating a new context.",
