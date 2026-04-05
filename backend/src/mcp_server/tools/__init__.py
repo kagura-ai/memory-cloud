@@ -40,6 +40,7 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         "get_usage",
         "list_contexts",
         "get_context_info",  # Must remain callable so agents can inspect context even when rate-limited
+        "list_edges",  # Read-only edge listing
     }
 )
 
@@ -62,6 +63,12 @@ def _build_registry() -> dict[str, Any]:
         handle_merge_contexts,
         handle_update_context,
     )
+    from mcp_server.tools.edge import (
+        handle_create_edge,
+        handle_delete_edge,
+        handle_list_edges,
+        handle_update_edge,
+    )
     from mcp_server.tools.search_config import handle_update_search_config
     from mcp_server.tools.usage import handle_get_usage
 
@@ -79,6 +86,10 @@ def _build_registry() -> dict[str, Any]:
         "merge_contexts": handle_merge_contexts,
         "list_contexts": handle_list_contexts,
         "update_search_config": handle_update_search_config,
+        "list_edges": handle_list_edges,
+        "create_edge": handle_create_edge,
+        "update_edge": handle_update_edge,
+        "delete_edge": handle_delete_edge,
         "get_usage": handle_get_usage,
     }
 

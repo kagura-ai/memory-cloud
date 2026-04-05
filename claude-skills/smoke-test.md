@@ -75,11 +75,44 @@ recall(context_id=..., query="smoke test UPDATED", k=5)
 -> Verify: returns updated memory with new summary
 ```
 
-### 6. Cleanup
+### 6. Edge CRUD tools
+
+First, create a second test memory for edge testing (self-loops are not allowed):
+
+```
+remember(
+  context_id=...,
+  summary="MCP smoke test memory 2 — edge target",
+  content="Second test memory for edge CRUD testing.",
+  type="note",
+  importance=0.5,
+  tags=["smoke-test", "automated"]
+)
+-> Save returned memory_id as memory_id_2
+```
+
+```
+create_edge(context_id=..., source_id=<memory_id>, target_id=<memory_id_2>, edge_type="related_to")
+-> Verify: returns edge with weight=0.5, edge_type="related_to"
+
+list_edges(context_id=..., memory_id=<memory_id>)
+-> Verify: returns edges array with count >= 1
+
+update_edge(context_id=..., source_id=<memory_id>, target_id=<memory_id_2>, weight=0.8)
+-> Verify: returns updated edge with weight=0.8
+
+delete_edge(context_id=..., source_id=<memory_id>, target_id=<memory_id_2>)
+-> Verify: success response (edge deleted)
+```
+
+### 7. Cleanup
 
 ```
 forget(memory_id=..., context_id=...)
--> Verify: success response (memory deleted)
+-> Verify: success response (memory 1 deleted)
+
+forget(memory_id=<memory_id_2>, context_id=...)
+-> Verify: success response (memory 2 deleted)
 
 delete_context(context_id=...)
 -> Verify: success response (context deleted)
@@ -105,10 +138,16 @@ Print a summary table:
 | 9 | explore | Graph traversal | PASS/FAIL |
 | 10 | update_memory | Update memory | PASS/FAIL |
 | 11 | recall (verify) | Verify update | PASS/FAIL |
-| 12 | forget | Delete memory | PASS/FAIL |
-| 13 | delete_context | Delete test context | PASS/FAIL |
+| 12 | remember | Create 2nd test memory (edge target) | PASS/FAIL |
+| 13 | create_edge | Create test edge | PASS/FAIL |
+| 14 | list_edges | List edges | PASS/FAIL |
+| 15 | update_edge | Update edge weight | PASS/FAIL |
+| 16 | delete_edge | Delete edge | PASS/FAIL |
+| 17 | forget | Delete memory 1 | PASS/FAIL |
+| 18 | forget | Delete memory 2 | PASS/FAIL |
+| 19 | delete_context | Delete test context | PASS/FAIL |
 
-**Result: N/13 passed**
+**Result: N/19 passed**
 
 Test context: smoke-test-{timestamp} (cleaned up)
 ```

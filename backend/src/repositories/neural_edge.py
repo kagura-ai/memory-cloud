@@ -124,6 +124,7 @@ class NeuralEdgeRepository:
         stmt = stmt.on_conflict_do_update(
             constraint="unique_edge",  # (user_id, src_id, dst_id)
             set_={
+                "edge_type": stmt.excluded.edge_type,
                 "weight": stmt.excluded.weight,
                 "confidence": stmt.excluded.confidence,
                 "metadata": stmt.excluded.metadata,
@@ -216,25 +217,38 @@ class NeuralEdgeRepository:
     # Read Operations
     # ========================================================================
 
-    async def get_edge(self, user_id: str, src_id: UUID, dst_id: UUID) -> NeuralMemoryEdge | None:
-        """Get single edge.
+    async def get_edge(
+        self,
+        user_id: str,
+        src_id: UUID,
+        dst_id: UUID,
+        workspace_id: str | None = None,
+        context_id: str | None = None,
+    ) -> NeuralMemoryEdge | None:
+        """Get single edge with optional 3-level isolation.
 
         Args:
             user_id: User identifier
             src_id: Source node ID
             dst_id: Destination node ID
+            workspace_id: Workspace ID (for isolation)
+            context_id: Context ID (for isolation)
 
         Returns:
             Edge or None if not found
         """
-        stmt = select(NeuralMemoryEdge).where(
-            and_(
-                NeuralMemoryEdge.user_id == user_id,
-                NeuralMemoryEdge.src_id == src_id,
-                NeuralMemoryEdge.dst_id == dst_id,
-            )
-        )
+        conditions = [
+            NeuralMemoryEdge.user_id == user_id,
+            NeuralMemoryEdge.src_id == src_id,
+            NeuralMemoryEdge.dst_id == dst_id,
+        ]
 
+        if workspace_id:
+            conditions.append(NeuralMemoryEdge.workspace_id == UUID(workspace_id))
+        if context_id:
+            conditions.append(NeuralMemoryEdge.context_id == UUID(context_id))
+
+        stmt = select(NeuralMemoryEdge).where(and_(*conditions))
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -715,24 +729,38 @@ class NeuralEdgeRepository:
     # Delete Operations
     # ========================================================================
 
-    async def delete_edge(self, user_id: str, src_id: UUID, dst_id: UUID) -> bool:
-        """Delete a single edge.
+    async def delete_edge(
+        self,
+        user_id: str,
+        src_id: UUID,
+        dst_id: UUID,
+        workspace_id: str | None = None,
+        context_id: str | None = None,
+    ) -> bool:
+        """Delete a single edge with optional 3-level isolation.
 
         Args:
             user_id: User identifier
             src_id: Source node ID
             dst_id: Destination node ID
+            workspace_id: Workspace ID (for isolation)
+            context_id: Context ID (for isolation)
 
         Returns:
             True if deleted, False if not found
         """
-        stmt = delete(NeuralMemoryEdge).where(
-            and_(
-                NeuralMemoryEdge.user_id == user_id,
-                NeuralMemoryEdge.src_id == src_id,
-                NeuralMemoryEdge.dst_id == dst_id,
-            )
-        )
+        conditions = [
+            NeuralMemoryEdge.user_id == user_id,
+            NeuralMemoryEdge.src_id == src_id,
+            NeuralMemoryEdge.dst_id == dst_id,
+        ]
+
+        if workspace_id:
+            conditions.append(NeuralMemoryEdge.workspace_id == UUID(workspace_id))
+        if context_id:
+            conditions.append(NeuralMemoryEdge.context_id == UUID(context_id))
+
+        stmt = delete(NeuralMemoryEdge).where(and_(*conditions))
 
         result = await self.db.execute(stmt)
         deleted = (result.rowcount or 0) > 0
