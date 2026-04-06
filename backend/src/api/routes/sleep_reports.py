@@ -107,7 +107,7 @@ _VALID_STATUSES = {"running", "completed", "failed", "cancelled", "rolled_back"}
 
 @router.get("", response_model=SleepReportListResponse)
 async def list_sleep_reports(
-    _: dict = Depends(require_admin),
+    _admin: dict = Depends(require_admin),  # noqa: ARG001 - FastAPI dep, access guard only
     db: AsyncSession = Depends(get_db),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -159,7 +159,7 @@ async def list_sleep_reports(
 @router.get("/{report_id}", response_model=SleepReportDetailResponse)
 async def get_sleep_report_detail(
     report_id: UUID,
-    _: dict = Depends(require_admin),
+    _admin: dict = Depends(require_admin),  # noqa: ARG001 - FastAPI dep, access guard only
     db: AsyncSession = Depends(get_db),
 ) -> SleepReportDetailResponse:
     """Get a single Sleep Maintenance report with its full action audit log.
