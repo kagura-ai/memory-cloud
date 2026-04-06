@@ -52,6 +52,7 @@ import {
   Gauge,
   ChevronDown,
   AlertTriangle,
+  Moon,
 } from "lucide-react";
 // Issue #246: ContextSelector removed - use /contexts link instead
 import { WorkspaceSwitcher } from "@/components/workspaces/WorkspaceSwitcher";
@@ -160,6 +161,12 @@ const navigationGroups: NavGroup[] = [
         nameKey: "neuralConfig",
         href: "/admin/neural-config",
         icon: Brain,
+        requiredRole: Role.ADMIN,
+      },
+      {
+        nameKey: "sleepReports",
+        href: "/admin/sleep-reports",
+        icon: Moon,
         requiredRole: Role.ADMIN,
       },
       {

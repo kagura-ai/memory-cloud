@@ -60,6 +60,7 @@
     "users": "ユーザー",
     "quotas": "クォータ・制限",
     "neuralConfig": "ニューラル設定",
+    "sleepReports": "Sleep レポート",
     "environment": "環境設定",
     "systemAdmin": "システム管理",
     "ownerOnly": "オーナー",
@@ -2175,6 +2176,83 @@
         "sleep_edge_discovery_enabled": "エッジ発見フェーズを有効化",
         "sleep_edge_discovery_sample_size": "エッジ発見 1 回あたりのサンプルメモリ数",
         "sleep_importance_reeval_enabled": "重要度再評価フェーズを有効化"
+      }
+    },
+    "sleepReports": {
+      "title": "Sleep レポート",
+      "description": "Sleep Maintenance の実行履歴と監査ログを確認します",
+      "actions": {
+        "refresh": "更新",
+        "viewDetail": "詳細を表示",
+        "back": "一覧に戻る"
+      },
+      "filter": {
+        "title": "ステータスでフィルター",
+        "all": "すべて ({count})",
+        "status": "{status} ({count})"
+      },
+      "table": {
+        "startedAt": "開始時刻",
+        "status": "ステータス",
+        "memoriesProcessed": "処理メモリ数",
+        "edgesCreated": "作成エッジ数",
+        "merges": "マージ数",
+        "promotions": "昇格数",
+        "llmCalls": "LLM 呼び出し",
+        "actions": "操作"
+      },
+      "status": {
+        "running": "実行中",
+        "completed": "完了",
+        "failed": "失敗",
+        "cancelled": "キャンセル",
+        "rolled_back": "ロールバック済み"
+      },
+      "detail": {
+        "overview": "概要",
+        "phaseResults": "フェーズ結果",
+        "actionLog": "アクションログ ({count})",
+        "reportId": "レポート ID",
+        "userId": "ユーザー ID",
+        "contextId": "コンテキスト ID",
+        "workspaceId": "ワークスペース ID",
+        "startedAt": "開始時刻",
+        "completedAt": "完了時刻",
+        "duration": "所要時間",
+        "status": "ステータス",
+        "memoriesProcessed": "処理メモリ数",
+        "edgesCreated": "作成エッジ数",
+        "memoriesMerged": "マージされたメモリ",
+        "memoriesPromoted": "昇格されたメモリ",
+        "memoriesFlagged": "フラグされたメモリ",
+        "llmCallsMade": "LLM 呼び出し",
+        "llmTokensUsed": "LLM トークン",
+        "embeddingCallsMade": "埋め込み呼び出し",
+        "errorMessage": "エラー",
+        "phase": "フェーズ",
+        "actionType": "アクション",
+        "memoryId": "メモリ",
+        "targetId": "ターゲット",
+        "details": "詳細",
+        "createdAt": "時刻",
+        "noActions": "このランに記録されたアクションはありません。",
+        "noResults": "このフェーズのデータはありません。",
+        "edgeDiscovery": "エッジ発見",
+        "dedup": "重複排除",
+        "importance": "重要度再評価",
+        "consolidation": "統合",
+        "reindex": "再インデックス"
+      },
+      "pagination": {
+        "showing": "{total} 件中 {from}〜{to} 件目",
+        "previous": "前へ",
+        "next": "次へ"
+      },
+      "messages": {
+        "loading": "Sleep レポートを読み込み中...",
+        "loadError": "Sleep レポートの読み込みに失敗しました",
+        "noReports": "Sleep レポートが見つかりません。",
+        "notFound": "Sleep レポートが見つかりません。"
       }
     },
     "environment": {
