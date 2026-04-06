@@ -9,13 +9,14 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import require_admin
 from db.base import get_db
 from models.sleep import SleepAction, SleepReport
+from utils.datetime import to_utc_iso
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -46,6 +47,10 @@ class SleepReportSummary(BaseModel):
     llm_calls_made: int
     llm_tokens_used: int
 
+    @field_serializer("started_at", "completed_at")
+    def _serialize_dt(self, dt: datetime | None) -> str | None:
+        return to_utc_iso(dt)
+
 
 class SleepReportDetail(SleepReportSummary):
     """Sleep report full detail."""
@@ -69,6 +74,10 @@ class SleepActionItem(BaseModel):
     target_id: UUID | None
     details: dict[str, Any] | None
     created_at: datetime
+
+    @field_serializer("created_at")
+    def _serialize_dt(self, dt: datetime) -> str:
+        return to_utc_iso(dt) or ""
 
 
 class SleepReportListResponse(BaseModel):
@@ -98,7 +107,7 @@ _VALID_STATUSES = {"running", "completed", "failed", "cancelled", "rolled_back"}
 
 @router.get("", response_model=SleepReportListResponse)
 async def list_sleep_reports(
-    admin: dict = Depends(require_admin),
+    _: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -118,21 +127,22 @@ async def list_sleep_reports(
         )
 
     conditions = []
-    if status_filter:
+    if status_filter is not None:
         conditions.append(SleepReport.status == status_filter)
-    if context_id:
+    if context_id is not None:
         conditions.append(SleepReport.context_id == context_id)
-    if user_id:
+    if user_id is not None:
         conditions.append(SleepReport.user_id == user_id)
+
+    count_stmt = select(func.count()).select_from(SleepReport)
+    if conditions:
+        count_stmt = count_stmt.where(*conditions)
+    count_result = await db.execute(count_stmt)
+    total = count_result.scalar() or 0
 
     stmt = select(SleepReport)
     if conditions:
         stmt = stmt.where(*conditions)
-
-    count_stmt = select(func.count()).select_from(stmt.subquery())
-    count_result = await db.execute(count_stmt)
-    total = count_result.scalar() or 0
-
     result = await db.execute(
         stmt.order_by(SleepReport.started_at.desc()).limit(limit).offset(offset)
     )
@@ -149,7 +159,7 @@ async def list_sleep_reports(
 @router.get("/{report_id}", response_model=SleepReportDetailResponse)
 async def get_sleep_report_detail(
     report_id: UUID,
-    admin: dict = Depends(require_admin),
+    _: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> SleepReportDetailResponse:
     """Get a single Sleep Maintenance report with its full action audit log.

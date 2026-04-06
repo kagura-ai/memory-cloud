@@ -7,9 +7,10 @@
  * Admin-only page (Issue #179).
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useTranslations, useLocale } from "next-intl";
+import { useAuth } from "@/contexts/AuthContext";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
@@ -27,13 +28,11 @@ import { Button } from "@/components/ui/button";
 import { RefreshCw, Eye, ChevronLeft, ChevronRight } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { formatRelativeTime } from "@/lib/utils/datetime";
-
-type SleepStatus =
-  | "running"
-  | "completed"
-  | "failed"
-  | "cancelled"
-  | "rolled_back";
+import {
+  getSleepStatusColor,
+  SLEEP_STATUS_OPTIONS,
+  type SleepStatus,
+} from "@/lib/sleep-report";
 
 interface SleepReportSummary {
   id: string;
@@ -61,34 +60,12 @@ interface SleepReportListResponse {
 
 const PAGE_SIZE = 50;
 
-const STATUS_OPTIONS: SleepStatus[] = [
-  "completed",
-  "running",
-  "failed",
-  "cancelled",
-  "rolled_back",
-];
-
-function getStatusColor(status: SleepStatus): string {
-  switch (status) {
-    case "completed":
-      return "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300";
-    case "running":
-      return "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300";
-    case "failed":
-      return "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300";
-    case "rolled_back":
-      return "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300";
-    case "cancelled":
-    default:
-      return "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300";
-  }
-}
-
 export default function AdminSleepReportsPage() {
   const t = useTranslations("admin.sleepReports");
   const tCommon = useTranslations("admin.common");
   const locale = useLocale();
+  const { user } = useAuth();
+  const timezone = user?.timezone || "UTC";
 
   const [reports, setReports] = useState<SleepReportSummary[]>([]);
   const [total, setTotal] = useState(0);
@@ -99,7 +76,7 @@ export default function AdminSleepReportsPage() {
   const [offset, setOffset] = useState(0);
   const { toast } = useToast();
 
-  const loadReports = async () => {
+  const loadReports = useCallback(async () => {
     try {
       setLoading(true);
       const params = new URLSearchParams();
@@ -113,7 +90,7 @@ export default function AdminSleepReportsPage() {
       );
       setReports(data.reports);
       setTotal(data.total);
-    } catch (error) {
+    } catch {
       toast({
         title: tCommon("error"),
         description: t("messages.loadError"),
@@ -122,26 +99,11 @@ export default function AdminSleepReportsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [offset, selectedStatus, t, tCommon, toast]);
 
   useEffect(() => {
     loadReports();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [offset, selectedStatus]);
-
-  const statusCounts = useMemo(() => {
-    const counts: Record<SleepStatus, number> = {
-      running: 0,
-      completed: 0,
-      failed: 0,
-      cancelled: 0,
-      rolled_back: 0,
-    };
-    for (const r of reports) {
-      counts[r.status] = (counts[r.status] || 0) + 1;
-    }
-    return counts;
-  }, [reports]);
+  }, [loadReports]);
 
   const pageStart = total === 0 ? 0 : offset + 1;
   const pageEnd = Math.min(offset + PAGE_SIZE, total);
@@ -182,14 +144,14 @@ export default function AdminSleepReportsPage() {
           >
             {t("filter.all", { count: total })}
           </button>
-          {STATUS_OPTIONS.map((status) => (
+          {SLEEP_STATUS_OPTIONS.map((status) => (
             <button
               key={status}
               type="button"
               aria-pressed={selectedStatus === status}
               className={`inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-500 dark:focus-visible:ring-offset-gray-900 ${
                 selectedStatus === status
-                  ? `${getStatusColor(status)} border-transparent`
+                  ? `${getSleepStatusColor(status)} border-transparent`
                   : "border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
               }`}
               onClick={() => {
@@ -197,10 +159,7 @@ export default function AdminSleepReportsPage() {
                 setOffset(0);
               }}
             >
-              {t("filter.status", {
-                status: t(`status.${status}`),
-                count: statusCounts[status] || 0,
-              })}
+              {t(`status.${status}`)}
             </button>
           ))}
         </div>
@@ -246,11 +205,11 @@ export default function AdminSleepReportsPage() {
                 {reports.map((report) => (
                   <TableRow key={report.id}>
                     <TableCell className="text-sm whitespace-nowrap">
-                      {formatRelativeTime(report.started_at, "UTC", locale)}
+                      {formatRelativeTime(report.started_at, timezone, locale)}
                     </TableCell>
                     <TableCell>
                       <span
-                        className={`inline-flex items-center px-2 py-0.5 text-xs font-medium rounded ${getStatusColor(report.status)}`}
+                        className={`inline-flex items-center px-2 py-0.5 text-xs font-medium rounded ${getSleepStatusColor(report.status)}`}
                       >
                         {t(`status.${report.status}`)}
                       </span>

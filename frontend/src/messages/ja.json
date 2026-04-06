@@ -2188,8 +2188,7 @@
       },
       "filter": {
         "title": "ステータスでフィルター",
-        "all": "すべて ({count})",
-        "status": "{status} ({count})"
+        "all": "すべて ({count})"
       },
       "table": {
         "startedAt": "開始時刻",
@@ -2209,7 +2208,6 @@
         "rolled_back": "ロールバック済み"
       },
       "detail": {
-        "overview": "概要",
         "phaseResults": "フェーズ結果",
         "actionLog": "アクションログ ({count})",
         "reportId": "レポート ID",
@@ -2218,7 +2216,6 @@
         "workspaceId": "ワークスペース ID",
         "startedAt": "開始時刻",
         "completedAt": "完了時刻",
-        "duration": "所要時間",
         "status": "ステータス",
         "memoriesProcessed": "処理メモリ数",
         "edgesCreated": "作成エッジ数",
@@ -2234,7 +2231,6 @@
         "memoryId": "メモリ",
         "targetId": "ターゲット",
         "details": "詳細",
-        "createdAt": "時刻",
         "noActions": "このランに記録されたアクションはありません。",
         "noActionsHint": "アクション記録機能 (#164) 追加前のレポートには監査ログがありません。",
         "noResults": "このフェーズのデータはありません。",
@@ -2251,7 +2247,6 @@
         "next": "次へ"
       },
       "messages": {
-        "loading": "Sleep レポートを読み込み中...",
         "loadError": "Sleep レポートの読み込みに失敗しました",
         "noReports": "Sleep レポートが見つかりません。",
         "notFound": "Sleep レポートが見つかりません。"

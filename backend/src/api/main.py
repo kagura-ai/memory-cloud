@@ -137,6 +137,10 @@ openapi_tags = [
     {"name": "admin", "description": "Admin: user management and system stats"},
     {"name": "admin-plans", "description": "Admin: plan tier and quota management"},
     {"name": "neural-config", "description": "Admin: neural memory configuration"},
+    {
+        "name": "sleep-reports",
+        "description": "Admin: Sleep Maintenance execution reports and audit log",
+    },
     {"name": "system-admins", "description": "Admin: system administrator management"},
     # System
     {"name": "config", "description": "Environment configuration management (admin)"},

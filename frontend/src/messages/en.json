@@ -2188,8 +2188,7 @@
       },
       "filter": {
         "title": "Filter by Status",
-        "all": "All ({count})",
-        "status": "{status} ({count})"
+        "all": "All ({count})"
       },
       "table": {
         "startedAt": "Started",
@@ -2209,7 +2208,6 @@
         "rolled_back": "Rolled back"
       },
       "detail": {
-        "overview": "Overview",
         "phaseResults": "Phase Results",
         "actionLog": "Action Log ({count})",
         "reportId": "Report ID",
@@ -2218,7 +2216,6 @@
         "workspaceId": "Workspace ID",
         "startedAt": "Started at",
         "completedAt": "Completed at",
-        "duration": "Duration",
         "status": "Status",
         "memoriesProcessed": "Memories processed",
         "edgesCreated": "Edges created",
@@ -2234,7 +2231,6 @@
         "memoryId": "Memory",
         "targetId": "Target",
         "details": "Details",
-        "createdAt": "Time",
         "noActions": "No actions recorded for this run.",
         "noActionsHint": "Reports from before action recording was added (#164) have no audit log.",
         "noResults": "No data for this phase.",
@@ -2251,7 +2247,6 @@
         "next": "Next"
       },
       "messages": {
-        "loading": "Loading sleep reports...",
         "loadError": "Failed to load sleep reports",
         "noReports": "No sleep reports found.",
         "notFound": "Sleep report not found."

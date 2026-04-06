@@ -38,14 +38,9 @@ import {
   Sparkles,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/contexts/AuthContext";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
-
-type SleepStatus =
-  | "running"
-  | "completed"
-  | "failed"
-  | "cancelled"
-  | "rolled_back";
+import { getSleepStatusColor, type SleepStatus } from "@/lib/sleep-report";
 
 interface SleepReportDetail {
   id: string;
@@ -95,22 +90,6 @@ interface SleepReportDetailResponse {
   report: SleepReportDetail;
   actions: SleepActionItem[];
   action_count: number;
-}
-
-function getStatusColor(status: SleepStatus): string {
-  switch (status) {
-    case "completed":
-      return "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300";
-    case "running":
-      return "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300";
-    case "failed":
-      return "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300";
-    case "rolled_back":
-      return "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300";
-    case "cancelled":
-    default:
-      return "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300";
-  }
 }
 
 function formatDuration(startedAt: string, completedAt: string | null): string {
@@ -236,10 +215,14 @@ function KpiTile({
 
 export default function AdminSleepReportDetailPage() {
   const params = useParams();
-  const reportId = params.reportId as string;
+  const reportId = Array.isArray(params.reportId)
+    ? params.reportId[0]
+    : (params.reportId ?? "");
   const t = useTranslations("admin.sleepReports");
   const tCommon = useTranslations("admin.common");
   const locale = useLocale();
+  const { user } = useAuth();
+  const timezone = user?.timezone || "UTC";
 
   const [detail, setDetail] = useState<SleepReportDetailResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -271,7 +254,9 @@ export default function AdminSleepReportDetailPage() {
       }
     };
     loadDetail();
-  }, [reportId, t, tCommon, toast]);
+    // t/tCommon/toast are stable across renders; only reportId should trigger refetch
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reportId]);
 
   if (loading) {
     return (
@@ -309,7 +294,11 @@ export default function AdminSleepReportDetailPage() {
     { key: "reindex", result: report.reindex_result },
   ];
 
-  const relativeStarted = formatRelativeTime(report.started_at, "UTC", locale);
+  const relativeStarted = formatRelativeTime(
+    report.started_at,
+    timezone,
+    locale,
+  );
   const duration = formatDuration(report.started_at, report.completed_at);
 
   return (
@@ -327,12 +316,11 @@ export default function AdminSleepReportDetailPage() {
       />
 
       <div className="space-y-6">
-        {/* Hero: status + summary at a glance */}
         <div className="p-6 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700">
           <div className="flex items-start justify-between gap-4 flex-wrap">
             <div className="flex items-center gap-3">
               <span
-                className={`inline-flex items-center px-3 py-1 text-sm font-medium rounded ${getStatusColor(report.status)}`}
+                className={`inline-flex items-center px-3 py-1 text-sm font-medium rounded ${getSleepStatusColor(report.status)}`}
               >
                 {t(`status.${report.status}`)}
               </span>
@@ -341,7 +329,7 @@ export default function AdminSleepReportDetailPage() {
                   {relativeStarted} · {duration}
                 </div>
                 <div className="text-xs text-gray-400 dark:text-gray-500">
-                  {formatDateTime(report.started_at, "UTC", locale)}
+                  {formatDateTime(report.started_at, timezone, locale)}
                 </div>
               </div>
             </div>
@@ -358,7 +346,6 @@ export default function AdminSleepReportDetailPage() {
           )}
         </div>
 
-        {/* KPI tiles */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
           <KpiTile
             icon={Database}
@@ -387,7 +374,6 @@ export default function AdminSleepReportDetailPage() {
           />
         </div>
 
-        {/* Phase summaries */}
         <Card>
           <CardHeader>
             <CardTitle>{t("detail.phaseResults")}</CardTitle>
@@ -433,7 +419,6 @@ export default function AdminSleepReportDetailPage() {
           </CardContent>
         </Card>
 
-        {/* Action log */}
         <Card>
           <CardHeader>
             <CardTitle>
@@ -492,7 +477,6 @@ export default function AdminSleepReportDetailPage() {
           </CardContent>
         </Card>
 
-        {/* Metadata (collapsed by default) */}
         <div>
           <button
             type="button"
@@ -538,7 +522,7 @@ export default function AdminSleepReportDetailPage() {
                   <dt className="text-gray-500 dark:text-gray-400">
                     {t("detail.startedAt")}
                   </dt>
-                  <dd>{formatDateTime(report.started_at, "UTC", locale)}</dd>
+                  <dd>{formatDateTime(report.started_at, timezone, locale)}</dd>
                 </div>
                 <div>
                   <dt className="text-gray-500 dark:text-gray-400">
@@ -546,7 +530,7 @@ export default function AdminSleepReportDetailPage() {
                   </dt>
                   <dd>
                     {report.completed_at
-                      ? formatDateTime(report.completed_at, "UTC", locale)
+                      ? formatDateTime(report.completed_at, timezone, locale)
                       : "-"}
                   </dd>
                 </div>
