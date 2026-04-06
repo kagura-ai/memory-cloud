@@ -23,6 +23,7 @@ from uuid import UUID
 
 if TYPE_CHECKING:
     from neural.config import NeuralMemoryConfig
+    from services.sleep.reporter import SleepReporter
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -60,6 +61,9 @@ class ConsolidationPhase:
         workspace_id: str | None,
         context_id: str | None,
         budget: SleepBudget,
+        *,
+        reporter: SleepReporter | None = None,
+        report_id: UUID | None = None,
     ) -> PhaseResult:
         """Run consolidation phase."""
         result = PhaseResult(phase_name="consolidation")
@@ -115,11 +119,31 @@ class ConsolidationPhase:
                 await self.memory_repo.promote_to_persistent(memory.id)
                 promoted += 1
                 result.changed_memory_ids.add(memory.id)
+                await self._record_action(
+                    reporter,
+                    report_id,
+                    "promote",
+                    memory.id,
+                    "rule",
+                    memory.importance,
+                    memory.access_count,
+                    age_days,
+                )
             elif should_delete:
                 try:
                     await delete_memory_from_qdrant(user_id, memory.id, self.collection_name)
                     await self.memory_repo.delete(memory.id)
                     deleted += 1
+                    await self._record_action(
+                        reporter,
+                        report_id,
+                        "archive",
+                        memory.id,
+                        "rule",
+                        memory.importance,
+                        memory.access_count,
+                        age_days,
+                    )
                 except Exception as e:
                     logger.warning(
                         "consolidation_delete_failed",
@@ -127,7 +151,6 @@ class ConsolidationPhase:
                         error=str(e),
                     )
             else:
-                # Borderline: candidate for LLM judgment
                 borderline.append(memory)
 
         # === LLM path for borderline cases ===
@@ -145,24 +168,50 @@ class ConsolidationPhase:
                     batch, user_id, context_id, workspace_id, budget, config
                 )
 
+                batch_map = {m.id: m for m in batch}
                 for memory_id, action in decisions.items():
+                    mem = batch_map.get(memory_id)
+                    if not mem:
+                        logger.warning(
+                            "consolidation_llm_unknown_memory",
+                            memory_id=str(memory_id),
+                        )
+                        continue
+                    mem_age_days = (utcnow() - mem.created_at).days
                     if action == "promote":
                         await self.memory_repo.promote_to_persistent(memory_id)
                         llm_promoted += 1
                         result.changed_memory_ids.add(memory_id)
+                        await self._record_action(
+                            reporter,
+                            report_id,
+                            "promote",
+                            memory_id,
+                            "llm",
+                            mem.importance,
+                            mem.access_count,
+                            mem_age_days,
+                        )
                     elif action == "archive":
-                        mem = next((m for m in batch if m.id == memory_id), None)
-                        if mem:
-                            # Only archive truly isolated memories
-                            neural = None
-                            if has_graph:
-                                neural = await graph_service.get_node_metrics(str(memory_id))
-                            if not neural or neural["is_isolated"]:
-                                await delete_memory_from_qdrant(
-                                    user_id, memory_id, self.collection_name
-                                )
-                                await self.memory_repo.delete(memory_id)
-                                llm_archived += 1
+                        neural = None
+                        if has_graph:
+                            neural = await graph_service.get_node_metrics(str(memory_id))
+                        if not neural or neural["is_isolated"]:
+                            await delete_memory_from_qdrant(
+                                user_id, memory_id, self.collection_name
+                            )
+                            await self.memory_repo.delete(memory_id)
+                            llm_archived += 1
+                            await self._record_action(
+                                reporter,
+                                report_id,
+                                "archive",
+                                memory_id,
+                                "llm",
+                                mem.importance,
+                                mem.access_count,
+                                mem_age_days,
+                            )
 
         result.memories_processed = len(working)
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
@@ -184,6 +233,32 @@ class ConsolidationPhase:
         )
 
         return result
+
+    @staticmethod
+    async def _record_action(
+        reporter: SleepReporter | None,
+        report_id: UUID | None,
+        action_type: str,
+        memory_id: UUID,
+        reason: str,
+        importance: float,
+        access_count: int,
+        age_days: int,
+    ) -> None:
+        """Record a consolidation action if reporter is available."""
+        if reporter and report_id:
+            await reporter.add_action(
+                report_id=report_id,
+                phase="consolidation",
+                action_type=action_type,
+                memory_id=memory_id,
+                details={
+                    "reason": reason,
+                    "importance": importance,
+                    "access_count": access_count,
+                    "age_days": age_days,
+                },
+            )
 
     async def _fetch_working_memories(
         self,

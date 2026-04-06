@@ -94,7 +94,7 @@ class SleepReport(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('running', 'completed', 'failed', 'cancelled')",
+            "status IN ('running', 'completed', 'failed', 'cancelled', 'rolled_back')",
             name="valid_sleep_report_status",
         ),
         Index("idx_sleep_reports_user_status", "user_id", "status"),

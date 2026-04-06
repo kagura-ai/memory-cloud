@@ -32,6 +32,9 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "create_edge": _get_timeout("create_edge", 10.0),
     "update_edge": _get_timeout("update_edge", 10.0),
     "delete_edge": _get_timeout("delete_edge", 10.0),
+    "get_sleep_history": _get_timeout("get_sleep_history", 10.0),
+    "get_sleep_report": _get_timeout("get_sleep_report", 15.0),
+    "rollback_sleep_run": _get_timeout("rollback_sleep_run", 120.0),
 }
 DEFAULT_TOOL_TIMEOUT = float(os.getenv("MCP_TIMEOUT_DEFAULT", 60.0))
 
@@ -390,7 +393,7 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 
 ---
 
-## Available Tools (17 tools)
+## Available Tools (20 tools)
 
 | Tool | Purpose |
 |------|---------|
@@ -411,8 +414,11 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 | `update_search_config` | Tune hybrid search weights and reranker |
 | `delete_context` | Delete a context and all its memories |
 | `get_usage` | Get workspace quota and usage information |
+| `get_sleep_history` | List recent Sleep Maintenance runs for a context |
+| `get_sleep_report` | Get detailed sleep report with all actions |
+| `rollback_sleep_run` | Rollback all actions from a completed sleep run |
 
-All tools except `list_contexts`, `create_context`, and `get_usage` require `context_id`.
+Most tools require `context_id`. Exceptions: `list_contexts`, `create_context`, `get_usage` (no context needed), `get_sleep_report` and `rollback_sleep_run` (use `report_id` instead).
 
 ---
 

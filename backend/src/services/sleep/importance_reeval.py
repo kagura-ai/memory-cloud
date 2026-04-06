@@ -23,6 +23,7 @@ from uuid import UUID
 
 if TYPE_CHECKING:
     from neural.config import NeuralMemoryConfig
+    from services.sleep.reporter import SleepReporter
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -66,6 +67,9 @@ class ImportanceReevalPhase:
         workspace_id: str | None,
         context_id: str | None,
         budget: SleepBudget,
+        *,
+        reporter: SleepReporter | None = None,
+        report_id: UUID | None = None,
     ) -> PhaseResult:
         """Run importance re-evaluation phase."""
         result = PhaseResult(phase_name="importance_reeval")
@@ -131,6 +135,19 @@ class ImportanceReevalPhase:
 
                 result.changed_memory_ids.add(memory_id)
                 updated_count += 1
+                if reporter and report_id:
+                    await reporter.add_action(
+                        report_id=report_id,
+                        phase="importance_reeval",
+                        action_type="update_importance",
+                        memory_id=memory_id,
+                        details={
+                            "old_importance": old_importance,
+                            "new_importance": smoothed,
+                            "llm_score": new_score,
+                            "alpha": alpha,
+                        },
+                    )
 
         result.memories_processed = updated_count
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
