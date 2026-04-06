@@ -7,7 +7,7 @@
  * Admin-only page (Issue #107).
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
@@ -25,7 +25,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { RefreshCw, Save, RotateCcw, Check, X, Pencil } from "lucide-react";
+import { RefreshCw, RotateCcw, Check, X, Pencil } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { InlineSpinner } from "@/components/common/LoadingState";
 
@@ -170,6 +170,14 @@ export default function AdminNeuralConfigPage() {
     ? configs.filter((c) => c.category === selectedCategory)
     : configs;
 
+  const categoryCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const c of configs) {
+      counts[c.category] = (counts[c.category] || 0) + 1;
+    }
+    return counts;
+  }, [configs]);
+
   if (loading) {
     return (
       <PageContainer>
@@ -227,7 +235,8 @@ export default function AdminNeuralConfigPage() {
             <button
               key={cat}
               type="button"
-              className={`inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md border transition-colors ${
+              aria-pressed={selectedCategory === cat}
+              className={`inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-500 dark:focus-visible:ring-offset-gray-900 ${
                 selectedCategory === cat
                   ? `${getCategoryColor(cat)} border-transparent`
                   : "border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
@@ -236,7 +245,7 @@ export default function AdminNeuralConfigPage() {
             >
               {t("filter.category", {
                 category: cat,
-                count: configs.filter((c) => c.category === cat).length,
+                count: categoryCounts[cat] || 0,
               })}
             </button>
           ))}
@@ -278,7 +287,12 @@ export default function AdminNeuralConfigPage() {
                           setEditing({ ...editing, value: e.target.value })
                         }
                         className="w-24 h-8 text-sm"
-                        type={config.value_type === "int" ? "number" : "text"}
+                        type={
+                          config.value_type === "int" ||
+                          config.value_type === "float"
+                            ? "number"
+                            : "text"
+                        }
                         step={config.value_type === "float" ? "0.01" : "1"}
                       />
                     ) : (
