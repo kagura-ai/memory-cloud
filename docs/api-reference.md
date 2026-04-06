@@ -599,21 +599,41 @@ System information.
 
 ```json
 {
-  "version": "0.5.1",
+  "version": "0.7.0",
   "environment": "production",
   "features": {
     "neural_memory": true,
     "hybrid_search": true,
-    "oauth2": true
+    "oauth2": true,
+    "sleep_maintenance": true
   }
 }
 ```
 
 ---
 
+## Admin APIs
+
+Admin endpoints require `system_admin` or `workspace_admin` role.
+
+### Sleep Maintenance
+
+| Endpoint                                         | Purpose                                                       |
+|--------------------------------------------------|---------------------------------------------------------------|
+| `GET /api/v1/admin/sleep-reports`                | List Sleep runs with filters (`status`, `context_id`, `user_id`) and pagination. |
+| `GET /api/v1/admin/sleep-reports/{report_id}`    | Fetch a single report with per-phase results and the full action audit log. |
+
+See [Sleep Maintenance](sleep-maintenance.md) for the full Sleep cycle design, `sleep_mode`, and rollback semantics.
+
+### Neural Config
+
+Sleep and Neural Memory tuning knobs (LLM provider, budgets, per-phase toggles, reranker weights) are persisted in `neural_config` and exposed under `/api/v1/admin/neural-config`. The fields are editable from the admin UI's Neural Config page.
+
+---
+
 ## MCP Tools
 
-Kagura Memory Cloud provides 5 MCP tools for AI assistants:
+Kagura Memory Cloud provides 21 MCP tools for AI assistants. See [Core Concepts › MCP Tools](concepts.md#mcp-tools) for the full table. The examples below are the most commonly used tools; the remaining tools (context CRUD, edge CRUD, `update_search_config`, `get_usage`, and the Sleep observability tools `get_sleep_history` / `get_sleep_report` / `rollback_sleep_run`) share the same JSON-RPC call shape.
 
 ### 1. remember
 

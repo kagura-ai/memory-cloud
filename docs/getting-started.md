@@ -142,6 +142,7 @@ curl -X POST http://localhost:8080/api/v1/memory/recall \
 - [API Reference](api-reference.md) — Detailed API documentation
 - [Architecture](architecture.md) — System design overview
 - [Concepts](concepts.md) — Core concepts (contexts, workspaces, neural memory)
+- [Sleep Maintenance](sleep-maintenance.md) — Background cleanup cycle, `sleep_mode`, observability, and rollback
 
 ## Troubleshooting
 
