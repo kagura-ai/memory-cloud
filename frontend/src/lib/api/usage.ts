@@ -7,9 +7,10 @@
 export interface PlanLimits {
   plan_name: string;
   memory_limit: number;
-  // Combined sums (MCP + REST + Public). Issue #198: these now come from
-  // real plan-tier weekly caps instead of the broken `daily * 7` heuristic.
+  // Combined daily sum (MCP + REST + Public).
   daily_api_limit: number;
+  // Combined weekly sum (MCP + REST + Public). Issue #198: this now comes
+  // from real plan-tier weekly caps instead of the broken `daily * 7` heuristic.
   weekly_api_limit: number;
   // Issue #198: per-tier limits so the dashboard can show the marketed
   // numbers without users wondering why the combined total is higher.

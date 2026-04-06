@@ -308,7 +308,10 @@ async def get_workspace_usage_current(
             effective_quotas = await EffectiveQuotaService(db).get_effective_quotas(workspace_id)
         except ValueError:
             # Shouldn't happen — workspace was validated above. Fallback to
-            # the model's own properties so we still return the right shape.
+            # the model's own properties for the quota fields this endpoint
+            # reads, without claiming full parity with the service contract
+            # (max_members / max_contexts are intentionally omitted because
+            # this route does not consume them).
             effective_quotas = {
                 "memory_limit": workspace.effective_memory_limit,
                 "mcp_calls_per_day": workspace.effective_mcp_calls_per_day,
