@@ -50,9 +50,12 @@ def _resolve_mcp_json_path() -> Path | None:
     if env_dir := os.environ.get("MCP_JSON_DIR"):
         return Path(env_dir) / ".mcp.json"
 
-    # On host, _project_root is the repo root (has pyproject.toml).
-    # In Docker it resolves to "/" which has neither → fall through.
-    if (_project_root / "pyproject.toml").exists() or (_project_root / ".git").exists():
+    # On host, _project_root is the repo root (has .git, and backend/pyproject.toml
+    # one level down). In Docker it resolves to "/" which has neither → fall through.
+    # Repo root does NOT have a top-level pyproject.toml (it lives under backend/),
+    # so .git is the authoritative marker; pyproject.toml is kept only for worktree
+    # / submodule edge cases where .git may be a file or absent.
+    if (_project_root / ".git").exists() or (_project_root / "pyproject.toml").exists():
         return _project_root / ".mcp.json"
 
     candidates: list[Path] = []
@@ -61,7 +64,10 @@ def _resolve_mcp_json_path() -> Path | None:
     candidates.append(Path.cwd())
 
     for candidate in candidates:
-        if os.access(candidate, os.W_OK):
+        # W_OK alone is insufficient: a directory needs X_OK to traverse into it,
+        # and a non-directory path that happens to be writable would still fail
+        # on write_text(). Require both is_dir() and W_OK | X_OK.
+        if candidate.is_dir() and os.access(candidate, os.W_OK | os.X_OK):
             return candidate / ".mcp.json"
 
     return None
@@ -187,7 +193,8 @@ def _write_mcp_json(api_key: str, workspace_id: str) -> bool:
 
 def _print_mcp_config_fallback(mcp_config: dict) -> None:
     """Print the .mcp.json content so the operator can copy-paste it manually."""
-    print("    Copy the following into ~/.mcp.json manually:")
+    print("    Copy the following into a writable .mcp.json location")
+    print("    (or set MCP_JSON_DIR and re-run to write it automatically):")
     print("    " + "-" * 60)
     for line in json.dumps(mcp_config, indent=2).splitlines():
         print(f"    {line}")

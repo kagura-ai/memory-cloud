@@ -1,7 +1,13 @@
-"""Tests for create_admin .mcp.json path resolution and error handling.
+"""Tests for create_admin .mcp.json path resolution, best-effort writing,
+and CLI flag parsing.
 
-Regression tests for #194: create_admin must never raise PermissionError
-on .mcp.json write in a way that rolls back admin creation.
+These cover path selection, non-raising behavior on I/O failure, and the
+--skip-mcp-json argparse contract. The transaction-ordering regression for
+#194 (db.commit must precede _write_mcp_json) is guarded structurally in
+TestCommitOrdering via source inspection rather than a full integration
+test, since exercising create_admin() end-to-end would require mocking
+create_engine, Session, the interactive prompts, and several encryption
+dependencies.
 """
 
 import sys
@@ -45,9 +51,9 @@ class TestResolveMcpJsonPath:
         with patch("os.access", return_value=False):
             assert create_admin._resolve_mcp_json_path() is None
 
-    def test_host_repo_root_with_pyproject_still_works(self, tmp_path, monkeypatch):
-        """On host, _project_root has pyproject.toml → use it."""
-        (tmp_path / "pyproject.toml").write_text("")
+    def test_host_repo_root_with_git_marker_still_works(self, tmp_path, monkeypatch):
+        """On host, _project_root is the repo root — identified via .git."""
+        (tmp_path / ".git").mkdir()
         monkeypatch.delenv("MCP_JSON_DIR", raising=False)
         monkeypatch.setattr(create_admin, "_project_root", tmp_path)
         assert create_admin._resolve_mcp_json_path() == tmp_path / ".mcp.json"
@@ -114,3 +120,27 @@ class TestArgumentParsing:
         monkeypatch.setattr(sys, "argv", ["create_admin"])
         create_admin._main()
         assert captured_skip["skip"] is False
+
+
+class TestCommitOrdering:
+    """Structural regression guard for #194.
+
+    The original bug: db.commit() was AFTER _write_mcp_json(), so a
+    PermissionError on the file write rolled back the entire admin creation.
+    Asserting ordering via source inspection is cheaper than an integration
+    test that mocks create_engine + Session + interactive prompts, and it
+    fails loudly if someone reverts the fix.
+    """
+
+    def test_db_commit_precedes_write_mcp_json_in_create_admin(self):
+        import inspect
+
+        source = inspect.getsource(create_admin.create_admin)
+        commit_idx = source.find("db.commit()")
+        write_idx = source.find("_write_mcp_json(")
+        assert commit_idx != -1, "db.commit() not found in create_admin source"
+        assert write_idx != -1, "_write_mcp_json( not found in create_admin source"
+        assert commit_idx < write_idx, (
+            "db.commit() must precede _write_mcp_json() to avoid rollback on "
+            "file-write failure — see #194."
+        )
