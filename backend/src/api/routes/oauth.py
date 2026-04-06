@@ -1196,11 +1196,16 @@ async def oauth_authorize_get(
 
         query_string = urlencode(query_params)
 
-        # Use Jinja2 template (Issue #52, #221 i18n)
+        # Use Jinja2 template (Issue #52, #221 i18n).
+        # Modern Starlette TemplateResponse takes ``request`` as the first
+        # positional argument; the legacy form
+        # ``TemplateResponse(name, context_with_request)`` causes
+        # ``TypeError: unhashable type: 'dict'`` deep inside Jinja2's cache
+        # because Starlette interprets the dict as the template name.
         return templates.TemplateResponse(
+            request,
             "oauth_authorize.html",
             {
-                "request": request,
                 "client_name": client.client_name,
                 "user_email": user.email,
                 "query_string": query_string,
