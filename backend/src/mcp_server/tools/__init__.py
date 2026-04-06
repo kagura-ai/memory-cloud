@@ -18,6 +18,7 @@ from uuid import UUID
 
 from mcp.types import TextContent
 
+from mcp_server.tools._arg_coercion import coerce_mcp_arguments
 from mcp_server.tools._definitions import get_tool_definitions  # noqa: F401
 from mcp_server.tools._helpers import _error_response, _resolve_context_id
 
@@ -194,6 +195,11 @@ async def execute_tool_call(
     handler = _TOOL_REGISTRY.get(tool_name)
     if handler is None:
         return _error_response("unknown_tool", f"Unknown tool: {tool_name}")
+
+    # Issue #196 / #197: some MCP clients serialize arrays / objects / booleans
+    # as JSON strings. Coerce them back to their declared types before the
+    # handler constructs its pydantic request model.
+    args = coerce_mcp_arguments(tool_name, args)
 
     # Rate limit check (exempt read-only info tools)
     if workspace_id and tool_name not in _RATE_LIMIT_EXEMPT_TOOLS:
