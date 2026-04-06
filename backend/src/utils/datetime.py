@@ -8,6 +8,26 @@ with existing TIMESTAMP WITHOUT TIME ZONE database columns.
 from datetime import UTC, datetime
 
 
+def to_utc_iso(dt: datetime | None) -> str | None:
+    """Serialize a datetime as an ISO 8601 string with explicit Z suffix.
+
+    Naive datetimes are treated as UTC (the project convention for
+    TIMESTAMP WITHOUT TIME ZONE columns). Without the Z suffix, JS
+    clients parse the string as local time and display the wrong offset.
+
+    Args:
+        dt: Datetime to serialize (may be None)
+
+    Returns:
+        ISO 8601 string with Z suffix, or None if input is None
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
 def utcnow() -> datetime:
     """Return current UTC time as a naive datetime.
 

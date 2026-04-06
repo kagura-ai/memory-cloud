@@ -137,6 +137,10 @@ openapi_tags = [
     {"name": "admin", "description": "Admin: user management and system stats"},
     {"name": "admin-plans", "description": "Admin: plan tier and quota management"},
     {"name": "neural-config", "description": "Admin: neural memory configuration"},
+    {
+        "name": "sleep-reports",
+        "description": "Admin: Sleep Maintenance execution reports and audit log",
+    },
     {"name": "system-admins", "description": "Admin: system administrator management"},
     # System
     {"name": "config", "description": "Environment configuration management (admin)"},
@@ -259,6 +263,7 @@ from api.routes import (  # noqa: E402
     resource_ingest,  # Issue #238: Resource Ingest API
     resource_schema,  # Issue #238: Schema Management API
     resource_tokens,  # Issue #242: Resource Token Management API
+    sleep_reports,  # Issue #179: Sleep Report admin UI
     system,
     system_admins,
     usage,
@@ -307,6 +312,9 @@ app.include_router(member_credentials.router)
 
 # Neural Config routes (Issue #107 - Neural Memory configuration)
 app.include_router(neural_config.router, prefix="/api/v1")
+
+# Sleep Reports admin routes (Issue #179 - Sleep Report admin UI)
+app.include_router(sleep_reports.router, prefix="/api/v1")
 
 # External API Keys routes (Issue #45 - External keys management)
 app.include_router(external_keys.router, prefix="/api/v1")

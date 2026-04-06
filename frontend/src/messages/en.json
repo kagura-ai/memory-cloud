@@ -60,6 +60,7 @@
     "users": "Users",
     "quotas": "Quotas & Limits",
     "neuralConfig": "Neural Config",
+    "sleepReports": "Sleep Reports",
     "environment": "Environment",
     "systemAdmin": "System Admin",
     "ownerOnly": "Owner",
@@ -2175,6 +2176,80 @@
         "sleep_edge_discovery_enabled": "Enable edge discovery phase",
         "sleep_edge_discovery_sample_size": "Number of memories to sample per edge discovery run",
         "sleep_importance_reeval_enabled": "Enable importance re-evaluation phase"
+      }
+    },
+    "sleepReports": {
+      "title": "Sleep Reports",
+      "description": "View Sleep Maintenance execution history and audit logs",
+      "actions": {
+        "refresh": "Refresh",
+        "viewDetail": "View Detail",
+        "back": "Back to List"
+      },
+      "filter": {
+        "title": "Filter by Status",
+        "all": "All ({count})"
+      },
+      "table": {
+        "startedAt": "Started",
+        "status": "Status",
+        "memoriesProcessed": "Memories",
+        "edgesCreated": "Edges",
+        "merges": "Merges",
+        "promotions": "Promotions",
+        "llmCalls": "LLM Calls",
+        "actions": "Actions"
+      },
+      "status": {
+        "running": "Running",
+        "completed": "Completed",
+        "failed": "Failed",
+        "cancelled": "Cancelled",
+        "rolled_back": "Rolled back"
+      },
+      "detail": {
+        "phaseResults": "Phase Results",
+        "actionLog": "Action Log ({count})",
+        "reportId": "Report ID",
+        "userId": "User ID",
+        "contextId": "Context ID",
+        "workspaceId": "Workspace ID",
+        "startedAt": "Started at",
+        "completedAt": "Completed at",
+        "status": "Status",
+        "memoriesProcessed": "Memories processed",
+        "edgesCreated": "Edges created",
+        "memoriesMerged": "Memories merged",
+        "memoriesPromoted": "Memories promoted",
+        "memoriesFlagged": "Memories flagged",
+        "llmCallsMade": "LLM calls",
+        "llmTokensUsed": "LLM tokens",
+        "embeddingCallsMade": "Embedding calls",
+        "errorMessage": "Error",
+        "phase": "Phase",
+        "actionType": "Action",
+        "memoryId": "Memory",
+        "targetId": "Target",
+        "details": "Details",
+        "noActions": "No actions recorded for this run.",
+        "noActionsHint": "Reports from before action recording was added (#164) have no audit log.",
+        "noResults": "No data for this phase.",
+        "metadata": "Metadata",
+        "edgeDiscovery": "Edge Discovery",
+        "dedup": "Deduplication",
+        "importance": "Importance Re-evaluation",
+        "consolidation": "Consolidation",
+        "reindex": "Reindex"
+      },
+      "pagination": {
+        "showing": "Showing {from}-{to} of {total}",
+        "previous": "Previous",
+        "next": "Next"
+      },
+      "messages": {
+        "loadError": "Failed to load sleep reports",
+        "noReports": "No sleep reports found.",
+        "notFound": "Sleep report not found."
       }
     },
     "environment": {
