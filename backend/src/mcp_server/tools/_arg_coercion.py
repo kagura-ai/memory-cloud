@@ -24,9 +24,6 @@ import json
 from typing import Any
 
 from mcp_server.tools._definitions import get_tool_definitions
-from utils.logger import get_logger
-
-logger = get_logger(__name__)
 
 _STRING_TRUTHY = frozenset({"true", "1", "yes", "on"})
 _STRING_FALSY = frozenset({"false", "0", "no", "off"})
@@ -92,7 +89,7 @@ _COERCERS = {
 }
 
 
-def coerce_mcp_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+def coerce_mcp_arguments(tool_name: str, arguments: dict[str, Any] | None) -> dict[str, Any] | None:
     """Coerce MCP tool arguments to their declared JSON-schema types.
 
     Only array / object / boolean fields are coerced — these are the types
@@ -100,17 +97,22 @@ def coerce_mcp_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str,
     types (string, number, integer) are left to pydantic to validate, since
     pydantic already coerces numeric strings when strict mode is off.
 
-    The returned dict is a shallow copy: top-level keys can be replaced
-    safely but mutable values that were passed through unchanged (already
-    of the declared type) remain aliased to the caller's originals.
+    When any coercion happens the returned dict is a shallow copy of the
+    input: top-level keys can be replaced safely but mutable values that
+    were passed through unchanged remain aliased to the caller's originals.
+    When no coercion applies (falsy arguments, unknown tool, no coercible
+    fields) the original object is returned unchanged to avoid allocating
+    on every tool call — callers must not rely on identity to detect
+    coercion.
 
     Args:
         tool_name: MCP tool name (e.g. "remember", "create_context").
-        arguments: Raw arguments dict from the MCP request.
+        arguments: Raw arguments dict from the MCP request, or None.
 
     Returns:
-        A new dict with values coerced where applicable. Unknown tools or
-        unknown arguments pass through untouched.
+        Arguments with values coerced where applicable, or the original
+        object if there is nothing to coerce. Unknown tools and unknown
+        argument names pass through untouched.
     """
     if not arguments:
         return arguments
