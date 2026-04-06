@@ -12,6 +12,7 @@ from mcp.types import TextContent
 from sqlalchemy import select
 
 from mcp_server.tools._helpers import (
+    _check_viewer_permission,
     _ContextNotFoundError,
     _error_response,
     _log_tool_usage,
@@ -130,7 +131,14 @@ async def handle_get_sleep_history(
     from db.base import get_db
     from models.sleep import SleepReport
 
-    limit = min(int(args.get("limit", 10)), 50)
+    raw_limit = args.get("limit", 10)
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError):
+        return _error_response(
+            "validation_error", "Invalid 'limit': expected an integer between 1 and 50."
+        )
+    limit = max(1, min(limit, 50))
 
     start_time = time.time()
     async for db in get_db():
@@ -229,9 +237,6 @@ async def handle_get_sleep_report(
                 actions=[_action_to_dict(a) for a in actions],
                 action_count=len(actions),
             )
-        except _ContextNotFoundError as e:
-            await db.rollback()
-            return e.to_response()
         except Exception:
             await db.rollback()
             raise
@@ -273,6 +278,13 @@ async def handle_rollback_sleep_run(
                     "report_not_found",
                     f"Sleep report {report_uuid} not found or not owned by you.",
                 )
+
+            # Viewers cannot rollback
+            perm_error = await _check_viewer_permission(
+                db, user_id, workspace_id, "rollback sleep runs"
+            )
+            if perm_error:
+                return perm_error
 
             if report.status != "completed":
                 return _error_response(
@@ -355,6 +367,8 @@ async def handle_rollback_sleep_run(
                                 user_id=user_id,
                                 src_id=action.memory_id,
                                 dst_id=action.target_id,
+                                workspace_id=ws_id or None,
+                                context_id=ctx_id_str or None,
                             )
                             rollback_summary["edges_deleted"] += 1
 
@@ -362,7 +376,10 @@ async def handle_rollback_sleep_run(
                         if action.target_id:
                             await db.execute(
                                 sa_update(Memory)
-                                .where(Memory.id == action.target_id)
+                                .where(
+                                    Memory.id == action.target_id,
+                                    Memory.user_id == user_id,
+                                )
                                 .values(deleted_at=None, deleted_by=None)
                             )
                             loser = memory_cache.get(action.target_id)
@@ -383,7 +400,10 @@ async def handle_rollback_sleep_run(
                         if action.memory_id and old_importance is not None:
                             await db.execute(
                                 sa_update(Memory)
-                                .where(Memory.id == action.memory_id)
+                                .where(
+                                    Memory.id == action.memory_id,
+                                    Memory.user_id == user_id,
+                                )
                                 .values(importance=old_importance, updated_at=utcnow())
                             )
                             try:
@@ -400,7 +420,10 @@ async def handle_rollback_sleep_run(
                         if action.memory_id:
                             await db.execute(
                                 sa_update(Memory)
-                                .where(Memory.id == action.memory_id)
+                                .where(
+                                    Memory.id == action.memory_id,
+                                    Memory.user_id == user_id,
+                                )
                                 .values(
                                     scope="working",
                                     promoted_at=None,
@@ -413,7 +436,10 @@ async def handle_rollback_sleep_run(
                         if action.memory_id:
                             await db.execute(
                                 sa_update(Memory)
-                                .where(Memory.id == action.memory_id)
+                                .where(
+                                    Memory.id == action.memory_id,
+                                    Memory.user_id == user_id,
+                                )
                                 .values(deleted_at=None, deleted_by=None)
                             )
                             mem = memory_cache.get(action.memory_id)
@@ -437,9 +463,13 @@ async def handle_rollback_sleep_run(
                         f"Action {action.id} ({action.action_type}): {e}"
                     )
 
-            # Mark report as rolled back
-            report.status = "rolled_back"
+            has_errors = bool(rollback_summary["errors"])
+            report.status = "rolled_back" if not has_errors else "failed"
             report.completed_at = utcnow()
+            if has_errors:
+                report.error_message = (
+                    f"Partial rollback: {len(rollback_summary['errors'])} action(s) failed"
+                )
 
             ctx_id = report.context_id
             await _log_tool_usage(
@@ -447,11 +477,20 @@ async def handle_rollback_sleep_run(
                 user_id,
                 "rollback_sleep_run",
                 start_time,
-                200,
+                200 if not has_errors else 500,
                 ctx_id,
                 workspace_id,
             )
             await db.commit()
+
+            if has_errors:
+                return _error_response(
+                    "partial_rollback",
+                    f"Rollback completed with {len(rollback_summary['errors'])} error(s). "
+                    "Report marked as 'failed' — inspect errors and retry if needed.",
+                    report_id=str(report_uuid),
+                    rollback_summary=rollback_summary,
+                )
 
             return _success_response(
                 report_id=str(report_uuid),

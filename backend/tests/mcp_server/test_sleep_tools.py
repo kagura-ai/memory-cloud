@@ -351,7 +351,14 @@ class TestRollbackSleepRun:
         async def mock_get_db():
             yield mock_db
 
-        with patch("db.base.get_db", new=mock_get_db):
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "mcp_server.tools.sleep._check_viewer_permission",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
             result = await handle_rollback_sleep_run(
                 {"report_id": str(report_id)}, user_id, workspace_id
             )

@@ -418,7 +418,7 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 | `get_sleep_report` | Get detailed sleep report with all actions |
 | `rollback_sleep_run` | Rollback all actions from a completed sleep run |
 
-All tools except `list_contexts`, `create_context`, and `get_usage` require `context_id`.
+Most tools require `context_id`. Exceptions: `list_contexts`, `create_context`, `get_usage` (no context needed), `get_sleep_report` and `rollback_sleep_run` (use `report_id` instead).
 
 ---
 
