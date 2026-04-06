@@ -33,9 +33,9 @@ variable "machine_type" {
 }
 
 variable "boot_disk_size_gb" {
-  description = "Boot disk size in GB. 30GB is enough for the stack + a few weeks of logs and Qdrant data at soft-launch scale."
+  description = "Boot disk size in GB. 50GB accommodates the OS + Docker image layers (api 2GB, web 500MB, base images 600MB), build cache across a few rebuilds, rotated logs, Qdrant data, and headroom for a few months of uneventful operation. Bump higher if you expect large Qdrant collections."
   type        = number
-  default     = 30
+  default     = 50
 }
 
 variable "boot_disk_type" {

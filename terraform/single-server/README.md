@@ -30,6 +30,44 @@ Google Compute Engine VM behind Cloudflare.
 - No Cloudflare provider in Terraform. DNS + Origin CA are configured
   manually in the Cloudflare dashboard — it's a 5-minute one-time setup.
 
+## OS choice — Ubuntu 22.04 LTS
+
+The VM image is pinned to `ubuntu-os-cloud/ubuntu-2204-lts`.
+
+- **Ubuntu 22.04 LTS** — supported until April 2027, has an officially
+  maintained Docker CE apt repository, and works with every tool you're
+  likely to reach for (cloudflared, snap, standard apt packages). `startup.sh`
+  installs Docker from the upstream repository — **Docker is NOT preinstalled**
+  on Ubuntu images; expect `startup.sh` to take 2-3 minutes on first boot.
+- **Container-Optimized OS (COS)** — not used. COS ships with Docker
+  preinstalled but has a read-only root filesystem and heavy restrictions on
+  where you can write files. Running docker-compose with host volume mounts
+  on COS is painful. COS is designed for GKE nodes, not multi-service
+  self-host stacks.
+- **Debian 12** — viable, but you'd need to set up the Docker apt repo
+  anyway and the LTS window is shorter than Ubuntu's. Ubuntu wins on
+  ecosystem familiarity.
+
+## How long startup takes
+
+`terraform apply` → first reachable `docker compose up -d`:
+
+1. VM create (~30 seconds)
+2. Boot + `startup.sh` (~2-3 minutes: apt update, Docker CE install, daemon
+   config, systemd unit, cron, prune rules)
+3. First `docker compose up -d --build` (5-10 minutes on e2-medium for the
+   backend and frontend images)
+
+You can watch the startup script's progress via the serial console:
+
+```bash
+gcloud compute instances get-serial-port-output "$(terraform output -raw vm_name)" \
+  --zone "$(terraform output -raw vm_zone)" --project "$PROJECT_ID" \
+  | grep -a kagura
+```
+
+Look for `=== kagura startup complete: ready for docker compose up ===`.
+
 ## Prerequisites
 
 1. **GCP project** with billing enabled
@@ -121,9 +159,13 @@ gcloud compute ssh "$(terraform output -raw vm_name)" \
   --project "$PROJECT_ID" \
   --tunnel-through-iap
 
-# On the VM:
+# On the VM — add yourself to the docker group so you can skip sudo
+sudo usermod -aG docker "$USER"
+newgrp docker
+
+# Prepare the working directory and pull the source
 sudo mkdir -p /opt/kagura-memory
-sudo chown -R $USER /opt/kagura-memory
+sudo chown -R "$USER" /opt/kagura-memory
 cd /opt/kagura-memory
 git clone https://github.com/kagura-ai/memory-cloud.git src
 cd src/terraform/single-server
@@ -173,6 +215,13 @@ docker compose -f docker-compose.prod.yml up -d --build
 ```
 
 The first build takes several minutes (backend + frontend images).
+
+Once everything is healthy, enable the systemd unit so the stack comes back
+after a reboot:
+
+```bash
+sudo systemctl enable kagura-memory
+```
 
 ## Step 6 — Initialize the database and create the first admin
 
