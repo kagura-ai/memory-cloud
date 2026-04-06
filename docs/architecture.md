@@ -17,15 +17,19 @@ Kagura Memory Cloud is built with a modern, scalable architecture designed for p
                               ↓
 ┌──────────────────────┬──────────────────────────────────────┐
 │   MCP Server (SSE)   │          REST API (FastAPI)          │
-│  - 5 MCP Tools       │  - Memory CRUD                       │
-│  - Session Mgmt      │  - OAuth2 endpoints                  │
-│  - JSON-RPC          │  - API Key management                │
+│  - 21 MCP Tools      │  - Memory CRUD                       │
+│    (memory / ctx /   │  - OAuth2 endpoints                  │
+│     edge / search /  │  - API Key management                │
+│     usage / sleep)   │  - Admin: sleep-reports, neural cfg  │
+│  - Session Mgmt      │                                      │
+│  - JSON-RPC          │                                      │
 └──────────────────────┴──────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                      Service Layer                           │
 │  MemoryService │ SearchService │ EmbeddingService           │
 │  GraphService │ NeuralMemoryEngine │ AuthService            │
+│  SleepService │ LLMService                                  │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
