@@ -33,6 +33,7 @@ import {
 } from "recharts";
 import { Brain, Zap, TrendingUp, XCircle } from "lucide-react";
 import { apiClient } from "@/lib/api";
+import type { PlanLimits } from "@/lib/api/usage";
 import {
   getWorkspaceUsageCurrent,
   getWorkspaceUsageHistory,
@@ -43,13 +44,6 @@ import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatDate } from "@/lib/utils/datetime";
 import { QuotaWarning } from "@/components/common/QuotaWarning";
-
-interface PlanLimits {
-  plan_name: string;
-  memory_limit: number;
-  daily_api_limit: number;
-  weekly_api_limit: number;
-}
 
 interface CurrentUsage {
   memory_count: number;
@@ -311,7 +305,9 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
             </Card>
           </div>
 
-          {/* API Breakdown - Issue #238: MCP/REST/Public separation */}
+          {/* API Breakdown - Issue #238: MCP/REST/Public separation,
+              Issue #198: now also shows the per-tier daily limits so the
+              numbers match what's in plan_tiers.py and the rate limiter. */}
           <div className="mt-4">
             <h3 className="text-sm font-medium text-gray-600 dark:text-gray-400 mb-3">
               API Call Breakdown (Today)
@@ -324,6 +320,11 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
                 </div>
                 <div className="text-lg font-bold text-blue-600">
                   {currentUsage.usage.mcp_calls_today}
+                  {currentUsage.plan.mcp_daily_limit > 0 && (
+                    <span className="text-xs text-gray-500 dark:text-gray-400 font-normal ml-1">
+                      / {currentUsage.plan.mcp_daily_limit.toLocaleString()}
+                    </span>
+                  )}
                 </div>
                 <div className="text-xs text-gray-500 dark:text-gray-400">
                   {currentUsage.usage.api_calls_today > 0
@@ -339,6 +340,11 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
                 </div>
                 <div className="text-lg font-bold text-green-600">
                   {currentUsage.usage.rest_calls_today}
+                  {currentUsage.plan.rest_daily_limit > 0 && (
+                    <span className="text-xs text-gray-500 dark:text-gray-400 font-normal ml-1">
+                      / {currentUsage.plan.rest_daily_limit.toLocaleString()}
+                    </span>
+                  )}
                 </div>
                 <div className="text-xs text-gray-500 dark:text-gray-400">
                   {currentUsage.usage.api_calls_today > 0
@@ -354,6 +360,11 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
                 </div>
                 <div className="text-lg font-bold text-purple-600">
                   {currentUsage.usage.public_calls_today}
+                  {currentUsage.plan.public_daily_limit > 0 && (
+                    <span className="text-xs text-gray-500 dark:text-gray-400 font-normal ml-1">
+                      / {currentUsage.plan.public_daily_limit.toLocaleString()}
+                    </span>
+                  )}
                 </div>
                 <div className="text-xs text-gray-500 dark:text-gray-400">
                   {currentUsage.usage.api_calls_today > 0

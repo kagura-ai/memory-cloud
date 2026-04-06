@@ -44,12 +44,48 @@ def _build_usage_filter(user_id: str, workspace_id=None):
 
 
 class PlanLimits(BaseModel):
-    """Plan limits and quotas."""
+    """Plan limits and quotas.
+
+    Issue #198: ``daily_api_limit`` / ``weekly_api_limit`` are the
+    sums of every API tier (MCP + REST + Public) so the dashboard's
+    "API Calls Today" card stays meaningful when looking at the
+    aggregate. Use the per-tier fields below for accurate breakdowns
+    that match ``plan_tiers.py``. Public callers and the rate limiter
+    should always read the per-tier fields, never the legacy combined
+    sums.
+    """
 
     plan_name: str = Field(..., description="Plan name (free/pro/enterprise)")
     memory_limit: int = Field(..., description="Maximum memories allowed")
-    daily_api_limit: int = Field(..., description="Daily API call limit")
-    weekly_api_limit: int = Field(..., description="Weekly API call limit")
+    daily_api_limit: int = Field(
+        ...,
+        deprecated=True,
+        description=(
+            "Combined daily limit (MCP + REST + Public). "
+            "DEPRECATED — use mcp_daily_limit / rest_daily_limit / "
+            "public_daily_limit instead. The semantics changed in #198: "
+            "previously this was MCP + REST only, now it includes Public."
+        ),
+    )
+    weekly_api_limit: int = Field(
+        ...,
+        deprecated=True,
+        description=(
+            "Combined weekly limit (MCP + REST + Public). "
+            "DEPRECATED — use mcp_weekly_limit / rest_weekly_limit / "
+            "public_weekly_limit instead. Before #198 this was hardcoded "
+            "to daily * 7 and disagreed with the rate limiter."
+        ),
+    )
+    # Issue #198: per-tier fields so the dashboard and any client can show
+    # the marketed numbers without guessing. Default to 0 for callers (like
+    # the legacy /usage/current endpoint) that don't compute them yet.
+    mcp_daily_limit: int = Field(default=0, description="MCP API daily limit")
+    mcp_weekly_limit: int = Field(default=0, description="MCP API weekly limit")
+    rest_daily_limit: int = Field(default=0, description="REST API daily limit")
+    rest_weekly_limit: int = Field(default=0, description="REST API weekly limit")
+    public_daily_limit: int = Field(default=0, description="Public REST API daily limit")
+    public_weekly_limit: int = Field(default=0, description="Public REST API weekly limit")
 
 
 class CurrentUsage(BaseModel):
@@ -194,9 +230,15 @@ async def get_current_usage(
             db.add(plan)
             await db.commit()
 
-        # Get current memory count
+        # Get current memory count.
+        # Issue #198 (Bug D): exclude soft-deleted rows so this matches the
+        # workspace endpoint and the underlying DB count. Without this filter
+        # the dashboard's "memories" card double-counted forgotten items.
         memory_result = await db.execute(
-            select(func.count(Memory.id)).where(Memory.user_id == user_id)
+            select(func.count(Memory.id)).where(
+                Memory.user_id == user_id,
+                Memory.deleted_at.is_(None),
+            )
         )
         memory_count = memory_result.scalar() or 0
 

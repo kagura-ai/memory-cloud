@@ -1114,6 +1114,26 @@ class Workspace(Base):
         return self._plan_tier.mcp_calls_per_week + (self.addon_mcp_quota_bonus or 0)
 
     @property
+    def effective_rest_calls_per_day(self) -> int:
+        """REST API calls/day: plan tier base + addon."""
+        return self._plan_tier.rest_calls_per_day + (self.addon_rest_quota_bonus or 0)
+
+    @property
+    def effective_rest_calls_per_week(self) -> int:
+        """Weekly REST API call limit: plan tier base + addon."""
+        return self._plan_tier.rest_calls_per_week + (self.addon_rest_quota_bonus or 0)
+
+    @property
+    def effective_public_calls_per_day(self) -> int:
+        """Public REST API calls/day: plan tier base + addon."""
+        return self._plan_tier.public_calls_per_day + (self.addon_public_quota_bonus or 0)
+
+    @property
+    def effective_public_calls_per_week(self) -> int:
+        """Weekly Public REST API call limit: plan tier base + addon."""
+        return self._plan_tier.public_calls_per_week + (self.addon_public_quota_bonus or 0)
+
+    @property
     def effective_max_contexts(self) -> int:
         """Max contexts: plan tier base + addon."""
         return self._plan_tier.max_contexts_per_workspace + (self.addon_context_bonus or 0)
