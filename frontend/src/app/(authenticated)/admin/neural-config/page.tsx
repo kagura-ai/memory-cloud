@@ -292,7 +292,9 @@ export default function AdminNeuralConfigPage() {
                   </TableCell>
                   <TableCell className="text-sm text-gray-600 dark:text-gray-400 max-w-md">
                     <div className="whitespace-normal break-words">
-                      {config.description || "-"}
+                      {t.has(`descriptions.${config.key}`)
+                        ? t(`descriptions.${config.key}`)
+                        : config.description || "-"}
                     </div>
                   </TableCell>
                   <TableCell className="text-right">
