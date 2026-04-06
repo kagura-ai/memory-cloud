@@ -1,0 +1,26 @@
+# Real values — never commit
+terraform.tfvars
+*.auto.tfvars
+*.auto.tfvars.json
+
+# Local state, even though backend is GCS
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+
+# Terraform lock file — commit this one
+# .terraform.lock.hcl is INTENTIONALLY tracked for reproducible provider versions.
+.terraform/
+.terraform.tfstate.lock.info
+
+# Local env files — never commit
+.env
+.env.prod
+.env.local
+
+# Cloudflare Origin CA cert + key — never commit
+origin-ca/
+*.pem
+*.key

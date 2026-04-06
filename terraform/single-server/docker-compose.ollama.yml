@@ -1,0 +1,50 @@
+# =============================================================================
+# Ollama override — local embeddings + reranker
+# =============================================================================
+# Usage:
+#   docker compose \
+#     -f docker-compose.prod.yml \
+#     -f docker-compose.ollama.yml \
+#     up -d
+#
+# Model pre-pull is a manual step, run AFTER `up`:
+#   docker compose exec ollama ollama pull nomic-embed-text
+#
+# Sizing:
+#   - Embeddings-only on CPU: n2-highmem-4 (4 vCPU / 32GB) ~ $195/mo recommended
+#   - With GPU: g2-standard-4 (L4) ~ $580/mo
+# The default e2-medium VM in Terraform is NOT large enough for Ollama —
+# bump machine_type in terraform.tfvars before switching.
+# =============================================================================
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: kagura-ollama
+    restart: always
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  api:
+    environment:
+      EMBEDDING_PROVIDER: ollama
+      OLLAMA_BASE_URL: http://ollama:11434
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+
+volumes:
+  ollama_data:
+    name: kagura_ollama_data
