@@ -271,7 +271,6 @@ async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError) -
     return _database_unavailable_response(request, exc)
 
 
-@app.exception_handler(ConnectionError)
 async def connection_error_handler(request: Request, exc: ConnectionError) -> JSONResponse:
     """Handle raw network errors from the DB driver (#193).
 
@@ -283,10 +282,25 @@ async def connection_error_handler(request: Request, exc: ConnectionError) -> JS
     — would bubble a bare "Internal Server Error" 500 whenever the DB was
     briefly unreachable.
 
-    ``ConnectionError`` is narrow enough (network only: refused / reset /
-    aborted / broken pipe) to avoid swallowing unrelated bugs.
+    Registered on the specific subclasses (``ConnectionRefusedError``,
+    ``ConnectionResetError``, ``ConnectionAbortedError``, ``BrokenPipeError``)
+    rather than the base ``ConnectionError`` so we do NOT catch the plain
+    ``ConnectionError("Failed to connect to Redis: ...")`` raised from
+    ``auth/session.py``, which is a Redis-specific failure that should not
+    be reported as a database outage.
     """
     return _database_unavailable_response(request, exc)
+
+
+# Register on specific OSError subclasses raised by asyncpg / low-level
+# socket code, NOT on the base ConnectionError. See docstring above.
+for _exc_cls in (
+    ConnectionRefusedError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+):
+    app.add_exception_handler(_exc_cls, connection_error_handler)
 
 
 # ============================================================================

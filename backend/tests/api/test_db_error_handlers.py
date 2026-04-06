@@ -19,10 +19,22 @@ from api.main import connection_error_handler, sqlalchemy_exception_handler
 
 
 def _build_isolated_app() -> FastAPI:
-    """FastAPI app with only the two #193 handlers and three raising routes."""
+    """FastAPI app with only the #193 handlers and the test routes.
+
+    Mirrors the production registration in ``api.main``: handlers are
+    registered on specific OSError subclasses (NOT on plain
+    ``ConnectionError``), so we don't accidentally catch the plain
+    ``ConnectionError`` that ``auth/session.py`` raises for Redis.
+    """
     app = FastAPI()
     app.add_exception_handler(SQLAlchemyError, sqlalchemy_exception_handler)
-    app.add_exception_handler(ConnectionError, connection_error_handler)
+    for exc_cls in (
+        ConnectionRefusedError,
+        ConnectionResetError,
+        ConnectionAbortedError,
+        BrokenPipeError,
+    ):
+        app.add_exception_handler(exc_cls, connection_error_handler)
 
     @app.get("/raise-sqlalchemy")
     async def _raise_sqlalchemy() -> dict:
@@ -31,6 +43,11 @@ def _build_isolated_app() -> FastAPI:
     @app.get("/raise-connection")
     async def _raise_connection() -> dict:
         raise ConnectionRefusedError(111, "Connect call failed")
+
+    @app.get("/raise-redis-style")
+    async def _raise_redis_style() -> dict:
+        # auth/session.py raises this exact pattern for Redis failures.
+        raise ConnectionError("Failed to connect to Redis: timeout")
 
     @app.get("/raise-value")
     async def _raise_value() -> dict:
@@ -67,3 +84,19 @@ class TestDatabaseErrorHandlers:
         with TestClient(_build_isolated_app(), raise_server_exceptions=False) as client:
             response = client.get("/raise-value")
         assert response.status_code == 500
+
+    def test_plain_connection_error_is_not_caught(self):
+        """Regression for PR #202 review: auth/session.py raises plain
+        ``ConnectionError("Failed to connect to Redis: ...")`` for Redis
+        failures. We must NOT report Redis outages as DB-002, so the
+        handler is registered on specific OSError subclasses
+        (ConnectionRefusedError / Reset / Aborted / BrokenPipe) — never
+        on the bare ``ConnectionError`` base class.
+        """
+        with TestClient(_build_isolated_app(), raise_server_exceptions=False) as client:
+            response = client.get("/raise-redis-style")
+        assert response.status_code == 500
+        # Body should NOT carry the DB-002 error code
+        body = response.text
+        assert "DB-002" not in body
+        assert "Database connection failed" not in body
