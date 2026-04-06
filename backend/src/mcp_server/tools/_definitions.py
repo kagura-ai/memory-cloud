@@ -869,6 +869,92 @@ No parameters required — uses the current workspace.""",
                 "properties": {},
             },
         },
+        # ====================================================================
+        # Sleep Maintenance Observability (Issue #164)
+        # ====================================================================
+        {
+            "name": "get_sleep_history",
+            "readOnly": True,
+            "description": """List recent Sleep Maintenance runs for a context.
+
+Returns a summary of each run including status, timing, and counters
+(memories processed, edges created, merges, promotions).
+
+Use this to check what Sleep Maintenance has been doing and when it last ran.
+Combine with get_sleep_report(report_id) for action-level detail.""",
+            "inputSchema": {
+                "type": "object",
+                "required": ["context_id"],
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Target context UUID (from list_contexts).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of reports to return (default: 10, max: 50).",
+                        "default": 10,
+                    },
+                },
+            },
+        },
+        {
+            "name": "get_sleep_report",
+            "readOnly": True,
+            "description": """Get detailed Sleep Maintenance report with all recorded actions.
+
+Returns the full report (per-phase results, cost tracking) plus the
+complete audit log of individual actions (edges created, merges,
+importance changes, promotions, archives).
+
+Each action includes:
+- phase: Which phase took the action
+- action_type: create_edge, merge, update_importance, promote, archive
+- memory_id/target_id: Affected memories
+- details: Action-specific data (old/new values, similarity scores, etc.)
+
+Use get_sleep_history() first to find report_ids.""",
+            "inputSchema": {
+                "type": "object",
+                "required": ["report_id"],
+                "properties": {
+                    "report_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Sleep report UUID (from get_sleep_history).",
+                    },
+                },
+            },
+        },
+        {
+            "name": "rollback_sleep_run",
+            "description": """Rollback all actions from a completed Sleep Maintenance run.
+
+Reverses each recorded action in order:
+- create_edge → deletes the edge
+- merge → restores the soft-deleted loser memory and re-embeds it
+- update_importance → restores the previous importance value
+- promote → reverts scope back to 'working'
+- archive → restores the deleted memory and re-embeds it
+
+Only works on reports with status 'completed'. After rollback, the
+report is marked 'rolled_back' to prevent double rollback.
+
+⚠️ This is a destructive operation — use with care.
+Requires action recording (reports created before this feature have no actions to rollback).""",
+            "inputSchema": {
+                "type": "object",
+                "required": ["report_id"],
+                "properties": {
+                    "report_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Sleep report UUID to rollback (from get_sleep_history).",
+                    },
+                },
+            },
+        },
     ]
 
 

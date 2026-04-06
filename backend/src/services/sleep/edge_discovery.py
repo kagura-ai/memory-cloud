@@ -26,6 +26,7 @@ from uuid import UUID
 
 if TYPE_CHECKING:
     from neural.config import NeuralMemoryConfig
+    from services.sleep.reporter import SleepReporter
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,6 +78,9 @@ class EdgeDiscoveryPhase:
         workspace_id: str | None,
         context_id: str | None,
         budget: SleepBudget,
+        *,
+        reporter: SleepReporter | None = None,
+        report_id: UUID | None = None,
     ) -> PhaseResult:
         """Run edge discovery phase."""
         result = PhaseResult(phase_name="edge_discovery")
@@ -148,6 +152,19 @@ class EdgeDiscoveryPhase:
                         edge_metadata={"source": "sleep_edge_discovery"},
                     )
                     edges_created += 1
+                    if reporter and report_id:
+                        await reporter.add_action(
+                            report_id=report_id,
+                            phase="edge_discovery",
+                            action_type="create_edge",
+                            memory_id=src_id,
+                            target_id=dst_id,
+                            details={
+                                "edge_type": edge_type,
+                                "confidence": confidence,
+                                "weight": DISCOVERY_EDGE_WEIGHT,
+                            },
+                        )
                 except Exception as e:
                     logger.warning(
                         "edge_creation_failed",

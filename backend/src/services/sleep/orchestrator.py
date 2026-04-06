@@ -128,6 +128,7 @@ class SleepOrchestrator:
                     workspace_id,
                     context_id,
                     budget,
+                    report_id=report.id,
                 )
                 phase_results.append(result)
                 changed_memory_ids.update(result.changed_memory_ids)
@@ -167,6 +168,7 @@ class SleepOrchestrator:
         workspace_id: str | None,
         context_id: str | None,
         budget: SleepBudget,
+        report_id: UUID,
     ) -> PhaseResult:
         """Run a single phase with error isolation and budget check."""
         if budget.exhausted:
@@ -183,6 +185,8 @@ class SleepOrchestrator:
                 workspace_id,
                 context_id,
                 budget,
+                reporter=self.reporter,
+                report_id=report_id,
             )
             logger.info(
                 "sleep_phase_completed",

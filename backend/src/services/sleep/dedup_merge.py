@@ -26,6 +26,7 @@ from uuid import UUID
 
 if TYPE_CHECKING:
     from neural.config import NeuralMemoryConfig
+    from services.sleep.reporter import SleepReporter
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -112,6 +113,9 @@ class DedupMergePhase:
         workspace_id: str | None,
         context_id: str | None,
         budget: SleepBudget,
+        *,
+        reporter: SleepReporter | None = None,
+        report_id: UUID | None = None,
     ) -> PhaseResult:
         """Run dedup/merge phase.
 
@@ -195,15 +199,32 @@ class DedupMergePhase:
             )
 
             for winner_id, loser_id in merge_decisions:
+                winner = memory_map.get(winner_id)
+                loser = memory_map.get(loser_id)
                 await self._execute_merge(
-                    memory_map.get(winner_id),
-                    memory_map.get(loser_id),
+                    winner,
+                    loser,
                     user_id,
                     workspace_id,
                     context_id,
                 )
                 result.changed_memory_ids.add(winner_id)
                 merged_count += 1
+                if reporter and report_id and winner and loser:
+                    pair_key = tuple(sorted([winner_id, loser_id], key=str))
+                    await reporter.add_action(
+                        report_id=report_id,
+                        phase="dedup_merge",
+                        action_type="merge",
+                        memory_id=winner_id,
+                        target_id=loser_id,
+                        details={
+                            "similarity": pair_scores.get(pair_key, 0.0),
+                            "winner_tags": list(winner.tags or []),
+                            "loser_tags": list(loser.tags or []),
+                            "loser_summary": (loser.summary or "")[:200],
+                        },
+                    )
 
             result.memories_processed += len(cluster_memories)
 

@@ -31,6 +31,8 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
         "update_context",
         "merge_contexts",
         "get_usage",
+        "get_sleep_report",  # Uses report_id, not context_id
+        "rollback_sleep_run",  # Uses report_id, not context_id
     }
 )
 
@@ -41,6 +43,8 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         "list_contexts",
         "get_context_info",  # Must remain callable so agents can inspect context even when rate-limited
         "list_edges",  # Read-only edge listing
+        "get_sleep_history",  # Read-only sleep report listing
+        "get_sleep_report",  # Read-only sleep report detail
     }
 )
 
@@ -70,6 +74,11 @@ def _build_registry() -> dict[str, Any]:
         handle_update_edge,
     )
     from mcp_server.tools.search_config import handle_update_search_config
+    from mcp_server.tools.sleep import (
+        handle_get_sleep_history,
+        handle_get_sleep_report,
+        handle_rollback_sleep_run,
+    )
     from mcp_server.tools.usage import handle_get_usage
 
     return {
@@ -91,6 +100,9 @@ def _build_registry() -> dict[str, Any]:
         "update_edge": handle_update_edge,
         "delete_edge": handle_delete_edge,
         "get_usage": handle_get_usage,
+        "get_sleep_history": handle_get_sleep_history,
+        "get_sleep_report": handle_get_sleep_report,
+        "rollback_sleep_run": handle_rollback_sleep_run,
     }
 
 
