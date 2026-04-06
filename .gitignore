@@ -225,11 +225,12 @@ out/
 *.tsbuildinfo
 
 # Terraform
-terraform/
+# terraform/single-server/ is committed (public self-host template).
+# Real tfvars, state, and secrets are ignored via its own .gitignore.
 *.tfstate
 *.tfstate.backup
 .terraform/
-.terraform.lock.hcl
+# .terraform.lock.hcl is intentionally tracked per-module for reproducible provider versions.
 
 # Docker
 docker-compose.override.yml

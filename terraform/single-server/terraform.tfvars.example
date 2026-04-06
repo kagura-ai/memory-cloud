@@ -1,0 +1,50 @@
+# =============================================================================
+# terraform.tfvars — Kagura Memory Cloud single-server
+# =============================================================================
+# Copy to terraform.tfvars (which is .gitignored) and fill in real values.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+#   vim terraform.tfvars
+#
+# =============================================================================
+
+# Required --------------------------------------------------------------------
+
+# GCP project to deploy into.
+project_id = "your-gcp-project-id"
+
+# Public domain served by Caddy (used in outputs and documentation only —
+# DNS is managed in Cloudflare outside Terraform).
+domain = "memory.example.com"
+
+# Optional overrides ----------------------------------------------------------
+
+# region = "asia-northeast1"
+# zone   = "asia-northeast1-a"
+
+# Machine size. e2-medium (2 vCPU / 4GB) is the minimum for the full stack.
+# Bump to e2-standard-2 (2 vCPU / 8GB) if you expect sustained LLM workloads.
+# machine_type = "e2-medium"
+
+# Boot disk sizing.
+# boot_disk_size_gb = 30
+# boot_disk_type    = "pd-balanced"
+
+# SSH access on port 22.
+# Default is [] (empty) — port 22 is closed at the firewall and you use
+# `gcloud compute ssh --tunnel-through-iap` instead, which is recommended.
+#
+# If you really want direct SSH, add your own IP/CIDR here:
+# admin_ssh_cidrs = ["203.0.113.5/32"]
+
+# Cloudflare edge IPs allowed on port 443.
+# The defaults in variables.tf are populated from https://www.cloudflare.com/ips-v4
+# — refresh periodically.
+# cloudflare_ipv4_cidrs = []
+
+# Assets bucket name suffix (bucket = {name_prefix}-{project_id}-{suffix}).
+# assets_bucket_suffix = "assets"
+
+# Set to true ONLY if you want `terraform destroy` to wipe the assets bucket
+# even when it contains objects. Keep false in real production.
+# assets_bucket_force_destroy = false

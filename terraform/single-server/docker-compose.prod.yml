@@ -1,0 +1,146 @@
+# =============================================================================
+# Kagura Memory Cloud — production docker-compose
+# =============================================================================
+# Single-host production stack. All services share a default docker network;
+# Caddy is the only container exposed to the outside world.
+#
+# Usage (on the VM):
+#   cp .env.prod.example .env.prod      # then edit secrets
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Add Ollama (local embeddings) as an override:
+#   docker compose -f docker-compose.prod.yml -f docker-compose.ollama.yml up -d
+#
+# Build context note: the api / web images are built from the source tree in
+# the same repo. On the VM, `git clone` the repo next to this file, or
+# `scp -r` the source, and point build.context at the right path.
+# =============================================================================
+
+services:
+  # ==========================================================================
+  # Databases
+  # ==========================================================================
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: kagura-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: kagura
+      POSTGRES_USER: kagura
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kagura -d kagura"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  qdrant:
+    image: qdrant/qdrant:v1.15.0
+    container_name: kagura-qdrant
+    restart: always
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 10s bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: kagura-redis
+    restart: always
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ==========================================================================
+  # Application
+  # ==========================================================================
+
+  api:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    container_name: kagura-api
+    restart: always
+    env_file:
+      - .env.prod
+    environment:
+      DATABASE_URL: postgresql+asyncpg://kagura:${DB_PASSWORD}@postgres:5432/kagura
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY}
+      REDIS_URL: redis://redis:6379
+      API_HOST: 0.0.0.0
+      API_PORT: 8080
+      ENVIRONMENT: production
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --log-level info
+
+  web:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: https://${KAGURA_DOMAIN}
+        NEXT_PUBLIC_APP_URL: https://${KAGURA_DOMAIN}
+    container_name: kagura-web
+    restart: always
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+    depends_on:
+      - api
+
+  # ==========================================================================
+  # Reverse proxy — only service bound to host ports
+  # ==========================================================================
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: kagura-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - /var/lib/kagura/origin-ca:/etc/caddy/origin-ca:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+      - web
+
+volumes:
+  postgres_data:
+    name: kagura_postgres_data
+  qdrant_data:
+    name: kagura_qdrant_data
+  redis_data:
+    name: kagura_redis_data
+  caddy_data:
+    name: kagura_caddy_data
+  caddy_config:
+    name: kagura_caddy_config
