@@ -155,16 +155,22 @@ class FeatureNotAvailableError(MemoryCloudException):
 class DatabaseError(MemoryCloudException):
     """Database operation failed (500)."""
 
-    def __init__(self, message: str = "Database operation failed", **details: Any):
-        super().__init__(message, status_code=500, error_code="DB-001", **details)
+    def __init__(
+        self,
+        message: str = "Database operation failed",
+        *,
+        status_code: int = 500,
+        error_code: str = "DB-001",
+        **details: Any,
+    ):
+        super().__init__(message, status_code=status_code, error_code=error_code, **details)
 
 
 class DatabaseConnectionError(DatabaseError):
     """Database connection failed (503)."""
 
     def __init__(self, message: str = "Database connection failed"):
-        super().__init__(message, error_code="DB-002")
-        self.status_code = 503
+        super().__init__(message, status_code=503, error_code="DB-002")
 
 
 # External Service Errors (5xx)

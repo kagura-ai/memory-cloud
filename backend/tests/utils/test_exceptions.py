@@ -150,10 +150,11 @@ class TestDatabaseErrors:
         exc = DatabaseError()
         assert exc.status_code == 500
 
-    @pytest.mark.skip(reason="Bug: error_code double-passed in subclass constructors")
     def test_database_connection_error(self):
         exc = DatabaseConnectionError()
         assert exc.status_code == 503
+        assert exc.error_code == "DB-002"
+        assert exc.message == "Database connection failed"
 
 
 class TestExternalServiceErrors:

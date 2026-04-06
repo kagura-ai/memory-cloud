@@ -10,13 +10,14 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.middleware.base import BaseHTTPMiddleware
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.constants import APP_VERSION
 from config.settings import get_settings
-from utils.exceptions import MemoryCloudException
+from utils.exceptions import DatabaseConnectionError, MemoryCloudException
 from utils.logger import get_logger, setup_logger
 
 # Setup logger first
@@ -236,6 +237,56 @@ async def memory_cloud_exception_handler(
             "details": exc.details,
         },
     )
+
+
+def _database_unavailable_response(request: Request, exc: Exception) -> JSONResponse:
+    """Shared 503 response for any DB-backend failure (#193).
+
+    Reuses the ``DatabaseConnectionError`` exception class so that the
+    status code, error code, and message stay in one place and match the
+    shape emitted by ``memory_cloud_exception_handler`` for any code path
+    that raises it directly.
+    """
+    wrapped = DatabaseConnectionError()
+    logger.error(
+        "database_error",
+        error_code=wrapped.error_code,
+        error_type=type(exc).__name__,
+        path=request.url.path,
+        exc_info=True,
+    )
+    return JSONResponse(
+        status_code=wrapped.status_code,
+        content={
+            "error": wrapped.error_code,
+            "message": wrapped.message,
+            "details": wrapped.details,
+        },
+        headers={"Retry-After": "5"},
+    )
+
+
+@app.exception_handler(SQLAlchemyError)
+async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError) -> JSONResponse:
+    return _database_unavailable_response(request, exc)
+
+
+@app.exception_handler(ConnectionError)
+async def connection_error_handler(request: Request, exc: ConnectionError) -> JSONResponse:
+    """Handle raw network errors from the DB driver (#193).
+
+    When the async engine cannot even open a connection, asyncpg raises a
+    bare ``ConnectionRefusedError`` (``OSError`` subclass) that SQLAlchemy
+    does not wrap, so the ``SQLAlchemyError`` handler above never sees it.
+    Before this handler, public routes like ``GET /public/{context_id}/info``
+    and ``GET /invitations/{token}`` — which run before any auth dependency
+    — would bubble a bare "Internal Server Error" 500 whenever the DB was
+    briefly unreachable.
+
+    ``ConnectionError`` is narrow enough (network only: refused / reset /
+    aborted / broken pipe) to avoid swallowing unrelated bugs.
+    """
+    return _database_unavailable_response(request, exc)
 
 
 # ============================================================================
