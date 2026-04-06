@@ -1101,7 +1101,7 @@ class Workspace(Base):
     @property
     def effective_memory_limit(self) -> int:
         """Memory limit including addon bonus."""
-        return (self.memory_limit or 0) + (self.addon_memory_bonus or 0)
+        return self._plan_tier.memory_limit + (self.addon_memory_bonus or 0)
 
     @property
     def effective_mcp_calls_per_day(self) -> int:
