@@ -14,7 +14,6 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.plan_tiers import get_plan_tier
 from models.auth import Workspace
 from utils.logger import get_logger
 
@@ -50,8 +49,11 @@ class EffectiveQuotaService:
             {
                 "memory_limit": int,
                 "mcp_calls_per_day": int,
+                "mcp_calls_per_week": int,
                 "rest_calls_per_day": int,
+                "rest_calls_per_week": int,
                 "public_calls_per_day": int,
+                "public_calls_per_week": int,
                 "max_members": int,
                 "max_contexts": int
             }
@@ -86,17 +88,17 @@ class EffectiveQuotaService:
             result = await self.db.execute(select(Workspace).where(Workspace.id == workspace_id))
             workspace = result.scalar_one_or_none()
 
-        # Get base quotas from plan tier
-        plan_tier = get_plan_tier(workspace.plan_name)
-
         # Calculate effective quotas via model properties
+        # Issue #198 (Bug C): include weekly fields so callers don't need to fall
+        # back on the broken `daily * 7` heuristic.
         effective_quotas = {
             "memory_limit": workspace.effective_memory_limit,
             "mcp_calls_per_day": workspace.effective_mcp_calls_per_day,
-            "rest_calls_per_day": self._get_base_rest_quota(plan_tier)
-            + (workspace.addon_rest_quota_bonus or 0),
-            "public_calls_per_day": self._get_base_public_quota(plan_tier)
-            + (workspace.addon_public_quota_bonus or 0),
+            "mcp_calls_per_week": workspace.effective_mcp_calls_per_week,
+            "rest_calls_per_day": workspace.effective_rest_calls_per_day,
+            "rest_calls_per_week": workspace.effective_rest_calls_per_week,
+            "public_calls_per_day": workspace.effective_public_calls_per_day,
+            "public_calls_per_week": workspace.effective_public_calls_per_week,
             "max_members": workspace.effective_max_members,
             "max_contexts": workspace.effective_max_contexts,
         }
@@ -142,40 +144,3 @@ class EffectiveQuotaService:
             "addon_member_bonus": workspace.addon_member_bonus,
             "addon_context_bonus": workspace.addon_context_bonus,
         }
-
-    # ========================================================================
-    # Private Helper Methods
-    # ========================================================================
-
-    def _get_base_mcp_quota(self, plan_tier) -> int:
-        """Get base MCP calls/day from plan tier.
-
-        Args:
-            plan_tier: Plan tier object
-
-        Returns:
-            Base MCP calls per day
-        """
-        return plan_tier.mcp_calls_per_day
-
-    def _get_base_rest_quota(self, plan_tier) -> int:
-        """Get base REST calls/day from plan tier.
-
-        Args:
-            plan_tier: Plan tier object
-
-        Returns:
-            Base REST calls per day
-        """
-        return plan_tier.rest_calls_per_day
-
-    def _get_base_public_quota(self, plan_tier) -> int:
-        """Get base Public REST calls/day from plan tier.
-
-        Args:
-            plan_tier: Plan tier object
-
-        Returns:
-            Base Public REST calls per day
-        """
-        return plan_tier.public_calls_per_day

@@ -7,19 +7,30 @@
 export interface PlanLimits {
   plan_name: string;
   memory_limit: number;
+  // Combined daily sum (MCP + REST + Public).
   daily_api_limit: number;
+  // Combined weekly sum (MCP + REST + Public). Issue #198: this now comes
+  // from real plan-tier weekly caps instead of the broken `daily * 7` heuristic.
   weekly_api_limit: number;
+  // Issue #198: per-tier limits so the dashboard can show the marketed
+  // numbers without users wondering why the combined total is higher.
+  mcp_daily_limit: number;
+  mcp_weekly_limit: number;
+  rest_daily_limit: number;
+  rest_weekly_limit: number;
+  public_daily_limit: number;
+  public_weekly_limit: number;
 }
 
 export interface CurrentUsage {
   memory_count: number;
   api_calls_today: number;
   api_calls_this_week: number;
-  mcp_calls_today: number;  // Issue #238: MCP quota separation
+  mcp_calls_today: number; // Issue #238: MCP quota separation
   mcp_calls_this_week: number;
-  rest_calls_today: number;  // Issue #238: REST quota separation
+  rest_calls_today: number; // Issue #238: REST quota separation
   rest_calls_this_week: number;
-  public_calls_today: number;  // Issue #238: Public quota separation
+  public_calls_today: number; // Issue #238: Public quota separation
   public_calls_this_week: number;
 }
 

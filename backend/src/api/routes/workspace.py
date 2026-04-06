@@ -297,23 +297,47 @@ async def get_workspace_usage_current(
         if not workspace:
             raise HTTPException(status_code=404, detail="Workspace not found")
 
-        # Calculate effective limits (base + addon bonuses) via shared service
+        # Calculate effective limits (base + addon bonuses) via shared service.
+        # Issue #198: include weekly + per-tier values; the legacy "* 7"
+        # heuristic disagreed with the rate limiter (PRO weekly: hardcoded
+        # 385000 vs actual 275000) and the combined daily was misleading
+        # because it lumped MCP + REST + Public into one number.
         from services.effective_quota_service import EffectiveQuotaService
 
         try:
             effective_quotas = await EffectiveQuotaService(db).get_effective_quotas(workspace_id)
         except ValueError:
-            # Shouldn't happen — workspace was validated above. Fallback to model effective limits.
+            # Shouldn't happen — workspace was validated above. Fallback to
+            # the model's own properties for the quota fields this endpoint
+            # reads, without claiming full parity with the service contract
+            # (max_members / max_contexts are intentionally omitted because
+            # this route does not consume them).
             effective_quotas = {
                 "memory_limit": workspace.effective_memory_limit,
                 "mcp_calls_per_day": workspace.effective_mcp_calls_per_day,
-                "rest_calls_per_day": 0,
+                "mcp_calls_per_week": workspace.effective_mcp_calls_per_week,
+                "rest_calls_per_day": workspace.effective_rest_calls_per_day,
+                "rest_calls_per_week": workspace.effective_rest_calls_per_week,
+                "public_calls_per_day": workspace.effective_public_calls_per_day,
+                "public_calls_per_week": workspace.effective_public_calls_per_week,
             }
+
         effective_memory_limit = effective_quotas["memory_limit"]
+        effective_mcp_daily = effective_quotas["mcp_calls_per_day"]
+        effective_mcp_weekly = effective_quotas["mcp_calls_per_week"]
+        effective_rest_daily = effective_quotas["rest_calls_per_day"]
+        effective_rest_weekly = effective_quotas["rest_calls_per_week"]
+        effective_public_daily = effective_quotas["public_calls_per_day"]
+        effective_public_weekly = effective_quotas["public_calls_per_week"]
+        # Combined sums kept for backward compatibility with the dashboard's
+        # aggregate "API Calls" cards. These now reflect the real plan-tier
+        # weekly caps, not daily * 7.
         effective_daily_api_limit = (
-            effective_quotas["mcp_calls_per_day"] + effective_quotas["rest_calls_per_day"]
+            effective_mcp_daily + effective_rest_daily + effective_public_daily
         )
-        effective_weekly_api_limit = effective_daily_api_limit * 7
+        effective_weekly_api_limit = (
+            effective_mcp_weekly + effective_rest_weekly + effective_public_weekly
+        )
 
         # Issue #65: workspace_id scoping is sufficient — no need to fetch member_ids
         memory_count_result = await db.execute(
@@ -370,6 +394,12 @@ async def get_workspace_usage_current(
                 memory_limit=effective_memory_limit,
                 daily_api_limit=effective_daily_api_limit,
                 weekly_api_limit=effective_weekly_api_limit,
+                mcp_daily_limit=effective_mcp_daily,
+                mcp_weekly_limit=effective_mcp_weekly,
+                rest_daily_limit=effective_rest_daily,
+                rest_weekly_limit=effective_rest_weekly,
+                public_daily_limit=effective_public_daily,
+                public_weekly_limit=effective_public_weekly,
             ),
             usage=CurrentUsage(
                 memory_count=memory_count,

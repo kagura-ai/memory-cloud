@@ -144,6 +144,11 @@ class TestDashboardAddonReflection:
         tier = get_plan_tier("pro")
         ws.effective_memory_limit = 1000 + 500
         ws.effective_mcp_calls_per_day = tier.mcp_calls_per_day + 200
+        ws.effective_mcp_calls_per_week = tier.mcp_calls_per_week + 200
+        ws.effective_rest_calls_per_day = tier.rest_calls_per_day + 100
+        ws.effective_rest_calls_per_week = tier.rest_calls_per_week + 100
+        ws.effective_public_calls_per_day = tier.public_calls_per_day + 50
+        ws.effective_public_calls_per_week = tier.public_calls_per_week + 50
         ws.effective_max_contexts = tier.max_contexts_per_workspace + 5
         ws.effective_max_members = tier.max_members_per_workspace + 3
 
@@ -157,3 +162,7 @@ class TestDashboardAddonReflection:
         assert quotas["memory_limit"] == 1500
         assert quotas["mcp_calls_per_day"] > 200  # base_mcp + 200
         assert quotas["rest_calls_per_day"] > 100  # base_rest + 100
+        # Issue #198: weekly fields are now exposed too.
+        assert quotas["mcp_calls_per_week"] == tier.mcp_calls_per_week + 200
+        assert quotas["rest_calls_per_week"] == tier.rest_calls_per_week + 100
+        assert quotas["public_calls_per_week"] == tier.public_calls_per_week + 50
