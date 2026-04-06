@@ -1,4 +1,4 @@
-'use client';
+"use client";
 
 /**
  * Admin Neural Config Management Page
@@ -7,13 +7,13 @@
  * Admin-only page (Issue #107).
  */
 
-import { useEffect, useState } from 'react';
-import { useTranslations } from 'next-intl';
-import { PageHeader } from '@/components/common/PageHeader';
-import { PageContainer } from '@/components/common/PageContainer';
-import { Section } from '@/components/common/Section';
-import { LoadingState } from '@/components/common/LoadingState';
-import { apiClient } from '@/lib/api';
+import { useEffect, useMemo, useState } from "react";
+import { useTranslations } from "next-intl";
+import { PageHeader } from "@/components/common/PageHeader";
+import { PageContainer } from "@/components/common/PageContainer";
+import { Section } from "@/components/common/Section";
+import { LoadingState } from "@/components/common/LoadingState";
+import { apiClient } from "@/lib/api";
 import {
   Table,
   TableBody,
@@ -21,13 +21,13 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from '@/components/ui/table';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Badge } from '@/components/ui/badge';
-import { RefreshCw, Save, RotateCcw, Check, X, Pencil } from 'lucide-react';
-import { useToast } from '@/hooks/use-toast';
-import { InlineSpinner } from '@/components/common/LoadingState';
+} from "@/components/ui/table";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { RefreshCw, RotateCcw, Check, X, Pencil } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
+import { InlineSpinner } from "@/components/common/LoadingState";
 
 interface NeuralConfigItem {
   key: string;
@@ -46,8 +46,8 @@ interface EditingState {
 }
 
 export default function AdminNeuralConfigPage() {
-  const t = useTranslations('admin.neuralConfig');
-  const tCommon = useTranslations('admin.common');
+  const t = useTranslations("admin.neuralConfig");
+  const tCommon = useTranslations("admin.common");
 
   const [configs, setConfigs] = useState<NeuralConfigItem[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
@@ -69,14 +69,14 @@ export default function AdminNeuralConfigPage() {
         configs: NeuralConfigItem[];
         categories: string[];
         total: number;
-      }>('/api/v1/admin/neural-config');
+      }>("/api/v1/admin/neural-config");
       setConfigs(data.configs);
       setCategories(data.categories);
     } catch (error) {
       toast({
-        title: tCommon('error'),
-        description: t('messages.loadError'),
-        variant: 'destructive',
+        title: tCommon("error"),
+        description: t("messages.loadError"),
+        variant: "destructive",
       });
     } finally {
       setLoading(false);
@@ -94,18 +94,20 @@ export default function AdminNeuralConfigPage() {
   const handleSave = async (key: string, newValue: string) => {
     try {
       setSaving(key);
-      await apiClient.put(`/api/v1/admin/neural-config/${key}`, { value: newValue });
+      await apiClient.put(`/api/v1/admin/neural-config/${key}`, {
+        value: newValue,
+      });
       toast({
-        title: tCommon('success'),
-        description: t('messages.updateSuccess', { key }),
+        title: tCommon("success"),
+        description: t("messages.updateSuccess", { key }),
       });
       setEditing(null);
       loadConfigs();
     } catch (error: any) {
       toast({
-        title: tCommon('error'),
-        description: error?.details?.detail || t('messages.updateError'),
-        variant: 'destructive',
+        title: tCommon("error"),
+        description: error?.details?.detail || t("messages.updateError"),
+        variant: "destructive",
       });
     } finally {
       setSaving(null);
@@ -113,25 +115,26 @@ export default function AdminNeuralConfigPage() {
   };
 
   const handleReset = async () => {
-    if (!confirm(t('messages.resetConfirm'))) {
+    if (!confirm(t("messages.resetConfirm"))) {
       return;
     }
 
     try {
       setResetting(true);
-      const result = await apiClient.post<{ message: string; reset_count: number }>(
-        '/api/v1/admin/neural-config/reset'
-      );
+      const result = await apiClient.post<{
+        message: string;
+        reset_count: number;
+      }>("/api/v1/admin/neural-config/reset");
       toast({
-        title: tCommon('success'),
+        title: tCommon("success"),
         description: result.message,
       });
       loadConfigs();
     } catch (error) {
       toast({
-        title: tCommon('error'),
-        description: t('messages.resetError'),
-        variant: 'destructive',
+        title: tCommon("error"),
+        description: t("messages.resetError"),
+        variant: "destructive",
       });
     } finally {
       setResetting(false);
@@ -140,31 +143,47 @@ export default function AdminNeuralConfigPage() {
 
   const getCategoryColor = (category: string) => {
     const colors: Record<string, string> = {
-      hebbian: 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300',
-      spreading: 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300',
-      scoring: 'bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300',
-      temporal: 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300',
-      decay: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300',
-      coactivation: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300',
-      consolidation: 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-300',
-      performance: 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300',
+      hebbian:
+        "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300",
+      spreading:
+        "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
+      scoring:
+        "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300",
+      temporal:
+        "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300",
+      decay: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300",
+      coactivation:
+        "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300",
+      consolidation:
+        "bg-indigo-100 text-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-300",
+      performance:
+        "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300",
+      sleep: "bg-teal-100 text-teal-800 dark:bg-teal-900/30 dark:text-teal-300",
     };
-    return colors[category] || 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300';
+    return (
+      colors[category] ||
+      "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300"
+    );
   };
 
   const filteredConfigs = selectedCategory
     ? configs.filter((c) => c.category === selectedCategory)
     : configs;
 
+  const categoryCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const c of configs) {
+      counts[c.category] = (counts[c.category] || 0) + 1;
+    }
+    return counts;
+  }, [configs]);
+
   if (loading) {
     return (
       <PageContainer>
-        <PageHeader
-          title={t('title')}
-          description={t('description')}
-        />
+        <PageHeader title={t("title")} description={t("description")} />
         <div className="text-center py-8">
-          <p className="text-gray-500">{t('messages.loading')}</p>
+          <p className="text-gray-500">{t("messages.loading")}</p>
           <LoadingState lines={5} />
         </div>
       </PageContainer>
@@ -174,17 +193,21 @@ export default function AdminNeuralConfigPage() {
   return (
     <PageContainer>
       <PageHeader
-        title={t('title')}
-        description={t('description')}
+        title={t("title")}
+        description={t("description")}
         actions={
           <div className="flex gap-2">
-            <Button onClick={handleReset} variant="outline" disabled={resetting}>
+            <Button
+              onClick={handleReset}
+              variant="outline"
+              disabled={resetting}
+            >
               {resetting ? (
                 <InlineSpinner size="sm" className="mr-2" />
               ) : (
                 <RotateCcw className="h-4 w-4 mr-2" />
               )}
-              {t('actions.resetToDefaults')}
+              {t("actions.resetToDefaults")}
             </Button>
             <Button onClick={loadConfigs} variant="outline" disabled={loading}>
               {loading ? (
@@ -192,53 +215,65 @@ export default function AdminNeuralConfigPage() {
               ) : (
                 <RefreshCw className="h-4 w-4 mr-2" />
               )}
-              {t('actions.refresh')}
+              {t("actions.refresh")}
             </Button>
           </div>
         }
       />
 
       {/* Category Filter */}
-      <Section title={t('filter.title')}>
+      <Section title={t("filter.title")}>
         <div className="flex flex-wrap gap-2 mb-4">
           <Button
-            variant={selectedCategory === null ? 'default' : 'outline'}
+            variant={selectedCategory === null ? "default" : "outline"}
             size="sm"
             onClick={() => setSelectedCategory(null)}
           >
-            {t('filter.all', { count: configs.length })}
+            {t("filter.all", { count: configs.length })}
           </Button>
           {categories.map((cat) => (
-            <Button
+            <button
               key={cat}
-              variant={selectedCategory === cat ? 'default' : 'outline'}
-              size="sm"
+              type="button"
+              aria-pressed={selectedCategory === cat}
+              className={`inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-500 dark:focus-visible:ring-offset-gray-900 ${
+                selectedCategory === cat
+                  ? `${getCategoryColor(cat)} border-transparent`
+                  : "border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+              }`}
               onClick={() => setSelectedCategory(cat)}
             >
-              {t('filter.category', { category: cat, count: configs.filter((c) => c.category === cat).length })}
-            </Button>
+              {t("filter.category", {
+                category: cat,
+                count: categoryCounts[cat] || 0,
+              })}
+            </button>
           ))}
         </div>
       </Section>
 
       {/* Config Table */}
-      <Section title={t('table.title')}>
+      <Section title={t("table.title")}>
         <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>{t('table.key')}</TableHead>
-                <TableHead>{t('table.category')}</TableHead>
-                <TableHead>{t('table.value')}</TableHead>
-                <TableHead>{t('table.range')}</TableHead>
-                <TableHead>{t('table.description')}</TableHead>
-                <TableHead className="text-right">{t('table.actions')}</TableHead>
+                <TableHead>{t("table.key")}</TableHead>
+                <TableHead>{t("table.category")}</TableHead>
+                <TableHead>{t("table.value")}</TableHead>
+                <TableHead>{t("table.range")}</TableHead>
+                <TableHead>{t("table.description")}</TableHead>
+                <TableHead className="text-right">
+                  {t("table.actions")}
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {filteredConfigs.map((config) => (
                 <TableRow key={config.key}>
-                  <TableCell className="font-mono text-sm">{config.key}</TableCell>
+                  <TableCell className="font-mono text-sm">
+                    {config.key}
+                  </TableCell>
                   <TableCell>
                     <Badge className={getCategoryColor(config.category)}>
                       {config.category}
@@ -252,8 +287,13 @@ export default function AdminNeuralConfigPage() {
                           setEditing({ ...editing, value: e.target.value })
                         }
                         className="w-24 h-8 text-sm"
-                        type={config.value_type === 'int' ? 'number' : 'text'}
-                        step={config.value_type === 'float' ? '0.01' : '1'}
+                        type={
+                          config.value_type === "int" ||
+                          config.value_type === "float"
+                            ? "number"
+                            : "text"
+                        }
+                        step={config.value_type === "float" ? "0.01" : "1"}
                       />
                     ) : (
                       <span className="font-mono text-sm">{config.value}</span>
@@ -262,11 +302,13 @@ export default function AdminNeuralConfigPage() {
                   <TableCell className="text-xs text-gray-500 dark:text-gray-400">
                     {config.min_value !== null && config.max_value !== null
                       ? `${config.min_value} - ${config.max_value}`
-                      : '-'}
+                      : "-"}
                   </TableCell>
                   <TableCell className="text-sm text-gray-600 dark:text-gray-400 max-w-md">
                     <div className="whitespace-normal break-words">
-                      {config.description || '-'}
+                      {t.has(`descriptions.${config.key}`)
+                        ? t(`descriptions.${config.key}`)
+                        : config.description || "-"}
                     </div>
                   </TableCell>
                   <TableCell className="text-right">
