@@ -125,9 +125,24 @@ The `explore()` tool uses graph traversal to discover related memories:
 
 Starting from a seed memory, activation spreads outward through the graph, returning memories ranked by connection strength.
 
+## Sleep Maintenance
+
+**Sleep Maintenance** is a nightly background cycle that pays down memory debt asynchronously. Write paths optimize for ingest speed; over time this leaves near-duplicates, stale importance values, and graph gaps. Sleep runs per context and executes six phases in order:
+
+1. **Edge Discovery** — find missing edges between related memories via medium-similarity search + optional LLM judgment
+2. **Dedup / Merge** — cluster high-similarity memories and merge duplicates
+3. **Importance Re-eval** — adjust importance via LLM scoring with EMA smoothing
+4. **Consolidation** — promote / keep / archive working memories (replaces the legacy rule-only consolidation)
+5. **Reindex** — re-embed memories modified by earlier phases so Qdrant stays in sync with PostgreSQL
+6. **Report** — aggregate per-phase results and the action audit log
+
+Each context has a `sleep_mode` setting (`full`, `edges_only`, or `skip`) that controls which phases run. Every action is recorded in `sleep_actions` and can be reversed via `rollback_sleep_run`.
+
+See [Sleep Maintenance](sleep-maintenance.md) for the complete reference.
+
 ## MCP Tools
 
-Kagura Memory Cloud exposes 17 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/):
+Kagura Memory Cloud exposes 21 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/):
 
 | Tool | Description | Read-only |
 |------|------------|-----------|
@@ -148,6 +163,10 @@ Kagura Memory Cloud exposes 17 tools via the [Model Context Protocol (MCP)](http
 | `delete_context` | Delete a context and all its memories | No |
 | `merge_contexts` | Merge memories from source into target context | No |
 | `update_search_config` | Tune hybrid search weights and reranker per context | No |
+| `get_usage` | Quota and usage queries for the current workspace | Yes |
+| `get_sleep_history` | List recent Sleep Maintenance runs for a context | Yes |
+| `get_sleep_report` | Fetch a Sleep run's full report and action audit log | Yes |
+| `rollback_sleep_run` | Reverse every recorded action of a Sleep run | No |
 
 **Typical workflow:**
 
