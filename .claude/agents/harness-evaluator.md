@@ -54,10 +54,17 @@ If the rule file disagrees with your memory of prior verdicts, the rule file win
 ### 2. Load the frozen contract
 
 ```bash
-contract_path="${HOME}/.cache/memory-cloud-harness/runs/${run_id}/contract.json"
-test -f "$contract_path" || { echo "MISSING contract at $contract_path"; exit 1; }
-python3 -c "import json; json.load(open('$contract_path'))" || { echo "INVALID contract JSON"; exit 1; }
+# Honor the optional contract_path override; otherwise default to the cache dir.
+contract_path="${contract_path:-${HOME}/.cache/memory-cloud-harness/runs/${run_id}/contract.json}"
+test -f "$contract_path" || { echo "MISSING contract at $contract_path"; goto_escalate; }
+python3 -c "import json; json.load(open('$contract_path'))" || { echo "INVALID contract JSON at $contract_path"; goto_escalate; }
 ```
+
+`goto_escalate` is a placeholder for the escalation path defined in the
+**When to escalate to the user** section below — missing or invalid contract
+files are escalation-class failures (no verdict is written, the user is
+told why), not hard `exit 1` crashes. Both termination paths converge on
+the same "print reason, do not write verdict, exit 0" behavior.
 
 Read the contract using the `Read` tool. Extract:
 
@@ -72,14 +79,24 @@ do not invent contracts.
 ### 3. Group contracts by channel
 
 The rule file says: *"the Evaluator caches channel results per iteration so
-identical channels across contracts run once per iteration."* Build a map:
+identical channels across contracts run once per iteration."* Build a map
+keyed on channel string with the contract `id` field as the value list
+(note: source contracts use the field name `id`, not `contract_id` —
+`contract_id` is reserved for the verdict schema below):
 
 ```
-channel → [contract_id, contract_id, ...]
+channel → [id, id, ...]
 ```
 
-You will invoke each channel exactly once per iteration. Per-contract pass/fail
-is then derived from the channel's output by matching `evidence_target`.
+You will invoke each channel exactly once per iteration. The shared channel
+run captures one channel-level `exit_code` and the full output. Per-contract
+`status` and per-contract `exit_code` are then derived **from the test-node
+result inside that output** by matching `evidence_target` (a pytest node id,
+URL, or tool call). The anti-softening rule still binds: per-contract
+`status` is bound to the per-contract derived exit_code (test node PASSED →
+0 → pass; FAILED/ERROR → non-zero → fail). The Evaluator never argues a
+non-zero result into a `pass`. See **Verdict rules** in the contract for
+the full anti-softening text.
 
 ### 4. Invoke each channel
 
@@ -301,8 +318,9 @@ Stop and ask the user before writing the verdict if any of these hold:
 - A `make test-*` channel exits with a setup error (not a test failure) that
   prevents any contract from being evaluated (e.g., docker daemon down,
   database unreachable)
-- The budget breaker `five_hour.used_percentage` is already above 80% at
-  Evaluator start (pre-flight abort per the rule file)
+- The budget breaker `five_hour_pct` is already above 80% at Evaluator
+  start (pre-flight abort per the rule file's Forbidden patterns section,
+  which uses `five_hour_pct` as the canonical field name)
 
 Escalation means: print a single-block reason, do not write a verdict file,
 exit without error. The user decides whether to fix the environment, rewrite
