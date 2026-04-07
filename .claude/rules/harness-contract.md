@@ -15,10 +15,12 @@ This schema is intentionally not generic. It hardcodes memory-cloud conventions
 so the harness stays fast and concrete. If harness is ever extracted to a
 plugin, these are the values to abstract.
 
-- **Test runners**: `make test-local`, `test-integration`, `test-e2e`,
-  `test-smoke`, `test-neural`, `cd frontend && npm test`
-- **Source areas**: `src/api/`, `src/mcp/`, `src/neural/`, `src/db/`,
-  `src/models/`, `migrations/`, `alembic/`, `frontend/`
+- **Test runners**: `make test-local`, `make test-integration`,
+  `make test-e2e`, `make test-smoke`, `make test-neural`,
+  `cd frontend && npm test`
+- **Source areas**: `backend/src/api/`, `backend/src/mcp/`,
+  `backend/src/neural/`, `backend/src/db/`, `backend/src/models/`,
+  `backend/migrations/`, `backend/alembic/`, `frontend/`
 - **Memory context**: `kagura-dev` (see CLAUDE.md)
 - **Branch protection**: `main`, squash merge, conventional commits
 - **Budget thresholds**: 5h rate-limit abort at 80%, context clear at 75%
@@ -62,8 +64,8 @@ closes that gap.
 
   "areas": ["api", "db"],
   "detected_from": [
-    "src/api/contexts.py",
-    "migrations/20260408_add_workspace_index.py"
+    "backend/src/api/contexts.py",
+    "backend/alembic/versions/20260408_add_workspace_index.py"
   ],
 
   "contracts": [
@@ -71,7 +73,7 @@ closes that gap.
       "id": "C-234-01",
       "statement": "POST /contexts rejects cross-workspace context_id with 403",
       "channel": "make test-integration",
-      "evidence_target": "tests/api/test_contexts.py::test_rbac_isolation",
+      "evidence_target": "backend/tests/api/test_contexts.py::test_rbac_isolation",
       "promotion_candidate": true,
       "reason": "RBAC bypass would warrant a new issue — re-occurrence guard mandatory"
     },
@@ -79,16 +81,25 @@ closes that gap.
       "id": "C-234-02",
       "statement": "alembic upgrade head → downgrade -1 → upgrade head is idempotent",
       "channel": "make test-integration",
-      "evidence_target": "tests/db/test_migration_roundtrip.py",
+      "evidence_target": "backend/tests/db/test_migration_roundtrip.py",
       "promotion_candidate": true,
       "reason": "Migration regressions are destructive; roundtrip must be enforced"
     }
   ],
 
   "gates": {
-    "gate1_planner_review": ["claude-c-suite:cto", "claude-phd-panel:db"],
-    "gate2_pre_pr_review":  ["claude-c-suite:cso"],
-    "gate3_release_audit":  false
+    "gate1_planner_review": {
+      "enabled": true,
+      "reviewers": ["claude-c-suite:cto", "claude-phd-panel:db"]
+    },
+    "gate2_pre_pr_review": {
+      "enabled": true,
+      "reviewers": ["claude-c-suite:cso"]
+    },
+    "gate3_release_audit": {
+      "enabled": false,
+      "reviewers": []
+    }
   },
 
   "budget": {
@@ -116,22 +127,36 @@ closes that gap.
   Evaluator will use. `null` only allowed for `self-review` channel.
 - `contracts[].promotion_candidate` — Planner's initial guess. Evaluator
   re-scores via the **promotion test** below and may downgrade.
+- `gates.*` — each gate is an object with two fields: `enabled` (boolean)
+  and `reviewers` (array of role slugs). When `enabled` is `false`,
+  `reviewers` must be `[]`. This uniform shape lets the harness parse all
+  three gates without type branching.
 
 ## Channel enum
 
 `channel` is **not** a free-form string. Exactly these values are accepted:
 
-| channel               | When Planner picks it                           | Evaluator invocation                |
-| --------------------- | ----------------------------------------------- | ----------------------------------- |
-| `make test-local`     | Default. Pure logic, utils, no DB/API/frontend  | `make test-local`                   |
-| `make test-integration` | `migrations/`, `src/api/`, `src/db/` in diff  | `make test-integration`             |
-| `make test-neural`    | `src/neural/` in diff                           | `make test-neural`                  |
-| `make test-smoke`     | Health, auth, well-known paths                  | `make test-smoke`                   |
-| `make test-e2e`       | Cross-service flow (memory lifecycle, rate limit) | `make test-e2e`                   |
-| `make test-frontend`  | `frontend/**` unit tests                        | `cd frontend && npm test`           |
-| `playwright-mcp`      | `frontend/**` UI behavior verification          | Playwright MCP browser tools        |
-| `mcp-live`            | `src/.../mcp/` handler behavior                 | `kagura-memory` MCP tool real calls |
-| `self-review`         | Static code review, no runtime verification     | `/self-review` invocation           |
+| channel                 | When Planner picks it                                             | Evaluator invocation                |
+| ----------------------- | ----------------------------------------------------------------- | ----------------------------------- |
+| `make test-local`       | Default. Pure logic, utils, no DB/API/frontend                    | `make test-local`                   |
+| `make test-integration` | `backend/migrations/`, `backend/src/api/`, `backend/src/db/` in diff | `make test-integration`          |
+| `make test-neural`      | `backend/src/neural/` in diff                                     | `make test-neural`                  |
+| `make test-smoke`       | Health, auth, well-known paths                                    | `make test-smoke`                   |
+| `make test-e2e`         | Cross-service flow (memory lifecycle, rate limit)                 | `make test-e2e`                     |
+| `make test-frontend`    | `frontend/**` unit tests                                          | `cd frontend && npm test`           |
+| `playwright-mcp`        | `frontend/**` UI behavior verification                            | Playwright MCP browser tools        |
+| `mcp-live`              | `backend/src/**/mcp/` handler behavior                            | `kagura-memory` MCP tool real calls |
+| `self-review`           | Static code review, no runtime verification                       | `/self-review` invocation           |
+
+The enum mixes **Makefile-backed channels** (the `make test-*` rows) and
+**non-Makefile channels** (`playwright-mcp`, `mcp-live`, `self-review`).
+Makefile-backed channels are validated by CI against `Makefile` targets.
+Non-Makefile channels are validated by the Evaluator at run time: they
+invoke MCP tools or slash commands directly and bind `status` to the
+underlying tool's exit code (for `playwright-mcp`, the Playwright step
+return; for `mcp-live`, the MCP tool response status; for `self-review`,
+the presence of any `[C]` finding → `fail`). Planners must never invent a
+channel not in this table.
 
 Planners may assign multiple contracts to the same channel. Each contract
 invokes the channel independently; the Evaluator caches channel results per
@@ -144,15 +169,15 @@ Path-based, label-independent. The Planner runs this mapping against
 exists yet):
 
 ```
-src/api/                    → api
-src/mcp/, src/**/mcp/       → mcp
-src/neural/                 → neural
-migrations/, alembic/       → db
-src/db/, src/models/        → db
-frontend/                   → frontend
-tests/                      → test
-.claude/, docs/             → meta
-(no match)                  → lib
+backend/src/api/                         → api
+backend/src/mcp/, backend/src/**/mcp/    → mcp
+backend/src/neural/                      → neural
+backend/migrations/, backend/alembic/    → db
+backend/src/db/, backend/src/models/     → db
+frontend/                                → frontend
+backend/tests/, frontend/**/__tests__/   → test
+.claude/, docs/                          → meta
+(no match)                               → lib
 ```
 
 Multi-match is allowed and expected. `areas: ["api", "db"]` is normal for a
@@ -173,7 +198,7 @@ Each iteration, the Evaluator writes one verdict document to
       "contract_id": "C-234-01",
       "status": "pass",
       "channel_invoked": "make test-integration",
-      "evidence": "tests/api/test_contexts.py::test_rbac_isolation PASSED",
+      "evidence": "backend/tests/api/test_contexts.py::test_rbac_isolation PASSED",
       "exit_code": 0,
       "fix_hint": null,
       "promotion_candidate": true
@@ -270,7 +295,7 @@ writes one record via `kagura-memory:remember`:
     "promoted_to_regression": 1
   },
   "regression_added": [
-    "tests/api/test_contexts.py::test_rbac_isolation"
+    "backend/tests/api/test_contexts.py::test_rbac_isolation"
   ],
   "pr_url": "https://github.com/.../pull/245"
 }
@@ -309,9 +334,13 @@ Example `remember` call for the final contract:
   "type": "harness-contract",
   "importance": 0.8,
   "tags": ["harness", "area:api", "area:db", "issue:234"],
-  "details": { /* full contract JSON */ }
+  "details": {}
 }
 ```
+
+In practice, `details` is populated with the full contract JSON at write
+time. It is shown empty above so the example parses as valid JSON; the
+linter in CI rejects block comments inside fenced ````json` blocks.
 
 Bugs found by the Evaluator that include a root-cause fix use the existing
 `type=troubleshooting` (importance 0.9) — this is not a new type, just reuse
