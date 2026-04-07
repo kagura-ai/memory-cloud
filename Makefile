@@ -298,6 +298,19 @@ mcp-test:
 	@echo "  - explore: Graph traversal"
 
 # ============================================================================
+# Harness (Planner / Evaluator / Generator)
+# ============================================================================
+
+.PHONY: harness-lint
+harness-lint:
+	@echo "Linting harness contract..."
+ifdef CONTRACT
+	python3 scripts/harness_contract_lint.py --schema --contract $(CONTRACT)
+else
+	python3 scripts/harness_contract_lint.py --schema
+endif
+
+# ============================================================================
 # Development
 # ============================================================================
 

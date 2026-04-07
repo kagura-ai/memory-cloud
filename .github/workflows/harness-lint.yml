@@ -1,0 +1,26 @@
+name: harness-lint
+
+on:
+  pull_request:
+    branches: [main, "250-docs/harness-contract"]
+    paths:
+      - ".claude/rules/harness-contract.md"
+      - ".claude/agents/harness-*.md"
+      - ".claude/commands/harness-loop.md"
+      - "scripts/harness_contract_lint.py"
+      - ".github/workflows/harness-lint.yml"
+      - "Makefile"
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run harness contract lint
+        run: make harness-lint
