@@ -82,7 +82,7 @@ closes that gap.
       "id": "C-234-02",
       "statement": "alembic upgrade head → downgrade -1 → upgrade head is idempotent",
       "channel": "make test-integration",
-      "evidence_target": "backend/tests/db/test_migration_roundtrip.py",
+      "evidence_target": "backend/tests/integration/test_alembic_migrations.py",
       "promotion_candidate": true,
       "reason": "Migration regressions are destructive; roundtrip must be enforced"
     }
@@ -146,7 +146,7 @@ closes that gap.
 | `make test-e2e`         | Cross-service flow (memory lifecycle, rate limit)                 | `make test-e2e`                     |
 | `make test-frontend`    | `frontend/**` unit tests                                          | `cd frontend && npm test`           |
 | `playwright-mcp`        | `frontend/**` UI behavior verification                            | Playwright MCP browser tools        |
-| `mcp-live`              | `backend/src/mcp_server/` handler behavior                        | `kagura-memory` MCP tool real calls |
+| `mcp-live`              | `backend/src/mcp_server/` or `backend/tests/mcp_server/` changes  | `kagura-memory` MCP tool real calls |
 | `self-review`           | Static code review, no runtime verification                       | `/self-review` invocation           |
 
 The enum mixes **Makefile-backed channels** (the `make test-*` rows) and
