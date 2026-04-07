@@ -146,6 +146,18 @@ class NeuralMemoryConfig:
     async_update_delay_ms: int = 2000  # 2 seconds
     max_candidates_k: int = 64
 
+    # k-NN Cold-Start Seeding (Issue #221)
+    # On remember(), search for k nearest neighbors and create weak
+    # `semantic_similarity` edges so new memories are not born as isolated nodes.
+    knn_seed_enabled: bool = True
+    knn_seed_k: int = 5  # Neighbors per new memory (1-20)
+    knn_seed_min_similarity: float = (
+        0.6  # Cosine threshold; matches Sleep Edge Discovery lower bound
+    )
+    knn_seed_weight: float = (
+        0.3  # Intentionally low — synthetic signal, Sleep Maintenance prunes if unused
+    )
+
     # Sleep Maintenance (Issue #101)
     sleep_enabled: bool = False  # Feature flag (env-only)
     sleep_cron_hour: int = 2  # UTC hour for cron schedule (env-only)
@@ -239,6 +251,16 @@ class NeuralMemoryConfig:
             )
         if not self.max_candidates_k > 0:
             raise ValueError(f"max_candidates_k must be positive, got {self.max_candidates_k}")
+
+        # k-NN Cold-Start Seeding validation (Issue #221)
+        if not (1 <= self.knn_seed_k <= 20):
+            raise ValueError(f"knn_seed_k must be in [1, 20], got {self.knn_seed_k}")
+        if not (0.0 <= self.knn_seed_min_similarity <= 1.0):
+            raise ValueError(
+                f"knn_seed_min_similarity must be in [0, 1], got {self.knn_seed_min_similarity}"
+            )
+        if not (0.0 <= self.knn_seed_weight <= 3.0):
+            raise ValueError(f"knn_seed_weight must be in [0, 3], got {self.knn_seed_weight}")
 
         # Sleep Maintenance validation
         if not (0 <= self.sleep_cron_hour <= 23):
@@ -344,6 +366,11 @@ class NeuralMemoryConfig:
             batch_update_size=get_int("BATCH_UPDATE_SIZE", 100),
             async_update_delay_ms=get_int("ASYNC_UPDATE_DELAY_MS", 2000),
             max_candidates_k=get_int("MAX_CANDIDATES_K", 64),
+            # k-NN Cold-Start Seeding (Issue #221)
+            knn_seed_enabled=get_bool("KNN_SEED_ENABLED", True),
+            knn_seed_k=get_int("KNN_SEED_K", 5),
+            knn_seed_min_similarity=get_float("KNN_SEED_MIN_SIMILARITY", 0.6),
+            knn_seed_weight=get_float("KNN_SEED_WEIGHT", 0.3),
             # Sleep Maintenance (env-only flags + DB-configurable params)
             sleep_enabled=get_bool("SLEEP_ENABLED", False),
             sleep_cron_hour=get_int("SLEEP_CRON_HOUR", 2),
@@ -450,6 +477,13 @@ class NeuralMemoryConfig:
                 "async_update_delay_ms", base_config.async_update_delay_ms
             ),
             max_candidates_k=configs.get("max_candidates_k", base_config.max_candidates_k),
+            # k-NN Cold-Start Seeding (Issue #221) — DB-overridable
+            knn_seed_enabled=configs.get("knn_seed_enabled", base_config.knn_seed_enabled),
+            knn_seed_k=configs.get("knn_seed_k", base_config.knn_seed_k),
+            knn_seed_min_similarity=configs.get(
+                "knn_seed_min_similarity", base_config.knn_seed_min_similarity
+            ),
+            knn_seed_weight=configs.get("knn_seed_weight", base_config.knn_seed_weight),
             # Sleep Maintenance (env-only flags use base_config, DB params use configs)
             sleep_enabled=base_config.sleep_enabled,  # Feature flag (env-only)
             sleep_cron_hour=base_config.sleep_cron_hour,  # Schedule (env-only)
