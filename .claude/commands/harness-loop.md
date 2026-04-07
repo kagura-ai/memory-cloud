@@ -46,8 +46,9 @@ single-block reason and an `outcome: aborted` run record.
 
 1. **5-hour rate limit** — read `~/.claude/statusline-command.sh` output
    (or whatever the harness's standard usage probe returns) and abort if
-   `five_hour.used_percentage > 80`. The threshold is the rule file's
-   `abort_if_five_hour_pct_above` default.
+   `five_hour_pct > 80`. The threshold is the rule file's
+   `abort_if_five_hour_pct_above` default. The field name `five_hour_pct`
+   is the canonical one used in the contract's Forbidden patterns section.
 2. **Issue exists and is open** — `gh issue view <issue> --json state` →
    abort if state ≠ `OPEN`.
 3. **Branch hygiene** — current branch is either `main` or already a
@@ -158,7 +159,7 @@ After the Evaluator returns, read `verdict-<iteration>.json`:
   - **Budget breakers** (any one trips → abort with `outcome: failed`):
     - `iteration > max_iterations` — Generator did not converge
     - `claude_usage.input_tokens > contract.budget.max_input_tokens_per_run`
-    - `five_hour.used_percentage > contract.budget.abort_if_five_hour_pct_above`
+    - `five_hour_pct > contract.budget.abort_if_five_hour_pct_above`
   - **Context pressure** (does NOT abort, only resets):
     - `context_pct > contract.budget.clear_if_context_pct_above` — clear
       and restart from `contract.json` + most recent `verdict-*.json`
