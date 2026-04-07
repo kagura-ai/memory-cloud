@@ -449,11 +449,7 @@ class TestWorkspaceUsageCurrent:
 
         with patch("services.effective_quota_service.EffectiveQuotaService") as mock_quota:
             mock_quota.return_value.get_effective_quotas = AsyncMock(
-                return_value={
-                    "memory_limit": 10000,
-                    "mcp_calls_per_day": 500,
-                    "rest_calls_per_day": 500,
-                }
+                return_value=self._make_effective_quotas()
             )
 
             response = await get_workspace_usage_current(user=mock_user, db=mock_db)
@@ -484,16 +480,32 @@ class TestWorkspaceUsageCurrent:
 
         with patch("services.effective_quota_service.EffectiveQuotaService") as mock_quota:
             mock_quota.return_value.get_effective_quotas = AsyncMock(
-                return_value={
-                    "memory_limit": 10000,
-                    "mcp_calls_per_day": 500,
-                    "rest_calls_per_day": 500,
-                }
+                return_value=self._make_effective_quotas()
             )
             await get_workspace_usage_current(user=mock_user, db=mock_db)
 
         # 3 queries: workspace, memory count, usage aggregation (no member_ids query)
         assert call_count == 3
+
+    @staticmethod
+    def _make_effective_quotas():
+        """Mock EffectiveQuotaService.get_effective_quotas() return value.
+
+        Mirrors the full 9-key contract documented in
+        services.effective_quota_service.EffectiveQuotaService.get_effective_quotas
+        so that adding a key to the service signals here in one place.
+        """
+        return {
+            "memory_limit": 10000,
+            "mcp_calls_per_day": 500,
+            "mcp_calls_per_week": 2750,
+            "rest_calls_per_day": 500,
+            "rest_calls_per_week": 2750,
+            "public_calls_per_day": 100,
+            "public_calls_per_week": 550,
+            "max_members": 5,
+            "max_contexts": 50,
+        }
 
     @staticmethod
     def _build_execute_side_effects(mock_workspace):
