@@ -163,10 +163,13 @@ test-unit:
 .PHONY: coverage-upload
 coverage-upload:
 	@echo "Running unit tests with coverage and uploading to Codecov..."
-	cd $(BACKEND_DIR) && pytest tests/api/ tests/auth/ tests/smoke/ tests/neural/test_hebbian.py -v --cov=src --cov-report=xml --cov-report=term-missing -x || true
+	cd $(BACKEND_DIR) && pytest tests/api/ tests/auth/ tests/smoke/ tests/neural/test_hebbian.py -v --cov=src --cov-report=xml --cov-report=term-missing || true
 	@CODECOV_TOKEN=$${CODECOV_TOKEN:-$$(grep '^CODECOV_TOKEN=' .env.local 2>/dev/null | cut -d= -f2)}; \
 	if [ -z "$$CODECOV_TOKEN" ]; then echo "Error: CODECOV_TOKEN not set (add to .env.local)"; exit 1; fi; \
-	cd $(BACKEND_DIR) && codecovcli upload-process --token $$CODECOV_TOKEN -f coverage.xml
+	cd $(BACKEND_DIR) && codecovcli upload-process --token $$CODECOV_TOKEN -f coverage.xml \
+		--sha $$(git rev-parse HEAD) \
+		--slug kagura-ai/memory-cloud \
+		--git-service github
 	@echo "Coverage uploaded to Codecov."
 
 .PHONY: test-neural
