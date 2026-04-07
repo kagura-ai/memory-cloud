@@ -259,8 +259,8 @@ class NeuralMemoryConfig:
             raise ValueError(
                 f"knn_seed_min_similarity must be in [0, 1], got {self.knn_seed_min_similarity}"
             )
-        if not (0.0 <= self.knn_seed_weight <= 3.0):
-            raise ValueError(f"knn_seed_weight must be in [0, 3], got {self.knn_seed_weight}")
+        if not (0.0 <= self.knn_seed_weight <= 1.0):
+            raise ValueError(f"knn_seed_weight must be in [0, 1], got {self.knn_seed_weight}")
 
         # Sleep Maintenance validation
         if not (0 <= self.sleep_cron_hour <= 23):
