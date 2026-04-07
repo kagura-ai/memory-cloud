@@ -1,0 +1,96 @@
+name: Harness-ready task
+description: A task structured so the Planner / Generator / Evaluator harness can drive it automatically.
+title: "[HARNESS] "
+labels: ["harness-ready"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Use this template when you want the harness to drive the work end-to-end.**
+
+        The harness reads the acceptance criteria below and turns each checkbox
+        into a contract entry that the Evaluator must verify via exit code.
+        If your task cannot be expressed as verifiable criteria (e.g., raw bug
+        triage, design exploration, brainstorming), use a different template.
+
+        Authoritative contract schema: `.claude/rules/harness-contract.md`
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One sentence describing what this issue delivers.
+      placeholder: Enforce cross-workspace RBAC on context endpoints so users cannot access contexts from other workspaces.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance criteria
+      description: |
+        One checkbox per verifiable behavior. Each `- [ ]` line becomes a
+        contract entry consumed by the Planner. Rules:
+
+        - Every criterion must be answerable by running a shell command and
+          checking exit code. "POST /x returns 403 for cross-workspace access"
+          is verifiable; "the API should feel secure" is not.
+        - Avoid subjective language ("works nicely", "looks good", "feels right").
+        - Reference concrete endpoints, file paths, commands, or output.
+        - If you cannot phrase a criterion as verifiable, drop it from this
+          issue and move it to a design document or discussion.
+      value: |
+        - [ ]
+        - [ ]
+        - [ ]
+      render: markdown
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: area_hint
+    attributes:
+      label: Affected areas (hint for the Planner)
+      description: |
+        The Planner will verify areas via `git diff` once a branch exists.
+        Check any that apply as a hint. Leave empty if unsure.
+      options:
+        - label: "api — `backend/src/api/`"
+        - label: "mcp — `backend/src/mcp/` or `backend/src/**/mcp/`"
+        - label: "neural — `backend/src/neural/`"
+        - label: "db — `backend/src/db/`, `backend/src/models/`, `backend/alembic/`, `backend/migrations/`"
+        - label: "frontend — `frontend/`"
+        - label: "test — `backend/tests/` or `frontend/**/__tests__/`"
+        - label: "meta — `.claude/`, `.github/`, `docs/`, project configuration"
+
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: What this issue explicitly does NOT touch. Helps the Generator stay narrow.
+      placeholder: |
+        - Frontend changes (this is backend-only)
+        - Migration of existing data (separate issue #NNN)
+
+  - type: textarea
+    id: related
+    attributes:
+      label: Related past work
+      description: |
+        Links to prior issues, PRs, or harness run IDs (format: `hr-YYYYMMDD-NNN`).
+        The Planner's recall step will surface these automatically, but linking
+        accelerates the search and documents intent.
+      placeholder: |
+        - Prior attempt: #123
+        - Related decision: #145
+        - Prior harness run: hr-20260401-003 (outcome: escalated)
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+        **After submitting**: run `/harness-loop <issue-number>` to start the
+        harness, or `/issue-start <issue-number>` for a manual flow. The
+        Planner will read this body, extract criteria, and write a contract
+        file at `~/.cache/memory-cloud-harness/runs/hr-*/contract.json`.

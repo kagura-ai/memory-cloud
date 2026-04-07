@@ -48,6 +48,50 @@ make test-frontend   # Frontend tests (Vitest)
 make test-integration # Integration tests (DB, migrations)
 ```
 
+## Writing Issues for the Harness
+
+A three-agent harness (Planner / Generator / Evaluator) drives development
+work end-to-end from issues. For the harness to run, issues must be
+**harness-ready**: structured so the Planner can extract verifiable
+acceptance criteria and translate them into contracts.
+
+**Use the harness-ready template** when creating issues that should flow
+through the harness:
+
+```bash
+gh issue create --template harness-ready.yml
+```
+
+**Write acceptance criteria as verifiable checkboxes.** Each `- [ ]` line
+in the issue's acceptance criteria section becomes one contract entry.
+Rules:
+
+- Every criterion must be answerable by running a shell command and
+  checking exit code. "POST /contexts returns 403 for cross-workspace
+  access" is verifiable; "the API should feel secure" is not.
+- Avoid subjective language ("works nicely", "looks good", "feels right").
+  The Evaluator binds pass/fail to shell exit codes — subjective criteria
+  will be dropped by the Planner's escalation path.
+- Reference concrete endpoints, file paths, commands, or output strings.
+- Link prior harness run IDs (`hr-YYYYMMDD-NNN`) when continuing work —
+  the Planner's recall step will surface them automatically, but linking
+  accelerates the search and documents intent.
+
+**Skip the harness** (use `task.md` / `bug_report.md` / `feature_request.md`
+instead) when:
+
+- The issue is a raw bug report that has not yet been triaged into a
+  concrete fix — convert to harness-ready only after triage proposes a
+  concrete fix path.
+- The work is pure design exploration or brainstorming with no decidable
+  output.
+- The scope touches meta-work that cannot be verified by running a test
+  (e.g., changing licensing terms, renaming the repo).
+
+See `.claude/rules/harness-contract.md` for the authoritative contract
+schema and `.claude/agents/harness-planner.md` for how the Planner reads
+harness-ready issues.
+
 ## PR Review Trigger
 
 Comment `/review` on the PR to run AI review + quality checks via GitHub Actions.
