@@ -22,6 +22,10 @@ class TestIsValidPattern:
             "https://claude.ai/api/mcp/auth_callback",
             "http://localhost:3000/cb/*",
             "http://localhost/cb",
+            # RFC 6749 §3.1.2 allows query string on exact redirect_uri
+            "https://example.com/cb?env=prod",
+            "https://example.com/cb?env=prod&v=1",
+            "https://example.com/cb#frag",
         ],
     )
     def test_valid(self, pattern):
@@ -43,6 +47,9 @@ class TestIsValidPattern:
             "https://example.com/cb/*?x=1",  # query on wildcard pattern
             "https://example.com/cb#frag/*",  # wildcard after fragment
             "https:///cb",  # missing host
+            "https://example.com/*",  # host-root wildcard (no pinned path)
+            "https://example.com/*/",  # variant of host-root wildcard
+            "http://localhost/*",  # host-root wildcard, localhost
         ],
     )
     def test_invalid(self, pattern):

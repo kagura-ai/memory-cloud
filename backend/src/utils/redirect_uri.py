@@ -32,8 +32,16 @@ def is_valid_redirect_uri_pattern(pattern: str) -> bool:
 
     A pattern is valid if it is either:
 
-    - An exact URI with no ``*`` characters anywhere, or
-    - A URI with exactly one trailing ``/*`` and no other ``*`` characters.
+    - An **exact** URI with no ``*`` characters anywhere. Query strings and
+      fragments are allowed (RFC 6749 §3.1.2 permits them), since exact-match
+      semantics make them unambiguous.
+    - A **wildcard** URI with exactly one trailing ``/*`` and no other ``*``.
+      The path prefix before ``/*`` must contain at least one non-empty
+      segment — a host-root wildcard like ``https://example.com/*`` is
+      rejected because it would whitelist any single-segment path on the
+      host, violating the "path prefix pinned" security goal. Wildcard
+      patterns must not carry a query string or fragment (both are stripped
+      from the incoming URI at match time, so they would be unreachable).
 
     Args:
         pattern: Stored redirect_uri pattern to validate.
@@ -44,24 +52,30 @@ def is_valid_redirect_uri_pattern(pattern: str) -> bool:
     if not pattern:
         return False
 
+    is_wildcard = pattern.endswith(WILDCARD_SUFFIX)
+
     # Reject any '*' that is not the trailing wildcard suffix.
     if "*" in pattern:
-        if not pattern.endswith(WILDCARD_SUFFIX):
+        if not is_wildcard:
             return False
         if pattern.count("*") != 1:
             return False
-        prefix = pattern[: -len(WILDCARD_SUFFIX)]
-        if "*" in prefix:
-            return False
 
-    target = pattern[: -len(WILDCARD_SUFFIX)] if pattern.endswith(WILDCARD_SUFFIX) else pattern
+    target = pattern[: -len(WILDCARD_SUFFIX)] if is_wildcard else pattern
     parsed = urlparse(target)
     if parsed.scheme not in ("http", "https"):
         return False
     if not parsed.netloc:
         return False
-    if parsed.query or parsed.fragment:
-        return False
+
+    if is_wildcard:
+        # Wildcard patterns must have a pinned path prefix with at least one
+        # non-empty segment, and must not carry query/fragment.
+        if parsed.query or parsed.fragment:
+            return False
+        if not parsed.path.strip("/"):
+            return False
+
     return True
 
 
