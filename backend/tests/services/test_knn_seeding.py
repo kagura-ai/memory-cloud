@@ -39,24 +39,42 @@ def _make_config(
 
 
 def _make_db():
-    """Build an AsyncSession mock."""
+    """Build an AsyncSession mock.
+
+    `begin_nested()` is the SAVEPOINT context manager used around each edge
+    insert. The mock returns an async context manager that is a no-op for
+    the success path; tests that simulate insert failure raise inside the
+    with-block so the outer try/except catches it (matching real behavior).
+    """
     db = MagicMock()
     db.commit = AsyncMock()
     db.rollback = AsyncMock()
+
+    # begin_nested() returns an async context manager
+    nested_cm = MagicMock()
+    nested_cm.__aenter__ = AsyncMock(return_value=nested_cm)
+    nested_cm.__aexit__ = AsyncMock(return_value=False)
+    db.begin_nested = MagicMock(return_value=nested_cm)
+
     return db
 
 
-def _make_edge_repo(existing_edges=None):
+def _make_edge_repo(existing_edges=None, created_edge=None):
     """Build a NeuralEdgeRepository mock.
 
     Args:
         existing_edges: Return value for get_outgoing_edges (idempotency guard).
             Default [] = no existing edges = new memory, seeding proceeds.
             Non-empty = already seeded, seeding skipped.
+        created_edge: Return value for create_edge_if_absent.
+            Default MagicMock() simulates successful insert.
+            None simulates ON CONFLICT DO NOTHING (edge already existed).
     """
     repo = MagicMock()
     repo.get_outgoing_edges = AsyncMock(return_value=existing_edges or [])
-    repo.create_or_update_edge = AsyncMock()
+    repo.create_edge_if_absent = AsyncMock(
+        return_value=created_edge if created_edge is not None else MagicMock()
+    )
     return repo
 
 
@@ -114,7 +132,7 @@ class TestKnnSeeding:
                 collection_name="kagura_memories",
             )
 
-        mock_repo.create_or_update_edge.assert_not_called()
+        mock_repo.create_edge_if_absent.assert_not_called()
         db.commit.assert_not_called()
 
     @pytest.mark.asyncio
@@ -153,9 +171,9 @@ class TestKnnSeeding:
             )
 
         # 2 edges created (self excluded)
-        assert mock_repo.create_or_update_edge.call_count == 2
+        assert mock_repo.create_edge_if_absent.call_count == 2
         # Verify self_id never appears as dst_id
-        for call in mock_repo.create_or_update_edge.call_args_list:
+        for call in mock_repo.create_edge_if_absent.call_args_list:
             assert call.kwargs["dst_id"] != memory.id
 
     @pytest.mark.asyncio
@@ -194,7 +212,7 @@ class TestKnnSeeding:
             )
 
         # Only 2 edges (0.9 and 0.7 pass the 0.6 threshold)
-        assert mock_repo.create_or_update_edge.call_count == 2
+        assert mock_repo.create_edge_if_absent.call_count == 2
 
     @pytest.mark.asyncio
     async def test_k_limit_caps_edge_count(self):
@@ -231,7 +249,7 @@ class TestKnnSeeding:
             )
 
         # Capped at k=3
-        assert mock_repo.create_or_update_edge.call_count == 3
+        assert mock_repo.create_edge_if_absent.call_count == 3
 
     @pytest.mark.asyncio
     async def test_edge_metadata_correct(self):
@@ -266,8 +284,8 @@ class TestKnnSeeding:
                 collection_name="kagura_memories",
             )
 
-        mock_repo.create_or_update_edge.assert_called_once()
-        call = mock_repo.create_or_update_edge.call_args
+        mock_repo.create_edge_if_absent.assert_called_once()
+        call = mock_repo.create_edge_if_absent.call_args
         assert call.kwargs["src_id"] == memory.id
         assert call.kwargs["dst_id"] == neighbor_id
         assert call.kwargs["edge_type"] == "semantic_similarity"
@@ -346,13 +364,14 @@ class TestKnnSeeding:
 
     @pytest.mark.asyncio
     async def test_edge_creation_failure_does_not_block_other_edges(self):
-        """If one edge creation fails, others still proceed."""
+        """If one edge insert raises a DB error, SAVEPOINT isolates it and the
+        remaining neighbors still get processed."""
         memory = _make_memory()
         db = _make_db()
         mock_repo = _make_edge_repo()
-        # Override create_or_update_edge with sequential side effects
-        mock_repo.create_or_update_edge = AsyncMock(
-            side_effect=[None, RuntimeError("constraint violation"), None]
+        # 1st and 3rd return a created edge, 2nd raises (SQLAlchemyError-like)
+        mock_repo.create_edge_if_absent = AsyncMock(
+            side_effect=[MagicMock(), RuntimeError("DB error"), MagicMock()]
         )
 
         candidates = [
@@ -383,7 +402,7 @@ class TestKnnSeeding:
             )
 
         # All 3 attempts made
-        assert mock_repo.create_or_update_edge.call_count == 3
+        assert mock_repo.create_edge_if_absent.call_count == 3
         # Commit called once (after the loop, since at least 1 succeeded)
         db.commit.assert_called_once()
 
@@ -409,6 +428,86 @@ class TestKnnSeeding:
             )
 
         mock_search.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_conflict_do_nothing_not_counted_as_created(self):
+        """When create_edge_if_absent returns None (edge already existed, ON
+        CONFLICT DO NOTHING fired), the edge is preserved and not counted
+        toward edges_created. commit() is not called if no new edges."""
+        memory = _make_memory()
+        db = _make_db()
+        mock_repo = _make_edge_repo()
+        # Simulate all 2 candidates already having edges (existing Hebbian edges)
+        mock_repo.create_edge_if_absent = AsyncMock(return_value=None)
+
+        candidates = [
+            {"id": str(uuid4()), "score": 0.9, "payload": {}, "embedding": []},
+            {"id": str(uuid4()), "score": 0.8, "payload": {}, "embedding": []},
+        ]
+
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=_make_config()),
+            ),
+            patch(
+                "db.qdrant.search_memories_qdrant",
+                new=AsyncMock(return_value=candidates),
+            ),
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                return_value=mock_repo,
+            ),
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 1536,
+                collection_name="kagura_memories",
+            )
+
+        # All 2 attempted, but none counted as "created" since DO NOTHING fired
+        assert mock_repo.create_edge_if_absent.call_count == 2
+        # commit() NOT called because nothing was actually inserted
+        db.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_savepoint_used_per_edge_insert(self):
+        """Each edge insert is wrapped in db.begin_nested() (SAVEPOINT)
+        so that a DB error on one edge does not corrupt the outer session."""
+        memory = _make_memory()
+        db = _make_db()
+        mock_repo = _make_edge_repo()
+
+        candidates = [
+            {"id": str(uuid4()), "score": 0.9, "payload": {}, "embedding": []},
+            {"id": str(uuid4()), "score": 0.8, "payload": {}, "embedding": []},
+            {"id": str(uuid4()), "score": 0.7, "payload": {}, "embedding": []},
+        ]
+
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=_make_config()),
+            ),
+            patch(
+                "db.qdrant.search_memories_qdrant",
+                new=AsyncMock(return_value=candidates),
+            ),
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                return_value=mock_repo,
+            ),
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 1536,
+                collection_name="kagura_memories",
+            )
+
+        # begin_nested() called once per edge attempt (3 candidates)
+        assert db.begin_nested.call_count == 3
 
     @pytest.mark.asyncio
     async def test_idempotent_skip_when_edges_already_exist(self):
@@ -450,5 +549,5 @@ class TestKnnSeeding:
         # so Qdrant search and edge creation are skipped
         mock_repo.get_outgoing_edges.assert_called_once()
         mock_search.assert_not_called()
-        mock_repo.create_or_update_edge.assert_not_called()
+        mock_repo.create_edge_if_absent.assert_not_called()
         db.commit.assert_not_called()

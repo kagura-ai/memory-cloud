@@ -1528,19 +1528,28 @@ async def _create_knn_seed_edges(
             except (ValueError, TypeError, KeyError):
                 continue
 
+            # SAVEPOINT per edge: if one insert raises a DB error (e.g.,
+            # IntegrityError, connection issue), the inner transaction is
+            # rolled back without poisoning the outer session, so subsequent
+            # inserts and the final commit still succeed.
             try:
-                await edge_repo.create_or_update_edge(
-                    user_id=memory.user_id,
-                    src_id=memory.id,
-                    dst_id=neighbor_id,
-                    edge_type="semantic_similarity",
-                    weight=config.knn_seed_weight,
-                    confidence=neighbor_score,
-                    workspace_id=workspace_id_str,
-                    context_id=context_id_str,
-                )
-                edges_created += 1
-                similarities.append(neighbor_score)
+                async with db.begin_nested():
+                    edge = await edge_repo.create_edge_if_absent(
+                        user_id=memory.user_id,
+                        src_id=memory.id,
+                        dst_id=neighbor_id,
+                        edge_type="semantic_similarity",
+                        weight=config.knn_seed_weight,
+                        confidence=neighbor_score,
+                        workspace_id=workspace_id_str,
+                        context_id=context_id_str,
+                    )
+                # edge is None when ON CONFLICT DO NOTHING fired — existing
+                # edge was preserved (TOCTOU-safe against concurrent Hebbian
+                # writes). Count only actually-created seed edges.
+                if edge is not None:
+                    edges_created += 1
+                    similarities.append(neighbor_score)
             except Exception as edge_err:
                 logger.warning(
                     "knn_seed_edge_failed",
@@ -1562,11 +1571,18 @@ async def _create_knn_seed_edges(
             )
 
     except Exception as e:
-        # Best-effort: never let kNN seeding failures affect memory creation
+        # Best-effort: never let kNN seeding failures affect memory creation.
+        # Rollback may itself fail if the session is already in a bad state;
+        # log that failure at debug so it's observable but doesn't mask the
+        # original error which is already being logged below.
         try:
             await db.rollback()
-        except Exception:
-            pass
+        except Exception as rollback_err:
+            logger.debug(
+                "knn_seeding_rollback_failed",
+                memory_id=str(memory.id),
+                error=str(rollback_err),
+            )
         logger.warning(
             "knn_seeding_failed",
             memory_id=str(memory.id),
