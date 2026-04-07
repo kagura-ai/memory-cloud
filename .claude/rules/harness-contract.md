@@ -17,7 +17,7 @@ plugin, these are the values to abstract.
 
 - **Test runners**: `make test-local`, `make test-integration`,
   `make test-e2e`, `make test-smoke`, `make test-neural`,
-  `cd frontend && npm test`
+  `make test-frontend` (which wraps `cd frontend && npm test`)
 - **Source areas**: `backend/src/api/`, `backend/src/auth/`,
   `backend/src/mcp_server/`, `backend/src/neural/`, `backend/src/db/`,
   `backend/src/models/`, `backend/src/services/`, `backend/alembic/`,
@@ -45,7 +45,7 @@ closes that gap.
   round trips in the inner loop. Out-of-tree by design: no gitignore entry,
   no accidental commits, and run state survives reboots so park-and-resume
   works when the 5-hour budget breaker trips mid-run.
-- **Post-run** (on completion): persisted via `kagura-memory:remember` with
+- **Post-run** (on completion): persisted via `/kagura-memory:remember` with
   `type=harness-contract`, `importance=0.8`, and the full contract JSON in
   `details`. See the **Memory type namespace** section for the exact call
   shape.
@@ -137,17 +137,23 @@ closes that gap.
 
 `channel` is **not** a free-form string. Exactly these values are accepted:
 
-| channel                 | When Planner picks it                                             | Evaluator invocation                |
-| ----------------------- | ----------------------------------------------------------------- | ----------------------------------- |
-| `make test-local`       | Default. Pure logic, utils, no DB/API/frontend                    | `make test-local`                   |
-| `make test-integration` | `backend/alembic/`, `backend/src/api/`, `backend/src/auth/`, `backend/src/db/` in diff | `make test-integration`          |
-| `make test-neural`      | `backend/src/neural/` in diff                                     | `make test-neural`                  |
-| `make test-smoke`       | Health, auth, well-known paths                                    | `make test-smoke`                   |
-| `make test-e2e`         | Cross-service flow (memory lifecycle, rate limit)                 | `make test-e2e`                     |
-| `make test-frontend`    | `frontend/**` unit tests                                          | `cd frontend && npm test`           |
-| `playwright-mcp`        | `frontend/**` UI behavior verification                            | Playwright MCP browser tools        |
-| `mcp-live`              | `backend/src/mcp_server/` or `backend/tests/mcp_server/` changes  | `kagura-memory` MCP tool real calls |
-| `self-review`           | Static code review, no runtime verification                       | `/self-review` invocation           |
+Each row lists **when Planner picks it** (trigger), **what the underlying
+target actually runs** (real scope, verified against `Makefile`), and the
+**Evaluator invocation**. Trigger and scope can differ — `make test-local`
+runs the entire backend suite, but the Planner picks it as the default for
+work that has no narrower channel.
+
+| channel                 | When Planner picks it                                                                  | What it runs (real scope)                                                                          | Evaluator invocation                |
+| ----------------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `make test-local`       | Default when no narrower channel matches                                               | `cd backend && pytest -v --maxfail=5` — full backend suite (all of `backend/tests/`)               | `make test-local`                   |
+| `make test-integration` | `backend/alembic/`, `backend/src/api/`, `backend/src/auth/`, `backend/src/db/` in diff | `cd backend && pytest tests/integration/ -v --timeout=120` — only `backend/tests/integration/`     | `make test-integration`             |
+| `make test-neural`      | `backend/src/neural/` in diff                                                          | `docker exec kagura-api python -m pytest tests/neural/ -v` — only `backend/tests/neural/`          | `make test-neural`                  |
+| `make test-smoke`       | Health, auth, well-known paths                                                         | `cd backend && pytest tests/smoke/ -v --timeout=30` — only `backend/tests/smoke/`                  | `make test-smoke`                   |
+| `make test-e2e`         | Cross-service flow (memory lifecycle, rate limit)                                      | `cd backend && pytest tests/e2e/ -v --timeout=60` — only `backend/tests/e2e/`                      | `make test-e2e`                     |
+| `make test-frontend`    | `frontend/**` unit tests                                                               | `cd frontend && npm test` — Vitest suite under `frontend/src/**/*.test.{ts,tsx}`                   | `make test-frontend`                |
+| `playwright-mcp`        | `frontend/**` UI behavior verification                                                 | Playwright MCP browser tools driving the running frontend                                          | Playwright MCP browser tools        |
+| `mcp-live`              | `backend/src/mcp_server/` or `backend/tests/mcp_server/` changes                       | Live MCP tool calls against the running server                                                     | `kagura-memory` MCP tool real calls |
+| `self-review`           | Static code review, no runtime verification                                            | `/self-review` slash command — no test execution                                                   | `/self-review` invocation           |
 
 The enum mixes **Makefile-backed channels** (the `make test-*` rows) and
 **non-Makefile channels** (`playwright-mcp`, `mcp-live`, `self-review`).
@@ -249,9 +255,9 @@ test file is committed) only if `promotion_candidate` is `true` AND the
 Evaluator re-scores it with these three questions, all answered yes:
 
 1. If this behavior breaks in the future, would a separate issue be opened?
-2. Does `recall(type="troubleshooting", query=<statement>)` return any prior
-   occurrence of this bug? (A hit is a strong yes — re-occurrence mandates a
-   test.)
+2. Does `recall(context_id="kagura-dev", query=<statement>, filters={"type": "troubleshooting"})`
+   return any prior occurrence of this bug? (A hit is a strong yes —
+   re-occurrence mandates a test.)
 3. Is the cost of maintaining the test lower than the cost of the bug
    recurring?
 
@@ -262,7 +268,7 @@ only; the Evaluator has the final call.
 ## Run record schema
 
 On run termination (merged, failed, aborted, or escalated), the harness
-writes one record via `kagura-memory:remember`:
+writes one record via `/kagura-memory:remember`:
 
 ```json
 {
@@ -318,7 +324,9 @@ exactly so the harness can parse the statusline JSON without remapping.
 
 Four new `type` values, all prefixed `harness-` to avoid collisions with
 existing types (`pattern`, `troubleshooting`, `decision`, `learning`,
-`bug-fix`, `code`, `note`, `feature`, `config`).
+`bug-fix`, `code`, `note`, `feature`, `config`). The existing-type list was
+collected from `claude-skills/remember.md` and `claude-skills/recall.md`,
+which document the conventions used by the `/kagura-memory:*` skills.
 
 | type                  | When written                                    | importance | Required tags                                            |
 | --------------------- | ----------------------------------------------- | ---------- | -------------------------------------------------------- |
@@ -343,7 +351,7 @@ Example `remember` call for the final contract:
 
 In practice, `details` is populated with the full contract JSON at write
 time. It is shown empty above so the example parses as valid JSON; the
-linter in CI rejects block comments inside fenced ````json` blocks.
+linter in CI rejects block comments inside JSON code fences.
 
 Bugs found by the Evaluator that include a root-cause fix use the existing
 `type=troubleshooting` (importance 0.9) — this is not a new type, just reuse
