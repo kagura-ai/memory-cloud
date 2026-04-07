@@ -38,6 +38,7 @@ from sqlalchemy.orm import relationship
 
 from db.base import Base
 from utils.datetime import utcnow
+from utils.redirect_uri import any_redirect_uri_matches
 
 
 class User(Base):
@@ -428,15 +429,18 @@ class OAuth2Client(Base):
     def check_redirect_uri(self, redirect_uri: str) -> bool:
         """Validate redirect URI.
 
-        Required by Authlib.
+        Required by Authlib. Supports trailing ``/*`` wildcard patterns in
+        registered ``redirect_uris`` to accommodate ChatGPT/Claude per-connector
+        dynamic callback URLs (Issue #207). Exact matching is preserved for
+        patterns without ``*``.
 
         Args:
             redirect_uri: Redirect URI to validate
 
         Returns:
-            True if redirect_uri is in registered redirect_uris
+            True if redirect_uri matches any registered pattern
         """
-        return redirect_uri in self.redirect_uris
+        return any_redirect_uri_matches(self.redirect_uris, redirect_uri)
 
     def has_client_secret(self) -> bool:
         """Check if client has a secret.

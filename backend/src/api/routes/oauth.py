@@ -28,7 +28,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser, require_admin
@@ -39,6 +39,25 @@ from models.schemas import TokenIntrospectionResponse
 from utils.datetime import utcnow
 from utils.logger import get_logger
 from utils.oauth_messages import get_oauth_messages
+from utils.redirect_uri import is_valid_redirect_uri_pattern
+
+
+def _check_redirect_uri_patterns(value: list[str]) -> list[str]:
+    """Validate that each redirect_uri is a well-formed pattern.
+
+    Patterns may be exact URIs or trailing-wildcard URIs (e.g.
+    ``https://example.com/cb/*``). The wildcard ``*`` is only allowed as a
+    trailing path segment to prevent open-redirect attacks (Issue #207).
+    """
+    for uri in value:
+        if not is_valid_redirect_uri_pattern(uri):
+            raise ValueError(
+                f"Invalid redirect_uri pattern: {uri!r}. "
+                "Must be an http/https URL. Wildcard '*' is only allowed as "
+                "a trailing path segment (e.g. https://example.com/cb/*)."
+            )
+    return value
+
 
 # Initialize Jinja2 templates
 TEMPLATES_DIR = Path(__file__).parent.parent.parent.parent / "templates"
@@ -126,6 +145,11 @@ class OAuth2ClientCreateRequest(BaseModel):
         default="client_secret_post", description="Client authentication method"
     )
 
+    @field_validator("redirect_uris")
+    @classmethod
+    def _validate_redirect_uris(cls, value: list[str]) -> list[str]:
+        return _check_redirect_uri_patterns(value)
+
 
 class DynamicClientRegistrationRequest(BaseModel):
     """Dynamic Client Registration (DCR) request for MCP clients.
@@ -147,6 +171,11 @@ class DynamicClientRegistrationRequest(BaseModel):
         default="none", description="Token endpoint auth method"
     )
 
+    @field_validator("redirect_uris")
+    @classmethod
+    def _validate_redirect_uris(cls, value: list[str]) -> list[str]:
+        return _check_redirect_uri_patterns(value)
+
 
 class OAuth2ClientUpdateRequest(BaseModel):
     """OAuth2 Client update request."""
@@ -158,6 +187,13 @@ class OAuth2ClientUpdateRequest(BaseModel):
         None,
         description="Client authentication method (none, client_secret_post, client_secret_basic)",
     )
+
+    @field_validator("redirect_uris")
+    @classmethod
+    def _validate_redirect_uris(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        return _check_redirect_uri_patterns(value)
 
 
 class OAuth2ProviderResponse(BaseModel):

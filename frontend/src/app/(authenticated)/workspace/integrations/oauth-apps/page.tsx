@@ -192,7 +192,7 @@ export default function CustomAppsPage() {
         redirect_uris:
           provider === "claude"
             ? ["https://claude.ai/api/mcp/auth_callback"]
-            : ["https://chatgpt.com/connector_platform_oauth_redirect"],
+            : ["https://chatgpt.com/connector/oauth/*"],
       });
 
       await loadOAuthClients();
