@@ -56,9 +56,11 @@ body:
         Check any that apply as a hint. Leave empty if unsure.
       options:
         - label: "api — `backend/src/api/`"
-        - label: "mcp — `backend/src/mcp/` or `backend/src/**/mcp/`"
+        - label: "auth — `backend/src/auth/`"
+        - label: "mcp — `backend/src/mcp_server/`"
         - label: "neural — `backend/src/neural/`"
-        - label: "db — `backend/src/db/`, `backend/src/models/`, `backend/alembic/`, `backend/migrations/`"
+        - label: "db — `backend/src/db/`, `backend/src/models/`, `backend/alembic/`"
+        - label: "services — `backend/src/services/`"
         - label: "frontend — `frontend/`"
         - label: "test — `backend/tests/` or `frontend/**/__tests__/`"
         - label: "meta — `.claude/`, `.github/`, `docs/`, project configuration"
