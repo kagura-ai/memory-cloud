@@ -141,9 +141,9 @@ contract entry. Rules:
    is broken, the statement is not ready — rewrite it or drop it.
 2. **Pick `channel` from the enum only**. Use the decision logic from the
    rule file's Channel enum section:
-   - `backend/migrations/`, `backend/src/api/`, `backend/src/db/` in diff → `make test-integration`
+   - `backend/alembic/`, `backend/src/api/`, `backend/src/auth/`, `backend/src/db/` in diff → `make test-integration`
    - `backend/src/neural/` → `make test-neural`
-   - `backend/src/mcp/`, `backend/src/**/mcp/` → `mcp-live`
+   - `backend/src/mcp_server/` → `mcp-live`
    - `frontend/**` logic → `make test-frontend`
    - `frontend/**` UI behavior → `playwright-mcp`
    - health/auth/well-known → `make test-smoke`
@@ -179,10 +179,10 @@ in the stdout summary.
 |------------------------------------|-------------------------------|-------------------------------|
 | new feature, scope unclear         | `claude-c-suite:pm`           | (skip)                        |
 | architectural change               | `claude-c-suite:cto`          | (skip)                        |
-| `backend/src/api/auth/`, RBAC, secrets | `claude-c-suite:cso`      | `claude-c-suite:cso`          |
-| `backend/migrations/`, schema change | `claude-phd-panel:db`       | `claude-phd-panel:db`         |
+| `backend/src/auth/`, RBAC, secrets | `claude-c-suite:cso`          | `claude-c-suite:cso`          |
+| `backend/alembic/`, schema change  | `claude-phd-panel:db`         | `claude-phd-panel:db`         |
 | `backend/src/neural/`, embeddings  | `claude-c-suite:caio`         | `claude-phd-panel:ds`         |
-| `backend/src/mcp/`                 | `claude-c-suite:dx-lead`      | (skip)                        |
+| `backend/src/mcp_server/`          | `claude-c-suite:dx-lead`      | (skip)                        |
 | `frontend/**`                      | `claude-c-suite:cdo`          | (skip)                        |
 | async / concurrent code            | (skip)                        | `claude-phd-panel:dist-sys`   |
 | none of the above                  | (skip, enabled=false)         | (skip, enabled=false)         |
