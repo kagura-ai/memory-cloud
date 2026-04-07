@@ -296,8 +296,9 @@ Stop and ask the user before writing the contract if any of these hold:
 - The detected areas are empty AND the issue body mentions files that do
   not exist in the repo
 - The issue wants a behavior that would require a channel not in the enum
-- The budget breaker `five_hour.used_percentage` is already above 80% at
-  Planner start (pre-flight abort per the rule file)
+- The budget breaker `five_hour_pct` is already above 80% at Planner
+  start (pre-flight abort per the rule file's Forbidden patterns section,
+  which uses `five_hour_pct` as the canonical field name)
 
 Escalation means: print a single-block reason, do not write a contract
 file, exit without error. The user decides whether to rewrite the issue,
