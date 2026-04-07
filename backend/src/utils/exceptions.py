@@ -46,8 +46,15 @@ class MemoryCloudException(Exception):
 class AuthenticationError(MemoryCloudException):
     """Authentication failed (401)."""
 
-    def __init__(self, message: str = "Authentication failed", **details: Any):
-        super().__init__(message, status_code=401, error_code="AUTH-001", **details)
+    def __init__(
+        self,
+        message: str = "Authentication failed",
+        *,
+        status_code: int = 401,
+        error_code: str = "AUTH-001",
+        **details: Any,
+    ) -> None:
+        super().__init__(message, status_code=status_code, error_code=error_code, **details)
 
 
 class InvalidCredentialsError(AuthenticationError):
@@ -74,21 +81,28 @@ class AuthorizationError(MemoryCloudException):
 class APIKeyError(MemoryCloudException):
     """API key related error (401)."""
 
-    def __init__(self, message: str = "Invalid or missing API key"):
-        super().__init__(message, status_code=401, error_code="AUTH-201")
+    def __init__(
+        self,
+        message: str = "Invalid or missing API key",
+        *,
+        status_code: int = 401,
+        error_code: str = "AUTH-201",
+        **details: Any,
+    ) -> None:
+        super().__init__(message, status_code=status_code, error_code=error_code, **details)
 
 
 class APIKeyRevokedError(APIKeyError):
     """API key has been revoked (401)."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__("API key has been revoked", error_code="AUTH-202")
 
 
 class APIKeyExpiredError(APIKeyError):
     """API key has expired (401)."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__("API key has expired", error_code="AUTH-203")
 
 

@@ -1,7 +1,5 @@
 """Tests for custom exceptions."""
 
-import pytest
-
 from utils.exceptions import (
     APIKeyError,
     APIKeyExpiredError,
@@ -62,15 +60,17 @@ class TestAuthErrors:
         assert exc.status_code == 401
         assert exc.error_code == "AUTH-001"
 
-    @pytest.mark.skip(reason="Bug: error_code double-passed in subclass constructors")
     def test_invalid_credentials(self):
         exc = InvalidCredentialsError()
         assert exc.status_code == 401
+        assert exc.error_code == "AUTH-002"
+        assert exc.message == "Invalid credentials"
 
-    @pytest.mark.skip(reason="Bug: error_code double-passed in subclass constructors")
     def test_token_expired(self):
         exc = TokenExpiredError()
         assert exc.status_code == 401
+        assert exc.error_code == "AUTH-003"
+        assert exc.message == "Token has expired"
 
     def test_authorization_error(self):
         exc = AuthorizationError("Access denied")
@@ -80,15 +80,17 @@ class TestAuthErrors:
         exc = APIKeyError()
         assert exc.status_code == 401
 
-    @pytest.mark.skip(reason="Bug: error_code double-passed in subclass constructors")
     def test_api_key_revoked(self):
         exc = APIKeyRevokedError()
         assert exc.status_code == 401
+        assert exc.error_code == "AUTH-202"
+        assert exc.message == "API key has been revoked"
 
-    @pytest.mark.skip(reason="Bug: error_code double-passed in subclass constructors")
     def test_api_key_expired(self):
         exc = APIKeyExpiredError()
         assert exc.status_code == 401
+        assert exc.error_code == "AUTH-203"
+        assert exc.message == "API key has expired"
 
     def test_token_revoked(self):
         exc = TokenRevokedError()
