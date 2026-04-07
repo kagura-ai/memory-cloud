@@ -22,7 +22,16 @@ from mcp_server.tools._helpers import (
     execute_with_timeout,
 )
 
-VALID_EDGE_TYPES = frozenset({"neural_association", "related_to", "depends_on", "learned_from"})
+VALID_EDGE_TYPES = frozenset(
+    {
+        "neural_association",
+        "related_to",
+        "depends_on",
+        "learned_from",
+        # Cold-start seeding (Issue #221): synthetic edges from k-NN at remember() time
+        "semantic_similarity",
+    }
+)
 
 
 def _edge_to_dict(edge: Any) -> dict[str, Any]:

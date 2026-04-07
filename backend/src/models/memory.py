@@ -309,7 +309,8 @@ class NeuralMemoryEdge(Base):
         CheckConstraint("weight >= 0.0 AND weight <= 3.0", name="valid_weight"),
         CheckConstraint("confidence >= 0.0 AND confidence <= 1.0", name="valid_confidence"),
         CheckConstraint(
-            "edge_type IN ('neural_association', 'related_to', 'depends_on', 'learned_from')",
+            "edge_type IN ('neural_association', 'related_to', 'depends_on', "
+            "'learned_from', 'semantic_similarity')",
             name="valid_edge_type",
         ),
         Index("idx_edges_user_src", "user_id", "src_id"),
