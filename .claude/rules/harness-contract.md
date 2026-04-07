@@ -18,9 +18,10 @@ plugin, these are the values to abstract.
 - **Test runners**: `make test-local`, `make test-integration`,
   `make test-e2e`, `make test-smoke`, `make test-neural`,
   `cd frontend && npm test`
-- **Source areas**: `backend/src/api/`, `backend/src/mcp/`,
-  `backend/src/neural/`, `backend/src/db/`, `backend/src/models/`,
-  `backend/migrations/`, `backend/alembic/`, `frontend/`
+- **Source areas**: `backend/src/api/`, `backend/src/auth/`,
+  `backend/src/mcp_server/`, `backend/src/neural/`, `backend/src/db/`,
+  `backend/src/models/`, `backend/src/services/`, `backend/alembic/`,
+  `frontend/`
 - **Memory context**: `kagura-dev` (see CLAUDE.md)
 - **Branch protection**: `main`, squash merge, conventional commits
 - **Budget thresholds**: 5h rate-limit abort at 80%, context clear at 75%
@@ -139,13 +140,13 @@ closes that gap.
 | channel                 | When Planner picks it                                             | Evaluator invocation                |
 | ----------------------- | ----------------------------------------------------------------- | ----------------------------------- |
 | `make test-local`       | Default. Pure logic, utils, no DB/API/frontend                    | `make test-local`                   |
-| `make test-integration` | `backend/migrations/`, `backend/src/api/`, `backend/src/db/` in diff | `make test-integration`          |
+| `make test-integration` | `backend/alembic/`, `backend/src/api/`, `backend/src/auth/`, `backend/src/db/` in diff | `make test-integration`          |
 | `make test-neural`      | `backend/src/neural/` in diff                                     | `make test-neural`                  |
 | `make test-smoke`       | Health, auth, well-known paths                                    | `make test-smoke`                   |
 | `make test-e2e`         | Cross-service flow (memory lifecycle, rate limit)                 | `make test-e2e`                     |
 | `make test-frontend`    | `frontend/**` unit tests                                          | `cd frontend && npm test`           |
 | `playwright-mcp`        | `frontend/**` UI behavior verification                            | Playwright MCP browser tools        |
-| `mcp-live`              | `backend/src/**/mcp/` handler behavior                            | `kagura-memory` MCP tool real calls |
+| `mcp-live`              | `backend/src/mcp_server/` handler behavior                        | `kagura-memory` MCP tool real calls |
 | `self-review`           | Static code review, no runtime verification                       | `/self-review` invocation           |
 
 The enum mixes **Makefile-backed channels** (the `make test-*` rows) and
@@ -170,13 +171,15 @@ exists yet):
 
 ```
 backend/src/api/                         → api
-backend/src/mcp/, backend/src/**/mcp/    → mcp
+backend/src/auth/                        → auth
+backend/src/mcp_server/                  → mcp
 backend/src/neural/                      → neural
-backend/migrations/, backend/alembic/    → db
+backend/alembic/                         → db
 backend/src/db/, backend/src/models/     → db
+backend/src/services/                    → services
 frontend/                                → frontend
 backend/tests/, frontend/**/__tests__/   → test
-.claude/, docs/                          → meta
+.claude/, docs/, .github/                → meta
 (no match)                               → lib
 ```
 
