@@ -145,6 +145,69 @@ class NeuralEdgeRepository:
 
         return edge
 
+    async def create_edge_if_absent(
+        self,
+        user_id: str,
+        src_id: UUID,
+        dst_id: UUID,
+        edge_type: str,
+        weight: float,
+        confidence: float = 1.0,
+        workspace_id: str | None = None,
+        context_id: str | None = None,
+    ) -> NeuralMemoryEdge | None:
+        """Create an edge only if no edge exists for (user_id, src_id, dst_id).
+
+        Uses ``ON CONFLICT DO NOTHING`` on the ``unique_edge`` constraint, so
+        existing edges — regardless of their ``edge_type`` — are preserved.
+
+        This is the canonical path for **synthetic / seed edges** (k-NN
+        cold-start seeding, tag co-occurrence, etc.) where we must not
+        overwrite Hebbian-learned edges via upsert.
+
+        Returns:
+            The newly created NeuralMemoryEdge, or ``None`` if an edge
+            already existed (TOCTOU-safe: no race window).
+        """
+        # Issue #273 Review: Enforce 3-level isolation
+        if not workspace_id or not context_id:
+            raise ValueError(
+                f"create_edge_if_absent() requires workspace_id and context_id for "
+                f"3-level isolation. Got workspace_id={workspace_id}, context_id={context_id}"
+            )
+
+        stmt = (
+            insert(NeuralMemoryEdge)
+            .values(
+                user_id=user_id,
+                src_id=src_id,
+                dst_id=dst_id,
+                edge_type=edge_type,
+                weight=weight,
+                confidence=confidence,
+                workspace_id=UUID(workspace_id),
+                context_id=UUID(context_id),
+                created_at=utcnow(),
+                last_updated=utcnow(),
+            )
+            .on_conflict_do_nothing(constraint="unique_edge")
+            .returning(NeuralMemoryEdge)
+        )
+
+        result = await self.db.execute(stmt)
+        edge = result.scalar_one_or_none()
+
+        if edge is not None:
+            logger.debug(
+                "edge_inserted_if_absent",
+                user_id=user_id,
+                src_id=str(src_id),
+                dst_id=str(dst_id),
+                edge_type=edge_type,
+            )
+
+        return edge
+
     async def update_edge_weight(
         self,
         user_id: str,
