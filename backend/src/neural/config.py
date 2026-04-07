@@ -151,9 +151,15 @@ class NeuralMemoryConfig:
     # `semantic_similarity` edges so new memories are not born as isolated nodes.
     knn_seed_enabled: bool = True
     knn_seed_k: int = 5  # Neighbors per new memory (1-20)
-    knn_seed_min_similarity: float = (
-        0.6  # Cosine threshold; matches Sleep Edge Discovery lower bound
-    )
+    # Cosine threshold. Validated for OpenAI text-embedding-3-small via dogfood
+    # on 2026-04-07 (memory.kagura-ai.com): strongly related memories typically
+    # cluster around 0.40-0.50 cosine, so 0.4 is the right floor for that model.
+    # Other embedding models (Ollama qwen3, etc.) have different distributions
+    # and may need a different threshold — see #236 for per-model defaults.
+    # Sleep Edge Discovery uses 0.6 because it has LLM judgment downstream as a
+    # quality filter; kNN seeding has no such filter, so use a lower threshold
+    # and let Sleep Maintenance prune low-quality edges later.
+    knn_seed_min_similarity: float = 0.4
     knn_seed_weight: float = (
         0.3  # Intentionally low — synthetic signal, Sleep Maintenance prunes if unused
     )
@@ -369,7 +375,7 @@ class NeuralMemoryConfig:
             # k-NN Cold-Start Seeding (Issue #221)
             knn_seed_enabled=get_bool("KNN_SEED_ENABLED", True),
             knn_seed_k=get_int("KNN_SEED_K", 5),
-            knn_seed_min_similarity=get_float("KNN_SEED_MIN_SIMILARITY", 0.6),
+            knn_seed_min_similarity=get_float("KNN_SEED_MIN_SIMILARITY", 0.4),
             knn_seed_weight=get_float("KNN_SEED_WEIGHT", 0.3),
             # Sleep Maintenance (env-only flags + DB-configurable params)
             sleep_enabled=get_bool("SLEEP_ENABLED", False),
