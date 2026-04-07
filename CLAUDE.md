@@ -88,9 +88,11 @@ instead) when:
 - The scope touches meta-work that cannot be verified by running a test
   (e.g., changing licensing terms, renaming the repo).
 
-See `.claude/rules/harness-contract.md` for the authoritative contract
-schema and `.claude/agents/harness-planner.md` for how the Planner reads
-harness-ready issues.
+The authoritative contract schema lives at
+`.claude/rules/harness-contract.md` and the Planner agent at
+`.claude/agents/harness-planner.md` (both landing via companion PRs
+#251 and #253; reference them there until merged). Once merged, those
+two files are the single source of truth for harness behavior.
 
 ## PR Review Trigger
 

@@ -13,7 +13,8 @@ body:
         If your task cannot be expressed as verifiable criteria (e.g., raw bug
         triage, design exploration, brainstorming), use a different template.
 
-        Authoritative contract schema: `.claude/rules/harness-contract.md`
+        The acceptance criteria section is the authoritative source for the
+        contract the harness will generate and evaluate against.
 
   - type: textarea
     id: summary
@@ -39,10 +40,10 @@ body:
         - Reference concrete endpoints, file paths, commands, or output.
         - If you cannot phrase a criterion as verifiable, drop it from this
           issue and move it to a design document or discussion.
-      value: |
-        - [ ]
-        - [ ]
-        - [ ]
+      placeholder: |
+        - [ ] POST /api/contexts/:id returns 403 when the context belongs to a different workspace
+        - [ ] backend/tests/api/test_context_access.py covers cross-workspace rejection
+        - [ ] make test-integration passes after the change
       render: markdown
     validations:
       required: true
@@ -62,7 +63,7 @@ body:
         - label: "db — `backend/src/db/`, `backend/src/models/`, `backend/alembic/`"
         - label: "services — `backend/src/services/`"
         - label: "frontend — `frontend/`"
-        - label: "test — `backend/tests/` or `frontend/**/__tests__/`"
+        - label: "test — `backend/tests/` or `frontend/src/**/*.test.{ts,tsx}`"
         - label: "meta — `.claude/`, `.github/`, `docs/`, project configuration"
 
   - type: textarea
@@ -92,7 +93,9 @@ body:
       value: |
         ---
 
-        **After submitting**: run `/harness-loop <issue-number>` to start the
-        harness, or `/issue-start <issue-number>` for a manual flow. The
-        Planner will read this body, extract criteria, and write a contract
-        file at `~/.cache/memory-cloud-harness/runs/hr-*/contract.json`.
+        **After submitting**: run `/issue-start <issue-number>` to begin
+        the manual flow. Once the full harness ships, `/harness-loop
+        <issue-number>` will drive the Planner / Generator / Evaluator
+        sequence end-to-end. The Planner reads this issue body, extracts
+        the acceptance criteria, and writes a contract file at
+        `~/.cache/memory-cloud-harness/runs/hr-*/contract.json`.
