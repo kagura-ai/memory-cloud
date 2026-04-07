@@ -1428,6 +1428,168 @@ class MemoryService:
         return related_tags
 
 
+async def _create_knn_seed_edges(
+    db: AsyncSession,
+    memory: Memory,
+    vector: list[float],
+    collection_name: str,
+) -> None:
+    """Create k-NN cold-start seed edges for a newly embedded memory.
+
+    Issue #221: After a memory is upserted to Qdrant, search for its k nearest
+    neighbors within the same workspace+context and create weak
+    `semantic_similarity` edges. This prevents new memories from being born as
+    isolated nodes (graph cold-start UX failure).
+
+    Best-effort: any failure is logged and swallowed — must not affect memory
+    creation. Edge creation uses an isolated commit so partial failures do not
+    roll back unrelated work.
+
+    Args:
+        db: AsyncSession (already bound to memory's transaction context)
+        memory: The freshly created Memory entity
+        vector: The dense embedding vector that was upserted to Qdrant
+        collection_name: Qdrant collection name (varies by embedding model)
+    """
+    from db.qdrant import search_memories_qdrant
+    from neural.config import NeuralMemoryConfig
+    from repositories.neural_edge import NeuralEdgeRepository
+
+    try:
+        config = await NeuralMemoryConfig.from_db(db)
+
+        if not config.knn_seed_enabled:
+            return
+
+        if not memory.workspace_id or not memory.context_id:
+            # Defensive: 3-level isolation requires both
+            return
+
+        workspace_id_str = str(memory.workspace_id)
+        context_id_str = str(memory.context_id)
+        memory_id_str = str(memory.id)
+
+        # Idempotency guard: process_pending_embedding is called on both new
+        # memory creation AND update_memory re-embed (memory_service.py:431).
+        # Without this check, re-embeds would overwrite existing Hebbian edges
+        # via ON CONFLICT DO UPDATE on the (user_id, src_id, dst_id) unique
+        # constraint — downgrading `neural_association` weight=1.5 to
+        # `semantic_similarity` weight=0.3. Skip seeding if the memory already
+        # has any outgoing edges.
+        edge_repo = NeuralEdgeRepository(db)
+        existing_edges = await edge_repo.get_outgoing_edges(
+            user_id=memory.user_id,
+            src_id=memory.id,
+            workspace_id=workspace_id_str,
+            context_id=context_id_str,
+            limit=1,
+        )
+        if existing_edges:
+            logger.debug(
+                "knn_seed_skip_already_seeded",
+                memory_id=memory_id_str,
+            )
+            return
+
+        # Search for k+1 candidates because the new memory itself will appear
+        # as the top hit (cosine similarity with itself = 1.0).
+        candidates = await search_memories_qdrant(
+            user_id=memory.user_id,
+            query_vector=vector,
+            workspace_id=workspace_id_str,
+            context_id=context_id_str,
+            limit=config.knn_seed_k + 1,
+            collection_name=collection_name,
+        )
+
+        # Filter: exclude self, apply similarity threshold, cap at k
+        seed_neighbors = [
+            c
+            for c in candidates
+            if str(c["id"]) != memory_id_str and c["score"] >= config.knn_seed_min_similarity
+        ][: config.knn_seed_k]
+
+        if not seed_neighbors:
+            logger.debug(
+                "knn_seed_no_neighbors",
+                memory_id=memory_id_str,
+                candidates=len(candidates),
+                threshold=config.knn_seed_min_similarity,
+            )
+            return
+
+        edges_created = 0
+        similarities: list[float] = []
+
+        for neighbor in seed_neighbors:
+            try:
+                neighbor_id = UUID(str(neighbor["id"]))
+                neighbor_score = float(neighbor["score"])
+            except (ValueError, TypeError, KeyError):
+                continue
+
+            # SAVEPOINT per edge: if one insert raises a DB error (e.g.,
+            # IntegrityError, connection issue), the inner transaction is
+            # rolled back without poisoning the outer session, so subsequent
+            # inserts and the final commit still succeed.
+            try:
+                async with db.begin_nested():
+                    edge = await edge_repo.create_edge_if_absent(
+                        user_id=memory.user_id,
+                        src_id=memory.id,
+                        dst_id=neighbor_id,
+                        edge_type="semantic_similarity",
+                        weight=config.knn_seed_weight,
+                        confidence=neighbor_score,
+                        workspace_id=workspace_id_str,
+                        context_id=context_id_str,
+                    )
+                # edge is None when ON CONFLICT DO NOTHING fired — existing
+                # edge was preserved (TOCTOU-safe against concurrent Hebbian
+                # writes). Count only actually-created seed edges.
+                if edge is not None:
+                    edges_created += 1
+                    similarities.append(neighbor_score)
+            except Exception as edge_err:
+                logger.warning(
+                    "knn_seed_edge_failed",
+                    memory_id=memory_id_str,
+                    neighbor_id=str(neighbor.get("id", "?")),
+                    error=str(edge_err),
+                )
+
+        if edges_created > 0:
+            await db.commit()
+            avg_similarity = sum(similarities) / len(similarities)
+            logger.info(
+                "knn_seed_edges_created",
+                memory_id=memory_id_str,
+                edges_created=edges_created,
+                k=config.knn_seed_k,
+                avg_similarity=round(avg_similarity, 4),
+                weight=config.knn_seed_weight,
+            )
+
+    except Exception as e:
+        # Best-effort: never let kNN seeding failures affect memory creation.
+        # Rollback may itself fail if the session is already in a bad state;
+        # log that failure at debug so it's observable but doesn't mask the
+        # original error which is already being logged below.
+        try:
+            await db.rollback()
+        except Exception as rollback_err:
+            logger.debug(
+                "knn_seeding_rollback_failed",
+                memory_id=str(memory.id),
+                error=str(rollback_err),
+            )
+        logger.warning(
+            "knn_seeding_failed",
+            memory_id=str(memory.id),
+            error=str(e),
+        )
+
+
 async def process_pending_embedding(memory_id: UUID) -> None:
     """Process embedding generation + Qdrant upsert for a pending memory.
 
@@ -1562,6 +1724,24 @@ async def process_pending_embedding(memory_id: UUID) -> None:
             await db.commit()
 
             logger.info("embedding_completed", memory_id=str(memory_id))
+
+            # ================================================================
+            # Issue #221: k-NN cold-start seeding
+            # ================================================================
+            # After Qdrant upsert succeeds, search for k nearest neighbors
+            # within the same workspace+context and create weak
+            # `semantic_similarity` edges. This guarantees new memories are
+            # not born as isolated nodes (cold-start UX failure).
+            #
+            # Best-effort: failures must NOT affect memory creation.
+            # Runs in the background embedding task, so no impact on
+            # remember() response latency.
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=vector,
+                collection_name=collection,
+            )
 
         except Exception as e:
             await db.rollback()
