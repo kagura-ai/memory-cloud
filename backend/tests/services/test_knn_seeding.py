@@ -26,7 +26,7 @@ def _make_memory(workspace_id=None, context_id=None, user_id="user1"):
 def _make_config(
     enabled=True,
     k=5,
-    min_similarity=0.6,
+    min_similarity=0.4,
     weight=0.3,
 ):
     """Build a NeuralMemoryConfig mock."""
