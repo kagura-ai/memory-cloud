@@ -178,11 +178,7 @@ export default function AdminSleepReportsPage() {
               {t("actions.refresh")}
             </Button>
             {user?.role === "admin" && (
-              <Button
-                onClick={handleRunNow}
-                disabled={running || loading}
-                aria-label={t("actions.runNow")}
-              >
+              <Button onClick={handleRunNow} disabled={running || loading}>
                 {running ? (
                   <InlineSpinner size="sm" className="mr-2" />
                 ) : (
