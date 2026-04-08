@@ -25,7 +25,7 @@ from models.auth import Context
 from models.sleep import SleepReport
 from services.sleep.orchestrator import SleepOrchestrator
 from services.sleep.reporter import SleepReporter
-from utils.datetime import to_utc_iso
+from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import MemoryCloudException
 from utils.logger import get_logger
 
@@ -90,6 +90,14 @@ async def _run_sleep_job(
                     report_id=str(report_id),
                 )
                 return
+
+            # The endpoint pre-creates every report up front so the 202
+            # response can return their ids, which means queued jobs in a
+            # multi-context batch would otherwise all share a stale
+            # creation timestamp. Reset to the actual execution start so
+            # duration analytics and list ordering reflect reality.
+            report.started_at = utcnow()
+            await db.flush()
 
             orchestrator = SleepOrchestrator(db)
             await orchestrator.run(
@@ -227,10 +235,15 @@ async def trigger_sleep_run(
         )
 
     # ---- Concurrency guard --------------------------------------------------
+    # Oldest-first so the returned running_report_id is deterministic: in a
+    # multi-context batch several reports can share status='running', and
+    # the oldest is the most likely to be currently executing — which is
+    # the most useful target for the UI's "view running report" link.
     running_stmt = (
         select(SleepReport.id, SleepReport.started_at)
         .where(SleepReport.user_id == user_id)
         .where(SleepReport.status == "running")
+        .order_by(SleepReport.started_at.asc())
         .limit(1)
     )
     running_row = (await db.execute(running_stmt)).first()

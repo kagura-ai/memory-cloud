@@ -218,8 +218,10 @@ describe("AdminSleepReportsPage — Run Now button", () => {
       `/admin/sleep-reports/${runningReportId}`,
     );
 
-    // Button recovers to idle.
-    expect(button).not.toBeDisabled();
+    // Button recovers to idle. Wait for the setRunning(false) in the
+    // handler's finally block to propagate — asserting synchronously
+    // immediately after the toast is race-prone.
+    await waitFor(() => expect(button).not.toBeDisabled());
     expect(button).toHaveTextContent("actions.runNow");
     // No redundant reload on conflict.
     expect(mockGet).toHaveBeenCalledTimes(1);
