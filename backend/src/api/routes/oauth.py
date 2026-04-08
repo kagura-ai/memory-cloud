@@ -23,7 +23,7 @@ import hashlib
 import os
 import secrets
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -1129,6 +1129,66 @@ def get_current_user_from_session(request: Request):
         )
 
 
+def _append_query_params(url: str, extra: dict[str, str]) -> str:
+    """Append query params to ``url``, preserving any existing query string.
+
+    Issue #218 (Copilot review): the OAuth deny / error redirect paths
+    used to do ``f"{redirect_uri}?{urlencode(params)}"`` which produces a
+    malformed URL with a double ``?`` whenever the registered
+    ``redirect_uri`` already carries a query string. RFC 6749 §3.1.2
+    explicitly allows query strings on exact-match redirect URIs, and
+    ``is_valid_redirect_uri_pattern`` accepts them, so this is reachable
+    in production. The bug silently breaks the OAuth client's view of
+    ``error=access_denied`` (it ends up nested inside the existing
+    query value).
+
+    Args:
+        url: Base URL — may already contain a query string and/or fragment.
+        extra: Mapping of additional query parameters to append.
+
+    Returns:
+        URL with ``extra`` merged into the existing query string using
+        ``&`` as the separator. Fragment is preserved.
+    """
+    parts = urlsplit(url)
+    merged = parse_qsl(parts.query, keep_blank_values=True)
+    merged.extend(extra.items())
+    return urlunsplit(parts._replace(query=urlencode(merged)))
+
+
+def _redact_redirect_uri_for_log(redirect_uri: str | None) -> str:
+    """Reduce a redirect_uri to a safe form for logging.
+
+    Issue #218 (Copilot review): warning logs used to echo the full,
+    attacker-controlled ``redirect_uri``. Even validated URIs may carry
+    sensitive query strings (RFC 6749 §3.1.2 allows them on exact-match
+    patterns), and unvalidated probes can be arbitrarily long or contain
+    log-injection payloads. We log scheme + host + path only, capped to
+    256 characters.
+
+    Args:
+        redirect_uri: The URI to redact, or ``None``.
+
+    Returns:
+        ``"<missing>"`` if the input is empty, otherwise
+        ``"{scheme}://{netloc}{path}"`` truncated to 256 chars. Falls back
+        to a truncated raw value if URL parsing fails.
+    """
+    if not redirect_uri:
+        return "<missing>"
+    try:
+        parts = urlsplit(redirect_uri)
+        if parts.scheme and parts.netloc:
+            redacted = f"{parts.scheme}://{parts.netloc}{parts.path}"
+        else:
+            redacted = redirect_uri
+    except ValueError:
+        redacted = redirect_uri
+    if len(redacted) > 256:
+        redacted = redacted[:253] + "..."
+    return redacted
+
+
 def _resolve_oauth_locale(request: Request, db_session, user_email: str | None) -> str:
     """Resolve the locale for OAuth authorize/error pages.
 
@@ -1310,7 +1370,8 @@ async def oauth_authorize_get(
         if not client.check_redirect_uri(redirect_uri):
             logger.warning(
                 "oauth_authorize_get_rejected_redirect_uri: "
-                f"client_id={client_id}, redirect_uri={redirect_uri!r}"
+                f"client_id={client_id!r}, "
+                f"redirect_uri={_redact_redirect_uri_for_log(redirect_uri)!r}"
             )
             return _render_invalid_redirect_uri_error(request, locale, redirect_uri)
 
@@ -1318,8 +1379,6 @@ async def oauth_authorize_get(
         messages = get_oauth_messages(locale)
 
         # Build query string for POST action (maintain OAuth2 params in query)
-        from urllib.parse import urlencode
-
         query_params = {
             "client_id": client_id,
             "redirect_uri": redirect_uri,
@@ -1417,7 +1476,8 @@ async def oauth_authorize_post(
         if not _validate_authorize_redirect_uri(pre_check_session, client_id, redirect_uri):
             logger.warning(
                 "oauth_authorize_post_rejected_redirect_uri: "
-                f"client_id={client_id}, redirect_uri={redirect_uri!r}"
+                f"client_id={client_id!r}, "
+                f"redirect_uri={_redact_redirect_uri_for_log(redirect_uri)!r}"
             )
             locale = _resolve_oauth_locale(request, pre_check_session, user.email)
             return _render_invalid_redirect_uri_error(request, locale, redirect_uri)
@@ -1429,7 +1489,7 @@ async def oauth_authorize_post(
         if state:
             params["state"] = state
         return RedirectResponse(
-            f"{redirect_uri}?{urlencode(params)}",
+            _append_query_params(redirect_uri, params),
             status_code=303,  # See Other: POST→GET redirect
         )
 
@@ -1463,7 +1523,7 @@ async def oauth_authorize_post(
                     params["error_description"] = e.description
                 if state:
                     params["state"] = state
-                return RedirectResponse(f"{redirect_uri}?{urlencode(params)}", status_code=303)
+                return RedirectResponse(_append_query_params(redirect_uri, params), status_code=303)
 
             # No redirect_uri - return HTML error
             return HTMLResponse(
@@ -1491,7 +1551,7 @@ async def oauth_authorize_post(
             params = {"error": "server_error", "error_description": str(e)}
             if state:
                 params["state"] = state
-            return RedirectResponse(f"{redirect_uri}?{urlencode(params)}", status_code=303)
+            return RedirectResponse(_append_query_params(redirect_uri, params), status_code=303)
 
         # No redirect_uri - re-raise
         raise

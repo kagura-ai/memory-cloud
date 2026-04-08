@@ -12,19 +12,32 @@ the deny path and both exception handlers used to 303-redirect to the
 unvalidated ``redirect_uri`` from the query string, even when the GET
 pre-check would now refuse to render the consent screen for the same URI.
 
+PR #264 review (Copilot) also flagged a third bug in the same area: the
+deny / OAuth2Error / generic-exception handlers all built their redirect
+URL with ``f"{redirect_uri}?{urlencode(params)}"``, which produces a
+malformed double-``?`` URL whenever the registered ``redirect_uri``
+already carries a query string (RFC 6749 §3.1.2 + ``is_valid_redirect_uri_pattern``
+allow this). The fix uses ``_append_query_params`` which merges with
+``urlsplit``/``urlunsplit``.
+
 These tests assert:
 
-1. GET ``/authorize`` returns the error page (400) instead of the consent
-   screen when ``redirect_uri`` is not registered.
-2. POST ``/authorize`` (deny path) returns the error page instead of
+1. ``GET /authorize`` returns the error page (400) instead of the
+   consent screen when ``redirect_uri`` is not registered.
+2. ``POST /authorize`` (deny path) returns the error page instead of
    303-redirecting to an unregistered ``redirect_uri``.
-3. POST ``/authorize`` exception handler does not redirect to an
-   unregistered ``redirect_uri``.
+3. ``POST /authorize`` exception handlers (``OAuth2Error`` and generic
+   ``Exception``) redirect to the *registered* ``redirect_uri`` with
+   error params — never to an attacker URI, since the upfront pre-check
+   guarantees the URI is registered by the time the exception fires.
 4. Percent-encoded path traversal sequences (``%2F``, ``%2E%2E``) are
    rejected — defence in depth on top of the matcher's own decoder.
 5. The happy path still works (registered ``redirect_uri`` renders the
-   consent screen, registered POST deny still redirects with
+   consent screen, registered ``POST`` deny still redirects with
    ``error=access_denied``).
+6. ``_append_query_params`` regression: a registered ``redirect_uri``
+   carrying its own query string still produces a well-formed URL on
+   the deny path (no double ``?``, original params preserved).
 """
 
 import sys
@@ -301,3 +314,137 @@ class TestPostAuthorizeRedirectUriPreCheck:
 
         assert response.status_code == 400
         assert response.headers.get("content-type", "").startswith("text/html")
+
+
+class TestPostAuthorizeExceptionBranches:
+    """Exception handlers must operate only on validated redirect_uri.
+
+    Because the upfront pre-check now refuses any unregistered URI, by
+    the time ``OAuth2Error`` or a generic ``Exception`` fires, the URI
+    is guaranteed registered. These tests pin that contract: the
+    exception branches still 303 to the *registered* URI with proper
+    OAuth error params (RFC 6749 §4.1.2.1) — never to an attacker URI.
+    """
+
+    def test_oauth2error_redirects_to_registered_uri_with_error_params(self):
+        from authlib.oauth2.rfc6749.errors import InvalidScopeError
+
+        fake_user = MagicMock(email="test@example.com")
+        fake_client = _make_fake_client(accepts=True)
+
+        with (
+            patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
+            patch("api.routes.oauth.get_sync_session") as mock_sess,
+            patch(
+                "api.routes.oauth._handle_authorize_sync",
+                side_effect=InvalidScopeError(description="bad scope"),
+            ),
+        ):
+            db = MagicMock()
+            db.query.return_value.filter_by.return_value.first.return_value = fake_client
+            mock_sess.return_value = db
+
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.post(
+                    "/api/v1/oauth/authorize",
+                    params={
+                        "client_id": "test-client",
+                        "redirect_uri": "https://legit.example/cb",
+                        "state": "s",
+                        "locale": "en",
+                    },
+                    data={"confirm": "yes"},
+                    follow_redirects=False,
+                )
+
+        assert response.status_code == 303
+        location = response.headers.get("location", "")
+        assert location.startswith("https://legit.example/cb")
+        assert "error=invalid_scope" in location
+        assert "state=s" in location
+        assert "attacker" not in location
+
+    def test_generic_exception_redirects_to_registered_uri_with_server_error(self):
+        fake_user = MagicMock(email="test@example.com")
+        fake_client = _make_fake_client(accepts=True)
+
+        with (
+            patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
+            patch("api.routes.oauth.get_sync_session") as mock_sess,
+            patch(
+                "api.routes.oauth._handle_authorize_sync",
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
+            db = MagicMock()
+            db.query.return_value.filter_by.return_value.first.return_value = fake_client
+            mock_sess.return_value = db
+
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.post(
+                    "/api/v1/oauth/authorize",
+                    params={
+                        "client_id": "test-client",
+                        "redirect_uri": "https://legit.example/cb",
+                        "state": "s",
+                        "locale": "en",
+                    },
+                    data={"confirm": "yes"},
+                    follow_redirects=False,
+                )
+
+        assert response.status_code == 303
+        location = response.headers.get("location", "")
+        assert location.startswith("https://legit.example/cb")
+        assert "error=server_error" in location
+        assert "state=s" in location
+
+
+class TestAppendQueryParamsRegression:
+    """Regression: registered redirect_uri carrying its own query string
+    must not produce a malformed double-``?`` URL.
+
+    RFC 6749 §3.1.2 explicitly allows query strings on exact-match
+    redirect URIs, and ``is_valid_redirect_uri_pattern`` accepts them,
+    so this is a real production scenario, not a hypothetical."""
+
+    def test_deny_with_query_string_in_registered_uri_merges_correctly(self):
+        from urllib.parse import parse_qs, urlsplit
+
+        fake_user = MagicMock(email="test@example.com")
+        fake_client = _make_fake_client(accepts=True)
+
+        with (
+            patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
+            patch("api.routes.oauth.get_sync_session") as mock_sess,
+        ):
+            db = MagicMock()
+            db.query.return_value.filter_by.return_value.first.return_value = fake_client
+            mock_sess.return_value = db
+
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.post(
+                    "/api/v1/oauth/authorize",
+                    params={
+                        "client_id": "test-client",
+                        "redirect_uri": "https://legit.example/cb?env=prod&v=1",
+                        "state": "s",
+                        "locale": "en",
+                    },
+                    data={"confirm": "no"},
+                    follow_redirects=False,
+                )
+
+        assert response.status_code == 303
+        location = response.headers.get("location", "")
+
+        # Hard guard against the regression: exactly one '?' in the URL.
+        assert location.count("?") == 1, f"double-? regression: {location}"
+
+        # Original query params preserved AND new ones appended.
+        parts = urlsplit(location)
+        qs = parse_qs(parts.query)
+        assert qs.get("env") == ["prod"]
+        assert qs.get("v") == ["1"]
+        assert qs.get("error") == ["access_denied"]
+        assert qs.get("state") == ["s"]
