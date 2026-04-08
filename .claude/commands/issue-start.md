@@ -22,4 +22,9 @@ Steps:
    - Issue summary
    - Branch name created
    - Related past knowledge found (if any)
-   - Suggested next steps
+   - Suggested next steps — always include the standard post-implementation sequence:
+     1. Implement the change
+     2. `/quality` — lint, type-check, frontend tests
+     3. `/simplify` — review for code reuse, quality, and efficiency; fix any issues found
+     4. `/self-review` — fix all `[C]` critical and `[W]` warning findings
+     5. PR (only when the user explicitly asks)
