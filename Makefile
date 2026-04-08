@@ -20,9 +20,9 @@ help:
 	@echo ""
 	@echo "Backend Testing:"
 	@echo "  make test            - Run all tests (Docker, default)"
-	@echo "  make test-local      - Run all tests (local, fast)"
+	@echo "  make test-local      - Run unit tests (local, fast; excludes e2e/integration)"
 	@echo "  make test-cov        - Run tests with coverage (Docker)"
-	@echo "  make test-cov-local  - Run tests with coverage (local)"
+	@echo "  make test-cov-local  - Run unit tests with coverage (local; excludes e2e/integration)"
 	@echo "  make test-neural     - Run Neural Memory tests only"
 	@echo "  make test-neural-cov - Run Neural Memory tests with coverage"
 	@echo "  make test-smoke      - Run smoke tests (health, auth, well-known)"
@@ -108,7 +108,7 @@ test:
 
 .PHONY: test-local
 test-local:
-	@echo "Running tests locally..."
+	@echo "Running unit tests locally (excluding tests/e2e and tests/integration)..."
 	cd $(BACKEND_DIR) && pytest -v --maxfail=5 --ignore=tests/e2e --ignore=tests/integration
 	@echo "Backend tests complete."
 
@@ -151,7 +151,7 @@ test-cov:
 
 .PHONY: test-cov-local
 test-cov-local:
-	@echo "Running tests with coverage locally..."
+	@echo "Running unit tests with coverage locally (excluding tests/e2e and tests/integration)..."
 	cd $(BACKEND_DIR) && pytest --cov=src --cov-report=html --cov-report=xml --cov-report=term-missing --ignore=tests/e2e --ignore=tests/integration
 	@echo "Coverage report: backend/htmlcov/index.html"
 
