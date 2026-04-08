@@ -44,7 +44,7 @@ const stableTranslator = (key: string, values?: Record<string, unknown>) => {
   return key;
 };
 const stableToastCtx = { toast: mockToast };
-const stableAuthCtx = { user: { timezone: "UTC" } };
+const stableAuthCtx = { user: { timezone: "UTC", role: "admin" } };
 
 vi.mock("@/hooks/use-toast", () => ({
   useToast: () => stableToastCtx,
@@ -179,15 +179,16 @@ describe("AdminSleepReportsPage — Run Now button", () => {
     );
   });
 
-  it("shows the 409 conflict toast without throwing", async () => {
+  it("shows the 409 conflict toast with a link to the running report", async () => {
     await renderReady();
 
+    const runningReportId = "22222222-2222-2222-2222-222222222222";
     mockPost.mockRejectedValueOnce({
       status: 409,
       error: "sleep_run_in_progress",
       message: "A sleep run is already in progress for this user.",
       details: {
-        running_report_id: "22222222-2222-2222-2222-222222222222",
+        running_report_id: runningReportId,
         started_at: "2026-04-09T11:30:00Z",
       },
     });
@@ -204,10 +205,44 @@ describe("AdminSleepReportsPage — Run Now button", () => {
       );
     });
 
+    // The toast description must be a ReactNode linking to the running
+    // report's detail page so the admin can jump straight to it.
+    const toastCall = mockToast.mock.calls.at(-1)?.[0];
+    const { render: renderNode } = await import("@testing-library/react");
+    const { container: descContainer } = renderNode(
+      <>{toastCall.description}</>,
+    );
+    const link = descContainer.querySelector("a");
+    expect(link).not.toBeNull();
+    expect(link?.getAttribute("href")).toBe(
+      `/admin/sleep-reports/${runningReportId}`,
+    );
+
     // Button recovers to idle.
     expect(button).not.toBeDisabled();
     expect(button).toHaveTextContent("actions.runNow");
     // No redundant reload on conflict.
     expect(mockGet).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the Run Now button for non-admin users", async () => {
+    // Swap the auth mutation for this single render.
+    stableAuthCtx.user.role = "member";
+    try {
+      mockGet.mockResolvedValueOnce(EMPTY_REPORTS);
+      render(<AdminSleepReportsPage />);
+
+      await waitFor(() => {
+        expect(
+          screen.queryByRole("button", { name: "actions.runNow" }),
+        ).toBeNull();
+      });
+      // Refresh remains available — only the trigger is admin-gated.
+      expect(
+        screen.getByRole("button", { name: /actions\.refresh/ }),
+      ).toBeInTheDocument();
+    } finally {
+      stableAuthCtx.user.role = "admin";
+    }
   });
 });

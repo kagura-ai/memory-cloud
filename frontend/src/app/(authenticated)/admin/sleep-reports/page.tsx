@@ -125,8 +125,20 @@ export default function AdminSleepReportsPage() {
     } catch (err) {
       const apiErr = err as ApiError;
       if (apiErr?.status === 409) {
+        const details = apiErr.details as
+          | { running_report_id?: string }
+          | undefined;
+        const runningReportId = details?.running_report_id;
         toast({
           title: t("messages.runConflict"),
+          description: runningReportId ? (
+            <Link
+              href={`/admin/sleep-reports/${runningReportId}`}
+              className="underline underline-offset-2"
+            >
+              {t("messages.runConflictViewLink")}
+            </Link>
+          ) : undefined,
           variant: "destructive",
         });
       } else {
@@ -165,18 +177,20 @@ export default function AdminSleepReportsPage() {
               )}
               {t("actions.refresh")}
             </Button>
-            <Button
-              onClick={handleRunNow}
-              disabled={running || loading}
-              aria-label={t("actions.runNow")}
-            >
-              {running ? (
-                <InlineSpinner size="sm" className="mr-2" />
-              ) : (
-                <Play className="h-4 w-4 mr-2" />
-              )}
-              {running ? t("actions.runNowPending") : t("actions.runNow")}
-            </Button>
+            {user?.role === "admin" && (
+              <Button
+                onClick={handleRunNow}
+                disabled={running || loading}
+                aria-label={t("actions.runNow")}
+              >
+                {running ? (
+                  <InlineSpinner size="sm" className="mr-2" />
+                ) : (
+                  <Play className="h-4 w-4 mr-2" />
+                )}
+                {running ? t("actions.runNowPending") : t("actions.runNow")}
+              </Button>
+            )}
           </>
         }
       />

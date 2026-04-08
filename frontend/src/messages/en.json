@@ -2255,6 +2255,7 @@
         "runStarted": "Sleep run started",
         "runStartedDesc": "Maintenance is running in the background. The list will refresh shortly.",
         "runConflict": "A sleep run is already in progress.",
+        "runConflictViewLink": "View the running report",
         "runError": "Failed to start sleep run."
       }
     },
