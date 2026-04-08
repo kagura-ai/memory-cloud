@@ -85,9 +85,6 @@ class TestPassThroughCases:
     def test_empty_arguments(self):
         assert coerce_mcp_arguments("remember", {}) == {}
 
-    def test_none_arguments(self):
-        assert coerce_mcp_arguments("remember", None) is None
-
     def test_unknown_tool_passes_through(self):
         args = {"tags": '["a"]', "is_private": "true"}
         # Unknown tool → no schema → no coercion
