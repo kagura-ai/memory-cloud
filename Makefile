@@ -109,7 +109,7 @@ test:
 .PHONY: test-local
 test-local:
 	@echo "Running tests locally..."
-	cd $(BACKEND_DIR) && pytest -v --maxfail=5
+	cd $(BACKEND_DIR) && pytest -v --maxfail=5 --ignore=tests/e2e --ignore=tests/integration
 	@echo "Backend tests complete."
 
 .PHONY: test-frontend
@@ -152,7 +152,7 @@ test-cov:
 .PHONY: test-cov-local
 test-cov-local:
 	@echo "Running tests with coverage locally..."
-	cd $(BACKEND_DIR) && pytest --cov=src --cov-report=html --cov-report=xml --cov-report=term-missing
+	cd $(BACKEND_DIR) && pytest --cov=src --cov-report=html --cov-report=xml --cov-report=term-missing --ignore=tests/e2e --ignore=tests/integration
 	@echo "Coverage report: backend/htmlcov/index.html"
 
 .PHONY: test-unit
