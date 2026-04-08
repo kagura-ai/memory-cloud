@@ -2183,6 +2183,8 @@
       "description": "View Sleep Maintenance execution history and audit logs",
       "actions": {
         "refresh": "Refresh",
+        "runNow": "Run Now",
+        "runNowPending": "Starting...",
         "viewDetail": "View Detail",
         "back": "Back to List"
       },
@@ -2249,7 +2251,12 @@
       "messages": {
         "loadError": "Failed to load sleep reports",
         "noReports": "No sleep reports found.",
-        "notFound": "Sleep report not found."
+        "notFound": "Sleep report not found.",
+        "runStarted": "Sleep run started",
+        "runStartedDesc": "Maintenance is running in the background. The list will refresh shortly.",
+        "runConflict": "A sleep run is already in progress.",
+        "runConflictViewLink": "View the running report",
+        "runError": "Failed to start sleep run."
       }
     },
     "environment": {

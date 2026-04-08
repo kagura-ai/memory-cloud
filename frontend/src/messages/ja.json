@@ -2183,6 +2183,8 @@
       "description": "Sleep Maintenance の実行履歴と監査ログを確認します",
       "actions": {
         "refresh": "更新",
+        "runNow": "今すぐ実行",
+        "runNowPending": "開始中...",
         "viewDetail": "詳細を表示",
         "back": "一覧に戻る"
       },
@@ -2249,7 +2251,12 @@
       "messages": {
         "loadError": "Sleep レポートの読み込みに失敗しました",
         "noReports": "Sleep レポートが見つかりません。",
-        "notFound": "Sleep レポートが見つかりません。"
+        "notFound": "Sleep レポートが見つかりません。",
+        "runStarted": "Sleep 実行を開始しました",
+        "runStartedDesc": "バックグラウンドで Maintenance を実行中です。一覧はまもなく更新されます。",
+        "runConflict": "Sleep 実行は既に進行中です。",
+        "runConflictViewLink": "実行中のレポートを表示",
+        "runError": "Sleep 実行の開始に失敗しました。"
       }
     },
     "environment": {

@@ -25,8 +25,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
-import { RefreshCw, Eye, ChevronLeft, ChevronRight } from "lucide-react";
+import { RefreshCw, Eye, ChevronLeft, ChevronRight, Play } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import type { ApiError } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/utils/datetime";
 import {
   getSleepStatusColor,
@@ -58,6 +59,10 @@ interface SleepReportListResponse {
   offset: number;
 }
 
+interface SleepRunResponse {
+  report_ids: string[];
+}
+
 const PAGE_SIZE = 50;
 
 export default function AdminSleepReportsPage() {
@@ -70,6 +75,7 @@ export default function AdminSleepReportsPage() {
   const [reports, setReports] = useState<SleepReportSummary[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
   const [selectedStatus, setSelectedStatus] = useState<SleepStatus | null>(
     null,
   );
@@ -105,6 +111,48 @@ export default function AdminSleepReportsPage() {
     loadReports();
   }, [loadReports]);
 
+  const handleRunNow = useCallback(async () => {
+    try {
+      setRunning(true);
+      await apiClient.post<SleepRunResponse>("/api/v1/admin/sleep/run", {
+        context_id: null,
+      });
+      toast({
+        title: t("messages.runStarted"),
+        description: t("messages.runStartedDesc"),
+      });
+      await loadReports();
+    } catch (err) {
+      const apiErr = err as ApiError;
+      if (apiErr?.status === 409) {
+        const details = apiErr.details as
+          | { running_report_id?: string }
+          | undefined;
+        const runningReportId = details?.running_report_id;
+        toast({
+          title: t("messages.runConflict"),
+          description: runningReportId ? (
+            <Link
+              href={`/admin/sleep-reports/${runningReportId}`}
+              className="underline underline-offset-2"
+            >
+              {t("messages.runConflictViewLink")}
+            </Link>
+          ) : undefined,
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: tCommon("error"),
+          description: apiErr?.message || t("messages.runError"),
+          variant: "destructive",
+        });
+      }
+    } finally {
+      setRunning(false);
+    }
+  }, [loadReports, t, tCommon, toast]);
+
   const pageStart = total === 0 ? 0 : offset + 1;
   const pageEnd = Math.min(offset + PAGE_SIZE, total);
   const hasPrev = offset > 0;
@@ -116,14 +164,30 @@ export default function AdminSleepReportsPage() {
         title={t("title")}
         description={t("description")}
         actions={
-          <Button onClick={loadReports} variant="outline" disabled={loading}>
-            {loading ? (
-              <InlineSpinner size="sm" className="mr-2" />
-            ) : (
-              <RefreshCw className="h-4 w-4 mr-2" />
+          <>
+            <Button
+              onClick={loadReports}
+              variant="outline"
+              disabled={loading || running}
+            >
+              {loading ? (
+                <InlineSpinner size="sm" className="mr-2" />
+              ) : (
+                <RefreshCw className="h-4 w-4 mr-2" />
+              )}
+              {t("actions.refresh")}
+            </Button>
+            {user?.role === "admin" && (
+              <Button onClick={handleRunNow} disabled={running || loading}>
+                {running ? (
+                  <InlineSpinner size="sm" className="mr-2" />
+                ) : (
+                  <Play className="h-4 w-4 mr-2" />
+                )}
+                {running ? t("actions.runNowPending") : t("actions.runNow")}
+              </Button>
             )}
-            {t("actions.refresh")}
-          </Button>
+          </>
         }
       />
 

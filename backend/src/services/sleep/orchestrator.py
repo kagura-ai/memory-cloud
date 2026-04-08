@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import Context
+from models.sleep import SleepReport
 from neural.config import NeuralMemoryConfig
 from services.llm_service import LLMService
 from services.sleep.consolidation import ConsolidationPhase
@@ -28,6 +29,7 @@ from services.sleep.edge_discovery import EdgeDiscoveryPhase
 from services.sleep.importance_reeval import ImportanceReevalPhase
 from services.sleep.reindex import ReindexPhase
 from services.sleep.reporter import PhaseResult, SleepBudget, SleepReporter
+from utils.datetime import utcnow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -52,6 +54,7 @@ class SleepOrchestrator:
         context_id: str | None = None,
         *,
         config: NeuralMemoryConfig | None = None,
+        report: SleepReport | None = None,
     ) -> None:
         """Execute full sleep maintenance cycle for one user/context.
 
@@ -60,6 +63,11 @@ class SleepOrchestrator:
             workspace_id: Target workspace (for 3-level isolation)
             context_id: Target context (for 3-level isolation)
             config: Optional pre-loaded config (loaded from DB if None)
+            report: Optional pre-created SleepReport. When provided (e.g. by
+                the manual-trigger endpoint in issue #247), the orchestrator
+                runs phases against the existing report instead of creating
+                a new one, so the caller can return the report_id to the
+                client before phase execution completes.
         """
         # Load config if not provided
         if config is None:
@@ -75,6 +83,11 @@ class SleepOrchestrator:
                 context_id=context_id,
                 reason="context_sleep_mode_skip",
             )
+            # If a report was passed in, mark it completed so it does not
+            # stay in 'running' state forever.
+            if report is not None:
+                report.status = "completed"
+                report.completed_at = utcnow()
             return
 
         # Determine which phases to run based on sleep_mode
@@ -91,8 +104,9 @@ class SleepOrchestrator:
             max_memories=config.sleep_max_memories_per_run,
         )
 
-        # Create report
-        report = await self.reporter.create_report(user_id, workspace_id, context_id)
+        # Create report if caller did not supply one
+        if report is None:
+            report = await self.reporter.create_report(user_id, workspace_id, context_id)
 
         phase_results: list[PhaseResult] = []
         changed_memory_ids: set[UUID] = set()
