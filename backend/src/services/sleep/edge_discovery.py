@@ -32,7 +32,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import search_memories_qdrant
-from models.memory import Memory
+from models.memory import Memory, NeuralMemoryEdge
 from repositories.neural_edge import NeuralEdgeRepository
 from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService
@@ -53,6 +53,30 @@ DISCOVERY_EDGE_WEIGHT = 0.5
 
 # Max pairs per LLM batch call
 BATCH_SIZE = 5
+
+# Issue #248: k-NN cold-start seeding (#224/#238) births every new memory
+# with weak `semantic_similarity` edges to its 0.4-0.9 Qdrant neighbors at
+# `knn_seed_weight` (default 0.3, "intentionally low — synthetic signal").
+# Without an edge_type-aware filter, `_filter_existing_edges` below would
+# treat those seeded pairs as "already connected" and skip LLM judgment,
+# producing 0 edges per run in production. 0.5 sits comfortably above the
+# default seed weight so the LLM judge sees the mid-similarity band again;
+# operators who configure `knn_seed_weight` >= 0.5 are implicitly opting
+# those edges back into "real connection" semantics.
+SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD = 0.5
+
+
+def _is_synthetic_seed_edge(edge: NeuralMemoryEdge) -> bool:
+    """Return True if ``edge`` is a low-weight k-NN cold-start seed (#248).
+
+    Cold-start seeds from #224/#238 must NOT block Sleep Edge Discovery from
+    re-judging a pair. All other edge types — and high-weight
+    ``semantic_similarity`` edges — represent real connections.
+    """
+    return (
+        edge.edge_type == "semantic_similarity"
+        and edge.weight < SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD
+    )
 
 
 class EdgeDiscoveryPhase:
@@ -283,7 +307,15 @@ class EdgeDiscoveryPhase:
         workspace_id: str | None,
         context_id: str | None,
     ) -> list[tuple[UUID, UUID, float]]:
-        """Remove pairs that already have edges."""
+        """Remove pairs that already have a meaningful edge.
+
+        Issue #248: Low-weight ``semantic_similarity`` edges (weight <
+        ``SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD``) are synthetic
+        k-NN cold-start seeds from #224/#238 and do NOT block the pair from
+        being re-judged by Sleep Edge Discovery. All other edge types — and
+        high-weight ``semantic_similarity`` edges — are treated as real
+        connections and cause the pair to be filtered out.
+        """
         # TODO: N+1 query per candidate — batch fetch edges for all src_ids in one query
         filtered = []
         for src_id, dst_id, score in candidates:
@@ -293,7 +325,7 @@ class EdgeDiscoveryPhase:
                 workspace_id=workspace_id,
                 context_id=context_id,
             )
-            connected_ids = {e.dst_id for e in existing}
+            connected_ids = {e.dst_id for e in existing if not _is_synthetic_seed_edge(e)}
             if dst_id not in connected_ids:
                 filtered.append((src_id, dst_id, score))
         return filtered

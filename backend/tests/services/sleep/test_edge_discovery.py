@@ -11,9 +11,11 @@ import pytest
 from services.sleep.edge_discovery import (
     BATCH_SIZE,
     DISCOVERY_EDGE_WEIGHT,
+    SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD,
     SIMILARITY_MAX,
     SIMILARITY_MIN,
     EdgeDiscoveryPhase,
+    _is_synthetic_seed_edge,
 )
 from services.sleep.reporter import SleepBudget
 
@@ -57,6 +59,15 @@ def _make_memory(memory_id=None, summary="test", importance=0.5):
     m.importance = importance
     m.tags = []
     return m
+
+
+def _make_edge(edge_type, weight, dst_id=None):
+    """Build a minimal edge double with only the attributes the filter reads."""
+    e = MagicMock()
+    e.edge_type = edge_type
+    e.weight = weight
+    e.dst_id = dst_id or uuid4()
+    return e
 
 
 class TestEdgeDiscoveryPhase:
@@ -167,3 +178,157 @@ class TestConstants:
 
     def test_batch_size(self):
         assert BATCH_SIZE == 5
+
+    def test_synthetic_threshold(self):
+        """Issue #248: pins the threshold at 0.5. Must sit comfortably above
+        the default knn_seed_weight (0.3) so cold-start seeds do not block
+        Sleep Edge Discovery."""
+        assert SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD == 0.5
+
+
+class TestIsSyntheticSeedEdge:
+    """Unit tests for the synthetic-seed edge classifier (Issue #248)."""
+
+    def test_knn_seed_default_weight_is_synthetic(self):
+        """Default knn_seed_weight=0.3 must be classified as synthetic —
+        this is the in-production value that #248 was triggered by."""
+        edge = _make_edge("semantic_similarity", 0.3)
+        assert _is_synthetic_seed_edge(edge) is True
+
+    def test_high_weight_semantic_similarity_is_not_synthetic(self):
+        edge = _make_edge("semantic_similarity", 0.8)
+        assert _is_synthetic_seed_edge(edge) is False
+
+    def test_at_threshold_is_not_synthetic(self):
+        """Threshold is strict (< 0.5); exactly 0.5 is treated as real."""
+        edge = _make_edge("semantic_similarity", SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD)
+        assert _is_synthetic_seed_edge(edge) is False
+
+    def test_related_to_is_never_synthetic(self):
+        edge = _make_edge("related_to", 0.1)
+        assert _is_synthetic_seed_edge(edge) is False
+
+    def test_neural_association_is_never_synthetic(self):
+        """Hebbian co-activation edges are real even at low weight."""
+        edge = _make_edge("neural_association", 0.05)
+        assert _is_synthetic_seed_edge(edge) is False
+
+    def test_depends_on_is_never_synthetic(self):
+        edge = _make_edge("depends_on", 0.1)
+        assert _is_synthetic_seed_edge(edge) is False
+
+    def test_learned_from_is_never_synthetic(self):
+        edge = _make_edge("learned_from", 0.1)
+        assert _is_synthetic_seed_edge(edge) is False
+
+
+class TestFilterExistingEdges:
+    """_filter_existing_edges is now edge_type-aware (Issue #248).
+
+    Background: k-NN cold-start seeding (#224/#238) births every new memory
+    with low-weight `semantic_similarity` edges to its 0.4-0.9 neighbors.
+    Before this fix, those synthetic edges caused edge discovery to filter
+    out nearly every candidate before reaching the LLM judge, yielding 0
+    edges created per sleep run in production.
+    """
+
+    @pytest.mark.asyncio
+    async def test_low_weight_semantic_similarity_does_not_block(self, edge_phase):
+        """A pair with only a k-NN seed edge is re-judged by discovery."""
+        src = uuid4()
+        dst = uuid4()
+        seed_edge = _make_edge("semantic_similarity", 0.3, dst_id=dst)
+        edge_phase.edge_repo.get_outgoing_edges = AsyncMock(return_value=[seed_edge])
+
+        filtered = await edge_phase._filter_existing_edges(
+            [(src, dst, 0.75)], "user-1", "ws-1", "ctx-1"
+        )
+
+        assert filtered == [(src, dst, 0.75)]
+
+    @pytest.mark.asyncio
+    async def test_high_weight_semantic_similarity_blocks(self, edge_phase):
+        """A strong semantic_similarity edge is treated as a real connection."""
+        src = uuid4()
+        dst = uuid4()
+        strong_edge = _make_edge("semantic_similarity", 0.8, dst_id=dst)
+        edge_phase.edge_repo.get_outgoing_edges = AsyncMock(return_value=[strong_edge])
+
+        filtered = await edge_phase._filter_existing_edges(
+            [(src, dst, 0.75)], "user-1", "ws-1", "ctx-1"
+        )
+
+        assert filtered == []
+
+    @pytest.mark.asyncio
+    async def test_related_to_blocks_regardless_of_weight(self, edge_phase):
+        """Meaningful edge types always block, even at low weight."""
+        src = uuid4()
+        dst = uuid4()
+        real_edge = _make_edge("related_to", 0.1, dst_id=dst)
+        edge_phase.edge_repo.get_outgoing_edges = AsyncMock(return_value=[real_edge])
+
+        filtered = await edge_phase._filter_existing_edges(
+            [(src, dst, 0.75)], "user-1", "ws-1", "ctx-1"
+        )
+
+        assert filtered == []
+
+    @pytest.mark.asyncio
+    async def test_neural_association_blocks(self, edge_phase):
+        """Hebbian co-activation edges always block."""
+        src = uuid4()
+        dst = uuid4()
+        hebbian = _make_edge("neural_association", 0.2, dst_id=dst)
+        edge_phase.edge_repo.get_outgoing_edges = AsyncMock(return_value=[hebbian])
+
+        filtered = await edge_phase._filter_existing_edges(
+            [(src, dst, 0.75)], "user-1", "ws-1", "ctx-1"
+        )
+
+        assert filtered == []
+
+    @pytest.mark.asyncio
+    async def test_no_existing_edges_passes_through(self, edge_phase):
+        """Pairs with no existing edges are always kept."""
+        src = uuid4()
+        dst = uuid4()
+        edge_phase.edge_repo.get_outgoing_edges = AsyncMock(return_value=[])
+
+        filtered = await edge_phase._filter_existing_edges(
+            [(src, dst, 0.75)], "user-1", "ws-1", "ctx-1"
+        )
+
+        assert filtered == [(src, dst, 0.75)]
+
+    @pytest.mark.asyncio
+    async def test_seed_edge_to_other_neighbor_does_not_block_candidate(self, edge_phase):
+        """A seed edge to a *different* neighbor must not leak and block
+        the current candidate (regression guard on set-building logic)."""
+        src = uuid4()
+        dst = uuid4()
+        other = uuid4()
+        seed_to_other = _make_edge("semantic_similarity", 0.3, dst_id=other)
+        edge_phase.edge_repo.get_outgoing_edges = AsyncMock(return_value=[seed_to_other])
+
+        filtered = await edge_phase._filter_existing_edges(
+            [(src, dst, 0.75)], "user-1", "ws-1", "ctx-1"
+        )
+
+        assert filtered == [(src, dst, 0.75)]
+
+    @pytest.mark.asyncio
+    async def test_real_edge_to_other_neighbor_does_not_block_candidate(self, edge_phase):
+        """A real edge to a *different* neighbor must not block the current
+        candidate either."""
+        src = uuid4()
+        dst = uuid4()
+        other = uuid4()
+        real_to_other = _make_edge("related_to", 0.8, dst_id=other)
+        edge_phase.edge_repo.get_outgoing_edges = AsyncMock(return_value=[real_to_other])
+
+        filtered = await edge_phase._filter_existing_edges(
+            [(src, dst, 0.75)], "user-1", "ws-1", "ctx-1"
+        )
+
+        assert filtered == [(src, dst, 0.75)]
