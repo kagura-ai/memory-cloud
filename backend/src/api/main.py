@@ -310,6 +310,7 @@ for _exc_cls in (
 from api.routes import (  # noqa: E402
     admin,
     admin_plans,
+    admin_sleep,  # Issue #247: Manual Sleep Maintenance trigger
     api_keys,
     attachments,  # Issue #330: File attachment support
     auth,
@@ -380,6 +381,9 @@ app.include_router(neural_config.router, prefix="/api/v1")
 
 # Sleep Reports admin routes (Issue #179 - Sleep Report admin UI)
 app.include_router(sleep_reports.router, prefix="/api/v1")
+
+# Admin Sleep trigger (Issue #247 - Manual Sleep Maintenance trigger)
+app.include_router(admin_sleep.router, prefix="/api/v1")
 
 # External API Keys routes (Issue #45 - External keys management)
 app.include_router(external_keys.router, prefix="/api/v1")
