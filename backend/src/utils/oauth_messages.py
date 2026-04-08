@@ -1,6 +1,7 @@
 """OAuth2 Authorization Page i18n Messages.
 
 Issue #221: Internationalization support for OAuth authorization page.
+Issue #218: Error page messages for invalid redirect_uri pre-check.
 Supports English and Japanese.
 """
 
@@ -17,6 +18,22 @@ OAUTH_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
             "write": "Write new memories",
             "manage": "Manage your memory cloud",
         },
+        "error_title": "Authorization Error",
+        "error_badge": "Request Blocked",
+        "error_invalid_redirect_uri_heading": "This authorization request was blocked",
+        "error_invalid_redirect_uri_body": (
+            "Kagura Memory Cloud could not authorize this request. The "
+            "redirect_uri is missing, malformed, or not registered with the "
+            "OAuth client. To protect you from phishing, the consent screen "
+            "was not shown."
+        ),
+        "error_what_to_do": (
+            "If you are the OAuth client administrator, register this "
+            "redirect_uri in the Kagura Memory Cloud admin panel and try "
+            "again. If you arrived here from another app, ask its developer "
+            "to update the redirect_uri it sends to Kagura."
+        ),
+        "error_redirect_uri_label": "Attempted redirect_uri",
     },
     "ja": {
         "title": "認可リクエスト",
@@ -30,6 +47,22 @@ OAUTH_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
             "write": "新しいメモリーの作成",
             "manage": "メモリークラウドの管理",
         },
+        "error_title": "認可エラー",
+        "error_badge": "リクエストをブロックしました",
+        "error_invalid_redirect_uri_heading": "この認可リクエストはブロックされました",
+        "error_invalid_redirect_uri_body": (
+            "Kagura Memory Cloud はこのリクエストを認可できませんでした。"
+            "redirect_uri が指定されていない、形式が不正、または OAuth クライアントに"
+            "登録されていません。フィッシングからユーザーを保護するため、認可画面は"
+            "表示されませんでした。"
+        ),
+        "error_what_to_do": (
+            "あなたが OAuth クライアントの管理者であれば、Kagura Memory Cloud の"
+            "管理画面でこの redirect_uri を登録してから再度お試しください。"
+            "別のアプリから来た場合は、そのアプリの開発者に連絡して、Kagura に送る"
+            "redirect_uri を修正してもらってください。"
+        ),
+        "error_redirect_uri_label": "リクエストされた redirect_uri",
     },
 }
 
