@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="{{ locale }}">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kagura Memory Cloud - {{ messages.error_title }}</title>
+<style>
+:root {
+  --tw-bg-opacity: 1;
+  --tw-border-opacity: 1;
+}
+* {margin:0;padding:0;box-sizing:border-box}
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: linear-gradient(135deg, rgb(4 120 87 / var(--tw-bg-opacity, 1)) 0%, rgb(4 120 87 / var(--tw-bg-opacity, 1)) 100%);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+.card {
+    background: white;
+    border-radius: 16px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    padding: 40px;
+    max-width: 520px;
+    width: 100%;
+    border: 1px solid rgba(0,0,0,0.06);
+}
+.logo {
+    text-align: center;
+    margin-bottom: 24px;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-radius: 9999px;
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  background: linear-gradient(90deg, rgba(239,68,68,0.10), rgba(220,38,38,0.10));
+  box-shadow: 0 14px 30px rgba(239,68,68,0.18);
+  margin-bottom: 18px;
+}
+.badge .badge-text {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  color: rgb(185, 28, 28);
+}
+.center {
+  text-align: center;
+}
+h1 {
+    font-size: 22px;
+    color: #1a1a1a;
+    margin-bottom: 16px;
+    text-align: center;
+}
+.body-text {
+    color: #4a5568;
+    font-size: 15px;
+    line-height: 1.6;
+    margin-bottom: 20px;
+}
+.what-to-do {
+    background: #f8f9fa;
+    border-left: 3px solid rgb(4 120 87 / var(--tw-bg-opacity, 1));
+    border-radius: 6px;
+    padding: 16px 20px;
+    color: #2d3748;
+    font-size: 14px;
+    line-height: 1.6;
+    margin-bottom: 20px;
+}
+.detail {
+    background: #fef2f2;
+    border: 1px solid rgba(239, 68, 68, 0.18);
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin-top: 8px;
+}
+.detail-label {
+    font-size: 12px;
+    color: #991b1b;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin-bottom: 6px;
+}
+.detail-value {
+    font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+    font-size: 13px;
+    color: #1a1a1a;
+    word-break: break-all;
+}
+</style>
+</head>
+<body>
+<div class="card">
+<div class="logo">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 100" style="height: 60px; width: auto; margin: 0 auto; display: block;">
+  <path d="M70 40 C110 15, 190 25, 230 40 S280 65, 250 70 S170 80, 150 70 S90 65, 70 40"
+        fill="none" stroke="rgb(220, 38, 38)" stroke-width="0.8" stroke-opacity="0.25"/>
+  <defs>
+    <linearGradient id="redGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color: rgb(239 68 68 / var(--tw-border-opacity, 1)); stop-opacity: 0.9"/>
+      <stop offset="100%" style="stop-color: rgb(239 68 68 / var(--tw-border-opacity, 1)); stop-opacity: 1"/>
+    </linearGradient>
+  </defs>
+  <text x="150" y="45" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', serif" font-size="36" font-weight="bold" fill="url(#redGrad)" text-anchor="middle">Kagura</text>
+  <text x="150" y="80" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', serif" font-size="32" font-weight="bold" fill="rgb(4 120 87 / var(--tw-bg-opacity, 1))" text-anchor="middle">Ai</text>
+</svg>
+</div>
+<div class="center">
+  <div class="badge" role="alert" aria-label="{{ messages.error_badge }}">
+    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: rgb(185, 28, 28);">
+      <circle cx="12" cy="12" r="10"/>
+      <line x1="12" y1="8" x2="12" y2="12"/>
+      <line x1="12" y1="16" x2="12.01" y2="16"/>
+    </svg>
+    <span class="badge-text">{{ messages.error_badge }}</span>
+  </div>
+</div>
+<h1>{{ messages.error_invalid_redirect_uri_heading }}</h1>
+<div class="body-text">{{ messages.error_invalid_redirect_uri_body }}</div>
+<div class="what-to-do">{{ messages.error_what_to_do }}</div>
+{% if redirect_uri %}
+<div class="detail">
+<div class="detail-label">{{ messages.error_redirect_uri_label }}</div>
+<div class="detail-value">{{ redirect_uri }}</div>
+</div>
+{% endif %}
+</div>
+</body>
+</html>

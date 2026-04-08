@@ -1129,6 +1129,110 @@ def get_current_user_from_session(request: Request):
         )
 
 
+def _resolve_oauth_locale(request: Request, db_session, user_email: str | None) -> str:
+    """Resolve the locale for OAuth authorize/error pages.
+
+    Priority: ``?locale=`` query param > ``User.locale`` > ``Accept-Language``
+    header > ``"en"``. ``db_session`` is the sync OAuth session and may be
+    queried for the user's stored preference.
+
+    Args:
+        request: FastAPI request whose query params and headers are inspected.
+        db_session: Synchronous SQLAlchemy session used for the optional
+            ``User.locale`` lookup. May be ``None`` to skip the DB lookup.
+        user_email: Email of the authenticated user, or ``None`` if not
+            available. Used as the lookup key for ``User.locale``.
+
+    Returns:
+        Locale code such as ``"en"`` or ``"ja"``. Always returns a non-empty
+        string.
+    """
+    locale = request.query_params.get("locale")
+    if not locale and db_session is not None and user_email:
+        db_user = db_session.query(User).filter_by(email=user_email).first()
+        if db_user and db_user.locale:
+            locale = db_user.locale
+    if not locale:
+        accept_lang = request.headers.get("Accept-Language", "")
+        if accept_lang.startswith("ja"):
+            locale = "ja"
+    if not locale:
+        locale = "en"
+    return locale
+
+
+def _validate_authorize_redirect_uri(
+    db_session,
+    client_id: str | None,
+    redirect_uri: str | None,
+) -> bool:
+    """Return ``True`` iff the client exists and accepts ``redirect_uri``.
+
+    Issue #218: Used by both GET and POST ``/authorize`` to enforce
+    redirect_uri registration *before* the consent UI is rendered or any
+    303 redirect is issued. The lookup is intentionally tolerant of missing
+    inputs (returning ``False``) so that callers can route every failure
+    through the same error path.
+
+    Args:
+        db_session: Synchronous SQLAlchemy session.
+        client_id: ``client_id`` from the request, or ``None``.
+        redirect_uri: Incoming ``redirect_uri`` from the request, or ``None``.
+
+    Returns:
+        ``True`` if the client is registered and the redirect_uri matches at
+        least one of its registered patterns, ``False`` otherwise.
+    """
+    if not client_id or not redirect_uri:
+        return False
+    client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
+    if not client:
+        return False
+    return client.check_redirect_uri(redirect_uri)
+
+
+def _render_invalid_redirect_uri_error(
+    request: Request,
+    locale: str,
+    incoming_redirect_uri: str | None,
+) -> HTMLResponse:
+    """Render an HTML error page for an unregistered ``redirect_uri``.
+
+    Issue #218: When the incoming ``redirect_uri`` does not match any pattern
+    registered with the OAuth client, both GET and POST ``/authorize`` must
+    refuse to render the consent screen *and* refuse to 303-redirect to the
+    untrusted URI. RFC 6749 §4.1.2.1 explicitly forbids redirecting in this
+    case — the authorization server must inform the resource owner directly.
+
+    The page also closes a phishing rendering gadget: without this guard,
+    an attacker could craft a link to ``/authorize`` with a legitimate
+    ``client_id`` and a hostile ``redirect_uri``; Kagura would render the
+    real consent screen (with the legitimate client name) and only fail at
+    POST time, normalising "Authorize on kagura-ai.com for unknown sites".
+
+    Args:
+        request: FastAPI request, used by Starlette's ``TemplateResponse``.
+        locale: Resolved locale code (``"en"``/``"ja"``).
+        incoming_redirect_uri: The offending URI from the request, shown to
+            the user verbatim (Jinja2 auto-escapes it). May be ``None``.
+
+    Returns:
+        ``HTMLResponse`` with ``status_code=400`` and the rendered error
+        template.
+    """
+    messages = get_oauth_messages(locale)
+    return templates.TemplateResponse(
+        request,
+        "oauth_authorize_error.html",
+        {
+            "messages": messages,
+            "locale": locale,
+            "redirect_uri": incoming_redirect_uri or "",
+        },
+        status_code=400,
+    )
+
+
 @router.get("/authorize", response_class=HTMLResponse)
 async def oauth_authorize_get(
     request: Request,
@@ -1193,20 +1297,22 @@ async def oauth_authorize_get(
             raise HTTPException(status_code=404, detail="Client not found")
 
         # Issue #221: Detect locale for i18n
-        # Priority: query param > user.locale > Accept-Language > default "en"
-        locale = request.query_params.get("locale")
-        if not locale:
-            # Get user's preferred locale from database
-            db_user = db_session.query(User).filter_by(email=user.email).first()
-            if db_user and db_user.locale:
-                locale = db_user.locale
-        if not locale:
-            # Check Accept-Language header
-            accept_lang = request.headers.get("Accept-Language", "")
-            if accept_lang.startswith("ja"):
-                locale = "ja"
-        if not locale:
-            locale = "en"
+        locale = _resolve_oauth_locale(request, db_session, user.email)
+
+        # Issue #218: Reject unregistered redirect_uri *before* rendering the
+        # consent screen. Without this guard, an attacker can craft a link
+        # with a legitimate client_id and a hostile redirect_uri; Kagura
+        # would render the real consent UI (with the real client name) and
+        # only fail at POST time. That turns the consent page itself into a
+        # phishing rendering gadget. RFC 6749 §4.1.2.1 also forbids
+        # redirecting on invalid redirect_uri — the AS must inform the
+        # resource owner directly, which is what the error template does.
+        if not client.check_redirect_uri(redirect_uri):
+            logger.warning(
+                "oauth_authorize_get_rejected_redirect_uri: "
+                f"client_id={client_id}, redirect_uri={redirect_uri!r}"
+            )
+            return _render_invalid_redirect_uri_error(request, locale, redirect_uri)
 
         # Get i18n messages
         messages = get_oauth_messages(locale)
@@ -1295,12 +1401,30 @@ async def oauth_authorize_post(
     confirm = request.state.form_data.get("confirm")
 
     # Get OAuth2 params from query
+    client_id = request.query_params.get("client_id")
     redirect_uri = request.query_params.get("redirect_uri")
     state = request.query_params.get("state")
 
+    # Issue #218: Pre-validate redirect_uri before *any* downstream branch
+    # can act on it. Without this, the deny path and the exception handlers
+    # below would 303-redirect to an attacker-controlled URI even when the
+    # GET pre-check has already refused to render the consent screen — a
+    # CWE-601 Open Redirect that turns /authorize into a phishing pivot.
+    # RFC 6749 §4.1.2.1 forbids redirecting on invalid redirect_uri; we
+    # render the error page directly instead.
+    pre_check_session = get_sync_session()
+    try:
+        if not _validate_authorize_redirect_uri(pre_check_session, client_id, redirect_uri):
+            logger.warning(
+                "oauth_authorize_post_rejected_redirect_uri: "
+                f"client_id={client_id}, redirect_uri={redirect_uri!r}"
+            )
+            locale = _resolve_oauth_locale(request, pre_check_session, user.email)
+            return _render_invalid_redirect_uri_error(request, locale, redirect_uri)
+    finally:
+        pre_check_session.close()
+
     if confirm != "yes":
-        if not redirect_uri:
-            raise HTTPException(status_code=400, detail="Missing redirect_uri")
         params = {"error": "access_denied"}
         if state:
             params["state"] = state
