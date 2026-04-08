@@ -89,7 +89,7 @@ _COERCERS = {
 }
 
 
-def coerce_mcp_arguments(tool_name: str, arguments: dict[str, Any] | None) -> dict[str, Any] | None:
+def coerce_mcp_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Coerce MCP tool arguments to their declared JSON-schema types.
 
     Only array / object / boolean fields are coerced — these are the types
@@ -107,7 +107,7 @@ def coerce_mcp_arguments(tool_name: str, arguments: dict[str, Any] | None) -> di
 
     Args:
         tool_name: MCP tool name (e.g. "remember", "create_context").
-        arguments: Raw arguments dict from the MCP request, or None.
+        arguments: Raw arguments dict from the MCP request.
 
     Returns:
         Arguments with values coerced where applicable, or the original
