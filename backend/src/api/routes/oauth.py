@@ -1130,11 +1130,11 @@ def get_current_user_from_session(request: Request):
 
 
 def _append_query_params(url: str, extra: dict[str, str]) -> str:
-    """Append query params to ``url``, preserving any existing query string.
+    """Merge query params into ``url``, with ``extra`` winning on collisions.
 
-    Issue #218 (Copilot review): the OAuth deny / error redirect paths
-    used to do ``f"{redirect_uri}?{urlencode(params)}"`` which produces a
-    malformed URL with a double ``?`` whenever the registered
+    Issue #218 (PR review, round 1): the OAuth deny / error redirect
+    paths used to do ``f"{redirect_uri}?{urlencode(params)}"`` which
+    produces a malformed URL with a double ``?`` whenever the registered
     ``redirect_uri`` already carries a query string. RFC 6749 §3.1.2
     explicitly allows query strings on exact-match redirect URIs, and
     ``is_valid_redirect_uri_pattern`` accepts them, so this is reachable
@@ -1142,16 +1142,30 @@ def _append_query_params(url: str, extra: dict[str, str]) -> str:
     ``error=access_denied`` (it ends up nested inside the existing
     query value).
 
+    Issue #218 (PR review, round 2): on top of the double-``?`` fix,
+    collisions between pre-existing keys and ``extra`` must be resolved
+    in favour of ``extra``. OAuth response params (``error``, ``state``,
+    ``error_description``) are the *authoritative* value for that
+    response; if a registered redirect_uri happened to carry a baked-in
+    ``state=old`` or similar, duplicating the key would let many clients
+    pick the first occurrence and silently ignore the one we just set.
+
     Args:
         url: Base URL — may already contain a query string and/or fragment.
-        extra: Mapping of additional query parameters to append.
+        extra: Mapping of additional query parameters. Keys in ``extra``
+            override any existing parameters with the same name.
 
     Returns:
         URL with ``extra`` merged into the existing query string using
         ``&`` as the separator. Fragment is preserved.
     """
     parts = urlsplit(url)
-    merged = parse_qsl(parts.query, keep_blank_values=True)
+    override_keys = set(extra)
+    merged = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key not in override_keys
+    ]
     merged.extend(extra.items())
     return urlunsplit(parts._replace(query=urlencode(merged)))
 
@@ -1509,52 +1523,36 @@ async def oauth_authorize_post(
         import traceback
 
         from authlib.oauth2.rfc6749.errors import OAuth2Error
-        from fastapi.responses import HTMLResponse
 
         # Log full traceback for debugging
         tb = traceback.format_exc()
         logger.error(f"oauth_authorize_failed: {type(e).__name__}: {e}\n{tb}")
 
-        # Handle OAuth2Error with redirect
+        # Issue #218 (PR review, round 2): by the time we get here, the
+        # upfront pre-check has already guaranteed ``redirect_uri`` is
+        # a non-empty, registered URI — every earlier failure mode was
+        # routed through ``_render_invalid_redirect_uri_error`` and
+        # returned before entering this try block. The legacy
+        # ``if redirect_uri: ... else: inline-HTML / raise`` fallbacks
+        # here are therefore dead code; dropping them removes an
+        # unreachable inline HTML response path and keeps the error
+        # flow uniform (always redirect to the registered URI with
+        # OAuth error params, per RFC 6749 §4.1.2.1).
+
+        # OAuth2Error → redirect with structured error params.
         if isinstance(e, OAuth2Error):
-            if redirect_uri:
-                params = {"error": e.error}
-                if hasattr(e, "description") and e.description:
-                    params["error_description"] = e.description
-                if state:
-                    params["state"] = state
-                return RedirectResponse(_append_query_params(redirect_uri, params), status_code=303)
-
-            # No redirect_uri - return HTML error
-            return HTMLResponse(
-                content=f"""
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <meta charset="utf-8">
-                    <meta name="viewport" content="width=device-width, initial-scale=1">
-                    <title>OAuth Error</title>
-                </head>
-                <body style="font-family: system-ui; padding: 20px; max-width: 600px; margin: 0 auto;">
-                    <h1>OAuth Authorization Error</h1>
-                    <p><strong>Error:</strong> {e.error}</p>
-                    <p><strong>Description:</strong> {e.description if hasattr(e, "description") else "Unknown error"}</p>
-                    <button onclick="window.history.back()" style="padding: 10px 20px; margin-top: 20px;">Go Back</button>
-                </body>
-                </html>
-                """,
-                status_code=400,
-            )
-
-        # Other exceptions - try to redirect if possible
-        if redirect_uri:
-            params = {"error": "server_error", "error_description": str(e)}
+            params = {"error": e.error}
+            if hasattr(e, "description") and e.description:
+                params["error_description"] = e.description
             if state:
                 params["state"] = state
             return RedirectResponse(_append_query_params(redirect_uri, params), status_code=303)
 
-        # No redirect_uri - re-raise
-        raise
+        # Generic exception → redirect with server_error.
+        params = {"error": "server_error", "error_description": str(e)}
+        if state:
+            params["state"] = state
+        return RedirectResponse(_append_query_params(redirect_uri, params), status_code=303)
 
 
 def _handle_token_sync(request):
