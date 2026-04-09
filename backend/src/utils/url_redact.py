@@ -87,8 +87,13 @@ def redact_generic_url(url: str) -> str:
     try:
         parsed = urlparse(url)
 
-        # Credentials in the netloc (the @-before-host form) — redact them.
-        if "@" in parsed.netloc:
+        # Credentials in the netloc (the @-before-host form) — redact them,
+        # but ONLY if urlparse recognized a scheme. Scheme-less network-path
+        # references like "//user:pw@host" do populate netloc, but they are
+        # not something a log-site caller should be passing to this helper.
+        # Treat them as malformed input and fall through to the fail-closed
+        # branch below, matching the docstring contract.
+        if "@" in parsed.netloc and parsed.scheme:
             userinfo, _, host = parsed.netloc.rpartition("@")
             if ":" in userinfo:
                 user, _, _ = userinfo.partition(":")

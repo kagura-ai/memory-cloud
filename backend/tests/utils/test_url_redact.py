@@ -174,3 +174,13 @@ class TestRedactGenericUrl:
         result = redact_generic_url(url)
         assert result == "<redacted-url>"
         assert "sk-abc123" not in result
+
+    def test_scheme_less_network_path_reference_returns_placeholder(self):
+        """Network-path references like `//user:pw@host` populate netloc
+        but have no scheme. Per the fail-closed contract, treat them as
+        malformed and return the placeholder, not a partial redaction.
+        """
+        url = "//user:MYSUPERSECRET@host"
+        result = redact_generic_url(url)
+        assert "MYSUPERSECRET" not in result
+        assert result == "<redacted-url>"
