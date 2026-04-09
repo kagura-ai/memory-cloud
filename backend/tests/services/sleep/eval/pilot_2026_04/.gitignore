@@ -1,0 +1,5 @@
+# Full (un-redacted) pilot outputs live here.
+# _local/pairs.jsonl contains real memory summaries from kagura-dev and is
+# NEVER committed — this repo is public. The committed pairs.jsonl next
+# to this .gitignore is a redacted copy produced by redact_pairs.py.
+_local/

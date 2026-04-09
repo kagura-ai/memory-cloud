@@ -1,0 +1,56 @@
+{
+  "pilot": "issue_249_pilot_2026_04",
+  "captured_at_utc": "2026-04-09T05:45:37.017613+00:00",
+  "user_id": "local:admin",
+  "workspace_id": "61b5cf6f-c2cd-4e92-b71f-ff37bf28f1d2",
+  "seed": 42,
+  "contexts": {
+    "kagura-dev": {
+      "context_id": "abfd654d-c489-47fe-a1d3-e6471041259b",
+      "total_memories": 128
+    },
+    "personal_memo": {
+      "context_id": "af19b721-7bcf-4889-a3b8-b9f6659b9454",
+      "total_memories": 1
+    }
+  },
+  "allocation_used": {
+    "kagura-dev": {
+      "A": 25,
+      "B": 10,
+      "C": 8,
+      "D": 7
+    },
+    "personal_memo": {
+      "A": 0,
+      "B": 0,
+      "C": 0,
+      "D": 0
+    }
+  },
+  "fallback_reason": "personal_memo has 1 memories (< MIN_MEMORIES_FOR_DUAL_CONTEXT=100); kagura-dev absorbs all 50 pairs",
+  "edge_discovery_git_sha": null,
+  "constants": {
+    "MIN_MEMORIES_FOR_DUAL_CONTEXT": 100,
+    "STRATUM_BANDS": {
+      "A": [
+        0.4,
+        0.6
+      ],
+      "B": [
+        0.6,
+        0.9
+      ],
+      "C": [
+        0.2,
+        0.4
+      ]
+    },
+    "SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD": 0.5
+  },
+  "versions": {
+    "python": "3.11.15",
+    "numpy": "2.4.4"
+  },
+  "out_dir": "/tmp"
+}

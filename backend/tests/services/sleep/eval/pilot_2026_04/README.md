@@ -39,6 +39,34 @@ python run_spot_check.py --pairs pairs.jsonl --n 10 --seed 4242
 # Phase B.4 — author writes findings.md and next_steps.md from templates
 ```
 
+## Privacy model — why there are two `pairs.jsonl` files
+
+The sampling context (`kagura-dev`) is the author's real development log. Committing
+`src_summary` / `dst_summary` verbatim into a **public** GitHub repo would publish the
+author's memories forever. So the pilot uses a **two-file pattern**:
+
+| File | Content | Location | Committed? |
+|---|---|---|---|
+| `_local/pairs.jsonl` | Full — real `src_summary` + `dst_summary` content | `_local/` (gitignored) | ❌ never |
+| `pairs.jsonl` | Redacted — summaries replaced with `"<redacted>"`, all other fields preserved | this dir | ✅ yes |
+| `_local/snapshot.json` | Full snapshot (identical to committed copy — no memory content) | `_local/` | copy is committed |
+| `snapshot.json` | Same as `_local/snapshot.json` | this dir | ✅ yes |
+
+Derivation: after `sampling_script.py` writes the full `pairs.jsonl` to `_local/`, run
+`python redact_pairs.py` to produce the committed `pairs.jsonl`. The script replaces
+only the two `*_summary` fields and preserves everything else (pair_id, stratum,
+cosine, tags, existing-edge metadata, Stratum D ranking audit fields, prompt hash,
+annotations when present).
+
+**For LLM annotation (Phase B.2)** `run_annotation.py` reads `_local/pairs.jsonl` so
+the real text is available to claude-opus-4-6 and gpt-4o. It writes annotations BACK
+to `_local/pairs.jsonl`. Re-running `redact_pairs.py` after annotation updates the
+committed `pairs.jsonl` with the labels while keeping summaries redacted.
+
+**For findings write-up** The author pulls anecdotes from `_local/pairs.jsonl`,
+manually anonymizes quoted text before putting them into `findings.md`. The committed
+`findings.md` is free of verbatim memory content.
+
 ## Directory naming — deviation from issue spec
 
 The issue body originally said `backend/tests/sleep/eval/pilot_2026-04/`. **Two corrections**
