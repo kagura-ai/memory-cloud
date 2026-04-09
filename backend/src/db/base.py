@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 from utils.logger import get_logger
+from utils.url_redact import redact_db_url
 
 logger = get_logger(__name__)
 
@@ -41,7 +42,7 @@ def _get_engine():
             pool_size=5,
             max_overflow=10,
         )
-        logger.info("database_engine_created", url=DATABASE_URL.split("@")[0] + "@...")
+        logger.info("database_engine_created", url=redact_db_url(DATABASE_URL))
 
     return engine
 
