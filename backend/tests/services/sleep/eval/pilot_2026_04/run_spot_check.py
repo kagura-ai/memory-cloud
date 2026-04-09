@@ -33,7 +33,7 @@ import argparse
 import json
 import random
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -209,11 +209,27 @@ def reveal_comparison(picks: list[dict], author_labels: list[dict]) -> dict[str,
     }
 
 
-def write_spot_check_md(out_path: Path, seed: int, n: int, summary: dict) -> None:
+def write_spot_check_md(
+    out_path: Path,
+    seed: int,
+    n: int,
+    summary: dict,
+    *,
+    include_rationales: bool,
+) -> None:
     """Write the spot_check.md report. Includes verdict + per-pair table +
-    off-ramp instructions if FAILED."""
+    off-ramp instructions if FAILED.
+
+    ``include_rationales=True`` writes the full report (author + LLM
+    rationales). LLM rationales paraphrase the source memories and can leak
+    development-log content, so this version is only safe to write into the
+    gitignored ``_local/`` directory.
+
+    ``include_rationales=False`` writes the labels-and-verdict view safe
+    for committing to the public repo. The label-comparison table is
+    preserved (labels are 1 of 6 known values, no leakage)."""
     lines: list[str] = []
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     lines.append("# Pilot #249 — author spot-check")
     lines.append("")
     lines.append(f"**Generated**: {now}")
@@ -281,20 +297,29 @@ def write_spot_check_md(out_path: Path, seed: int, n: int, summary: dict) -> Non
             f"{r['author_label']} | {r['openai_label']} | {r['gemini_label']} | "
             f"{'✓' if r['match_openai'] else '✗'} | {'✓' if r['match_gemini'] else '✗'} |"
         )
-    lines.append("")
-    lines.append("## Per-pair rationales")
-    lines.append("")
-    for r in summary["rows"]:
-        lines.append(f"### {r['pair_id']}  (stratum {r['stratum']})")
+    if include_rationales:
+        lines.append("")
+        lines.append("## Per-pair rationales")
+        lines.append("")
+        for r in summary["rows"]:
+            lines.append(f"### {r['pair_id']}  (stratum {r['stratum']})")
+            lines.append("")
+            lines.append(
+                f"- **author** ({r['author_label']}): {r['author_rationale'] or '_(no rationale)_'}"
+            )
+            lines.append(
+                f"- **openai** ({r['openai_label']}, conf {r['openai_confidence']}): {r['openai_rationale'] or '_(none)_'}"
+            )
+            lines.append(
+                f"- **gemini** ({r['gemini_label']}, conf {r['gemini_confidence']}): {r['gemini_rationale'] or '_(none)_'}"
+            )
+            lines.append("")
+    else:
         lines.append("")
         lines.append(
-            f"- **author** ({r['author_label']}): {r['author_rationale'] or '_(no rationale)_'}"
-        )
-        lines.append(
-            f"- **openai** ({r['openai_label']}, conf {r['openai_confidence']}): {r['openai_rationale'] or '_(none)_'}"
-        )
-        lines.append(
-            f"- **gemini** ({r['gemini_label']}, conf {r['gemini_confidence']}): {r['gemini_rationale'] or '_(none)_'}"
+            "_(rationales redacted from committed view — see "
+            "`_local/spot_check_full.md` for the full version with author and "
+            "LLM rationales. LLM rationales paraphrase source memory content.)_"
         )
         lines.append("")
 
@@ -350,8 +375,28 @@ def main() -> int:
         return 130
 
     summary = reveal_comparison(picks, author_labels)
-    write_spot_check_md(args.out, seed=args.seed, n=args.n, summary=summary)
-    print(f"\nWrote {args.out}")
+
+    # Always write two files:
+    #   1. _local/spot_check_full.md  — full report with all rationales (gitignored)
+    #   2. spot_check.md             — labels + verdict only, safe to commit
+    full_path = HERE / "_local" / "spot_check_full.md"
+    full_path.parent.mkdir(parents=True, exist_ok=True)
+    write_spot_check_md(
+        full_path,
+        seed=args.seed,
+        n=args.n,
+        summary=summary,
+        include_rationales=True,
+    )
+    write_spot_check_md(
+        args.out,
+        seed=args.seed,
+        n=args.n,
+        summary=summary,
+        include_rationales=False,
+    )
+    print(f"\nWrote {full_path}  (full, gitignored)")
+    print(f"Wrote {args.out}  (committed view, no rationales)")
 
     return 0 if summary["passed"] else 2
 
