@@ -8,6 +8,7 @@ import redis.asyncio as aioredis
 from config.database import REDIS_URL
 from utils.exceptions import RedisError
 from utils.logger import get_logger
+from utils.url_redact import redact_generic_url
 
 logger = get_logger(__name__)
 
@@ -34,7 +35,7 @@ def get_redis_client() -> aioredis.Redis:
                 decode_responses=True,
                 max_connections=10,
             )
-            logger.info("redis_client_initialized", url=REDIS_URL)
+            logger.info("redis_client_initialized", url=redact_generic_url(REDIS_URL))
         except Exception as e:
             raise RedisError(f"Failed to connect to Redis: {e}") from e
 
