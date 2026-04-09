@@ -81,17 +81,44 @@ were applied during implementation planning:
 
 The issue body was updated to v2.1 with the corrected path. This README is the audit trail.
 
+## Annotators (changed during Phase B.2)
+
+The original spec named `claude-opus-4-6 + gpt-4o` as the two annotators. Phase B.2
+setup discovered:
+
+- **`gpt-4o` is no longer in the OpenAI API** (deprecated). Replaced with `gpt-5.4`
+  (released 2026-03-05, current stable mainline). Note that gpt-5.x uses
+  `max_completion_tokens` instead of `max_tokens`.
+- **The local `anthropic 0.37.1` SDK is incompatible with the installed `httpx`**
+  (the `proxies` keyword was removed). Rather than upgrade the venv, Claude is
+  dropped from the default annotator set.
+- **`gemini-2.5-pro` is added** as the second annotator. This actually gives a
+  *stronger* answer to the DS PhD review's correlated-rater concern: gpt + gemini
+  share less training data than gpt + claude (different organizations entirely).
+- **Gemini 2.5 always thinks**: `thinking_budget=0` is rejected by `gemini-2.5-pro`
+  with "This model only works in thinking mode". The pilot pins thinking to
+  `512` tokens, which produces stable JSON output (verified by smoke test).
+
+Default annotators: `openai gemini` (gpt-5.4 + gemini-2.5-pro). `claude` is still
+wired up — pass it explicitly if you have a working `anthropic` SDK install.
+
 ## Token budget + cost envelope
 
-| | Calls | Tokens (est) | Cost ceiling |
+| Annotator | Per call (est) | 50 pairs | Notes |
 |---|---|---|---|
-| `claude-opus-4-6` | 50 (×retries) | ~78k | ~$2.00 |
-| `gpt-4o` | 50 (×retries) | ~78k | ~$0.80 |
-| **Total upper bound** | **120 (hard cap)** | **~200k (hard cap)** | **<$5** |
+| `gpt-5.4` (openai) | ~2.1k tokens | ~106k | response_format=json_object |
+| `gemini-2.5-pro` (gemini) | ~2.7k tokens | ~136k | thinking_budget=512 + ~80 output |
+| **Default both** | | **~242k** | within 300k ceiling |
+| `claude-opus-4-6` (optional 3rd) | ~2.0k tokens | ~100k | requires anthropic >= 0.40 |
 
-Hard caps:
-- `MAX_CALLS_DEFAULT = 120` in `run_annotation.py` (CLI overridable downward only for dry runs)
-- `TOKEN_CEILING = 200_000` checked before each call. Runaway bug fails closed within a few dollars.
+Hard caps in `run_annotation.py`:
+- `MAX_CALLS_DEFAULT = 150` (50 pairs × up to 3 annotators)
+- `TOKEN_CEILING = 300_000` checked before each call. Runaway bug fails closed
+  within a few dollars.
+
+Cost envelope (rough): well under $10 total for the default 2-annotator run.
+gpt-5.4 dominates (gpt-5 series is more expensive than gpt-4); gemini-2.5-pro
+is comparatively cheap.
 
 ## What happens if spot-check fails (LLM-human agreement < 70%)
 
