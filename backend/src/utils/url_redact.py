@@ -55,18 +55,32 @@ def redact_generic_url(url: str) -> str:
     query. Use this for non-SQLAlchemy URLs — for SQLAlchemy URLs use
     :func:`redact_db_url` instead.
 
+    Behavior on various inputs:
+
+    - Well-formed URL with credentials in netloc → credentials redacted,
+      rest of URL preserved.
+    - Well-formed URL (scheme and netloc both present) with no credentials
+      in netloc → returned unchanged, even if ``@`` appears elsewhere
+      (e.g. in path or query — such ``@`` is not a credential).
+    - Malformed / scheme-less / unrecognizable input → returns the
+      placeholder ``<redacted-url>``. This is fail-closed: if the string
+      is not a URL we can reason about, we refuse to log it verbatim
+      rather than risk a credential (or raw token) leaking through.
+
     Args:
         url: A generic URL string (e.g. ``redis://:pass@host:6379/0``).
 
     Returns:
-        The URL with the password replaced by ``***``, or a safe placeholder
-        if the input cannot be parsed.
+        The URL with the password replaced by ``***``, or the placeholder
+        ``<redacted-url>`` if the input is not a well-formed URL.
 
     Example:
         >>> redact_generic_url("redis://:s3cret@redis:6379/0")
         'redis://:***@redis:6379/0'
         >>> redact_generic_url("redis://redis:6379/0")
         'redis://redis:6379/0'
+        >>> redact_generic_url("not a url")
+        '<redacted-url>'
     """
     if not url:
         return _REDACTED
@@ -93,12 +107,10 @@ def redact_generic_url(url: str) -> str:
             return url
 
         # urlparse did not produce a well-formed URL (scheme or netloc missing).
-        # A scheme-less credential string like "user:pw@host" parses as
-        # scheme="user", netloc="", path="pw@host" — the password ends up in
-        # `path`, so we cannot safely extract it. If the raw input contains `@`,
-        # return the placeholder rather than risk logging the password.
-        if "@" in url:
-            return _REDACTED
-        return url
+        # Fail closed: return the placeholder. This covers scheme-less
+        # credential strings like "user:pw@host" (where the password ends up
+        # in `path`), half-formed inputs like "not a url at all", and any raw
+        # token/secret that a caller accidentally passes instead of a URL.
+        return _REDACTED
     except (ValueError, TypeError):
         return _REDACTED

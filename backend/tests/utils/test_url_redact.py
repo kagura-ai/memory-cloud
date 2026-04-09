@@ -154,3 +154,23 @@ class TestRedactGenericUrl:
         result = redact_generic_url(url)
         assert result == url
         assert "alice@example.com" in result
+
+    def test_malformed_input_without_at_sign_returns_placeholder(self):
+        """Malformed/partial inputs (no scheme, no netloc, no `@`) must not
+        be echoed back verbatim. Fail-closed matches the docstring contract:
+        a caller who misuses the helper (e.g. passes a raw token instead of
+        a URL) should get the placeholder, not a log line containing the
+        secret.
+        """
+        url = "not a url at all"
+        result = redact_generic_url(url)
+        assert result == "<redacted-url>"
+
+    def test_raw_token_returns_placeholder(self):
+        """A caller who accidentally passes a raw API token instead of a URL
+        must get the placeholder, not the token echoed back.
+        """
+        url = "sk-abc123DEFsecret"
+        result = redact_generic_url(url)
+        assert result == "<redacted-url>"
+        assert "sk-abc123" not in result
