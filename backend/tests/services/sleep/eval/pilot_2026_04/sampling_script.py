@@ -56,6 +56,20 @@ BACKEND_SRC = HERE.parents[4] / "src"
 if BACKEND_SRC.exists() and str(BACKEND_SRC) not in sys.path:
     sys.path.insert(0, str(BACKEND_SRC))
 
+# --- Dev convenience: auto-load backend/.env.local before touching config. ---
+# DATABASE_URL and QDRANT_URL are read at module-import time inside
+# ``db.base`` / ``db.qdrant``, so env vars MUST be set BEFORE those imports
+# below. Production is configured via docker-compose env vars and does not
+# need this path. override=False means shell-exported vars still win.
+try:
+    from dotenv import load_dotenv as _load_dotenv  # type: ignore[import-not-found]
+
+    _ENV_LOCAL = BACKEND_SRC.parent / ".env.local"
+    if _ENV_LOCAL.exists():
+        _load_dotenv(_ENV_LOCAL, override=False)
+except ImportError:
+    pass  # python-dotenv not installed — caller must set env vars in shell
+
 # These imports require BACKEND_SRC on sys.path.
 from qdrant_client.models import FieldCondition, Filter, MatchValue  # noqa: E402
 from sqlalchemy import select  # noqa: E402
