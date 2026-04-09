@@ -40,7 +40,7 @@ import subprocess
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -85,7 +85,10 @@ from qdrant_client.models import FieldCondition, Filter, MatchValue  # noqa: E40
 from sqlalchemy import select  # noqa: E402
 
 from db.base import _get_session_factory  # noqa: E402  # type: ignore[import-not-found]
-from db.qdrant import KAGURA_MEMORIES_COLLECTION, get_qdrant_client  # noqa: E402  # type: ignore[import-not-found]
+from db.qdrant import (  # noqa: E402  # type: ignore[import-not-found]
+    KAGURA_MEMORIES_COLLECTION,
+    get_qdrant_client,
+)
 from models.auth import Context  # noqa: E402  # type: ignore[import-not-found]
 from models.memory import Memory, NeuralMemoryEdge  # noqa: E402  # type: ignore[import-not-found]
 from utils.logger import get_logger  # noqa: E402  # type: ignore[import-not-found]
@@ -582,7 +585,7 @@ def capture_snapshot(
     """Build the snapshot dict that gets written to ``snapshot.json``."""
     return {
         "pilot": "issue_249_pilot_2026_04",
-        "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+        "captured_at_utc": datetime.now(UTC).isoformat(),
         "user_id": user_id,
         "workspace_id": workspace_id,
         "seed": seed,
@@ -738,7 +741,7 @@ async def run_sampling(
 
     # All DB reads done. Sampling below is pure compute (deterministic).
     rng = np.random.default_rng(seed)
-    snapshot_t0 = datetime.now(timezone.utc).isoformat()
+    snapshot_t0 = datetime.now(UTC).isoformat()
     filter_state = "post-248"
     labeling_prompt_sha256 = _hash_labeling_prompt()
 

@@ -103,7 +103,9 @@ def test_synthetic_seed_matches_production(sampling_module):
     existing edge" Stratum A filter is no longer measuring what production
     measures. That's a critical correctness invariant for the probe.
     """
-    from services.sleep.edge_discovery import _is_synthetic_seed_edge  # type: ignore[import-not-found]
+    from services.sleep.edge_discovery import (
+        _is_synthetic_seed_edge,  # type: ignore[import-not-found]
+    )
 
     class FakeEdge:
         def __init__(self, et: str, w: float):
