@@ -72,8 +72,16 @@ def redact_generic_url(url: str) -> str:
         return _REDACTED
     try:
         parsed = urlparse(url)
-        if not parsed.netloc or "@" not in parsed.netloc:
-            return url  # Nothing to redact
+        if "@" not in parsed.netloc:
+            # Either no credentials present (e.g. "redis://host:6379"), OR
+            # urlparse did not recognize the string as a URL and the `@` was
+            # pushed into path (e.g. scheme-less "user:pw@host" parses as
+            # scheme="user", netloc="", path="pw@host"). If the raw input
+            # contains `@`, we cannot safely extract credentials — return the
+            # placeholder rather than risk logging the password.
+            if "@" in url:
+                return _REDACTED
+            return url
         userinfo, _, host = parsed.netloc.rpartition("@")
         if ":" in userinfo:
             user, _, _ = userinfo.partition(":")

@@ -115,3 +115,22 @@ class TestRedactGenericUrl:
         assert "/v1/search" in result
         assert "q=foo" in result
         assert "k=5" in result
+
+    def test_scheme_less_credentials_return_placeholder(self):
+        """Scheme-less input like "user:pw@host" puts @ in path, not netloc —
+        urlparse gives scheme='user', netloc='', path='pw@host'. Must not
+        return the raw string (would leak the password).
+        """
+        url = "user:MYSUPERSECRET@host"
+        result = redact_generic_url(url)
+        assert "MYSUPERSECRET" not in result
+        assert result == "<redacted-url>"
+
+    def test_garbage_input_with_at_sign_returns_placeholder(self):
+        """Even malformed strings containing `@` and credential-like text must
+        not be echoed back verbatim.
+        """
+        url = "not a url user:MYSUPERSECRET@host"
+        result = redact_generic_url(url)
+        assert "MYSUPERSECRET" not in result
+        assert result == "<redacted-url>"
