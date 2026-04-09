@@ -52,23 +52,33 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 # HERE = backend/tests/services/sleep/eval/pilot_2026_04
 # parents: [eval, sleep, services, tests, backend]
-BACKEND_SRC = HERE.parents[4] / "src"
-if BACKEND_SRC.exists() and str(BACKEND_SRC) not in sys.path:
-    sys.path.insert(0, str(BACKEND_SRC))
+# BACKEND_SRC only resolves when running from the repo checkout. When the
+# script is copied into the production backend container (e.g. /tmp), the
+# 4-parent chain doesn't exist; skip the sys.path insert and rely on
+# PYTHONPATH/uvicorn-style discovery instead.
+try:
+    BACKEND_SRC: Path | None = HERE.parents[4] / "src"
+    if BACKEND_SRC and BACKEND_SRC.exists() and str(BACKEND_SRC) not in sys.path:
+        sys.path.insert(0, str(BACKEND_SRC))
+    else:
+        BACKEND_SRC = None
+except IndexError:
+    BACKEND_SRC = None
 
 # --- Dev convenience: auto-load backend/.env.local before touching config. ---
 # DATABASE_URL and QDRANT_URL are read at module-import time inside
 # ``db.base`` / ``db.qdrant``, so env vars MUST be set BEFORE those imports
 # below. Production is configured via docker-compose env vars and does not
 # need this path. override=False means shell-exported vars still win.
-try:
-    from dotenv import load_dotenv as _load_dotenv  # type: ignore[import-not-found]
+if BACKEND_SRC is not None:
+    try:
+        from dotenv import load_dotenv as _load_dotenv  # type: ignore[import-not-found]
 
-    _ENV_LOCAL = BACKEND_SRC.parent / ".env.local"
-    if _ENV_LOCAL.exists():
-        _load_dotenv(_ENV_LOCAL, override=False)
-except ImportError:
-    pass  # python-dotenv not installed — caller must set env vars in shell
+        _ENV_LOCAL = BACKEND_SRC.parent / ".env.local"
+        if _ENV_LOCAL.exists():
+            _load_dotenv(_ENV_LOCAL, override=False)
+    except ImportError:
+        pass  # python-dotenv not installed — caller must set env vars in shell
 
 # These imports require BACKEND_SRC on sys.path.
 from qdrant_client.models import FieldCondition, Filter, MatchValue  # noqa: E402
