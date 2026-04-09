@@ -72,24 +72,33 @@ def redact_generic_url(url: str) -> str:
         return _REDACTED
     try:
         parsed = urlparse(url)
-        if "@" not in parsed.netloc:
-            # Either no credentials present (e.g. "redis://host:6379"), OR
-            # urlparse did not recognize the string as a URL and the `@` was
-            # pushed into path (e.g. scheme-less "user:pw@host" parses as
-            # scheme="user", netloc="", path="pw@host"). If the raw input
-            # contains `@`, we cannot safely extract credentials — return the
-            # placeholder rather than risk logging the password.
-            if "@" in url:
-                return _REDACTED
+
+        # Credentials in the netloc (the @-before-host form) — redact them.
+        if "@" in parsed.netloc:
+            userinfo, _, host = parsed.netloc.rpartition("@")
+            if ":" in userinfo:
+                user, _, _ = userinfo.partition(":")
+                safe_userinfo = f"{user}:***"
+            else:
+                # User but no password — preserve as-is, do not fabricate a marker
+                safe_userinfo = userinfo
+            safe_netloc = f"{safe_userinfo}@{host}" if safe_userinfo else host
+            return urlunparse(parsed._replace(netloc=safe_netloc))
+
+        # Well-formed URL (both scheme and netloc present) with no credentials
+        # in netloc — any `@` in the raw string is in path/query/fragment, which
+        # is not a credential (e.g. "https://example.com/path@v1" or a query
+        # with "?email=a@b.com"). Pass through unchanged.
+        if parsed.scheme and parsed.netloc:
             return url
-        userinfo, _, host = parsed.netloc.rpartition("@")
-        if ":" in userinfo:
-            user, _, _ = userinfo.partition(":")
-            safe_userinfo = f"{user}:***"
-        else:
-            # User but no password — preserve as-is, do not fabricate a marker
-            safe_userinfo = userinfo
-        safe_netloc = f"{safe_userinfo}@{host}" if safe_userinfo else host
-        return urlunparse(parsed._replace(netloc=safe_netloc))
+
+        # urlparse did not produce a well-formed URL (scheme or netloc missing).
+        # A scheme-less credential string like "user:pw@host" parses as
+        # scheme="user", netloc="", path="pw@host" — the password ends up in
+        # `path`, so we cannot safely extract it. If the raw input contains `@`,
+        # return the placeholder rather than risk logging the password.
+        if "@" in url:
+            return _REDACTED
+        return url
     except (ValueError, TypeError):
         return _REDACTED

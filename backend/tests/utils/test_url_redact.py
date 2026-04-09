@@ -134,3 +134,23 @@ class TestRedactGenericUrl:
         result = redact_generic_url(url)
         assert "MYSUPERSECRET" not in result
         assert result == "<redacted-url>"
+
+    def test_at_in_path_is_not_redacted(self):
+        """Well-formed URL with `@` in the path (not credentials) must pass
+        through unchanged — `@` in path/query/fragment is legal per RFC 3986
+        and is not a credential marker.
+        """
+        url = "https://example.com/users/@alice/posts"
+        result = redact_generic_url(url)
+        assert result == url
+        assert "@alice" in result
+
+    def test_at_in_query_is_not_redacted(self):
+        """Well-formed URL with an email address in a query parameter must
+        pass through unchanged — the `@` in `email=a@b.com` is not a
+        credential.
+        """
+        url = "https://example.com/search?email=alice@example.com"
+        result = redact_generic_url(url)
+        assert result == url
+        assert "alice@example.com" in result
