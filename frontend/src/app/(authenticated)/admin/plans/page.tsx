@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useTabParam } from "@/hooks/useTabParam";
 import {
   Table,
   TableBody,
@@ -96,6 +97,7 @@ export default function AdminPlansPage() {
   const [addonMember, setAddonMember] = useState(0);
   const [addonContext, setAddonContext] = useState(0);
   const { toast } = useToast();
+  const [tab, setTab] = useTabParam("workspaces");
 
   useEffect(() => {
     loadData();
@@ -231,7 +233,7 @@ export default function AdminPlansPage() {
         }
       />
 
-      <Tabs defaultValue="workspaces" className="mt-6">
+      <Tabs value={tab} onValueChange={setTab} className="mt-6">
         <TabsList>
           <TabsTrigger value="workspaces">{t("tabs.workspaces")}</TabsTrigger>
           <TabsTrigger value="tiers">{t("tabs.tiers")}</TabsTrigger>

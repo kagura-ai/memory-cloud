@@ -29,6 +29,7 @@ paths:
 - In-page tabs MUST use the Tabs primitive from `@/components/ui/tabs`. Do not build ad-hoc tab UIs.
 - Use `Tabs` (pill style) for facets of one entity (e.g., Overview / Settings of a context).
 - Use `CategoryTabs` (underline style) for independent feature categories grouped under one route (e.g., API Keys / OAuth Apps / Resource Tokens). `CategoryTabsContent` requires a `helpText` string explaining when to use the category.
+- In-page Tabs that cross information boundaries MUST sync active tab to a URL search param via `useTabParam` from `@/hooks/useTabParam`. Exception: tabs inside a Dialog/Sheet (use local state, not URL-addressable).
 
 ## Forbidden
 - No `any` type (use `unknown` or proper types)
