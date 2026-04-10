@@ -55,6 +55,7 @@ For each item, use `remember` with:
 - **Separate concerns** — one memory per decision/pattern, not one giant dump
 - **Skip ephemeral details** — don't save "ran make lint", do save "lint requires ruff check from project root"
 - **Include rejected approaches** — knowing what NOT to do is as valuable as what to do
+- **Save dev-env traps** — if you hit a dev environment gotcha (wrong file path, missing env var, non-existent compose file, etc.), save it as `type="troubleshooting"` with `tags=["dev-environment"]` so future sessions can avoid the same mistake
 
 ### 6. Report
 

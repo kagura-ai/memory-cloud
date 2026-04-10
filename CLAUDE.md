@@ -58,6 +58,7 @@ Comment `/review` on the PR to run AI review + quality checks via GitHub Actions
 - [CONTRIBUTING.md](CONTRIBUTING.md) — Contribution guide, code style, testing
 - [SECURITY.md](SECURITY.md) — Vulnerability reporting, security design
 - `.claude/rules/` — Coding standards (auto-loaded by file path)
+- `.claude/rules/dev-environment.md` — Docker, test commands, Python env, Makefile targets (auto-loaded)
 - `.claude/rules/development-workflow.md` — Development flow, commit discipline, PR rules (auto-loaded)
 - `.claude/commands/` — Project-specific slash commands (`/test-unit`, `/test-e2e`, `/quality`, `/self-review`, `/issue-start`, `/self-maint`, `/api-docs-audit`, `/workflow`, `/release`, `/docker`, `/admin`)
 - `.claude-plugin/` + `claude-skills/` — Kagura Memory Cloud plugin (marketplace-compatible)
