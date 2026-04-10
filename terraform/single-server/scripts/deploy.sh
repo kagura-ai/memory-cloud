@@ -201,8 +201,11 @@ generate_caddyfile() {
 }
 
 reload_caddy() {
-    dc exec -T caddy caddy reload --config /etc/caddy/Caddyfile --force
-    log "  Caddy reloaded"
+    # Restart (not just reload) because Docker single-file bind mounts
+    # may not reflect host-side cp writes inside the container. A restart
+    # re-mounts the file, guaranteeing the new Caddyfile is picked up.
+    dc restart caddy
+    log "  Caddy restarted"
 }
 
 # ---------------------------------------------------------------------------
