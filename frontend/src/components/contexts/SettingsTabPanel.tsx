@@ -2,19 +2,17 @@
  * SettingsTabPanel
  *
  * Self-contained panel for the Settings tab in the consolidated context detail page.
- * Contains basic info, AI config, privacy, protection/danger zone with sticky save bar.
+ * Contains basic info, AI config, privacy with sticky save bar.
  * Extracted from contexts/[id]/settings/page.tsx (#232).
  */
 
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Badge } from "@/components/ui/badge";
 import {
   Card,
   CardContent,
@@ -43,18 +41,15 @@ import {
 } from "@/components/ui/select";
 import {
   Save,
-  Trash2,
   AlertCircle,
   Loader2,
   Brain,
   Lock,
-  ShieldCheck,
-  ShieldOff,
   Copy,
   Info,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { getContext, updateContext, deleteContext } from "@/lib/api/contexts";
+import { getContext, updateContext } from "@/lib/api/contexts";
 import type { Context } from "@/lib/types/context";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
@@ -71,8 +66,7 @@ export function SettingsTabPanel({
   context,
   onContextUpdated,
 }: SettingsTabPanelProps) {
-  const router = useRouter();
-  const { refetchUser, user } = useAuth();
+  const { user } = useAuth();
   const { currentWorkspace } = useWorkspace();
   const { toast } = useToast();
   const t = useTranslations("contextSettings");
@@ -88,13 +82,9 @@ export function SettingsTabPanel({
   const [usageGuide, setUsageGuide] = useState(context.usage_guide || "");
   const [isPrivate, setIsPrivate] = useState(context.is_private ?? true);
   const [isPublic, setIsPublic] = useState(context.is_public ?? false);
-  const [isLocked, setIsLocked] = useState(context.is_locked ?? false);
   const [resourceId, setResourceId] = useState("");
 
   const [idCopied, setIdCopied] = useState(false);
-  const [lockSaving, setLockSaving] = useState(false);
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const [privacyDialogOpen, setPrivacyDialogOpen] = useState(false);
   const [pendingPrivacyChange, setPendingPrivacyChange] = useState<
     boolean | null
@@ -107,7 +97,6 @@ export function SettingsTabPanel({
     setUsageGuide(data.usage_guide || "");
     setIsPrivate(data.is_private ?? true);
     setIsPublic(data.is_public ?? false);
-    setIsLocked(data.is_locked ?? false);
     setResourceId("");
   }, []);
 
@@ -170,41 +159,6 @@ export function SettingsTabPanel({
       });
     } finally {
       setSaving(false);
-    }
-  };
-
-  const handleDelete = async () => {
-    try {
-      setDeleting(true);
-      await deleteContext(context.id);
-      await refetchUser();
-      router.push("/workspace/contexts");
-    } catch (err: unknown) {
-      const apiError = err as { details?: { detail?: string } };
-      setError(apiError?.details?.detail || t("deleteFailed"));
-      setDeleteDialogOpen(false);
-    } finally {
-      setDeleting(false);
-    }
-  };
-
-  const handleLockToggle = async () => {
-    const newLocked = !isLocked;
-    try {
-      setLockSaving(true);
-      await updateContext(context.id, { is_locked: newLocked });
-      setIsLocked(newLocked);
-      toast({
-        title: newLocked ? t("lockedToast") : t("unlockedToast"),
-        description: newLocked ? t("lockedToastDesc") : t("unlockedToastDesc"),
-      });
-    } catch {
-      toast({
-        title: t("lockFailed"),
-        variant: "destructive",
-      });
-    } finally {
-      setLockSaving(false);
     }
   };
 
@@ -563,92 +517,7 @@ export function SettingsTabPanel({
               ))}
           </CardContent>
         </Card>
-
-        {/* Protection & Danger Zone */}
-        {!context.is_default && (
-          <Card className="border-red-200 dark:border-red-900">
-            <CardHeader>
-              <CardTitle className="text-red-900 dark:text-red-400">
-                {t("protectionTitle")}
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex items-center justify-between p-4 border rounded-lg">
-                <div className="flex-1">
-                  <p className="font-medium text-sm flex items-center gap-2">
-                    {isLocked ? (
-                      <ShieldCheck className="h-4 w-4 text-amber-600" />
-                    ) : (
-                      <ShieldOff className="h-4 w-4 text-muted-foreground" />
-                    )}
-                    {isLocked ? t("contextLocked") : t("contextUnlocked")}
-                  </p>
-                  <p className="text-sm text-muted-foreground">
-                    {isLocked ? t("lockedDesc") : t("unlockedDesc")}
-                  </p>
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleLockToggle}
-                  disabled={lockSaving}
-                >
-                  {lockSaving
-                    ? t("saving")
-                    : isLocked
-                      ? t("unlock")
-                      : t("lock")}
-                </Button>
-              </div>
-
-              <div
-                className={`p-4 border border-red-200 dark:border-red-900 rounded-lg ${isLocked ? "opacity-50" : ""}`}
-              >
-                <p className="font-semibold text-red-900 dark:text-red-400 mb-2">
-                  {t("deleteContext")}
-                </p>
-                <p className="text-sm text-muted-foreground mb-4">
-                  {isLocked
-                    ? t("deleteLockedDesc", { name: context.name })
-                    : t("deleteDesc", { name: context.name })}
-                </p>
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  onClick={() => setDeleteDialogOpen(true)}
-                  disabled={isLocked}
-                >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  {t("deleteContext")}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        )}
       </div>
-
-      {/* Delete Confirmation Dialog */}
-      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t("deleteConfirmTitle")}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {t("deleteConfirmDesc", { name: context.name })}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleDelete}
-              className="bg-red-600 hover:bg-red-700"
-              disabled={deleting}
-            >
-              {deleting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              {t("deleteContext")}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
       {/* Privacy Change Confirmation Dialog */}
       <AlertDialog open={privacyDialogOpen} onOpenChange={setPrivacyDialogOpen}>
@@ -684,27 +553,29 @@ export function SettingsTabPanel({
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Sticky Save Bar */}
-      <div
-        className={`fixed bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 transition-transform duration-200 ${isDirty ? "translate-y-0" : "translate-y-full"}`}
-      >
-        <div className="container flex items-center justify-between py-3 px-4 max-w-4xl mx-auto">
-          <p className="text-sm text-muted-foreground">{t("unsavedChanges")}</p>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={refreshContext}>
-              {t("discard")}
-            </Button>
-            <Button size="sm" onClick={handleSave} disabled={saving}>
-              {saving ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <Save className="h-4 w-4 mr-2" />
-              )}
-              {saving ? t("saving") : t("saveChanges")}
-            </Button>
+      {/* Sticky Save Bar — only rendered when dirty */}
+      {isDirty && (
+        <div className="fixed bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+          <div className="container flex items-center justify-between py-3 px-4 max-w-4xl mx-auto">
+            <p className="text-sm text-muted-foreground">
+              {t("unsavedChanges")}
+            </p>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={refreshContext}>
+                {t("discard")}
+              </Button>
+              <Button size="sm" onClick={handleSave} disabled={saving}>
+                {saving ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Save className="h-4 w-4 mr-2" />
+                )}
+                {saving ? t("saving") : t("saveChanges")}
+              </Button>
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </>
   );
 }

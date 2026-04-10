@@ -719,38 +719,35 @@ export function SearchSettingsSection({
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Sticky Save Bar — offset above SettingsTabPanel's bar to avoid overlap */}
-      <div
-        className={cn(
-          "fixed bottom-14 left-0 right-0 z-[49] border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 transition-transform duration-200",
-          isDirty ? "translate-y-0" : "translate-y-full",
-        )}
-      >
-        <div className="container flex items-center justify-between py-3 px-4 max-w-4xl mx-auto">
-          <p className="text-sm text-muted-foreground">
-            {cannotSave
-              ? t("providerUnavailableCannotSave")
-              : t("unsavedChangesBar")}
-          </p>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={refreshConfig}>
-              {t("discardChanges")}
-            </Button>
-            <Button
-              size="sm"
-              onClick={handleSave}
-              disabled={saving || !!cannotSave}
-            >
-              {saving ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <Save className="h-4 w-4 mr-2" />
-              )}
-              {saving ? t("saving") : t("saveChanges")}
-            </Button>
+      {/* Sticky Save Bar — only rendered when dirty */}
+      {isDirty && (
+        <div className="fixed bottom-14 left-0 right-0 z-[49] border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+          <div className="container flex items-center justify-between py-3 px-4 max-w-4xl mx-auto">
+            <p className="text-sm text-muted-foreground">
+              {cannotSave
+                ? t("providerUnavailableCannotSave")
+                : t("unsavedChangesBar")}
+            </p>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={refreshConfig}>
+                {t("discardChanges")}
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleSave}
+                disabled={saving || !!cannotSave}
+              >
+                {saving ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Save className="h-4 w-4 mr-2" />
+                )}
+                {saving ? t("saving") : t("saveChanges")}
+              </Button>
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </>
   );
 }

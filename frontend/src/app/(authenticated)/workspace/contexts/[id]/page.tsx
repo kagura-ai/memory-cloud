@@ -36,6 +36,7 @@ import { OverviewTabPanel } from "@/components/contexts/OverviewTabPanel";
 import { ConnectionsTabPanel } from "@/components/contexts/ConnectionsTabPanel";
 import { SettingsTabPanel } from "@/components/contexts/SettingsTabPanel";
 import { SearchSettingsSection } from "@/components/contexts/SearchSettingsSection";
+import { ProtectionSection } from "@/components/contexts/ProtectionSection";
 
 export default function ContextDetailPage() {
   const params = useParams();
@@ -188,6 +189,8 @@ export default function ContextDetailPage() {
           />
           <Separator className="my-8" />
           <SearchSettingsSection contextId={contextId} />
+          <Separator className="my-8" />
+          <ProtectionSection context={context} />
         </TabsContent>
       </Tabs>
     </PageContainer>
