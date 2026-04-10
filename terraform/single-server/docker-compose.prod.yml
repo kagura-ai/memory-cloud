@@ -1,12 +1,15 @@
 # =============================================================================
-# Kagura Memory Cloud — production docker-compose
+# Kagura Memory Cloud — production docker-compose (blue-green)
 # =============================================================================
-# Single-host production stack. All services share a default docker network;
+# Single-host production stack with blue-green API deploy.
 # Caddy is the only container exposed to the outside world.
 #
 # Usage (on the VM):
 #   cp .env.prod.example .env.prod      # then edit secrets
-#   docker compose -f docker-compose.prod.yml up -d
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+#
+# Deploy (zero-downtime):
+#   ./scripts/deploy.sh
 #
 # Add Ollama (local embeddings) as an override:
 #   docker compose -f docker-compose.prod.yml -f docker-compose.ollama.yml up -d
@@ -15,6 +18,38 @@
 # the same repo. On the VM, `git clone` the repo next to this file, or
 # `scp -r` the source, and point build.context at the right path.
 # =============================================================================
+
+# Shared API config — referenced by api-blue and api-green via YAML anchor.
+x-api-common: &api-common
+  build:
+    context: ../../backend
+    dockerfile: Dockerfile
+  restart: always
+  env_file:
+    - .env.prod
+  environment:
+    DATABASE_URL: postgresql+asyncpg://kagura:${DB_PASSWORD}@postgres:5432/kagura
+    QDRANT_URL: http://qdrant:6333
+    QDRANT_API_KEY: ${QDRANT_API_KEY}
+    REDIS_URL: redis://redis:6379
+    API_HOST: 0.0.0.0
+    API_PORT: 8080
+    ENVIRONMENT: production
+    PYTHONUNBUFFERED: "1"
+  depends_on:
+    postgres:
+      condition: service_healthy
+    qdrant:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "curl", "-sf", "http://localhost:8080/readiness"]
+    interval: 10s
+    timeout: 5s
+    retries: 3
+    start_period: 15s
+  command: uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --log-level info
 
 services:
   # ==========================================================================
@@ -67,34 +102,20 @@ services:
       retries: 5
 
   # ==========================================================================
-  # Application
+  # Application — blue-green API (Issue #239)
+  # ==========================================================================
+  # Two identical API services share the same image, env, and dependencies.
+  # Only one receives traffic at a time (controlled by Caddy upstream).
+  # scripts/deploy.sh automates the switchover.
   # ==========================================================================
 
-  api:
-    build:
-      context: ../../backend
-      dockerfile: Dockerfile
-    container_name: kagura-api
-    restart: always
-    env_file:
-      - .env.prod
-    environment:
-      DATABASE_URL: postgresql+asyncpg://kagura:${DB_PASSWORD}@postgres:5432/kagura
-      QDRANT_URL: http://qdrant:6333
-      QDRANT_API_KEY: ${QDRANT_API_KEY}
-      REDIS_URL: redis://redis:6379
-      API_HOST: 0.0.0.0
-      API_PORT: 8080
-      ENVIRONMENT: production
-      PYTHONUNBUFFERED: "1"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      qdrant:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --log-level info
+  api-blue:
+    <<: *api-common
+    container_name: kagura-api-blue
+
+  api-green:
+    <<: *api-common
+    container_name: kagura-api-green
 
   web:
     build:
@@ -110,8 +131,6 @@ services:
       NEXT_TELEMETRY_DISABLED: "1"
       PORT: "3000"
       HOSTNAME: "0.0.0.0"
-    depends_on:
-      - api
 
   # ==========================================================================
   # Reverse proxy — only service bound to host ports
@@ -129,8 +148,9 @@ services:
       - /var/lib/kagura/origin-ca:/etc/caddy/origin-ca:ro
       - caddy_data:/data
       - caddy_config:/config
+    # No hard dependency on api-blue/api-green: during normal operation only
+    # one color is active. Caddy handles upstream unavailability gracefully.
     depends_on:
-      - api
       - web
 
 volumes:

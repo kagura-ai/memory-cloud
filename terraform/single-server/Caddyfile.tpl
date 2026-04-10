@@ -1,11 +1,22 @@
 # =============================================================================
-# Kagura Memory Cloud — Caddy reverse proxy (production)
+# Kagura Memory Cloud — Caddy reverse proxy (production, blue-green template)
 # =============================================================================
-# GENERATED from Caddyfile.tpl by scripts/deploy.sh — do not edit directly.
-# To make permanent changes, edit Caddyfile.tpl instead.
+# This is a TEMPLATE. Do not edit directly.
+# scripts/deploy.sh generates Caddyfile from this template via envsubst.
 #
-# This default targets api-blue. scripts/deploy.sh regenerates this file
-# on each deploy to point at the active color.
+# Placeholder:
+#   ${API_UPSTREAM} — replaced with "api-blue" or "api-green" at deploy time
+#
+# TLS is terminated here using a Cloudflare Origin CA certificate. Cloudflare
+# sits in front in "Full (strict)" mode, so client → Cloudflare and
+# Cloudflare → Caddy are both TLS, but the origin cert doesn't need to be
+# publicly trusted — only trusted by Cloudflare, which Cloudflare Origin CA
+# certs are by construction.
+#
+# Place the cert and key at:
+#   /etc/caddy/origin-ca/cert.pem
+#   /etc/caddy/origin-ca/key.pem
+# (These are mounted into the caddy container from the host.)
 # =============================================================================
 
 {
@@ -19,8 +30,8 @@
 	}
 }
 
-# Replace memory.kagura-ai.com with your domain. This file is deployed as-is
-# to the VM, so the operator edits it in place or templates it before scp.
+# Replace memory.kagura-ai.com with your domain in this template file.
+# scripts/deploy.sh generates Caddyfile from this via envsubst.
 memory.kagura-ai.com {
 	tls /etc/caddy/origin-ca/cert.pem /etc/caddy/origin-ca/key.pem
 
@@ -30,30 +41,30 @@ memory.kagura-ai.com {
 	# Backend API (FastAPI on :8080) — blue-green upstream
 	# -------------------------------------------------------------------------
 	handle /api/* {
-		reverse_proxy api-blue:8080
+		reverse_proxy ${API_UPSTREAM}:8080
 	}
 
 	handle /health {
-		reverse_proxy api-blue:8080
+		reverse_proxy ${API_UPSTREAM}:8080
 	}
 
 	# /readiness is intentionally NOT exposed through Caddy.
 	# deploy.sh probes it from inside the container via `docker compose exec`.
 
 	handle /docs* {
-		reverse_proxy api-blue:8080
+		reverse_proxy ${API_UPSTREAM}:8080
 	}
 
 	handle /openapi.json {
-		reverse_proxy api-blue:8080
+		reverse_proxy ${API_UPSTREAM}:8080
 	}
 
 	handle /.well-known/* {
-		reverse_proxy api-blue:8080
+		reverse_proxy ${API_UPSTREAM}:8080
 	}
 
 	handle /oauth/* {
-		reverse_proxy api-blue:8080
+		reverse_proxy ${API_UPSTREAM}:8080
 	}
 
 	# -------------------------------------------------------------------------
@@ -62,7 +73,7 @@ memory.kagura-ai.com {
 	#   and the client never sees events until the stream closes.
 	# -------------------------------------------------------------------------
 	handle /mcp* {
-		reverse_proxy api-blue:8080 {
+		reverse_proxy ${API_UPSTREAM}:8080 {
 			flush_interval -1
 			transport http {
 				read_timeout  24h

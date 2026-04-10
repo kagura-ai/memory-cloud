@@ -31,7 +31,21 @@ services:
       retries: 3
       start_period: 60s
 
-  api:
+  api-blue:
+    environment:
+      EMBEDDING_PROVIDER: ollama
+      OLLAMA_BASE_URL: http://ollama:11434
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+
+  api-green:
     environment:
       EMBEDDING_PROVIDER: ollama
       OLLAMA_BASE_URL: http://ollama:11434

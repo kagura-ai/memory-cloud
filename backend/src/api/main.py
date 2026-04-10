@@ -3,6 +3,7 @@
 Based on: kagura-ai/src/kagura/api/server.py
 """
 
+import asyncio
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -525,8 +526,74 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
+    """Health check endpoint (liveness probe — always fast)."""
     return {"status": "ok"}
+
+
+@app.get("/readiness")
+async def readiness():
+    """Readiness probe for blue-green deploy.
+
+    Checks PostgreSQL, Qdrant, and Redis connectivity with tight timeouts.
+    Returns 200 only when all backends are reachable.
+    Returns 503 if any backend is unavailable.
+
+    Note: Uses _get_session_factory() directly (not Depends(get_db)) because
+    this is a standalone probe, not a typical route handler.
+    """
+
+    async def _check_postgres() -> str:
+        try:
+            from sqlalchemy import text
+
+            from db.base import _get_session_factory
+
+            async with _get_session_factory()() as session:
+                await session.execute(text("SELECT 1"))
+            return "ok"
+        except Exception as exc:
+            logger.warning("readiness_check_failed", backend="postgres", error=str(exc))
+            return "error"
+
+    async def _check_qdrant() -> str:
+        try:
+            from db.qdrant import get_qdrant_client
+
+            qdrant = get_qdrant_client()
+            await qdrant.get_collections()
+            return "ok"
+        except Exception as exc:
+            logger.warning("readiness_check_failed", backend="qdrant", error=str(exc))
+            return "error"
+
+    async def _check_redis() -> str:
+        try:
+            from db.redis import get_redis_client
+
+            redis = get_redis_client()
+            await redis.ping()
+            return "ok"
+        except Exception as exc:
+            logger.warning("readiness_check_failed", backend="redis", error=str(exc))
+            return "error"
+
+    # Run all checks concurrently with a single 3s budget
+    try:
+        pg, qd, rd = await asyncio.wait_for(
+            asyncio.gather(_check_postgres(), _check_qdrant(), _check_redis()),
+            timeout=3.0,
+        )
+    except TimeoutError:
+        logger.warning("readiness_check_timeout", timeout=3.0)
+        pg, qd, rd = "error", "error", "error"
+
+    checks = {"postgres": pg, "qdrant": qd, "redis": rd}
+    all_ok = all(v == "ok" for v in checks.values())
+    status_code = 200 if all_ok else 503
+    return JSONResponse(
+        content={"status": "ready" if all_ok else "not_ready", "checks": checks},
+        status_code=status_code,
+    )
 
 
 if __name__ == "__main__":
