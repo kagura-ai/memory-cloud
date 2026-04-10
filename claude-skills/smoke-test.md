@@ -2,7 +2,8 @@
 description: Run comprehensive smoke test of all MCP tools via live MCP connection
 ---
 
-Verify every MCP tool works correctly by executing them in sequence against a temporary test context.
+Verify MCP tools work correctly by executing them in sequence against temporary test contexts.
+Tests 21 of 24 tools (excludes 3 sleep tools that require a prior Sleep Maintenance run).
 Use this after deployments, tool description changes, or MCP server updates.
 
 **Prerequisite:** MCP server must be running and connected.
@@ -105,20 +106,40 @@ delete_edge(context_id=..., source_id=<memory_id>, target_id=<memory_id_2>)
 -> Verify: success response (edge deleted)
 ```
 
-### 7. Cleanup
+### 7. Merge & usage tools
+
+Create a second temporary context, then test merge and usage:
 
 ```
-forget(memory_id=..., context_id=...)
--> Verify: success response (memory 1 deleted)
+create_context(name="smoke-test-merge-{unix_timestamp}", description="Merge target for smoke test.")
+-> Save returned context_id as merge_target_id
+
+merge_contexts(source_id=<context_id>, target_id=<merge_target_id>)
+-> Verify: success response with merged memory count
+
+get_usage()
+-> Verify: returns plan, memories.used, contexts.used (no error)
+```
+
+Note: Sleep tools (`get_sleep_history`, `get_sleep_report`, `rollback_sleep_run`) are not tested here because they require a completed Sleep Maintenance run. Verify these manually after a sleep cycle.
+
+### Cleanup
+
+```
+forget(memory_id=..., context_id=<merge_target_id>)
+-> Verify: success response (merged memory deleted from target)
+
+delete_context(context_id=<merge_target_id>)
+-> Verify: success response (merge target deleted)
 
 forget(memory_id=<memory_id_2>, context_id=...)
--> Verify: success response (memory 2 deleted)
+-> Verify: success response (memory 2 deleted from source)
 
 delete_context(context_id=...)
--> Verify: success response (context deleted)
+-> Verify: success response (source context deleted)
 ```
 
-### 7. Report
+### 8. Report
 
 Print a summary table:
 
@@ -143,17 +164,24 @@ Print a summary table:
 | 14 | list_edges | List edges | PASS/FAIL |
 | 15 | update_edge | Update edge weight | PASS/FAIL |
 | 16 | delete_edge | Delete edge | PASS/FAIL |
-| 17 | forget | Delete memory 1 | PASS/FAIL |
-| 18 | forget | Delete memory 2 | PASS/FAIL |
-| 19 | delete_context | Delete test context | PASS/FAIL |
+| 17 | create_context | Create merge target context | PASS/FAIL |
+| 18 | merge_contexts | Merge source into target | PASS/FAIL |
+| 19 | get_usage | Get workspace usage | PASS/FAIL |
+| 20 | forget | Delete merged memory | PASS/FAIL |
+| 21 | delete_context | Delete merge target | PASS/FAIL |
+| 22 | forget | Delete memory 2 | PASS/FAIL |
+| 23 | delete_context | Delete source context | PASS/FAIL |
 
-**Result: N/19 passed**
+**Result: N/23 passed**
 
 Test context: smoke-test-{timestamp} (cleaned up)
+
+Not tested (require prior Sleep Maintenance run):
+- get_sleep_history, get_sleep_report, rollback_sleep_run
 ```
 
 If any step fails:
 - Mark it as FAIL with error message
 - **Continue** with remaining steps where possible (skip dependent steps)
-- Still attempt cleanup (step 6) even if earlier steps failed
+- Still attempt cleanup even if earlier steps failed
 - Show total pass/fail count in summary
