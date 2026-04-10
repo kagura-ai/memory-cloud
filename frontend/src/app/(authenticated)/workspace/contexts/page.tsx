@@ -1042,31 +1042,28 @@ export default function ContextsPage() {
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
-                          {context.created_by === user?.id && (
-                            <>
-                              <DropdownMenuItem
-                                onClick={() =>
-                                  router.push(
-                                    `/workspace/contexts/${context.id}?tab=settings`,
-                                  )
-                                }
-                              >
-                                <Settings2 className="h-4 w-4 mr-2" />
-                                {tCommon("settings")}
-                              </DropdownMenuItem>
-                              <DropdownMenuSeparator />
-                            </>
-                          )}
                           <DropdownMenuItem
                             onClick={() =>
                               router.push(
-                                `/workspace/contexts/${context.id}?tab=settings`,
+                                `/workspace/contexts/${context.id}?tab=connections`,
                               )
                             }
                           >
                             <Settings2 className="h-4 w-4 mr-2" />
-                            {t("searchSettings")}
+                            {t("connections")}
                           </DropdownMenuItem>
+                          {context.created_by === user?.id && (
+                            <DropdownMenuItem
+                              onClick={() =>
+                                router.push(
+                                  `/workspace/contexts/${context.id}?tab=settings`,
+                                )
+                              }
+                            >
+                              <Settings2 className="h-4 w-4 mr-2" />
+                              {tCommon("settings")}
+                            </DropdownMenuItem>
+                          )}
                         </DropdownMenuContent>
                       </DropdownMenu>
                     </div>
