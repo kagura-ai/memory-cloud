@@ -345,9 +345,8 @@ If the new color misbehaves after switching:
 ./scripts/deploy.sh --rollback
 ```
 
-This flips Caddy back to the previous color and reloads. The old container
-must still be running (it stays up for `DRAIN_TIMEOUT` seconds after
-deploy, but `restart: always` brings it back if needed).
+This starts the previous color if it's not running, waits for readiness,
+then flips Caddy back and reloads. Safe to run at any time after a deploy.
 
 ## Teardown
 

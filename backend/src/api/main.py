@@ -541,46 +541,53 @@ async def readiness():
     Note: Uses _get_session_factory() directly (not Depends(get_db)) because
     this is a standalone probe, not a typical route handler.
     """
-    checks: dict[str, str] = {}
 
-    # PostgreSQL — timeout wraps entire session lifecycle
-    try:
-        from sqlalchemy import text
+    async def _check_postgres() -> str:
+        try:
+            from sqlalchemy import text
 
-        from db.base import _get_session_factory
+            from db.base import _get_session_factory
 
-        async def _check_pg() -> None:
             async with _get_session_factory()() as session:
                 await session.execute(text("SELECT 1"))
+            return "ok"
+        except Exception as exc:
+            logger.warning("readiness_check_failed", backend="postgres", error=str(exc))
+            return "error"
 
-        await asyncio.wait_for(_check_pg(), timeout=3.0)
-        checks["postgres"] = "ok"
-    except Exception as exc:
-        logger.warning("readiness_check_failed", backend="postgres", error=str(exc))
-        checks["postgres"] = "error"
+    async def _check_qdrant() -> str:
+        try:
+            from db.qdrant import get_qdrant_client
 
-    # Qdrant — reuse singleton client from db.qdrant
+            qdrant = get_qdrant_client()
+            await qdrant.get_collections()
+            return "ok"
+        except Exception as exc:
+            logger.warning("readiness_check_failed", backend="qdrant", error=str(exc))
+            return "error"
+
+    async def _check_redis() -> str:
+        try:
+            from db.redis import get_redis_client
+
+            redis = get_redis_client()
+            await redis.ping()
+            return "ok"
+        except Exception as exc:
+            logger.warning("readiness_check_failed", backend="redis", error=str(exc))
+            return "error"
+
+    # Run all checks concurrently with a single 3s budget
     try:
-        from db.qdrant import get_qdrant_client
+        pg, qd, rd = await asyncio.wait_for(
+            asyncio.gather(_check_postgres(), _check_qdrant(), _check_redis()),
+            timeout=3.0,
+        )
+    except TimeoutError:
+        logger.warning("readiness_check_timeout", timeout=3.0)
+        pg, qd, rd = "error", "error", "error"
 
-        qdrant = get_qdrant_client()
-        await asyncio.wait_for(qdrant.get_collections(), timeout=3.0)
-        checks["qdrant"] = "ok"
-    except Exception as exc:
-        logger.warning("readiness_check_failed", backend="qdrant", error=str(exc))
-        checks["qdrant"] = "error"
-
-    # Redis
-    try:
-        from db.redis import get_redis_client
-
-        redis = get_redis_client()
-        await asyncio.wait_for(redis.ping(), timeout=3.0)
-        checks["redis"] = "ok"
-    except Exception as exc:
-        logger.warning("readiness_check_failed", backend="redis", error=str(exc))
-        checks["redis"] = "error"
-
+    checks = {"postgres": pg, "qdrant": qd, "redis": rd}
     all_ok = all(v == "ok" for v in checks.values())
     status_code = 200 if all_ok else 503
     return JSONResponse(

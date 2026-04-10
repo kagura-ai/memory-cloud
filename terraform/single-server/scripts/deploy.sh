@@ -79,10 +79,13 @@ cmd_rollback() {
     active="$(get_active_color)"
     inactive="$(get_inactive_color)"
 
-    # Check that the previous color's container is still running
+    # Ensure the previous color's container is running
     if ! is_container_running "$inactive"; then
-        error "api-${inactive} is not running — cannot rollback. Start it first:
-  docker compose -f $COMPOSE_FILE --env-file $ENV_FILE up -d api-${inactive}"
+        log "api-${inactive} is not running — starting it for rollback..."
+        docker update --restart=always "kagura-api-${inactive}" 2>/dev/null || true
+        dc up -d "api-${inactive}"
+        log "Waiting for api-${inactive} readiness..."
+        wait_for_readiness "$inactive"
     fi
 
     # Write marker BEFORE switching Caddy (atomic: same filesystem mv)
