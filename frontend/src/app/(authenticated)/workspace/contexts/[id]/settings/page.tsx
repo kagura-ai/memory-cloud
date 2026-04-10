@@ -571,7 +571,7 @@ export default function ContextSettingsPage() {
                       </div>
                       <div className="flex gap-3 mt-2 text-xs">
                         <a
-                          href="/workspace/integrations/resource-tokens"
+                          href="/workspace/integrations/credentials?tab=resource-tokens"
                           className="text-primary underline hover:text-primary/80"
                         >
                           {t("manageResourceTokens")}

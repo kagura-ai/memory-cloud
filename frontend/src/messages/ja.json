@@ -1461,6 +1461,23 @@
     "deleteSuccess": "APIキーが正常に削除されました",
     "regenerateSuccess": "APIキーが正常に再生成されました"
   },
+  "credentials": {
+    "title": "認証情報・連携",
+    "description": "ワークスペースへの接続に使用する認証方法を管理します",
+    "featureGuide": {
+      "title": "認証方法の選び方",
+      "overview": "このページではすべての認証情報を一元管理できます。各タブは異なる連携方法に対応しています。",
+      "choosingMethod": "プログラムからのアクセスにはAPIキー（Claude Code、Python SDK）、デスクトップ/Webクライアントにはo OAuthアプリ（Claude Desktop、ChatGPT）、コンテキストの公開共有にはリソーストークンを使用してください。"
+    },
+    "tabs": {
+      "apiKeys": "APIキー",
+      "oauthApps": "OAuthアプリ",
+      "resourceTokens": "リソーストークン",
+      "apiKeysHelp": "プログラムからのアクセス用 — Claude Code、Python SDK、その他のMCPクライアントで使用",
+      "oauthAppsHelp": "Claude Desktop、ChatGPT、またはカスタムOAuth2コネクタの設定用",
+      "resourceTokensHelp": "コンテキストの公開共有用 — 外部アプリがログインなしでメモリーを読み取れます"
+    }
+  },
   "customApps": {
     "title": "アプリ認証",
     "description": "Claude、ChatGPT、カスタム統合用のOAuthアプリケーションを管理",
