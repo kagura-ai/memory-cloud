@@ -48,9 +48,8 @@ memory.kagura-ai.com {
 		reverse_proxy ${API_UPSTREAM}:8080
 	}
 
-	handle /readiness {
-		reverse_proxy ${API_UPSTREAM}:8080
-	}
+	# /readiness is intentionally NOT exposed through Caddy.
+	# deploy.sh probes it from inside the container via `docker compose exec`.
 
 	handle /docs* {
 		reverse_proxy ${API_UPSTREAM}:8080

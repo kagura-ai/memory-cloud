@@ -330,8 +330,8 @@ Database migrations run **before** the Caddy switch so both old and new
 containers can coexist on the same schema:
 
 - **Forward-compatible** (additive columns, new tables): always safe.
-  `deploy.sh` runs `alembic upgrade head` on the active container before
-  starting the new color.
+  `deploy.sh` starts the new container, waits for readiness, then runs
+  `alembic upgrade head` on the new container before switching Caddy.
 - **Backward-incompatible** (drop columns, type changes): require a
   **two-phase deploy**:
   1. First deploy: add new columns/tables, update code to use both old and new

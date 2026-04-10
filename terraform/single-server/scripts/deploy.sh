@@ -107,8 +107,10 @@ cmd_deploy() {
     dc build "api-${inactive}"
 
     # Step 2: Start the inactive color (uses new image)
+    # Re-enable restart policy in case it was disabled by a previous deploy.
     log "Step 2/7: Starting api-${inactive}..."
     dc up -d "api-${inactive}"
+    docker update --restart=always "kagura-api-${inactive}" 2>/dev/null || true
 
     # Step 3: Wait for readiness (DB + Qdrant + Redis all reachable)
     log "Step 3/7: Waiting for api-${inactive} readiness (timeout: ${READINESS_TIMEOUT}s)..."
@@ -130,10 +132,13 @@ cmd_deploy() {
     reload_caddy
 
     # Step 7: Drain and stop old container
+    # Disable restart policy first — otherwise `restart: always` revives
+    # the container immediately after stop.
     log "Step 7/7: Draining api-${active} for ${DRAIN_TIMEOUT}s..."
     sleep "$DRAIN_TIMEOUT"
+    docker update --restart=no "kagura-api-${active}" 2>/dev/null || true
     dc stop "api-${active}" || true
-    log "api-${active} stopped."
+    log "api-${active} stopped (restart policy disabled)."
 
     log "=== DEPLOY COMPLETE ==="
     log "Active: $inactive"
@@ -205,6 +210,9 @@ command -v envsubst > /dev/null 2>&1 || error "envsubst not found. Install: apt-
 # Validate timeout values are integers
 [[ "$READINESS_TIMEOUT" =~ ^[0-9]+$ ]] || error "READINESS_TIMEOUT must be an integer (got: $READINESS_TIMEOUT)"
 [[ "$DRAIN_TIMEOUT" =~ ^[0-9]+$ ]] || error "DRAIN_TIMEOUT must be an integer (got: $DRAIN_TIMEOUT)"
+
+# Ensure marker directory exists
+mkdir -p "$(dirname "$MARKER_FILE")"
 
 case "${1:-}" in
     --rollback)

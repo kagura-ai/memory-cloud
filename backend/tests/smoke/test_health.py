@@ -65,3 +65,31 @@ class TestHealthEndpoints:
         """GET /api/v1/system/info returns 200."""
         response = client.get("/api/v1/system/info")
         assert response.status_code in (200, 401, 403)
+
+
+class TestReadinessEndpoint:
+    """Test /readiness probe for blue-green deploy (Issue #239)."""
+
+    def test_readiness_returns_503_when_backends_unavailable(self, client):
+        """GET /readiness returns 503 when backends are not reachable.
+
+        In the test environment DB/Qdrant/Redis are not running,
+        so all checks should fail and return 503.
+        """
+        response = client.get("/readiness")
+        assert response.status_code == 503
+        data = response.json()
+        assert data["status"] == "not_ready"
+        assert "checks" in data
+        assert set(data["checks"].keys()) == {"postgres", "qdrant", "redis"}
+
+    def test_readiness_response_shape(self, client):
+        """GET /readiness always returns the expected JSON structure."""
+        response = client.get("/readiness")
+        data = response.json()
+        assert "status" in data
+        assert data["status"] in ("ready", "not_ready")
+        assert "checks" in data
+        for backend in ("postgres", "qdrant", "redis"):
+            assert backend in data["checks"]
+            assert data["checks"][backend] in ("ok", "error")

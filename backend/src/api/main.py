@@ -3,6 +3,7 @@
 Based on: kagura-ai/src/kagura/api/server.py
 """
 
+import asyncio
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -540,8 +541,6 @@ async def readiness():
     Note: Uses _get_session_factory() directly (not Depends(get_db)) because
     this is a standalone probe, not a typical route handler.
     """
-    import asyncio
-
     checks: dict[str, str] = {}
 
     # PostgreSQL — timeout wraps entire session lifecycle
@@ -556,7 +555,8 @@ async def readiness():
 
         await asyncio.wait_for(_check_pg(), timeout=3.0)
         checks["postgres"] = "ok"
-    except Exception:
+    except Exception as exc:
+        logger.warning("readiness_check_failed", backend="postgres", error=str(exc))
         checks["postgres"] = "error"
 
     # Qdrant — reuse singleton client from db.qdrant
@@ -566,7 +566,8 @@ async def readiness():
         qdrant = get_qdrant_client()
         await asyncio.wait_for(qdrant.get_collections(), timeout=3.0)
         checks["qdrant"] = "ok"
-    except Exception:
+    except Exception as exc:
+        logger.warning("readiness_check_failed", backend="qdrant", error=str(exc))
         checks["qdrant"] = "error"
 
     # Redis
@@ -576,7 +577,8 @@ async def readiness():
         redis = get_redis_client()
         await asyncio.wait_for(redis.ping(), timeout=3.0)
         checks["redis"] = "ok"
-    except Exception:
+    except Exception as exc:
+        logger.warning("readiness_check_failed", backend="redis", error=str(exc))
         checks["redis"] = "error"
 
     all_ok = all(v == "ok" for v in checks.values())
