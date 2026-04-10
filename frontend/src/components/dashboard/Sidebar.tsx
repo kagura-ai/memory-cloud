@@ -108,17 +108,17 @@ const navigationGroups: NavGroup[] = [
     items: [
       {
         nameKey: "apiKeys",
-        href: "/workspace/integrations/api-keys",
+        href: "/workspace/integrations/credentials?tab=api-keys",
         icon: Key,
       },
       {
         nameKey: "oauthApps",
-        href: "/workspace/integrations/oauth-apps",
+        href: "/workspace/integrations/credentials?tab=oauth-apps",
         icon: Puzzle,
       },
       {
         nameKey: "resourceTokens",
-        href: "/workspace/integrations/resource-tokens",
+        href: "/workspace/integrations/credentials?tab=resource-tokens",
         icon: Database,
         requiredWorkspaceRole: "owner",
       },

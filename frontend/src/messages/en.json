@@ -1461,6 +1461,23 @@
     "deleteSuccess": "API key deleted successfully",
     "regenerateSuccess": "API key regenerated successfully"
   },
+  "credentials": {
+    "title": "Credentials & Integrations",
+    "description": "Manage authentication methods for connecting clients to your workspace",
+    "featureGuide": {
+      "title": "Choosing an Authentication Method",
+      "overview": "This page consolidates all credential types. Each tab covers a different integration method.",
+      "choosingMethod": "Use API Keys for programmatic access (Claude Code, Python SDK), OAuth Apps for desktop/web clients (Claude Desktop, ChatGPT), or Resource Tokens for public context sharing."
+    },
+    "tabs": {
+      "apiKeys": "API Keys",
+      "oauthApps": "OAuth Apps",
+      "resourceTokens": "Resource Tokens",
+      "apiKeysHelp": "For programmatic access — use in Claude Code, Python SDK, or any MCP client",
+      "oauthAppsHelp": "For Claude Desktop, ChatGPT, or custom OAuth2 connector setup",
+      "resourceTokensHelp": "For sharing a context publicly — external apps can read memories without login"
+    }
+  },
   "customApps": {
     "title": "App Authentication",
     "description": "Manage OAuth applications for Claude, ChatGPT, and custom integrations",
