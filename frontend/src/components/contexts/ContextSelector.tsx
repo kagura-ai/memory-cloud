@@ -23,7 +23,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
-import { cn, colors, transitions } from "@/styles/design-tokens";
+import { cn, transitions } from "@/styles/design-tokens";
 import { getContexts } from "@/lib/api/contexts";
 import type { Context } from "@/lib/types/context";
 import { useMemoryContext } from "@/contexts/MemoryContextContext";
@@ -141,7 +141,7 @@ export function ContextSelector({ className }: ContextSelectorProps) {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-56">
-        <DropdownMenuLabel>コンテキストを選択</DropdownMenuLabel>
+        <DropdownMenuLabel>{t("selectContext")}</DropdownMenuLabel>
         <DropdownMenuSeparator />
         {contexts.length === 0 ? (
           <DropdownMenuItem disabled>
