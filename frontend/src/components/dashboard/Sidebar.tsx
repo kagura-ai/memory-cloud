@@ -10,7 +10,7 @@
 
 import { useState, useEffect, Fragment } from "react";
 import Link from "next/link";
-import { useRouter, usePathname } from "next/navigation";
+import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { cn as utilCn } from "@/lib/utils/cn";
 import {
@@ -224,6 +224,8 @@ export function Sidebar() {
     return initial;
   });
   const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const currentTab = searchParams.get("tab");
   const router = useRouter();
   const { user, logout } = useAuth();
 
@@ -550,10 +552,16 @@ export function Sidebar() {
                     }
 
                     // Regular items (no children)
-                    const isActive =
-                      pathname === item.href ||
-                      (item.href !== "/dashboard" &&
-                        pathname.startsWith(item.href + "/"));
+                    // Handle hrefs with query params (e.g. /credentials?tab=api-keys)
+                    const [itemPath, itemQuery] = item.href.split("?");
+                    const itemTab = itemQuery
+                      ? new URLSearchParams(itemQuery).get("tab")
+                      : null;
+                    const isActive = itemTab
+                      ? pathname === itemPath && currentTab === itemTab
+                      : pathname === item.href ||
+                        (item.href !== "/dashboard" &&
+                          pathname.startsWith(item.href + "/"));
 
                     // Issue #115: Disabled items show as "Coming Soon"
                     if (item.disabled) {
