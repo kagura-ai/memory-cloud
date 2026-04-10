@@ -745,7 +745,13 @@
     "member": "Member",
     "memories": "Memories",
     "apiToday": "API Today",
-    "apiWeek": "API Week"
+    "apiWeek": "API Week",
+    "contextCount": "Contexts",
+    "apiCallsWeek": "API Calls (7d)",
+    "activeUsersWeek": "Active Users (7d)",
+    "showDetails": "Show Details",
+    "hideDetails": "Hide Details",
+    "adminMemberActivity": "Admin: Member Activity"
   },
   "profile": {
     "title": "Profile Settings",

@@ -745,7 +745,13 @@
     "member": "メンバー",
     "memories": "メモリー",
     "apiToday": "API（今日）",
-    "apiWeek": "API（今週）"
+    "apiWeek": "API（今週）",
+    "contextCount": "コンテキスト数",
+    "apiCallsWeek": "API呼び出し (7日)",
+    "activeUsersWeek": "アクティブユーザー (7日)",
+    "showDetails": "詳細を表示",
+    "hideDetails": "詳細を非表示",
+    "adminMemberActivity": "管理者: メンバーアクティビティ"
   },
   "profile": {
     "title": "プロフィール設定",

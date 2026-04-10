@@ -14,33 +14,10 @@ import { graphApi } from "@/lib/api/graph";
 import type { GraphData, GraphStatsResponse } from "@/lib/types/graph";
 import { getMemoryTypeColor } from "@/lib/types/graph";
 import { Brain, GitBranch, Activity, TrendingUp } from "lucide-react";
+import { KpiCard } from "@/components/ui/kpi-card";
 
 interface ConnectionsTabPanelProps {
   contextId: string;
-}
-
-function StatCard({
-  icon: Icon,
-  label,
-  value,
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  value: string | number;
-}) {
-  return (
-    <div className="p-4 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg">
-      <div className="flex items-center gap-2 mb-1">
-        <Icon className="h-4 w-4 text-gray-400" />
-        <span className="text-xs text-gray-500 dark:text-gray-400">
-          {label}
-        </span>
-      </div>
-      <p className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-        {value}
-      </p>
-    </div>
-  );
 }
 
 export function ConnectionsTabPanel({ contextId }: ConnectionsTabPanelProps) {
@@ -102,22 +79,22 @@ export function ConnectionsTabPanel({ contextId }: ConnectionsTabPanelProps) {
     <div className="space-y-6">
       {/* Stats Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard
+        <KpiCard
           icon={Brain}
           label={t("graphNodes", { default: "Nodes" })}
           value={s?.total_nodes ?? 0}
         />
-        <StatCard
+        <KpiCard
           icon={GitBranch}
           label={t("graphEdges", { default: "Edges" })}
           value={s?.total_edges ?? 0}
         />
-        <StatCard
+        <KpiCard
           icon={Activity}
           label={t("graphAvgWeight", { default: "Avg Weight" })}
           value={s?.avg_edge_weight?.toFixed(4) ?? "0"}
         />
-        <StatCard
+        <KpiCard
           icon={TrendingUp}
           label={t("graphMaxWeight", { default: "Max Weight" })}
           value={s?.max_edge_weight?.toFixed(4) ?? "0"}
