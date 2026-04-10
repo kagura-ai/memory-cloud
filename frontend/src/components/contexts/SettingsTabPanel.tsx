@@ -81,14 +81,14 @@ export function SettingsTabPanel({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Form state
-  const [displayName, setDisplayName] = useState("");
-  const [description, setDescription] = useState("");
-  const [summary, setSummary] = useState("");
-  const [usageGuide, setUsageGuide] = useState("");
-  const [isPrivate, setIsPrivate] = useState(true);
-  const [isPublic, setIsPublic] = useState(false);
-  const [isLocked, setIsLocked] = useState(false);
+  // Form state — initialised from context prop to avoid isDirty flash
+  const [displayName, setDisplayName] = useState(context.display_name || "");
+  const [description, setDescription] = useState(context.description || "");
+  const [summary, setSummary] = useState(context.summary || "");
+  const [usageGuide, setUsageGuide] = useState(context.usage_guide || "");
+  const [isPrivate, setIsPrivate] = useState(context.is_private ?? true);
+  const [isPublic, setIsPublic] = useState(context.is_public ?? false);
+  const [isLocked, setIsLocked] = useState(context.is_locked ?? false);
   const [resourceId, setResourceId] = useState("");
 
   const [idCopied, setIdCopied] = useState(false);
