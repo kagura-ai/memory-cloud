@@ -51,8 +51,8 @@ class WorkspacePlanInfo(BaseModel):
     owner_email: str | None = None
     total_memories: int
     memory_limit: int
-    daily_api_limit: int
-    weekly_api_limit: int
+    mcp_calls_per_day: int
+    mcp_calls_per_week: int
 
 
 class UpdatePlanRequest(BaseModel):
@@ -206,8 +206,8 @@ async def list_workspaces_with_plans(
                     owner_email=owner.email if owner else None,
                     total_memories=total_memories,
                     memory_limit=workspace.effective_memory_limit,
-                    daily_api_limit=workspace.effective_mcp_calls_per_day,
-                    weekly_api_limit=workspace.effective_mcp_calls_per_week,
+                    mcp_calls_per_day=workspace.effective_mcp_calls_per_day,
+                    mcp_calls_per_week=workspace.effective_mcp_calls_per_week,
                 )
             )
 

@@ -4,7 +4,7 @@
  * Issue #149: Plan tier enforcement - Admin management
  */
 
-import { apiClient } from './base';
+import { apiClient } from "./base";
 
 export interface WorkspacePlanInfo {
   id: string;
@@ -15,8 +15,8 @@ export interface WorkspacePlanInfo {
   owner_email: string | null;
   total_memories: number;
   memory_limit: number;
-  daily_api_limit: number;
-  weekly_api_limit: number;
+  mcp_calls_per_day: number;
+  mcp_calls_per_week: number;
 }
 
 export interface PlanChangeAuditEntry {
@@ -31,7 +31,7 @@ export interface PlanChangeAuditEntry {
 }
 
 export interface UpdatePlanRequest {
-  plan_name: 'free' | 'basic' | 'pro';
+  plan_name: "free" | "basic" | "pro";
   reason?: string;
 }
 
@@ -39,7 +39,7 @@ export interface UpdatePlanRequest {
  * List all workspaces with plan info (Admin only)
  */
 export async function getAdminWorkspaces(): Promise<WorkspacePlanInfo[]> {
-  return apiClient.get<WorkspacePlanInfo[]>('/api/v1/admin/plans/workspaces');
+  return apiClient.get<WorkspacePlanInfo[]>("/api/v1/admin/plans/workspaces");
 }
 
 /**
@@ -47,16 +47,23 @@ export async function getAdminWorkspaces(): Promise<WorkspacePlanInfo[]> {
  */
 export async function updateWorkspacePlan(
   workspaceId: string,
-  request: UpdatePlanRequest
+  request: UpdatePlanRequest,
 ): Promise<{ message: string }> {
-  return apiClient.put<{ message: string }>(`/api/v1/admin/plans/workspaces/${workspaceId}/plan`, request);
+  return apiClient.put<{ message: string }>(
+    `/api/v1/admin/plans/workspaces/${workspaceId}/plan`,
+    request,
+  );
 }
 
 /**
  * Get plan change audit log (Admin only)
  */
-export async function getAdminPlanAudit(limit: number = 100): Promise<PlanChangeAuditEntry[]> {
-  return apiClient.get<PlanChangeAuditEntry[]>(`/api/v1/admin/plans/audit?limit=${limit}`);
+export async function getAdminPlanAudit(
+  limit: number = 100,
+): Promise<PlanChangeAuditEntry[]> {
+  return apiClient.get<PlanChangeAuditEntry[]>(
+    `/api/v1/admin/plans/audit?limit=${limit}`,
+  );
 }
 
 // ============================================================================
@@ -75,7 +82,12 @@ export interface WorkspaceQuotaDetail {
   workspace_name: string;
   plan_name: string;
   base: QuotaBreakdown;
-  addon: { memory_bonus: number; mcp_quota_bonus: number; member_bonus: number; context_bonus: number };
+  addon: {
+    memory_bonus: number;
+    mcp_quota_bonus: number;
+    member_bonus: number;
+    context_bonus: number;
+  };
   effective: QuotaBreakdown;
   usage: { memories: number; contexts: number; members: number };
 }
@@ -90,8 +102,12 @@ export interface UpdateAddonRequest {
 /**
  * Get workspace quota details (Admin only)
  */
-export async function getWorkspaceQuotas(workspaceId: string): Promise<WorkspaceQuotaDetail> {
-  return apiClient.get<WorkspaceQuotaDetail>(`/api/v1/admin/plans/workspaces/${workspaceId}/quotas`);
+export async function getWorkspaceQuotas(
+  workspaceId: string,
+): Promise<WorkspaceQuotaDetail> {
+  return apiClient.get<WorkspaceQuotaDetail>(
+    `/api/v1/admin/plans/workspaces/${workspaceId}/quotas`,
+  );
 }
 
 /**
@@ -99,9 +115,12 @@ export async function getWorkspaceQuotas(workspaceId: string): Promise<Workspace
  */
 export async function updateWorkspaceAddons(
   workspaceId: string,
-  request: UpdateAddonRequest
+  request: UpdateAddonRequest,
 ): Promise<{ message: string }> {
-  return apiClient.put<{ message: string }>(`/api/v1/admin/plans/workspaces/${workspaceId}/quotas`, request);
+  return apiClient.put<{ message: string }>(
+    `/api/v1/admin/plans/workspaces/${workspaceId}/quotas`,
+    request,
+  );
 }
 
 // ============================================================================
@@ -130,14 +149,14 @@ export interface UserStats {
   total_memories: number;
   working_memories: number;
   persistent_memories: number;
-  active_api_keys: number;  // Issue #164: Active API keys count
+  active_api_keys: number; // Issue #164: Active API keys count
   api_calls_today: number;
   api_calls_week: number;
 }
 
 export interface UserDetail {
   user: {
-    id: string;  // Backward compatibility field (same as user_id)
+    id: string; // Backward compatibility field (same as user_id)
     user_id: string;
     email: string;
     name: string;

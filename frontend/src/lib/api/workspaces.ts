@@ -306,8 +306,10 @@ export interface WorkspacePlanInfo {
   quotas: {
     memory_limit: number;
     max_contexts: number;
-    daily_api_limit: number;
-    weekly_api_limit: number;
+    mcp_calls_per_day: number;
+    mcp_calls_per_week: number;
+    rest_calls_per_day: number;
+    public_calls_per_day: number;
   };
   can_upgrade: boolean;
   can_downgrade: boolean;
@@ -320,8 +322,10 @@ export interface AvailablePlanInfo {
   quotas: {
     memory_limit: number;
     max_contexts: number;
-    daily_api_limit: number;
-    weekly_api_limit: number;
+    mcp_calls_per_day: number;
+    mcp_calls_per_week: number;
+    rest_calls_per_day: number;
+    public_calls_per_day: number;
   };
   features: string[];
 }
