@@ -270,16 +270,6 @@ export function APIKeysTabPanel() {
     <>
       <ErrorBanner error={error} />
 
-      {/* OAuth Apps note — OAuth setup is in the adjacent tab */}
-      <div className="mb-6 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
-        <p className="text-sm font-medium text-blue-900 dark:text-blue-100 mb-1">
-          🔗 {t("mcpOAuthSetup")}
-        </p>
-        <p className="text-xs text-blue-700 dark:text-blue-300">
-          {t("mcpOAuthSetupDesc")} {t("seeOAuthAppsTab")}
-        </p>
-      </div>
-
       {/* API Keys Section */}
       <Section title={t("apiKeysTitle")} description={t("apiKeysDesc")}>
         <div className="space-y-4">
