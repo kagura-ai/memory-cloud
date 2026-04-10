@@ -206,6 +206,9 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# Local scratch data (eval pilots, experiments)
+_local/
+
 # Kagura Memory Cloud v5.0 specific
 kagura-ai-v4/
 .env.local
