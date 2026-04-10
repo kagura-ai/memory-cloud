@@ -19,8 +19,10 @@ Use the branch name, recent commits, modified files, and uncommitted changes to 
 
 ### 2. Check open GitHub issues
 
+First verify `gh` is available. If not, skip this step and steps that use `gh` — git state alone is sufficient.
+
 ```bash
-gh issue list --state open --limit 10 --json number,title,milestone --jq '.[] | "#\(.number) [\(.milestone.title // "no milestone")] \(.title)"'
+command -v gh >/dev/null 2>&1 && gh issue list --state open --limit 10 --json number,title,milestone --jq '.[] | "#\(.number) [\(.milestone.title // "no milestone")] \(.title)"' || echo "(gh CLI not available — skipping GitHub issues)"
 ```
 
 ### 3. Identify the working context
@@ -33,7 +35,10 @@ If multiple contexts exist, pick the one most relevant to the current project. I
 
 ### 4. Recall recent memories (last 7 days)
 
-Calculate the date 7 days ago from today and use it as `created_after` filter. Run these in parallel:
+Calculate the date 7 days ago from today and use it as `created_after` filter.
+The 7-day window balances recency with coverage — long enough to span a typical work week including weekends, short enough to avoid stale context drowning out current work.
+
+Run these in parallel:
 
 ```
 recall(context_id=..., query="session summary progress decision", k=5, filters={"created_after": "{7_days_ago_ISO8601}"})
@@ -49,7 +54,7 @@ recall(context_id=..., query="dev environment troubleshooting workaround", k=3, 
 
 ### 5. Check related GitHub issues
 
-If issue numbers appear in the branch name, recent commits, or recalled memories:
+If issue numbers appear in the branch name, recent commits, or recalled memories (and `gh` is available):
 
 ```bash
 gh issue view <number> --json title,state,body,labels
