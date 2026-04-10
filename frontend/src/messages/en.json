@@ -2622,6 +2622,24 @@
       "copied": "Copied to clipboard!"
     }
   },
+  "contextDetail": {
+    "title": "Context Detail",
+    "loading": "Loading context...",
+    "failedToLoad": "Failed to load context",
+    "notFoundTitle": "Context Not Found",
+    "notFoundDescription": "The context you're looking for doesn't exist or you don't have access.",
+    "backToContexts": "Back to Contexts",
+    "breadcrumbContexts": "Contexts",
+    "current": "Current",
+    "default": "Default",
+    "privateContext": "Private context",
+    "sharedContext": "Shared context",
+    "tabs": {
+      "overview": "Overview",
+      "connections": "Connections",
+      "settings": "Settings"
+    }
+  },
   "contextSettings": {
     "title": "{contextName} — Settings",
     "description": "Manage context settings and configurations",

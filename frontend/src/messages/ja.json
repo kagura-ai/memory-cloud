@@ -2622,6 +2622,24 @@
       "copied": "クリップボードにコピーしました！"
     }
   },
+  "contextDetail": {
+    "title": "コンテキスト詳細",
+    "loading": "コンテキストを読み込み中...",
+    "failedToLoad": "コンテキストの読み込みに失敗しました",
+    "notFoundTitle": "コンテキストが見つかりません",
+    "notFoundDescription": "お探しのコンテキストが存在しないか、アクセス権がありません。",
+    "backToContexts": "コンテキスト一覧に戻る",
+    "breadcrumbContexts": "コンテキスト",
+    "current": "現在",
+    "default": "デフォルト",
+    "privateContext": "プライベート",
+    "sharedContext": "共有",
+    "tabs": {
+      "overview": "概要",
+      "connections": "接続",
+      "settings": "設定"
+    }
+  },
   "contextSettings": {
     "title": "{contextName} — 設定",
     "description": "コンテキストの設定と構成を管理",
