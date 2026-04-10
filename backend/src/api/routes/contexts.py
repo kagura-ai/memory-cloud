@@ -347,7 +347,9 @@ async def list_contexts(
             select(
                 Memory.context_id,
                 func.count(Memory.id).label("count"),
-                func.max(Memory.updated_at).label("last_activity"),
+                func.max(func.coalesce(Memory.updated_at, Memory.created_at)).label(
+                    "last_activity"
+                ),
             )
             .where(
                 Memory.context_id.in_(context_ids),

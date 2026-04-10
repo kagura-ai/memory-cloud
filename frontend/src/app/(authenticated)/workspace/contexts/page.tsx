@@ -961,10 +961,9 @@ export default function ContextsPage() {
                             </Badge>
                           )}
                           {context.is_locked && (
-                            <ShieldCheck
-                              className="h-3 w-3 text-amber-500"
-                              title={t("locked")}
-                            />
+                            <span title={t("locked")} aria-label={t("locked")}>
+                              <ShieldCheck className="h-3 w-3 text-amber-500" />
+                            </span>
                           )}
                         </div>
                         {context.description && (
