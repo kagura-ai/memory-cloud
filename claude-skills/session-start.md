@@ -6,7 +6,11 @@ Restore previous session context to quickly resume development work. Uses git st
 
 ## Steps
 
-### 1. Check current git state
+### 1. Gather context (run in parallel)
+
+Run these three data-gathering blocks concurrently — they have no dependencies on each other.
+
+**Git state** (Bash):
 
 ```bash
 git branch --show-current
@@ -17,15 +21,13 @@ git diff --stat HEAD~3 2>/dev/null || true
 
 Use the branch name, recent commits, modified files, and uncommitted changes to infer what work is in progress.
 
-### 2. Check open GitHub issues
-
-First verify `gh` is available. If not, skip this step and steps that use `gh` — git state alone is sufficient.
+**GitHub issues** (Bash — skip if `gh` unavailable):
 
 ```bash
 command -v gh >/dev/null 2>&1 && gh issue list --state open --limit 10 --json number,title,milestone --jq '.[] | "#\(.number) [\(.milestone.title // "no milestone")] \(.title)"' || echo "(gh CLI not available — skipping GitHub issues)"
 ```
 
-### 3. Identify the working context
+**Memory Cloud** (MCP):
 
 ```
 list_contexts()
@@ -33,12 +35,9 @@ list_contexts()
 
 If multiple contexts exist, pick the one most relevant to the current project. If unclear, ask the user.
 
-### 4. Recall recent memories (last 7 days)
+Then recall recent memories (last 7 days). The 7-day window balances recency with coverage — long enough to span a typical work week including weekends, short enough to avoid stale context drowning out current work.
 
-Calculate the date 7 days ago from today and use it as `created_after` filter.
-The 7-day window balances recency with coverage — long enough to span a typical work week including weekends, short enough to avoid stale context drowning out current work.
-
-Run these in parallel:
+Calculate the date 7 days ago from today and use it as `created_after` filter. Run these recalls in parallel:
 
 ```
 recall(context_id=..., query="session summary progress decision", k=5, filters={"created_after": "{7_days_ago_ISO8601}"})
@@ -52,7 +51,7 @@ recall(context_id=..., query="blocker issue TODO pending", k=5, filters={"create
 recall(context_id=..., query="dev environment troubleshooting workaround", k=3, filters={"type": "troubleshooting", "tags": ["dev-environment"]})
 ```
 
-### 5. Check related GitHub issues
+### 2. Check related GitHub issues
 
 If issue numbers appear in the branch name, recent commits, or recalled memories (and `gh` is available):
 
@@ -60,7 +59,7 @@ If issue numbers appear in the branch name, recent commits, or recalled memories
 gh issue view <number> --json title,state,body,labels
 ```
 
-### 6. Present session context
+### 3. Present session context
 
 Display a concise summary:
 
@@ -84,7 +83,7 @@ Display a concise summary:
 {based on git state + memories + issues, suggest what to work on}
 ```
 
-### 7. Guidelines
+### 4. Guidelines
 
 - **Git state is primary** — recent commits and uncommitted changes are the most reliable signal
 - **Memory Cloud is supplementary** — adds context that git alone doesn't capture (decisions, rationale, blockers)
