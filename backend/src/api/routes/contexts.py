@@ -16,7 +16,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import APIKeyOrSessionUser, SessionUser, get_current_user
@@ -219,6 +219,11 @@ class ContextResponse(BaseModel):
     member_count: int | None = Field(
         None, description="Number of members with access to this context"
     )
+    # Issue #187: Memory count and last activity for contexts table redesign
+    memory_count: int = Field(default=0, description="Number of active memories in this context")
+    last_activity_at: datetime | None = Field(
+        None, description="Most recent memory activity (max of updated_at across memories)"
+    )
 
     model_config = {"from_attributes": True}
 
@@ -333,6 +338,28 @@ async def list_contexts(
                         count += 1
             member_counts[context.id] = count
 
+    # Issue #187: Batch memory count + last activity (single query, no N+1)
+    memory_stats: dict[UUID, tuple[int, datetime | None]] = {}
+    if context_ids:
+        from models.memory import Memory
+
+        stats_stmt = (
+            select(
+                Memory.context_id,
+                func.count(Memory.id).label("count"),
+                func.max(Memory.updated_at).label("last_activity"),
+            )
+            .where(
+                Memory.context_id.in_(context_ids),
+                Memory.deleted_at.is_(None),
+            )
+            .group_by(Memory.context_id)
+        )
+        stats_result = await db.execute(stats_stmt)
+        memory_stats = {
+            row.context_id: (row.count, row.last_activity) for row in stats_result.all()
+        }
+
     context_responses = []
     for context in contexts_list:
         # Issue #165: Privacy filtering
@@ -346,6 +373,9 @@ async def list_contexts(
 
         # Issue #217: Get search config for this context
         search_config = search_configs.get(context.id)
+
+        # Issue #187: Memory count and last activity
+        ctx_stats = memory_stats.get(context.id, (0, None))
 
         context_responses.append(
             ContextResponse(
@@ -375,6 +405,9 @@ async def list_contexts(
                 embedding_dimensions=search_config.embedding_dimensions if search_config else None,
                 # Member count
                 member_count=member_counts.get(context.id, 0) if not context.is_private else None,
+                # Issue #187: Memory stats
+                memory_count=ctx_stats[0],
+                last_activity_at=ctx_stats[1],
             )
         )
 
