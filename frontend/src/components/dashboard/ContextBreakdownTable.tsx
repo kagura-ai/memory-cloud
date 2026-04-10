@@ -182,7 +182,12 @@ export function ContextBreakdownTable({
             )}
             {tDashboard(showDetails ? "hideDetails" : "showDetails")}
           </Button>
-          <Button onClick={exportToCSV} variant="outline" size="sm">
+          <Button
+            onClick={exportToCSV}
+            variant="outline"
+            size="sm"
+            disabled={!contextStats}
+          >
             <Download className="h-4 w-4 mr-2" />
             Export CSV
           </Button>
@@ -231,7 +236,9 @@ export function ContextBreakdownTable({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {contexts.length === 0 && !privateAggregation ? (
+              {contexts.length === 0 &&
+              (!privateAggregation ||
+                privateAggregation.context_count === 0) ? (
                 <TableRow>
                   <TableCell
                     colSpan={showDetails ? 8 : 3}
@@ -319,11 +326,13 @@ export function ContextBreakdownTable({
                                     : "text-gray-400"
                                 }
                               >
-                                {contextDetail?.active_users_week || "0"}
+                                {contextDetail?.active_users_week?.toLocaleString() ??
+                                  "0"}
                               </span>
                             </TableCell>
                             <TableCell className="text-right">
-                              {contextDetail?.member_count || "-"}
+                              {contextDetail?.member_count?.toLocaleString() ??
+                                "-"}
                             </TableCell>
                             <TableCell className="text-right">
                               {percentage}%

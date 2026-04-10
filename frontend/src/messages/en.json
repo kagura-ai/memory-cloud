@@ -751,7 +751,8 @@
     "activeUsersWeek": "Active Users (7d)",
     "showDetails": "Show Details",
     "hideDetails": "Hide Details",
-    "adminMemberActivity": "Admin: Member Activity"
+    "adminMemberActivity": "Admin: Member Activity",
+    "selectContextForActivity": "Select a specific context to view per-user activity. Member usage appears for team workspaces."
   },
   "profile": {
     "title": "Profile Settings",

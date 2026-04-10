@@ -751,7 +751,8 @@
     "activeUsersWeek": "アクティブユーザー (7日)",
     "showDetails": "詳細を表示",
     "hideDetails": "詳細を非表示",
-    "adminMemberActivity": "管理者: メンバーアクティビティ"
+    "adminMemberActivity": "管理者: メンバーアクティビティ",
+    "selectContextForActivity": "特定のコンテキストを選択するとユーザー別アクティビティを表示します。メンバー使用状況はチームワークスペースで表示されます。"
   },
   "profile": {
     "title": "プロフィール設定",

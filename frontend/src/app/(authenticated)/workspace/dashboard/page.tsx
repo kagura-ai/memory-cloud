@@ -66,9 +66,11 @@ export default function WorkspaceStatsPage() {
       ]);
       setStats(statsResponse);
       setContextStats(contextStatsResponse);
-    } catch (err) {
+    } catch (err: unknown) {
       console.error("Failed to fetch workspace stats:", err);
-      setError(err instanceof Error ? err.message : t("failedToLoadStats"));
+      const message =
+        (err as { message?: string })?.message || t("failedToLoadStats");
+      setError(message);
     } finally {
       setLoading(false);
     }
@@ -76,7 +78,7 @@ export default function WorkspaceStatsPage() {
 
   useEffect(() => {
     fetchStats();
-  }, []);
+  }, [currentWorkspaceId]);
 
   useEffect(() => {
     if (!currentWorkspaceId) return;

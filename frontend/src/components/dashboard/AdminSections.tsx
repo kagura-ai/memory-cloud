@@ -272,11 +272,15 @@ export function AdminSections({
         </span>
       </CollapsibleTrigger>
       <CollapsibleContent className="mt-4 space-y-6">
-        {hasUserActivity && (
+        {hasUserActivity ? (
           <UserActivitySection
             selectedContextId={selectedContextId!}
             currentWorkspaceId={currentWorkspaceId!}
           />
+        ) : (
+          <p className="text-sm text-muted-foreground py-4">
+            {t("selectContextForActivity")}
+          </p>
         )}
         <MemberUsageSection />
       </CollapsibleContent>
