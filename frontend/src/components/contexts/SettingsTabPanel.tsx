@@ -8,7 +8,7 @@
 
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/button";
@@ -214,12 +214,14 @@ export function SettingsTabPanel({
       setPrivacyDialogOpen(true);
     } else {
       setIsPrivate(newIsPrivate);
+      markDirty();
     }
   };
 
   const confirmPrivacyChange = () => {
     if (pendingPrivacyChange !== null) {
       setIsPrivate(pendingPrivacyChange);
+      markDirty();
     }
     setPrivacyDialogOpen(false);
     setPendingPrivacyChange(null);
@@ -227,24 +229,13 @@ export function SettingsTabPanel({
 
   const isOwner = currentWorkspace?.current_user_role === "owner";
 
-  const isDirty = useMemo(() => {
-    return (
-      displayName !== (context.display_name || "") ||
-      description !== (context.description || "") ||
-      summary !== (context.summary || "") ||
-      usageGuide !== (context.usage_guide || "") ||
-      isPrivate !== (context.is_private ?? true) ||
-      isPublic !== (context.is_public ?? false)
-    );
-  }, [
-    displayName,
-    description,
-    summary,
-    usageGuide,
-    isPrivate,
-    isPublic,
-    context,
-  ]);
+  const [isDirty, setIsDirty] = useState(false);
+  const markDirty = useCallback(() => setIsDirty(true), []);
+
+  // Reset dirty flag when context prop changes (after save/discard)
+  useEffect(() => {
+    setIsDirty(false);
+  }, [context]);
 
   return (
     <>
@@ -317,7 +308,10 @@ export function SettingsTabPanel({
               <Label>{t("displayName")}</Label>
               <Input
                 value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
+                onChange={(e) => {
+                  setDisplayName(e.target.value);
+                  markDirty();
+                }}
                 placeholder={context.name}
                 maxLength={200}
               />
@@ -331,7 +325,10 @@ export function SettingsTabPanel({
               <Textarea
                 placeholder={t("descriptionPlaceholder")}
                 value={description}
-                onChange={(e) => setDescription(e.target.value)}
+                onChange={(e) => {
+                  setDescription(e.target.value);
+                  markDirty();
+                }}
                 rows={2}
               />
             </div>
@@ -356,6 +353,7 @@ export function SettingsTabPanel({
                   if (template) {
                     setSummary(template.summary);
                     setUsageGuide(template.usage_guide);
+                    markDirty();
                   }
                 }}
               >
@@ -385,7 +383,10 @@ export function SettingsTabPanel({
               <Textarea
                 placeholder={t("summaryPlaceholder")}
                 value={summary}
-                onChange={(e) => setSummary(e.target.value)}
+                onChange={(e) => {
+                  setSummary(e.target.value);
+                  markDirty();
+                }}
                 maxLength={500}
                 rows={3}
               />
@@ -399,7 +400,10 @@ export function SettingsTabPanel({
               <Textarea
                 placeholder={t("usageGuidePlaceholder")}
                 value={usageGuide}
-                onChange={(e) => setUsageGuide(e.target.value)}
+                onChange={(e) => {
+                  setUsageGuide(e.target.value);
+                  markDirty();
+                }}
                 maxLength={2000}
                 rows={6}
               />
@@ -461,7 +465,10 @@ export function SettingsTabPanel({
                       variant="outline"
                       size="sm"
                       className="border-red-300 text-red-700 hover:bg-red-50 dark:border-red-700 dark:text-red-400 dark:hover:bg-red-950"
-                      onClick={() => setIsPublic(false)}
+                      onClick={() => {
+                        setIsPublic(false);
+                        markDirty();
+                      }}
                     >
                       {t("unpublish")}
                     </Button>
@@ -544,7 +551,10 @@ export function SettingsTabPanel({
                     className="w-full"
                     disabled={!resourceId.trim()}
                     onClick={() => {
-                      if (resourceId.trim()) setIsPublic(true);
+                      if (resourceId.trim()) {
+                        setIsPublic(true);
+                        markDirty();
+                      }
                     }}
                   >
                     🌍 {t("makePublic")}
