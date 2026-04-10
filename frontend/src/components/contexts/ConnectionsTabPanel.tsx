@@ -1,24 +1,50 @@
-'use client';
-
 /**
- * Neural Memory Graph View — Stats + Edge Table
- * Issue #31: Redesigned from React Flow to simple table view
+ * ConnectionsTabPanel
+ *
+ * Self-contained panel for the Connections tab in the consolidated context detail page.
+ * Contains neural memory graph stats and edge table.
+ * Extracted from contexts/[id]/graph/page.tsx (#232).
  */
 
-import { useEffect, useState, useCallback, useMemo } from 'react';
-import { useParams } from 'next/navigation';
-import { useTranslations } from 'next-intl';
-import { graphApi } from '@/lib/api/graph';
-import type { GraphData, GraphStatsResponse } from '@/lib/types/graph';
-import { getMemoryTypeColor } from '@/lib/types/graph';
-import { PageContainer } from '@/components/common/PageContainer';
-import { PageHeader } from '@/components/common/PageHeader';
-import { Brain, GitBranch, Activity, TrendingUp } from 'lucide-react';
+"use client";
 
-export default function ContextGraphPage() {
-  const params = useParams();
-  const contextId = params.id as string;
-  const t = useTranslations('contexts');
+import { useEffect, useState, useCallback, useMemo } from "react";
+import { useTranslations } from "next-intl";
+import { graphApi } from "@/lib/api/graph";
+import type { GraphData, GraphStatsResponse } from "@/lib/types/graph";
+import { getMemoryTypeColor } from "@/lib/types/graph";
+import { Brain, GitBranch, Activity, TrendingUp } from "lucide-react";
+
+interface ConnectionsTabPanelProps {
+  contextId: string;
+}
+
+function StatCard({
+  icon: Icon,
+  label,
+  value,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  value: string | number;
+}) {
+  return (
+    <div className="p-4 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg">
+      <div className="flex items-center gap-2 mb-1">
+        <Icon className="h-4 w-4 text-gray-400" />
+        <span className="text-xs text-gray-500 dark:text-gray-400">
+          {label}
+        </span>
+      </div>
+      <p className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+        {value}
+      </p>
+    </div>
+  );
+}
+
+export function ConnectionsTabPanel({ contextId }: ConnectionsTabPanelProps) {
+  const t = useTranslations("contexts");
 
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [stats, setStats] = useState<GraphStatsResponse | null>(null);
@@ -38,7 +64,9 @@ export default function ContextGraphPage() {
       setGraphData(dataResult);
       setStats(statsResult);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load graph data');
+      setError(
+        err instanceof Error ? err.message : "Failed to load graph data",
+      );
     } finally {
       setLoading(false);
     }
@@ -52,46 +80,55 @@ export default function ContextGraphPage() {
   const nodes = graphData?.nodes || [];
   const edges = graphData?.edges || [];
   const topConnections = s?.top_connections || [];
-  const nodeById = useMemo(() => new Map(nodes.map(n => [n.id, n])), [nodes]);
+  const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
 
   if (loading) {
     return (
-      <PageContainer>
-        <div className="flex items-center justify-center h-64">
-          <div className="h-8 w-8 animate-spin rounded-full border-4 border-brand-green-200 border-t-brand-green-600" />
-        </div>
-      </PageContainer>
+      <div className="flex items-center justify-center h-64">
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-brand-green-200 border-t-brand-green-600" />
+      </div>
     );
   }
 
   if (error) {
     return (
-      <PageContainer>
-        <PageHeader title="Neural Memory Graph" description={contextId} />
-        <div className="p-4 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 rounded-lg">
-          {error}
-        </div>
-      </PageContainer>
+      <div className="p-4 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 rounded-lg">
+        {error}
+      </div>
     );
   }
 
   return (
-    <PageContainer>
-      <PageHeader title="Neural Memory Graph" description={`Context: ${contextId.slice(0, 8)}...`} />
-
+    <div className="space-y-6">
       {/* Stats Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        <StatCard icon={Brain} label={t('graphNodes', { default: 'Nodes' })} value={s?.total_nodes ?? 0} />
-        <StatCard icon={GitBranch} label={t('graphEdges', { default: 'Edges' })} value={s?.total_edges ?? 0} />
-        <StatCard icon={Activity} label={t('graphAvgWeight', { default: 'Avg Weight' })} value={s?.avg_edge_weight?.toFixed(4) ?? '0'} />
-        <StatCard icon={TrendingUp} label={t('graphMaxWeight', { default: 'Max Weight' })} value={s?.max_edge_weight?.toFixed(4) ?? '0'} />
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <StatCard
+          icon={Brain}
+          label={t("graphNodes", { default: "Nodes" })}
+          value={s?.total_nodes ?? 0}
+        />
+        <StatCard
+          icon={GitBranch}
+          label={t("graphEdges", { default: "Edges" })}
+          value={s?.total_edges ?? 0}
+        />
+        <StatCard
+          icon={Activity}
+          label={t("graphAvgWeight", { default: "Avg Weight" })}
+          value={s?.avg_edge_weight?.toFixed(4) ?? "0"}
+        />
+        <StatCard
+          icon={TrendingUp}
+          label={t("graphMaxWeight", { default: "Max Weight" })}
+          value={s?.max_edge_weight?.toFixed(4) ?? "0"}
+        />
       </div>
 
       {/* Top Connected Nodes */}
       {topConnections.length > 0 && (
-        <div className="mb-6">
+        <div>
           <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
-            {t('graphTopConnections', { default: 'Top Connected Memories' })}
+            {t("graphTopConnections", { default: "Top Connected Memories" })}
           </h3>
           <div className="space-y-2">
             {topConnections.map((node, i) => (
@@ -99,12 +136,15 @@ export default function ContextGraphPage() {
                 key={node.node_id}
                 className="flex items-center gap-3 p-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg"
               >
-                <span className="text-xs font-mono text-gray-400 w-5">{i + 1}</span>
+                <span className="text-xs font-mono text-gray-400 w-5">
+                  {i + 1}
+                </span>
                 <div className="flex-1 text-sm text-gray-900 dark:text-gray-100 truncate">
                   {node.summary || node.node_id.slice(0, 8)}
                 </div>
                 <span className="text-xs font-medium text-brand-green-600 dark:text-brand-green-400">
-                  {node.degree} {t('graphConnections', { default: 'connections' })}
+                  {node.degree}{" "}
+                  {t("graphConnections", { default: "connections" })}
                 </span>
               </div>
             ))}
@@ -116,16 +156,24 @@ export default function ContextGraphPage() {
       {edges.length > 0 ? (
         <div>
           <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
-            {t('graphEdgeList', { default: 'Edges' })} ({edges.length})
+            {t("graphEdgeList", { default: "Edges" })} ({edges.length})
           </h3>
           <div className="overflow-x-auto border border-gray-200 dark:border-gray-700 rounded-lg">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
-                  <th className="px-4 py-2 text-left font-medium text-gray-600 dark:text-gray-300">Source</th>
-                  <th className="px-4 py-2 text-left font-medium text-gray-600 dark:text-gray-300">Target</th>
-                  <th className="px-4 py-2 text-center font-medium text-gray-600 dark:text-gray-300">Weight</th>
-                  <th className="px-4 py-2 text-center font-medium text-gray-600 dark:text-gray-300">Type</th>
+                  <th className="px-4 py-2 text-left font-medium text-gray-600 dark:text-gray-300">
+                    Source
+                  </th>
+                  <th className="px-4 py-2 text-left font-medium text-gray-600 dark:text-gray-300">
+                    Target
+                  </th>
+                  <th className="px-4 py-2 text-center font-medium text-gray-600 dark:text-gray-300">
+                    Weight
+                  </th>
+                  <th className="px-4 py-2 text-center font-medium text-gray-600 dark:text-gray-300">
+                    Type
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -133,13 +181,20 @@ export default function ContextGraphPage() {
                   const srcNode = nodeById.get(edge.source);
                   const tgtNode = nodeById.get(edge.target);
                   return (
-                    <tr key={i} className="border-b border-gray-100 dark:border-gray-800">
+                    <tr
+                      key={i}
+                      className="border-b border-gray-100 dark:border-gray-800"
+                    >
                       <td className="px-4 py-2">
                         <div className="flex items-center gap-2">
                           {srcNode && (
                             <span
                               className="w-2 h-2 rounded-full flex-shrink-0"
-                              style={{ backgroundColor: getMemoryTypeColor(srcNode.type) }}
+                              style={{
+                                backgroundColor: getMemoryTypeColor(
+                                  srcNode.type,
+                                ),
+                              }}
                             />
                           )}
                           <span className="truncate max-w-[200px] text-gray-900 dark:text-gray-100">
@@ -152,7 +207,11 @@ export default function ContextGraphPage() {
                           {tgtNode && (
                             <span
                               className="w-2 h-2 rounded-full flex-shrink-0"
-                              style={{ backgroundColor: getMemoryTypeColor(tgtNode.type) }}
+                              style={{
+                                backgroundColor: getMemoryTypeColor(
+                                  tgtNode.type,
+                                ),
+                              }}
                             />
                           )}
                           <span className="truncate max-w-[200px] text-gray-900 dark:text-gray-100">
@@ -165,7 +224,9 @@ export default function ContextGraphPage() {
                           <div className="w-16 bg-gray-200 dark:bg-gray-700 rounded-full h-1.5">
                             <div
                               className="bg-brand-green-500 h-1.5 rounded-full"
-                              style={{ width: `${Math.min(edge.weight / (s?.max_edge_weight || 0.5) * 100, 100)}%` }}
+                              style={{
+                                width: `${Math.min((edge.weight / (s?.max_edge_weight || 0.5)) * 100, 100)}%`,
+                              }}
                             />
                           </div>
                           <span className="text-xs font-mono text-gray-500 dark:text-gray-400 w-12">
@@ -175,7 +236,7 @@ export default function ContextGraphPage() {
                       </td>
                       <td className="px-4 py-2 text-center">
                         <span className="text-xs text-gray-500 dark:text-gray-400">
-                          {edge.type.replace('_', ' ')}
+                          {edge.type.replace("_", " ")}
                         </span>
                       </td>
                     </tr>
@@ -188,21 +249,14 @@ export default function ContextGraphPage() {
       ) : (
         <div className="text-center py-12 text-gray-500 dark:text-gray-400">
           <Brain className="h-12 w-12 mx-auto mb-3 opacity-30" />
-          <p>{t('graphEmpty', { default: 'No neural edges yet. Use recall to build connections between memories.' })}</p>
+          <p>
+            {t("graphEmpty", {
+              default:
+                "No neural edges yet. Use recall to build connections between memories.",
+            })}
+          </p>
         </div>
       )}
-    </PageContainer>
-  );
-}
-
-function StatCard({ icon: Icon, label, value }: { icon: React.ComponentType<{ className?: string }>; label: string; value: string | number }) {
-  return (
-    <div className="p-4 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg">
-      <div className="flex items-center gap-2 mb-1">
-        <Icon className="h-4 w-4 text-gray-400" />
-        <span className="text-xs text-gray-500 dark:text-gray-400">{label}</span>
-      </div>
-      <p className="text-xl font-semibold text-gray-900 dark:text-gray-100">{value}</p>
     </div>
   );
 }

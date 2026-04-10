@@ -510,7 +510,7 @@ export default function WorkspaceStatsPage() {
                                       />
                                     )}
                                     <Link
-                                      href={`/workspace/contexts/${context.context_id}/stats`}
+                                      href={`/workspace/contexts/${context.context_id}`}
                                       className="text-indigo-600 hover:text-indigo-900 dark:text-indigo-400 dark:hover:text-indigo-300"
                                     >
                                       {context.context_name}

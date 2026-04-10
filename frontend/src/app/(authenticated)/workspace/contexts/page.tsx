@@ -203,7 +203,7 @@ export default function ContextsPage() {
     const editId = searchParams.get("edit");
     if (editId && !editHandled.current) {
       editHandled.current = true;
-      router.replace(`/workspace/contexts/${editId}/settings`);
+      router.replace(`/workspace/contexts/${editId}?tab=settings`);
     }
   }, [searchParams, router]);
 
@@ -357,7 +357,7 @@ export default function ContextsPage() {
   };
 
   const handleViewStats = async (context: Context) => {
-    router.push(`/workspace/contexts/${context.id}/stats`);
+    router.push(`/workspace/contexts/${context.id}`);
   };
 
   const handleLoadStats = async (context: Context) => {
@@ -1042,30 +1042,25 @@ export default function ContextsPage() {
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
-                          {context.created_by === user?.id && (
-                            <>
-                              <DropdownMenuItem
-                                onClick={() =>
-                                  router.push(
-                                    `/workspace/contexts/${context.id}/settings`,
-                                  )
-                                }
-                              >
-                                <Settings2 className="h-4 w-4 mr-2" />
-                                {tCommon("settings")}
-                              </DropdownMenuItem>
-                              <DropdownMenuSeparator />
-                            </>
-                          )}
                           <DropdownMenuItem
                             onClick={() =>
                               router.push(
-                                `/workspace/contexts/${context.id}/search-settings`,
+                                `/workspace/contexts/${context.id}?tab=connections`,
                               )
                             }
                           >
                             <Settings2 className="h-4 w-4 mr-2" />
-                            {t("searchSettings")}
+                            {t("connections")}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onClick={() =>
+                              router.push(
+                                `/workspace/contexts/${context.id}?tab=settings`,
+                              )
+                            }
+                          >
+                            <Settings2 className="h-4 w-4 mr-2" />
+                            {tCommon("settings")}
                           </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>

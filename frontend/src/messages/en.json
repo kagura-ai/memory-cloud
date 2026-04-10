@@ -1115,6 +1115,7 @@
     "settings": "Settings",
     "members": "Members",
     "graph": "Knowledge Graph",
+    "connections": "Connections",
     "searchSettings": "Search Settings",
     "viewStats": "View Usage Stats",
     "viewUsage": "View Usage Stats",
@@ -2620,6 +2621,24 @@
       "versionHistoryNote": "Future versions will be listed here",
       "exportJSON": "Export as JSON",
       "copied": "Copied to clipboard!"
+    }
+  },
+  "contextDetail": {
+    "title": "Context Detail",
+    "loading": "Loading context...",
+    "failedToLoad": "Failed to load context",
+    "notFoundTitle": "Context Not Found",
+    "notFoundDescription": "The context you're looking for doesn't exist or you don't have access.",
+    "backToContexts": "Back to Contexts",
+    "breadcrumbContexts": "Contexts",
+    "current": "Current",
+    "default": "Default",
+    "privateContext": "Private context",
+    "sharedContext": "Shared context",
+    "tabs": {
+      "overview": "Overview",
+      "connections": "Connections",
+      "settings": "Settings"
     }
   },
   "contextSettings": {
