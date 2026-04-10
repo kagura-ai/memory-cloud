@@ -208,10 +208,12 @@ vim .env.prod      # set KAGURA_DOMAIN, DB_PASSWORD, QDRANT_API_KEY,
                    # API_KEY_SECRET, JWT_SECRET, Google OAuth client, etc.
 ```
 
-Start everything:
+Start everything (initial setup starts both API colors; Caddy defaults to
+`api-blue`):
 
 ```bash
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+echo "blue" > /opt/kagura-memory/active-color
 ```
 
 The first build takes several minutes (backend + frontend images).
@@ -226,10 +228,11 @@ sudo systemctl enable kagura-memory
 ## Step 6 — Initialize the database and create the first admin
 
 ```bash
-docker compose -f docker-compose.prod.yml exec api alembic upgrade head
+docker compose -f docker-compose.prod.yml --env-file .env.prod \
+  exec api-blue alembic upgrade head
 
-docker compose -f docker-compose.prod.yml exec api \
-  python -m src.cli.create_admin
+docker compose -f docker-compose.prod.yml --env-file .env.prod \
+  exec api-blue python -m src.cli.create_admin
 ```
 
 ## Step 7 — Verify
@@ -295,17 +298,56 @@ gcloud compute disks snapshot kagura-memory-vm \
   --snapshot-names "kagura-memory-$(date +%Y%m%d-%H%M)"
 ```
 
-### Update to a new release
+### Update to a new release (zero-downtime)
+
+The stack uses **blue-green deploy** for the API container. Caddy always
+routes to one color; the deploy script builds the other, waits for it to
+be ready, switches Caddy, then drains and stops the old color.
 
 ```bash
 # On the VM
 cd /opt/kagura-memory/src
-git pull
+git fetch && git reset --hard origin/main
+
 cd terraform/single-server
-docker compose -f docker-compose.prod.yml build
-docker compose -f docker-compose.prod.yml up -d
-docker compose -f docker-compose.prod.yml exec api alembic upgrade head
+./scripts/deploy.sh           # zero-downtime blue-green deploy
 ```
+
+The script handles building, migrations, readiness checks, Caddy reload,
+and draining automatically. Use `./scripts/deploy.sh --status` to see
+which color is active, or `./scripts/deploy.sh --rollback` to switch back.
+
+Tunable environment variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `READINESS_TIMEOUT` | 60 | Seconds to wait for `/readiness` |
+| `DRAIN_TIMEOUT` | 30 | Seconds to drain old container |
+
+### Migration discipline
+
+Database migrations run **before** the Caddy switch so both old and new
+containers can coexist on the same schema:
+
+- **Forward-compatible** (additive columns, new tables): always safe.
+  `deploy.sh` runs `alembic upgrade head` on the active container before
+  starting the new color.
+- **Backward-incompatible** (drop columns, type changes): require a
+  **two-phase deploy**:
+  1. First deploy: add new columns/tables, update code to use both old and new
+  2. Second deploy: remove old columns after the previous deploy is verified
+
+### Rollback
+
+If the new color misbehaves after switching:
+
+```bash
+./scripts/deploy.sh --rollback
+```
+
+This flips Caddy back to the previous color and reloads. The old container
+must still be running (it stays up for `DRAIN_TIMEOUT` seconds after
+deploy, but `restart: always` brings it back if needed).
 
 ## Teardown
 

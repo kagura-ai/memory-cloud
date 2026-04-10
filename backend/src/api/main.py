@@ -525,8 +525,66 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
+    """Health check endpoint (liveness probe — always fast)."""
     return {"status": "ok"}
+
+
+@app.get("/readiness")
+async def readiness():
+    """Readiness probe for blue-green deploy.
+
+    Checks PostgreSQL, Qdrant, and Redis connectivity with tight timeouts.
+    Returns 200 only when all backends are reachable.
+    Returns 503 if any backend is unavailable.
+
+    Note: Uses _get_session_factory() directly (not Depends(get_db)) because
+    this is a standalone probe, not a typical route handler.
+    """
+    import asyncio
+
+    checks: dict[str, str] = {}
+
+    # PostgreSQL — timeout wraps entire session lifecycle
+    try:
+        from sqlalchemy import text
+
+        from db.base import _get_session_factory
+
+        async def _check_pg() -> None:
+            async with _get_session_factory()() as session:
+                await session.execute(text("SELECT 1"))
+
+        await asyncio.wait_for(_check_pg(), timeout=3.0)
+        checks["postgres"] = "ok"
+    except Exception:
+        checks["postgres"] = "error"
+
+    # Qdrant — reuse singleton client from db.qdrant
+    try:
+        from db.qdrant import get_qdrant_client
+
+        qdrant = get_qdrant_client()
+        await asyncio.wait_for(qdrant.get_collections(), timeout=3.0)
+        checks["qdrant"] = "ok"
+    except Exception:
+        checks["qdrant"] = "error"
+
+    # Redis
+    try:
+        from db.redis import get_redis_client
+
+        redis = get_redis_client()
+        await asyncio.wait_for(redis.ping(), timeout=3.0)
+        checks["redis"] = "ok"
+    except Exception:
+        checks["redis"] = "error"
+
+    all_ok = all(v == "ok" for v in checks.values())
+    status_code = 200 if all_ok else 503
+    return JSONResponse(
+        content={"status": "ready" if all_ok else "not_ready", "checks": checks},
+        status_code=status_code,
+    )
 
 
 if __name__ == "__main__":
