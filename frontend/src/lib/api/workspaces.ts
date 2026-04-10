@@ -90,6 +90,29 @@ export interface WorkspaceTotals {
   memory_count: number;
 }
 
+// Dashboard context stat (workspace-level, distinct from Qdrant ContextStats in types/context.ts)
+export interface DashboardContextStats {
+  context_id: string;
+  context_name: string;
+  created_by: string | null;
+  created_by_name: string | null;
+  memory_count: number;
+  is_private?: boolean;
+}
+
+export interface PrivateContextAggregation {
+  context_count: number;
+  memory_count: number;
+}
+
+export interface WorkspaceStats {
+  total_memories: number;
+  context_count: number;
+  contexts: DashboardContextStats[];
+  private_aggregation?: PrivateContextAggregation | null;
+  plan_name: string;
+}
+
 export interface ContextStatsResponse {
   contexts: ContextStatsItem[];
   total_contexts: number;
