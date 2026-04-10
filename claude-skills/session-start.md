@@ -43,6 +43,10 @@ recall(context_id=..., query="session summary progress decision", k=5, filters={
 recall(context_id=..., query="blocker issue TODO pending", k=5, filters={"created_after": "{7_days_ago_ISO8601}"})
 ```
 
+```
+recall(context_id=..., query="dev environment troubleshooting workaround", k=3, filters={"type": "troubleshooting", "tags": ["dev-environment"]})
+```
+
 ### 5. Check related GitHub issues
 
 If issue numbers appear in the branch name, recent commits, or recalled memories:

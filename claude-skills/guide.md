@@ -107,3 +107,32 @@ Merge this into your existing `hooks` object if you already have other hooks def
 | `remember` | Save new knowledge |
 | `guide` | This guide |
 | `smoke-test` | Verify all MCP tools work |
+
+### 6. Install in another project / machine
+
+If you're setting up Kagura Memory Cloud plugin in a new project or on another machine:
+
+**Option A: Marketplace install (recommended)**
+
+Run `/install-plugin` in Claude Code and search for `kagura-memory`, or install directly:
+
+```bash
+claude /install-plugin kagura-memory-cloud
+```
+
+After install, the plugin skills (`/kagura-memory:*`) become available. Proceed to Step 2 above to configure the MCP server connection.
+
+**Option B: Local install (from this repository)**
+
+If you have the `memory-cloud` repo cloned locally:
+
+```bash
+claude /install-plugin /path/to/memory-cloud
+```
+
+This installs the plugin from `.claude-plugin/plugin.json` and `claude-skills/` in the repo.
+
+**After either install:**
+- Plugin skills are available immediately after restart
+- MCP server connection still needs to be configured (Step 2) — the plugin provides skills, not the server connection
+- Each project needs its own `.mcp.json` with workspace-specific credentials
