@@ -160,8 +160,10 @@ async def get_workspace_plan(
             "max_contexts": workspace.effective_max_contexts,
             "max_resource_tokens": plan_tier.max_resource_tokens,  # Issue #242
             "max_quota_capacity": plan_tier.max_resource_tokens * 10000,  # Issue #242: events/hour
-            "daily_api_limit": workspace.effective_mcp_calls_per_day,
-            "weekly_api_limit": workspace.effective_mcp_calls_per_week,
+            "mcp_calls_per_day": workspace.effective_mcp_calls_per_day,
+            "mcp_calls_per_week": workspace.effective_mcp_calls_per_week,
+            "rest_calls_per_day": workspace.effective_rest_calls_per_day,
+            "public_calls_per_day": workspace.effective_public_calls_per_day,
         },
         can_upgrade=current_index < len(plan_order) - 1,
         can_downgrade=current_index > 0,
@@ -515,8 +517,10 @@ async def get_available_plans(
             quotas={
                 "memory_limit": tier.memory_limit,
                 "max_contexts": tier.max_contexts_per_workspace,
-                "daily_api_limit": tier.daily_api_limit,
-                "weekly_api_limit": tier.weekly_api_limit,
+                "mcp_calls_per_day": tier.mcp_calls_per_day,
+                "mcp_calls_per_week": tier.mcp_calls_per_week,
+                "rest_calls_per_day": tier.rest_calls_per_day,
+                "public_calls_per_day": tier.public_calls_per_day,
             },
             features=[feature_display_names.get(f, f) for f in sorted(tier.features)],
         )

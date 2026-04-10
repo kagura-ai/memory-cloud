@@ -261,7 +261,7 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
               <CardContent>
                 <div className="text-2xl font-bold mb-2">
                   {currentUsage.usage.api_calls_today} /{" "}
-                  {currentUsage.plan.daily_api_limit}
+                  {currentUsage.plan.daily_total_limit}
                 </div>
                 <Progress
                   value={Math.min(currentUsage.daily_api_usage.percentage, 100)}
@@ -286,7 +286,7 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
               <CardContent>
                 <div className="text-2xl font-bold mb-2">
                   {currentUsage.usage.api_calls_this_week} /{" "}
-                  {currentUsage.plan.weekly_api_limit}
+                  {currentUsage.plan.weekly_total_limit}
                 </div>
                 <Progress
                   value={Math.min(
@@ -320,9 +320,9 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
                 </div>
                 <div className="text-lg font-bold text-blue-600">
                   {currentUsage.usage.mcp_calls_today}
-                  {currentUsage.plan.mcp_daily_limit > 0 && (
+                  {currentUsage.plan.mcp_calls_per_day > 0 && (
                     <span className="text-xs text-gray-500 dark:text-gray-400 font-normal ml-1">
-                      / {currentUsage.plan.mcp_daily_limit.toLocaleString()}
+                      / {currentUsage.plan.mcp_calls_per_day.toLocaleString()}
                     </span>
                   )}
                 </div>
@@ -340,9 +340,9 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
                 </div>
                 <div className="text-lg font-bold text-green-600">
                   {currentUsage.usage.rest_calls_today}
-                  {currentUsage.plan.rest_daily_limit > 0 && (
+                  {currentUsage.plan.rest_calls_per_day > 0 && (
                     <span className="text-xs text-gray-500 dark:text-gray-400 font-normal ml-1">
-                      / {currentUsage.plan.rest_daily_limit.toLocaleString()}
+                      / {currentUsage.plan.rest_calls_per_day.toLocaleString()}
                     </span>
                   )}
                 </div>
@@ -360,9 +360,10 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
                 </div>
                 <div className="text-lg font-bold text-purple-600">
                   {currentUsage.usage.public_calls_today}
-                  {currentUsage.plan.public_daily_limit > 0 && (
+                  {currentUsage.plan.public_calls_per_day > 0 && (
                     <span className="text-xs text-gray-500 dark:text-gray-400 font-normal ml-1">
-                      / {currentUsage.plan.public_daily_limit.toLocaleString()}
+                      /{" "}
+                      {currentUsage.plan.public_calls_per_day.toLocaleString()}
                     </span>
                   )}
                 </div>

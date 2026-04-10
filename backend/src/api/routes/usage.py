@@ -57,35 +57,20 @@ class PlanLimits(BaseModel):
 
     plan_name: str = Field(..., description="Plan name (free/pro/enterprise)")
     memory_limit: int = Field(..., description="Maximum memories allowed")
-    daily_api_limit: int = Field(
+    daily_total_limit: int = Field(
         ...,
-        deprecated=True,
-        description=(
-            "Combined daily limit (MCP + REST + Public). "
-            "DEPRECATED — use mcp_daily_limit / rest_daily_limit / "
-            "public_daily_limit instead. The semantics changed in #198: "
-            "previously this was MCP + REST only, now it includes Public."
-        ),
+        description="Combined daily limit (MCP + REST + Public)",
     )
-    weekly_api_limit: int = Field(
+    weekly_total_limit: int = Field(
         ...,
-        deprecated=True,
-        description=(
-            "Combined weekly limit (MCP + REST + Public). "
-            "DEPRECATED — use mcp_weekly_limit / rest_weekly_limit / "
-            "public_weekly_limit instead. Before #198 this was hardcoded "
-            "to daily * 7 and disagreed with the rate limiter."
-        ),
+        description="Combined weekly limit (MCP + REST + Public)",
     )
-    # Issue #198: per-tier fields so the dashboard and any client can show
-    # the marketed numbers without guessing. Default to 0 for callers (like
-    # the legacy /usage/current endpoint) that don't compute them yet.
-    mcp_daily_limit: int = Field(default=0, description="MCP API daily limit")
-    mcp_weekly_limit: int = Field(default=0, description="MCP API weekly limit")
-    rest_daily_limit: int = Field(default=0, description="REST API daily limit")
-    rest_weekly_limit: int = Field(default=0, description="REST API weekly limit")
-    public_daily_limit: int = Field(default=0, description="Public REST API daily limit")
-    public_weekly_limit: int = Field(default=0, description="Public REST API weekly limit")
+    mcp_calls_per_day: int = Field(default=0, description="MCP API daily limit")
+    mcp_calls_per_week: int = Field(default=0, description="MCP API weekly limit")
+    rest_calls_per_day: int = Field(default=0, description="REST API daily limit")
+    rest_calls_per_week: int = Field(default=0, description="REST API weekly limit")
+    public_calls_per_day: int = Field(default=0, description="Public REST API daily limit")
+    public_calls_per_week: int = Field(default=0, description="Public REST API weekly limit")
 
 
 class CurrentUsage(BaseModel):
@@ -323,8 +308,8 @@ async def get_current_usage(
             plan=PlanLimits(
                 plan_name=plan.plan_name,
                 memory_limit=plan.memory_limit,
-                daily_api_limit=plan.daily_api_limit,
-                weekly_api_limit=plan.weekly_api_limit,
+                daily_total_limit=plan.daily_api_limit,
+                weekly_total_limit=plan.weekly_api_limit,
             ),
             usage=CurrentUsage(
                 memory_count=memory_count,
