@@ -257,22 +257,25 @@ export function AdminSections({
     currentWorkspace?.current_user_role === "admin" ||
     currentWorkspace?.current_user_role === "owner";
 
+  // Hide entirely for non-admin, or when there's nothing to show
+  // (solo workspace with no context selected = both subsections would be empty)
+  const hasUserActivity = !!(selectedContextId && currentWorkspaceId);
   if (!isAdmin) return null;
 
   return (
     <Collapsible className="mb-6">
-      <CollapsibleTrigger className="flex items-center gap-2 w-full text-left py-3 px-1 hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-md transition-colors">
-        <ChevronDown className="h-5 w-5 text-gray-500 transition-transform -rotate-90 data-[state=open]:rotate-0" />
+      <CollapsibleTrigger className="group flex items-center gap-2 w-full text-left py-3 px-1 hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-md transition-colors">
+        <ChevronDown className="h-5 w-5 text-gray-500 transition-transform -rotate-90 group-data-[state=open]:rotate-0" />
         <Users className="h-5 w-5 text-gray-500" />
         <span className="text-lg font-semibold text-gray-900 dark:text-gray-100">
           {t("adminMemberActivity")}
         </span>
       </CollapsibleTrigger>
       <CollapsibleContent className="mt-4 space-y-6">
-        {selectedContextId && currentWorkspaceId && (
+        {hasUserActivity && (
           <UserActivitySection
-            selectedContextId={selectedContextId}
-            currentWorkspaceId={currentWorkspaceId}
+            selectedContextId={selectedContextId!}
+            currentWorkspaceId={currentWorkspaceId!}
           />
         )}
         <MemberUsageSection />
