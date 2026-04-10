@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useTranslations } from "next-intl";
-import { updateOAuth2Client, OAuth2Client } from "@/lib/api/oauth";
+import { updateOAuth2Client } from "@/lib/api/oauth";
+import type { OAuth2Client } from "@/lib/api/oauth";
 import { useToast } from "@/hooks/use-toast";
 import { X, Pencil } from "lucide-react";
 import {
@@ -103,11 +104,13 @@ export function EditOAuthClientDialog({
           return;
         }
       }
-      setError(
-        apiError?.message ||
-          (apiError?.details?.detail as string) ||
-          "Failed to update OAuth client",
-      );
+      const fallbackMessage =
+        typeof apiError?.message === "string"
+          ? apiError.message
+          : typeof apiError?.details?.detail === "string"
+            ? apiError.details.detail
+            : t("editFieldError");
+      setError(fallbackMessage);
     } finally {
       setSaving(false);
     }
@@ -197,6 +200,7 @@ export function EditOAuthClientDialog({
                     />
                     {redirectUris.length > 1 && (
                       <button
+                        type="button"
                         onClick={() => {
                           setRedirectUris(
                             redirectUris.filter((_, i) => i !== index),
@@ -204,6 +208,7 @@ export function EditOAuthClientDialog({
                         }}
                         className="p-2 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded"
                         title={t("removeUri")}
+                        aria-label={t("removeUri")}
                       >
                         <X className="w-4 h-4" />
                       </button>
