@@ -30,21 +30,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import {
   Settings,
   Save,
-  RotateCcw,
   AlertCircle,
   Info,
   Database,
@@ -55,7 +44,6 @@ import {
 import {
   getContextSearchConfig,
   updateContextSearchConfig,
-  resetContextSearchConfig,
   type ContextSearchConfig,
   type ContextSearchConfigUpdate,
 } from "@/lib/api/contexts";
@@ -127,7 +115,6 @@ export function SearchSettingsSection({
   const [error, setError] = useState<string | null>(null);
   const [externalKeys, setExternalKeys] = useState<ExternalAPIKey[]>([]);
   const [ollamaAvailable, setOllamaAvailable] = useState(false);
-  const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const { toast } = useToast();
   const { currentWorkspace } = useWorkspace();
 
@@ -225,25 +212,6 @@ export function SearchSettingsSection({
       setSaving(false);
     }
   }, [contextId, editedConfig, config, t, tCommon, toast, refreshConfig]);
-
-  const handleReset = useCallback(async () => {
-    if (!contextId) return;
-
-    try {
-      setError(null);
-      await resetContextSearchConfig(contextId);
-      toast({ title: tCommon("success"), description: t("configReset") });
-      await refreshConfig();
-    } catch (err: unknown) {
-      const errorMsg = getErrorMessage(err, t("errorReset"));
-      setError(errorMsg);
-      toast({
-        title: tCommon("error"),
-        description: errorMsg,
-        variant: "destructive",
-      });
-    }
-  }, [contextId, t, tCommon, toast, refreshConfig]);
 
   const handleWeightChange = (semantic: number) => {
     if (isNaN(semantic)) return;
@@ -353,18 +321,6 @@ export function SearchSettingsSection({
   return (
     <>
       <div className="space-y-6">
-        {/* Reset to Defaults — top-right, matching Overview's Refresh position */}
-        <div className="flex justify-end">
-          <Button
-            onClick={() => setResetDialogOpen(true)}
-            variant="outline"
-            size="sm"
-          >
-            <RotateCcw className="h-4 w-4 mr-2" />
-            {t("resetToDefaults")}
-          </Button>
-        </div>
-
         {error && (
           <Alert variant="destructive">
             <AlertCircle className="h-4 w-4" />
@@ -702,26 +658,6 @@ export function SearchSettingsSection({
           </CardContent>
         </Card>
       </div>
-
-      <AlertDialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t("resetToDefaults")}</AlertDialogTitle>
-            <AlertDialogDescription>{t("confirmReset")}</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                setResetDialogOpen(false);
-                handleReset();
-              }}
-            >
-              {t("resetToDefaults")}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
       {/* Sticky Save Bar — only rendered when dirty */}
       {isDirty && (

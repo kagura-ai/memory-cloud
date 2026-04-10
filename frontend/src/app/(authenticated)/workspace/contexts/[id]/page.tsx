@@ -20,7 +20,8 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import { useTabParam } from "@/hooks/useTabParam";
-import { getContext } from "@/lib/api/contexts";
+import { getContext, resetContextSearchConfig } from "@/lib/api/contexts";
+import { useToast } from "@/hooks/use-toast";
 import type { Context } from "@/lib/types/context";
 import { useMemoryContext } from "@/contexts/MemoryContextContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -31,6 +32,7 @@ import {
   ChevronRight,
   ArrowLeft,
   AlertCircle,
+  RotateCcw,
 } from "lucide-react";
 import { OverviewTabPanel } from "@/components/contexts/OverviewTabPanel";
 import { ConnectionsTabPanel } from "@/components/contexts/ConnectionsTabPanel";
@@ -45,10 +47,14 @@ export default function ContextDetailPage() {
   const { user } = useAuth();
   const { currentContext } = useMemoryContext();
 
+  const { toast } = useToast();
+  const tSearch = useTranslations("searchSettings");
+
   const [tab, setTab] = useTabParam("overview");
   const [context, setContext] = useState<Context | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [searchConfigKey, setSearchConfigKey] = useState(0);
 
   const fetchContext = useCallback(async () => {
     try {
@@ -71,6 +77,16 @@ export default function ContextDetailPage() {
     const title = context?.display_name || context?.name || t("title");
     document.title = `${title} - Kagura Memory Cloud`;
   }, [context, t]);
+
+  const handleResetSearchConfig = useCallback(async () => {
+    try {
+      await resetContextSearchConfig(contextId);
+      toast({ title: tSearch("configReset") });
+      setSearchConfigKey((k) => k + 1);
+    } catch {
+      toast({ title: tSearch("errorReset"), variant: "destructive" });
+    }
+  }, [contextId, toast, tSearch]);
 
   const handleContextUpdated = useCallback((updated: Context) => {
     setContext(updated);
@@ -182,13 +198,23 @@ export default function ContextDetailPage() {
         </TabsContent>
 
         <TabsContent value="settings">
+          <div className="flex justify-end mb-4">
+            <Button
+              onClick={handleResetSearchConfig}
+              variant="outline"
+              size="sm"
+            >
+              <RotateCcw className="h-4 w-4 mr-2" />
+              {tSearch("resetToDefaults")}
+            </Button>
+          </div>
           <SettingsTabPanel
             contextId={contextId}
             context={context}
             onContextUpdated={handleContextUpdated}
           />
           <Separator className="my-8" />
-          <SearchSettingsSection contextId={contextId} />
+          <SearchSettingsSection key={searchConfigKey} contextId={contextId} />
           <Separator className="my-8" />
           <ProtectionSection context={context} />
         </TabsContent>
