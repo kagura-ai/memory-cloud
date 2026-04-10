@@ -259,3 +259,4 @@ next-env.d.ts
 *.bak.*
 backend/=*
 backend/uv.lock
+.playwright-mcp/
