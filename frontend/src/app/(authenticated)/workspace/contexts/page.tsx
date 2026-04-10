@@ -1052,18 +1052,16 @@ export default function ContextsPage() {
                             <Settings2 className="h-4 w-4 mr-2" />
                             {t("connections")}
                           </DropdownMenuItem>
-                          {context.created_by === user?.id && (
-                            <DropdownMenuItem
-                              onClick={() =>
-                                router.push(
-                                  `/workspace/contexts/${context.id}?tab=settings`,
-                                )
-                              }
-                            >
-                              <Settings2 className="h-4 w-4 mr-2" />
-                              {tCommon("settings")}
-                            </DropdownMenuItem>
-                          )}
+                          <DropdownMenuItem
+                            onClick={() =>
+                              router.push(
+                                `/workspace/contexts/${context.id}?tab=settings`,
+                              )
+                            }
+                          >
+                            <Settings2 className="h-4 w-4 mr-2" />
+                            {tCommon("settings")}
+                          </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
                     </div>
