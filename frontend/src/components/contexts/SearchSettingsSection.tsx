@@ -353,6 +353,18 @@ export function SearchSettingsSection({
   return (
     <>
       <div className="space-y-6">
+        {/* Reset to Defaults — top-right, matching Overview's Refresh position */}
+        <div className="flex justify-end">
+          <Button
+            onClick={() => setResetDialogOpen(true)}
+            variant="outline"
+            size="sm"
+          >
+            <RotateCcw className="h-4 w-4 mr-2" />
+            {t("resetToDefaults")}
+          </Button>
+        </div>
+
         {error && (
           <Alert variant="destructive">
             <AlertCircle className="h-4 w-4" />
@@ -689,14 +701,6 @@ export function SearchSettingsSection({
             </div>
           </CardContent>
         </Card>
-
-        {/* Reset to Defaults */}
-        <div className="flex justify-start">
-          <Button onClick={() => setResetDialogOpen(true)} variant="outline">
-            <RotateCcw className="h-4 w-4 mr-2" />
-            {t("resetToDefaults")}
-          </Button>
-        </div>
       </div>
 
       <AlertDialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
