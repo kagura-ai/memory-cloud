@@ -1527,7 +1527,14 @@
     "hideSecretNow": "今すぐシークレットを非表示（再表示不可）",
     "createSuccess": "{provider}アプリが正常に作成されました",
     "deleteSuccess": "OAuthアプリが正常に削除されました",
-    "regenerateSuccess": "OAuthシークレットが正常に再生成されました"
+    "regenerateSuccess": "OAuthシークレットが正常に再生成されました",
+    "editOAuthTitle": "OAuthクライアントを編集",
+    "editOAuthDesc": "このOAuthアプリケーションのクライアント名とリダイレクトURIを更新します。",
+    "clientNameLabel": "クライアント名",
+    "saveChanges": "変更を保存",
+    "saving": "保存中...",
+    "editSuccess": "OAuthクライアントが正常に更新されました",
+    "editFieldError": "保存する前にエラーを修正してください。"
   },
   "systemSettings": {
     "title": "システム設定",

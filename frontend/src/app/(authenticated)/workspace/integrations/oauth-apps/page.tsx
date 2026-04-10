@@ -31,11 +31,13 @@ import {
   regenerateOAuth2ClientSecret,
   OAuth2Client,
 } from "@/lib/api/oauth";
+import { EditOAuthClientDialog } from "./EditOAuthClientDialog";
 import { hideOAuthClientSecret } from "@/lib/api/member-credentials";
 import {
   Copy,
   Check,
   EyeOff,
+  Pencil,
   RefreshCw,
   Trash2,
   AlertTriangle,
@@ -102,6 +104,10 @@ export default function CustomAppsPage() {
   } | null>(null);
   const [showDeleteOAuthDialog, setShowDeleteOAuthDialog] = useState(false);
   const [oauthToDelete, setOauthToDelete] = useState<string | null>(null);
+
+  // Edit dialog state
+  const [showEditDialog, setShowEditDialog] = useState(false);
+  const [oauthToEdit, setOauthToEdit] = useState<OAuth2Client | null>(null);
 
   // Track if component is mounted
   const isMountedRef = useRef(true);
@@ -539,6 +545,15 @@ export default function CustomAppsPage() {
                   {/* Actions */}
                   <div className="flex gap-2">
                     <ActionButton
+                      onClick={() => {
+                        setOauthToEdit(app);
+                        setShowEditDialog(true);
+                      }}
+                      icon={<Pencil className="w-4 h-4" />}
+                    >
+                      {tCommon("edit")}
+                    </ActionButton>
+                    <ActionButton
                       onClick={() =>
                         handleRegenerateOAuthClick(app.client_id, title)
                       }
@@ -749,6 +764,15 @@ export default function CustomAppsPage() {
                     {/* Actions */}
                     <div className="flex gap-2">
                       <ActionButton
+                        onClick={() => {
+                          setOauthToEdit(app);
+                          setShowEditDialog(true);
+                        }}
+                        icon={<Pencil className="w-4 h-4" />}
+                      >
+                        {tCommon("edit")}
+                      </ActionButton>
+                      <ActionButton
                         onClick={() =>
                           handleRegenerateOAuthClick(
                             app.client_id,
@@ -947,6 +971,14 @@ export default function CustomAppsPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Edit OAuth Client Dialog */}
+      <EditOAuthClientDialog
+        client={oauthToEdit}
+        open={showEditDialog}
+        onOpenChange={setShowEditDialog}
+        onSuccess={loadOAuthClients}
+      />
     </PageContainer>
   );
 }

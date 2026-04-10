@@ -1527,7 +1527,14 @@
     "hideSecretNow": "Hide secret now (cannot be shown again)",
     "createSuccess": "{provider} app created successfully",
     "deleteSuccess": "OAuth app deleted successfully",
-    "regenerateSuccess": "OAuth secret regenerated successfully"
+    "regenerateSuccess": "OAuth secret regenerated successfully",
+    "editOAuthTitle": "Edit OAuth Client",
+    "editOAuthDesc": "Update client name and redirect URIs for this OAuth application.",
+    "clientNameLabel": "Client Name",
+    "saveChanges": "Save Changes",
+    "saving": "Saving...",
+    "editSuccess": "OAuth client updated successfully",
+    "editFieldError": "Please fix the errors above before saving."
   },
   "systemSettings": {
     "title": "System Settings",
