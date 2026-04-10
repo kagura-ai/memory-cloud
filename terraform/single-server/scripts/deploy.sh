@@ -186,12 +186,17 @@ generate_caddyfile() {
         error "Caddyfile.tpl not found at $CADDYFILE_TPL"
     fi
 
-    # envsubst with explicit var list — only ${API_UPSTREAM} is replaced
+    # envsubst with explicit var list — only ${API_UPSTREAM} is replaced.
+    # Use tmp + cp (not mv) because Caddyfile is bind-mounted as a single
+    # file into the caddy container. mv changes the inode, so the container
+    # would keep seeing the old file. cp overwrites in-place, preserving
+    # the inode that Docker tracks.
     if ! API_UPSTREAM="$upstream" envsubst '${API_UPSTREAM}' < "$CADDYFILE_TPL" > "$CADDYFILE.tmp"; then
         rm -f "$CADDYFILE.tmp"
         error "envsubst failed — Caddyfile not updated"
     fi
-    mv "$CADDYFILE.tmp" "$CADDYFILE"
+    cp "$CADDYFILE.tmp" "$CADDYFILE"
+    rm -f "$CADDYFILE.tmp"
     log "  Caddyfile generated: upstream=$upstream"
 }
 
