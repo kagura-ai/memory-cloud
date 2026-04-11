@@ -17,9 +17,11 @@ import { APIKeysTabPanel } from "@/components/credentials/APIKeysTabPanel";
 import { OAuthAppsTabPanel } from "@/components/credentials/OAuthAppsTabPanel";
 import { ResourceTokensTabPanel } from "@/components/credentials/ResourceTokensTabPanel";
 
+const CREDENTIAL_TABS = ["api-keys", "oauth-apps", "resource-tokens"] as const;
+
 export default function CredentialsPage() {
   const t = useTranslations("credentials");
-  const [tab, setTab] = useTabParam("api-keys");
+  const [tab, setTab] = useTabParam("api-keys", "tab", CREDENTIAL_TABS);
 
   return (
     <PageContainer>
@@ -32,30 +34,33 @@ export default function CredentialsPage() {
 
       <CategoryTabs value={tab} onValueChange={setTab}>
         <CategoryTabsList>
-          <CategoryTabsTrigger value="api-keys">
+          <CategoryTabsTrigger value={CREDENTIAL_TABS[0]}>
             {t("tabs.apiKeys")}
           </CategoryTabsTrigger>
-          <CategoryTabsTrigger value="oauth-apps">
+          <CategoryTabsTrigger value={CREDENTIAL_TABS[1]}>
             {t("tabs.oauthApps")}
           </CategoryTabsTrigger>
-          <CategoryTabsTrigger value="resource-tokens">
+          <CategoryTabsTrigger value={CREDENTIAL_TABS[2]}>
             {t("tabs.resourceTokens")}
           </CategoryTabsTrigger>
         </CategoryTabsList>
 
-        <CategoryTabsContent value="api-keys" helpText={t("tabs.apiKeysHelp")}>
+        <CategoryTabsContent
+          value={CREDENTIAL_TABS[0]}
+          helpText={t("tabs.apiKeysHelp")}
+        >
           <APIKeysTabPanel />
         </CategoryTabsContent>
 
         <CategoryTabsContent
-          value="oauth-apps"
+          value={CREDENTIAL_TABS[1]}
           helpText={t("tabs.oauthAppsHelp")}
         >
           <OAuthAppsTabPanel />
         </CategoryTabsContent>
 
         <CategoryTabsContent
-          value="resource-tokens"
+          value={CREDENTIAL_TABS[2]}
           helpText={t("tabs.resourceTokensHelp")}
         >
           <ResourceTokensTabPanel />
