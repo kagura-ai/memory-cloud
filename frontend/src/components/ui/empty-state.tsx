@@ -1,6 +1,6 @@
-import { type ReactNode } from 'react';
-import { type LucideIcon } from 'lucide-react';
-import { Button } from '@/components/ui/button';
+import { type ReactNode } from "react";
+import { type LucideIcon } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
 interface EmptyStateProps {
   icon?: LucideIcon;
@@ -22,10 +22,10 @@ export function EmptyState({
   children,
 }: EmptyStateProps) {
   return (
-    <div className="flex min-h-[400px] flex-col items-center justify-center rounded-2xl border-2 border-dashed border-gray-300 bg-gray-50/50 p-12 text-center">
+    <div className="flex min-h-[400px] flex-col items-center justify-center rounded-2xl border-2 border-dashed border-gray-300 bg-gray-50/50 p-12 text-center dark:border-gray-700 dark:bg-gray-900/30">
       {/* Icon or Emoji */}
       {Icon ? (
-        <div className="mb-6 inline-flex rounded-full bg-gradient-to-br from-gray-100 to-gray-200 p-6 text-gray-400">
+        <div className="mb-6 inline-flex rounded-full bg-gradient-to-br from-gray-100 to-gray-200 p-6 text-gray-400 dark:from-gray-800 dark:to-gray-900 dark:text-gray-500">
           <Icon className="h-12 w-12" />
         </div>
       ) : emoji ? (
@@ -33,10 +33,14 @@ export function EmptyState({
       ) : null}
 
       {/* Title */}
-      <h3 className="mb-2 text-2xl font-bold text-gray-900">{title}</h3>
+      <h3 className="mb-2 text-2xl font-bold text-gray-900 dark:text-gray-100">
+        {title}
+      </h3>
 
       {/* Description */}
-      <p className="mb-6 max-w-md text-gray-600">{description}</p>
+      <p className="mb-6 max-w-md text-gray-600 dark:text-gray-400">
+        {description}
+      </p>
 
       {/* Action Button */}
       {actionLabel && onAction && (
