@@ -29,6 +29,7 @@ import { CreateCustomOAuthAppDialog } from "@/components/oauth/CreateCustomOAuth
 import { hideOAuthClientSecret } from "@/lib/api/member-credentials";
 import { Copy, Check, Plus, KeyRound } from "lucide-react";
 import { EmptyState } from "@/components/ui/empty-state";
+import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useToast } from "@/hooks/use-toast";
 import {
   AlertDialog,
@@ -65,7 +66,10 @@ export function OAuthAppsTabPanel() {
   const [oauthClients, setOauthClients] = useState<OAuth2Client[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [copiedItems, setCopiedItems] = useState<Record<string, boolean>>({});
+
+  // Per-key copy feedback (extracted into useCopyFeedback to fix the
+  // multi-target stale-state bug from the pre-batch single-shared-ref pattern).
+  const { isCopied, copyToTarget } = useCopyFeedback();
 
   // Custom OAuth App dialog
   const [showCustomDialog, setShowCustomDialog] = useState(false);
@@ -86,24 +90,14 @@ export function OAuthAppsTabPanel() {
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [oauthToEdit, setOauthToEdit] = useState<OAuth2Client | null>(null);
 
-  // Track if component is mounted
+  // Track if component is mounted (used by load handlers; copy feedback
+  // owns its own mount tracking inside the hook).
   const isMountedRef = useRef(true);
-  // Map of copy-target key → timer (see APIKeysTabPanel for the rationale —
-  // a single shared timer leaves stale "copied" indicators).
-  const copyTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>(
-    {},
-  );
 
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
-      // Read the ref directly at cleanup time — see APIKeysTabPanel for
-      // the rationale. Mutation-in-place is robust today, reassignment-
-      // safe tomorrow.
-      for (const t of Object.values(copyTimeoutsRef.current)) {
-        clearTimeout(t);
-      }
     };
   }, []);
 
@@ -151,20 +145,7 @@ export function OAuthAppsTabPanel() {
 
   const handleCopy = async (text: string, key: string) => {
     try {
-      await navigator.clipboard.writeText(text);
-      setCopiedItems((prev) => ({ ...prev, [key]: true }));
-
-      const existing = copyTimeoutsRef.current[key];
-      if (existing) {
-        clearTimeout(existing);
-      }
-
-      copyTimeoutsRef.current[key] = setTimeout(() => {
-        if (isMountedRef.current) {
-          setCopiedItems((prev) => ({ ...prev, [key]: false }));
-        }
-        delete copyTimeoutsRef.current[key];
-      }, 2000);
+      await copyToTarget(text, key);
     } catch (err: unknown) {
       // Clipboard write failure is a user-action failure — surface via
       // destructive toast per the 3-channel error rule.
@@ -298,7 +279,7 @@ export function OAuthAppsTabPanel() {
 
   const cardProps = {
     onCopy: handleCopy,
-    copiedItems,
+    isCopied,
     onHide: handleHideOAuthAppClick,
     onRegenerate: handleRegenerateOAuthClick,
     onDelete: handleDeleteOAuthClientClick,
@@ -335,7 +316,7 @@ export function OAuthAppsTabPanel() {
                 title={t("copyMcpUrl", { default: "Copy MCP URL" })}
                 aria-label={t("copyMcpUrl", { default: "Copy MCP URL" })}
               >
-                {copiedItems["workspace-mcp-url"] ? (
+                {isCopied("workspace-mcp-url") ? (
                   <Check className="w-4 h-4 text-green-600" />
                 ) : (
                   <Copy className="w-4 h-4" />
@@ -356,7 +337,7 @@ export function OAuthAppsTabPanel() {
                 title={t("copyMcpUrl", { default: "Copy MCP URL" })}
                 aria-label={t("copyMcpUrl", { default: "Copy MCP URL" })}
               >
-                {copiedItems["mcp-url"] ? (
+                {isCopied("mcp-url") ? (
                   <Check className="w-4 h-4 text-green-600" />
                 ) : (
                   <Copy className="w-4 h-4" />

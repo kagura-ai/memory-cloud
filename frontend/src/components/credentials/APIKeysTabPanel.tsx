@@ -38,6 +38,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { MaskedSecretField } from "@/components/common/MaskedSecretField";
 import { MCPConfigBlock } from "@/components/credentials/MCPConfigBlock";
 import { useAutoOpenOnFreshWindow } from "@/hooks/useAutoOpenOnFreshWindow";
+import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -85,7 +86,11 @@ export function APIKeysTabPanel() {
   );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [copiedItems, setCopiedItems] = useState<Record<string, boolean>>({});
+
+  // Per-key copy feedback (independent timers per copy target — extracted
+  // into useCopyFeedback to fix the multi-target stale-state bug from the
+  // pre-batch single-shared-ref pattern).
+  const { isCopied, copyToTarget } = useCopyFeedback();
 
   // Dialog states
   const [showCreateKeyDialog, setShowCreateKeyDialog] = useState(false);
@@ -100,29 +105,13 @@ export function APIKeysTabPanel() {
   const [deleting, setDeleting] = useState(false);
 
   // Track if component is mounted to prevent state updates after unmount
+  // (used by the load handlers; copy feedback owns its own mount tracking).
   const isMountedRef = useRef(true);
-  // Map of copy-target key → timer so multiple targets can show the
-  // "copied" check independently. A single shared timer would let a second
-  // copy cancel the first item's reset and leave it stuck in the checked
-  // state until page reload.
-  const copyTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>(
-    {},
-  );
 
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
-      // Read the ref's current value at cleanup time so we observe ALL
-      // pending timers, including those added between mount and unmount.
-      // Capturing `copyTimeoutsRef.current` into a local variable at mount
-      // time would freeze the *initial* object reference — fine today
-      // because the object is mutated in place, but a future refactor that
-      // reassigns `.current = newObject` would silently miss the new timers.
-      // Reading at cleanup time is robust to either pattern.
-      for (const t of Object.values(copyTimeoutsRef.current)) {
-        clearTimeout(t);
-      }
     };
   }, []);
 
@@ -179,23 +168,7 @@ export function APIKeysTabPanel() {
 
   const handleCopy = async (text: string, key: string) => {
     try {
-      await navigator.clipboard.writeText(text);
-      setCopiedItems((prev) => ({ ...prev, [key]: true }));
-
-      // Clear only this key's previous timeout — leave other keys' timers
-      // alone so simultaneous "copied" indicators on multiple buttons all
-      // reset on their own schedule.
-      const existing = copyTimeoutsRef.current[key];
-      if (existing) {
-        clearTimeout(existing);
-      }
-
-      copyTimeoutsRef.current[key] = setTimeout(() => {
-        if (isMountedRef.current) {
-          setCopiedItems((prev) => ({ ...prev, [key]: false }));
-        }
-        delete copyTimeoutsRef.current[key];
-      }, 2000);
+      await copyToTarget(text, key);
     } catch (err: unknown) {
       // Clipboard write failure is a user-action failure (the user clicked
       // a Copy button) — surface via destructive toast per the 3-channel
@@ -358,7 +331,7 @@ export function APIKeysTabPanel() {
                   title={t("copyMcpUrl")}
                   aria-label={t("copyMcpUrl")}
                 >
-                  {copiedItems["mcp-url"] ? (
+                  {isCopied("mcp-url") ? (
                     <Check className="w-3.5 h-3.5 text-green-600" />
                   ) : (
                     <Copy className="w-3.5 h-3.5" />

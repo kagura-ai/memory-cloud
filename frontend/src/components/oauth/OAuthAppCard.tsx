@@ -23,9 +23,10 @@ import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 
 interface OAuthAppCardProps {
   app: OAuth2Client;
-  copyKey: string; // prefix for copiedItems keys, e.g. "claude", "chatgpt", "custom-{client_id}"
+  copyKey: string; // prefix for copy-feedback keys, e.g. "claude", "chatgpt", "custom-{client_id}"
   onCopy: (text: string, key: string) => void;
-  copiedItems: Record<string, boolean>;
+  /** Returns true while the given key is in the "just copied" feedback window. */
+  isCopied: (key: string) => boolean;
   onHide: (clientId: string) => void;
   onRegenerate: (clientId: string, provider: string) => void;
   onDelete: (clientId: string) => void;
@@ -38,7 +39,7 @@ export function OAuthAppCard({
   app,
   copyKey,
   onCopy,
-  copiedItems,
+  isCopied,
   onHide,
   onRegenerate,
   onDelete,
@@ -67,7 +68,7 @@ export function OAuthAppCard({
             className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
             title={t("copyClientId")}
           >
-            {copiedItems[`${copyKey}-id`] ? (
+            {isCopied(`${copyKey}-id`) ? (
               <Check className="w-4 h-4 text-green-600" />
             ) : (
               <Copy className="w-4 h-4" />
@@ -133,7 +134,7 @@ export function OAuthAppCard({
               className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
               title={t("copyClientSecret")}
             >
-              {copiedItems[`${copyKey}-secret`] ? (
+              {isCopied(`${copyKey}-secret`) ? (
                 <Check className="w-4 h-4 text-green-600" />
               ) : (
                 <Copy className="w-4 h-4" />
