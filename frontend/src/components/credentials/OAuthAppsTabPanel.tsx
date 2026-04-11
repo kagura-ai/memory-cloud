@@ -109,7 +109,10 @@ export function OAuthAppsTabPanel() {
         setOauthClients(clients);
       }
     } catch (err: unknown) {
-      console.error("Failed to load OAuth clients:", err);
+      if (process.env.NODE_ENV === "development") {
+        // eslint-disable-next-line no-console
+        console.error("Failed to load OAuth clients:", err);
+      }
       if (isMountedRef.current) {
         setError(err instanceof Error ? err.message : String(err));
       }
@@ -153,8 +156,14 @@ export function OAuthAppsTabPanel() {
           setCopiedItems((prev) => ({ ...prev, [key]: false }));
         }
       }, 2000);
-    } catch (err) {
-      console.error("Failed to copy:", err);
+    } catch (err: unknown) {
+      // Clipboard write failure is a user-action failure — surface via
+      // destructive toast per the 3-channel error rule.
+      toast({
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
     }
   };
 

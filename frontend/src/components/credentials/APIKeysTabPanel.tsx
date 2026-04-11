@@ -129,7 +129,10 @@ export function APIKeysTabPanel() {
         setCredentials(data);
       }
     } catch (err: unknown) {
-      console.error("Failed to load credentials:", err);
+      if (process.env.NODE_ENV === "development") {
+        // eslint-disable-next-line no-console
+        console.error("Failed to load credentials:", err);
+      }
       if (isMountedRef.current) {
         setError((err as Error).message);
       }
@@ -187,8 +190,15 @@ export function APIKeysTabPanel() {
           setCopiedItems((prev) => ({ ...prev, [key]: false }));
         }
       }, 2000);
-    } catch (err) {
-      console.error("Failed to copy:", err);
+    } catch (err: unknown) {
+      // Clipboard write failure is a user-action failure (the user clicked
+      // a Copy button) — surface via destructive toast per the 3-channel
+      // error rule, not via silent console.error.
+      toast({
+        title: tCommon("error"),
+        description: (err as Error).message,
+        variant: "destructive",
+      });
     }
   };
 
