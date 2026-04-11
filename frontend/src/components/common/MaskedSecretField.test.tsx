@@ -13,8 +13,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, act } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { render, screen, act, fireEvent } from "@testing-library/react";
 import { MaskedSecretField } from "./MaskedSecretField";
 
 const mockToast = vi.fn();
@@ -78,9 +77,8 @@ describe("MaskedSecretField", () => {
 
   describe("Show toggle", () => {
     it("clicking Show reveals the live value", async () => {
-      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
       render(<MaskedSecretField {...baseProps} value="kag_real_secret" />);
-      await user.click(screen.getByRole("button", { name: "Show key" }));
+      fireEvent.click(screen.getByRole("button", { name: "Show key" }));
 
       expect(screen.getByText("Bearer kag_real_secret")).toBeInTheDocument();
       expect(
@@ -89,19 +87,17 @@ describe("MaskedSecretField", () => {
     });
 
     it("after Show, the toggle button becomes Hide and aria-pressed=true", async () => {
-      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
       render(<MaskedSecretField {...baseProps} value="kag_real_secret" />);
-      await user.click(screen.getByRole("button", { name: "Show key" }));
+      fireEvent.click(screen.getByRole("button", { name: "Show key" }));
 
       const hideBtn = screen.getByRole("button", { name: "Hide key" });
       expect(hideBtn).toHaveAttribute("aria-pressed", "true");
     });
 
-    it("clicking Hide returns to masked state", async () => {
-      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    it("clicking Hide returns to masked state", () => {
       render(<MaskedSecretField {...baseProps} value="kag_real_secret" />);
-      await user.click(screen.getByRole("button", { name: "Show key" }));
-      await user.click(screen.getByRole("button", { name: "Hide key" }));
+      fireEvent.click(screen.getByRole("button", { name: "Show key" }));
+      fireEvent.click(screen.getByRole("button", { name: "Hide key" }));
 
       expect(screen.getByText("Bearer sk-•••••••••••")).toBeInTheDocument();
       expect(screen.queryByText(/kag_real_secret/)).not.toBeInTheDocument();
@@ -110,9 +106,8 @@ describe("MaskedSecretField", () => {
 
   describe("Copy action", () => {
     it("writes the live value to clipboard (not the mask)", async () => {
-      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
       render(<MaskedSecretField {...baseProps} value="kag_real_secret" />);
-      await user.click(
+      fireEvent.click(
         screen.getByRole("button", { name: "Copy to clipboard" }),
       );
 
@@ -120,11 +115,13 @@ describe("MaskedSecretField", () => {
     });
 
     it("fires the consumer-supplied success toast", async () => {
-      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
       render(<MaskedSecretField {...baseProps} value="kag_real_secret" />);
-      await user.click(
+      fireEvent.click(
         screen.getByRole("button", { name: "Copy to clipboard" }),
       );
+      await act(async () => {
+        await Promise.resolve();
+      });
 
       expect(mockToast).toHaveBeenCalledWith({
         title: "Config copied",
@@ -132,11 +129,10 @@ describe("MaskedSecretField", () => {
       });
     });
 
-    it("Copy works regardless of revealed state (mask still on screen)", async () => {
-      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    it("Copy works regardless of revealed state (mask still on screen)", () => {
       render(<MaskedSecretField {...baseProps} value="kag_real_secret" />);
       // Do NOT click Show — copy should still write the live value
-      await user.click(
+      fireEvent.click(
         screen.getByRole("button", { name: "Copy to clipboard" }),
       );
 
@@ -147,11 +143,13 @@ describe("MaskedSecretField", () => {
 
     it("clipboard write failures fire a destructive toast", async () => {
       mockWriteText.mockRejectedValueOnce(new Error("clipboard denied"));
-      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
       render(<MaskedSecretField {...baseProps} value="kag_real_secret" />);
-      await user.click(
+      fireEvent.click(
         screen.getByRole("button", { name: "Copy to clipboard" }),
       );
+      await act(async () => {
+        await Promise.resolve();
+      });
 
       expect(mockToast).toHaveBeenCalledWith({
         title: "Config copied",
@@ -177,13 +175,12 @@ describe("MaskedSecretField", () => {
   });
 
   describe("visible→hidden transition (regression)", () => {
-    it("force-hides any revealed state when value transitions to null", async () => {
-      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    it("force-hides any revealed state when value transitions to null", () => {
       const { rerender } = render(
         <MaskedSecretField {...baseProps} value="kag_real_secret" />,
       );
       // Reveal first
-      await user.click(screen.getByRole("button", { name: "Show key" }));
+      fireEvent.click(screen.getByRole("button", { name: "Show key" }));
       expect(screen.getByText("Bearer kag_real_secret")).toBeInTheDocument();
 
       // Simulate the visibility window expiring (value becomes null)
@@ -200,11 +197,13 @@ describe("MaskedSecretField", () => {
 
   describe("clipboard auto-clear", () => {
     it("clears clipboard 60s after a copy by default", async () => {
-      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
       render(<MaskedSecretField {...baseProps} value="kag_real_secret" />);
-      await user.click(
+      fireEvent.click(
         screen.getByRole("button", { name: "Copy to clipboard" }),
       );
+      await act(async () => {
+        await Promise.resolve();
+      });
 
       expect(mockWriteText).toHaveBeenCalledTimes(1);
 
