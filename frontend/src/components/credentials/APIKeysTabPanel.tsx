@@ -98,6 +98,12 @@ export function APIKeysTabPanel() {
   const [regenerating, setRegenerating] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
+  // MCP Setup Guide collapsible state. Controlled (not defaultOpen) so we can
+  // auto-open whenever a fresh visibility window starts — defaultOpen would
+  // be read once on mount before credentials load and never re-evaluated.
+  const [setupGuideOpen, setSetupGuideOpen] = useState(false);
+  const prevVisibilityExpiresAtRef = useRef<string | null>(null);
+
   // Track if component is mounted to prevent state updates after unmount
   const isMountedRef = useRef(true);
   const copyTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
@@ -152,6 +158,19 @@ export function APIKeysTabPanel() {
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentWorkspaceId, userId]);
+
+  // Auto-open the MCP Setup Guide whenever a NEW visibility window starts
+  // (e.g. just after key creation or regenerate). Detect "new window" by
+  // tracking changes to visibility_expires_at — a fresh ISO timestamp means
+  // the backend issued a new window. We do NOT reopen on every load (that
+  // would override a deliberate user close), only when a new window starts.
+  useEffect(() => {
+    const expiresAt = credentials?.api_keys?.[0]?.visibility_expires_at ?? null;
+    if (expiresAt && expiresAt !== prevVisibilityExpiresAtRef.current) {
+      setSetupGuideOpen(true);
+    }
+    prevVisibilityExpiresAtRef.current = expiresAt;
+  }, [credentials]);
 
   const handleCopy = async (text: string, key: string) => {
     try {
@@ -292,10 +311,13 @@ export function APIKeysTabPanel() {
       {/* API Keys Section */}
       <Section title={t("apiKeysTitle")} description={t("apiKeysDesc")}>
         <div className="space-y-4">
-          {/* MCP Setup Guide (Collapsible) — auto-opens when a live API key is in the visibility window */}
+          {/* MCP Setup Guide (Collapsible) — controlled state so the
+              auto-open useEffect can react to fresh visibility windows
+              after credentials load asynchronously. */}
           <Collapsible
             className="border border-blue-200 dark:border-blue-800 rounded-lg"
-            defaultOpen={apiKeys[0]?.is_visible ?? false}
+            open={setupGuideOpen}
+            onOpenChange={setSetupGuideOpen}
           >
             <CollapsibleTrigger className="w-full text-left cursor-pointer px-4 py-3 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded-lg font-medium text-blue-900 dark:text-blue-100 text-sm">
               📖 {t("mcpSetupGuide")}
