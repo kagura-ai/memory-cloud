@@ -39,6 +39,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
 
 // Auto-refresh interval: 5 minutes (refresh before 10-minute visibility expiry)
 const OAUTH_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
@@ -304,36 +305,44 @@ export function OAuthAppsTabPanel() {
               <code className="flex-1 bg-blue-50 dark:bg-blue-900/30 px-4 py-3 rounded border border-blue-200 dark:border-blue-800 text-sm font-mono text-blue-800 dark:text-blue-200">
                 {workspaceScopedMcpUrl}
               </code>
-              <button
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
                 onClick={() =>
                   handleCopy(workspaceScopedMcpUrl, "workspace-mcp-url")
                 }
-                className="p-3 text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-800 rounded transition-colors"
+                className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-800"
                 title={t("copyMcpUrl", { default: "Copy MCP URL" })}
+                aria-label={t("copyMcpUrl", { default: "Copy MCP URL" })}
               >
                 {copiedItems["workspace-mcp-url"] ? (
                   <Check className="w-4 h-4 text-green-600" />
                 ) : (
                   <Copy className="w-4 h-4" />
                 )}
-              </button>
+              </Button>
             </div>
           ) : (
             <div className="flex items-center gap-2">
               <code className="flex-1 bg-blue-50 dark:bg-blue-900/30 px-4 py-3 rounded border border-blue-200 dark:border-blue-800 text-sm font-mono text-blue-800 dark:text-blue-200">
                 {mcpBaseUrl}
               </code>
-              <button
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
                 onClick={() => handleCopy(mcpBaseUrl, "mcp-url")}
-                className="p-3 text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-800 rounded transition-colors"
+                className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-800"
                 title={t("copyMcpUrl", { default: "Copy MCP URL" })}
+                aria-label={t("copyMcpUrl", { default: "Copy MCP URL" })}
               >
                 {copiedItems["mcp-url"] ? (
                   <Check className="w-4 h-4 text-green-600" />
                 ) : (
                   <Copy className="w-4 h-4" />
                 )}
-              </button>
+              </Button>
             </div>
           )}
         </div>

@@ -15,6 +15,12 @@ import { Section } from "@/components/common/Section";
 import { LoadingState } from "@/components/common/LoadingState";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import {
   listResourceTokens,
@@ -301,11 +307,11 @@ export function ResourceTokensTabPanel() {
         {/* Usage Guide */}
         {tokens.length > 0 && (
           <Section>
-            <details className="border border-blue-200 dark:border-blue-800 rounded-lg">
-              <summary className="cursor-pointer px-4 py-3 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded-lg font-medium text-blue-900 dark:text-blue-100 text-sm">
+            <Collapsible className="border border-blue-200 dark:border-blue-800 rounded-lg">
+              <CollapsibleTrigger className="w-full text-left cursor-pointer px-4 py-3 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded-lg font-medium text-blue-900 dark:text-blue-100 text-sm">
                 {t("guideTitle")}
-              </summary>
-              <div className="p-4 bg-blue-50 dark:bg-blue-900/20 space-y-4">
+              </CollapsibleTrigger>
+              <CollapsibleContent className="p-4 bg-blue-50 dark:bg-blue-900/20 space-y-4">
                 <div>
                   <p className="font-semibold text-gray-900 dark:text-gray-100 mb-2 text-sm">
                     {t("guide.dataManagementTitle")}
@@ -472,8 +478,8 @@ export function ResourceTokensTabPanel() {
                     </div>
                   </div>
                 </div>
-              </div>
-            </details>
+              </CollapsibleContent>
+            </Collapsible>
           </Section>
         )}
 
@@ -550,12 +556,16 @@ export function ResourceTokensTabPanel() {
 
           <div className="flex items-center justify-between mb-6">
             <div className="flex items-center gap-2">
-              <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400 cursor-pointer">
-                <input
-                  type="checkbox"
+              <label
+                htmlFor="show-revoked-tokens"
+                className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400 cursor-pointer"
+              >
+                <Checkbox
+                  id="show-revoked-tokens"
                   checked={showRevoked}
-                  onChange={(e) => setShowRevoked(e.target.checked)}
-                  className="rounded"
+                  onCheckedChange={(checked) =>
+                    setShowRevoked(checked === true)
+                  }
                 />
                 {t("showRevokedTokens")}
               </label>
