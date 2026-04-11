@@ -2468,6 +2468,7 @@
       "title": "リソーストークンを取り消しますか？",
       "description": "リソース",
       "warning": "この操作は元に戻せません。このトークンを使用したすべてのAPIリクエストは直ちに拒否されます。",
+      "quotaFreed": "{quota} events/hour のクォータが解放されます。",
       "cancel": "キャンセル",
       "revoke": "トークンを取り消す",
       "revoking": "取り消し中..."

@@ -744,22 +744,19 @@ export function ResourceTokensTabPanel() {
                 <strong className="font-semibold">
                   {tokenToRevoke?.resource_id}
                 </strong>
-                ?
-                {tokenToRevoke && (
-                  <div className="p-2 bg-blue-50 dark:bg-blue-900/20 rounded text-sm mt-2 mb-2">
-                    <p className="text-blue-900 dark:text-blue-100">
-                      💡 This will free up{" "}
-                      <strong>
-                        {tokenToRevoke.quota_events_per_hour.toLocaleString()}{" "}
-                        {t("eventsPerHour")}
-                      </strong>{" "}
-                      quota.
-                    </p>
-                  </div>
-                )}
-                {t("revokeDialog.warning")}
+                ? {t("revokeDialog.warning")}
               </AlertDialogDescription>
             </AlertDialogHeader>
+            {tokenToRevoke && (
+              <div className="p-2 bg-blue-50 dark:bg-blue-900/20 rounded text-sm mt-2 mb-2">
+                <p className="text-blue-900 dark:text-blue-100">
+                  💡{" "}
+                  {t("revokeDialog.quotaFreed", {
+                    quota: tokenToRevoke.quota_events_per_hour.toLocaleString(),
+                  })}
+                </p>
+              </div>
+            )}
             <AlertDialogFooter>
               <AlertDialogCancel disabled={revoking}>
                 {t("revokeDialog.cancel")}
