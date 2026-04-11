@@ -79,8 +79,10 @@ export function useTabParam(
   // This keeps the URL in sync with the rendered tab so external selectors
   // (sidebar isActive, deep links, browser bookmarks) work without having to
   // know the page's default tab. Invalid values (raw not in allowedValues)
-  // are intentionally NOT auto-promoted — the dev warn fires once and the
-  // URL is corrected on the next user interaction, so forensic info is kept.
+  // are intentionally NOT auto-promoted — the URL is corrected on the next
+  // user interaction, preserving forensic info. The dev warn in resolveTabValue
+  // will re-fire on each render until the URL is corrected, by design: a
+  // persistent warning is more visible to developers than a one-shot.
   useEffect(() => {
     if (raw === null) {
       setValue(defaultValue);
@@ -113,7 +115,7 @@ export function resolveTabValue(
   if (process.env.NODE_ENV === "development") {
     // eslint-disable-next-line no-console
     console.warn(
-      `[useTabParam] Unknown value "${raw}" for ?${paramName}=; ` +
+      `[useTabParam] Unknown ${paramName} value "${raw}"; ` +
         `falling back to "${defaultValue}". Allowed: [${allowedValues.join(", ")}]`,
     );
   }

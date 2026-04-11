@@ -1475,7 +1475,7 @@
     "featureGuide": {
       "title": "認証方法の選び方",
       "overview": "このページではすべての認証情報を一元管理できます。各タブは異なる連携方法に対応しています。",
-      "choosingMethod": "プログラムからのアクセスにはAPIキー（Claude Code、Python SDK）、デスクトップ/Webクライアントには OAuthアプリ（Claude Desktop、ChatGPT）、コンテキストの公開共有にはリソーストークンを使用してください。"
+      "choosingMethod": "プログラムからのアクセスにはAPIキー（Claude Code、Python SDK）、デスクトップ/WebクライアントにはOAuthアプリ（Claude Desktop、ChatGPT）、コンテキストの公開共有にはリソーストークンを使用してください。"
     },
     "tabs": {
       "apiKeys": "APIキー",
