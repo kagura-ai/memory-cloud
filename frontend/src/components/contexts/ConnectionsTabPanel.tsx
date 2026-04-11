@@ -15,6 +15,17 @@ import type { GraphData, GraphStatsResponse } from "@/lib/types/graph";
 import { getMemoryTypeColor } from "@/lib/types/graph";
 import { Brain, GitBranch, Activity, TrendingUp } from "lucide-react";
 import { KpiCard } from "@/components/ui/kpi-card";
+import { TableLoadingState } from "@/components/common/LoadingState";
+import { ErrorBanner } from "@/components/common/ErrorBanner";
+import { EmptyState } from "@/components/ui/empty-state";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 
 interface ConnectionsTabPanelProps {
   contextId: string;
@@ -60,19 +71,11 @@ export function ConnectionsTabPanel({ contextId }: ConnectionsTabPanelProps) {
   const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-brand-green-200 border-t-brand-green-600" />
-      </div>
-    );
+    return <TableLoadingState rows={5} />;
   }
 
   if (error) {
-    return (
-      <div className="p-4 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 rounded-lg">
-        {error}
-      </div>
-    );
+    return <ErrorBanner error={error} />;
   }
 
   return (
@@ -135,34 +138,31 @@ export function ConnectionsTabPanel({ contextId }: ConnectionsTabPanelProps) {
           <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
             {t("graphEdgeList", { default: "Edges" })} ({edges.length})
           </h3>
-          <div className="overflow-x-auto border border-gray-200 dark:border-gray-700 rounded-lg">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
-                  <th className="px-4 py-2 text-left font-medium text-gray-600 dark:text-gray-300">
-                    Source
-                  </th>
-                  <th className="px-4 py-2 text-left font-medium text-gray-600 dark:text-gray-300">
-                    Target
-                  </th>
-                  <th className="px-4 py-2 text-center font-medium text-gray-600 dark:text-gray-300">
-                    Weight
-                  </th>
-                  <th className="px-4 py-2 text-center font-medium text-gray-600 dark:text-gray-300">
-                    Type
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
+          <div className="rounded-lg border border-slate-200 dark:border-slate-800">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>
+                    {t("graphSource", { default: "Source" })}
+                  </TableHead>
+                  <TableHead>
+                    {t("graphTarget", { default: "Target" })}
+                  </TableHead>
+                  <TableHead className="text-center">
+                    {t("graphWeight", { default: "Weight" })}
+                  </TableHead>
+                  <TableHead className="text-center">
+                    {t("graphType", { default: "Type" })}
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {edges.map((edge, i) => {
                   const srcNode = nodeById.get(edge.source);
                   const tgtNode = nodeById.get(edge.target);
                   return (
-                    <tr
-                      key={i}
-                      className="border-b border-gray-100 dark:border-gray-800"
-                    >
-                      <td className="px-4 py-2">
+                    <TableRow key={i}>
+                      <TableCell>
                         <div className="flex items-center gap-2">
                           {srcNode && (
                             <span
@@ -178,8 +178,8 @@ export function ConnectionsTabPanel({ contextId }: ConnectionsTabPanelProps) {
                             {srcNode?.summary || edge.source.slice(0, 8)}
                           </span>
                         </div>
-                      </td>
-                      <td className="px-4 py-2">
+                      </TableCell>
+                      <TableCell>
                         <div className="flex items-center gap-2">
                           {tgtNode && (
                             <span
@@ -195,8 +195,8 @@ export function ConnectionsTabPanel({ contextId }: ConnectionsTabPanelProps) {
                             {tgtNode?.summary || edge.target.slice(0, 8)}
                           </span>
                         </div>
-                      </td>
-                      <td className="px-4 py-2 text-center">
+                      </TableCell>
+                      <TableCell className="text-center">
                         <div className="flex items-center justify-center gap-2">
                           <div className="w-16 bg-gray-200 dark:bg-gray-700 rounded-full h-1.5">
                             <div
@@ -210,29 +210,27 @@ export function ConnectionsTabPanel({ contextId }: ConnectionsTabPanelProps) {
                             {edge.weight.toFixed(4)}
                           </span>
                         </div>
-                      </td>
-                      <td className="px-4 py-2 text-center">
+                      </TableCell>
+                      <TableCell className="text-center">
                         <span className="text-xs text-gray-500 dark:text-gray-400">
                           {edge.type.replace("_", " ")}
                         </span>
-                      </td>
-                    </tr>
+                      </TableCell>
+                    </TableRow>
                   );
                 })}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
           </div>
         </div>
       ) : (
-        <div className="text-center py-12 text-gray-500 dark:text-gray-400">
-          <Brain className="h-12 w-12 mx-auto mb-3 opacity-30" />
-          <p>
-            {t("graphEmpty", {
-              default:
-                "No neural edges yet. Use recall to build connections between memories.",
-            })}
-          </p>
-        </div>
+        <EmptyState
+          icon={Brain}
+          title={t("graphEmptyTitle", { default: "No neural edges yet" })}
+          description={t("graphEmpty", {
+            default: "Use recall to build connections between memories.",
+          })}
+        />
       )}
     </div>
   );
