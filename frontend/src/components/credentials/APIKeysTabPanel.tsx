@@ -35,6 +35,7 @@ import {
   Key,
 } from "lucide-react";
 import { EmptyState } from "@/components/ui/empty-state";
+import { MaskedSecretField } from "@/components/common/MaskedSecretField";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -442,28 +443,17 @@ export function APIKeysTabPanel() {
                 {apiKey.is_visible && apiKey.plaintext_key ? (
                   <div className="bg-green-50 dark:bg-green-900/20 p-3 rounded border border-green-200 dark:border-green-800">
                     <div className="flex items-center gap-2">
-                      <code className="flex-1 bg-white dark:bg-gray-900 px-3 py-2 rounded border border-gray-300 dark:border-gray-600 text-sm font-mono">
-                        {apiKey.plaintext_key}
-                      </code>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        onClick={() =>
-                          handleCopy(
-                            apiKey.plaintext_key!,
-                            `api-key-${apiKey.id}`,
-                          )
-                        }
-                        title={t("copyToClipboard")}
-                        aria-label={t("copyToClipboard")}
-                      >
-                        {copiedItems[`api-key-${apiKey.id}`] ? (
-                          <Check className="w-4 h-4 text-green-600" />
-                        ) : (
-                          <Copy className="w-4 h-4" />
-                        )}
-                      </Button>
+                      <MaskedSecretField
+                        value={apiKey.plaintext_key}
+                        displayMask="kag_•••••••••••••••"
+                        copyToastTitle={t("keyCopied")}
+                        copyToastDescription={t("keyCopiedHint")}
+                        showLabel={t("showKey")}
+                        hideLabel={t("hideKey")}
+                        copyLabel={t("copyToClipboard")}
+                        className="flex-1"
+                        data-testid={`api-key-field-${apiKey.id}`}
+                      />
                       <Button
                         type="button"
                         variant="ghost"
