@@ -42,7 +42,7 @@ describe("useTabParam", () => {
     expect(result.current[0]).toBe("settings");
   });
 
-  it("setValue removes the param from the URL when called with defaultValue", () => {
+  it("setValue always includes the param in the URL (no clean-URL behavior)", () => {
     mockGet.mockReturnValue("settings");
     mockToString.mockReturnValue("tab=settings");
     const { result } = renderHook(() => useTabParam("overview"));
@@ -51,19 +51,50 @@ describe("useTabParam", () => {
       result.current[1]("overview");
     });
 
-    expect(mockReplace).toHaveBeenCalledWith("/test");
+    // Even when called with the defaultValue, the param stays explicit in the URL
+    // so sidebar isActive and deep links can detect the active tab via simple
+    // string comparison.
+    expect(mockReplace).toHaveBeenLastCalledWith("/test?tab=overview");
   });
 
   it("setValue preserves unrelated existing params", () => {
-    mockGet.mockReturnValue(null);
-    mockToString.mockReturnValue("foo=bar");
+    mockGet.mockReturnValue("settings");
+    mockToString.mockReturnValue("foo=bar&tab=settings");
     const { result } = renderHook(() => useTabParam("overview"));
 
     act(() => {
-      result.current[1]("settings");
+      result.current[1]("connections");
     });
 
-    expect(mockReplace).toHaveBeenCalledWith("/test?foo=bar&tab=settings");
+    expect(mockReplace).toHaveBeenLastCalledWith(
+      "/test?foo=bar&tab=connections",
+    );
+  });
+
+  it("promotes default tab to URL on mount when the param is absent", () => {
+    mockGet.mockReturnValue(null);
+    mockToString.mockReturnValue("");
+
+    renderHook(() => useTabParam("api-keys"));
+
+    // The mount effect should fire setValue("api-keys") so the canonical URL
+    // form (?tab=api-keys) appears immediately, even though the user landed
+    // on the bare /credentials path. This is what makes the sidebar highlight
+    // work without each menu having to know the default tab per page.
+    expect(mockReplace).toHaveBeenCalledWith("/test?tab=api-keys");
+  });
+
+  it("does NOT promote on mount when the URL already carries a valid tab value", () => {
+    mockGet.mockReturnValue("oauth-apps");
+    mockToString.mockReturnValue("tab=oauth-apps");
+
+    renderHook(() =>
+      useTabParam("api-keys", "tab", ["api-keys", "oauth-apps"]),
+    );
+
+    // Mount effect must NOT fire when raw is non-null — the URL is already
+    // canonical, so calling setValue would cause a redundant router.replace.
+    expect(mockReplace).not.toHaveBeenCalled();
   });
 
   it("falls back to defaultValue and warns when URL value is not in allowedValues", () => {

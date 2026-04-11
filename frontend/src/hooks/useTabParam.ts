@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 /**
@@ -10,6 +10,13 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
  * `<Tabs value={value} onValueChange={setValue}>`.
  *
  * Uses `router.replace` so tab switches don't pollute browser history.
+ *
+ * The URL always carries an explicit `?<paramName>=<value>` once mounted —
+ * if the URL is loaded without the param (e.g. `/credentials`), the hook
+ * promotes it to `/credentials?tab=<defaultValue>` on first render. This
+ * keeps the URL canonical so the sidebar (and any other URL-driven UI) can
+ * detect the active tab via simple string comparison without having to know
+ * each page's default value.
  *
  * If `allowedValues` is provided and non-empty, any URL value not in the
  * allowed set falls back to `defaultValue`. This prevents Radix Tabs from
@@ -62,16 +69,24 @@ export function useTabParam(
   const setValue = useCallback(
     (newValue: string) => {
       const params = new URLSearchParams(searchParams.toString());
-      if (newValue === defaultValue) {
-        params.delete(paramName);
-      } else {
-        params.set(paramName, newValue);
-      }
-      const qs = params.toString();
-      router.replace(qs ? `${pathname}?${qs}` : pathname);
+      params.set(paramName, newValue);
+      router.replace(`${pathname}?${params.toString()}`);
     },
-    [searchParams, pathname, router, defaultValue, paramName],
+    [searchParams, pathname, router, paramName],
   );
+
+  // Promote the canonical URL form on first mount when the param is missing.
+  // This keeps the URL in sync with the rendered tab so external selectors
+  // (sidebar isActive, deep links, browser bookmarks) work without having to
+  // know the page's default tab. Invalid values (raw not in allowedValues)
+  // are intentionally NOT auto-promoted — the dev warn fires once and the
+  // URL is corrected on the next user interaction, so forensic info is kept.
+  useEffect(() => {
+    if (raw === null) {
+      setValue(defaultValue);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return [value, setValue];
 }
