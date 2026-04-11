@@ -1483,7 +1483,8 @@
     "hideSecretNow": "Hide secret now (cannot be shown again)",
     "createSuccess": "API key created successfully",
     "deleteSuccess": "API key deleted successfully",
-    "regenerateSuccess": "API key regenerated successfully"
+    "regenerateSuccess": "API key regenerated successfully",
+    "errorCreateKey": "Failed to create API key. Please try again."
   },
   "credentials": {
     "title": "Credentials & Integrations",

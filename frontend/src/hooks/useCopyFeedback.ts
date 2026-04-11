@@ -106,7 +106,16 @@ export function useCopyFeedback(): UseCopyFeedbackReturn {
 
       copyTimeoutsRef.current[key] = setTimeout(() => {
         if (isMountedRef.current) {
-          setCopiedItems((prev) => ({ ...prev, [key]: false }));
+          // DELETE the key from state instead of setting it to false.
+          // Setting `false` would leave the key in the Record forever,
+          // which causes unbounded growth in panels with many distinct
+          // copy targets (e.g. lists with dynamic IDs). The Record now
+          // shrinks back to empty when no copy is "fresh".
+          setCopiedItems((prev) => {
+            if (!(key in prev)) return prev;
+            const { [key]: _removed, ...rest } = prev;
+            return rest;
+          });
         }
         delete copyTimeoutsRef.current[key];
       }, COPIED_FEEDBACK_MS);

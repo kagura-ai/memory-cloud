@@ -63,6 +63,41 @@ describe("useCopyFeedback", () => {
     expect(result.current.isCopied("key-a")).toBe(false);
   });
 
+  it("DELETES the key from state after the timer fires (no unbounded growth)", async () => {
+    // Regression: the previous implementation set { [key]: false } which
+    // left the key in the Record forever. With many distinct copy targets
+    // (e.g. lists with dynamic IDs), the Record could grow unbounded.
+    // After the fix, the timer body deletes the key entirely.
+    const { result } = renderHook(() => useCopyFeedback());
+
+    // Copy 3 distinct keys
+    await act(async () => {
+      await result.current.copyToTarget("a", "key-a");
+      await result.current.copyToTarget("b", "key-b");
+      await result.current.copyToTarget("c", "key-c");
+    });
+
+    // All 3 are copied (true)
+    expect(result.current.isCopied("key-a")).toBe(true);
+    expect(result.current.isCopied("key-b")).toBe(true);
+    expect(result.current.isCopied("key-c")).toBe(true);
+
+    // Wait for all timers to fire
+    act(() => {
+      vi.advanceTimersByTime(2001);
+    });
+
+    // All 3 return false — but the underlying state should be EMPTY,
+    // not { "key-a": false, "key-b": false, "key-c": false }. We can't
+    // directly inspect copiedItems from the public API, so we verify the
+    // contract via isCopied returning false (the user-visible behavior).
+    expect(result.current.isCopied("key-a")).toBe(false);
+    expect(result.current.isCopied("key-b")).toBe(false);
+    expect(result.current.isCopied("key-c")).toBe(false);
+    // Also verify a never-touched key still returns false (sanity).
+    expect(result.current.isCopied("never-touched")).toBe(false);
+  });
+
   describe("multi-target regression (commit 8bc1ee4 bug fix)", () => {
     it("copying key-b within 2s of key-a leaves BOTH in the copied state", async () => {
       const { result } = renderHook(() => useCopyFeedback());

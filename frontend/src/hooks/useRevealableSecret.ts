@@ -157,21 +157,41 @@ export function useRevealableSecret(
         autoClearTimerRef.current = setTimeout(() => {
           if (!isMountedRef.current) return;
           // Best-effort: silently swallow errors. Browser may reject the
-          // write because we are outside the user-initiated gesture window.
-          navigator.clipboard
-            .writeText("")
-            .then(() => {
+          // write because we are outside the user-initiated gesture window,
+          // AND some environments (older browsers, hardened security
+          // contexts, embedded webviews) may not expose `navigator.clipboard`
+          // at all or may throw SYNCHRONOUSLY when the property is accessed.
+          // Wrap the access in try/catch so a missing clipboard API never
+          // crashes the app — defense-in-depth code must not break the
+          // primary user flow.
+          try {
+            const clipboard = navigator.clipboard;
+            const writeText = clipboard?.writeText;
+            if (typeof writeText !== "function") {
               if (isMountedRef.current) {
                 setClipboardCleared(true);
               }
-            })
-            .catch(() => {
-              // Even on failure, mark as "attempted" so consumers can stop
-              // showing the "will clear in N seconds" hint.
-              if (isMountedRef.current) {
-                setClipboardCleared(true);
-              }
-            });
+              return;
+            }
+            writeText
+              .call(clipboard, "")
+              .then(() => {
+                if (isMountedRef.current) {
+                  setClipboardCleared(true);
+                }
+              })
+              .catch(() => {
+                // Even on failure, mark as "attempted" so consumers can stop
+                // showing the "will clear in N seconds" hint.
+                if (isMountedRef.current) {
+                  setClipboardCleared(true);
+                }
+              });
+          } catch {
+            if (isMountedRef.current) {
+              setClipboardCleared(true);
+            }
+          }
         }, autoClearMs);
       }
     },

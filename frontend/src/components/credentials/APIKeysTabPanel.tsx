@@ -284,10 +284,16 @@ export function APIKeysTabPanel() {
         description: t("createSuccess"),
       });
     } catch (err: unknown) {
+      // Use err.message when available; fall back to the i18n'd error
+      // string for non-Error rejections OR when err.message is empty.
+      // The previous fallback `String(err) || "Failed to create API key"`
+      // had a precedence bug: `String(err)` is always truthy ("undefined",
+      // "[object Object]", etc.), so the hardcoded English fallback was
+      // dead code AND it bypassed i18n.
       setCreateKeyError(
-        err instanceof Error
+        err instanceof Error && err.message.trim()
           ? err.message
-          : String(err) || "Failed to create API key",
+          : t("errorCreateKey"),
       );
     }
   };

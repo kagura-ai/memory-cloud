@@ -280,6 +280,54 @@ describe("useRevealableSecret", () => {
 
       expect(result.current.clipboardCleared).toBe(true);
     });
+
+    it("does not crash when navigator.clipboard is missing at clear time", async () => {
+      const { result } = renderHook(() => useRevealableSecret());
+      await act(async () => {
+        await result.current.copy("secret");
+      });
+
+      // Simulate an environment where the clipboard API disappears between
+      // the user-initiated copy and the auto-clear timer firing (e.g.
+      // hardened security context). The clear must NOT crash the app.
+      Object.defineProperty(navigator, "clipboard", {
+        value: undefined,
+        writable: true,
+        configurable: true,
+      });
+
+      expect(() => {
+        act(() => {
+          vi.advanceTimersByTime(60_001);
+        });
+      }).not.toThrow();
+
+      expect(result.current.clipboardCleared).toBe(true);
+    });
+
+    it("does not crash when accessing navigator.clipboard throws synchronously", async () => {
+      const { result } = renderHook(() => useRevealableSecret());
+      await act(async () => {
+        await result.current.copy("secret");
+      });
+
+      // Simulate a property accessor that throws (some hardened environments
+      // do this when clipboard access is denied at the policy layer).
+      Object.defineProperty(navigator, "clipboard", {
+        get() {
+          throw new Error("clipboard access denied");
+        },
+        configurable: true,
+      });
+
+      expect(() => {
+        act(() => {
+          vi.advanceTimersByTime(60_001);
+        });
+      }).not.toThrow();
+
+      expect(result.current.clipboardCleared).toBe(true);
+    });
   });
 
   describe("unmount cleanup", () => {

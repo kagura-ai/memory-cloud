@@ -1483,7 +1483,8 @@
     "hideSecretNow": "今すぐシークレットを非表示（再表示不可）",
     "createSuccess": "APIキーが正常に作成されました",
     "deleteSuccess": "APIキーが正常に削除されました",
-    "regenerateSuccess": "APIキーが正常に再生成されました"
+    "regenerateSuccess": "APIキーが正常に再生成されました",
+    "errorCreateKey": "APIキーの作成に失敗しました。もう一度お試しください。"
   },
   "credentials": {
     "title": "認証情報・連携",
@@ -2468,7 +2469,7 @@
       "title": "リソーストークンを取り消しますか？",
       "description": "リソース",
       "warning": "この操作は元に戻せません。このトークンを使用したすべてのAPIリクエストは直ちに拒否されます。",
-      "quotaFreed": "{quota} events/hour のクォータが解放されます。",
+      "quotaFreed": "{quota} イベント/時 のクォータが解放されます。",
       "cancel": "キャンセル",
       "revoke": "トークンを取り消す",
       "revoking": "取り消し中..."
