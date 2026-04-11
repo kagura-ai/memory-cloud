@@ -1438,7 +1438,16 @@
     "apiKeysDesc": "Claude Codeなどのクライアント用",
     "mcpSetupGuide": "MCPセットアップガイド",
     "mcpConfigTitle": "設定 (Claude Code, Cline など):",
-    "mcpConfigHint": "YOUR_API_KEYを以下の実際のAPIキーに置き換えてください。",
+    "mcpConfigHint": "APIキーが visibility window 内であれば、上記の設定は live キーが埋め込まれた状態でそのままコピーできます。",
+    "copyConfig": "設定をコピー",
+    "mcpConfigCopied": "設定をコピーしました",
+    "mcpConfigCopiedHint": "クリップボードは 60 秒後に消去されます。今すぐ貼り付けてください。",
+    "mcpConfigHiddenCopyDisabled": "動作する設定をコピーするにはキーを再生成してください",
+    "clients": {
+      "claudeCode": "Claude Code",
+      "cursor": "Cursor",
+      "chatgpt": "ChatGPT"
+    },
     "createApiKey": "APIキーを作成",
     "noApiKeys": "APIキーが設定されていません。上の「APIキーを作成」ボタンをクリックして開始してください。",
     "noKeysTitle": "APIキーがまだありません",

@@ -36,6 +36,7 @@ import {
 } from "lucide-react";
 import { EmptyState } from "@/components/ui/empty-state";
 import { MaskedSecretField } from "@/components/common/MaskedSecretField";
+import { MCPConfigBlock } from "@/components/credentials/MCPConfigBlock";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -291,8 +292,11 @@ export function APIKeysTabPanel() {
       {/* API Keys Section */}
       <Section title={t("apiKeysTitle")} description={t("apiKeysDesc")}>
         <div className="space-y-4">
-          {/* MCP Setup Guide (Collapsible) */}
-          <Collapsible className="border border-blue-200 dark:border-blue-800 rounded-lg">
+          {/* MCP Setup Guide (Collapsible) — auto-opens when a live API key is in the visibility window */}
+          <Collapsible
+            className="border border-blue-200 dark:border-blue-800 rounded-lg"
+            defaultOpen={apiKeys[0]?.is_visible ?? false}
+          >
             <CollapsibleTrigger className="w-full text-left cursor-pointer px-4 py-3 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded-lg font-medium text-blue-900 dark:text-blue-100 text-sm">
               📖 {t("mcpSetupGuide")}
             </CollapsibleTrigger>
@@ -329,22 +333,10 @@ export function APIKeysTabPanel() {
                 <p className="font-semibold text-gray-900 dark:text-gray-100 mb-2 text-sm">
                   {t("mcpConfigTitle")}
                 </p>
-                <pre className="bg-gray-900 text-gray-100 p-3 rounded overflow-x-auto text-xs">
-                  {`{
-  "mcpServers": {
-    "kagura-memory": {
-      "type": "http",
-      "url": "${workspaceScopedMcpUrl || mcpBaseUrl}",
-      "headers": {
-        "Authorization": "Bearer YOUR_API_KEY"
-      }
-    }
-  }
-}`}
-                </pre>
-                <p className="text-xs text-blue-700 dark:text-blue-300 mt-2">
-                  💡 {t("mcpConfigHint")}
-                </p>
+                <MCPConfigBlock
+                  apiKey={apiKeys[0] ?? null}
+                  mcpUrl={workspaceScopedMcpUrl || mcpBaseUrl}
+                />
               </div>
             </CollapsibleContent>
           </Collapsible>

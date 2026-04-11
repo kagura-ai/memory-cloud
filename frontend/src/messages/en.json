@@ -1438,7 +1438,16 @@
     "apiKeysDesc": "For Claude Code and other MCP clients",
     "mcpSetupGuide": "MCP Setup Guide",
     "mcpConfigTitle": "Configuration (Claude Code, Cline, etc.):",
-    "mcpConfigHint": "Replace YOUR_API_KEY with your actual API key from below.",
+    "mcpConfigHint": "While your API key is in the visibility window, the config above is ready to copy with the live key already embedded.",
+    "copyConfig": "Copy config",
+    "mcpConfigCopied": "Config copied",
+    "mcpConfigCopiedHint": "Clipboard clears in 60 seconds — paste it now.",
+    "mcpConfigHiddenCopyDisabled": "Regenerate the key to copy a working config",
+    "clients": {
+      "claudeCode": "Claude Code",
+      "cursor": "Cursor",
+      "chatgpt": "ChatGPT"
+    },
     "createApiKey": "Create API Key",
     "noApiKeys": "No API keys configured. Click \"Create API Key\" button above to get started.",
     "noKeysTitle": "No API keys yet",
