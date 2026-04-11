@@ -49,8 +49,20 @@ import { useEffect, useRef, useState } from "react";
 export function useAutoOpenOnFreshWindow(
   currentExpiresAt: string | null,
 ): readonly [boolean, (open: boolean) => void] {
-  const [isOpen, setIsOpen] = useState(false);
-  const prevExpiresAtRef = useRef<string | null>(null);
+  // Initialize state from the FIRST prop value so the very first paint
+  // already matches the documented semantics ("Initial render with a
+  // non-null timestamp → opens"). The previous implementation used
+  // useState(false) + useEffect(setOpen), which caused a one-paint
+  // "closed → open" flash whenever the hook was mounted with a
+  // non-null timestamp.
+  //
+  // The ref is initialized to the same first prop value so the effect's
+  // "only auto-open on a NEW timestamp" comparison stays correct on the
+  // first run (T !== T is false → no redundant setOpen). All other
+  // semantics (manual close respected, fresh-window reopen, null→string
+  // transition) are unaffected.
+  const [isOpen, setIsOpen] = useState(currentExpiresAt !== null);
+  const prevExpiresAtRef = useRef<string | null>(currentExpiresAt);
 
   useEffect(() => {
     if (currentExpiresAt && currentExpiresAt !== prevExpiresAtRef.current) {
