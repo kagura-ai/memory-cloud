@@ -37,6 +37,7 @@ import {
 import { EmptyState } from "@/components/ui/empty-state";
 import { MaskedSecretField } from "@/components/common/MaskedSecretField";
 import { MCPConfigBlock } from "@/components/credentials/MCPConfigBlock";
+import { useAutoOpenOnFreshWindow } from "@/hooks/useAutoOpenOnFreshWindow";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -97,12 +98,6 @@ export function APIKeysTabPanel() {
   const [selectedKeyId, setSelectedKeyId] = useState<number | null>(null);
   const [regenerating, setRegenerating] = useState(false);
   const [deleting, setDeleting] = useState(false);
-
-  // MCP Setup Guide collapsible state. Controlled (not defaultOpen) so we can
-  // auto-open whenever a fresh visibility window starts — defaultOpen would
-  // be read once on mount before credentials load and never re-evaluated.
-  const [setupGuideOpen, setSetupGuideOpen] = useState(false);
-  const prevVisibilityExpiresAtRef = useRef<string | null>(null);
 
   // Track if component is mounted to prevent state updates after unmount
   const isMountedRef = useRef(true);
@@ -176,17 +171,11 @@ export function APIKeysTabPanel() {
   }, [currentWorkspaceId, userId]);
 
   // Auto-open the MCP Setup Guide whenever a NEW visibility window starts
-  // (e.g. just after key creation or regenerate). Detect "new window" by
-  // tracking changes to visibility_expires_at — a fresh ISO timestamp means
-  // the backend issued a new window. We do NOT reopen on every load (that
-  // would override a deliberate user close), only when a new window starts.
-  useEffect(() => {
-    const expiresAt = credentials?.api_keys?.[0]?.visibility_expires_at ?? null;
-    if (expiresAt && expiresAt !== prevVisibilityExpiresAtRef.current) {
-      setSetupGuideOpen(true);
-    }
-    prevVisibilityExpiresAtRef.current = expiresAt;
-  }, [credentials]);
+  // (e.g. just after key creation or regenerate). The hook respects
+  // deliberate user closes — same-timestamp re-renders do NOT reopen.
+  const [setupGuideOpen, setSetupGuideOpen] = useAutoOpenOnFreshWindow(
+    credentials?.api_keys?.[0]?.visibility_expires_at ?? null,
+  );
 
   const handleCopy = async (text: string, key: string) => {
     try {
