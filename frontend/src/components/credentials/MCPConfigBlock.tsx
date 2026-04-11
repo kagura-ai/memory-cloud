@@ -150,21 +150,38 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
   const { toast } = useToast();
   const { revealed, toggle, copy, copied, hide } = useRevealableSecret();
 
-  // Track which client tab is active. Read localStorage on mount only —
-  // SSR-safe because the initial state computation runs in useState init,
-  // which executes on the client during hydration.
-  const [client, setClient] = useState<MCPClient>(DEFAULT_CLIENT);
-  useEffect(() => {
-    setClient(readStoredClient());
-  }, []);
+  // Track which client tab is active.
+  //
+  // SSR + localStorage handling: the lazy `useState` initializer runs on
+  // BOTH the server (where window is undefined → DEFAULT_CLIENT) and the
+  // client (where window exists → readStoredClient()). When the user has
+  // a non-default client stored, server and client produce different
+  // initial values, which is a deliberate hydration mismatch — React
+  // patches the DOM to the client value in a single commit, with no
+  // visible "claude-code → cursor" flash. The wrapping div opts out of
+  // the hydration warning that would otherwise fire (the mismatch is
+  // intentional and contained to this component).
+  //
+  // Alternatives considered:
+  //  - useState(DEFAULT_CLIENT) + useEffect(setStored): correct hydration
+  //    but causes a visible flash on every mount AND a redundant
+  //    setItem(DEFAULT_CLIENT) write before the stored value is applied.
+  //  - useSyncExternalStore: heavier, doesn't actually solve the
+  //    server/client mismatch any more cleanly than the lazy initializer.
+  //  - Render placeholder until hydrated: degrades the perceived load
+  //    time of the MCP setup guide.
+  const [client, setClient] = useState<MCPClient>(() => readStoredClient());
 
-  // Persist client choice on every change (after mount).
+  // Persist client choice on every change. Fires once on mount with the
+  // resolved initial value (idempotent if it equals the stored value, a
+  // first-write if no value was stored). Subsequent fires happen when
+  // the user clicks a different tab.
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
       window.localStorage.setItem(STORAGE_KEY, client);
     } catch {
-      // Same Safari private mode caveat as readStoredClient.
+      // Some browsers (Safari private mode) throw on localStorage access.
     }
   }, [client]);
 
@@ -237,7 +254,7 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
   };
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-3" suppressHydrationWarning>
       <Tabs value={client} onValueChange={(v) => setClient(v as MCPClient)}>
         <TabsList>
           <TabsTrigger value="claude-code">

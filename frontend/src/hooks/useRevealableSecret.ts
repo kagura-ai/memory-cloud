@@ -111,7 +111,28 @@ export function useRevealableSecret(
 
   const copy = useCallback(
     async (text: string): Promise<void> => {
-      // Cancel any pending feedback / auto-clear from a previous copy.
+      // Attempt the clipboard write FIRST, before touching any timer or
+      // state. If the write fails, the previous copy's lifecycle stays
+      // intact: the prior secret's auto-clear still fires on schedule,
+      // and the prior secret's "copied" feedback timer still resets the
+      // icon. A failed re-copy must NOT strand the previous secret in
+      // the clipboard with no auto-clear pending, and must NOT leave the
+      // copied state stuck true with no feedback timer to reset it.
+      //
+      // Re-throws on failure so the caller can show a destructive toast
+      // (clipboard write failure is a user-visible action failure, not
+      // a defense-in-depth background event).
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (err) {
+        throw err;
+      }
+
+      if (!isMountedRef.current) return;
+
+      // Write succeeded — now it's safe to cancel the previous copy's
+      // timers (the new state will replace the old) and start fresh ones
+      // for this copy.
       if (copiedFeedbackTimerRef.current) {
         clearTimeout(copiedFeedbackTimerRef.current);
         copiedFeedbackTimerRef.current = null;
@@ -120,17 +141,6 @@ export function useRevealableSecret(
         clearTimeout(autoClearTimerRef.current);
         autoClearTimerRef.current = null;
       }
-
-      try {
-        await navigator.clipboard.writeText(text);
-      } catch (err) {
-        // Re-throw so the caller can show an error toast — clipboard write
-        // failure is a user-visible action failure, not a defense-in-depth
-        // background event.
-        throw err;
-      }
-
-      if (!isMountedRef.current) return;
 
       setCopied(true);
       setClipboardCleared(false);

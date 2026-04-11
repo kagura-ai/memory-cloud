@@ -110,6 +110,69 @@ describe("useRevealableSecret", () => {
         );
       });
     });
+
+    it("preserves previous copy's copied state when a re-copy within the feedback window fails", async () => {
+      const { result } = renderHook(() => useRevealableSecret());
+
+      // First successful copy at t=0
+      await act(async () => {
+        await result.current.copy("first");
+      });
+      expect(result.current.copied).toBe(true);
+
+      // 1s later (within 2s feedback window), attempt a re-copy that fails
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      mockWriteText.mockRejectedValueOnce(new Error("denied"));
+      await act(async () => {
+        await expect(result.current.copy("second")).rejects.toThrow("denied");
+      });
+
+      // CRITICAL: copied must STILL be true — the first copy's feedback
+      // timer is intact, not cancelled. Pre-fix bug: cancellation happened
+      // BEFORE the failed write, leaving copied stuck true forever.
+      expect(result.current.copied).toBe(true);
+
+      // Original feedback timer should still fire at t=2.001s (1s more)
+      act(() => {
+        vi.advanceTimersByTime(1001);
+      });
+      expect(result.current.copied).toBe(false);
+    });
+
+    it("preserves previous copy's auto-clear timer when a re-copy fails", async () => {
+      const { result } = renderHook(() => useRevealableSecret());
+
+      // First successful copy at t=0
+      await act(async () => {
+        await result.current.copy("first");
+      });
+      expect(mockWriteText).toHaveBeenCalledTimes(1);
+
+      // 30s later, attempt a re-copy that fails
+      act(() => {
+        vi.advanceTimersByTime(30_000);
+      });
+      mockWriteText.mockRejectedValueOnce(new Error("denied"));
+      await act(async () => {
+        await expect(result.current.copy("second")).rejects.toThrow("denied");
+      });
+      // 2 calls: "first" (success) + "second" (rejected). NO timer cancellation.
+      expect(mockWriteText).toHaveBeenCalledTimes(2);
+
+      // Wait for the ORIGINAL 60s auto-clear (30s more from now)
+      await act(async () => {
+        vi.advanceTimersByTime(30_001);
+        await Promise.resolve();
+      });
+
+      // CRITICAL: the original auto-clear must still fire. Pre-fix bug:
+      // the auto-clear was cancelled at the top of the failed re-copy,
+      // leaving "first" in the clipboard past the 60s window.
+      expect(mockWriteText).toHaveBeenCalledTimes(3);
+      expect(mockWriteText).toHaveBeenLastCalledWith("");
+    });
   });
 
   describe("clipboard auto-clear", () => {

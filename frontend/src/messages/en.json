@@ -2468,7 +2468,7 @@
       "title": "Revoke Resource Token?",
       "description": "Are you sure you want to revoke this token for resource",
       "warning": "This action cannot be undone. All API requests using this token will be rejected immediately.",
-      "quotaFreed": "This will free up {quota} events per hour quota.",
+      "quotaFreed": "This will free up {quota} events/hour of quota.",
       "cancel": "Cancel",
       "revoke": "Revoke Token",
       "revoking": "Revoking..."

@@ -1438,7 +1438,7 @@
     "apiKeysDesc": "Claude Codeなどのクライアント用",
     "mcpSetupGuide": "MCPセットアップガイド",
     "mcpConfigTitle": "設定 (Claude Code, Cline など):",
-    "mcpConfigHint": "APIキーが visibility window 内であれば、上記の設定は live キーが埋め込まれた状態でそのままコピーできます。",
+    "mcpConfigHint": "APIキーが公開期間内であれば、上記の設定は有効なキーが埋め込まれた状態でそのままコピーできます。",
     "copyConfig": "設定をコピー",
     "mcpConfigCopied": "設定をコピーしました",
     "mcpConfigCopiedHint": "クリップボードは 60 秒後に消去されます。今すぐ貼り付けてください。",
