@@ -12,7 +12,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { useTranslations, useLocale } from "next-intl";
 import { Section } from "@/components/common/Section";
 import { ActionButton } from "@/components/common/ActionButton";
-import { LoadingState } from "@/components/common/LoadingState";
+import { TableLoadingState } from "@/components/common/LoadingState";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -270,7 +270,7 @@ export function OAuthAppsTabPanel() {
   // --- Derived data ---
 
   if (loading && oauthClients.length === 0) {
-    return <LoadingState lines={3} />;
+    return <TableLoadingState rows={3} />;
   }
 
   const claudeApp = oauthClients.find((c) => c.provider === "claude");

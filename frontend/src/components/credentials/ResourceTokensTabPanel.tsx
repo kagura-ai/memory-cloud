@@ -12,7 +12,10 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { Section } from "@/components/common/Section";
-import { LoadingState } from "@/components/common/LoadingState";
+import {
+  InlineSpinner,
+  TableLoadingState,
+} from "@/components/common/LoadingState";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -215,7 +218,7 @@ export function ResourceTokensTabPanel() {
   };
 
   if (loading && tokens.length === 0) {
-    return <LoadingState lines={3} />;
+    return <TableLoadingState rows={3} />;
   }
 
   return (
@@ -728,9 +731,7 @@ export function ResourceTokensTabPanel() {
                   onClick={handleEditConfirm}
                   disabled={editing}
                 >
-                  {editing && (
-                    <span className="inline-block mr-2 h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent"></span>
-                  )}
+                  {editing && <InlineSpinner size="sm" className="mr-2" />}
                   {editing ? t("editDialog.updating") : t("editDialog.update")}
                 </AlertDialogAction>
               </AlertDialogFooter>
