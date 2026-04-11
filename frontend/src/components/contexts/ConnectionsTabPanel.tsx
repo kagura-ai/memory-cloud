@@ -11,6 +11,7 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { useTranslations } from "next-intl";
 import { graphApi } from "@/lib/api/graph";
+import type { ApiError } from "@/lib/api/base";
 import type { GraphData, GraphStatsResponse } from "@/lib/types/graph";
 import { getMemoryTypeColor } from "@/lib/types/graph";
 import { Brain, GitBranch, Activity, TrendingUp } from "lucide-react";
@@ -52,9 +53,11 @@ export function ConnectionsTabPanel({ contextId }: ConnectionsTabPanelProps) {
       setGraphData(dataResult);
       setStats(statsResult);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load graph data",
-      );
+      // apiClient throws plain-object ApiError (see frontend/src/lib/api/base.ts),
+      // so `err instanceof Error` is false — use a shape check via Partial<ApiError>.
+      // This also handles real Error instances (which have .message via prototype).
+      const apiErr = err as Partial<ApiError> | null;
+      setError(apiErr?.message ?? "Failed to load graph data");
     } finally {
       setLoading(false);
     }
