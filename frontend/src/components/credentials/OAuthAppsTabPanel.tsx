@@ -27,7 +27,8 @@ import { EditOAuthClientDialog } from "@/app/(authenticated)/workspace/integrati
 import { OAuthAppCard } from "@/components/oauth/OAuthAppCard";
 import { CreateCustomOAuthAppDialog } from "@/components/oauth/CreateCustomOAuthAppDialog";
 import { hideOAuthClientSecret } from "@/lib/api/member-credentials";
-import { Copy, Check, Plus } from "lucide-react";
+import { Copy, Check, Plus, KeyRound } from "lucide-react";
+import { EmptyState } from "@/components/ui/empty-state";
 import { useToast } from "@/hooks/use-toast";
 import {
   AlertDialog,
@@ -428,9 +429,13 @@ export function OAuthAppsTabPanel() {
             </div>
 
             {customApps.length === 0 ? (
-              <p className="text-sm text-gray-500 dark:text-gray-400 text-center py-4">
-                {t("noCustomApps")}
-              </p>
+              <EmptyState
+                icon={KeyRound}
+                title={t("noCustomOAuthAppsTitle")}
+                description={t("noCustomApps")}
+                actionLabel={t("createCustomApp")}
+                onAction={() => handleCreateOAuthApp("custom")}
+              />
             ) : (
               <div className="space-y-4">
                 {customApps.map((app) => (

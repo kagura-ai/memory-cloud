@@ -32,7 +32,9 @@ import {
   Trash2,
   AlertTriangle,
   Plus,
+  Key,
 } from "lucide-react";
+import { EmptyState } from "@/components/ui/empty-state";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -411,11 +413,13 @@ export function APIKeysTabPanel() {
 
           {/* API Keys Display */}
           {apiKeys.length === 0 ? (
-            <div className="bg-gray-50 dark:bg-gray-800 p-6 rounded border border-gray-200 dark:border-gray-700 text-center">
-              <p className="text-gray-500 dark:text-gray-400">
-                {t("noApiKeys")}
-              </p>
-            </div>
+            <EmptyState
+              icon={Key}
+              title={t("noKeysTitle")}
+              description={t("noKeysDesc")}
+              actionLabel={t("createApiKey")}
+              onAction={() => setShowCreateKeyDialog(true)}
+            />
           ) : (
             apiKeys.map((apiKey) => (
               <div
