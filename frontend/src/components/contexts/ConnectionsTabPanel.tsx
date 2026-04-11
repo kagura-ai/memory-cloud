@@ -11,7 +11,6 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { useTranslations } from "next-intl";
 import { graphApi } from "@/lib/api/graph";
-import type { ApiError } from "@/lib/api/base";
 import type { GraphData, GraphStatsResponse } from "@/lib/types/graph";
 import { getMemoryTypeColor } from "@/lib/types/graph";
 import { Brain, GitBranch, Activity, TrendingUp } from "lucide-react";
@@ -54,10 +53,17 @@ export function ConnectionsTabPanel({ contextId }: ConnectionsTabPanelProps) {
       setStats(statsResult);
     } catch (err) {
       // apiClient throws plain-object ApiError (see frontend/src/lib/api/base.ts),
-      // so `err instanceof Error` is false — use a shape check via Partial<ApiError>.
-      // This also handles real Error instances (which have .message via prototype).
-      const apiErr = err as Partial<ApiError> | null;
-      setError(apiErr?.message ?? "Failed to load graph data");
+      // so `err instanceof Error` is false. Runtime shape check for a string
+      // `.message` — this also handles real Error instances transparently
+      // (Error.prototype.message is a string field).
+      let message = "Failed to load graph data";
+      if (err !== null && typeof err === "object" && "message" in err) {
+        const m = (err as { message: unknown }).message;
+        if (typeof m === "string") {
+          message = m;
+        }
+      }
+      setError(message);
     } finally {
       setLoading(false);
     }

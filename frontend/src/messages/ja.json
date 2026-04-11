@@ -1113,7 +1113,7 @@
     "graphConnections": "接続",
     "graphEdgeList": "エッジ一覧",
     "graphEmpty": "recallを使用してメモリ間の接続を構築してください。",
-    "graphEmptyTitle": "Neural edge がまだありません",
+    "graphEmptyTitle": "Neural edgeがまだありません",
     "graphSource": "ソース",
     "graphTarget": "ターゲット",
     "graphWeight": "重み",
