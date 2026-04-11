@@ -1449,6 +1449,7 @@
     "regenerate": "再生成",
     "created": "作成日時",
     "createApiKeyTitle": "APIキーを作成",
+    "createApiKeyDesc": "後から識別できるよう、このAPIキーに分かりやすい名前を付けてください。",
     "keyName": "キー名",
     "keyNamePlaceholder": "My API Key",
     "keyNameRequired": "APIキー名は必須です",

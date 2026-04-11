@@ -465,13 +465,11 @@ export function OAuthAppsTabPanel() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{t("hideOAuthTitle")}</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="space-y-2">
-                <p>{t("hideOAuthWarning")}</p>
-                <p>{t("hideOAuthNote")}</p>
-              </div>
+            <AlertDialogDescription>
+              {t("hideOAuthWarning")}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          <p className="text-sm text-muted-foreground">{t("hideOAuthNote")}</p>
           <AlertDialogFooter>
             <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
             <AlertDialogAction onClick={handleConfirmHideOAuthApp}>

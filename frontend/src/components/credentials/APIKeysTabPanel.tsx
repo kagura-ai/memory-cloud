@@ -549,31 +549,32 @@ export function APIKeysTabPanel() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{t("createApiKeyTitle")}</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium mb-1">
-                    {t("keyName")}
-                  </label>
-                  <input
-                    type="text"
-                    value={newKeyName}
-                    onChange={(e) => setNewKeyName(e.target.value)}
-                    placeholder={t("keyNamePlaceholder")}
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
-                  />
-                </div>
-                {createKeyError && (
-                  <p className="text-sm text-red-600 dark:text-red-400">
-                    {createKeyError}
-                  </p>
-                )}
-                <p className="text-xs text-yellow-700 dark:text-yellow-300">
-                  💡 {t("securityNote")}
-                </p>
-              </div>
+            <AlertDialogDescription>
+              {t("createApiKeyDesc")}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium mb-1">
+                {t("keyName")}
+              </label>
+              <input
+                type="text"
+                value={newKeyName}
+                onChange={(e) => setNewKeyName(e.target.value)}
+                placeholder={t("keyNamePlaceholder")}
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+              />
+            </div>
+            {createKeyError && (
+              <p className="text-sm text-red-600 dark:text-red-400">
+                {createKeyError}
+              </p>
+            )}
+            <p className="text-xs text-yellow-700 dark:text-yellow-300">
+              💡 {t("securityNote")}
+            </p>
+          </div>
           <AlertDialogFooter>
             <AlertDialogCancel
               onClick={() => {
@@ -599,13 +600,11 @@ export function APIKeysTabPanel() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{t("hideApiKeyTitle")}</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="space-y-2">
-                <p>{t("hideApiKeyWarning")}</p>
-                <p>{t("hideApiKeyNote")}</p>
-              </div>
+            <AlertDialogDescription>
+              {t("hideApiKeyWarning")}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          <p className="text-sm text-muted-foreground">{t("hideApiKeyNote")}</p>
           <AlertDialogFooter>
             <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
             <AlertDialogAction onClick={handleConfirmHideAPIKey}>

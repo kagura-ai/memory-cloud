@@ -1449,6 +1449,7 @@
     "regenerate": "Regenerate",
     "created": "Created",
     "createApiKeyTitle": "Create API Key",
+    "createApiKeyDesc": "Give this API key a memorable name so you can identify it later.",
     "keyName": "Key Name",
     "keyNamePlaceholder": "My API Key",
     "keyNameRequired": "API Key name is required",
