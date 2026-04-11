@@ -14,7 +14,6 @@ import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
 import { apiClient } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/utils/datetime";
-import { useAuth } from "@/contexts/AuthContext";
 import {
   Table,
   TableBody,
@@ -82,10 +81,8 @@ export default function AdminUsersPage() {
   const t = useTranslations("admin.users");
   const tCommon = useTranslations("admin.common");
 
-  const { user } = useAuth();
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const { toast } = useToast();
 
   // Issue #165 Phase 5: Search and filter state
@@ -181,17 +178,6 @@ export default function AdminUsersPage() {
         description: "Failed to delete user",
         variant: "destructive",
       });
-    }
-  };
-
-  const getRoleBadgeColor = (role: string) => {
-    switch (role) {
-      case "admin":
-        return "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300";
-      case "user":
-        return "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300";
-      default:
-        return "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300";
     }
   };
 

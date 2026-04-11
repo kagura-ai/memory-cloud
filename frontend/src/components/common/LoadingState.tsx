@@ -119,7 +119,7 @@ export function InlineSpinner({
   className,
 }: InlineSpinnerProps) {
   return (
-    <div
+    <span
       className={cn(
         "rounded-full inline-block",
         loadingTokens.spinner[size],
