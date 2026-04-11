@@ -6,21 +6,25 @@
  * Issue #58: Standardized Loading State Design
  */
 
-import { cn, loading as loadingTokens } from '@/styles/design-tokens';
+import { cn, loading as loadingTokens } from "@/styles/design-tokens";
 
 interface LoadingStateProps {
   lines?: number;
   className?: string;
 }
 
+// Deterministic width sequence (prevents SSR hydration mismatch).
+// Values span 73-98% to match the previous Math.random()*30+70 distribution.
+const SKELETON_WIDTHS = [95, 82, 91, 76, 88, 98, 73, 86, 94, 80] as const;
+
 export function LoadingState({ lines = 3, className }: LoadingStateProps) {
   return (
-    <div className={cn('space-y-3', className)}>
+    <div className={cn("space-y-3", className)}>
       {Array.from({ length: lines }).map((_, i) => (
         <div
           key={i}
           className="h-4 bg-slate-200 dark:bg-slate-800 rounded animate-pulse"
-          style={{ width: `${Math.random() * 30 + 70}%` }}
+          style={{ width: `${SKELETON_WIDTHS[i % SKELETON_WIDTHS.length]}%` }}
         />
       ))}
     </div>
@@ -57,8 +61,8 @@ export function TableLoadingState({ rows = 5 }: { rows?: number }) {
 // Issue #58: New Loading Variants
 // ============================================================================
 
-type SpinnerSize = 'xs' | 'sm' | 'md' | 'lg' | 'xl';
-type SpinnerVariant = 'default' | 'brand';
+type SpinnerSize = "xs" | "sm" | "md" | "lg" | "xl";
+type SpinnerVariant = "default" | "brand";
 
 interface SpinnerLoadingProps {
   size?: SpinnerSize;
@@ -72,22 +76,29 @@ interface SpinnerLoadingProps {
  * Usage: <SpinnerLoading size="lg" message="Loading data..." />
  */
 export function SpinnerLoading({
-  size = 'md',
-  variant = 'brand',
+  size = "md",
+  variant = "brand",
   message,
   className,
 }: SpinnerLoadingProps) {
   return (
-    <div className={cn('flex flex-col items-center justify-center gap-3 py-8', className)}>
+    <div
+      className={cn(
+        "flex flex-col items-center justify-center gap-3 py-8",
+        className,
+      )}
+    >
       <div
         className={cn(
-          'rounded-full',
+          "rounded-full",
           loadingTokens.spinner[size],
           loadingTokens.colors[variant],
-          loadingTokens.animations.spin
+          loadingTokens.animations.spin,
         )}
       />
-      {message && <p className="text-sm text-slate-500 dark:text-slate-400">{message}</p>}
+      {message && (
+        <p className="text-sm text-slate-500 dark:text-slate-400">{message}</p>
+      )}
     </div>
   );
 }
@@ -103,18 +114,18 @@ interface InlineSpinnerProps {
  * Usage: <InlineSpinner size="sm" />
  */
 export function InlineSpinner({
-  size = 'sm',
-  variant = 'default',
+  size = "sm",
+  variant = "default",
   className,
 }: InlineSpinnerProps) {
   return (
-    <div
+    <span
       className={cn(
-        'rounded-full inline-block',
+        "rounded-full inline-block",
         loadingTokens.spinner[size],
         loadingTokens.colors[variant],
         loadingTokens.animations.spin,
-        className
+        className,
       )}
     />
   );
@@ -129,7 +140,10 @@ interface PageLoadingProps {
  * Full page loading overlay
  * Usage: <PageLoading message="Loading application..." />
  */
-export function PageLoading({ message = 'Loading...', showLogo = false }: PageLoadingProps) {
+export function PageLoading({
+  message = "Loading...",
+  showLogo = false,
+}: PageLoadingProps) {
   return (
     <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center">
       <div className="bg-white dark:bg-slate-900 rounded-lg p-8 shadow-xl">
@@ -139,13 +153,15 @@ export function PageLoading({ message = 'Loading...', showLogo = false }: PageLo
           )}
           <div
             className={cn(
-              'rounded-full',
+              "rounded-full",
               loadingTokens.spinner.xl,
               loadingTokens.colors.brand,
-              loadingTokens.animations.spin
+              loadingTokens.animations.spin,
             )}
           />
-          <p className="text-sm text-slate-600 dark:text-slate-400">{message}</p>
+          <p className="text-sm text-slate-600 dark:text-slate-400">
+            {message}
+          </p>
         </div>
       </div>
     </div>

@@ -1,4 +1,4 @@
-'use client';
+"use client";
 
 /**
  * Workspace Members Management Page
@@ -8,16 +8,19 @@
  * Manage workspace members, roles, and invitations.
  */
 
-import { useEffect, useState } from 'react';
-import { useTranslations } from 'next-intl';
-import { PageHeader } from '@/components/common/PageHeader';
-import { PageContainer } from '@/components/common/PageContainer';
-import { Section } from '@/components/common/Section';
-import { ActionButton } from '@/components/common/ActionButton';
-import { Button } from '@/components/ui/button';
-import { LoadingState, SpinnerLoading } from '@/components/common/LoadingState';
-import { useWorkspace } from '@/contexts/WorkspaceContext';
-import { useAuth } from '@/contexts/AuthContext';
+import { useEffect, useState } from "react";
+import { useTranslations } from "next-intl";
+import { PageHeader } from "@/components/common/PageHeader";
+import { PageContainer } from "@/components/common/PageContainer";
+import { Section } from "@/components/common/Section";
+import { ActionButton } from "@/components/common/ActionButton";
+import { Button } from "@/components/ui/button";
+import {
+  InlineSpinner,
+  TableLoadingState,
+} from "@/components/common/LoadingState";
+import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useAuth } from "@/contexts/AuthContext";
 import {
   listMembers,
   addMember,
@@ -25,8 +28,8 @@ import {
   removeMember,
   updateMemberContextAccess,
   WorkspaceMember,
-} from '@/lib/api/workspaces';
-import { getContexts, Context } from '@/lib/api/contexts';
+} from "@/lib/api/workspaces";
+import { getContexts, Context } from "@/lib/api/contexts";
 import {
   listInvitations,
   createInvitation,
@@ -34,9 +37,21 @@ import {
   WorkspaceInvitation,
   getMemberQuota,
   MemberQuota,
-} from '@/lib/api/invitations';
-import { UserPlus, Trash2, Shield, Users, Copy, Check, X, Key, AlertTriangle, Loader2, Settings, ChevronDown, ChevronUp } from 'lucide-react';
-import Link from 'next/link';
+} from "@/lib/api/invitations";
+import {
+  UserPlus,
+  Trash2,
+  Shield,
+  Users,
+  Copy,
+  Check,
+  X,
+  AlertTriangle,
+  Settings,
+  ChevronDown,
+  ChevronUp,
+} from "lucide-react";
+import Link from "next/link";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -46,39 +61,49 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
-import { useToast } from '@/hooks/use-toast';
+} from "@/components/ui/alert-dialog";
+import { useToast } from "@/hooks/use-toast";
 
 export default function WorkspaceMembersPage() {
-  const t = useTranslations('workspace');
-  const tCommon = useTranslations('common');
-  const { currentWorkspaceId, currentWorkspace, loading: workspaceLoading } = useWorkspace();
+  const t = useTranslations("workspace");
+  const tCommon = useTranslations("common");
+  const {
+    currentWorkspaceId,
+    currentWorkspace,
+    loading: workspaceLoading,
+  } = useWorkspace();
   const { user } = useAuth();
   const { toast } = useToast();
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [invitations, setInvitations] = useState<WorkspaceInvitation[]>([]);
   const [loading, setLoading] = useState(true);
   const [showInviteDialog, setShowInviteDialog] = useState(false);
-  const [showUpgradePrompt, setShowUpgradePrompt] = useState(false);  // Issue #165: Pro plan gate
+  const [showUpgradePrompt, setShowUpgradePrompt] = useState(false); // Issue #165: Pro plan gate
 
   // Invite dialog state
-  const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteRole, setInviteRole] = useState<'member' | 'admin' | 'viewer'>('member');
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<"member" | "admin" | "viewer">(
+    "member",
+  );
   const [inviteExpiry, setInviteExpiry] = useState<number | null>(30);
-  const [inviteContextIds, setInviteContextIds] = useState<string[]>([]);  // Migration 042
+  const [inviteContextIds, setInviteContextIds] = useState<string[]>([]); // Migration 042
   const [createdInviteUrl, setCreatedInviteUrl] = useState<string | null>(null);
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
-  const [inviteError, setInviteError] = useState<string | null>(null);  // Issue #217
-  const [inviteLoading, setInviteLoading] = useState(false);  // Issue #217
+  const [inviteError, setInviteError] = useState<string | null>(null); // Issue #217
+  const [inviteLoading, setInviteLoading] = useState(false); // Issue #217
 
   // Issue #217: Delete member confirmation dialog
-  const [memberToDelete, setMemberToDelete] = useState<WorkspaceMember | null>(null);
+  const [memberToDelete, setMemberToDelete] = useState<WorkspaceMember | null>(
+    null,
+  );
   const [showDeleteMemberDialog, setShowDeleteMemberDialog] = useState(false);
   const [deleteLoading, setDeleteLoading] = useState(false);
 
   // Issue #217: Delete invitation confirmation dialog
-  const [invitationToDelete, setInvitationToDelete] = useState<WorkspaceInvitation | null>(null);
-  const [showDeleteInvitationDialog, setShowDeleteInvitationDialog] = useState(false);
+  const [invitationToDelete, setInvitationToDelete] =
+    useState<WorkspaceInvitation | null>(null);
+  const [showDeleteInvitationDialog, setShowDeleteInvitationDialog] =
+    useState(false);
   const [deleteInvitationLoading, setDeleteInvitationLoading] = useState(false);
 
   // Issue #229: Member quota state
@@ -87,13 +112,17 @@ export default function WorkspaceMembersPage() {
 
   // Issue #234: Context access restriction
   const [contexts, setContexts] = useState<Context[]>([]);
-  const [contextAccessMember, setContextAccessMember] = useState<WorkspaceMember | null>(null);
+  const [contextAccessMember, setContextAccessMember] =
+    useState<WorkspaceMember | null>(null);
   const [showContextAccessDialog, setShowContextAccessDialog] = useState(false);
   const [selectedContextIds, setSelectedContextIds] = useState<string[]>([]);
   const [contextAccessLoading, setContextAccessLoading] = useState(false);
 
   // Issue #234: Role change confirmation (clears context access)
-  const [pendingRoleChange, setPendingRoleChange] = useState<{ member: WorkspaceMember; newRole: string } | null>(null);
+  const [pendingRoleChange, setPendingRoleChange] = useState<{
+    member: WorkspaceMember;
+    newRole: string;
+  } | null>(null);
   const [showRoleChangeDialog, setShowRoleChangeDialog] = useState(false);
   const [roleChangeLoading, setRoleChangeLoading] = useState(false);
 
@@ -101,14 +130,14 @@ export default function WorkspaceMembersPage() {
   const [showRolePermissions, setShowRolePermissions] = useState(false);
 
   // Check if Pro plan
-  const isProPlan = currentWorkspace?.plan_name === 'pro';
+  const isProPlan = currentWorkspace?.plan_name === "pro";
 
   useEffect(() => {
     if (currentWorkspaceId) {
       loadMembers();
       loadInvitations();
-      loadMemberQuota();  // Issue #229
-      loadContexts();  // Issue #234
+      loadMemberQuota(); // Issue #229
+      loadContexts(); // Issue #234
     }
   }, [currentWorkspaceId]);
 
@@ -128,7 +157,7 @@ export default function WorkspaceMembersPage() {
 
       setMembers(sortedMembers);
     } catch (error) {
-      console.error('Failed to load members:', error);
+      console.error("Failed to load members:", error);
     } finally {
       setLoading(false);
     }
@@ -143,10 +172,10 @@ export default function WorkspaceMembersPage() {
     } catch (error: any) {
       // 403 = Not admin/owner, silently skip invitations feature
       if (error?.status === 403) {
-        setInvitations([]);  // No invitations to show
+        setInvitations([]); // No invitations to show
         return;
       }
-      console.error('Failed to load invitations:', error);
+      console.error("Failed to load invitations:", error);
     }
   };
 
@@ -164,7 +193,7 @@ export default function WorkspaceMembersPage() {
         setMemberQuota(null);
         return;
       }
-      console.error('Failed to load member quota:', error);
+      console.error("Failed to load member quota:", error);
     } finally {
       setQuotaLoading(false);
     }
@@ -175,10 +204,10 @@ export default function WorkspaceMembersPage() {
     try {
       const response = await getContexts();
       // Only show shared contexts - private contexts are owner-only anyway
-      const sharedContexts = response.contexts.filter(c => !c.is_private);
+      const sharedContexts = response.contexts.filter((c) => !c.is_private);
       setContexts(sharedContexts);
     } catch (error) {
-      console.error('Failed to load contexts:', error);
+      console.error("Failed to load contexts:", error);
     }
   };
 
@@ -197,9 +226,9 @@ export default function WorkspaceMembersPage() {
     // Migration 042: Require at least 1 context (same as invitation)
     if (selectedContextIds.length === 0) {
       toast({
-        title: tCommon('error'),
-        description: t('inviteContextRequired'),
-        variant: 'destructive',
+        title: tCommon("error"),
+        description: t("inviteContextRequired"),
+        variant: "destructive",
       });
       return;
     }
@@ -210,23 +239,25 @@ export default function WorkspaceMembersPage() {
       await updateMemberContextAccess(
         currentWorkspaceId,
         contextAccessMember.user_id,
-        selectedContextIds
+        selectedContextIds,
       );
 
       // Reload members to get updated data
       await loadMembers();
 
       toast({
-        title: t('contextAccessUpdated'),
-        description: t('contextsSelected', { count: selectedContextIds.length }),
+        title: t("contextAccessUpdated"),
+        description: t("contextsSelected", {
+          count: selectedContextIds.length,
+        }),
       });
 
       setShowContextAccessDialog(false);
     } catch (error: any) {
       toast({
-        title: t('contextAccessUpdateFailed'),
-        description: error?.message || 'Unknown error',
-        variant: 'destructive',
+        title: t("contextAccessUpdateFailed"),
+        description: error?.message || "Unknown error",
+        variant: "destructive",
       });
     } finally {
       setContextAccessLoading(false);
@@ -235,10 +266,10 @@ export default function WorkspaceMembersPage() {
 
   // Issue #234: Toggle context selection
   const toggleContextSelection = (contextId: string) => {
-    setSelectedContextIds(prev =>
+    setSelectedContextIds((prev) =>
       prev.includes(contextId)
-        ? prev.filter(id => id !== contextId)
-        : [...prev, contextId]
+        ? prev.filter((id) => id !== contextId)
+        : [...prev, contextId],
     );
   };
 
@@ -247,13 +278,16 @@ export default function WorkspaceMembersPage() {
 
     // Validate email is required
     if (!inviteEmail.trim()) {
-      setInviteError(t('emailRequiredError'));
+      setInviteError(t("emailRequiredError"));
       return;
     }
 
     // Migration 042: Validate context selection for member/viewer
-    if ((inviteRole === 'member' || inviteRole === 'viewer') && inviteContextIds.length === 0) {
-      setInviteError(t('inviteContextRequired'));
+    if (
+      (inviteRole === "member" || inviteRole === "viewer") &&
+      inviteContextIds.length === 0
+    ) {
+      setInviteError(t("inviteContextRequired"));
       return;
     }
 
@@ -265,23 +299,26 @@ export default function WorkspaceMembersPage() {
         email: inviteEmail,
         role: inviteRole,
         expires_in_days: inviteExpiry,
-        allowed_context_ids: (inviteRole === 'member' || inviteRole === 'viewer') ? inviteContextIds : null,  // Migration 042
+        allowed_context_ids:
+          inviteRole === "member" || inviteRole === "viewer"
+            ? inviteContextIds
+            : null, // Migration 042
       });
 
       setCreatedInviteUrl(invitation.invitation_url);
       await loadInvitations();
-      await loadMemberQuota();  // Issue #229: Reload quota after invitation
+      await loadMemberQuota(); // Issue #229: Reload quota after invitation
       toast({
-        title: t('invitationCreated'),
-        description: t('invitationSentTo', { email: inviteEmail }),
+        title: t("invitationCreated"),
+        description: t("invitationSentTo", { email: inviteEmail }),
       });
     } catch (error: any) {
-      console.error('Failed to create invitation:', error);
+      console.error("Failed to create invitation:", error);
       // Issue #217: Extract error message for display in dialog
       const errorMsg =
         error?.details?.detail ||
         error?.message ||
-        (typeof error === 'string' ? error : 'Failed to create invitation');
+        (typeof error === "string" ? error : "Failed to create invitation");
       setInviteError(errorMsg);
     } finally {
       setInviteLoading(false);
@@ -294,11 +331,11 @@ export default function WorkspaceMembersPage() {
       setCopiedToken(token);
       setTimeout(() => setCopiedToken(null), 2000);
     } catch (error) {
-      console.error('Failed to copy URL:', error);
+      console.error("Failed to copy URL:", error);
       toast({
-        title: tCommon('error'),
-        description: 'Failed to copy URL to clipboard',
-        variant: 'destructive',
+        title: tCommon("error"),
+        description: "Failed to copy URL to clipboard",
+        variant: "destructive",
       });
     }
   };
@@ -306,10 +343,10 @@ export default function WorkspaceMembersPage() {
   const handleCloseInviteDialog = () => {
     setShowInviteDialog(false);
     setCreatedInviteUrl(null);
-    setInviteEmail('');
-    setInviteRole('member');
+    setInviteEmail("");
+    setInviteRole("member");
     setInviteExpiry(30);
-    setInviteError(null);  // Issue #217: Clear error on close
+    setInviteError(null); // Issue #217: Clear error on close
   };
 
   // Issue #217: Open delete invitation confirmation dialog
@@ -326,23 +363,25 @@ export default function WorkspaceMembersPage() {
     try {
       await deleteInvitation(currentWorkspaceId, invitationToDelete.id);
       await loadInvitations();
-      await loadMemberQuota();  // Issue #229: Reload quota after deletion
+      await loadMemberQuota(); // Issue #229: Reload quota after deletion
       setShowDeleteInvitationDialog(false);
       setInvitationToDelete(null);
       toast({
-        title: t('invitationRevoked'),
-        description: t('invitationRevokedDesc', { email: invitationToDelete.email || 'user' }),
+        title: t("invitationRevoked"),
+        description: t("invitationRevokedDesc", {
+          email: invitationToDelete.email || "user",
+        }),
       });
     } catch (error: any) {
-      console.error('Failed to delete invitation:', error);
+      console.error("Failed to delete invitation:", error);
       const errorMsg =
         error?.details?.detail ||
         error?.message ||
-        t('failedToRevokeInvitation');
+        t("failedToRevokeInvitation");
       toast({
-        title: t('failedToRevokeInvitation'),
+        title: t("failedToRevokeInvitation"),
         description: errorMsg,
-        variant: 'destructive',
+        variant: "destructive",
       });
     } finally {
       setDeleteInvitationLoading(false);
@@ -366,19 +405,20 @@ export default function WorkspaceMembersPage() {
       setShowDeleteMemberDialog(false);
       setMemberToDelete(null);
       toast({
-        title: t('memberRemoved'),
-        description: t('memberRemovedDesc', { name: memberToDelete.user_name || memberToDelete.user_email || 'Member' }),
+        title: t("memberRemoved"),
+        description: t("memberRemovedDesc", {
+          name:
+            memberToDelete.user_name || memberToDelete.user_email || "Member",
+        }),
       });
     } catch (error: any) {
-      console.error('Failed to remove member:', error);
+      console.error("Failed to remove member:", error);
       const errorMsg =
-        error?.details?.detail ||
-        error?.message ||
-        t('failedToRemoveMember');
+        error?.details?.detail || error?.message || t("failedToRemoveMember");
       toast({
-        title: t('failedToRemoveMember'),
+        title: t("failedToRemoveMember"),
         description: errorMsg,
-        variant: 'destructive',
+        variant: "destructive",
       });
     } finally {
       setDeleteLoading(false);
@@ -389,8 +429,12 @@ export default function WorkspaceMembersPage() {
     if (!currentWorkspaceId) return;
 
     // Issue #234: Check if member has context restrictions that will be cleared
-    const member = members.find(m => m.user_id === userId);
-    if (member && member.allowed_context_ids !== null && member.allowed_context_ids !== undefined) {
+    const member = members.find((m) => m.user_id === userId);
+    if (
+      member &&
+      member.allowed_context_ids !== null &&
+      member.allowed_context_ids !== undefined
+    ) {
       // Show confirmation dialog
       setPendingRoleChange({ member, newRole });
       setShowRoleChangeDialog(true);
@@ -408,29 +452,29 @@ export default function WorkspaceMembersPage() {
     setRoleChangeLoading(true);
     try {
       await updateMemberRole(currentWorkspaceId, userId, {
-        role: newRole as 'owner' | 'admin' | 'member' | 'viewer',
+        role: newRole as "owner" | "admin" | "member" | "viewer",
       });
       await loadMembers();
       setShowRoleChangeDialog(false);
       setPendingRoleChange(null);
     } catch (error: any) {
-      console.error('Failed to update role:', error);
+      console.error("Failed to update role:", error);
 
       // Issue #254: Show specific message for role change errors
-      let errorMessage = error?.message || 'Failed to update role';
+      let errorMessage = error?.message || "Failed to update role";
 
       if (error?.status === 403) {
-        if (error?.message?.includes('own role')) {
-          errorMessage = t('cannotModifyOwnRoleDesc');
-        } else if (error?.message?.includes('owner can change')) {
-          errorMessage = t('onlyOwnerCanChangeOwner');
+        if (error?.message?.includes("own role")) {
+          errorMessage = t("cannotModifyOwnRoleDesc");
+        } else if (error?.message?.includes("owner can change")) {
+          errorMessage = t("onlyOwnerCanChangeOwner");
         }
       }
 
       toast({
-        title: tCommon('error'),
+        title: tCommon("error"),
         description: errorMessage,
-        variant: 'destructive',
+        variant: "destructive",
       });
     } finally {
       setRoleChangeLoading(false);
@@ -444,7 +488,9 @@ export default function WorkspaceMembersPage() {
       return;
     }
     // Migration 042: Initialize with all shared contexts selected
-    const sharedContextIds = contexts.filter(c => !c.is_private).map(c => c.id);
+    const sharedContextIds = contexts
+      .filter((c) => !c.is_private)
+      .map((c) => c.id);
     setInviteContextIds(sharedContextIds);
     setShowInviteDialog(true);
   };
@@ -452,35 +498,40 @@ export default function WorkspaceMembersPage() {
   if (workspaceLoading || loading) {
     return (
       <PageContainer>
-        <PageHeader title={t('membersTitle')} />
-        <div className="flex items-center justify-center py-12">
-          <SpinnerLoading message={t('loadingMembers')} />
-        </div>
+        <PageHeader title={t("membersTitle")} />
+        <TableLoadingState rows={5} />
       </PageContainer>
     );
   }
 
   return (
     <PageContainer>
-      <PageHeader
-        title={t('membersTitle')}
-        description={t('membersDesc')}
-      />
+      <PageHeader title={t("membersTitle")} description={t("membersDesc")} />
 
       <Section
-        title={t('membersSection')}
-        description={members.length !== 1 ? t('membersCount', { count: members.length }) : t('memberCount', { count: members.length })}
+        title={t("membersSection")}
+        description={
+          members.length !== 1
+            ? t("membersCount", { count: members.length })
+            : t("memberCount", { count: members.length })
+        }
         headerActions={
           <ActionButton
             onClick={handleInviteClick}
             icon={<UserPlus className="w-4 h-4" />}
             disabled={
               !isProPlan ||
-              currentWorkspace?.current_user_role === 'member' ||
-              currentWorkspace?.current_user_role === 'viewer'
+              currentWorkspace?.current_user_role === "member" ||
+              currentWorkspace?.current_user_role === "viewer"
             }
           >
-            {t('inviteMember')} {!isProPlan ? t('proPlanRequired') : currentWorkspace?.current_user_role === 'member' || currentWorkspace?.current_user_role === 'viewer' ? t('ownerAdminOnly') : ''}
+            {t("inviteMember")}{" "}
+            {!isProPlan
+              ? t("proPlanRequired")
+              : currentWorkspace?.current_user_role === "member" ||
+                  currentWorkspace?.current_user_role === "viewer"
+                ? t("ownerAdminOnly")
+                : ""}
           </ActionButton>
         }
       >
@@ -489,22 +540,22 @@ export default function WorkspaceMembersPage() {
             <thead>
               <tr>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                  {t('user')}
+                  {t("user")}
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                  {t('role')}
+                  {t("role")}
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                  {t('joinedAt')}
+                  {t("joinedAt")}
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                  {t('lastLogin')}
+                  {t("lastLogin")}
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                  {t('contextAccess')}
+                  {t("contextAccess")}
                 </th>
                 <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                  {t('authentication')}
+                  {t("authentication")}
                 </th>
               </tr>
             </thead>
@@ -514,18 +565,26 @@ export default function WorkspaceMembersPage() {
                   key={member.user_id}
                   className={`hover:bg-gray-100 dark:hover:bg-gray-700 ${
                     index % 2 === 0
-                      ? 'bg-white dark:bg-gray-900'
-                      : 'bg-gray-50 dark:bg-gray-800/50'
+                      ? "bg-white dark:bg-gray-900"
+                      : "bg-gray-50 dark:bg-gray-800/50"
                   }`}
                 >
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className="flex items-center gap-3">
                       <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-white text-sm font-bold">
-                        {(member.user_name || member.user_email || member.user_id).charAt(0).toUpperCase()}
+                        {(
+                          member.user_name ||
+                          member.user_email ||
+                          member.user_id
+                        )
+                          .charAt(0)
+                          .toUpperCase()}
                       </div>
                       <div>
                         <div className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                          {member.user_name || member.user_email || member.user_id}
+                          {member.user_name ||
+                            member.user_email ||
+                            member.user_id}
                         </div>
                         {member.user_email && !member.user_name && (
                           <div className="text-xs text-gray-500 dark:text-gray-400">
@@ -541,60 +600,83 @@ export default function WorkspaceMembersPage() {
                     </div>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap">
-                    {member.role === 'owner' ? (
+                    {member.role === "owner" ? (
                       <span className="px-3 py-1 text-sm font-medium bg-purple-100 dark:bg-purple-900 text-purple-800 dark:text-purple-200 rounded">
-                        {t('ownerCannotChange')}
+                        {t("ownerCannotChange")}
                       </span>
                     ) : (
                       <select
                         value={member.role}
-                        onChange={(e) => handleUpdateRole(member.user_id, e.target.value)}
-                        disabled={currentWorkspace?.current_user_role === 'member' || currentWorkspace?.current_user_role === 'viewer' || member.user_id === user?.id}
+                        onChange={(e) =>
+                          handleUpdateRole(member.user_id, e.target.value)
+                        }
+                        disabled={
+                          currentWorkspace?.current_user_role === "member" ||
+                          currentWorkspace?.current_user_role === "viewer" ||
+                          member.user_id === user?.id
+                        }
                         className="text-sm border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
-                        title={member.user_id === user?.id ? t('cannotModifyOwnRole') : undefined}
+                        title={
+                          member.user_id === user?.id
+                            ? t("cannotModifyOwnRole")
+                            : undefined
+                        }
                       >
-                        <option value="admin">{t('admin')}</option>
-                        <option value="member">{t('member')}</option>
-                        <option value="viewer">{t('viewer')}</option>
+                        <option value="admin">{t("admin")}</option>
+                        <option value="member">{t("member")}</option>
+                        <option value="viewer">{t("viewer")}</option>
                       </select>
                     )}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                     {member.joined_at
                       ? new Date(member.joined_at).toLocaleDateString()
-                      : 'N/A'}
+                      : "N/A"}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                     {member.last_login_at ? (
-                      <span>{new Date(member.last_login_at).toLocaleString()}</span>
+                      <span>
+                        {new Date(member.last_login_at).toLocaleString()}
+                      </span>
                     ) : (
-                      <span className="text-gray-400">{t('never')}</span>
+                      <span className="text-gray-400">{t("never")}</span>
                     )}
                   </td>
                   {/* Issue #234: Context Access column */}
                   <td className="px-6 py-4 whitespace-nowrap text-sm">
-                    {member.role === 'owner' || member.role === 'admin' ? (
-                      <span className="text-gray-400 text-xs">{t('contextAccessNotApplicable')}</span>
-                    ) : member.allowed_context_ids === null || member.allowed_context_ids === undefined ? (
+                    {member.role === "owner" || member.role === "admin" ? (
+                      <span className="text-gray-400 text-xs">
+                        {t("contextAccessNotApplicable")}
+                      </span>
+                    ) : member.allowed_context_ids === null ||
+                      member.allowed_context_ids === undefined ? (
                       <button
                         onClick={() => handleContextAccessClick(member)}
-                        disabled={currentWorkspace?.current_user_role !== 'owner' && currentWorkspace?.current_user_role !== 'admin'}
+                        disabled={
+                          currentWorkspace?.current_user_role !== "owner" &&
+                          currentWorkspace?.current_user_role !== "admin"
+                        }
                         className="flex items-center gap-1 text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         <AlertTriangle className="w-4 h-4" />
                         <span className="text-xs font-medium">
-                          {t('contextNotConfigured')}
+                          {t("contextNotConfigured")}
                         </span>
                       </button>
                     ) : (
                       <button
                         onClick={() => handleContextAccessClick(member)}
-                        disabled={currentWorkspace?.current_user_role !== 'owner' && currentWorkspace?.current_user_role !== 'admin'}
+                        disabled={
+                          currentWorkspace?.current_user_role !== "owner" &&
+                          currentWorkspace?.current_user_role !== "admin"
+                        }
                         className="flex items-center gap-1 text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         <Settings className="w-4 h-4" />
                         <span className="text-xs">
-                          {t('contextsSelected', { count: member.allowed_context_ids.length })}
+                          {t("contextsSelected", {
+                            count: member.allowed_context_ids.length,
+                          })}
                         </span>
                       </button>
                     )}
@@ -602,21 +684,23 @@ export default function WorkspaceMembersPage() {
                   <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
                     <div className="flex items-center justify-end gap-2">
                       {/* Remove button - only for owner, not for owner members */}
-                      {member.role !== 'owner' && currentWorkspace?.current_user_role === 'owner' && (
-                        <button
-                          onClick={() => handleRemoveMemberClick(member)}
-                          className="text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
-                          title={t('removeTitle')}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      )}
+                      {member.role !== "owner" &&
+                        currentWorkspace?.current_user_role === "owner" && (
+                          <button
+                            onClick={() => handleRemoveMemberClick(member)}
+                            className="text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
+                            title={t("removeTitle")}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
 
                       {/* Empty state for consistent spacing */}
                       {member.user_id !== user?.id &&
-                        (member.role === 'owner' || currentWorkspace?.current_user_role !== 'owner') && (
-                        <span className="text-gray-400 text-xs">—</span>
-                      )}
+                        (member.role === "owner" ||
+                          currentWorkspace?.current_user_role !== "owner") && (
+                          <span className="text-gray-400 text-xs">—</span>
+                        )}
                     </div>
                   </td>
                 </tr>
@@ -628,7 +712,7 @@ export default function WorkspaceMembersPage() {
         {members.length === 0 && (
           <div className="text-center py-12 text-gray-500 dark:text-gray-400">
             <Users className="w-12 h-12 mx-auto mb-4 opacity-50" />
-            <p>{t('noMembersYet')}</p>
+            <p>{t("noMembersYet")}</p>
           </div>
         )}
       </Section>
@@ -636,39 +720,46 @@ export default function WorkspaceMembersPage() {
       {/* Pending Invitations Section */}
       {invitations.length > 0 && (
         <Section
-          title={t('pendingInvitations')}
-          description={invitations.length !== 1 ? t('invitationsCount', { count: invitations.length }) : t('invitationCount', { count: invitations.length })}
+          title={t("pendingInvitations")}
+          description={
+            invitations.length !== 1
+              ? t("invitationsCount", { count: invitations.length })
+              : t("invitationCount", { count: invitations.length })
+          }
         >
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
               <thead>
                 <tr>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    {t('emailAnyone')}
+                    {t("emailAnyone")}
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    {t('role')}
+                    {t("role")}
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    {t('contextAccess')}
+                    {t("contextAccess")}
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    {t('expires')}
+                    {t("expires")}
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    {t('invitationLink')}
+                    {t("invitationLink")}
                   </th>
                   <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    {tCommon('actions')}
+                    {tCommon("actions")}
                   </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
                 {invitations.map((invitation) => (
-                  <tr key={invitation.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
+                  <tr
+                    key={invitation.id}
+                    className="hover:bg-gray-50 dark:hover:bg-gray-800"
+                  >
                     <td className="px-6 py-4 whitespace-nowrap text-sm">
                       <span className="text-gray-900 dark:text-gray-100">
-                        {invitation.email || 'N/A'}
+                        {invitation.email || "N/A"}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
@@ -677,18 +768,28 @@ export default function WorkspaceMembersPage() {
                       </span>
                     </td>
                     <td className="px-6 py-4 text-sm">
-                      {invitation.role === 'admin' ? (
-                        <span className="text-gray-400 text-xs">{t('contextAccessNotApplicable')}</span>
-                      ) : invitation.allowed_context_ids && invitation.allowed_context_ids.length > 0 ? (
+                      {invitation.role === "admin" ? (
+                        <span className="text-gray-400 text-xs">
+                          {t("contextAccessNotApplicable")}
+                        </span>
+                      ) : invitation.allowed_context_ids &&
+                        invitation.allowed_context_ids.length > 0 ? (
                         <div className="flex flex-wrap gap-1">
-                          {invitation.allowed_context_ids.slice(0, 3).map(ctxId => {
-                            const ctx = contexts.find(c => c.id === ctxId);
-                            return (
-                              <span key={ctxId} className="px-2 py-0.5 text-xs bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 rounded">
-                                {ctx?.display_name || ctx?.name || ctxId.substring(0, 8)}
-                              </span>
-                            );
-                          })}
+                          {invitation.allowed_context_ids
+                            .slice(0, 3)
+                            .map((ctxId) => {
+                              const ctx = contexts.find((c) => c.id === ctxId);
+                              return (
+                                <span
+                                  key={ctxId}
+                                  className="px-2 py-0.5 text-xs bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 rounded"
+                                >
+                                  {ctx?.display_name ||
+                                    ctx?.name ||
+                                    ctxId.substring(0, 8)}
+                                </span>
+                              );
+                            })}
                           {invitation.allowed_context_ids.length > 3 && (
                             <span className="text-xs text-gray-500 dark:text-gray-400">
                               +{invitation.allowed_context_ids.length - 3}
@@ -698,33 +799,48 @@ export default function WorkspaceMembersPage() {
                       ) : (
                         <span className="text-amber-600 dark:text-amber-400 text-xs flex items-center gap-1">
                           <AlertTriangle className="w-3 h-3" />
-                          {t('contextNotConfigured')}
+                          {t("contextNotConfigured")}
                         </span>
                       )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm">
                       {invitation.expires_at ? (
-                        <span className={invitation.is_expired ? 'text-red-600 dark:text-red-400' : 'text-gray-700 dark:text-gray-300'}>
+                        <span
+                          className={
+                            invitation.is_expired
+                              ? "text-red-600 dark:text-red-400"
+                              : "text-gray-700 dark:text-gray-300"
+                          }
+                        >
                           {new Date(invitation.expires_at).toLocaleDateString()}
                         </span>
                       ) : (
-                        <span className="text-gray-500 dark:text-gray-400">{t('neverExpires')}</span>
+                        <span className="text-gray-500 dark:text-gray-400">
+                          {t("neverExpires")}
+                        </span>
                       )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm">
                       <button
-                        onClick={() => handleCopyInviteUrl(invitation.invitation_url, invitation.token)}
+                        onClick={() =>
+                          handleCopyInviteUrl(
+                            invitation.invitation_url,
+                            invitation.token,
+                          )
+                        }
                         className="flex items-center gap-2 text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
                       >
                         {copiedToken === invitation.token ? (
                           <>
                             <Check className="w-4 h-4 text-green-600 dark:text-green-400" />
-                            <span className="text-green-600 dark:text-green-400">{t('copied')}</span>
+                            <span className="text-green-600 dark:text-green-400">
+                              {t("copied")}
+                            </span>
                           </>
                         ) : (
                           <>
                             <Copy className="w-4 h-4" />
-                            <span>{t('copyLink')}</span>
+                            <span>{t("copyLink")}</span>
                           </>
                         )}
                       </button>
@@ -733,7 +849,7 @@ export default function WorkspaceMembersPage() {
                       <button
                         onClick={() => handleDeleteInvitationClick(invitation)}
                         className="text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
-                        title={t('revokeInvitation')}
+                        title={t("revokeInvitation")}
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
@@ -758,10 +874,10 @@ export default function WorkspaceMembersPage() {
             </div>
             <div className="text-left">
               <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-                {t('rolePermissions')}
+                {t("rolePermissions")}
               </h3>
               <p className="text-sm text-gray-500 dark:text-gray-400">
-                {t('rolePermissionsDesc')}
+                {t("rolePermissionsDesc")}
               </p>
             </div>
           </div>
@@ -778,24 +894,94 @@ export default function WorkspaceMembersPage() {
               <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                 <thead>
                   <tr className="bg-gray-50 dark:bg-gray-800/50">
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">{t('permission')}</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">{t('ownerRole')}</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">{t('adminRole')}</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">{t('memberRole')}</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">{t('viewerRole')}</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
+                      {t("permission")}
+                    </th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
+                      {t("ownerRole")}
+                    </th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
+                      {t("adminRole")}
+                    </th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
+                      {t("memberRole")}
+                    </th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
+                      {t("viewerRole")}
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                  <PermissionRow permission={t('permissionManageWorkspace')} owner={true} admin={false} member={false} viewer={false} />
-                  <PermissionRow permission={t('permissionInviteMembers')} owner={true} admin={true} member={false} viewer={false} />
-                  <PermissionRow permission={t('permissionManageRoles')} owner={true} admin={true} member={false} viewer={false} />
-                  <PermissionRow permission={t('permissionManageContexts')} owner={true} admin={true} member={false} viewer={false} />
-                  <PermissionRow permission={t('permissionManagePublicSettings')} owner={true} admin={false} member={false} viewer={false} />
-                  <PermissionRow permission={t('permissionAccessAllContexts')} owner={true} admin={true} member={false} viewer={false} />
-                  <PermissionRow permission={t('permissionAccessAssignedContexts')} owner={false} admin={false} member={true} viewer={true} />
-                  <PermissionRow permission={t('permissionCreateMemories')} owner={true} admin={true} member={true} viewer={false} />
-                  <PermissionRow permission={t('permissionDeleteOwnMemories')} owner={true} admin={true} member={true} viewer={false} />
-                  <PermissionRow permission={t('permissionReadMemories')} owner={true} admin={true} member={true} viewer={true} />
+                  <PermissionRow
+                    permission={t("permissionManageWorkspace")}
+                    owner={true}
+                    admin={false}
+                    member={false}
+                    viewer={false}
+                  />
+                  <PermissionRow
+                    permission={t("permissionInviteMembers")}
+                    owner={true}
+                    admin={true}
+                    member={false}
+                    viewer={false}
+                  />
+                  <PermissionRow
+                    permission={t("permissionManageRoles")}
+                    owner={true}
+                    admin={true}
+                    member={false}
+                    viewer={false}
+                  />
+                  <PermissionRow
+                    permission={t("permissionManageContexts")}
+                    owner={true}
+                    admin={true}
+                    member={false}
+                    viewer={false}
+                  />
+                  <PermissionRow
+                    permission={t("permissionManagePublicSettings")}
+                    owner={true}
+                    admin={false}
+                    member={false}
+                    viewer={false}
+                  />
+                  <PermissionRow
+                    permission={t("permissionAccessAllContexts")}
+                    owner={true}
+                    admin={true}
+                    member={false}
+                    viewer={false}
+                  />
+                  <PermissionRow
+                    permission={t("permissionAccessAssignedContexts")}
+                    owner={false}
+                    admin={false}
+                    member={true}
+                    viewer={true}
+                  />
+                  <PermissionRow
+                    permission={t("permissionCreateMemories")}
+                    owner={true}
+                    admin={true}
+                    member={true}
+                    viewer={false}
+                  />
+                  <PermissionRow
+                    permission={t("permissionDeleteOwnMemories")}
+                    owner={true}
+                    admin={true}
+                    member={true}
+                    viewer={false}
+                  />
+                  <PermissionRow
+                    permission={t("permissionReadMemories")}
+                    owner={true}
+                    admin={true}
+                    member={true}
+                    viewer={true}
+                  />
                 </tbody>
               </table>
             </div>
@@ -809,7 +995,7 @@ export default function WorkspaceMembersPage() {
           <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-                {t('inviteTeamMember')}
+                {t("inviteTeamMember")}
               </h3>
               <button
                 onClick={handleCloseInviteDialog}
@@ -827,35 +1013,37 @@ export default function WorkspaceMembersPage() {
                   <div
                     className={`p-3 rounded-lg border ${
                       memberQuota.percentage >= 100
-                        ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800'
+                        ? "bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800"
                         : memberQuota.percentage >= 80
-                        ? 'bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800'
-                        : 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800'
+                          ? "bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800"
+                          : "bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800"
                     }`}
                   >
                     <div className="flex items-center justify-between">
                       <div>
                         <p className="text-sm font-medium">
                           {memberQuota.percentage >= 100
-                            ? '❌'
+                            ? "❌"
                             : memberQuota.percentage >= 80
-                            ? '⚠️'
-                            : 'ℹ️'}{' '}
-                          {t('seatUsage', {
+                              ? "⚠️"
+                              : "ℹ️"}{" "}
+                          {t("seatUsage", {
                             used: memberQuota.total_used,
                             limit: memberQuota.limit,
                           })}
                         </p>
                         <p className="text-xs mt-1">
                           {memberQuota.available > 0
-                            ? t('seatsAvailable', { available: memberQuota.available })
-                            : t('seatLimitReached')}
+                            ? t("seatsAvailable", {
+                                available: memberQuota.available,
+                              })
+                            : t("seatLimitReached")}
                         </p>
                       </div>
                       {memberQuota.percentage >= 100 && (
                         <Link href="/workspace/plan">
                           <button className="px-3 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700">
-                            {t('upgradeToAddMembers')}
+                            {t("upgradeToAddMembers")}
                           </button>
                         </Link>
                       )}
@@ -868,17 +1056,18 @@ export default function WorkspaceMembersPage() {
                   <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4 text-center">
                     <AlertTriangle className="w-12 h-12 text-red-600 mx-auto mb-3" />
                     <h4 className="text-lg font-semibold text-red-900 dark:text-red-100 mb-2">
-                      {t('seatLimitReached')}
+                      {t("seatLimitReached")}
                     </h4>
                     <p className="text-sm text-red-800 dark:text-red-200 mb-4">
-                      {t('seatLimitReachedDesc', {
-                        plan: currentWorkspace?.plan_name?.toUpperCase() || 'PRO',
+                      {t("seatLimitReachedDesc", {
+                        plan:
+                          currentWorkspace?.plan_name?.toUpperCase() || "PRO",
                         limit: memberQuota.limit,
                       })}
                     </p>
                     <Link href="/workspace/plan">
                       <button className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700">
-                        {t('upgradeToAddMembers')}
+                        {t("upgradeToAddMembers")}
                       </button>
                     </Link>
                   </div>
@@ -886,173 +1075,203 @@ export default function WorkspaceMembersPage() {
                   <>
                     <div>
                       <label className="block text-sm font-medium mb-1 text-gray-700 dark:text-gray-300">
-                        {t('emailRequired')} <span className="text-red-500">*</span>
+                        {t("emailRequired")}{" "}
+                        <span className="text-red-500">*</span>
                       </label>
                       <input
-                    type="email"
-                    value={inviteEmail}
-                    onChange={(e) => setInviteEmail(e.target.value)}
-                    placeholder={t('emailPlaceholder')}
-                    required
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                  />
-                  <div className="mt-1 p-2 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded">
-                    <p className="text-xs text-blue-900 dark:text-blue-100 font-medium">
-                      ℹ️ {t('emailImportant')}
-                    </p>
-                    <p className="text-xs text-blue-800 dark:text-blue-200 mt-1">
-                      {t('emailMustMatch')}
-                    </p>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium mb-1 text-gray-700 dark:text-gray-300">
-                    {t('role')}
-                  </label>
-                  <select
-                    value={inviteRole}
-                    onChange={(e) => setInviteRole(e.target.value as any)}
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                  >
-                    <option value="member">{t('roleMemberDesc')}</option>
-                    <option value="admin">{t('roleAdminDesc')}</option>
-                    <option value="viewer">{t('roleViewerDesc')}</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium mb-1 text-gray-700 dark:text-gray-300">
-                    {t('expiresIn')}
-                  </label>
-                  <select
-                    value={inviteExpiry ?? 'never'}
-                    onChange={(e) =>
-                      setInviteExpiry(e.target.value === 'never' ? null : Number(e.target.value))
-                    }
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                  >
-                    <option value="7">{t('days7')}</option>
-                    <option value="30">{t('days30')}</option>
-                    <option value="90">{t('days90')}</option>
-                    <option value="365">{t('year1')}</option>
-                    <option value="never">{t('neverExpires')}</option>
-                  </select>
-                </div>
-
-                {/* Migration 042: Context Access Selection (for member/viewer only) */}
-                {(inviteRole === 'member' || inviteRole === 'viewer') && (
-                  <div>
-                    <label className="block text-sm font-medium mb-2 text-gray-700 dark:text-gray-300">
-                      {t('inviteContextSelection')}
-                    </label>
-                    <p className="text-xs text-gray-600 dark:text-gray-400 mb-2">
-                      {t('inviteContextSelectionDesc')}
-                    </p>
-
-                    {/* Shared contexts check */}
-                    {contexts.filter(c => !c.is_private).length === 0 ? (
-                      <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3">
-                        <p className="text-sm text-amber-800 dark:text-amber-200">
-                          ⚠️ {t('noSharedContexts')}
+                        type="email"
+                        value={inviteEmail}
+                        onChange={(e) => setInviteEmail(e.target.value)}
+                        placeholder={t("emailPlaceholder")}
+                        required
+                        className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                      />
+                      <div className="mt-1 p-2 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded">
+                        <p className="text-xs text-blue-900 dark:text-blue-100 font-medium">
+                          ℹ️ {t("emailImportant")}
                         </p>
-                        <p className="text-xs text-amber-700 dark:text-amber-300 mt-1">
-                          {t('noSharedContextsDesc')}
+                        <p className="text-xs text-blue-800 dark:text-blue-200 mt-1">
+                          {t("emailMustMatch")}
                         </p>
                       </div>
-                    ) : (
-                      <>
-                        {/* Select All / Deselect All buttons */}
-                        <div className="flex items-center gap-2 mb-2">
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={() => {
-                              const sharedIds = contexts.filter(c => !c.is_private).map(c => c.id);
-                              setInviteContextIds(sharedIds);
-                            }}
-                          >
-                            {t('selectAll')}
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setInviteContextIds([])}
-                            disabled={inviteContextIds.length === 0}
-                          >
-                            {t('deselectAll')}
-                          </Button>
-                        </div>
-
-                        {/* Context checkboxes */}
-                        <div className="border border-gray-200 dark:border-gray-700 rounded-lg max-h-40 overflow-y-auto">
-                          <ul className="divide-y divide-gray-200 dark:divide-gray-700">
-                            {contexts.filter(c => !c.is_private).map((context) => (
-                              <li key={context.id} className="px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-800">
-                                <label className="flex items-center gap-2 cursor-pointer">
-                                  <input
-                                    type="checkbox"
-                                    checked={inviteContextIds.includes(context.id)}
-                                    onChange={() => {
-                                      if (inviteContextIds.includes(context.id)) {
-                                        setInviteContextIds(inviteContextIds.filter(id => id !== context.id));
-                                      } else {
-                                        setInviteContextIds([...inviteContextIds, context.id]);
-                                      }
-                                    }}
-                                    className="w-4 h-4 text-blue-600 rounded"
-                                  />
-                                  <span className="text-sm text-gray-900 dark:text-gray-100">
-                                    {context.display_name || context.name}
-                                  </span>
-                                </label>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-
-                        {/* Status message */}
-                        <p className="text-xs text-gray-600 dark:text-gray-400 mt-2">
-                          {t('contextsSelected', { count: inviteContextIds.length })}
-                        </p>
-                      </>
-                    )}
-                  </div>
-                )}
-
-                {/* Issue #217: Error display */}
-                {inviteError && (
-                  <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3">
-                    <div className="flex items-start gap-2">
-                      <AlertTriangle className="w-4 h-4 text-red-600 dark:text-red-400 mt-0.5 flex-shrink-0" />
-                      <p className="text-sm text-red-700 dark:text-red-300">{inviteError}</p>
                     </div>
-                  </div>
-                )}
 
-                <div className="flex justify-end gap-2 mt-6">
-                  <button
-                    onClick={handleCloseInviteDialog}
-                    disabled={inviteLoading}
-                    className="px-4 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md disabled:opacity-50"
-                  >
-                    {tCommon('cancel')}
-                  </button>
-                  <button
-                    onClick={handleCreateInvitation}
-                    disabled={
-                      inviteLoading ||
-                      ((inviteRole === 'member' || inviteRole === 'viewer') &&
-                        contexts.filter(c => !c.is_private).length === 0)
-                    }
-                    className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
-                  >
-                    {inviteLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                    {inviteLoading ? t('creating') : t('createInvitation')}
-                  </button>
-                </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1 text-gray-700 dark:text-gray-300">
+                        {t("role")}
+                      </label>
+                      <select
+                        value={inviteRole}
+                        onChange={(e) => setInviteRole(e.target.value as any)}
+                        className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                      >
+                        <option value="member">{t("roleMemberDesc")}</option>
+                        <option value="admin">{t("roleAdminDesc")}</option>
+                        <option value="viewer">{t("roleViewerDesc")}</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium mb-1 text-gray-700 dark:text-gray-300">
+                        {t("expiresIn")}
+                      </label>
+                      <select
+                        value={inviteExpiry ?? "never"}
+                        onChange={(e) =>
+                          setInviteExpiry(
+                            e.target.value === "never"
+                              ? null
+                              : Number(e.target.value),
+                          )
+                        }
+                        className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                      >
+                        <option value="7">{t("days7")}</option>
+                        <option value="30">{t("days30")}</option>
+                        <option value="90">{t("days90")}</option>
+                        <option value="365">{t("year1")}</option>
+                        <option value="never">{t("neverExpires")}</option>
+                      </select>
+                    </div>
+
+                    {/* Migration 042: Context Access Selection (for member/viewer only) */}
+                    {(inviteRole === "member" || inviteRole === "viewer") && (
+                      <div>
+                        <label className="block text-sm font-medium mb-2 text-gray-700 dark:text-gray-300">
+                          {t("inviteContextSelection")}
+                        </label>
+                        <p className="text-xs text-gray-600 dark:text-gray-400 mb-2">
+                          {t("inviteContextSelectionDesc")}
+                        </p>
+
+                        {/* Shared contexts check */}
+                        {contexts.filter((c) => !c.is_private).length === 0 ? (
+                          <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3">
+                            <p className="text-sm text-amber-800 dark:text-amber-200">
+                              ⚠️ {t("noSharedContexts")}
+                            </p>
+                            <p className="text-xs text-amber-700 dark:text-amber-300 mt-1">
+                              {t("noSharedContextsDesc")}
+                            </p>
+                          </div>
+                        ) : (
+                          <>
+                            {/* Select All / Deselect All buttons */}
+                            <div className="flex items-center gap-2 mb-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  const sharedIds = contexts
+                                    .filter((c) => !c.is_private)
+                                    .map((c) => c.id);
+                                  setInviteContextIds(sharedIds);
+                                }}
+                              >
+                                {t("selectAll")}
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setInviteContextIds([])}
+                                disabled={inviteContextIds.length === 0}
+                              >
+                                {t("deselectAll")}
+                              </Button>
+                            </div>
+
+                            {/* Context checkboxes */}
+                            <div className="border border-gray-200 dark:border-gray-700 rounded-lg max-h-40 overflow-y-auto">
+                              <ul className="divide-y divide-gray-200 dark:divide-gray-700">
+                                {contexts
+                                  .filter((c) => !c.is_private)
+                                  .map((context) => (
+                                    <li
+                                      key={context.id}
+                                      className="px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-800"
+                                    >
+                                      <label className="flex items-center gap-2 cursor-pointer">
+                                        <input
+                                          type="checkbox"
+                                          checked={inviteContextIds.includes(
+                                            context.id,
+                                          )}
+                                          onChange={() => {
+                                            if (
+                                              inviteContextIds.includes(
+                                                context.id,
+                                              )
+                                            ) {
+                                              setInviteContextIds(
+                                                inviteContextIds.filter(
+                                                  (id) => id !== context.id,
+                                                ),
+                                              );
+                                            } else {
+                                              setInviteContextIds([
+                                                ...inviteContextIds,
+                                                context.id,
+                                              ]);
+                                            }
+                                          }}
+                                          className="w-4 h-4 text-blue-600 rounded"
+                                        />
+                                        <span className="text-sm text-gray-900 dark:text-gray-100">
+                                          {context.display_name || context.name}
+                                        </span>
+                                      </label>
+                                    </li>
+                                  ))}
+                              </ul>
+                            </div>
+
+                            {/* Status message */}
+                            <p className="text-xs text-gray-600 dark:text-gray-400 mt-2">
+                              {t("contextsSelected", {
+                                count: inviteContextIds.length,
+                              })}
+                            </p>
+                          </>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Issue #217: Error display */}
+                    {inviteError && (
+                      <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3">
+                        <div className="flex items-start gap-2">
+                          <AlertTriangle className="w-4 h-4 text-red-600 dark:text-red-400 mt-0.5 flex-shrink-0" />
+                          <p className="text-sm text-red-700 dark:text-red-300">
+                            {inviteError}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex justify-end gap-2 mt-6">
+                      <button
+                        onClick={handleCloseInviteDialog}
+                        disabled={inviteLoading}
+                        className="px-4 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md disabled:opacity-50"
+                      >
+                        {tCommon("cancel")}
+                      </button>
+                      <button
+                        onClick={handleCreateInvitation}
+                        disabled={
+                          inviteLoading ||
+                          ((inviteRole === "member" ||
+                            inviteRole === "viewer") &&
+                            contexts.filter((c) => !c.is_private).length === 0)
+                        }
+                        className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+                      >
+                        {inviteLoading && <InlineSpinner size="sm" />}
+                        {inviteLoading ? t("creating") : t("createInvitation")}
+                      </button>
+                    </div>
                   </>
                 )}
               </div>
@@ -1061,16 +1280,16 @@ export default function WorkspaceMembersPage() {
               <div className="space-y-4">
                 <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-4">
                   <p className="text-sm text-green-800 dark:text-green-200 mb-2">
-                    ✓ {t('invitationSuccess')}
+                    ✓ {t("invitationSuccess")}
                   </p>
                   <p className="text-xs text-green-700 dark:text-green-300">
-                    {t('shareInviteLink')}
+                    {t("shareInviteLink")}
                   </p>
                 </div>
 
                 <div>
                   <label className="block text-sm font-medium mb-1 text-gray-700 dark:text-gray-300">
-                    {t('invitationLink')}
+                    {t("invitationLink")}
                   </label>
                   <div className="flex gap-2">
                     <input
@@ -1080,18 +1299,20 @@ export default function WorkspaceMembersPage() {
                       className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100 text-sm"
                     />
                     <button
-                      onClick={() => handleCopyInviteUrl(createdInviteUrl, createdInviteUrl)}
+                      onClick={() =>
+                        handleCopyInviteUrl(createdInviteUrl, createdInviteUrl)
+                      }
                       className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 flex items-center gap-2"
                     >
                       {copiedToken === createdInviteUrl ? (
                         <>
                           <Check className="w-4 h-4" />
-                          {t('copied')}
+                          {t("copied")}
                         </>
                       ) : (
                         <>
                           <Copy className="w-4 h-4" />
-                          {tCommon('copy')}
+                          {tCommon("copy")}
                         </>
                       )}
                     </button>
@@ -1099,7 +1320,7 @@ export default function WorkspaceMembersPage() {
                 </div>
 
                 <p className="text-xs text-gray-600 dark:text-gray-400">
-                  {t('inviteLinkAddedNote')}
+                  {t("inviteLinkAddedNote")}
                 </p>
 
                 <div className="flex justify-end mt-6">
@@ -1107,7 +1328,7 @@ export default function WorkspaceMembersPage() {
                     onClick={handleCloseInviteDialog}
                     className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
                   >
-                    {tCommon('close')}
+                    {tCommon("close")}
                   </button>
                 </div>
               </div>
@@ -1121,21 +1342,21 @@ export default function WorkspaceMembersPage() {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4">
             <h3 className="text-lg font-semibold mb-4 text-gray-900 dark:text-gray-100">
-              {t('proPlanRequiredTitle')}
+              {t("proPlanRequiredTitle")}
             </h3>
 
             <p className="text-gray-600 dark:text-gray-400 mb-6">
-              {t('proPlanRequiredDesc')}
+              {t("proPlanRequiredDesc")}
             </p>
 
             <div className="bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg p-4 mb-6">
               <p className="text-sm text-purple-900 dark:text-purple-100 font-medium mb-2">
-                {t('proPlanBenefits')}
+                {t("proPlanBenefits")}
               </p>
               <ul className="text-sm text-purple-800 dark:text-purple-200 space-y-1">
-                <li>✓ {t('benefitTeamInvitations')}</li>
-                <li>✓ {t('benefitSharedContexts')}</li>
-                <li>✓ {t('benefitCollaboration')}</li>
+                <li>✓ {t("benefitTeamInvitations")}</li>
+                <li>✓ {t("benefitSharedContexts")}</li>
+                <li>✓ {t("benefitCollaboration")}</li>
               </ul>
             </div>
 
@@ -1144,16 +1365,16 @@ export default function WorkspaceMembersPage() {
                 onClick={() => setShowUpgradePrompt(false)}
                 className="flex-1 px-4 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md"
               >
-                {tCommon('cancel')}
+                {tCommon("cancel")}
               </button>
               <button
                 onClick={() => {
                   setShowUpgradePrompt(false);
-                  window.location.href = '/workspace/plan';
+                  window.location.href = "/workspace/plan";
                 }}
                 className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700"
               >
-                {t('upgradeToPro')}
+                {t("upgradeToPro")}
               </button>
             </div>
           </div>
@@ -1161,24 +1382,34 @@ export default function WorkspaceMembersPage() {
       )}
 
       {/* Issue #217: Delete Member Confirmation Dialog */}
-      <AlertDialog open={showDeleteMemberDialog} onOpenChange={setShowDeleteMemberDialog}>
+      <AlertDialog
+        open={showDeleteMemberDialog}
+        onOpenChange={setShowDeleteMemberDialog}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle className="flex items-center gap-2">
               <AlertTriangle className="h-5 w-5 text-red-500" />
-              {t('removeMemberTitle')}
+              {t("removeMemberTitle")}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              {t('removeMemberDesc', { name: memberToDelete?.user_name || memberToDelete?.user_email || 'this member' })}
+              {t("removeMemberDesc", {
+                name:
+                  memberToDelete?.user_name ||
+                  memberToDelete?.user_email ||
+                  "this member",
+              })}
             </AlertDialogDescription>
             <div className="mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg">
               <p className="text-sm text-amber-800 dark:text-amber-200">
-                {t('removeMemberWarning')}
+                {t("removeMemberWarning")}
               </p>
             </div>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleteLoading}>{tCommon('cancel')}</AlertDialogCancel>
+            <AlertDialogCancel disabled={deleteLoading}>
+              {tCommon("cancel")}
+            </AlertDialogCancel>
             <AlertDialogAction
               onClick={handleConfirmRemoveMember}
               disabled={deleteLoading}
@@ -1186,11 +1417,11 @@ export default function WorkspaceMembersPage() {
             >
               {deleteLoading ? (
                 <>
-                  <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                  {t('removing')}
+                  <InlineSpinner size="sm" className="mr-2" />
+                  {t("removing")}
                 </>
               ) : (
-                t('removeMember')
+                t("removeMember")
               )}
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -1198,24 +1429,31 @@ export default function WorkspaceMembersPage() {
       </AlertDialog>
 
       {/* Issue #217: Delete Invitation Confirmation Dialog */}
-      <AlertDialog open={showDeleteInvitationDialog} onOpenChange={setShowDeleteInvitationDialog}>
+      <AlertDialog
+        open={showDeleteInvitationDialog}
+        onOpenChange={setShowDeleteInvitationDialog}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle className="flex items-center gap-2">
               <AlertTriangle className="h-5 w-5 text-amber-500" />
-              {t('revokeInvitationTitle')}
+              {t("revokeInvitationTitle")}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              {t('revokeInvitationDesc', { email: invitationToDelete?.email || 'this user' })}
+              {t("revokeInvitationDesc", {
+                email: invitationToDelete?.email || "this user",
+              })}
             </AlertDialogDescription>
             <div className="mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg">
               <p className="text-sm text-amber-800 dark:text-amber-200">
-                {t('revokeInvitationWarning')}
+                {t("revokeInvitationWarning")}
               </p>
             </div>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleteInvitationLoading}>{tCommon('cancel')}</AlertDialogCancel>
+            <AlertDialogCancel disabled={deleteInvitationLoading}>
+              {tCommon("cancel")}
+            </AlertDialogCancel>
             <AlertDialogAction
               onClick={handleConfirmDeleteInvitation}
               disabled={deleteInvitationLoading}
@@ -1223,11 +1461,11 @@ export default function WorkspaceMembersPage() {
             >
               {deleteInvitationLoading ? (
                 <>
-                  <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                  {t('revoking')}
+                  <InlineSpinner size="sm" className="mr-2" />
+                  {t("revoking")}
                 </>
               ) : (
-                t('revokeInvitation')
+                t("revokeInvitation")
               )}
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -1235,17 +1473,26 @@ export default function WorkspaceMembersPage() {
       </AlertDialog>
 
       {/* Issue #234: Role Change Confirmation Dialog */}
-      <AlertDialog open={showRoleChangeDialog} onOpenChange={setShowRoleChangeDialog}>
+      <AlertDialog
+        open={showRoleChangeDialog}
+        onOpenChange={setShowRoleChangeDialog}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t('roleChangeConfirmTitle')}</AlertDialogTitle>
+            <AlertDialogTitle>{t("roleChangeConfirmTitle")}</AlertDialogTitle>
             <AlertDialogDescription>
-              {pendingRoleChange && t('roleChangeConfirmDesc', { name: pendingRoleChange.member.user_name || pendingRoleChange.member.user_email || 'User' })}
+              {pendingRoleChange &&
+                t("roleChangeConfirmDesc", {
+                  name:
+                    pendingRoleChange.member.user_name ||
+                    pendingRoleChange.member.user_email ||
+                    "User",
+                })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="py-4">
             <p className="text-sm text-amber-600 dark:text-amber-400">
-              {t('roleChangeWarning')}
+              {t("roleChangeWarning")}
             </p>
           </div>
           <AlertDialogFooter>
@@ -1256,12 +1503,15 @@ export default function WorkspaceMembersPage() {
                 setPendingRoleChange(null);
               }}
             >
-              {tCommon('cancel')}
+              {tCommon("cancel")}
             </AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
                 if (pendingRoleChange) {
-                  executeRoleChange(pendingRoleChange.member.user_id, pendingRoleChange.newRole);
+                  executeRoleChange(
+                    pendingRoleChange.member.user_id,
+                    pendingRoleChange.newRole,
+                  );
                 }
               }}
               disabled={roleChangeLoading}
@@ -1269,11 +1519,11 @@ export default function WorkspaceMembersPage() {
             >
               {roleChangeLoading ? (
                 <>
-                  <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                  {tCommon('loading')}
+                  <InlineSpinner size="sm" className="mr-2" />
+                  {tCommon("loading")}
                 </>
               ) : (
-                t('confirmRoleChange')
+                t("confirmRoleChange")
               )}
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -1281,22 +1531,25 @@ export default function WorkspaceMembersPage() {
       </AlertDialog>
 
       {/* Issue #234: Context Access Dialog */}
-      <AlertDialog open={showContextAccessDialog} onOpenChange={setShowContextAccessDialog}>
+      <AlertDialog
+        open={showContextAccessDialog}
+        onOpenChange={setShowContextAccessDialog}
+      >
         <AlertDialogContent className="max-w-lg">
           <AlertDialogHeader>
             <AlertDialogTitle className="flex items-center gap-2">
               <Settings className="h-5 w-5 text-blue-500" />
-              {t('editContextAccess')}
+              {t("editContextAccess")}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              {t('contextAccessDesc')}
+              {t("contextAccessDesc")}
             </AlertDialogDescription>
           </AlertDialogHeader>
 
           <div className="py-4 space-y-4">
             {/* Info message */}
             <p className="text-sm text-gray-600 dark:text-gray-400">
-              {t('contextAccessInfo')}
+              {t("contextAccessInfo")}
             </p>
 
             {/* Select All / Deselect All buttons */}
@@ -1305,12 +1558,12 @@ export default function WorkspaceMembersPage() {
                 variant="outline"
                 size="sm"
                 onClick={() => {
-                  const allIds = contexts.map(c => c.id);
+                  const allIds = contexts.map((c) => c.id);
                   setSelectedContextIds(allIds);
                 }}
                 disabled={contexts.length === 0}
               >
-                {t('selectAll')}
+                {t("selectAll")}
               </Button>
               <Button
                 variant="outline"
@@ -1318,7 +1571,7 @@ export default function WorkspaceMembersPage() {
                 onClick={() => setSelectedContextIds([])}
                 disabled={selectedContextIds.length === 0}
               >
-                {t('deselectAll')}
+                {t("deselectAll")}
               </Button>
             </div>
 
@@ -1326,12 +1579,15 @@ export default function WorkspaceMembersPage() {
             <div className="border border-gray-200 dark:border-gray-700 rounded-lg max-h-60 overflow-y-auto">
               {contexts.length === 0 ? (
                 <div className="p-4 text-center text-gray-500 text-sm">
-                  {t('noContextsAvailable')}
+                  {t("noContextsAvailable")}
                 </div>
               ) : (
                 <ul className="divide-y divide-gray-200 dark:divide-gray-700">
                   {contexts.map((context) => (
-                    <li key={context.id} className="px-4 py-2 hover:bg-gray-50 dark:hover:bg-gray-800">
+                    <li
+                      key={context.id}
+                      className="px-4 py-2 hover:bg-gray-50 dark:hover:bg-gray-800"
+                    >
                       <label className="flex items-center gap-3 cursor-pointer">
                         <input
                           type="checkbox"
@@ -1360,18 +1616,20 @@ export default function WorkspaceMembersPage() {
             {selectedContextIds.length === 0 ? (
               <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3">
                 <p className="text-sm text-red-800 dark:text-red-200 font-medium">
-                  ⚠️ {t('inviteContextRequired')}
+                  ⚠️ {t("inviteContextRequired")}
                 </p>
               </div>
             ) : (
               <p className="text-sm text-gray-600 dark:text-gray-400">
-                {t('contextsSelected', { count: selectedContextIds.length })}
+                {t("contextsSelected", { count: selectedContextIds.length })}
               </p>
             )}
           </div>
 
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={contextAccessLoading}>{tCommon('cancel')}</AlertDialogCancel>
+            <AlertDialogCancel disabled={contextAccessLoading}>
+              {tCommon("cancel")}
+            </AlertDialogCancel>
             <AlertDialogAction
               onClick={handleSaveContextAccess}
               disabled={contextAccessLoading || selectedContextIds.length === 0}
@@ -1379,11 +1637,11 @@ export default function WorkspaceMembersPage() {
             >
               {contextAccessLoading ? (
                 <>
-                  <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                  {tCommon('saving')}
+                  <InlineSpinner size="sm" className="mr-2" />
+                  {tCommon("saving")}
                 </>
               ) : (
-                t('saveContextAccess')
+                t("saveContextAccess")
               )}
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -1401,7 +1659,13 @@ interface PermissionRowProps {
   viewer: boolean;
 }
 
-function PermissionRow({ permission, owner, admin, member, viewer }: PermissionRowProps) {
+function PermissionRow({
+  permission,
+  owner,
+  admin,
+  member,
+  viewer,
+}: PermissionRowProps) {
   const CheckIcon = () => (
     <Check className="h-4 w-4 text-green-600 dark:text-green-400 mx-auto" />
   );
@@ -1411,11 +1675,21 @@ function PermissionRow({ permission, owner, admin, member, viewer }: PermissionR
 
   return (
     <tr className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
-      <td className="px-4 py-3 text-sm text-gray-900 dark:text-gray-100">{permission}</td>
-      <td className="px-4 py-3 text-center">{owner ? <CheckIcon /> : <EmptyIcon />}</td>
-      <td className="px-4 py-3 text-center">{admin ? <CheckIcon /> : <EmptyIcon />}</td>
-      <td className="px-4 py-3 text-center">{member ? <CheckIcon /> : <EmptyIcon />}</td>
-      <td className="px-4 py-3 text-center">{viewer ? <CheckIcon /> : <EmptyIcon />}</td>
+      <td className="px-4 py-3 text-sm text-gray-900 dark:text-gray-100">
+        {permission}
+      </td>
+      <td className="px-4 py-3 text-center">
+        {owner ? <CheckIcon /> : <EmptyIcon />}
+      </td>
+      <td className="px-4 py-3 text-center">
+        {admin ? <CheckIcon /> : <EmptyIcon />}
+      </td>
+      <td className="px-4 py-3 text-center">
+        {member ? <CheckIcon /> : <EmptyIcon />}
+      </td>
+      <td className="px-4 py-3 text-center">
+        {viewer ? <CheckIcon /> : <EmptyIcon />}
+      </td>
     </tr>
   );
 }
