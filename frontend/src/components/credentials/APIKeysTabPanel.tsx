@@ -32,7 +32,14 @@ import {
   Trash2,
   AlertTriangle,
   Plus,
+  Key,
+  ChevronDown,
 } from "lucide-react";
+import { EmptyState } from "@/components/ui/empty-state";
+import { MaskedSecretField } from "@/components/common/MaskedSecretField";
+import { MCPConfigBlock } from "@/components/credentials/MCPConfigBlock";
+import { useAutoOpenOnFreshWindow } from "@/hooks/useAutoOpenOnFreshWindow";
+import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -45,6 +52,13 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 
 // Auto-refresh interval: 5 minutes (refresh before 10-minute visibility expiry)
 const CREDENTIALS_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
@@ -73,7 +87,11 @@ export function APIKeysTabPanel() {
   );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [copiedItems, setCopiedItems] = useState<Record<string, boolean>>({});
+
+  // Per-key copy feedback (independent timers per copy target — extracted
+  // into useCopyFeedback to fix the multi-target stale-state bug from the
+  // pre-batch single-shared-ref pattern).
+  const { isCopied, copyToTarget } = useCopyFeedback();
 
   // Dialog states
   const [showCreateKeyDialog, setShowCreateKeyDialog] = useState(false);
@@ -88,16 +106,13 @@ export function APIKeysTabPanel() {
   const [deleting, setDeleting] = useState(false);
 
   // Track if component is mounted to prevent state updates after unmount
+  // (used by the load handlers; copy feedback owns its own mount tracking).
   const isMountedRef = useRef(true);
-  const copyTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
 
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
-      if (copyTimeoutRef.current) {
-        clearTimeout(copyTimeoutRef.current);
-      }
     };
   }, []);
 
@@ -112,9 +127,12 @@ export function APIKeysTabPanel() {
         setCredentials(data);
       }
     } catch (err: unknown) {
-      console.error("Failed to load credentials:", err);
+      if (process.env.NODE_ENV === "development") {
+        // eslint-disable-next-line no-console
+        console.error("Failed to load credentials:", err);
+      }
       if (isMountedRef.current) {
-        setError((err as Error).message);
+        setError(err instanceof Error ? err.message : String(err));
       }
     } finally {
       if (isMountedRef.current) {
@@ -142,23 +160,25 @@ export function APIKeysTabPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentWorkspaceId, userId]);
 
+  // Auto-open the MCP Setup Guide whenever a NEW visibility window starts
+  // (e.g. just after key creation or regenerate). The hook respects
+  // deliberate user closes — same-timestamp re-renders do NOT reopen.
+  const [setupGuideOpen, setSetupGuideOpen] = useAutoOpenOnFreshWindow(
+    credentials?.api_keys?.[0]?.visibility_expires_at ?? null,
+  );
+
   const handleCopy = async (text: string, key: string) => {
     try {
-      await navigator.clipboard.writeText(text);
-      setCopiedItems((prev) => ({ ...prev, [key]: true }));
-
-      // Clear previous timeout
-      if (copyTimeoutRef.current) {
-        clearTimeout(copyTimeoutRef.current);
-      }
-
-      copyTimeoutRef.current = setTimeout(() => {
-        if (isMountedRef.current) {
-          setCopiedItems((prev) => ({ ...prev, [key]: false }));
-        }
-      }, 2000);
-    } catch (err) {
-      console.error("Failed to copy:", err);
+      await copyToTarget(text, key);
+    } catch (err: unknown) {
+      // Clipboard write failure is a user-action failure (the user clicked
+      // a Copy button) — surface via destructive toast per the 3-channel
+      // error rule, not via silent console.error.
+      toast({
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
     }
   };
 
@@ -177,7 +197,7 @@ export function APIKeysTabPanel() {
     } catch (err: unknown) {
       toast({
         title: tCommon("error"),
-        description: (err as Error).message,
+        description: err instanceof Error ? err.message : String(err),
         variant: "destructive",
       });
     }
@@ -201,7 +221,11 @@ export function APIKeysTabPanel() {
         description: t("regenerateSuccess"),
       });
     } catch (err: unknown) {
-      setError(`Failed to regenerate API key: ${(err as Error).message}`);
+      toast({
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
     } finally {
       setRegenerating(false);
     }
@@ -229,7 +253,11 @@ export function APIKeysTabPanel() {
         description: t("deleteSuccess"),
       });
     } catch (err: unknown) {
-      setError(`Failed to delete API key: ${(err as Error).message}`);
+      toast({
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
     } finally {
       setDeleting(false);
     }
@@ -256,7 +284,17 @@ export function APIKeysTabPanel() {
         description: t("createSuccess"),
       });
     } catch (err: unknown) {
-      setCreateKeyError((err as Error).message || "Failed to create API key");
+      // Use err.message when available; fall back to the i18n'd error
+      // string for non-Error rejections OR when err.message is empty.
+      // The previous fallback `String(err) || "Failed to create API key"`
+      // had a precedence bug: `String(err)` is always truthy ("undefined",
+      // "[object Object]", etc.), so the hardcoded English fallback was
+      // dead code AND it bypassed i18n.
+      setCreateKeyError(
+        err instanceof Error && err.message.trim()
+          ? err.message
+          : t("errorCreateKey"),
+      );
     }
   };
 
@@ -273,12 +311,25 @@ export function APIKeysTabPanel() {
       {/* API Keys Section */}
       <Section title={t("apiKeysTitle")} description={t("apiKeysDesc")}>
         <div className="space-y-4">
-          {/* MCP Setup Guide (Collapsible) */}
-          <details className="border border-blue-200 dark:border-blue-800 rounded-lg">
-            <summary className="cursor-pointer px-4 py-3 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded-lg font-medium text-blue-900 dark:text-blue-100 text-sm">
-              📖 {t("mcpSetupGuide")}
-            </summary>
-            <div className="p-4 bg-blue-50 dark:bg-blue-900/20 space-y-4">
+          {/* MCP Setup Guide (Collapsible) — controlled state so the
+              auto-open useEffect can react to fresh visibility windows
+              after credentials load asynchronously. */}
+          <Collapsible
+            className="border border-blue-200 dark:border-blue-800 rounded-lg"
+            open={setupGuideOpen}
+            onOpenChange={setSetupGuideOpen}
+          >
+            <CollapsibleTrigger
+              className="group flex w-full items-center justify-between cursor-pointer px-4 py-3 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded-lg font-medium text-blue-900 dark:text-blue-100 text-sm"
+              aria-expanded={setupGuideOpen}
+            >
+              <span>📖 {t("mcpSetupGuide")}</span>
+              <ChevronDown
+                className="w-4 h-4 transition-transform duration-200 group-data-[state=open]:rotate-180"
+                aria-hidden="true"
+              />
+            </CollapsibleTrigger>
+            <CollapsibleContent className="p-4 bg-blue-50 dark:bg-blue-900/20 space-y-4">
               {/* MCP URL */}
               <div className="flex items-center gap-2">
                 <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -287,19 +338,23 @@ export function APIKeysTabPanel() {
                 <code className="flex-1 bg-blue-100 dark:bg-blue-900/40 px-2 py-1 rounded border border-blue-200 dark:border-blue-800 text-xs font-mono text-blue-800 dark:text-blue-200">
                   {workspaceScopedMcpUrl || mcpBaseUrl}
                 </code>
-                <button
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
                   onClick={() =>
                     handleCopy(workspaceScopedMcpUrl || mcpBaseUrl, "mcp-url")
                   }
-                  className="p-1.5 text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-800 rounded transition-colors"
+                  className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-800"
                   title={t("copyMcpUrl")}
+                  aria-label={t("copyMcpUrl")}
                 >
-                  {copiedItems["mcp-url"] ? (
+                  {isCopied("mcp-url") ? (
                     <Check className="w-3.5 h-3.5 text-green-600" />
                   ) : (
                     <Copy className="w-3.5 h-3.5" />
                   )}
-                </button>
+                </Button>
               </div>
 
               {/* Config Example */}
@@ -307,25 +362,13 @@ export function APIKeysTabPanel() {
                 <p className="font-semibold text-gray-900 dark:text-gray-100 mb-2 text-sm">
                   {t("mcpConfigTitle")}
                 </p>
-                <pre className="bg-gray-900 text-gray-100 p-3 rounded overflow-x-auto text-xs">
-                  {`{
-  "mcpServers": {
-    "kagura-memory": {
-      "type": "http",
-      "url": "${workspaceScopedMcpUrl || mcpBaseUrl}",
-      "headers": {
-        "Authorization": "Bearer YOUR_API_KEY"
-      }
-    }
-  }
-}`}
-                </pre>
-                <p className="text-xs text-blue-700 dark:text-blue-300 mt-2">
-                  💡 {t("mcpConfigHint")}
-                </p>
+                <MCPConfigBlock
+                  apiKey={apiKeys[0] ?? null}
+                  mcpUrl={workspaceScopedMcpUrl || mcpBaseUrl}
+                />
               </div>
-            </div>
-          </details>
+            </CollapsibleContent>
+          </Collapsible>
 
           {/* SDK & Integration Links */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -392,11 +435,13 @@ export function APIKeysTabPanel() {
 
           {/* API Keys Display */}
           {apiKeys.length === 0 ? (
-            <div className="bg-gray-50 dark:bg-gray-800 p-6 rounded border border-gray-200 dark:border-gray-700 text-center">
-              <p className="text-gray-500 dark:text-gray-400">
-                {t("noApiKeys")}
-              </p>
-            </div>
+            <EmptyState
+              icon={Key}
+              title={t("noKeysTitle")}
+              description={t("noKeysDesc")}
+              actionLabel={t("createApiKey")}
+              onAction={() => setShowCreateKeyDialog(true)}
+            />
           ) : (
             apiKeys.map((apiKey) => (
               <div
@@ -419,32 +464,28 @@ export function APIKeysTabPanel() {
                 {apiKey.is_visible && apiKey.plaintext_key ? (
                   <div className="bg-green-50 dark:bg-green-900/20 p-3 rounded border border-green-200 dark:border-green-800">
                     <div className="flex items-center gap-2">
-                      <code className="flex-1 bg-white dark:bg-gray-900 px-3 py-2 rounded border border-gray-300 dark:border-gray-600 text-sm font-mono">
-                        {apiKey.plaintext_key}
-                      </code>
-                      <button
-                        onClick={() =>
-                          handleCopy(
-                            apiKey.plaintext_key!,
-                            `api-key-${apiKey.id}`,
-                          )
-                        }
-                        className="p-2 text-gray-600 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-colors"
-                        title={t("copyToClipboard")}
-                      >
-                        {copiedItems[`api-key-${apiKey.id}`] ? (
-                          <Check className="w-4 h-4 text-green-600" />
-                        ) : (
-                          <Copy className="w-4 h-4" />
-                        )}
-                      </button>
-                      <button
+                      <MaskedSecretField
+                        value={apiKey.plaintext_key}
+                        displayMask={`${apiKey.key_prefix || "kag_"}•••••••••••`}
+                        copyToastTitle={t("keyCopied")}
+                        copyToastDescription={t("keyCopiedHint")}
+                        copyErrorToastTitle={tCommon("error")}
+                        showLabel={t("showKey")}
+                        hideLabel={t("hideKey")}
+                        copyLabel={t("copyToClipboard")}
+                        className="flex-1"
+                        data-testid={`api-key-field-${apiKey.id}`}
+                      />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
                         onClick={() => handleHideAPIKeyClick(apiKey.id)}
-                        className="p-2 text-gray-600 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-colors"
                         title={t("hideSecretNow")}
+                        aria-label={t("hideSecretNow")}
                       >
                         <EyeOff className="w-4 h-4" />
-                      </button>
+                      </Button>
                       {apiKey.visibility_expires_at &&
                         (() => {
                           const expiresAt = new Date(
@@ -541,31 +582,35 @@ export function APIKeysTabPanel() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{t("createApiKeyTitle")}</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium mb-1">
-                    {t("keyName")}
-                  </label>
-                  <input
-                    type="text"
-                    value={newKeyName}
-                    onChange={(e) => setNewKeyName(e.target.value)}
-                    placeholder={t("keyNamePlaceholder")}
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
-                  />
-                </div>
-                {createKeyError && (
-                  <p className="text-sm text-red-600 dark:text-red-400">
-                    {createKeyError}
-                  </p>
-                )}
-                <p className="text-xs text-yellow-700 dark:text-yellow-300">
-                  💡 {t("securityNote")}
-                </p>
-              </div>
+            <AlertDialogDescription>
+              {t("createApiKeyDesc")}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          <div className="space-y-4">
+            <div>
+              <label
+                htmlFor="create-api-key-name"
+                className="block text-sm font-medium mb-1"
+              >
+                {t("keyName")}
+              </label>
+              <Input
+                id="create-api-key-name"
+                type="text"
+                value={newKeyName}
+                onChange={(e) => setNewKeyName(e.target.value)}
+                placeholder={t("keyNamePlaceholder")}
+              />
+            </div>
+            {createKeyError && (
+              <p className="text-sm text-red-600 dark:text-red-400">
+                {createKeyError}
+              </p>
+            )}
+            <p className="text-xs text-yellow-700 dark:text-yellow-300">
+              💡 {t("securityNote")}
+            </p>
+          </div>
           <AlertDialogFooter>
             <AlertDialogCancel
               onClick={() => {
@@ -591,13 +636,11 @@ export function APIKeysTabPanel() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{t("hideApiKeyTitle")}</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="space-y-2">
-                <p>{t("hideApiKeyWarning")}</p>
-                <p>{t("hideApiKeyNote")}</p>
-              </div>
+            <AlertDialogDescription>
+              {t("hideApiKeyWarning")}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          <p className="text-sm text-muted-foreground">{t("hideApiKeyNote")}</p>
           <AlertDialogFooter>
             <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
             <AlertDialogAction onClick={handleConfirmHideAPIKey}>

@@ -27,7 +27,9 @@ import { EditOAuthClientDialog } from "@/app/(authenticated)/workspace/integrati
 import { OAuthAppCard } from "@/components/oauth/OAuthAppCard";
 import { CreateCustomOAuthAppDialog } from "@/components/oauth/CreateCustomOAuthAppDialog";
 import { hideOAuthClientSecret } from "@/lib/api/member-credentials";
-import { Copy, Check, Plus } from "lucide-react";
+import { Copy, Check, Plus, KeyRound } from "lucide-react";
+import { EmptyState } from "@/components/ui/empty-state";
+import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useToast } from "@/hooks/use-toast";
 import {
   AlertDialog,
@@ -39,6 +41,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
 
 // Auto-refresh interval: 5 minutes (refresh before 10-minute visibility expiry)
 const OAUTH_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
@@ -63,7 +66,10 @@ export function OAuthAppsTabPanel() {
   const [oauthClients, setOauthClients] = useState<OAuth2Client[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [copiedItems, setCopiedItems] = useState<Record<string, boolean>>({});
+
+  // Per-key copy feedback (extracted into useCopyFeedback to fix the
+  // multi-target stale-state bug from the pre-batch single-shared-ref pattern).
+  const { isCopied, copyToTarget } = useCopyFeedback();
 
   // Custom OAuth App dialog
   const [showCustomDialog, setShowCustomDialog] = useState(false);
@@ -84,17 +90,14 @@ export function OAuthAppsTabPanel() {
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [oauthToEdit, setOauthToEdit] = useState<OAuth2Client | null>(null);
 
-  // Track if component is mounted
+  // Track if component is mounted (used by load handlers; copy feedback
+  // owns its own mount tracking inside the hook).
   const isMountedRef = useRef(true);
-  const copyTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
 
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
-      if (copyTimeoutRef.current) {
-        clearTimeout(copyTimeoutRef.current);
-      }
     };
   }, []);
 
@@ -107,7 +110,10 @@ export function OAuthAppsTabPanel() {
         setOauthClients(clients);
       }
     } catch (err: unknown) {
-      console.error("Failed to load OAuth clients:", err);
+      if (process.env.NODE_ENV === "development") {
+        // eslint-disable-next-line no-console
+        console.error("Failed to load OAuth clients:", err);
+      }
       if (isMountedRef.current) {
         setError(err instanceof Error ? err.message : String(err));
       }
@@ -139,20 +145,15 @@ export function OAuthAppsTabPanel() {
 
   const handleCopy = async (text: string, key: string) => {
     try {
-      await navigator.clipboard.writeText(text);
-      setCopiedItems((prev) => ({ ...prev, [key]: true }));
-
-      if (copyTimeoutRef.current) {
-        clearTimeout(copyTimeoutRef.current);
-      }
-
-      copyTimeoutRef.current = setTimeout(() => {
-        if (isMountedRef.current) {
-          setCopiedItems((prev) => ({ ...prev, [key]: false }));
-        }
-      }, 2000);
-    } catch (err) {
-      console.error("Failed to copy:", err);
+      await copyToTarget(text, key);
+    } catch (err: unknown) {
+      // Clipboard write failure is a user-action failure — surface via
+      // destructive toast per the 3-channel error rule.
+      toast({
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
     }
   };
 
@@ -167,7 +168,6 @@ export function OAuthAppsTabPanel() {
     }
 
     try {
-      setError(null);
       await createOAuth2Client({
         provider,
         client_name: provider === "claude" ? "Claude" : "ChatGPT",
@@ -186,8 +186,11 @@ export function OAuthAppsTabPanel() {
         }),
       });
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : JSON.stringify(err);
-      setError(`Failed to create OAuth app: ${errorMsg}`);
+      toast({
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
     }
   };
 
@@ -203,9 +206,11 @@ export function OAuthAppsTabPanel() {
       await loadOAuthClients();
       setShowHideOAuthDialog(false);
     } catch (err: unknown) {
-      setError(
-        `Failed to hide OAuth app: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      toast({
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
     }
   };
 
@@ -225,9 +230,11 @@ export function OAuthAppsTabPanel() {
         description: t("regenerateSecretSuccess"),
       });
     } catch (err: unknown) {
-      setError(
-        `Failed to regenerate OAuth secret: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      toast({
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
     }
   };
 
@@ -244,12 +251,14 @@ export function OAuthAppsTabPanel() {
       setShowDeleteOAuthDialog(false);
       toast({
         title: tCommon("success"),
-        description: "OAuth app deleted successfully",
+        description: t("deleteSuccess"),
       });
     } catch (err: unknown) {
-      setError(
-        `Failed to delete OAuth app: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      toast({
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
     }
   };
 
@@ -270,7 +279,7 @@ export function OAuthAppsTabPanel() {
 
   const cardProps = {
     onCopy: handleCopy,
-    copiedItems,
+    isCopied,
     onHide: handleHideOAuthAppClick,
     onRegenerate: handleRegenerateOAuthClick,
     onDelete: handleDeleteOAuthClientClick,
@@ -296,36 +305,44 @@ export function OAuthAppsTabPanel() {
               <code className="flex-1 bg-blue-50 dark:bg-blue-900/30 px-4 py-3 rounded border border-blue-200 dark:border-blue-800 text-sm font-mono text-blue-800 dark:text-blue-200">
                 {workspaceScopedMcpUrl}
               </code>
-              <button
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
                 onClick={() =>
                   handleCopy(workspaceScopedMcpUrl, "workspace-mcp-url")
                 }
-                className="p-3 text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-800 rounded transition-colors"
+                className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-800"
                 title={t("copyMcpUrl", { default: "Copy MCP URL" })}
+                aria-label={t("copyMcpUrl", { default: "Copy MCP URL" })}
               >
-                {copiedItems["workspace-mcp-url"] ? (
+                {isCopied("workspace-mcp-url") ? (
                   <Check className="w-4 h-4 text-green-600" />
                 ) : (
                   <Copy className="w-4 h-4" />
                 )}
-              </button>
+              </Button>
             </div>
           ) : (
             <div className="flex items-center gap-2">
               <code className="flex-1 bg-blue-50 dark:bg-blue-900/30 px-4 py-3 rounded border border-blue-200 dark:border-blue-800 text-sm font-mono text-blue-800 dark:text-blue-200">
                 {mcpBaseUrl}
               </code>
-              <button
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
                 onClick={() => handleCopy(mcpBaseUrl, "mcp-url")}
-                className="p-3 text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-800 rounded transition-colors"
+                className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-800"
                 title={t("copyMcpUrl", { default: "Copy MCP URL" })}
+                aria-label={t("copyMcpUrl", { default: "Copy MCP URL" })}
               >
-                {copiedItems["mcp-url"] ? (
+                {isCopied("mcp-url") ? (
                   <Check className="w-4 h-4 text-green-600" />
                 ) : (
                   <Copy className="w-4 h-4" />
                 )}
-              </button>
+              </Button>
             </div>
           )}
         </div>
@@ -411,9 +428,13 @@ export function OAuthAppsTabPanel() {
             </div>
 
             {customApps.length === 0 ? (
-              <p className="text-sm text-gray-500 dark:text-gray-400 text-center py-4">
-                {t("noCustomApps")}
-              </p>
+              <EmptyState
+                icon={KeyRound}
+                title={t("noCustomOAuthAppsTitle")}
+                description={t("noCustomApps")}
+                actionLabel={t("createCustomApp")}
+                onAction={() => handleCreateOAuthApp("custom")}
+              />
             ) : (
               <div className="space-y-4">
                 {customApps.map((app) => (
@@ -457,13 +478,11 @@ export function OAuthAppsTabPanel() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{t("hideOAuthTitle")}</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="space-y-2">
-                <p>{t("hideOAuthWarning")}</p>
-                <p>{t("hideOAuthNote")}</p>
-              </div>
+            <AlertDialogDescription>
+              {t("hideOAuthWarning")}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          <p className="text-sm text-muted-foreground">{t("hideOAuthNote")}</p>
           <AlertDialogFooter>
             <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
             <AlertDialogAction onClick={handleConfirmHideOAuthApp}>
