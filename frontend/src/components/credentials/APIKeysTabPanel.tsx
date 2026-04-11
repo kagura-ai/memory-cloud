@@ -116,10 +116,16 @@ export function APIKeysTabPanel() {
 
   useEffect(() => {
     isMountedRef.current = true;
-    const timers = copyTimeoutsRef.current;
     return () => {
       isMountedRef.current = false;
-      for (const t of Object.values(timers)) {
+      // Read the ref's current value at cleanup time so we observe ALL
+      // pending timers, including those added between mount and unmount.
+      // Capturing `copyTimeoutsRef.current` into a local variable at mount
+      // time would freeze the *initial* object reference — fine today
+      // because the object is mutated in place, but a future refactor that
+      // reassigns `.current = newObject` would silently miss the new timers.
+      // Reading at cleanup time is robust to either pattern.
+      for (const t of Object.values(copyTimeoutsRef.current)) {
         clearTimeout(t);
       }
     };

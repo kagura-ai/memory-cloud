@@ -96,10 +96,12 @@ export function OAuthAppsTabPanel() {
 
   useEffect(() => {
     isMountedRef.current = true;
-    const timers = copyTimeoutsRef.current;
     return () => {
       isMountedRef.current = false;
-      for (const t of Object.values(timers)) {
+      // Read the ref directly at cleanup time — see APIKeysTabPanel for
+      // the rationale. Mutation-in-place is robust today, reassignment-
+      // safe tomorrow.
+      for (const t of Object.values(copyTimeoutsRef.current)) {
         clearTimeout(t);
       }
     };

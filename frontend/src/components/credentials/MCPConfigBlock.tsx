@@ -68,11 +68,44 @@ function readStoredClient(): MCPClient {
   return DEFAULT_CLIENT;
 }
 
+/**
+ * Build the displayed/copied snippet for one of the 3 client variants.
+ *
+ * SECURITY CONTRACT: `mcpUrl` and `authValue` MUST be server-issued or
+ * known constants. They are NEVER user-controlled. Specifically:
+ * - `mcpUrl` is `${baseUrl}/mcp/w/${currentWorkspaceId}` where baseUrl is
+ *   from NEXT_PUBLIC_API_URL (build-time env) and currentWorkspaceId is a
+ *   backend-issued UUID.
+ * - `authValue` is either the live API key (backend-issued), the masked
+ *   constant `MASKED_KEY`, or the placeholder constant `PLACEHOLDER_KEY`.
+ *
+ * The Claude Code / Cursor branches use `JSON.stringify(...)` which
+ * automatically escapes the values. The ChatGPT branch uses raw template
+ * interpolation inside a comment block — if either input ever contains
+ * newlines, `*\/`, or other unsafe characters, the rendered comment will
+ * break. The dev-mode guard below catches refactor regressions early so
+ * a future change that introduces user-controllable content into either
+ * input fails loudly in development before reaching production.
+ */
 function buildJsonConfig(
   client: MCPClient,
   mcpUrl: string,
   authValue: string,
 ): string {
+  if (process.env.NODE_ENV === "development") {
+    const unsafeRe = /[\n\r]|\*\//;
+    if (unsafeRe.test(mcpUrl) || unsafeRe.test(authValue)) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[MCPConfigBlock.buildJsonConfig] mcpUrl or authValue contains " +
+          "newlines or comment-terminator sequences. These inputs MUST be " +
+          "server-issued. If a refactor introduced user-controllable content, " +
+          "either escape it before passing here or change the ChatGPT branch " +
+          "to use a structured format instead of raw template interpolation.",
+      );
+    }
+  }
+
   // The serverName is intentionally consistent across clients — it's the
   // identifier the user references when calling MCP tools, and matching it
   // to the project name (kagura-memory) keeps doc cross-references stable.
@@ -80,9 +113,9 @@ function buildJsonConfig(
 
   if (client === "chatgpt") {
     // ChatGPT custom connectors take a flatter shape — typically just the
-    // endpoint URL and authorization header at the top level. We render the
-    // same JSON shape as the other clients for consistency, with a comment
-    // header explaining how to paste it into the connector UI.
+    // endpoint URL and authorization header at the top level. We render a
+    // comment block explaining how to paste it into the connector UI. See
+    // the SECURITY CONTRACT in the JSDoc above for input trust expectations.
     return [
       "// ChatGPT → Settings → Custom Connectors → New connector",
       "// Paste the URL and Authorization header into the form fields:",
