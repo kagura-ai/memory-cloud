@@ -15,7 +15,10 @@ import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
 import { ActionButton } from "@/components/common/ActionButton";
 import { Button } from "@/components/ui/button";
-import { TableLoadingState } from "@/components/common/LoadingState";
+import {
+  InlineSpinner,
+  TableLoadingState,
+} from "@/components/common/LoadingState";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useAuth } from "@/contexts/AuthContext";
 import {
@@ -43,9 +46,7 @@ import {
   Copy,
   Check,
   X,
-  Key,
   AlertTriangle,
-  Loader2,
   Settings,
   ChevronDown,
   ChevronUp,
@@ -1267,9 +1268,7 @@ export default function WorkspaceMembersPage() {
                         }
                         className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
                       >
-                        {inviteLoading && (
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                        )}
+                        {inviteLoading && <InlineSpinner size="sm" />}
                         {inviteLoading ? t("creating") : t("createInvitation")}
                       </button>
                     </div>
@@ -1418,7 +1417,7 @@ export default function WorkspaceMembersPage() {
             >
               {deleteLoading ? (
                 <>
-                  <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                  <InlineSpinner size="sm" className="mr-2" />
                   {t("removing")}
                 </>
               ) : (
@@ -1462,7 +1461,7 @@ export default function WorkspaceMembersPage() {
             >
               {deleteInvitationLoading ? (
                 <>
-                  <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                  <InlineSpinner size="sm" className="mr-2" />
                   {t("revoking")}
                 </>
               ) : (
@@ -1520,7 +1519,7 @@ export default function WorkspaceMembersPage() {
             >
               {roleChangeLoading ? (
                 <>
-                  <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                  <InlineSpinner size="sm" className="mr-2" />
                   {tCommon("loading")}
                 </>
               ) : (
@@ -1638,7 +1637,7 @@ export default function WorkspaceMembersPage() {
             >
               {contextAccessLoading ? (
                 <>
-                  <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                  <InlineSpinner size="sm" className="mr-2" />
                   {tCommon("saving")}
                 </>
               ) : (

@@ -8,7 +8,6 @@
  */
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
@@ -42,7 +41,6 @@ import {
   RefreshCw,
   Lock,
   Building2,
-  CreditCard,
   Search,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
@@ -89,7 +87,6 @@ export default function AdminUsersPage() {
   const [loading, setLoading] = useState(true);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const { toast } = useToast();
-  const router = useRouter(); // Issue #164: Navigation to user detail
 
   // Issue #165 Phase 5: Search and filter state
   const [searchQuery, setSearchQuery] = useState("");
@@ -205,12 +202,8 @@ export default function AdminUsersPage() {
           title={t("title")}
           description={t("description")}
           actions={
-            <Button onClick={loadUsers} variant="outline" disabled={loading}>
-              {loading ? (
-                <InlineSpinner size="sm" className="mr-2" />
-              ) : (
-                <RefreshCw className="h-4 w-4 mr-2" />
-              )}
+            <Button onClick={loadUsers} variant="outline" disabled>
+              <InlineSpinner size="sm" className="mr-2" />
               {tCommon("refresh")}
             </Button>
           }
@@ -227,11 +220,7 @@ export default function AdminUsersPage() {
         description={t("description")}
         actions={
           <Button onClick={loadUsers} variant="outline" disabled={loading}>
-            {loading ? (
-              <InlineSpinner size="sm" className="mr-2" />
-            ) : (
-              <RefreshCw className="h-4 w-4 mr-2" />
-            )}
+            <RefreshCw className="h-4 w-4 mr-2" />
             {tCommon("refresh")}
           </Button>
         }
