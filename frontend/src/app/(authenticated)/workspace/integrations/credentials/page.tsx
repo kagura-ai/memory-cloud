@@ -1,11 +1,9 @@
 "use client";
 
-import { Suspense } from "react";
 import { useTranslations } from "next-intl";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { FeatureGuide } from "@/components/common/FeatureGuide";
-import { LoadingState } from "@/components/common/LoadingState";
 import {
   CategoryTabs,
   CategoryTabsList,
