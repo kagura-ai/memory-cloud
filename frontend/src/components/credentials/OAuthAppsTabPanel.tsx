@@ -167,7 +167,6 @@ export function OAuthAppsTabPanel() {
     }
 
     try {
-      setError(null);
       await createOAuth2Client({
         provider,
         client_name: provider === "claude" ? "Claude" : "ChatGPT",
@@ -186,8 +185,11 @@ export function OAuthAppsTabPanel() {
         }),
       });
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : JSON.stringify(err);
-      setError(`Failed to create OAuth app: ${errorMsg}`);
+      toast({
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
     }
   };
 
@@ -203,9 +205,11 @@ export function OAuthAppsTabPanel() {
       await loadOAuthClients();
       setShowHideOAuthDialog(false);
     } catch (err: unknown) {
-      setError(
-        `Failed to hide OAuth app: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      toast({
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
     }
   };
 
@@ -225,9 +229,11 @@ export function OAuthAppsTabPanel() {
         description: t("regenerateSecretSuccess"),
       });
     } catch (err: unknown) {
-      setError(
-        `Failed to regenerate OAuth secret: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      toast({
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
     }
   };
 
@@ -244,12 +250,14 @@ export function OAuthAppsTabPanel() {
       setShowDeleteOAuthDialog(false);
       toast({
         title: tCommon("success"),
-        description: "OAuth app deleted successfully",
+        description: t("deleteSuccess"),
       });
     } catch (err: unknown) {
-      setError(
-        `Failed to delete OAuth app: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      toast({
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
     }
   };
 

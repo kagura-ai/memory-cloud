@@ -201,7 +201,11 @@ export function APIKeysTabPanel() {
         description: t("regenerateSuccess"),
       });
     } catch (err: unknown) {
-      setError(`Failed to regenerate API key: ${(err as Error).message}`);
+      toast({
+        title: tCommon("error"),
+        description: (err as Error).message,
+        variant: "destructive",
+      });
     } finally {
       setRegenerating(false);
     }
@@ -229,7 +233,11 @@ export function APIKeysTabPanel() {
         description: t("deleteSuccess"),
       });
     } catch (err: unknown) {
-      setError(`Failed to delete API key: ${(err as Error).message}`);
+      toast({
+        title: tCommon("error"),
+        description: (err as Error).message,
+        variant: "destructive",
+      });
     } finally {
       setDeleting(false);
     }
