@@ -223,6 +223,21 @@ describe("MCPConfigBlock", () => {
       });
     });
 
+    it("clipboard write failures fire a destructive toast", async () => {
+      mockWriteText.mockRejectedValueOnce(new Error("clipboard denied"));
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      fireEvent.click(screen.getByRole("button", { name: "copyConfig" }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "mcpConfigCopied",
+        description: "clipboard denied",
+        variant: "destructive",
+      });
+    });
+
     it("clears clipboard 60s after a successful copy", async () => {
       render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
       fireEvent.click(screen.getByRole("button", { name: "copyConfig" }));
