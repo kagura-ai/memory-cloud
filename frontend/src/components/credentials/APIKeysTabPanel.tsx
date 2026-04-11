@@ -33,6 +33,7 @@ import {
   AlertTriangle,
   Plus,
   Key,
+  ChevronDown,
 } from "lucide-react";
 import { EmptyState } from "@/components/ui/empty-state";
 import { MaskedSecretField } from "@/components/common/MaskedSecretField";
@@ -308,8 +309,15 @@ export function APIKeysTabPanel() {
             open={setupGuideOpen}
             onOpenChange={setSetupGuideOpen}
           >
-            <CollapsibleTrigger className="w-full text-left cursor-pointer px-4 py-3 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded-lg font-medium text-blue-900 dark:text-blue-100 text-sm">
-              📖 {t("mcpSetupGuide")}
+            <CollapsibleTrigger
+              className="group flex w-full items-center justify-between cursor-pointer px-4 py-3 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded-lg font-medium text-blue-900 dark:text-blue-100 text-sm"
+              aria-expanded={setupGuideOpen}
+            >
+              <span>📖 {t("mcpSetupGuide")}</span>
+              <ChevronDown
+                className="w-4 h-4 transition-transform duration-200 group-data-[state=open]:rotate-180"
+                aria-hidden="true"
+              />
             </CollapsibleTrigger>
             <CollapsibleContent className="p-4 bg-blue-50 dark:bg-blue-900/20 space-y-4">
               {/* MCP URL */}

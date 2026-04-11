@@ -30,7 +30,7 @@ import {
 } from "@/lib/api/resource-tokens";
 import { getContexts } from "@/lib/api/contexts";
 import { getMaxQuotaCapacity } from "@/config/resource-tokens";
-import { Plus, AlertTriangle } from "lucide-react";
+import { Plus, AlertTriangle, ChevronDown } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -308,8 +308,12 @@ export function ResourceTokensTabPanel() {
         {tokens.length > 0 && (
           <Section>
             <Collapsible className="border border-blue-200 dark:border-blue-800 rounded-lg">
-              <CollapsibleTrigger className="w-full text-left cursor-pointer px-4 py-3 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded-lg font-medium text-blue-900 dark:text-blue-100 text-sm">
-                {t("guideTitle")}
+              <CollapsibleTrigger className="group flex w-full items-center justify-between cursor-pointer px-4 py-3 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded-lg font-medium text-blue-900 dark:text-blue-100 text-sm">
+                <span>{t("guideTitle")}</span>
+                <ChevronDown
+                  className="w-4 h-4 transition-transform duration-200 group-data-[state=open]:rotate-180"
+                  aria-hidden="true"
+                />
               </CollapsibleTrigger>
               <CollapsibleContent className="p-4 bg-blue-50 dark:bg-blue-900/20 space-y-4">
                 <div>
