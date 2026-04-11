@@ -88,14 +88,19 @@ export function OAuthAppsTabPanel() {
 
   // Track if component is mounted
   const isMountedRef = useRef(true);
-  const copyTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
+  // Map of copy-target key → timer (see APIKeysTabPanel for the rationale —
+  // a single shared timer leaves stale "copied" indicators).
+  const copyTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>(
+    {},
+  );
 
   useEffect(() => {
     isMountedRef.current = true;
+    const timers = copyTimeoutsRef.current;
     return () => {
       isMountedRef.current = false;
-      if (copyTimeoutRef.current) {
-        clearTimeout(copyTimeoutRef.current);
+      for (const t of Object.values(timers)) {
+        clearTimeout(t);
       }
     };
   }, []);
@@ -147,14 +152,16 @@ export function OAuthAppsTabPanel() {
       await navigator.clipboard.writeText(text);
       setCopiedItems((prev) => ({ ...prev, [key]: true }));
 
-      if (copyTimeoutRef.current) {
-        clearTimeout(copyTimeoutRef.current);
+      const existing = copyTimeoutsRef.current[key];
+      if (existing) {
+        clearTimeout(existing);
       }
 
-      copyTimeoutRef.current = setTimeout(() => {
+      copyTimeoutsRef.current[key] = setTimeout(() => {
         if (isMountedRef.current) {
           setCopiedItems((prev) => ({ ...prev, [key]: false }));
         }
+        delete copyTimeoutsRef.current[key];
       }, 2000);
     } catch (err: unknown) {
       // Clipboard write failure is a user-action failure — surface via

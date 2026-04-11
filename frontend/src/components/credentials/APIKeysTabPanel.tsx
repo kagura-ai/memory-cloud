@@ -106,14 +106,21 @@ export function APIKeysTabPanel() {
 
   // Track if component is mounted to prevent state updates after unmount
   const isMountedRef = useRef(true);
-  const copyTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
+  // Map of copy-target key → timer so multiple targets can show the
+  // "copied" check independently. A single shared timer would let a second
+  // copy cancel the first item's reset and leave it stuck in the checked
+  // state until page reload.
+  const copyTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>(
+    {},
+  );
 
   useEffect(() => {
     isMountedRef.current = true;
+    const timers = copyTimeoutsRef.current;
     return () => {
       isMountedRef.current = false;
-      if (copyTimeoutRef.current) {
-        clearTimeout(copyTimeoutRef.current);
+      for (const t of Object.values(timers)) {
+        clearTimeout(t);
       }
     };
   }, []);
@@ -180,15 +187,19 @@ export function APIKeysTabPanel() {
       await navigator.clipboard.writeText(text);
       setCopiedItems((prev) => ({ ...prev, [key]: true }));
 
-      // Clear previous timeout
-      if (copyTimeoutRef.current) {
-        clearTimeout(copyTimeoutRef.current);
+      // Clear only this key's previous timeout — leave other keys' timers
+      // alone so simultaneous "copied" indicators on multiple buttons all
+      // reset on their own schedule.
+      const existing = copyTimeoutsRef.current[key];
+      if (existing) {
+        clearTimeout(existing);
       }
 
-      copyTimeoutRef.current = setTimeout(() => {
+      copyTimeoutsRef.current[key] = setTimeout(() => {
         if (isMountedRef.current) {
           setCopiedItems((prev) => ({ ...prev, [key]: false }));
         }
+        delete copyTimeoutsRef.current[key];
       }, 2000);
     } catch (err: unknown) {
       // Clipboard write failure is a user-action failure (the user clicked
