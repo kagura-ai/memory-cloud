@@ -20,10 +20,10 @@
  * - Copy triggers a 60s clipboard auto-clear by default (defense in depth)
  *   and a default-variant toast acknowledging the action.
  *
- * Renders nothing when `value === null` AND no fallback is desired — the
- * caller is responsible for showing a placeholder ("Key is hidden") in that
- * branch. The component itself shows the masked field unconditionally so
- * positioning stays stable across visibility transitions.
+ * The component always renders the masked field, even when `value` is
+ * null — both Show and Copy buttons become disabled in that state, but
+ * the field stays in place so the surrounding layout doesn't jump across
+ * visibility transitions.
  */
 
 import { useEffect } from "react";
@@ -67,6 +67,13 @@ export interface MaskedSecretFieldProps {
    */
   copyToastDescription: string;
   /**
+   * Toast title shown when the clipboard write fails. Distinct from
+   * `copyToastTitle` so the failure is not visually mistaken for a
+   * success. If omitted, the literal string "Error" is used as a
+   * last-resort fallback.
+   */
+  copyErrorToastTitle?: string;
+  /**
    * Tooltip / aria-label for the Show button (revealed=false state).
    */
   showLabel: string;
@@ -97,6 +104,7 @@ export function MaskedSecretField({
   autoClearMs,
   copyToastTitle,
   copyToastDescription,
+  copyErrorToastTitle,
   showLabel,
   hideLabel,
   copyLabel,
@@ -130,11 +138,14 @@ export function MaskedSecretField({
       });
     } catch (err) {
       // Re-throwing here would surface as an unhandled rejection because
-      // this is an event handler. Surface as a generic error toast instead;
+      // this is an event handler. Surface as a destructive toast instead;
       // the consumer typically doesn't need to react to clipboard failures.
+      // Use a distinct error title (NOT the success title) so the user
+      // can distinguish success from failure at a glance, and narrow `err`
+      // safely so non-Error rejections produce a usable description.
       toast({
-        title: copyToastTitle,
-        description: (err as Error).message,
+        title: copyErrorToastTitle ?? "Error",
+        description: err instanceof Error ? err.message : String(err),
         variant: "destructive",
       });
     }

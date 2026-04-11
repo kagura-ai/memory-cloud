@@ -4,7 +4,7 @@
  * Verifies:
  * - 3 client variants render distinct JSON shapes
  * - localStorage persistence (read on mount, write on tab change)
- * - default-masked state shows "sk-•••••••••••" not the live key
+ * - default-masked state shows "kag_•••" derived from key_prefix, not the live key
  * - Show toggle reveals the live key in the displayed JSON
  * - Copy writes the JSON containing the LIVE key (not the mask)
  * - hidden state (apiKey null) shows "YOUR_API_KEY" placeholder and
@@ -96,9 +96,9 @@ const MCP_URL = "https://memory.kagura-ai.com/mcp/w/test-ws";
 
 describe("MCPConfigBlock", () => {
   describe("default rendering (visible window, masked)", () => {
-    it("renders the masked JSON with sk-••• placeholder, not the live key", () => {
+    it("renders the masked JSON with kag_••• placeholder derived from key_prefix, not the live key", () => {
       render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
-      const pre = screen.getByText(/Bearer sk-•••••••••••/);
+      const pre = screen.getByText(/Bearer kag_•••••••••••/);
       expect(pre).toBeInTheDocument();
       expect(screen.queryByText(/kag_real_secret_xyz/)).not.toBeInTheDocument();
     });
@@ -187,7 +187,7 @@ describe("MCPConfigBlock", () => {
         screen.getByText(/Bearer kag_real_secret_xyz/),
       ).toBeInTheDocument();
       expect(
-        screen.queryByText(/Bearer sk-•••••••••••/),
+        screen.queryByText(/Bearer kag_•••••••••••/),
       ).not.toBeInTheDocument();
     });
   });
@@ -207,7 +207,9 @@ describe("MCPConfigBlock", () => {
       expect(mockWriteText).toHaveBeenCalledTimes(1);
       const written = mockWriteText.mock.calls[0][0] as string;
       expect(written).toContain("kag_real_secret_xyz");
-      expect(written).not.toContain("sk-•••••••••••");
+      // Even though the visual mask uses bullets, the clipboard payload
+      // must contain the LIVE key, never the mask string.
+      expect(written).not.toContain("•••••••••••");
     });
 
     it("fires the consumer toast on success", async () => {
@@ -223,7 +225,7 @@ describe("MCPConfigBlock", () => {
       });
     });
 
-    it("clipboard write failures fire a destructive toast", async () => {
+    it("clipboard write failures fire a destructive toast with the common error title (not the success title)", async () => {
       mockWriteText.mockRejectedValueOnce(new Error("clipboard denied"));
       render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
       fireEvent.click(screen.getByRole("button", { name: "copyConfig" }));
@@ -231,9 +233,28 @@ describe("MCPConfigBlock", () => {
         await Promise.resolve();
       });
 
+      // Note: the test mocks useTranslations to return the key as-is,
+      // so "error" here is the tCommon namespace key (not "mcpConfigCopied").
       expect(mockToast).toHaveBeenCalledWith({
-        title: "mcpConfigCopied",
+        title: "error",
         description: "clipboard denied",
+        variant: "destructive",
+      });
+    });
+
+    it("non-Error rejections produce a usable description (not empty)", async () => {
+      // Some clipboard implementations reject with strings or DOMException
+      // — verify we narrow safely instead of hitting an undefined .message.
+      mockWriteText.mockRejectedValueOnce("permission denied");
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      fireEvent.click(screen.getByRole("button", { name: "copyConfig" }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "error",
+        description: "permission denied",
         variant: "destructive",
       });
     });

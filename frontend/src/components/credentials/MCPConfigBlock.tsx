@@ -41,7 +41,10 @@ type MCPClient = (typeof MCP_CLIENTS)[number];
 const STORAGE_KEY = "kagura_last_mcp_client";
 const DEFAULT_CLIENT: MCPClient = "claude-code";
 
-const MASKED_KEY = "sk-•••••••••••";
+// Fallback prefix when no key has been created yet (so the visible mask
+// still LOOKS like a Kagura key, not a generic OpenAI-style "sk-" key).
+const FALLBACK_KEY_PREFIX = "kag_";
+const MASK_BODY = "•••••••••••";
 const PLACEHOLDER_KEY = "YOUR_API_KEY";
 
 export interface MCPConfigBlockProps {
@@ -143,6 +146,7 @@ function buildJsonConfig(
 
 export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
   const t = useTranslations("apiKeys");
+  const tCommon = useTranslations("common");
   const { toast } = useToast();
   const { revealed, toggle, copy, copied, hide } = useRevealableSecret();
 
@@ -177,15 +181,26 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
     }
   }, [liveKey, revealed, hide]);
 
+  // Derive the masked display from the actual key_prefix when available
+  // (e.g. "kag_•••••••••••"), so the visible mask matches the real key
+  // shape and doesn't mislead the user with a generic "sk-" prefix.
+  // Falls back to "kag_" when apiKey is null because no key has been
+  // created yet — the placeholder branch is always YOUR_API_KEY anyway,
+  // so the maskedKey value is only used during the visible window.
+  const maskedKey = useMemo(
+    () => `${apiKey?.key_prefix ?? FALLBACK_KEY_PREFIX}${MASK_BODY}`,
+    [apiKey?.key_prefix],
+  );
+
   // The value embedded in the visible JSON. Three states:
   //   - hidden window  → PLACEHOLDER_KEY ("YOUR_API_KEY")
-  //   - masked, visible → MASKED_KEY ("sk-•••••••••••")
+  //   - masked, visible → maskedKey ("kag_•••••••••••")
   //   - revealed, visible → liveKey
   const visibleAuthValue = useMemo(() => {
     if (liveKey === null) return PLACEHOLDER_KEY;
     if (revealed) return liveKey;
-    return MASKED_KEY;
-  }, [liveKey, revealed]);
+    return maskedKey;
+  }, [liveKey, revealed, maskedKey]);
 
   // The displayed JSON snippet (what the user sees on screen).
   const displayJson = useMemo(
@@ -210,9 +225,12 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
         description: t("mcpConfigCopiedHint"),
       });
     } catch (err) {
+      // Use the common error title (NOT the success title) and narrow err
+      // safely so non-Error rejections (DOMException, strings) don't
+      // produce empty descriptions.
       toast({
-        title: t("mcpConfigCopied"),
-        description: (err as Error).message,
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : String(err),
         variant: "destructive",
       });
     }

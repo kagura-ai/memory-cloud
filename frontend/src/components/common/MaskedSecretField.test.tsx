@@ -44,6 +44,7 @@ const baseProps = {
   displayMask: "sk-•••••••••••",
   copyToastTitle: "Config copied",
   copyToastDescription: "Clipboard clears in 60 seconds — paste it now.",
+  copyErrorToastTitle: "Copy failed",
   showLabel: "Show key",
   hideLabel: "Hide key",
   copyLabel: "Copy to clipboard",
@@ -141,7 +142,7 @@ describe("MaskedSecretField", () => {
       expect(screen.getByText("Bearer sk-•••••••••••")).toBeInTheDocument();
     });
 
-    it("clipboard write failures fire a destructive toast", async () => {
+    it("clipboard write failures fire a destructive toast with the error title (not the success title)", async () => {
       mockWriteText.mockRejectedValueOnce(new Error("clipboard denied"));
       render(<MaskedSecretField {...baseProps} value="kag_real_secret" />);
       fireEvent.click(
@@ -151,9 +152,52 @@ describe("MaskedSecretField", () => {
         await Promise.resolve();
       });
 
+      // The error toast must use copyErrorToastTitle, NOT copyToastTitle —
+      // otherwise a failure looks like a success at a glance.
       expect(mockToast).toHaveBeenCalledWith({
-        title: "Config copied",
+        title: "Copy failed",
         description: "clipboard denied",
+        variant: "destructive",
+      });
+    });
+
+    it("non-Error rejections produce a usable description (not empty)", async () => {
+      mockWriteText.mockRejectedValueOnce("permission denied");
+      render(<MaskedSecretField {...baseProps} value="kag_real_secret" />);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Copy to clipboard" }),
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "Copy failed",
+        description: "permission denied",
+        variant: "destructive",
+      });
+    });
+
+    it("falls back to literal 'Error' title when copyErrorToastTitle is omitted", async () => {
+      mockWriteText.mockRejectedValueOnce(new Error("oops"));
+      const { copyErrorToastTitle: _omit, ...propsWithoutErrorTitle } =
+        baseProps;
+      render(
+        <MaskedSecretField
+          {...propsWithoutErrorTitle}
+          value="kag_real_secret"
+        />,
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "Copy to clipboard" }),
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "Error",
+        description: "oops",
         variant: "destructive",
       });
     });

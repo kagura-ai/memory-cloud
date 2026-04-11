@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { OAuth2Client } from "@/lib/api/oauth";
 import { ActionButton } from "@/components/common/ActionButton";
+import { Button } from "@/components/ui/button";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 
 interface OAuthAppCardProps {
@@ -63,17 +64,20 @@ export function OAuthAppCard({
           <code className="flex-1 bg-white dark:bg-gray-900 px-2 py-1 rounded text-xs font-mono break-all">
             {app.client_id}
           </code>
-          <button
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
             onClick={() => onCopy(app.client_id, `${copyKey}-id`)}
-            className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
             title={t("copyClientId")}
+            aria-label={t("copyClientId")}
           >
             {isCopied(`${copyKey}-id`) ? (
               <Check className="w-4 h-4 text-green-600" />
             ) : (
               <Copy className="w-4 h-4" />
             )}
-          </button>
+          </Button>
         </div>
         <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
           <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
@@ -129,24 +133,30 @@ export function OAuthAppCard({
             <code className="flex-1 bg-white dark:bg-gray-900 px-2 py-1 rounded text-xs font-mono break-all">
               {app.plaintext_secret}
             </code>
-            <button
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
               onClick={() => onCopy(app.plaintext_secret!, `${copyKey}-secret`)}
-              className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
               title={t("copyClientSecret")}
+              aria-label={t("copyClientSecret")}
             >
               {isCopied(`${copyKey}-secret`) ? (
                 <Check className="w-4 h-4 text-green-600" />
               ) : (
                 <Copy className="w-4 h-4" />
               )}
-            </button>
-            <button
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
               onClick={() => onHide(app.client_id)}
-              className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
               title={t("hideSecretNow")}
+              aria-label={t("hideSecretNow")}
             >
               <EyeOff className="w-4 h-4" />
-            </button>
+            </Button>
           </div>
         </div>
       ) : (

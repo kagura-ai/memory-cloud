@@ -132,7 +132,7 @@ export function APIKeysTabPanel() {
         console.error("Failed to load credentials:", err);
       }
       if (isMountedRef.current) {
-        setError((err as Error).message);
+        setError(err instanceof Error ? err.message : String(err));
       }
     } finally {
       if (isMountedRef.current) {
@@ -176,7 +176,7 @@ export function APIKeysTabPanel() {
       // error rule, not via silent console.error.
       toast({
         title: tCommon("error"),
-        description: (err as Error).message,
+        description: err instanceof Error ? err.message : String(err),
         variant: "destructive",
       });
     }
@@ -197,7 +197,7 @@ export function APIKeysTabPanel() {
     } catch (err: unknown) {
       toast({
         title: tCommon("error"),
-        description: (err as Error).message,
+        description: err instanceof Error ? err.message : String(err),
         variant: "destructive",
       });
     }
@@ -223,7 +223,7 @@ export function APIKeysTabPanel() {
     } catch (err: unknown) {
       toast({
         title: tCommon("error"),
-        description: (err as Error).message,
+        description: err instanceof Error ? err.message : String(err),
         variant: "destructive",
       });
     } finally {
@@ -255,7 +255,7 @@ export function APIKeysTabPanel() {
     } catch (err: unknown) {
       toast({
         title: tCommon("error"),
-        description: (err as Error).message,
+        description: err instanceof Error ? err.message : String(err),
         variant: "destructive",
       });
     } finally {
@@ -284,7 +284,11 @@ export function APIKeysTabPanel() {
         description: t("createSuccess"),
       });
     } catch (err: unknown) {
-      setCreateKeyError((err as Error).message || "Failed to create API key");
+      setCreateKeyError(
+        err instanceof Error
+          ? err.message
+          : String(err) || "Failed to create API key",
+      );
     }
   };
 
@@ -456,9 +460,10 @@ export function APIKeysTabPanel() {
                     <div className="flex items-center gap-2">
                       <MaskedSecretField
                         value={apiKey.plaintext_key}
-                        displayMask="kag_•••••••••••••••"
+                        displayMask={`${apiKey.key_prefix || "kag_"}•••••••••••`}
                         copyToastTitle={t("keyCopied")}
                         copyToastDescription={t("keyCopiedHint")}
+                        copyErrorToastTitle={tCommon("error")}
                         showLabel={t("showKey")}
                         hideLabel={t("hideKey")}
                         copyLabel={t("copyToClipboard")}
@@ -577,10 +582,14 @@ export function APIKeysTabPanel() {
           </AlertDialogHeader>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium mb-1">
+              <label
+                htmlFor="create-api-key-name"
+                className="block text-sm font-medium mb-1"
+              >
                 {t("keyName")}
               </label>
               <Input
+                id="create-api-key-name"
                 type="text"
                 value={newKeyName}
                 onChange={(e) => setNewKeyName(e.target.value)}
