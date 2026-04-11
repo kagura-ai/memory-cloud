@@ -39,6 +39,21 @@ paths:
 - Errors raised inside a Dialog body → `<Alert variant="destructive">` inside the dialog. Toasts behind a modal are easy to miss.
 - Hand-rolled red `<div>` blocks with `AlertTriangle` are a violation — replace with `ErrorBanner`. Informational gating notices (warnings, prerequisite hints) are not errors and are out of scope for this rule.
 
+## Loading States
+- Use primitives from `@/components/common/LoadingState`. Never hand-roll spinners or skeletons.
+- Shape-driven selection (not author preference):
+  - Table pages → `TableLoadingState rows={n}`
+  - Card grids → `CardLoadingState count={n}`
+  - Form / detail pages → `LoadingState lines={n}`
+  - Full page gated on a single fetch → `SpinnerLoading size="lg"`
+  - App bootstrap / auth gate → `PageLoading`
+  - Button / row / input → `InlineSpinner`
+- Prefer skeletons over spinners for first paint — skeletons preserve layout (no CLS) and communicate what is loading.
+- Never leave a page blank while loading — the initial paint must render a loader, not `null`.
+- Skeleton widths MUST be deterministic — never `Math.random()` in render (SSR hydration mismatch).
+- Loading messages go on `SpinnerLoading` via `message` prop — skeletons are silent.
+- Loading is resolved before empty — see Empty States.
+
 ## Empty States
 - Distinguish empty (request succeeded, zero results) from error (request failed). They use different channels.
 - New code MUST use the `EmptyState` primitive from `@/components/ui/empty-state` for any zero-item list or panel.
