@@ -73,6 +73,8 @@ import {
   type WorkspaceQuotaDetail,
 } from "@/lib/api/admin";
 
+const PLAN_TABS = ["workspaces", "tiers", "audit"] as const;
+
 export default function AdminPlansPage() {
   const t = useTranslations("admin.plans");
   const tCommon = useTranslations("admin.common");
@@ -97,7 +99,7 @@ export default function AdminPlansPage() {
   const [addonMember, setAddonMember] = useState(0);
   const [addonContext, setAddonContext] = useState(0);
   const { toast } = useToast();
-  const [tab, setTab] = useTabParam("workspaces");
+  const [tab, setTab] = useTabParam("workspaces", "tab", PLAN_TABS);
 
   useEffect(() => {
     loadData();
@@ -235,13 +237,13 @@ export default function AdminPlansPage() {
 
       <Tabs value={tab} onValueChange={setTab} className="mt-6">
         <TabsList>
-          <TabsTrigger value="workspaces">{t("tabs.workspaces")}</TabsTrigger>
-          <TabsTrigger value="tiers">{t("tabs.tiers")}</TabsTrigger>
-          <TabsTrigger value="audit">{t("tabs.audit")}</TabsTrigger>
+          <TabsTrigger value={PLAN_TABS[0]}>{t("tabs.workspaces")}</TabsTrigger>
+          <TabsTrigger value={PLAN_TABS[1]}>{t("tabs.tiers")}</TabsTrigger>
+          <TabsTrigger value={PLAN_TABS[2]}>{t("tabs.audit")}</TabsTrigger>
         </TabsList>
 
         {/* Workspaces Tab */}
-        <TabsContent value="workspaces" className="mt-6">
+        <TabsContent value={PLAN_TABS[0]} className="mt-6">
           <Card>
             <CardHeader>
               <CardTitle>{t("workspacesTable.title")}</CardTitle>
@@ -474,7 +476,7 @@ export default function AdminPlansPage() {
         </TabsContent>
 
         {/* Plan Tiers Tab */}
-        <TabsContent value="tiers" className="mt-6">
+        <TabsContent value={PLAN_TABS[1]} className="mt-6">
           <Card>
             <CardHeader>
               <CardTitle>{t("tiersTable.title")}</CardTitle>
@@ -546,7 +548,7 @@ export default function AdminPlansPage() {
         </TabsContent>
 
         {/* Audit Log Tab */}
-        <TabsContent value="audit" className="mt-6">
+        <TabsContent value={PLAN_TABS[2]} className="mt-6">
           <Card>
             <CardHeader>
               <CardTitle>{t("auditTable.title")}</CardTitle>

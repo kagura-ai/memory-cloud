@@ -13,6 +13,7 @@ import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { Section } from "@/components/common/Section";
 import { LoadingState } from "@/components/common/LoadingState";
+import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { Button } from "@/components/ui/button";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import {
@@ -113,13 +114,9 @@ export function ResourceTokensTabPanel() {
         apiErr?.error === "RES-001" && apiErr?.status === 404;
 
       if (!isNormalEmptyState) {
-        // Only show error for actual server/network errors (500, network failure, etc.)
+        // Load failure: ErrorBanner only — no toast (single channel per
+        // error class, see .claude/rules/frontend.md > Error Surface).
         setError(t("loadError"));
-        toast({
-          title: tCommon("error"),
-          description: apiErr?.message || t("loadError"),
-          variant: "destructive",
-        });
       }
       // For empty/normal state, just set empty arrays (no error message)
       setTokens([]);
@@ -260,14 +257,7 @@ export function ResourceTokensTabPanel() {
 
       {/* Resource Tokens Content */}
       <div className="mt-6">
-        {error && (
-          <div className="rounded-lg border border-red-200 bg-red-50 p-4 mb-6">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="h-5 w-5 text-red-600" />
-              <p className="text-sm text-red-800">{error}</p>
-            </div>
-          </div>
-        )}
+        <ErrorBanner error={error} />
 
         {!isOwner && (
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 mb-6">

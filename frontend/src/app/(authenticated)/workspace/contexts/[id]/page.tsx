@@ -38,6 +38,8 @@ import { SettingsTabPanel } from "@/components/contexts/SettingsTabPanel";
 import { SearchSettingsSection } from "@/components/contexts/SearchSettingsSection";
 import { ProtectionSection } from "@/components/contexts/ProtectionSection";
 
+const CONTEXT_TABS = ["overview", "connections", "settings"] as const;
+
 export default function ContextDetailPage() {
   const params = useParams();
   const contextId = params.id as string;
@@ -45,7 +47,7 @@ export default function ContextDetailPage() {
   const { user } = useAuth();
   const { currentContext } = useMemoryContext();
 
-  const [tab, setTab] = useTabParam("overview");
+  const [tab, setTab] = useTabParam("overview", "tab", CONTEXT_TABS);
   const [context, setContext] = useState<Context | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -168,20 +170,26 @@ export default function ContextDetailPage() {
 
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
-          <TabsTrigger value="overview">{t("tabs.overview")}</TabsTrigger>
-          <TabsTrigger value="connections">{t("tabs.connections")}</TabsTrigger>
-          <TabsTrigger value="settings">{t("tabs.settings")}</TabsTrigger>
+          <TabsTrigger value={CONTEXT_TABS[0]}>
+            {t("tabs.overview")}
+          </TabsTrigger>
+          <TabsTrigger value={CONTEXT_TABS[1]}>
+            {t("tabs.connections")}
+          </TabsTrigger>
+          <TabsTrigger value={CONTEXT_TABS[2]}>
+            {t("tabs.settings")}
+          </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="overview">
+        <TabsContent value={CONTEXT_TABS[0]}>
           <OverviewTabPanel contextId={contextId} context={context} />
         </TabsContent>
 
-        <TabsContent value="connections">
+        <TabsContent value={CONTEXT_TABS[1]}>
           <ConnectionsTabPanel contextId={contextId} />
         </TabsContent>
 
-        <TabsContent value="settings">
+        <TabsContent value={CONTEXT_TABS[2]}>
           <SettingsTabPanel
             contextId={contextId}
             context={context}
