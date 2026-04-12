@@ -23,7 +23,11 @@ COPY . .
 
 # Accept build-time environment variables
 ARG NEXT_PUBLIC_API_URL
+ARG NEXT_PUBLIC_APP_URL
+ARG NEXT_PUBLIC_ENABLE_GRAPH_VIZ
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL}
+ENV NEXT_PUBLIC_ENABLE_GRAPH_VIZ=${NEXT_PUBLIC_ENABLE_GRAPH_VIZ}
 
 # Next.js collects completely anonymous telemetry data about general usage.
 # Learn more here: https://nextjs.org/telemetry

@@ -124,6 +124,7 @@ services:
       args:
         NEXT_PUBLIC_API_URL: https://${KAGURA_DOMAIN}
         NEXT_PUBLIC_APP_URL: https://${KAGURA_DOMAIN}
+        NEXT_PUBLIC_ENABLE_GRAPH_VIZ: ${NEXT_PUBLIC_ENABLE_GRAPH_VIZ:-}
     container_name: kagura-web
     restart: always
     environment:
