@@ -132,6 +132,22 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
     });
   }, [graphData, n, strategy]);
 
+  // --- Type counts for legend ---
+  const typeCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const node of filtered.nodes) {
+      const key = node.type?.toLowerCase() ?? "unknown";
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([type, count]) => ({
+        type,
+        count,
+        color: TYPE_TO_CHART[type] ?? TYPE_TO_CHART.unknown,
+      }));
+  }, [filtered.nodes]);
+
   // --- Force simulation (auto-starts) ---
   useForceSimulation({
     nodes: filtered.nodes,
@@ -250,6 +266,26 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
           role="img"
           aria-label={t("graphVizAriaLabel")}
         />
+
+        {/* Legend — node type color map with counts */}
+        {typeCounts.length > 0 && (
+          <div className="absolute top-2 right-2 text-xs bg-white/80 dark:bg-black/60 backdrop-blur px-3 py-2 rounded-md border border-slate-200 dark:border-slate-700 space-y-1">
+            {typeCounts.map(({ type, count, color }) => (
+              <div key={type} className="flex items-center gap-2">
+                <span
+                  className="inline-block w-2.5 h-2.5 rounded-full flex-shrink-0"
+                  style={{ backgroundColor: color }}
+                />
+                <span className="text-slate-700 dark:text-slate-300">
+                  {type}
+                </span>
+                <span className="text-slate-400 dark:text-slate-500">
+                  ({count})
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Hover tooltip */}
         {hovered && (
