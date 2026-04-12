@@ -11,6 +11,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SpinnerLoading } from "@/components/common/LoadingState";
@@ -37,7 +38,15 @@ import { ConnectionsTabPanel } from "@/components/contexts/ConnectionsTabPanel";
 import { SettingsTabPanel } from "@/components/contexts/SettingsTabPanel";
 import { SearchSettingsSection } from "@/components/contexts/SearchSettingsSection";
 import { ProtectionSection } from "@/components/contexts/ProtectionSection";
-import { GraphTabPanel } from "@/components/contexts/GraphTabPanel";
+// Issue #233: graph viz tab — lazy-loaded so d3 modules stay out of
+// the initial bundle when the flag is off.
+const GraphTabPanel = dynamic(
+  () =>
+    import("@/components/contexts/GraphTabPanel").then((m) => ({
+      default: m.GraphTabPanel,
+    })),
+  { ssr: false },
+);
 
 // Issue #233: graph viz tab gated by feature flag.
 const GRAPH_VIZ_ENABLED = process.env.NEXT_PUBLIC_ENABLE_GRAPH_VIZ === "true";

@@ -143,26 +143,38 @@ export function useForceSimulation({
       circleToNode.set(circle, node);
     }
 
-    // Hover listeners
+    // Hover + focus listeners
     const handleEnter = (ev: Event) => {
       const n = circleToNode.get(ev.currentTarget as SVGCircleElement);
       if (n) onHoverRef.current(n);
     };
     const handleLeave = () => onHoverRef.current(null);
+    const handleFocus = (ev: Event) => {
+      const circle = ev.currentTarget as SVGCircleElement;
+      circle.setAttribute("stroke", "hsl(var(--ring))");
+      circle.setAttribute("stroke-width", "3");
+      handleEnter(ev);
+    };
+    const handleBlur = (ev: Event) => {
+      const circle = ev.currentTarget as SVGCircleElement;
+      circle.setAttribute("stroke", "hsl(var(--background))");
+      circle.setAttribute("stroke-width", "1.5");
+      handleLeave();
+    };
     const attachListeners = () => {
       for (const c of circles) {
         c.addEventListener("mouseenter", handleEnter);
         c.addEventListener("mouseleave", handleLeave);
-        c.addEventListener("focus", handleEnter);
-        c.addEventListener("blur", handleLeave);
+        c.addEventListener("focus", handleFocus);
+        c.addEventListener("blur", handleBlur);
       }
     };
     const detachListeners = () => {
       for (const c of circles) {
         c.removeEventListener("mouseenter", handleEnter);
         c.removeEventListener("mouseleave", handleLeave);
-        c.removeEventListener("focus", handleEnter);
-        c.removeEventListener("blur", handleLeave);
+        c.removeEventListener("focus", handleFocus);
+        c.removeEventListener("blur", handleBlur);
       }
     };
     attachListeners();

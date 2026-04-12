@@ -62,7 +62,10 @@ export function applyFilter({
     const sa = scores.get(a.id) ?? 0;
     const sb = scores.get(b.id) ?? 0;
     if (sb !== sa) return sb - sa;
-    return a.id.localeCompare(b.id);
+    // Locale-independent tie-break for cross-environment determinism
+    if (a.id < b.id) return -1;
+    if (a.id > b.id) return 1;
+    return 0;
   });
 
   const top = sorted.slice(0, n);
