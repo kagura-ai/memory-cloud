@@ -132,7 +132,7 @@ export function useForceSimulation({
       const circle = document.createElementNS(SVG_NS, "circle");
       circle.setAttribute("r", "6");
       circle.setAttribute("fill", colorRef.current(node));
-      circle.setAttribute("stroke", "var(--background)");
+      circle.setAttribute("stroke", "hsl(var(--background))");
       circle.setAttribute("stroke-width", "1.5");
       circle.setAttribute("tabindex", "0");
       circle.setAttribute("role", "img");

@@ -248,7 +248,7 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
         {t("graphVizInfo", {
           nodes: filtered.nodes.length,
           edges: filtered.edges.length,
-          total: graphData.nodes.length,
+          total: graphData.stats?.total_nodes ?? graphData.nodes.length,
         })}
       </div>
 
