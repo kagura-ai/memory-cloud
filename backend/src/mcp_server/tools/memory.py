@@ -323,7 +323,7 @@ async def handle_recall(
                 **_context_response_fields(current_context),
             }
 
-            if result.explore_hints:
+            if result.explore_hints is not None:
                 response_data["explore_hints"] = [
                     {"memory_id": str(h.memory_id), "reason": h.reason}
                     for h in result.explore_hints

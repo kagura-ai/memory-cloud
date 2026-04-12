@@ -924,7 +924,7 @@ class MemoryService:
         await self.db.commit()
 
         # Issue #216: Generate explore hints (best-effort, opt-in)
-        explore_hints = None
+        explore_hints = [] if request.include_explore_hints else None
         if request.include_explore_hints and responses:
             try:
                 explore_hints = await self._generate_explore_hints(
@@ -1590,11 +1590,15 @@ class MemoryService:
         from repositories.neural_edge import NeuralEdgeRepository
 
         hints: list[ExploreHint] = []
-        if not responses or not neural_enabled:
+        if not responses:
             return hints
 
-        # hint #1: top result (always available)
+        # hint #1: top result (always available, no graph query needed)
         hints.append(ExploreHint(memory_id=responses[0].memory_id, reason="top_result"))
+
+        # Graph-derived hints require neural memory to be enabled
+        if not neural_enabled:
+            return hints
 
         # For hints #2 and #3, query edge counts for top-3 results
         top_n = responses[:3]
@@ -1603,7 +1607,7 @@ class MemoryService:
         degree_map: dict[UUID, int] = {}
         for resp in top_n:
             try:
-                in_deg, out_deg = await edge_repo.get_node_degree(user_id, str(resp.memory_id))
+                in_deg, out_deg = await edge_repo.get_node_degree(user_id, resp.memory_id)
                 degree_map[resp.memory_id] = in_deg + out_deg
             except Exception:
                 degree_map[resp.memory_id] = 0
