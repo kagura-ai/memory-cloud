@@ -251,6 +251,9 @@ export function useForceSimulation({
     const svgSelection = select(svg);
     const rootSelection = select(rootGroup);
 
+    // Reset any stale __zoom transform from a previous effect run
+    svgSelection.call(zoom<SVGSVGElement, unknown>().transform, zoomIdentity);
+
     const zoomBehavior: ZoomBehavior<SVGSVGElement, unknown> = zoom<
       SVGSVGElement,
       unknown
