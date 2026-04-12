@@ -148,6 +148,11 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
       }));
   }, [filtered.nodes]);
 
+  // Clear stale hover when the filtered set changes (SVG is rebuilt)
+  useEffect(() => {
+    setHovered(null);
+  }, [filtered]);
+
   // --- Force simulation (auto-starts) ---
   useForceSimulation({
     nodes: filtered.nodes,

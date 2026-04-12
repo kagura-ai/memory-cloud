@@ -30,6 +30,9 @@ export function applyFilter({
   n,
   strategy,
 }: FilterInput): FilterOutput {
+  const clampedN = Math.max(0, Math.min(n, nodes.length));
+  if (clampedN === 0) return { nodes: [], edges: [] };
+
   const scores = new Map<string, number>();
 
   if (strategy === "degree") {
@@ -68,7 +71,7 @@ export function applyFilter({
     return 0;
   });
 
-  const top = sorted.slice(0, n);
+  const top = sorted.slice(0, clampedN);
   const topIds = new Set(top.map((node) => node.id));
   const filteredEdges = edges.filter(
     (edge) => topIds.has(edge.source) && topIds.has(edge.target),
