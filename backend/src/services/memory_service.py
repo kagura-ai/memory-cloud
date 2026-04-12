@@ -928,7 +928,11 @@ class MemoryService:
         if request.include_explore_hints and responses:
             try:
                 explore_hints = await self._generate_explore_hints(
-                    responses, user_id, current_context_id, current_workspace_id
+                    responses,
+                    user_id,
+                    current_context_id,
+                    current_workspace_id,
+                    neural_enabled=neural_enabled,
                 )
             except Exception as exc:
                 logger.warning("explore_hints_generation_failed", error=str(exc))
@@ -1569,6 +1573,7 @@ class MemoryService:
         user_id: str,
         context_id: UUID | None,
         workspace_id: UUID | None,
+        neural_enabled: bool = False,
     ) -> list[ExploreHint]:
         """Generate up to 3 explore hints from recall results.
 
@@ -1578,20 +1583,14 @@ class MemoryService:
         Hint selection:
           1. top_result: highest-scored result
           2. high_centrality: top-3 result with most edges
-          3. unexplored_neighbor: top-3 result with edges + recent update (7d)
+          3. unexplored_neighbor: top-3 result with edges + created in last 7d
         """
-        import os
         from datetime import timedelta
 
         from repositories.neural_edge import NeuralEdgeRepository
-        from utils.datetime import utcnow
 
         hints: list[ExploreHint] = []
-        if not responses:
-            return hints
-
-        neural_enabled = os.getenv("ENABLE_NEURAL_MEMORY", "false").lower() == "true"
-        if not neural_enabled:
+        if not responses or not neural_enabled:
             return hints
 
         # hint #1: top result (always available)
@@ -1619,13 +1618,19 @@ class MemoryService:
             hints.append(ExploreHint(memory_id=best[0], reason="high_centrality"))
             used_ids.add(best[0])
 
-        # hint #3: unexplored_neighbor — has edges + updated in last 7 days
+        # hint #3: unexplored_neighbor — has edges + created in last 7 days
         cutoff = utcnow() - timedelta(days=7)
         for resp in top_n:
             if resp.memory_id in used_ids:
                 continue
             deg = degree_map.get(resp.memory_id, 0)
-            if deg > 0 and resp.created_at and resp.created_at >= cutoff:
+            # Normalize to naive datetime for comparison (DB stores naive UTC)
+            created = (
+                resp.created_at.replace(tzinfo=None)
+                if resp.created_at and resp.created_at.tzinfo
+                else resp.created_at
+            )
+            if deg > 0 and created and created >= cutoff:
                 hints.append(ExploreHint(memory_id=resp.memory_id, reason="unexplored_neighbor"))
                 break
 
