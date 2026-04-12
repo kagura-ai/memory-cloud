@@ -243,6 +243,8 @@ class MemoryService:
             client=client,
             summary_embedding_id=memory_id,  # Same as memory_id
             embedding_status="pending",  # Issue #122: Track embedding state
+            source_uri=request.source_uri,
+            source_type=request.source_type,
         )
 
         try:
@@ -255,6 +257,15 @@ class MemoryService:
                 memory_id=str(memory_id),
                 user_id=user_id,
                 type=request.type,
+            )
+
+            # Issue #215: Create declared_link edges (best-effort, after commit)
+            await self._create_declared_links(
+                memory_id=memory_id,
+                request=request,
+                user_id=user_id,
+                workspace_id=workspace_id_str,
+                context_id=context_id_str,
             )
 
             import asyncio
@@ -575,6 +586,110 @@ class MemoryService:
             client=memory.client,
         )
 
+    async def _create_declared_links(
+        self,
+        memory_id: UUID,
+        request: RememberRequest,
+        user_id: str,
+        workspace_id: str | None,
+        context_id: str | None,
+    ) -> None:
+        """Create declared_link edges from linked_memory_ids and linked_source_uris.
+
+        Issue #215: Best-effort — failures are logged but never roll back
+        the memory creation. Forward references (source_uri not yet in DB)
+        are silently skipped.
+        """
+        if not request.linked_memory_ids and not request.linked_source_uris:
+            return
+
+        if not workspace_id or not context_id:
+            logger.warning("declared_links_skipped_no_isolation", memory_id=str(memory_id))
+            return
+
+        from repositories.neural_edge import NeuralEdgeRepository
+
+        edge_repo = NeuralEdgeRepository(self.db)
+        created = 0
+
+        try:
+            # Direct links by memory ID (batch-validate targets exist in same scope)
+            requested_ids = [t for t in (request.linked_memory_ids or []) if t != memory_id]
+            if requested_ids:
+                result = await self.db.execute(
+                    select(Memory.id).where(
+                        Memory.id.in_(requested_ids),
+                        Memory.user_id == user_id,
+                        Memory.workspace_id == UUID(workspace_id),
+                        Memory.context_id == UUID(context_id),
+                        Memory.deleted_at.is_(None),
+                    )
+                )
+                valid_ids = {row.id for row in result}
+                for target_id in requested_ids:
+                    if target_id not in valid_ids:
+                        logger.debug("declared_link_target_not_found", target_id=str(target_id))
+                        continue
+                    await edge_repo.create_edge_if_absent(
+                        user_id=user_id,
+                        src_id=memory_id,
+                        dst_id=target_id,
+                        edge_type="declared_link",
+                        weight=1.0,
+                        confidence=1.0,
+                        workspace_id=workspace_id,
+                        context_id=context_id,
+                    )
+                    created += 1
+
+            # Links by source_uri (batch resolve to memory_id)
+            uris = request.linked_source_uris or []
+            if uris:
+                result = await self.db.execute(
+                    select(Memory.source_uri, Memory.id).where(
+                        Memory.user_id == user_id,
+                        Memory.workspace_id == UUID(workspace_id),
+                        Memory.context_id == UUID(context_id),
+                        Memory.source_uri.in_(uris),
+                        Memory.deleted_at.is_(None),
+                    )
+                )
+                uri_to_id = {row.source_uri: row.id for row in result}
+                for uri in uris:
+                    target_id = uri_to_id.get(uri)
+                    if target_id is None:
+                        logger.debug("declared_link_forward_ref_skipped", uri=uri)
+                        continue
+                    if target_id == memory_id:
+                        continue
+                    await edge_repo.create_edge_if_absent(
+                        user_id=user_id,
+                        src_id=memory_id,
+                        dst_id=target_id,
+                        edge_type="declared_link",
+                        weight=1.0,
+                        confidence=1.0,
+                        workspace_id=workspace_id,
+                        context_id=context_id,
+                    )
+                    created += 1
+
+            if created > 0:
+                await self.db.commit()
+                logger.info(
+                    "declared_links_created",
+                    memory_id=str(memory_id),
+                    count=created,
+                )
+        except Exception as e:
+            await self.db.rollback()
+            logger.warning(
+                "declared_links_failed",
+                memory_id=str(memory_id),
+                error=str(e),
+            )
+            # Best-effort: do not raise — memory creation already succeeded
+
     async def recall(
         self,
         request: RecallRequest,
@@ -649,12 +764,18 @@ class MemoryService:
             return RecallResponse(results=[])
 
         # Fetch memories from PostgreSQL (exclude soft-deleted)
-        result = await self.db.execute(
-            select(Memory).where(
-                Memory.id.in_(memory_ids),
-                Memory.deleted_at.is_(None),  # Exclude deleted memories
-            )
-        )
+        pg_conditions = [
+            Memory.id.in_(memory_ids),
+            Memory.deleted_at.is_(None),
+        ]
+        # Issue #214: source_uri_prefix and source_type post-filters
+        if request.filters:
+            if prefix := request.filters.get("source_uri_prefix"):
+                escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                pg_conditions.append(Memory.source_uri.like(f"{escaped}%", escape="\\"))
+            if stype := request.filters.get("source_type"):
+                pg_conditions.append(Memory.source_type == stype)
+        result = await self.db.execute(select(Memory).where(*pg_conditions))
         memories_list = list(result.scalars().all())
         memories = {str(m.id): m for m in memories_list}
 
@@ -692,6 +813,8 @@ class MemoryService:
                     tags=memory.tags or [],
                     context=memory.context,
                     score=search_result.get("hybrid_score", search_result["score"]),
+                    source_uri=memory.source_uri,
+                    source_type=memory.source_type,
                 )
             )
 

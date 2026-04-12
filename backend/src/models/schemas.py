@@ -5,6 +5,7 @@ Based on Issue #1 - API specifications.
 
 import logging
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -76,6 +77,25 @@ class RememberRequest(BaseModel):
     importance: float = Field(0.5, ge=0.0, le=1.0, description="重要度 (0.0-1.0)")
     tags: list[str] = Field(default_factory=list, description="タグ")
     context: dict | None = Field(None, description="コンテキスト情報")
+
+    # Issue #213: Origin tracking for external integration
+    source_uri: str | None = Field(
+        None,
+        max_length=2048,
+        description="Origin URI: file://, http(s)://, vault://, obsidian://",
+    )
+    source_type: Literal["file", "url", "vault", "api", "manual"] | None = Field(
+        None, description="Origin type"
+    )
+
+    # Issue #215: Explicit links (declared_link edges)
+    linked_memory_ids: list[UUID] | None = Field(
+        None, description="Explicit links to existing memories (creates declared_link edges)"
+    )
+    linked_source_uris: list[str] | None = Field(
+        None,
+        description="Explicit links by source_uri (resolved at remember time, unresolved silently skipped)",
+    )
 
     @field_validator("summary")
     @classmethod
@@ -152,6 +172,8 @@ class MemoryResponse(BaseModel):
     tags: list[str]
     context: dict | None
     score: float | None = Field(None, description="検索スコア（recall時のみ）")
+    source_uri: str | None = None
+    source_type: Literal["file", "url", "vault", "api", "manual"] | None = None
 
     class Config:
         from_attributes = True

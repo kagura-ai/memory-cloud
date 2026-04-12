@@ -136,6 +136,11 @@ class Memory(Base):
     # P2-7: Remove index=True (index created in migration 057)
     source = Column(String(50), nullable=False, default="mcp_remember")
 
+    # Issue #213: Origin URI for external integration (Obsidian, code ingestion, web clipping)
+    # Partial index idx_memories_source_uri created in migration a95
+    source_uri = Column(String(2048), nullable=True)
+    source_type = Column(String(20), nullable=True)  # file, url, vault, api, manual
+
     # Migration 061: Generated columns for efficient resource memory lookups
     # These columns are automatically computed from details JSONB field
     resource_id = Column(
@@ -310,7 +315,7 @@ class NeuralMemoryEdge(Base):
         CheckConstraint("confidence >= 0.0 AND confidence <= 1.0", name="valid_confidence"),
         CheckConstraint(
             "edge_type IN ('neural_association', 'related_to', 'depends_on', "
-            "'learned_from', 'semantic_similarity')",
+            "'learned_from', 'semantic_similarity', 'declared_link')",
             name="valid_edge_type",
         ),
         Index("idx_edges_user_src", "user_id", "src_id"),

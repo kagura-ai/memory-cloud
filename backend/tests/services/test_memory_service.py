@@ -84,6 +84,8 @@ class TestRecall:
         mock_memory.client = "test"
         mock_memory.tags = []
         mock_memory.context = None
+        mock_memory.source_uri = None
+        mock_memory.source_type = None
 
         mock_scalars = MagicMock()
         mock_scalars.all.return_value = [mock_memory]
@@ -205,6 +207,124 @@ class TestReference:
 
         assert response.memory_id == memory_id
         assert response.summary == "Test"
+
+
+class TestRememberRequest:
+    """Test RememberRequest schema validation for #213/#215 fields."""
+
+    def test_source_uri_accepted(self):
+        """source_uri and source_type are accepted as optional fields."""
+        req = RememberRequest(
+            summary="Test memory for search quality",
+            content="Test content",
+            type="note",
+            source_uri="vault://my-vault/note.md",
+            source_type="vault",
+        )
+        assert req.source_uri == "vault://my-vault/note.md"
+        assert req.source_type == "vault"
+
+    def test_source_fields_optional(self):
+        """source_uri/source_type default to None."""
+        req = RememberRequest(
+            summary="Test memory for search quality",
+            content="Test content",
+            type="note",
+        )
+        assert req.source_uri is None
+        assert req.source_type is None
+
+    def test_invalid_source_type_rejected(self):
+        """Invalid source_type is rejected by Literal validation."""
+        with pytest.raises(ValueError):
+            RememberRequest(
+                summary="Test memory for search quality",
+                content="Test content",
+                type="note",
+                source_type="invalid_type",
+            )
+
+    def test_linked_fields_accepted(self):
+        """linked_memory_ids and linked_source_uris are accepted."""
+        target_id = uuid4()
+        req = RememberRequest(
+            summary="Test memory for search quality",
+            content="Test content",
+            type="note",
+            linked_memory_ids=[target_id],
+            linked_source_uris=["vault://my-vault/other.md"],
+        )
+        assert req.linked_memory_ids == [target_id]
+        assert req.linked_source_uris == ["vault://my-vault/other.md"]
+
+
+class TestDeclaredLinks:
+    """Test _create_declared_links logic (#215)."""
+
+    @pytest.fixture
+    def service(self):
+        return MemoryService(MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_skips_when_no_links(self, service):
+        """No-op when neither linked_memory_ids nor linked_source_uris provided."""
+        request = RememberRequest(
+            summary="Test memory for search quality",
+            content="Test content",
+            type="note",
+        )
+        # Should return immediately without touching DB
+        await service._create_declared_links(
+            memory_id=uuid4(),
+            request=request,
+            user_id="test_user",
+            workspace_id=str(uuid4()),
+            context_id=str(uuid4()),
+        )
+        service.db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_without_isolation(self, service):
+        """Skips when workspace_id or context_id is None."""
+        request = RememberRequest(
+            summary="Test memory for search quality",
+            content="Test content",
+            type="note",
+            linked_memory_ids=[uuid4()],
+        )
+        await service._create_declared_links(
+            memory_id=uuid4(),
+            request=request,
+            user_id="test_user",
+            workspace_id=None,
+            context_id=None,
+        )
+        service.db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_self_link_filtered(self, service):
+        """Self-links are filtered out before DB query."""
+        memory_id = uuid4()
+        request = RememberRequest(
+            summary="Test memory for search quality",
+            content="Test content",
+            type="note",
+            linked_memory_ids=[memory_id],  # self-link
+        )
+        # Mock the validation query to return empty (self-link filtered before query)
+        mock_result = MagicMock()
+        mock_result.__iter__ = MagicMock(return_value=iter([]))
+        service.db.execute = AsyncMock(return_value=mock_result)
+
+        await service._create_declared_links(
+            memory_id=memory_id,
+            request=request,
+            user_id="test_user",
+            workspace_id=str(uuid4()),
+            context_id=str(uuid4()),
+        )
+        # The empty requested_ids list means no DB query at all
+        service.db.execute.assert_not_called()
 
 
 class TestForget:
