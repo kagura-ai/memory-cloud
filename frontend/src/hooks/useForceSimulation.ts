@@ -1,8 +1,11 @@
+"use client";
+
 /**
  * useForceSimulation — d3-force lifecycle hook for Graph tab.
  *
  * Builds a d3-force simulation and drives it via requestAnimationFrame.
  * SVG nodes/edges are rendered as raw DOM (no React reconciliation per tick).
+ * Supports zoom/pan (d3-zoom) and node dragging (d3-drag).
  * Auto-restarts when nodes, edges, preset, or dimensions change.
  * Respects prefers-reduced-motion by running a synchronous tick batch.
  *
@@ -21,11 +24,14 @@ import {
   type SimulationNodeDatum,
   type SimulationLinkDatum,
 } from "d3-force";
+import { select } from "d3-selection";
+import { zoom, zoomIdentity, type ZoomBehavior } from "d3-zoom";
+import { drag, type D3DragEvent } from "d3-drag";
 import type { GraphNode, GraphEdge } from "@/lib/types/graph";
 import type { PresetConfig } from "@/lib/graph/forcePresets";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
-const STABLE_ALPHA = 0.01;
+const STABLE_ALPHA = 0.001;
 const STATIC_TICK_BUDGET = 300;
 
 type SimNode = GraphNode & SimulationNodeDatum;
@@ -81,15 +87,20 @@ export function useForceSimulation({
     // Clear SVG
     while (svg.firstChild) svg.removeChild(svg.firstChild);
 
+    // Root group for zoom/pan transform
+    const rootGroup = document.createElementNS(SVG_NS, "g");
+    rootGroup.setAttribute("data-role", "zoom-root");
+    svg.appendChild(rootGroup);
+
     const edgeGroup = document.createElementNS(SVG_NS, "g");
     edgeGroup.setAttribute("data-role", "edges");
     edgeGroup.setAttribute("stroke", "currentColor");
     edgeGroup.setAttribute("stroke-opacity", "0.4");
-    svg.appendChild(edgeGroup);
+    rootGroup.appendChild(edgeGroup);
 
     const nodeGroup = document.createElementNS(SVG_NS, "g");
     nodeGroup.setAttribute("data-role", "nodes");
-    svg.appendChild(nodeGroup);
+    rootGroup.appendChild(nodeGroup);
 
     // Build sim data
     const simNodes: SimNode[] = curNodes.map((n) => ({
@@ -116,7 +127,7 @@ export function useForceSimulation({
     }
 
     const circles: SVGCircleElement[] = [];
-    const hoverMap = new Map<SVGCircleElement, SimNode>();
+    const circleToNode = new Map<SVGCircleElement, SimNode>();
     for (const node of simNodes) {
       const circle = document.createElementNS(SVG_NS, "circle");
       circle.setAttribute("r", "6");
@@ -126,15 +137,15 @@ export function useForceSimulation({
       circle.setAttribute("tabindex", "0");
       circle.setAttribute("role", "img");
       circle.setAttribute("aria-label", node.summary || node.id);
-      circle.setAttribute("cursor", "pointer");
+      circle.setAttribute("cursor", "grab");
       nodeGroup.appendChild(circle);
       circles.push(circle);
-      hoverMap.set(circle, node);
+      circleToNode.set(circle, node);
     }
 
     // Hover listeners
     const handleEnter = (ev: Event) => {
-      const n = hoverMap.get(ev.currentTarget as SVGCircleElement);
+      const n = circleToNode.get(ev.currentTarget as SVGCircleElement);
       if (n) onHoverRef.current(n);
     };
     const handleLeave = () => onHoverRef.current(null);
@@ -156,9 +167,11 @@ export function useForceSimulation({
     };
     attachListeners();
 
-    // Build simulation
+    // Build simulation — keep running (alphaMin very low) so drag can reheat
     const simulation = forceSimulation<SimNode>(simNodes)
       .alphaDecay(curPreset.alphaDecay)
+      .alphaMin(STABLE_ALPHA)
+      .velocityDecay(0.4)
       .force(
         "link",
         forceLink<SimNode, SimLink>(simLinks)
@@ -184,8 +197,6 @@ export function useForceSimulation({
       );
     }
 
-    simulation.stop();
-
     // DOM writer
     const writeDom = () => {
       for (let i = 0; i < simNodes.length; i++) {
@@ -202,14 +213,14 @@ export function useForceSimulation({
         lines[i].setAttribute("y2", String(t.y ?? 0));
       }
     };
-    writeDom();
 
-    // Reduced-motion: batch ticks synchronously, draw once, freeze
+    // Reduced-motion: batch ticks synchronously, draw once, freeze (no drag/zoom)
     const prefersReducedMotion =
       typeof window !== "undefined" &&
       window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
 
     if (prefersReducedMotion) {
+      simulation.stop();
       for (
         let i = 0;
         i < STATIC_TICK_BUDGET && simulation.alpha() > STABLE_ALPHA;
@@ -224,23 +235,74 @@ export function useForceSimulation({
       };
     }
 
-    // Normal RAF loop
-    let cancelled = false;
-    let rafId: number | null = null;
-    const step = () => {
-      if (cancelled) return;
-      simulation.tick();
-      writeDom();
-      if (simulation.alpha() > STABLE_ALPHA) {
-        rafId = requestAnimationFrame(step);
-      }
-    };
-    rafId = requestAnimationFrame(step);
+    // --- Zoom & Pan (d3-zoom) ---
+    const svgSelection = select(svg);
+    const rootSelection = select(rootGroup);
+
+    const zoomBehavior: ZoomBehavior<SVGSVGElement, unknown> = zoom<
+      SVGSVGElement,
+      unknown
+    >()
+      .scaleExtent([0.2, 5])
+      .on("zoom", (event) => {
+        rootSelection.attr("transform", event.transform.toString());
+      });
+
+    svgSelection.call(zoomBehavior);
+
+    // Double-click resets zoom (immediate, no d3-transition dep)
+    svgSelection.on("dblclick.zoom", () => {
+      svgSelection.call(zoomBehavior.transform, zoomIdentity);
+    });
+
+    // --- Node Drag (d3-drag) ---
+    type DragEvent = D3DragEvent<SVGCircleElement, SimNode, SimNode>;
+
+    const dragBehavior = drag<SVGCircleElement, SimNode>()
+      .on("start", (event: DragEvent) => {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        const d = event.subject;
+        d.fx = d.x;
+        d.fy = d.y;
+        (event.sourceEvent.currentTarget as SVGCircleElement)?.setAttribute(
+          "cursor",
+          "grabbing",
+        );
+      })
+      .on("drag", (event: DragEvent) => {
+        const d = event.subject;
+        d.fx = event.x;
+        d.fy = event.y;
+      })
+      .on("end", (event: DragEvent) => {
+        if (!event.active) simulation.alphaTarget(0);
+        const d = event.subject;
+        d.fx = null;
+        d.fy = null;
+        (event.sourceEvent.currentTarget as SVGCircleElement)?.setAttribute(
+          "cursor",
+          "grab",
+        );
+      });
+
+    // Attach drag to each circle, binding the SimNode as datum
+    for (let i = 0; i < circles.length; i++) {
+      const sel = select<SVGCircleElement, SimNode>(circles[i]).datum(
+        simNodes[i],
+      );
+      sel.call(dragBehavior);
+    }
+
+    // Use simulation's own tick event + RAF for rendering
+    simulation.on("tick", writeDom);
+
+    // Initial positions
+    writeDom();
 
     return () => {
-      cancelled = true;
-      if (rafId !== null) cancelAnimationFrame(rafId);
       simulation.stop();
+      simulation.on("tick", null);
+      svgSelection.on(".zoom", null);
       detachListeners();
     };
   }, [nodes, edges, preset, width, height, svgRef]);
