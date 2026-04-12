@@ -37,8 +37,14 @@ import { ConnectionsTabPanel } from "@/components/contexts/ConnectionsTabPanel";
 import { SettingsTabPanel } from "@/components/contexts/SettingsTabPanel";
 import { SearchSettingsSection } from "@/components/contexts/SearchSettingsSection";
 import { ProtectionSection } from "@/components/contexts/ProtectionSection";
+import { GraphTabPanel } from "@/components/contexts/GraphTabPanel";
 
-const CONTEXT_TABS = ["overview", "connections", "settings"] as const;
+// Issue #233: graph viz tab gated by feature flag.
+const GRAPH_VIZ_ENABLED = process.env.NEXT_PUBLIC_ENABLE_GRAPH_VIZ === "true";
+
+const CONTEXT_TABS = GRAPH_VIZ_ENABLED
+  ? (["overview", "connections", "graph", "settings"] as const)
+  : (["overview", "connections", "settings"] as const);
 
 export default function ContextDetailPage() {
   const params = useParams();
@@ -170,26 +176,29 @@ export default function ContextDetailPage() {
 
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
-          <TabsTrigger value={CONTEXT_TABS[0]}>
-            {t("tabs.overview")}
-          </TabsTrigger>
-          <TabsTrigger value={CONTEXT_TABS[1]}>
-            {t("tabs.connections")}
-          </TabsTrigger>
-          <TabsTrigger value={CONTEXT_TABS[2]}>
-            {t("tabs.settings")}
-          </TabsTrigger>
+          <TabsTrigger value="overview">{t("tabs.overview")}</TabsTrigger>
+          <TabsTrigger value="connections">{t("tabs.connections")}</TabsTrigger>
+          {GRAPH_VIZ_ENABLED && (
+            <TabsTrigger value="graph">{t("tabs.graph")}</TabsTrigger>
+          )}
+          <TabsTrigger value="settings">{t("tabs.settings")}</TabsTrigger>
         </TabsList>
 
-        <TabsContent value={CONTEXT_TABS[0]}>
+        <TabsContent value="overview">
           <OverviewTabPanel contextId={contextId} context={context} />
         </TabsContent>
 
-        <TabsContent value={CONTEXT_TABS[1]}>
+        <TabsContent value="connections">
           <ConnectionsTabPanel contextId={contextId} />
         </TabsContent>
 
-        <TabsContent value={CONTEXT_TABS[2]}>
+        {GRAPH_VIZ_ENABLED && (
+          <TabsContent value="graph">
+            <GraphTabPanel contextId={contextId} />
+          </TabsContent>
+        )}
+
+        <TabsContent value="settings">
           <SettingsTabPanel
             contextId={contextId}
             context={context}
