@@ -38,8 +38,7 @@ import { ConnectionsTabPanel } from "@/components/contexts/ConnectionsTabPanel";
 import { SettingsTabPanel } from "@/components/contexts/SettingsTabPanel";
 import { SearchSettingsSection } from "@/components/contexts/SearchSettingsSection";
 import { ProtectionSection } from "@/components/contexts/ProtectionSection";
-// Issue #233: graph viz tab — lazy-loaded so d3 modules stay out of
-// the initial bundle when the flag is off.
+// Issue #233: graph viz tab — lazy-loaded so d3 modules are code-split.
 const GraphTabPanel = dynamic(
   () =>
     import("@/components/contexts/GraphTabPanel").then((m) => ({
@@ -48,12 +47,7 @@ const GraphTabPanel = dynamic(
   { ssr: false },
 );
 
-// Issue #233: graph viz tab gated by feature flag.
-const GRAPH_VIZ_ENABLED = process.env.NEXT_PUBLIC_ENABLE_GRAPH_VIZ === "true";
-
-const CONTEXT_TABS = GRAPH_VIZ_ENABLED
-  ? (["overview", "connections", "graph", "settings"] as const)
-  : (["overview", "connections", "settings"] as const);
+const CONTEXT_TABS = ["overview", "connections", "graph", "settings"] as const;
 
 export default function ContextDetailPage() {
   const params = useParams();
@@ -187,9 +181,7 @@ export default function ContextDetailPage() {
         <TabsList>
           <TabsTrigger value="overview">{t("tabs.overview")}</TabsTrigger>
           <TabsTrigger value="connections">{t("tabs.connections")}</TabsTrigger>
-          {GRAPH_VIZ_ENABLED && (
-            <TabsTrigger value="graph">{t("tabs.graph")}</TabsTrigger>
-          )}
+          <TabsTrigger value="graph">{t("tabs.graph")}</TabsTrigger>
           <TabsTrigger value="settings">{t("tabs.settings")}</TabsTrigger>
         </TabsList>
 
@@ -201,11 +193,9 @@ export default function ContextDetailPage() {
           <ConnectionsTabPanel contextId={contextId} />
         </TabsContent>
 
-        {GRAPH_VIZ_ENABLED && (
-          <TabsContent value="graph">
-            <GraphTabPanel contextId={contextId} />
-          </TabsContent>
-        )}
+        <TabsContent value="graph">
+          <GraphTabPanel contextId={contextId} />
+        </TabsContent>
 
         <TabsContent value="settings">
           <SettingsTabPanel

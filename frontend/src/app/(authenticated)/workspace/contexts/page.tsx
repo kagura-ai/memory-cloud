@@ -1055,6 +1055,16 @@ export default function ContextsPage() {
                           <DropdownMenuItem
                             onClick={() =>
                               router.push(
+                                `/workspace/contexts/${context.id}?tab=graph`,
+                              )
+                            }
+                          >
+                            <Settings2 className="h-4 w-4 mr-2" />
+                            {t("graph")}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onClick={() =>
+                              router.push(
                                 `/workspace/contexts/${context.id}?tab=settings`,
                               )
                             }
