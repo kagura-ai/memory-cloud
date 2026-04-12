@@ -21,7 +21,7 @@ def get_tool_definitions() -> list[dict]:
 SECURITY: DO NOT store secrets, credentials, or sensitive data in memories, including:
 - API keys, tokens, passwords, client secrets
 - Private keys, certificates
-- Personal Identifiable Information (PII)
+- Personally Identifiable Information (PII)
 - OAuth refresh tokens, session cookies
 - Contents of .env files or environment variables with credentials
 If the user's input contains such data, refuse to store it and ask them to redact the sensitive values first.
@@ -144,7 +144,7 @@ Provide exactly one of memory_id or external_id.
 SECURITY: DO NOT store secrets, credentials, or sensitive data in memories, including:
 - API keys, tokens, passwords, client secrets
 - Private keys, certificates
-- Personal Identifiable Information (PII)
+- Personally Identifiable Information (PII)
 - OAuth refresh tokens, session cookies
 - Contents of .env files or environment variables with credentials
 If the user's input contains such data, refuse to store it and ask them to redact the sensitive values first.
