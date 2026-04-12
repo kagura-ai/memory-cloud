@@ -277,7 +277,7 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
           height={dims.h}
           viewBox={`0 0 ${dims.w} ${dims.h}`}
           className="w-full h-full text-slate-400 dark:text-slate-600"
-          role="img"
+          role="group"
           aria-label={t("graphVizAriaLabel")}
         />
 
