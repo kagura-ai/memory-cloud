@@ -236,6 +236,7 @@ async def handle_recall(
         use_rerank=args.get("use_rerank", False),
         filters=args.get("filters"),
         search_mode=args.get("search_mode", "hybrid"),
+        include_explore_hints=args.get("include_explore_hints", False),
     )
 
     start_time = time.time()
@@ -314,18 +315,24 @@ async def handle_recall(
             )
             await db.commit()
 
+            response_data: dict[str, Any] = {
+                "status": "success",
+                "results": results_data,
+                "count": len(results_data),
+                "related_tags": related_tags_data,
+                **_context_response_fields(current_context),
+            }
+
+            if result.explore_hints:
+                response_data["explore_hints"] = [
+                    {"memory_id": str(h.memory_id), "reason": h.reason}
+                    for h in result.explore_hints
+                ]
+
             return [
                 TextContent(
                     type="text",
-                    text=json.dumps(
-                        {
-                            "status": "success",
-                            "results": results_data,
-                            "count": len(results_data),
-                            "related_tags": related_tags_data,
-                            **_context_response_fields(current_context),
-                        }
-                    ),
+                    text=json.dumps(response_data),
                 )
             ]
         except _ContextNotFoundError as e:

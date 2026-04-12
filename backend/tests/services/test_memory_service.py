@@ -347,3 +347,162 @@ class TestForget:
         response = await service.forget(request=request, user_id="test_user")
         assert response.deleted_count == 0
         assert response.memory_ids == []
+
+
+class TestExploreHints:
+    """Test explore_hints generation in recall (Issue #216)."""
+
+    @pytest.fixture
+    def service(self):
+        return MemoryService(MagicMock())
+
+    @pytest.fixture
+    def context_id(self):
+        return uuid4()
+
+    @pytest.fixture
+    def workspace_id(self):
+        return uuid4()
+
+    def _make_mock_memory(self, memory_id=None, summary="Test", tags=None):
+        m = MagicMock()
+        m.id = memory_id or str(uuid4())
+        m.summary = summary
+        m.context_summary = None
+        m.type = "note"
+        m.importance = 0.7
+        m.scope = "persistent"
+        m.created_at = datetime.utcnow()
+        m.last_used_at = datetime.utcnow()
+        m.access_count = 1
+        m.confidence = 0.8
+        m.client = "test"
+        m.tags = tags or []
+        m.context = None
+        m.source_uri = None
+        m.source_type = None
+        return m
+
+    @pytest.mark.asyncio
+    async def test_recall_no_hints_when_opt_out(self, service, context_id, workspace_id):
+        """When include_explore_hints=False (default), explore_hints is None."""
+        request = RecallRequest(query="test", k=5)
+        mid = str(uuid4())
+
+        service.search_service.hybrid_search = AsyncMock(
+            return_value=[{"id": mid, "score": 0.9, "hybrid_score": 0.9}]
+        )
+        mock_mem = self._make_mock_memory(memory_id=mid)
+        mock_scalars = MagicMock()
+        mock_scalars.all.return_value = [mock_mem]
+        mock_result = MagicMock()
+        mock_result.scalars.return_value = mock_scalars
+        service.db.execute = AsyncMock(return_value=mock_result)
+        service.db.commit = AsyncMock()
+        service.memory_repo.update_access_stats = AsyncMock()
+        service._check_and_promote = AsyncMock()
+
+        response = await service.recall(
+            request=request,
+            user_id="test_user",
+            current_context_id=context_id,
+            current_workspace_id=workspace_id,
+        )
+
+        assert response.explore_hints is None
+
+    @pytest.mark.asyncio
+    async def test_recall_hints_with_opt_in(self, service, context_id, workspace_id):
+        """When include_explore_hints=True, at least top_result hint is returned."""
+        request = RecallRequest(query="test", k=5, include_explore_hints=True)
+        mid = str(uuid4())
+
+        service.search_service.hybrid_search = AsyncMock(
+            return_value=[{"id": mid, "score": 0.9, "hybrid_score": 0.9}]
+        )
+        mock_mem = self._make_mock_memory(memory_id=mid)
+        mock_scalars = MagicMock()
+        mock_scalars.all.return_value = [mock_mem]
+        mock_result = MagicMock()
+        mock_result.scalars.return_value = mock_scalars
+        service.db.execute = AsyncMock(return_value=mock_result)
+        service.db.commit = AsyncMock()
+        service.memory_repo.update_access_stats = AsyncMock()
+        service._check_and_promote = AsyncMock()
+
+        with patch.dict("os.environ", {"ENABLE_NEURAL_MEMORY": "true"}):
+            with patch("repositories.neural_edge.NeuralEdgeRepository") as MockEdgeRepo:
+                mock_repo = MockEdgeRepo.return_value
+                mock_repo.get_node_degree = AsyncMock(return_value=(2, 3))
+
+                response = await service.recall(
+                    request=request,
+                    user_id="test_user",
+                    current_context_id=context_id,
+                    current_workspace_id=workspace_id,
+                )
+
+        assert response.explore_hints is not None
+        assert len(response.explore_hints) >= 1
+        assert response.explore_hints[0].reason == "top_result"
+
+    @pytest.mark.asyncio
+    async def test_recall_hints_empty_when_no_results(self, service, context_id, workspace_id):
+        """When include_explore_hints=True but no results, hints are empty."""
+        request = RecallRequest(query="nothing", k=5, include_explore_hints=True)
+
+        mock_context = MagicMock(
+            id=context_id,
+            workspace_id=workspace_id,
+            is_private=True,
+            created_by="test_user",
+        )
+        service.context_service.get_context = AsyncMock(return_value=mock_context)
+        service._get_context_search_config = AsyncMock(return_value=None)
+        service.search_service.hybrid_search = AsyncMock(return_value=[])
+
+        response = await service.recall(
+            request=request,
+            user_id="test_user",
+            current_context_id=context_id,
+            current_workspace_id=workspace_id,
+        )
+
+        assert response.explore_hints is None or response.explore_hints == []
+
+    @pytest.mark.asyncio
+    async def test_recall_hints_failure_does_not_fail_recall(
+        self, service, context_id, workspace_id
+    ):
+        """Hint generation failures are swallowed — recall still succeeds."""
+        request = RecallRequest(query="test", k=5, include_explore_hints=True)
+        mid = str(uuid4())
+
+        service.search_service.hybrid_search = AsyncMock(
+            return_value=[{"id": mid, "score": 0.9, "hybrid_score": 0.9}]
+        )
+        mock_mem = self._make_mock_memory(memory_id=mid)
+        mock_scalars = MagicMock()
+        mock_scalars.all.return_value = [mock_mem]
+        mock_result = MagicMock()
+        mock_result.scalars.return_value = mock_scalars
+        service.db.execute = AsyncMock(return_value=mock_result)
+        service.db.commit = AsyncMock()
+        service.memory_repo.update_access_stats = AsyncMock()
+        service._check_and_promote = AsyncMock()
+
+        with patch.dict("os.environ", {"ENABLE_NEURAL_MEMORY": "true"}):
+            with patch("repositories.neural_edge.NeuralEdgeRepository") as MockEdgeRepo:
+                mock_repo = MockEdgeRepo.return_value
+                mock_repo.get_node_degree = AsyncMock(side_effect=Exception("DB error"))
+
+                response = await service.recall(
+                    request=request,
+                    user_id="test_user",
+                    current_context_id=context_id,
+                    current_workspace_id=workspace_id,
+                )
+
+        # Recall succeeded despite hint failure
+        assert response.results is not None
+        assert len(response.results) == 1

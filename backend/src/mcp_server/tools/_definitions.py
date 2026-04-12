@@ -270,6 +270,10 @@ Search modes: Use search_mode to control the search strategy.
                         "enum": ["hybrid", "semantic", "keyword"],
                         "description": "Search strategy. If omitted, hybrid is used by default: 60% semantic + 40% BM25 with Neural Memory boosting. semantic: vector similarity only (no BM25, Neural Memory skipped). keyword: BM25 only (no embeddings; best for hiragana queries where embedding models struggle).",
                     },
+                    "include_explore_hints": {
+                        "type": "boolean",
+                        "description": "Include up to 3 explore_hints in the response suggesting good seed memories for a follow-up explore() call (default: false). Set to true when the user is exploring a topic broadly or asks 'what else is related?' — the hints bridge recall (precision search) and explore (graph discovery) without mixing their scoring. Each hint includes a memory_id and a reason (top_result, high_centrality, or unexplored_neighbor).",
+                    },
                 },
             },
         },
