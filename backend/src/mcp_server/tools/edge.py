@@ -30,6 +30,8 @@ VALID_EDGE_TYPES = frozenset(
         "learned_from",
         # Cold-start seeding (Issue #221): synthetic edges from k-NN at remember() time
         "semantic_similarity",
+        # Issue #215: Explicit links from clients (Obsidian wikilinks, code imports, etc.)
+        "declared_link",
     }
 )
 

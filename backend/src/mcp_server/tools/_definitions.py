@@ -101,6 +101,25 @@ IMPORTANT: Always specify context_id to ensure you're using the intended context
                         "format": "uuid",
                         "description": "Target context UUID (e.g. '550e8400-e29b-41d4-a716-446655440000'). MUST be a valid UUID from list_contexts(). Do NOT guess or fabricate IDs.",
                     },
+                    "source_uri": {
+                        "type": "string",
+                        "description": "Origin URI for external integration (e.g. 'file:///path/to/note.md', 'vault://my-vault/note', 'https://example.com/page'). Max 2048 chars.",
+                    },
+                    "source_type": {
+                        "type": "string",
+                        "enum": ["file", "url", "vault", "api", "manual"],
+                        "description": "Origin type. Use 'file' for local files, 'url' for web pages, 'vault' for Obsidian vaults, 'api' for API-ingested content, 'manual' for user-entered.",
+                    },
+                    "linked_memory_ids": {
+                        "type": "array",
+                        "items": {"type": "string", "format": "uuid"},
+                        "description": "Explicit links to existing memories by ID. Creates declared_link edges (weight 1.0). Use for known relationships like Obsidian [[wikilinks]] resolved to memory IDs.",
+                    },
+                    "linked_source_uris": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Explicit links by source_uri (resolved to memory_id at remember time). Unresolved URIs are silently skipped — the plugin can retry later when the target memory exists.",
+                    },
                 },
             },
         },

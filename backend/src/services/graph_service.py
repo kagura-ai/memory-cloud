@@ -53,6 +53,8 @@ class GraphService:
         "related_to",
         "depends_on",
         "learned_from",
+        "semantic_similarity",
+        "declared_link",
     ]
 
     def __init__(

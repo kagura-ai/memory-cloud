@@ -84,6 +84,8 @@ class TestRecall:
         mock_memory.client = "test"
         mock_memory.tags = []
         mock_memory.context = None
+        mock_memory.source_uri = None
+        mock_memory.source_type = None
 
         mock_scalars = MagicMock()
         mock_scalars.all.return_value = [mock_memory]
