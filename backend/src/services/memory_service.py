@@ -243,8 +243,8 @@ class MemoryService:
             client=client,
             summary_embedding_id=memory_id,  # Same as memory_id
             embedding_status="pending",  # Issue #122: Track embedding state
-            source_uri=request.source_uri,  # Issue #213
-            source_type=request.source_type,  # Issue #213
+            source_uri=request.source_uri,
+            source_type=request.source_type,
         )
 
         try:
@@ -629,35 +629,36 @@ class MemoryService:
                 )
                 created += 1
 
-            # Links by source_uri (resolve to memory_id)
-            for uri in request.linked_source_uris or []:
+            # Links by source_uri (batch resolve to memory_id)
+            uris = request.linked_source_uris or []
+            if uris:
                 result = await self.db.execute(
-                    select(Memory.id)
-                    .where(
+                    select(Memory.source_uri, Memory.id).where(
                         Memory.user_id == user_id,
                         Memory.context_id == UUID(context_id),
-                        Memory.source_uri == uri,
+                        Memory.source_uri.in_(uris),
                         Memory.deleted_at.is_(None),
                     )
-                    .limit(1)
                 )
-                target_id = result.scalar_one_or_none()
-                if target_id is None:
-                    logger.debug("declared_link_forward_ref_skipped", uri=uri)
-                    continue
-                if target_id == memory_id:
-                    continue
-                await edge_repo.create_edge_if_absent(
-                    user_id=user_id,
-                    src_id=memory_id,
-                    dst_id=target_id,
-                    edge_type="declared_link",
-                    weight=1.0,
-                    confidence=1.0,
-                    workspace_id=workspace_id,
-                    context_id=context_id,
-                )
-                created += 1
+                uri_to_id = {row.source_uri: row.id for row in result}
+                for uri in uris:
+                    target_id = uri_to_id.get(uri)
+                    if target_id is None:
+                        logger.debug("declared_link_forward_ref_skipped", uri=uri)
+                        continue
+                    if target_id == memory_id:
+                        continue
+                    await edge_repo.create_edge_if_absent(
+                        user_id=user_id,
+                        src_id=memory_id,
+                        dst_id=target_id,
+                        edge_type="declared_link",
+                        weight=1.0,
+                        confidence=1.0,
+                        workspace_id=workspace_id,
+                        context_id=context_id,
+                    )
+                    created += 1
 
             if created > 0:
                 await self.db.commit()
@@ -798,8 +799,8 @@ class MemoryService:
                     tags=memory.tags or [],
                     context=memory.context,
                     score=search_result.get("hybrid_score", search_result["score"]),
-                    source_uri=memory.source_uri,  # Issue #213
-                    source_type=memory.source_type,  # Issue #213
+                    source_uri=memory.source_uri,
+                    source_type=memory.source_type,
                 )
             )
 

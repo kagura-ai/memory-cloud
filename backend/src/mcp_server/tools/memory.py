@@ -49,10 +49,10 @@ async def handle_remember(
         importance=args.get("importance", 0.5),
         tags=args.get("tags", []),
         context=args.get("context"),
-        source_uri=args.get("source_uri"),  # Issue #213
-        source_type=args.get("source_type"),  # Issue #213
-        linked_memory_ids=args.get("linked_memory_ids"),  # Issue #215
-        linked_source_uris=args.get("linked_source_uris"),  # Issue #215
+        source_uri=args.get("source_uri"),
+        source_type=args.get("source_type"),
+        linked_memory_ids=args.get("linked_memory_ids"),
+        linked_source_uris=args.get("linked_source_uris"),
     )
 
     start_time = time.time()
