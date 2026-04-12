@@ -613,21 +613,34 @@ class MemoryService:
         created = 0
 
         try:
-            # Direct links by memory ID
-            for target_id in request.linked_memory_ids or []:
-                if target_id == memory_id:
-                    continue  # skip self-link
-                await edge_repo.create_edge_if_absent(
-                    user_id=user_id,
-                    src_id=memory_id,
-                    dst_id=target_id,
-                    edge_type="declared_link",
-                    weight=1.0,
-                    confidence=1.0,
-                    workspace_id=workspace_id,
-                    context_id=context_id,
+            # Direct links by memory ID (batch-validate targets exist in same scope)
+            requested_ids = [t for t in (request.linked_memory_ids or []) if t != memory_id]
+            if requested_ids:
+                result = await self.db.execute(
+                    select(Memory.id).where(
+                        Memory.id.in_(requested_ids),
+                        Memory.user_id == user_id,
+                        Memory.workspace_id == UUID(workspace_id),
+                        Memory.context_id == UUID(context_id),
+                        Memory.deleted_at.is_(None),
+                    )
                 )
-                created += 1
+                valid_ids = {row.id for row in result}
+                for target_id in requested_ids:
+                    if target_id not in valid_ids:
+                        logger.debug("declared_link_target_not_found", target_id=str(target_id))
+                        continue
+                    await edge_repo.create_edge_if_absent(
+                        user_id=user_id,
+                        src_id=memory_id,
+                        dst_id=target_id,
+                        edge_type="declared_link",
+                        weight=1.0,
+                        confidence=1.0,
+                        workspace_id=workspace_id,
+                        context_id=context_id,
+                    )
+                    created += 1
 
             # Links by source_uri (batch resolve to memory_id)
             uris = request.linked_source_uris or []

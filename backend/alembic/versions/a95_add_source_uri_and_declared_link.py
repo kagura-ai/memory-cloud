@@ -45,12 +45,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Remove source_uri, source_type columns and declared_link edge type.
+    """Remove source_uri, source_type columns and declared_link edge type."""
+    # Delete declared_link edges before narrowing the constraint
+    op.execute("DELETE FROM neural_memory_edges WHERE edge_type = 'declared_link'")
 
-    Note: declared_link downgrade will fail if edges with that type exist.
-    Delete them first:
-        DELETE FROM neural_memory_edges WHERE edge_type = 'declared_link';
-    """
     # Revert edge type constraint
     op.drop_constraint("valid_edge_type", "neural_memory_edges", type_="check")
     op.create_check_constraint(
