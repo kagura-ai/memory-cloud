@@ -235,7 +235,7 @@ Search modes: Use search_mode to control the search strategy.
                     },
                     "filters": {
                         "type": "object",
-                        "description": "Optional filters as JSON. Tag filter matches ANY of the specified tags by default (exact match). Set tags_match='all' to require ALL tags (AND logic). Date filters: created_after, created_before, updated_after, updated_before (ISO 8601). Examples: {'type': 'code'}, {'tags': ['python', 'fastapi'], 'tags_match': 'all'}, {'importance': {'gte': 0.7}}, {'created_after': '2026-03-01T00:00:00Z'}",
+                        "description": "Optional filters as JSON. Tag filter matches ANY of the specified tags by default (exact match). Set tags_match='all' to require ALL tags (AND logic). Date filters: created_after, created_before, updated_after, updated_before (ISO 8601). Source filters: 'source_uri_prefix' for origin prefix match (e.g. 'file://', 'vault://my-vault/'), 'source_type' for exact type match ('file'|'url'|'vault'|'api'|'manual'). Examples: {'type': 'code'}, {'tags': ['python', 'fastapi'], 'tags_match': 'all'}, {'importance': {'gte': 0.7}}, {'created_after': '2026-03-01T00:00:00Z'}, {'source_uri_prefix': 'vault://', 'source_type': 'vault'}",
                     },
                     "context_id": {
                         "type": "string",

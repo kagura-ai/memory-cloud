@@ -667,6 +667,7 @@ class MemoryService:
                     count=created,
                 )
         except Exception as e:
+            await self.db.rollback()
             logger.warning(
                 "declared_links_failed",
                 memory_id=str(memory_id),
@@ -755,7 +756,8 @@ class MemoryService:
         # Issue #214: source_uri_prefix and source_type post-filters
         if request.filters:
             if prefix := request.filters.get("source_uri_prefix"):
-                pg_conditions.append(Memory.source_uri.like(f"{prefix}%"))
+                escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                pg_conditions.append(Memory.source_uri.like(f"{escaped}%", escape="\\"))
             if stype := request.filters.get("source_type"):
                 pg_conditions.append(Memory.source_type == stype)
         result = await self.db.execute(select(Memory).where(*pg_conditions))
