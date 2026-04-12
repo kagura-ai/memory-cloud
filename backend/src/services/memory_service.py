@@ -762,7 +762,10 @@ class MemoryService:
         memory_ids = [r["id"] for r in search_results]
 
         if not memory_ids:
-            return RecallResponse(results=[])
+            return RecallResponse(
+                results=[],
+                explore_hints=[] if request.include_explore_hints else None,
+            )
 
         # Fetch memories from PostgreSQL (exclude soft-deleted)
         pg_conditions = [
