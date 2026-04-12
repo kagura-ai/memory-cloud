@@ -156,6 +156,10 @@ class RecallRequest(BaseModel):
         pattern="^(hybrid|semantic|keyword)$",
         description="Search mode: hybrid (default), semantic (vector only), keyword (BM25 only)",
     )
+    include_explore_hints: bool = Field(
+        False,
+        description="Include up to 3 explore_hints in response suggesting good seeds for explore()",
+    )
 
 
 class MemoryResponse(BaseModel):
@@ -187,14 +191,26 @@ class RelatedTagItem(BaseModel):
     sample_summary: str | None = None
 
 
+class ExploreHint(BaseModel):
+    """Hint suggesting a memory as a good seed for explore().
+
+    Issue #216: Opt-in field to bridge recall → explore discovery.
+    """
+
+    memory_id: UUID
+    reason: Literal["top_result", "high_centrality", "unexplored_neighbor"]
+
+
 class RecallResponse(BaseModel):
     """Response schema for recall() API.
 
     Issue #104: Added related_tags to help LLMs understand tag context.
+    Issue #216: Added explore_hints for graph discovery bridging.
     """
 
     results: list[MemoryResponse]
     related_tags: list[RelatedTagItem] = []
+    explore_hints: list[ExploreHint] | None = None
 
 
 class ReferenceRequest(BaseModel):

@@ -22,6 +22,7 @@ from db.qdrant import (
 from models.auth import Context
 from models.memory import Memory
 from models.schemas import (
+    ExploreHint,
     ExploreRequest,
     ExploreResponse,
     ForgetRequest,
@@ -761,7 +762,10 @@ class MemoryService:
         memory_ids = [r["id"] for r in search_results]
 
         if not memory_ids:
-            return RecallResponse(results=[])
+            return RecallResponse(
+                results=[],
+                explore_hints=[] if request.include_explore_hints else None,
+            )
 
         # Fetch memories from PostgreSQL (exclude soft-deleted)
         pg_conditions = [
@@ -922,12 +926,28 @@ class MemoryService:
 
         await self.db.commit()
 
+        # Issue #216: Generate explore hints (best-effort, opt-in)
+        explore_hints = [] if request.include_explore_hints else None
+        if request.include_explore_hints and responses:
+            try:
+                explore_hints = await self._generate_explore_hints(
+                    responses,
+                    user_id,
+                    current_context_id,
+                    current_workspace_id,
+                    neural_enabled=neural_enabled,
+                )
+            except Exception as exc:
+                logger.warning("explore_hints_generation_failed", error=str(exc))
+
         # Issue #104: Aggregate related tags from results
         related_tags = self._aggregate_related_tags(responses, limit=10)
 
         logger.info("recall_completed", user_id=user_id, results=len(responses))
 
-        return RecallResponse(results=responses, related_tags=related_tags)
+        return RecallResponse(
+            results=responses, related_tags=related_tags, explore_hints=explore_hints
+        )
 
     async def forget(
         self,
@@ -1549,6 +1569,79 @@ class MemoryService:
         ]
 
         return related_tags
+
+    async def _generate_explore_hints(
+        self,
+        responses: list[MemoryResponse],
+        user_id: str,
+        context_id: UUID | None,
+        workspace_id: UUID | None,
+        neural_enabled: bool = False,
+    ) -> list[ExploreHint]:
+        """Generate up to 3 explore hints from recall results.
+
+        Issue #216: Best-effort hints for graph discovery bridging.
+        Failures never propagate — caller wraps in try/except.
+
+        Hint selection:
+          1. top_result: highest-scored result
+          2. high_centrality: top-3 result with most edges
+          3. unexplored_neighbor: top-3 result with edges + created in last 7d
+        """
+        from datetime import timedelta
+
+        from repositories.neural_edge import NeuralEdgeRepository
+
+        hints: list[ExploreHint] = []
+        if not responses:
+            return hints
+
+        # hint #1: top result (always available, no graph query needed)
+        hints.append(ExploreHint(memory_id=responses[0].memory_id, reason="top_result"))
+
+        # Graph-derived hints require neural memory to be enabled
+        if not neural_enabled:
+            return hints
+
+        # For hints #2 and #3, query edge counts for top-3 results
+        top_n = responses[:3]
+        edge_repo = NeuralEdgeRepository(self.db)
+
+        degree_map: dict[UUID, int] = {}
+        for resp in top_n:
+            try:
+                in_deg, out_deg = await edge_repo.get_node_degree(user_id, resp.memory_id)
+                degree_map[resp.memory_id] = in_deg + out_deg
+            except Exception:
+                degree_map[resp.memory_id] = 0
+
+        # hint #2: high_centrality — top-3 result with highest edge count
+        used_ids = {hints[0].memory_id}
+        candidates = [
+            (mid, deg) for mid, deg in degree_map.items() if deg > 0 and mid not in used_ids
+        ]
+        if candidates:
+            best = max(candidates, key=lambda x: x[1])
+            hints.append(ExploreHint(memory_id=best[0], reason="high_centrality"))
+            used_ids.add(best[0])
+
+        # hint #3: unexplored_neighbor — has edges + created in last 7 days
+        cutoff = utcnow() - timedelta(days=7)
+        for resp in top_n:
+            if resp.memory_id in used_ids:
+                continue
+            deg = degree_map.get(resp.memory_id, 0)
+            # Normalize to naive datetime for comparison (DB stores naive UTC)
+            created = (
+                resp.created_at.replace(tzinfo=None)
+                if resp.created_at and resp.created_at.tzinfo
+                else resp.created_at
+            )
+            if deg > 0 and created and created >= cutoff:
+                hints.append(ExploreHint(memory_id=resp.memory_id, reason="unexplored_neighbor"))
+                break
+
+        return hints
 
 
 async def _create_knn_seed_edges(

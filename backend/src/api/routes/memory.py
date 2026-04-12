@@ -177,7 +177,7 @@ async def reference(
     return result
 
 
-@router.post("/recall", response_model=RecallResponse)
+@router.post("/recall", response_model=RecallResponse, response_model_exclude_none=True)
 async def recall(
     request: RecallRequest,
     user: APIKeyOrSessionUser,
