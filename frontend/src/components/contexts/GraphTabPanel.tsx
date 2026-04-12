@@ -187,12 +187,15 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
     <div className="space-y-4">
       {/* Control strip */}
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3 p-4 rounded-lg border border-slate-200 dark:border-slate-800">
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="font-medium text-slate-700 dark:text-slate-300">
+        <div className="flex flex-col gap-1 text-xs">
+          <label
+            htmlFor="graph-viz-n"
+            className="font-medium text-slate-700 dark:text-slate-300"
+          >
             {t("graphVizNodeCount")}
-          </span>
+          </label>
           <Select value={String(n)} onValueChange={(v) => setN(Number(v))}>
-            <SelectTrigger>
+            <SelectTrigger id="graph-viz-n">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -203,17 +206,20 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
               ))}
             </SelectContent>
           </Select>
-        </label>
+        </div>
 
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="font-medium text-slate-700 dark:text-slate-300">
+        <div className="flex flex-col gap-1 text-xs">
+          <label
+            htmlFor="graph-viz-strategy"
+            className="font-medium text-slate-700 dark:text-slate-300"
+          >
             {t("graphVizStrategy")}
-          </span>
+          </label>
           <Select
             value={strategy}
             onValueChange={(v) => setStrategy(v as FilterStrategy)}
           >
-            <SelectTrigger>
+            <SelectTrigger id="graph-viz-strategy">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -224,17 +230,20 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
               ))}
             </SelectContent>
           </Select>
-        </label>
+        </div>
 
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="font-medium text-slate-700 dark:text-slate-300">
+        <div className="flex flex-col gap-1 text-xs">
+          <label
+            htmlFor="graph-viz-preset"
+            className="font-medium text-slate-700 dark:text-slate-300"
+          >
             {t("graphVizPreset")}
-          </span>
+          </label>
           <Select
             value={preset}
             onValueChange={(v) => setPreset(v as PresetName)}
           >
-            <SelectTrigger>
+            <SelectTrigger id="graph-viz-preset">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -245,7 +254,7 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
               ))}
             </SelectContent>
           </Select>
-        </label>
+        </div>
       </div>
 
       {/* Info strip */}
