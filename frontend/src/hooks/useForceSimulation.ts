@@ -3,7 +3,7 @@
 /**
  * useForceSimulation — d3-force lifecycle hook for Graph tab.
  *
- * Builds a d3-force simulation and drives it via requestAnimationFrame.
+ * Builds a d3-force simulation driven by its internal tick timer.
  * SVG nodes/edges are rendered as raw DOM (no React reconciliation per tick).
  * Supports zoom/pan (d3-zoom) and node dragging (d3-drag).
  * Auto-restarts when nodes, edges, preset, or dimensions change.

@@ -140,7 +140,7 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
     return [...counts.entries()]
-      .sort((a, b) => b[1] - a[1])
+      .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
       .map(([type, count]) => ({
         type,
         count,
@@ -307,7 +307,7 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
             <div className="font-semibold truncate">
               {hovered.summary || hovered.id}
             </div>
-            <div className="text-slate-500">
+            <div className="text-slate-500 dark:text-slate-400">
               {t("graphVizTooltipDetail", {
                 type: hovered.type,
                 degree: hovered.degree,
