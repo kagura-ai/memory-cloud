@@ -635,6 +635,7 @@ class MemoryService:
                 result = await self.db.execute(
                     select(Memory.source_uri, Memory.id).where(
                         Memory.user_id == user_id,
+                        Memory.workspace_id == UUID(workspace_id),
                         Memory.context_id == UUID(context_id),
                         Memory.source_uri.in_(uris),
                         Memory.deleted_at.is_(None),

@@ -172,9 +172,8 @@ class MemoryResponse(BaseModel):
     tags: list[str]
     context: dict | None
     score: float | None = Field(None, description="検索スコア（recall時のみ）")
-    # Issue #213: Origin tracking
     source_uri: str | None = None
-    source_type: str | None = None
+    source_type: Literal["file", "url", "vault", "api", "manual"] | None = None
 
     class Config:
         from_attributes = True
