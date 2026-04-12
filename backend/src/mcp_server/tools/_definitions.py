@@ -18,6 +18,14 @@ def get_tool_definitions() -> list[dict]:
             "name": "remember",
             "description": """Store important information, decisions, code snippets, or context into long-term memory. Use this when you want to preserve information for future recall across conversations.
 
+SECURITY: DO NOT store secrets, credentials, or sensitive data in memories, including:
+- API keys, tokens, passwords, client secrets
+- Private keys, certificates
+- Personally Identifiable Information (PII)
+- OAuth refresh tokens, session cookies
+- Contents of .env files or environment variables with credentials
+If the user's input contains such data, refuse to store it and ask them to redact the sensitive values first.
+
 Supports 3-layer architecture:
 - summary: Concise overview for search (10-500 chars) - write the reusable conclusion/decision, not the process
   Include synonyms and related terms that users might search for.
@@ -132,6 +140,14 @@ Two modes:
 2. **Upsert (external_id)**: Finds existing memory by external resource ID within the context. If found, replaces it (new memory_id). If not found, creates new. Requires summary, content, and type. Use for sync workflows with stable external identifiers.
 
 Provide exactly one of memory_id or external_id.
+
+SECURITY: DO NOT store secrets, credentials, or sensitive data in memories, including:
+- API keys, tokens, passwords, client secrets
+- Private keys, certificates
+- Personally Identifiable Information (PII)
+- OAuth refresh tokens, session cookies
+- Contents of .env files or environment variables with credentials
+If the user's input contains such data, refuse to store it and ask them to redact the sensitive values first.
 
 IMPORTANT: Always specify context_id.""",
             "inputSchema": {
