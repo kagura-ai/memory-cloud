@@ -382,6 +382,8 @@ export default function AdminUsersPage() {
                         <Button
                           variant="ghost"
                           size="sm"
+                          aria-label="Row actions"
+                          title="Row actions"
                           onClick={(e) => e.stopPropagation()}
                         >
                           <MoreVertical className="h-4 w-4" />
