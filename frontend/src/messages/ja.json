@@ -2289,6 +2289,11 @@
         "typeEnum": "列挙型",
         "enabled": "有効",
         "disabled": "無効"
+      },
+      "metadata": {
+        "impact": "影響",
+        "recommended": "推奨値：",
+        "examples": "例："
       }
     },
     "workspaces": {
