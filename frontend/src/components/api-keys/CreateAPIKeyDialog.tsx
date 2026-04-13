@@ -5,8 +5,8 @@
  * Shows plaintext key ONLY once (one-time display)
  */
 
-import { useState } from 'react';
-import { Button } from '@/components/ui/button';
+import { useState } from "react";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -14,20 +14,21 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select';
-import { AlertCircle, Check, CheckCircle, Copy } from 'lucide-react';
-import { createAPIKey } from '@/lib/api/api-keys';
-import type { APIKeyCreateResponse } from '@/lib/types/api-key';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+} from "@/components/ui/select";
+import { AlertCircle, Check, CheckCircle, Copy } from "lucide-react";
+import { createAPIKey } from "@/lib/api/api-keys";
+import { ApiError } from "@/lib/api/base";
+import type { APIKeyCreateResponse } from "@/lib/types/api-key";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
 interface CreateAPIKeyDialogProps {
   isOpen: boolean;
@@ -40,20 +41,22 @@ export function CreateAPIKeyDialog({
   onClose,
   onSuccess,
 }: CreateAPIKeyDialogProps) {
-  const [name, setName] = useState('');
-  const [expiryDays, setExpiryDays] = useState<string>('null');
+  const [name, setName] = useState("");
+  const [expiryDays, setExpiryDays] = useState<string>("null");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // One-time display state
-  const [createdKey, setCreatedKey] = useState<APIKeyCreateResponse | null>(null);
+  const [createdKey, setCreatedKey] = useState<APIKeyCreateResponse | null>(
+    null,
+  );
   const [copied, setCopied] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (!name.trim()) {
-      setError('Please enter a name for the API key');
+      setError("Please enter a name for the API key");
       return;
     }
 
@@ -63,17 +66,18 @@ export function CreateAPIKeyDialog({
 
       const response = await createAPIKey({
         name: name.trim(),
-        expires_days: expiryDays === 'null' ? null : parseInt(expiryDays, 10),
+        expires_days: expiryDays === "null" ? null : parseInt(expiryDays, 10),
       });
 
       // Show one-time display
       setCreatedKey(response);
     } catch (err) {
-      console.error('Failed to create API key:', err);
-      // Extract error message from ApiError or Error
-      const apiError = err as { message?: string; details?: { detail?: string } };
-      const errorMessage = apiError.details?.detail || apiError.message || 'Failed to create API key';
-      setError(errorMessage);
+      console.error("Failed to create API key:", err);
+      const apiError = err instanceof ApiError ? err : null;
+      setError(
+        apiError?.details?.detail ||
+          (err instanceof Error ? err.message : "Failed to create API key"),
+      );
     } finally {
       setLoading(false);
     }
@@ -88,8 +92,8 @@ export function CreateAPIKeyDialog({
   };
 
   const handleClose = () => {
-    setName('');
-    setExpiryDays('null');
+    setName("");
+    setExpiryDays("null");
     setError(null);
     setCreatedKey(null);
     setCopied(false);
@@ -118,7 +122,8 @@ export function CreateAPIKeyDialog({
               <CheckCircle className="h-4 w-4 text-green-500" />
               <AlertTitle className="text-green-800">Success!</AlertTitle>
               <AlertDescription className="text-green-700">
-                Copy this API key immediately. It will only be shown once for security reasons.
+                Copy this API key immediately. It will only be shown once for
+                security reasons.
               </AlertDescription>
             </Alert>
 
@@ -141,7 +146,7 @@ export function CreateAPIKeyDialog({
                   <Button
                     onClick={handleCopy}
                     variant="outline"
-                    className={copied ? 'bg-green-50 border-green-300' : ''}
+                    className={copied ? "bg-green-50 border-green-300" : ""}
                   >
                     {copied ? (
                       <>
@@ -179,14 +184,15 @@ export function CreateAPIKeyDialog({
               )}
 
               <p className="text-xs text-slate-500">
-                Store this key securely. You'll need it to authenticate API requests.
+                Store this key securely. You'll need it to authenticate API
+                requests.
               </p>
             </div>
           </div>
 
           <DialogFooter>
             <Button onClick={handleDone} className="w-full" disabled={!copied}>
-              {copied ? 'Done' : 'Copy the key first'}
+              {copied ? "Done" : "Copy the key first"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -231,7 +237,11 @@ export function CreateAPIKeyDialog({
 
             <div className="space-y-2">
               <Label htmlFor="expiry">Expiration</Label>
-              <Select value={expiryDays} onValueChange={setExpiryDays} disabled={loading}>
+              <Select
+                value={expiryDays}
+                onValueChange={setExpiryDays}
+                disabled={loading}
+              >
                 <SelectTrigger id="expiry">
                   <SelectValue placeholder="Select expiration" />
                 </SelectTrigger>
@@ -249,11 +259,16 @@ export function CreateAPIKeyDialog({
           </div>
 
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={handleClose} disabled={loading}>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleClose}
+              disabled={loading}
+            >
               Cancel
             </Button>
             <Button type="submit" disabled={loading}>
-              {loading ? 'Creating...' : 'Create API Key'}
+              {loading ? "Creating..." : "Create API Key"}
             </Button>
           </DialogFooter>
         </form>

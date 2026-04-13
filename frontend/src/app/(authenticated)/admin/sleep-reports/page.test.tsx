@@ -21,6 +21,7 @@ import {
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 import AdminSleepReportsPage from "./page";
+import { ApiError } from "@/lib/api/base";
 
 // ---------- Mocks ------------------------------------------------------------
 
@@ -28,12 +29,16 @@ const mockGet = vi.fn();
 const mockPost = vi.fn();
 const mockToast = vi.fn();
 
-vi.mock("@/lib/api", () => ({
-  apiClient: {
-    get: (...args: unknown[]) => mockGet(...args),
-    post: (...args: unknown[]) => mockPost(...args),
-  },
-}));
+vi.mock("@/lib/api", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/api")>();
+  return {
+    ...original,
+    apiClient: {
+      get: (...args: unknown[]) => mockGet(...args),
+      post: (...args: unknown[]) => mockPost(...args),
+    },
+  };
+});
 
 // Stable references so useCallback/useEffect deps do not invalidate on
 // every render and spin up an infinite loadReports loop.
@@ -183,15 +188,17 @@ describe("AdminSleepReportsPage — Run Now button", () => {
     await renderReady();
 
     const runningReportId = "22222222-2222-2222-2222-222222222222";
-    mockPost.mockRejectedValueOnce({
-      status: 409,
-      error: "sleep_run_in_progress",
-      message: "A sleep run is already in progress for this user.",
-      details: {
-        running_report_id: runningReportId,
-        started_at: "2026-04-09T11:30:00Z",
-      },
-    });
+    mockPost.mockRejectedValueOnce(
+      new ApiError({
+        status: 409,
+        error: "sleep_run_in_progress",
+        message: "A sleep run is already in progress for this user.",
+        details: {
+          running_report_id: runningReportId,
+          started_at: "2026-04-09T11:30:00Z",
+        },
+      }),
+    );
 
     const button = screen.getByRole("button", { name: "actions.runNow" });
     fireEvent.click(button);

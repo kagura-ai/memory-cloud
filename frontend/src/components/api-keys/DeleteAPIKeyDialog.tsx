@@ -4,8 +4,8 @@
  * Issue #655 - Confirmation dialog for deleting API keys
  */
 
-import { useState } from 'react';
-import { Button } from '@/components/ui/button';
+import { useState } from "react";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -13,10 +13,10 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/ui/dialog';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { AlertCircle } from 'lucide-react';
-import { deleteSystemAPIKey } from '@/lib/api/api-keys';
+} from "@/components/ui/dialog";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { AlertCircle } from "lucide-react";
+import { deleteSystemAPIKey } from "@/lib/api/api-keys";
 
 interface DeleteAPIKeyDialogProps {
   isOpen: boolean;
@@ -48,9 +48,8 @@ export function DeleteAPIKeyDialog({
       // Don't set loading to false here since component will unmount
       onSuccess();
     } catch (err) {
-      console.error('Failed to delete API key:', err);
-      const errorMessage = (err as { message?: string })?.message || 'Failed to delete API key';
-      setError(errorMessage);
+      console.error("Failed to delete API key:", err);
+      setError(err instanceof Error ? err.message : "Failed to delete API key");
       setLoading(false);
     }
   };
@@ -69,7 +68,9 @@ export function DeleteAPIKeyDialog({
           <Alert variant="destructive">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
-              <strong>Warning:</strong> This action cannot be undone. The API key will be permanently deleted from the database, including all audit history.
+              <strong>Warning:</strong> This action cannot be undone. The API
+              key will be permanently deleted from the database, including all
+              audit history.
             </AlertDescription>
           </Alert>
 
@@ -82,7 +83,8 @@ export function DeleteAPIKeyDialog({
 
           <div className="space-y-2">
             <p className="text-sm">
-              Are you sure you want to permanently delete the API key <strong>"{keyName}"</strong>?
+              Are you sure you want to permanently delete the API key{" "}
+              <strong>"{keyName}"</strong>?
             </p>
             <p className="text-xs text-slate-500">
               Consider revoking instead if you want to keep audit history.
@@ -91,7 +93,12 @@ export function DeleteAPIKeyDialog({
         </div>
 
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={onClose} disabled={loading}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onClose}
+            disabled={loading}
+          >
             Cancel
           </Button>
           <Button
@@ -100,7 +107,7 @@ export function DeleteAPIKeyDialog({
             onClick={handleDelete}
             disabled={loading}
           >
-            {loading ? 'Deleting...' : 'Delete Permanently'}
+            {loading ? "Deleting..." : "Delete Permanently"}
           </Button>
         </DialogFooter>
       </DialogContent>

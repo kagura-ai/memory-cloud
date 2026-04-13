@@ -13,6 +13,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 import { EditOAuthClientDialog } from "./EditOAuthClientDialog";
+import { ApiError } from "@/lib/api/base";
 import type { OAuth2Client } from "@/lib/api/oauth";
 
 // ---------- Mocks ------------------------------------------------------------
@@ -142,12 +143,17 @@ describe("EditOAuthClientDialog", () => {
   });
 
   it("displays API error and keeps the dialog open on failure", async () => {
-    mockUpdateOAuth2Client.mockRejectedValueOnce({
-      message: "Validation failed",
-      details: {
-        detail: [{ loc: ["body", "redirect_uris"], msg: "Invalid URI format" }],
-      },
-    });
+    mockUpdateOAuth2Client.mockRejectedValueOnce(
+      new ApiError({
+        status: 422,
+        message: "Validation failed",
+        details: {
+          detail: [
+            { loc: ["body", "redirect_uris"], msg: "Invalid URI format" },
+          ],
+        },
+      }),
+    );
 
     const { props } = renderDialog();
 

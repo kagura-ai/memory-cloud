@@ -68,9 +68,7 @@ export default function WorkspaceStatsPage() {
       setContextStats(contextStatsResponse);
     } catch (err: unknown) {
       console.error("Failed to fetch workspace stats:", err);
-      const message =
-        (err as { message?: string })?.message || t("failedToLoadStats");
-      setError(message);
+      setError(err instanceof Error ? err.message : t("failedToLoadStats"));
     } finally {
       setLoading(false);
     }

@@ -26,6 +26,7 @@ import {
 import { Trash2, Loader2, ShieldCheck, ShieldOff } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { updateContext, deleteContext } from "@/lib/api/contexts";
+import { ApiError } from "@/lib/api/base";
 import type { Context } from "@/lib/types/context";
 import { useAuth } from "@/contexts/AuthContext";
 
@@ -72,7 +73,7 @@ export function ProtectionSection({ context }: ProtectionSectionProps) {
       await refetchUser();
       router.push("/workspace/contexts");
     } catch (err: unknown) {
-      const apiError = err as { details?: { detail?: string } };
+      const apiError = err instanceof ApiError ? err : null;
       toast({
         title: apiError?.details?.detail || t("deleteFailed"),
         variant: "destructive",

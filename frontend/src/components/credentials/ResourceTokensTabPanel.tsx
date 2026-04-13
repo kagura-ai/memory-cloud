@@ -32,6 +32,7 @@ import {
   type ResourceToken,
 } from "@/lib/api/resource-tokens";
 import { getContexts } from "@/lib/api/contexts";
+import { ApiError } from "@/lib/api/base";
 import { getMaxQuotaCapacity } from "@/config/resource-tokens";
 import { Plus, AlertTriangle, ChevronDown } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
@@ -114,11 +115,7 @@ export function ResourceTokensTabPanel() {
 
       // Use structured error codes instead of string matching
       // Normal empty state: RES-001 (Resource not found) with 404 status
-      const apiErr = err as {
-        error?: string;
-        status?: number;
-        message?: string;
-      };
+      const apiErr = err instanceof ApiError ? err : null;
       const isNormalEmptyState =
         apiErr?.error === "RES-001" && apiErr?.status === 404;
 

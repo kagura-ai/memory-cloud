@@ -30,6 +30,7 @@ import {
   WorkspaceMember,
 } from "@/lib/api/workspaces";
 import { getContexts, Context } from "@/lib/api/contexts";
+import { ApiError } from "@/lib/api/base";
 import {
   listInvitations,
   createInvitation,
@@ -169,10 +170,10 @@ export default function WorkspaceMembersPage() {
     try {
       const data = await listInvitations(currentWorkspaceId, false); // Only pending invitations
       setInvitations(data);
-    } catch (error: any) {
+    } catch (error: unknown) {
       // 403 = Not admin/owner, silently skip invitations feature
-      if (error?.status === 403) {
-        setInvitations([]); // No invitations to show
+      if (error instanceof ApiError && error.status === 403) {
+        setInvitations([]);
         return;
       }
       console.error("Failed to load invitations:", error);
@@ -187,9 +188,9 @@ export default function WorkspaceMembersPage() {
       setQuotaLoading(true);
       const quota = await getMemberQuota(currentWorkspaceId);
       setMemberQuota(quota);
-    } catch (error: any) {
+    } catch (error: unknown) {
       // Silently fail if user doesn't have access
-      if (error?.status === 403) {
+      if (error instanceof ApiError && error.status === 403) {
         setMemberQuota(null);
         return;
       }
@@ -253,10 +254,10 @@ export default function WorkspaceMembersPage() {
       });
 
       setShowContextAccessDialog(false);
-    } catch (error: any) {
+    } catch (error: unknown) {
       toast({
         title: t("contextAccessUpdateFailed"),
-        description: error?.message || "Unknown error",
+        description: error instanceof Error ? error.message : "Unknown error",
         variant: "destructive",
       });
     } finally {
@@ -312,13 +313,14 @@ export default function WorkspaceMembersPage() {
         title: t("invitationCreated"),
         description: t("invitationSentTo", { email: inviteEmail }),
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Failed to create invitation:", error);
-      // Issue #217: Extract error message for display in dialog
+      const apiErr = error instanceof ApiError ? error : null;
       const errorMsg =
-        error?.details?.detail ||
-        error?.message ||
-        (typeof error === "string" ? error : "Failed to create invitation");
+        apiErr?.details?.detail ||
+        (error instanceof Error
+          ? error.message
+          : "Failed to create invitation");
       setInviteError(errorMsg);
     } finally {
       setInviteLoading(false);
@@ -372,12 +374,14 @@ export default function WorkspaceMembersPage() {
           email: invitationToDelete.email || "user",
         }),
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Failed to delete invitation:", error);
+      const apiErr = error instanceof ApiError ? error : null;
       const errorMsg =
-        error?.details?.detail ||
-        error?.message ||
-        t("failedToRevokeInvitation");
+        apiErr?.details?.detail ||
+        (error instanceof Error
+          ? error.message
+          : t("failedToRevokeInvitation"));
       toast({
         title: t("failedToRevokeInvitation"),
         description: errorMsg,
@@ -411,10 +415,12 @@ export default function WorkspaceMembersPage() {
             memberToDelete.user_name || memberToDelete.user_email || "Member",
         }),
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Failed to remove member:", error);
+      const apiErr = error instanceof ApiError ? error : null;
       const errorMsg =
-        error?.details?.detail || error?.message || t("failedToRemoveMember");
+        apiErr?.details?.detail ||
+        (error instanceof Error ? error.message : t("failedToRemoveMember"));
       toast({
         title: t("failedToRemoveMember"),
         description: errorMsg,
@@ -457,16 +463,16 @@ export default function WorkspaceMembersPage() {
       await loadMembers();
       setShowRoleChangeDialog(false);
       setPendingRoleChange(null);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Failed to update role:", error);
 
-      // Issue #254: Show specific message for role change errors
-      let errorMessage = error?.message || "Failed to update role";
+      let errorMessage =
+        error instanceof Error ? error.message : "Failed to update role";
 
-      if (error?.status === 403) {
-        if (error?.message?.includes("own role")) {
+      if (error instanceof ApiError && error.status === 403) {
+        if (error.message.includes("own role")) {
           errorMessage = t("cannotModifyOwnRoleDesc");
-        } else if (error?.message?.includes("owner can change")) {
+        } else if (error.message.includes("owner can change")) {
           errorMessage = t("onlyOwnerCanChangeOwner");
         }
       }

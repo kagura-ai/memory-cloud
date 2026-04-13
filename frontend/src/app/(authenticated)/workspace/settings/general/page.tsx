@@ -1,4 +1,4 @@
-'use client';
+"use client";
 
 /**
  * Workspace Settings Page
@@ -11,24 +11,24 @@
  * Edit workspace details (name, description) or create new workspace.
  */
 
-import { useEffect, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
-import { useTranslations } from 'next-intl';
-import { PageHeader } from '@/components/common/PageHeader';
-import { PageContainer } from '@/components/common/PageContainer';
-import { Section } from '@/components/common/Section';
-import { ActionButton } from '@/components/common/ActionButton';
-import { SpinnerLoading } from '@/components/common/LoadingState';
-import { useWorkspace } from '@/contexts/WorkspaceContext';
-import { useAuth } from '@/contexts/AuthContext';
+import { useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useTranslations } from "next-intl";
+import { PageHeader } from "@/components/common/PageHeader";
+import { PageContainer } from "@/components/common/PageContainer";
+import { Section } from "@/components/common/Section";
+import { ActionButton } from "@/components/common/ActionButton";
+import { SpinnerLoading } from "@/components/common/LoadingState";
+import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useAuth } from "@/contexts/AuthContext";
 import {
   getWorkspace,
   updateWorkspace,
   deleteWorkspace,
   Workspace,
-} from '@/lib/api/workspaces';
-import { Save, Trash2 } from 'lucide-react';
-import { useToast } from '@/hooks/use-toast';
+} from "@/lib/api/workspaces";
+import { Save, Trash2 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -38,20 +38,27 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
-import { WorkspaceCreateForm } from '@/components/workspaces/WorkspaceCreateForm';
+} from "@/components/ui/alert-dialog";
+import { WorkspaceCreateForm } from "@/components/workspaces/WorkspaceCreateForm";
+import { ApiError } from "@/lib/api/base";
 
 export default function WorkspaceSettingsPage() {
-  const t = useTranslations('workspace');
-  const tCommon = useTranslations('common');
+  const t = useTranslations("workspace");
+  const tCommon = useTranslations("common");
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { currentWorkspaceId, currentWorkspace, refreshWorkspaces, workspaces, loading: workspaceLoading } = useWorkspace();
+  const {
+    currentWorkspaceId,
+    currentWorkspace,
+    refreshWorkspaces,
+    workspaces,
+    loading: workspaceLoading,
+  } = useWorkspace();
   const { toast } = useToast();
   const { logout } = useAuth();
 
   // Issue #276: Check if in create mode
-  const isCreateMode = searchParams.get('create') === 'true';
+  const isCreateMode = searchParams.get("create") === "true";
 
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [loading, setLoading] = useState(true);
@@ -60,8 +67,8 @@ export default function WorkspaceSettingsPage() {
   const [error, setError] = useState<string | null>(null);
 
   // Form state
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
 
   // Delete dialog state
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
@@ -77,8 +84,8 @@ export default function WorkspaceSettingsPage() {
     if (workspaceLoading) return;
 
     // Owner-only access check
-    if (currentWorkspace && currentWorkspace.current_user_role !== 'owner') {
-      router.push('/workspace/dashboard');
+    if (currentWorkspace && currentWorkspace.current_user_role !== "owner") {
+      router.push("/workspace/dashboard");
       return;
     }
 
@@ -95,10 +102,10 @@ export default function WorkspaceSettingsPage() {
       const workspace = await getWorkspace(currentWorkspaceId);
       setWorkspace(workspace);
       setName(workspace.name);
-      setDescription(workspace.description || '');
+      setDescription(workspace.description || "");
     } catch (error) {
-      console.error('Failed to load workspace:', error);
-      setError(t('failedToLoadWorkspace'));
+      console.error("Failed to load workspace:", error);
+      setError(t("failedToLoadWorkspace"));
     } finally {
       setLoading(false);
     }
@@ -113,7 +120,7 @@ export default function WorkspaceSettingsPage() {
 
       // Validation
       if (!name) {
-        setError(t('workspaceNameRequired'));
+        setError(t("workspaceNameRequired"));
         return;
       }
 
@@ -124,27 +131,33 @@ export default function WorkspaceSettingsPage() {
       });
 
       toast({
-        title: tCommon('success'),
-        description: t('settingsSaved'),
+        title: tCommon("success"),
+        description: t("settingsSaved"),
       });
       await loadWorkspace();
       await refreshWorkspaces();
-    } catch (err: any) {
-      console.error('Failed to save workspace:', err);
+    } catch (err: unknown) {
+      console.error("Failed to save workspace:", err);
 
       // Extract validation error details
-      if (err.status === 422 && err.details?.detail) {
-        const validationErrors = err.details.detail;
-        if (Array.isArray(validationErrors)) {
-          const messages = validationErrors.map((e: any) =>
-            `${e.loc?.join('.') || 'Field'}: ${e.msg}`
-          ).join('\n');
+      const apiError = err instanceof ApiError ? err : null;
+      // FastAPI 422 detail can be a string or validation error array at runtime
+      if (apiError?.status === 422 && apiError.details?.detail !== undefined) {
+        const rawDetail = apiError.details["detail"] as unknown;
+        if (Array.isArray(rawDetail)) {
+          const messages = (
+            rawDetail as Array<{ loc?: string[]; msg?: string }>
+          )
+            .map((e) => `${e.loc?.join(".") || "Field"}: ${e.msg}`)
+            .join("\n");
           setError(messages);
         } else {
-          setError(err.message || t('validationFailed'));
+          setError(apiError.message || t("validationFailed"));
         }
       } else {
-        setError(err.message || t('failedToUpdateWorkspace'));
+        setError(
+          err instanceof Error ? err.message : t("failedToUpdateWorkspace"),
+        );
       }
     } finally {
       setSaving(false);
@@ -171,8 +184,8 @@ export default function WorkspaceSettingsPage() {
       if (isLastWorkspace) {
         // Last workspace deleted - logout user
         toast({
-          title: t('workspaceDeleted'),
-          description: t('lastWorkspaceDeleteDesc'),
+          title: t("workspaceDeleted"),
+          description: t("lastWorkspaceDeleteDesc"),
         });
 
         // Small delay to allow toast to show, then logout
@@ -182,23 +195,24 @@ export default function WorkspaceSettingsPage() {
       } else {
         // Still have workspaces - refresh and redirect to home
         toast({
-          title: t('workspaceDeleted'),
-          description: t('workspaceDeletedDesc'),
+          title: t("workspaceDeleted"),
+          description: t("workspaceDeletedDesc"),
         });
 
         await refreshWorkspaces();
 
         setTimeout(() => {
-          router.push('/');
+          router.push("/");
           router.refresh();
         }, 500);
       }
-    } catch (error: any) {
-      console.error('Failed to delete workspace:', error);
+    } catch (error: unknown) {
+      console.error("Failed to delete workspace:", error);
       toast({
-        title: tCommon('error'),
-        description: error?.message || t('failedToDeleteWorkspace'),
-        variant: 'destructive',
+        title: tCommon("error"),
+        description:
+          error instanceof Error ? error.message : t("failedToDeleteWorkspace"),
+        variant: "destructive",
       });
       setDeleting(false);
     }
@@ -210,7 +224,7 @@ export default function WorkspaceSettingsPage() {
       <PageContainer>
         <WorkspaceCreateForm
           onSuccess={(workspace) => {
-            router.push('/workspace/dashboard');
+            router.push("/workspace/dashboard");
           }}
           onCancel={() => router.back()}
         />
@@ -221,9 +235,9 @@ export default function WorkspaceSettingsPage() {
   if (loading) {
     return (
       <PageContainer>
-        <PageHeader title={t('workspaceSettings')} />
+        <PageHeader title={t("workspaceSettings")} />
         <div className="flex items-center justify-center py-12">
-          <SpinnerLoading message={tCommon('loading')} />
+          <SpinnerLoading message={tCommon("loading")} />
         </div>
       </PageContainer>
     );
@@ -232,8 +246,8 @@ export default function WorkspaceSettingsPage() {
   return (
     <PageContainer>
       <PageHeader
-        title={t('workspaceSettings')}
-        description={t('settingsDesc')}
+        title={t("workspaceSettings")}
+        description={t("settingsDesc")}
       />
 
       <Section>
@@ -250,35 +264,35 @@ export default function WorkspaceSettingsPage() {
           {/* Workspace Name */}
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-              {t('workspaceName')} *
+              {t("workspaceName")} *
             </label>
             <input
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder={t('workspaceNamePlaceholder')}
+              placeholder={t("workspaceNamePlaceholder")}
               required
               className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
             />
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-              {t('workspaceNameHelp')}
+              {t("workspaceNameHelp")}
             </p>
           </div>
 
           {/* Description */}
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-              {t('workspaceDesc')} {t('optional')}
+              {t("workspaceDesc")} {t("optional")}
             </label>
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder={t('descPlaceholder')}
+              placeholder={t("descPlaceholder")}
               rows={3}
               className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
             />
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-              {t('descHelp')}
+              {t("descHelp")}
             </p>
           </div>
 
@@ -289,14 +303,14 @@ export default function WorkspaceSettingsPage() {
               icon={<Save className="w-4 h-4" />}
               disabled={!name || saving}
             >
-              {saving ? t('saving') : tCommon('saveChanges')}
+              {saving ? t("saving") : tCommon("saveChanges")}
             </ActionButton>
 
             <button
               onClick={() => router.back()}
               className="px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
             >
-              {tCommon('cancel')}
+              {tCommon("cancel")}
             </button>
           </div>
         </div>
@@ -304,21 +318,24 @@ export default function WorkspaceSettingsPage() {
 
       {/* Danger Zone */}
       {workspace && (
-        <Section title={t('dangerZone')} className="border-red-200 dark:border-red-900">
+        <Section
+          title={t("dangerZone")}
+          className="border-red-200 dark:border-red-900"
+        >
           <div className="space-y-4 max-w-2xl">
             <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900 rounded">
               <h3 className="font-semibold text-red-900 dark:text-red-400 mb-2">
-                {t('deleteWorkspace')}
+                {t("deleteWorkspace")}
               </h3>
               <p className="text-sm text-red-700 dark:text-red-300 mb-4">
-                {t('deleteWorkspaceWarning')}
+                {t("deleteWorkspaceWarning")}
               </p>
               <ActionButton
                 onClick={handleDeleteClick}
                 icon={<Trash2 className="w-4 h-4" />}
                 variant="danger"
               >
-                {t('deleteWorkspace')}
+                {t("deleteWorkspace")}
               </ActionButton>
             </div>
           </div>
@@ -330,32 +347,36 @@ export default function WorkspaceSettingsPage() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle className="text-red-600 dark:text-red-400">
-              {t('deleteConfirmTitle')}
+              {t("deleteConfirmTitle")}
             </AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-2">
                 <p>
-                  {t('deleteWorkspaceDialogDesc', { workspaceName: workspace?.name || '' })}
+                  {t("deleteWorkspaceDialogDesc", {
+                    workspaceName: workspace?.name || "",
+                  })}
                 </p>
                 <ul className="list-disc list-inside space-y-1 text-sm">
-                  <li>{t('allContexts')}</li>
-                  <li>{t('allMemories')}</li>
-                  <li>{t('allMembers')}</li>
+                  <li>{t("allContexts")}</li>
+                  <li>{t("allMemories")}</li>
+                  <li>{t("allMembers")}</li>
                 </ul>
                 <p className="font-semibold text-red-600 dark:text-red-400">
-                  {tCommon('thisActionCannotBeUndone')}
+                  {tCommon("thisActionCannotBeUndone")}
                 </p>
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleting}>{tCommon('cancel')}</AlertDialogCancel>
+            <AlertDialogCancel disabled={deleting}>
+              {tCommon("cancel")}
+            </AlertDialogCancel>
             <AlertDialogAction
               onClick={handleConfirmDelete}
               disabled={deleting}
               className="bg-red-600 hover:bg-red-700 text-white"
             >
-              {deleting ? t('deleting') : t('deleteWorkspace')}
+              {deleting ? t("deleting") : t("deleteWorkspace")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -87,6 +87,7 @@ import {
   type EmbeddingModel,
 } from "@/lib/api/contexts";
 import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
+import { ApiError } from "@/lib/api/base";
 import type { Context, ContextStats } from "@/lib/types/context";
 import { CONTEXT_TEMPLATES, getTemplate } from "@/lib/templates/usage-guide";
 import { createExternalAPIKey } from "@/lib/api/external-keys";
@@ -250,17 +251,11 @@ export default function ContextsPage() {
       await refetchUser();
       fetchContexts();
     } catch (err: unknown) {
-      const apiError = err as {
-        message?: string;
-        details?: { detail?: string };
-        response?: { data?: { detail?: string } };
-      };
+      const apiError = err instanceof ApiError ? err : null;
 
       let errorMessage =
-        apiError?.response?.data?.detail ||
         apiError?.details?.detail ||
-        apiError?.message ||
-        t("failedToCreate");
+        (err instanceof Error ? err.message : t("failedToCreate"));
 
       // Translate common error messages
       if (errorMessage.includes("Context limit reached")) {
@@ -323,10 +318,8 @@ export default function ContextsPage() {
       await refetchUser();
       fetchContexts();
     } catch (err: unknown) {
-      const apiErr = err as { message?: string };
       let errorMessage =
-        apiErr?.message ||
-        (typeof err === "string" ? err : t("failedToCreate"));
+        err instanceof Error ? err.message : t("failedToCreate");
 
       // Translate common error messages (but keep resource_id duplicates as-is)
       if (errorMessage.includes("already used")) {
@@ -410,10 +403,7 @@ export default function ContextsPage() {
       setApiKeyValue("");
       setApiKeyError(null);
     } catch (err: unknown) {
-      const apiErr = err as {
-        status?: number;
-        details?: { detail?: string };
-      };
+      const apiErr = err instanceof ApiError ? err : null;
       let errorMessage = t("failedToSaveApiKey");
       if (
         apiErr?.status === 409 ||

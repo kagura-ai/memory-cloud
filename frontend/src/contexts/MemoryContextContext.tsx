@@ -1,4 +1,4 @@
-'use client';
+"use client";
 
 /**
  * Context Context
@@ -9,10 +9,19 @@
  * Issue #82: Context-based Multi-Collection Support
  */
 
-import { createContext, useContext, useEffect, useState, useCallback, useMemo, ReactNode } from 'react';
-import { getContext } from '@/lib/api/contexts';
-import type { Context } from '@/lib/types/context';
-import { useSearchParams } from 'next/navigation';
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  useCallback,
+  useMemo,
+  ReactNode,
+} from "react";
+import { getContext } from "@/lib/api/contexts";
+import { ApiError } from "@/lib/api/base";
+import type { Context } from "@/lib/types/context";
+import { useSearchParams } from "next/navigation";
 
 interface MemoryContextContextValue {
   currentContext: Context | null;
@@ -23,11 +32,13 @@ interface MemoryContextContextValue {
   refresh: () => Promise<void>;
 }
 
-const MemoryContextContext = createContext<MemoryContextContextValue | undefined>(undefined);
+const MemoryContextContext = createContext<
+  MemoryContextContextValue | undefined
+>(undefined);
 
 export function MemoryContextProvider({ children }: { children: ReactNode }) {
   const searchParams = useSearchParams();
-  const contextIdFromUrl = searchParams?.get('context');
+  const contextIdFromUrl = searchParams?.get("context");
 
   const [currentContext, setCurrentContext] = useState<Context | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -46,14 +57,15 @@ export function MemoryContextProvider({ children }: { children: ReactNode }) {
         // No context selected - set to null
         setCurrentContext(null);
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Silent fail if no context or not found
-      if (err?.status === 404 || err?.status === 400) {
+      const apiErr = err instanceof ApiError ? err : null;
+      if (apiErr?.status === 404 || apiErr?.status === 400) {
         setCurrentContext(null);
         setError(null);
       } else {
-        console.error('Failed to fetch context:', err);
-        setError('Failed to load context');
+        console.error("Failed to fetch context:", err);
+        setError("Failed to load context");
         setCurrentContext(null);
       }
     } finally {
@@ -75,16 +87,22 @@ export function MemoryContextProvider({ children }: { children: ReactNode }) {
       error,
       refresh,
     }),
-    [currentContext, isLoading, error, refresh]
+    [currentContext, isLoading, error, refresh],
   );
 
-  return <MemoryContextContext.Provider value={value}>{children}</MemoryContextContext.Provider>;
+  return (
+    <MemoryContextContext.Provider value={value}>
+      {children}
+    </MemoryContextContext.Provider>
+  );
 }
 
 export function useMemoryContext(): MemoryContextContextValue {
   const context = useContext(MemoryContextContext);
   if (context === undefined) {
-    throw new Error('useMemoryContext must be used within MemoryContextProvider');
+    throw new Error(
+      "useMemoryContext must be used within MemoryContextProvider",
+    );
   }
   return context;
 }

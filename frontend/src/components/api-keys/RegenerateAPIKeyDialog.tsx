@@ -5,8 +5,8 @@
  * Shows new plaintext key ONLY once after regeneration
  */
 
-import { useState } from 'react';
-import { Button } from '@/components/ui/button';
+import { useState } from "react";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -14,13 +14,20 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { AlertCircle, AlertTriangle, Check, Copy, RefreshCw } from 'lucide-react';
-import { regenerateAPIKey } from '@/lib/api/api-keys';
-import type { APIKeyCreateResponse } from '@/lib/types/api-key';
-import { Alert, AlertDescription } from '@/components/ui/alert';
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  AlertCircle,
+  AlertTriangle,
+  Check,
+  Copy,
+  RefreshCw,
+} from "lucide-react";
+import { regenerateAPIKey } from "@/lib/api/api-keys";
+import { ApiError } from "@/lib/api/base";
+import type { APIKeyCreateResponse } from "@/lib/types/api-key";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 
 interface RegenerateAPIKeyDialogProps {
   isOpen: boolean;
@@ -41,7 +48,8 @@ export function RegenerateAPIKeyDialog({
   const [error, setError] = useState<string | null>(null);
 
   // New key display state
-  const [regeneratedKey, setRegeneratedKey] = useState<APIKeyCreateResponse | null>(null);
+  const [regeneratedKey, setRegeneratedKey] =
+    useState<APIKeyCreateResponse | null>(null);
   const [copied, setCopied] = useState(false);
 
   const handleRegenerate = async () => {
@@ -54,9 +62,11 @@ export function RegenerateAPIKeyDialog({
       // Show new key
       setRegeneratedKey(response);
     } catch (err) {
-      console.error('Failed to regenerate API key:', err);
-      const apiError = err as { message?: string; details?: { detail?: string } };
-      const errorMessage = apiError.details?.detail || apiError.message || 'Failed to regenerate API key';
+      console.error("Failed to regenerate API key:", err);
+      const apiError = err instanceof ApiError ? err : null;
+      const errorMessage =
+        apiError?.details?.detail ||
+        (err instanceof Error ? err.message : "Failed to regenerate API key");
       setError(errorMessage);
     } finally {
       setLoading(false);
@@ -102,7 +112,8 @@ export function RegenerateAPIKeyDialog({
             <Alert>
               <AlertCircle className="h-4 w-4" />
               <AlertDescription>
-                <strong>Important:</strong> Copy this API key immediately. The old key has been invalidated.
+                <strong>Important:</strong> Copy this API key immediately. The
+                old key has been invalidated.
               </AlertDescription>
             </Alert>
 
@@ -155,7 +166,7 @@ export function RegenerateAPIKeyDialog({
 
           <DialogFooter>
             <Button onClick={handleDone} className="w-full">
-              {copied ? 'Done' : 'I have saved the new key'}
+              {copied ? "Done" : "I have saved the new key"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -185,11 +196,15 @@ export function RegenerateAPIKeyDialog({
             </Alert>
           )}
 
-          <Alert variant="default" className="border-amber-200 bg-amber-50 dark:bg-amber-900/20">
+          <Alert
+            variant="default"
+            className="border-amber-200 bg-amber-50 dark:bg-amber-900/20"
+          >
             <AlertTriangle className="h-4 w-4 text-amber-600" />
             <AlertDescription className="text-amber-800 dark:text-amber-200">
-              <strong>Warning:</strong> Regenerating this key will immediately invalidate the existing key.
-              Any applications using it will stop working until updated with the new key.
+              <strong>Warning:</strong> Regenerating this key will immediately
+              invalidate the existing key. Any applications using it will stop
+              working until updated with the new key.
             </AlertDescription>
           </Alert>
 
@@ -200,7 +215,12 @@ export function RegenerateAPIKeyDialog({
         </div>
 
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={handleClose} disabled={loading}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={handleClose}
+            disabled={loading}
+          >
             Cancel
           </Button>
           <Button
@@ -210,7 +230,7 @@ export function RegenerateAPIKeyDialog({
             disabled={loading}
             className="bg-amber-600 hover:bg-amber-700 text-white"
           >
-            {loading ? 'Regenerating...' : 'Regenerate Key'}
+            {loading ? "Regenerating..." : "Regenerate Key"}
           </Button>
         </DialogFooter>
       </DialogContent>
