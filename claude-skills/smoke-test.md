@@ -3,7 +3,8 @@ description: Run comprehensive smoke test of all MCP tools via live MCP connecti
 ---
 
 Verify MCP tools work correctly by executing them in sequence against temporary test contexts.
-Tests 18 of 21 tools (excludes 3 sleep tools that require a prior Sleep Maintenance run).
+Tests 18 of 21 memory/context tools (excludes 3 sleep tools that require a prior Sleep Maintenance run).
+Optionally tests 5 resource tools if the workspace has a PRO plan.
 Use this after deployments, tool description changes, or MCP server updates.
 
 **Prerequisite:** MCP server must be running and connected.
@@ -140,6 +141,38 @@ get_usage()
 
 Note: Sleep tools (`get_sleep_history`, `get_sleep_report`, `rollback_sleep_run`) are not tested here because they require a completed Sleep Maintenance run. Verify these manually after a sleep cycle.
 
+### 7.5. Resource tools (PRO plan only)
+
+**Pre-check:** Call `get_usage()` and check the plan. If the plan is `free` or `basic`, skip this section entirely and note "Resource tools skipped — PRO plan required" in the report.
+
+```
+setup_resource(name="smoke-test-resource-{unix_timestamp}", resource_id="smoke_test_{unix_timestamp}")
+-> Verify: returns context_id (UUID), resource_id, token (plaintext), token_id
+-> Save context_id as resource_context_id, resource_id, and token
+
+ingest_events(resource_id=<resource_id>, events=[
+  {"op": "upsert", "doc_id": "TEST-001", "version": 1, "payload": {"name": "Test Product", "price": 1000}},
+  {"op": "upsert", "doc_id": "TEST-002", "version": 1, "payload": {"name": "Test Product 2", "price": 2000}}
+])
+-> Verify: created_count=2, failed_count=0, event_ids has 2 entries
+
+get_resource_impact(resource_id=<resource_id>)
+-> Verify: token_count >= 1, current_schema_version is null (no schema created)
+
+get_resource_schema(resource_id=<resource_id>)
+-> Verify: returns schema_not_found error (expected — no schema exists yet)
+
+list_resource_tokens(resource_id=<resource_id>)
+-> Verify: returns tokens array with at least 1 token matching resource_id
+```
+
+**Resource cleanup** (runs even if some steps failed):
+
+```
+delete_context(context_id=<resource_context_id>)
+-> Verify: success response (resource context soft-deleted)
+```
+
 ### Cleanup
 
 ```
@@ -188,13 +221,23 @@ Print a summary table:
 | 24 | delete_context | Soft-delete merge target and its memories | PASS/FAIL |
 | 25 | forget | Delete memory 2 | PASS/FAIL |
 | 26 | delete_context | Delete source context | PASS/FAIL |
+| 27 | setup_resource | Create resource context + token (PRO only) | PASS/FAIL/SKIP |
+| 28 | ingest_events | Batch ingest 2 test events (PRO only) | PASS/FAIL/SKIP |
+| 29 | get_resource_impact | Get resource stats (PRO only) | PASS/FAIL/SKIP |
+| 30 | get_resource_schema | Get schema (expect not_found) (PRO only) | PASS/FAIL/SKIP |
+| 31 | list_resource_tokens | List tokens for resource (PRO only) | PASS/FAIL/SKIP |
+| 32 | delete_context | Delete resource context (PRO only) | PASS/FAIL/SKIP |
 
-**Result: N/26 passed**
+**Result: N/26 passed** (+ N/6 resource tools passed, or skipped if not PRO)
 
 Test context: smoke-test-{timestamp} (cleaned up)
 
 Not tested (require prior Sleep Maintenance run):
 - get_sleep_history, get_sleep_report, rollback_sleep_run
+
+Resource tools (PRO plan only):
+- If plan is free/basic: all 6 resource rows show SKIP
+- setup_resource, ingest_events, get_resource_impact, get_resource_schema, list_resource_tokens
 ```
 
 If any step fails:

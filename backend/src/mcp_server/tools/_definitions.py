@@ -994,6 +994,220 @@ Requires action recording (reports created before this feature have no actions t
                 },
             },
         },
+        # ====================================================================
+        # Resource Management Tools (Issue #46)
+        # ====================================================================
+        {
+            "name": "setup_resource",
+            "description": (
+                "Create a new public context with an associated resource token in a single "
+                "atomic operation. Use this to set up a resource ingestion pipeline.\n\n"
+                "Returns context_id, resource_id, and a plaintext token. "
+                "Save the token immediately — it is shown only once.\n\n"
+                "Requires owner or admin role. Requires PRO plan.\n\n"
+                "Example:\n"
+                '  setup_resource(name="ec-products", resource_id="ec_products")\n'
+                "  → context created, token issued, ready for ingest_events()"
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["name", "resource_id"],
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Context name (lowercase alphanumeric, hyphens, underscores; "
+                            "max 100 chars). Example: 'ec-products'."
+                        ),
+                    },
+                    "resource_id": {
+                        "type": "string",
+                        "description": (
+                            "Resource identifier (lowercase alphanumeric, underscores; "
+                            "max 255 chars). Must be unique in the workspace. "
+                            "Example: 'ec_products'."
+                        ),
+                    },
+                    "display_name": {
+                        "type": "string",
+                        "description": "Human-readable display name for the context.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Token description to identify its purpose.",
+                    },
+                    "quota_events_per_hour": {
+                        "type": "integer",
+                        "description": (
+                            "Event ingestion quota per hour for the token (1-10000, default: 1000)."
+                        ),
+                    },
+                },
+            },
+        },
+        {
+            "name": "ingest_events",
+            "description": (
+                "Batch ingest resource events (upsert/delete) into a resource. "
+                "Maximum 100 events per call, 100KB max per event payload.\n\n"
+                "Triggers incremental indexing for all contexts bound to this resource. "
+                "Uses session authentication (not resource tokens).\n\n"
+                "For bulk imports (10k+ records), use the CLI or SDK instead.\n\n"
+                "Example:\n"
+                '  ingest_events(resource_id="ec_products", events=[\n'
+                '    {"op": "upsert", "doc_id": "PROD-1", "version": 1, '
+                '"payload": {"name": "...", "price": 5980}},\n'
+                '    {"op": "delete", "doc_id": "PROD-999"}\n'
+                "  ])"
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["resource_id", "events"],
+                "properties": {
+                    "resource_id": {
+                        "type": "string",
+                        "description": ("Resource identifier. Must belong to your workspace."),
+                    },
+                    "events": {
+                        "type": "array",
+                        "description": "List of events to ingest (max 100).",
+                        "items": {
+                            "type": "object",
+                            "required": ["op", "doc_id"],
+                            "properties": {
+                                "op": {
+                                    "type": "string",
+                                    "enum": ["upsert", "delete"],
+                                    "description": "Operation type.",
+                                },
+                                "doc_id": {
+                                    "type": "string",
+                                    "description": (
+                                        "Document identifier (stable across versions)."
+                                    ),
+                                },
+                                "version": {
+                                    "type": "integer",
+                                    "description": (
+                                        "Document version (required for upsert, "
+                                        "null for delete-all-versions)."
+                                    ),
+                                },
+                                "payload": {
+                                    "type": "object",
+                                    "description": (
+                                        "Document payload (required for upsert, "
+                                        "null for delete). Max 100KB."
+                                    ),
+                                },
+                                "idempotency_key": {
+                                    "type": "string",
+                                    "description": "Optional deduplication key.",
+                                },
+                                "importance": {
+                                    "type": "number",
+                                    "description": (
+                                        "Memory importance score (0.0-1.0, default 0.6)."
+                                    ),
+                                },
+                                "event_metadata": {
+                                    "type": "object",
+                                    "description": (
+                                        "Optional metadata key-value pairs "
+                                        "(source, tenant, correlation_id, etc.)."
+                                    ),
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+        {
+            "name": "get_resource_impact",
+            "readOnly": True,
+            "description": (
+                "Get resource stats: active token count, memory count, and current "
+                "schema version. Use before creating/modifying a schema to understand "
+                "the impact.\n\n"
+                "Example:\n"
+                '  get_resource_impact(resource_id="ec_products")\n'
+                "  → {token_count: 2, memory_count: 500, current_schema_version: 3}"
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["resource_id"],
+                "properties": {
+                    "resource_id": {
+                        "type": "string",
+                        "description": ("Resource identifier. Must belong to your workspace."),
+                    },
+                },
+            },
+        },
+        {
+            "name": "get_resource_schema",
+            "readOnly": True,
+            "description": (
+                "Get the field schema definition for a resource. Returns field names, "
+                "types, descriptions, and classification.\n\n"
+                "Specify schema_version for a historical version, or omit for the latest.\n\n"
+                "Example:\n"
+                '  get_resource_schema(resource_id="ec_products")\n'
+                '  → {schema_version: 3, field_definitions: [{name: "product_name", ...}]}'
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["resource_id"],
+                "properties": {
+                    "resource_id": {
+                        "type": "string",
+                        "description": ("Resource identifier. Must belong to your workspace."),
+                    },
+                    "schema_version": {
+                        "type": "integer",
+                        "description": ("Schema version to retrieve (default: latest)."),
+                    },
+                },
+            },
+        },
+        {
+            "name": "list_resource_tokens",
+            "readOnly": True,
+            "description": (
+                "List resource tokens for your workspace. Optionally filter by resource_id. "
+                "Returns token metadata (no plaintext tokens). "
+                "Requires owner or admin role.\n\n"
+                "Example:\n"
+                '  list_resource_tokens(resource_id="ec_products")\n'
+                "  → {tokens: [{id: 1, resource_id: ..., is_active: true, ...}], total: 3}"
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": [],
+                "properties": {
+                    "resource_id": {
+                        "type": "string",
+                        "description": (
+                            "Filter by resource_id (optional). "
+                            "If provided, must belong to your workspace."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": ("Number of tokens per page (1-100, default: 50)."),
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": ("Starting offset for pagination (default: 0)."),
+                    },
+                    "include_revoked": {
+                        "type": "boolean",
+                        "description": ("Include revoked tokens in results (default: true)."),
+                    },
+                },
+            },
+        },
     ]
 
 

@@ -32,9 +32,17 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "create_edge": _get_timeout("create_edge", 10.0),
     "update_edge": _get_timeout("update_edge", 10.0),
     "delete_edge": _get_timeout("delete_edge", 10.0),
+    "delete_context": _get_timeout("delete_context", 30.0),
+    "merge_contexts": _get_timeout("merge_contexts", 60.0),
+    "get_usage": _get_timeout("get_usage", 10.0),
     "get_sleep_history": _get_timeout("get_sleep_history", 10.0),
     "get_sleep_report": _get_timeout("get_sleep_report", 15.0),
     "rollback_sleep_run": _get_timeout("rollback_sleep_run", 120.0),
+    "setup_resource": _get_timeout("setup_resource", 20.0),
+    "ingest_events": _get_timeout("ingest_events", 30.0),
+    "get_resource_impact": _get_timeout("get_resource_impact", 10.0),
+    "get_resource_schema": _get_timeout("get_resource_schema", 10.0),
+    "list_resource_tokens": _get_timeout("list_resource_tokens", 10.0),
 }
 DEFAULT_TOOL_TIMEOUT = float(os.getenv("MCP_TIMEOUT_DEFAULT", 60.0))
 
@@ -393,7 +401,7 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 
 ---
 
-## Available Tools (20 tools)
+## Available Tools (25 tools)
 
 | Tool | Purpose |
 |------|---------|
@@ -417,8 +425,13 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 | `get_sleep_history` | List recent Sleep Maintenance runs for a context |
 | `get_sleep_report` | Get detailed sleep report with all actions |
 | `rollback_sleep_run` | Rollback all actions from a completed sleep run |
+| `setup_resource` | Set up a resource: create public context + issue token |
+| `ingest_events` | Batch ingest resource events (upsert/delete, max 100) |
+| `get_resource_impact` | Get resource stats (tokens, memories, schema version) |
+| `get_resource_schema` | Get field definitions for a resource |
+| `list_resource_tokens` | List resource tokens for your workspace |
 
-Most tools require `context_id`. Exceptions: `list_contexts`, `create_context`, `get_usage` (no context needed), `get_sleep_report` and `rollback_sleep_run` (use `report_id` instead).
+Most tools require `context_id`. Exceptions: `list_contexts`, `create_context`, `get_usage` (no context needed), `get_sleep_report` and `rollback_sleep_run` (use `report_id` instead), and all resource tools (`setup_resource`, `ingest_events`, `get_resource_impact`, `get_resource_schema`, `list_resource_tokens`) which use `resource_id` instead.
 
 ---
 
