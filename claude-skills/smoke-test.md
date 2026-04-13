@@ -3,7 +3,7 @@ description: Run comprehensive smoke test of all MCP tools via live MCP connecti
 ---
 
 Verify MCP tools work correctly by executing them in sequence against temporary test contexts.
-Tests 21 of 24 tools (excludes 3 sleep tools that require a prior Sleep Maintenance run).
+Tests 18 of 21 tools (excludes 3 sleep tools that require a prior Sleep Maintenance run).
 Use this after deployments, tool description changes, or MCP server updates.
 
 **Prerequisite:** MCP server must be running and connected.
@@ -46,10 +46,13 @@ remember(
   type="note",
   importance=0.5,
   tags=["smoke-test", "automated"],
-  context_summary="Created during automated MCP smoke test for verification purposes."
+  context_summary="Created during automated MCP smoke test for verification purposes.",
+  source_uri="file:///smoke-test/test-memory.md",
+  source_type="file"
 )
--> Verify: returns memory with id (UUID format)
+-> Verify: returns a success response containing memory_id (UUID format)
 -> Save returned memory_id
+-> Note: source_uri/source_type are persisted but not in the remember response; validated via recall filters in step 4
 ```
 
 ### 4. Memory read tools
@@ -58,6 +61,17 @@ remember(
 recall(context_id=..., query="smoke test memory", k=5)
 -> Verify: returns results array with length >= 1
 -> Verify: at least one result matches the memory created in step 3
+
+recall(context_id=..., query="smoke test memory", k=5, include_explore_hints=true)
+-> Verify: response contains explore_hints field (array)
+-> Verify: if explore_hints is non-empty, at least one hint has reason "top_result"
+-> Verify: empty explore_hints is acceptable (best-effort generation) and should not fail the smoke test
+
+recall(context_id=..., query="smoke test memory", k=5, filters={"source_uri_prefix": "file:///smoke-test/"})
+-> Verify: results contain the memory_id from step 3 (confirms source_uri filter works)
+
+recall(context_id=..., query="smoke test memory", k=5, filters={"source_type": "file"})
+-> Verify: results contain the memory_id from step 3 (confirms source_type filter works)
 
 reference(memory_id=..., context_id=...)
 -> Verify: returns full memory with summary, content, tags matching step 3
@@ -78,7 +92,7 @@ recall(context_id=..., query="smoke test UPDATED", k=5)
 
 ### 6. Edge CRUD tools
 
-First, create a second test memory for edge testing (self-loops are not allowed):
+First, create a second test memory for edge testing (self-loops are not allowed). Use `linked_memory_ids` to create a `declared_link` edge at creation time:
 
 ```
 remember(
@@ -87,9 +101,12 @@ remember(
   content="Second test memory for edge CRUD testing.",
   type="note",
   importance=0.5,
-  tags=["smoke-test", "automated"]
+  tags=["smoke-test", "automated"],
+  linked_memory_ids=[<memory_id>],
+  linked_source_uris=["file:///smoke-test/test-memory.md"]
 )
 -> Save returned memory_id as memory_id_2
+-> Verify: list_edges(context_id=..., memory_id=<memory_id_2>) returns at least one edge with edge_type="declared_link"
 ```
 
 ```
@@ -126,11 +143,8 @@ Note: Sleep tools (`get_sleep_history`, `get_sleep_report`, `rollback_sleep_run`
 ### Cleanup
 
 ```
-forget(memory_id=..., context_id=<merge_target_id>)
--> Verify: success response (merged memory deleted from target)
-
 delete_context(context_id=<merge_target_id>)
--> Verify: success response (merge target deleted)
+-> Verify: success response (merge target soft-deleted, along with its memories)
 
 forget(memory_id=<memory_id_2>, context_id=...)
 -> Verify: success response (memory 2 deleted from source)
@@ -153,26 +167,29 @@ Print a summary table:
 | 3 | get_context_info | Get context details | PASS/FAIL |
 | 4 | update_context | Update display name | PASS/FAIL |
 | 5 | update_search_config | Update search weights | PASS/FAIL |
-| 6 | remember | Create test memory | PASS/FAIL |
+| 6 | remember | Create test memory (with source_uri, source_type) | PASS/FAIL |
 | 7 | recall | Search for memory | PASS/FAIL |
-| 8 | reference | Get full memory | PASS/FAIL |
-| 9 | explore | Graph traversal | PASS/FAIL |
-| 10 | update_memory | Update memory | PASS/FAIL |
-| 11 | recall (verify) | Verify update | PASS/FAIL |
-| 12 | remember | Create 2nd test memory (edge target) | PASS/FAIL |
-| 13 | create_edge | Create test edge | PASS/FAIL |
-| 14 | list_edges | List edges | PASS/FAIL |
-| 15 | update_edge | Update edge weight | PASS/FAIL |
-| 16 | delete_edge | Delete edge | PASS/FAIL |
-| 17 | create_context | Create merge target context | PASS/FAIL |
-| 18 | merge_contexts | Merge source into target | PASS/FAIL |
-| 19 | get_usage | Get workspace usage | PASS/FAIL |
-| 20 | forget | Delete merged memory | PASS/FAIL |
-| 21 | delete_context | Delete merge target | PASS/FAIL |
-| 22 | forget | Delete memory 2 | PASS/FAIL |
-| 23 | delete_context | Delete source context | PASS/FAIL |
+| 8 | recall | Search with include_explore_hints=true | PASS/FAIL |
+| 9 | recall | Search with source_uri_prefix filter | PASS/FAIL |
+| 10 | recall | Search with source_type filter | PASS/FAIL |
+| 11 | reference | Get full memory | PASS/FAIL |
+| 12 | explore | Graph traversal | PASS/FAIL |
+| 13 | update_memory | Update memory | PASS/FAIL |
+| 14 | recall (verify) | Verify update | PASS/FAIL |
+| 15 | remember | Create 2nd memory (with linked_memory_ids, linked_source_uris) | PASS/FAIL |
+| 16 | list_edges (verify) | Verify declared_link edge created | PASS/FAIL |
+| 17 | create_edge | Create test edge | PASS/FAIL |
+| 18 | list_edges | List edges | PASS/FAIL |
+| 19 | update_edge | Update edge weight | PASS/FAIL |
+| 20 | delete_edge | Delete edge | PASS/FAIL |
+| 21 | create_context | Create merge target context | PASS/FAIL |
+| 22 | merge_contexts | Merge source into target | PASS/FAIL |
+| 23 | get_usage | Get workspace usage | PASS/FAIL |
+| 24 | delete_context | Soft-delete merge target and its memories | PASS/FAIL |
+| 25 | forget | Delete memory 2 | PASS/FAIL |
+| 26 | delete_context | Delete source context | PASS/FAIL |
 
-**Result: N/23 passed**
+**Result: N/26 passed**
 
 Test context: smoke-test-{timestamp} (cleaned up)
 

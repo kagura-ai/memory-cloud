@@ -46,6 +46,44 @@ remember(
 )
 ```
 
+**External source tracking** — when saving knowledge from a specific file, URL, or vault, set `source_uri` and `source_type` for traceability:
+
+```
+remember(
+  context_id=...,
+  summary="...",
+  content="...",
+  type="pattern",
+  importance=0.8,
+  tags=["obsidian", "architecture"],
+  context_summary="...",
+  source_uri="vault://my-vault/architecture/decisions.md",
+  source_type="vault"
+)
+```
+
+- `source_uri`: Origin URI (e.g. `file:///path/to/note.md`, `vault://my-vault/note`, `https://example.com/page`). Max 2048 chars.
+- `source_type`: `"file"` | `"url"` | `"vault"` | `"api"` | `"manual"`
+
+**Explicit linking** — connect related memories at creation time using `linked_memory_ids` or `linked_source_uris`:
+
+```
+remember(
+  context_id=...,
+  summary="...",
+  content="...",
+  type="decision",
+  importance=0.9,
+  tags=["auth"],
+  context_summary="...",
+  linked_memory_ids=["<existing-memory-uuid>"],
+  linked_source_uris=["vault://my-vault/related-note.md"]
+)
+```
+
+- `linked_memory_ids`: Creates `declared_link` edges (weight 1.0) to existing memories by ID. Use for known relationships like resolved `[[wikilinks]]`.
+- `linked_source_uris`: Links by source_uri — resolved to memory_id at remember time. Unresolved URIs are silently skipped (the plugin can retry later when the target memory exists).
+
 ### 4. Confirm
 
 Show what was saved: summary, type, importance, tags.

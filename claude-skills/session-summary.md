@@ -44,8 +44,8 @@ For each item, use `remember` with:
 - **type**: From the table above
 - **importance**: Based on reusability across future sessions
 - **tags**: `category:{domain}` + entity tags + writing variations for Japanese + `issue:#N` for each related issue
-- **context_summary**: Why this matters, when to recall it
-- **content**: Include a `Related issues: #N, #M` line at the end linking to relevant GitHub issues
+- **context_summary**: Why this matters, when to recall it. Include a `Related issues: #N, #M` line at the end of **content** linking to relevant GitHub issues.
+- **linked_source_uris** (optional): If the knowledge relates to a specific file or document already in memory, link it by source_uri (e.g. `["vault://my-vault/related-note.md"]`). Unresolved URIs are silently skipped.
 
 ### 5. Guidelines
 

@@ -39,19 +39,33 @@ recall(context_id=..., query="$ARGUMENTS", k=10, search_mode="keyword")
 recall(context_id=..., query="$ARGUMENTS", k=10, use_rerank=true)
 ```
 
-**Filters** — narrow results by type, tags, importance, or date:
+**Explore hints** — get suggestions for follow-up `explore()` calls to discover related memories via the knowledge graph:
+
+```
+recall(context_id=..., query="auth token handling", k=10, include_explore_hints=true)
+```
+
+When enabled, the response includes up to 3 `explore_hints` — each with a `memory_id` and a `reason` (`top_result`, `high_centrality`, or `unexplored_neighbor`). Use the suggested memory_id as a seed for `explore()` to discover related knowledge beyond keyword/semantic matching.
+
+**Filters** — narrow results by type, tags, importance, date, or source:
 
 ```
 recall(context_id=..., query="...", k=10, filters={"type": "decision"})
 recall(context_id=..., query="...", k=10, filters={"tags": ["python", "fastapi"]})
 recall(context_id=..., query="...", k=10, filters={"importance": {"gte": 0.8}})
 recall(context_id=..., query="...", k=10, filters={"created_after": "2026-01-01T00:00:00Z"})
+recall(context_id=..., query="...", k=10, filters={"source_uri_prefix": "vault://my-vault/"})
+recall(context_id=..., query="...", k=10, filters={"source_type": "file"})
 ```
+
+- `source_uri_prefix`: Filter by origin URI prefix (e.g. `"file://"`, `"vault://my-vault/"`). Useful for querying memories from a specific vault or directory.
+- `source_type`: Filter by origin type — `"file"` | `"url"` | `"vault"` | `"api"` | `"manual"`.
 
 Filters can be combined:
 
 ```
 recall(context_id=..., query="...", k=10, filters={"type": "bug-fix", "tags": ["auth"], "created_after": "2026-03-01T00:00:00Z"})
+recall(context_id=..., query="...", k=10, filters={"source_uri_prefix": "vault://", "source_type": "vault", "importance": {"gte": 0.7}})
 ```
 
 ### 3. Display results

@@ -68,6 +68,9 @@ Tell the user to restart Claude Code to pick up the config.
 2. Team members connect via their own API keys (same workspace)
 3. Onboarding: new members `recall` to learn project history
 
+**External integration — file and vault sync:**
+Use `source_uri` and `source_type` with `remember` to track where knowledge originated (e.g. Obsidian vaults, local files, web pages). Then use `source_uri_prefix` and `source_type` filters with `recall` to query memories from a specific source. Example: `remember(..., source_uri="vault://my-vault/note.md", source_type="vault")` → `recall(..., filters={"source_uri_prefix": "vault://my-vault/"})`.
+
 **Session workflow:**
 1. Start session: `/kagura-memory:session-start` to restore context
 2. During work: `/kagura-memory:remember` and `/kagura-memory:recall` as needed
