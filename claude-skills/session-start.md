@@ -40,7 +40,7 @@ Then recall recent memories (last 7 days). The 7-day window balances recency wit
 Calculate the date 7 days ago from today and use it as `created_after` filter. Run these recalls in parallel:
 
 ```
-recall(context_id=..., query="session summary progress decision", k=5, filters={"created_after": "{7_days_ago_ISO8601}"})
+recall(context_id=..., query="session summary progress decision", k=5, filters={"created_after": "{7_days_ago_ISO8601}"}, include_explore_hints=true)
 ```
 
 ```
