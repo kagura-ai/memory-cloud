@@ -305,7 +305,7 @@ export default function EnvironmentPage() {
             </span>
           </div>
           <div className="text-xs text-gray-600 dark:text-gray-400">
-            <span className="font-medium">Valid values:</span>{" "}
+            <span className="font-medium">{t("messages.enumValid")}</span>{" "}
             {configValue.enum_values.map((val, idx) => (
               <span key={val}>
                 <code className="px-1 py-0.5 bg-gray-100 dark:bg-gray-800 rounded">
@@ -627,12 +627,12 @@ export default function EnvironmentPage() {
                         </Label>
                         {configValue.requires_restart && (
                           <Badge variant="destructive" className="text-xs">
-                            Requires Restart
+                            {t("actions.requiresRestart")}
                           </Badge>
                         )}
                         {configValue.type === "enum" && (
                           <Badge variant="outline" className="text-xs">
-                            ENUM
+                            {t("messages.typeEnum")}
                           </Badge>
                         )}
                       </div>
@@ -658,7 +658,7 @@ export default function EnvironmentPage() {
                             <Info className="h-4 w-4 text-blue-600 dark:text-blue-400 mt-0.5 flex-shrink-0" />
                             <div>
                               <p className="text-xs font-medium text-blue-900 dark:text-blue-100">
-                                Impact
+                                {t("metadata.impact")}
                               </p>
                               <p className="text-xs text-blue-700 dark:text-blue-300">
                                 {configValue.impact}
@@ -669,7 +669,7 @@ export default function EnvironmentPage() {
                         {configValue.recommended && (
                           <div className="text-xs">
                             <span className="font-medium text-green-900 dark:text-green-100">
-                              Recommended:
+                              {t("metadata.recommended")}
                             </span>{" "}
                             <span className="text-green-700 dark:text-green-300">
                               {configValue.recommended}
@@ -680,7 +680,7 @@ export default function EnvironmentPage() {
                           configValue.examples.length > 0 && (
                             <div className="text-xs">
                               <span className="font-medium text-gray-700 dark:text-gray-300">
-                                Examples:
+                                {t("metadata.examples")}
                               </span>{" "}
                               {configValue.examples.map((ex, idx) => (
                                 <span key={idx}>
@@ -718,11 +718,11 @@ export default function EnvironmentPage() {
                 size="sm"
                 onClick={() => setEditedValues({})}
               >
-                {t("actions.discard", { default: "Discard" })}
+                {t("actions.discard")}
               </Button>
               <Button size="sm" onClick={handleSave} disabled={saving}>
                 <Save className="h-4 w-4 mr-1" />
-                {t("actions.save", { default: "Save" })}
+                {t("actions.save")}
               </Button>
             </div>
           </div>

@@ -2289,6 +2289,11 @@
         "typeEnum": "ENUM",
         "enabled": "Enabled",
         "disabled": "Disabled"
+      },
+      "metadata": {
+        "impact": "Impact",
+        "recommended": "Recommended:",
+        "examples": "Examples:"
       }
     },
     "workspaces": {
