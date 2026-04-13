@@ -172,7 +172,7 @@ Print a summary table:
 | 8 | recall | Search with include_explore_hints=true | PASS/FAIL |
 | 9 | recall | Search with source_uri_prefix filter | PASS/FAIL |
 | 10 | recall | Search with source_type filter | PASS/FAIL |
-| 11 | reference | Get full memory (verify source_uri, source_type) | PASS/FAIL |
+| 11 | reference | Get full memory | PASS/FAIL |
 | 12 | explore | Graph traversal | PASS/FAIL |
 | 13 | update_memory | Update memory | PASS/FAIL |
 | 14 | recall (verify) | Verify update | PASS/FAIL |
