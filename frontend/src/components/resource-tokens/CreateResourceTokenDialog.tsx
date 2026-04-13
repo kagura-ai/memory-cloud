@@ -35,7 +35,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { getContexts, type Context } from "@/lib/api/contexts";
-import { ApiError } from "@/lib/api/base";
+
 import {
   MAX_QUOTA_PER_TOKEN,
   getMaxTokens,

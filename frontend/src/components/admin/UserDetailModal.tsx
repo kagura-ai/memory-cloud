@@ -21,7 +21,6 @@ import {
   FolderOpen,
   Database,
   TrendingUp,
-  Calendar,
 } from "lucide-react";
 import { getUserDetails, UserDetail } from "@/lib/api/admin";
 import { SpinnerLoading } from "@/components/common/LoadingState";
