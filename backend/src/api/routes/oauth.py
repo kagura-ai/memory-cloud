@@ -1324,7 +1324,14 @@ async def oauth_authorize_get(
     Issue #157: Save resource parameter for POST request.
     PKCE (RFC 7636): Save code_challenge for public clients (ChatGPT/Claude).
     """
-    logger.info(f"GET /authorize: client_id={client_id}, state={state}, resource={resource}")
+    logger.info(
+        "oauth_authorize_get",
+        client_id=client_id,
+        state=state,
+        resource=resource,
+        pkce_present=bool(code_challenge),
+        code_challenge_method=code_challenge_method,
+    )
 
     user = get_current_user_from_session(request)
 
@@ -1646,6 +1653,7 @@ async def oauth_token(request: Request):
 
 @router.post("/introspect", response_model=TokenIntrospectionResponse)
 async def introspect_token(
+    request: Request,
     token: str = Form(..., description="Access token to introspect"),
     db: AsyncSession = Depends(get_db),
 ) -> TokenIntrospectionResponse:
@@ -1656,6 +1664,7 @@ async def introspect_token(
     Allows Resource Servers to validate access tokens.
 
     Args:
+        request: FastAPI request (for caller IP logging)
         token: Access token to introspect
 
     Returns:
@@ -1685,20 +1694,40 @@ async def introspect_token(
     from sqlalchemy import select
     from sqlalchemy.exc import SQLAlchemyError
 
+    caller_ip = request.client.host if request.client else "unknown"
+    token_prefix = token[:8] + "..." if token else "(empty)"
+
     try:
         # Look up token in database
         result = await db.execute(select(OAuth2Token).where(OAuth2Token.access_token == token))
         oauth_token = result.scalar_one_or_none()
 
         if not oauth_token:
+            logger.info(
+                "oauth_introspect",
+                caller_ip=caller_ip,
+                token_prefix=token_prefix,
+                active=False,
+                reason="not_found",
+            )
             return TokenIntrospectionResponse(active=False)
 
-        # Check if token is expired
-        if oauth_token.is_expired():
-            return TokenIntrospectionResponse(active=False)
+        # Determine introspection result
+        is_expired = oauth_token.is_expired()
+        is_revoked = oauth_token.is_revoked()
+        active = not is_expired and not is_revoked
+        reason = "expired" if is_expired else "revoked" if is_revoked else None
 
-        # Check if token is revoked
-        if oauth_token.is_revoked():
+        logger.info(
+            "oauth_introspect",
+            caller_ip=caller_ip,
+            token_prefix=token_prefix,
+            active=active,
+            reason=reason,
+            client_id=oauth_token.client_id,
+        )
+
+        if not active:
             return TokenIntrospectionResponse(active=False)
 
         # Return token metadata (RFC 7662) - type-safe response
@@ -1713,7 +1742,7 @@ async def introspect_token(
         )
 
     except SQLAlchemyError as e:
-        logger.error(f"Database error in token introspection: {e}")
+        logger.error("oauth_introspect_db_error", error=str(e), caller_ip=caller_ip)
         await db.rollback()
         raise HTTPException(
             status_code=500, detail="Internal server error during token introspection"

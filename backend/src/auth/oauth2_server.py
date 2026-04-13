@@ -517,20 +517,24 @@ class RefreshTokenGrant(grants.RefreshTokenGrant):
         return UserStub(user_id=credential.user_id)
 
     def revoke_old_credential(self, credential: OAuth2Token) -> None:
-        """Revoke old access token.
+        """Revoke old access and refresh tokens.
 
-        Called by Authlib after issuing new token.
-        Optionally revoke old token to enforce single active token per refresh.
+        Called by Authlib after issuing new token pair.
+        Revokes both the old access token and the old refresh token
+        to enforce refresh token rotation (RFC 6819 Section 5.2.2.3).
 
         Args:
             credential: Old OAuth2Token instance
         """
-        # Mark old access token as revoked
-        credential.access_token_revoked_at = utcnow()
+        now = utcnow()
+        credential.access_token_revoked_at = now
+        credential.refresh_token_revoked_at = now
         self.server.db_session.commit()
 
         logger.info(
-            f"Old access token revoked: client={credential.client_id}, user={credential.user_id}"
+            "oauth_refresh_token_rotated: client=%s, user=%s",
+            credential.client_id,
+            credential.user_id,
         )
 
 

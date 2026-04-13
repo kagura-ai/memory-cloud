@@ -36,8 +36,7 @@ dependencies = [
     "voyageai>=0.3.0",      # Reranking (Issue #105: Voyage AI alternative)
 
     # Authentication
-    "authlib>=1.3.0",       # OAuth2 client/server
-    "python-jose[cryptography]>=3.3.0",  # JWT
+    "authlib>=1.3.0",       # OAuth2 client/server + JWT (authlib.jose)
     "google-auth>=2.35.0",  # Google OAuth2
     "google-auth-oauthlib>=1.2.0",  # Google OAuth2 helpers
     "bcrypt>=4.0.0",        # Password hashing (Issue #51)
