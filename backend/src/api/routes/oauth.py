@@ -1694,7 +1694,7 @@ async def introspect_token(
     from sqlalchemy.exc import SQLAlchemyError
 
     caller_ip = request.client.host if request.client else "unknown"
-    token_prefix = token[:8] if len(token) >= 8 else token
+    token_prefix = token[:8] + "..." if token else "(empty)"
 
     try:
         # Look up token in database

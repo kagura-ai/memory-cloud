@@ -73,7 +73,17 @@ def verify_access_token(token: str) -> dict:
     settings = get_settings()
 
     try:
-        claims = jwt.decode(token, settings.jwt_secret)
+        claims = jwt.decode(
+            token,
+            settings.jwt_secret,
+            claims_options={"iss": {"essential": False}},
+        )
+        # Enforce configured algorithm — reject tokens signed with unexpected alg
+        token_alg = claims.header.get("alg")
+        if token_alg != settings.jwt_algorithm:
+            raise AuthenticationError(
+                f"JWT algorithm mismatch: expected {settings.jwt_algorithm}, got {token_alg}"
+            )
         claims.validate()
         return dict(claims)
 
@@ -101,8 +111,8 @@ def decode_token_without_verification(token: str) -> dict | None:
         parts = token.split(".")
         if len(parts) != 3:
             return None
-        # Add padding for base64url decoding
-        payload_b64 = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        # Add only the missing padding required for base64url decoding
+        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
         payload_bytes = base64.urlsafe_b64decode(payload_b64)
         return json.loads(payload_bytes)
     except (ValueError, json.JSONDecodeError, UnicodeDecodeError, binascii.Error):
