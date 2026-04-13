@@ -1,4 +1,4 @@
-'use client';
+"use client";
 
 /**
  * Environment Configuration Page
@@ -8,25 +8,45 @@
  * Issue #46: Environment page implementation
  */
 
-import { useEffect, useState } from 'react';
-import { useTranslations } from 'next-intl';
-import { PageContainer } from '@/components/common/PageContainer';
-import { PageHeader } from '@/components/common/PageHeader';
-import { SpinnerLoading, InlineSpinner } from '@/components/common/LoadingState';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Switch } from '@/components/ui/switch';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Settings, Save, RefreshCw, AlertCircle, Eye, EyeOff, Info, ExternalLink, CheckCircle, XCircle, Server } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
-import { apiClient } from '@/lib/api';
-import { useToast } from '@/hooks/use-toast';
+import { useEffect, useState } from "react";
+import { useTranslations } from "next-intl";
+import { PageContainer } from "@/components/common/PageContainer";
+import { PageHeader } from "@/components/common/PageHeader";
+import {
+  SpinnerLoading,
+  InlineSpinner,
+} from "@/components/common/LoadingState";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  Settings,
+  Save,
+  RefreshCw,
+  AlertCircle,
+  Eye,
+  EyeOff,
+  Info,
+  CheckCircle,
+  XCircle,
+  Server,
+} from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { apiClient } from "@/lib/api";
+import { useToast } from "@/hooks/use-toast";
 
 interface ConfigValue {
   value: string | number | boolean;
-  type: 'string' | 'number' | 'boolean' | 'enum';
+  type: "string" | "number" | "boolean" | "enum";
   sensitive: boolean;
   category: string;
   description?: string;
@@ -48,17 +68,25 @@ interface ConfigData {
 }
 
 export default function EnvironmentPage() {
-  const t = useTranslations('admin.environment');
-  const tCommon = useTranslations('admin.common');
+  const t = useTranslations("admin.environment");
 
   const [config, setConfig] = useState<ConfigData>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editedValues, setEditedValues] = useState<Record<string, any>>({});
-  const [showSensitive, setShowSensitive] = useState<Record<string, boolean>>({});
+  const [showSensitive, setShowSensitive] = useState<Record<string, boolean>>(
+    {},
+  );
   const [telemetry, setTelemetry] = useState<Record<string, any> | null>(null);
-  const [registryModels, setRegistryModels] = useState<Array<{ name: string; dimensions: number; provider: string; available: boolean }>>([]);
+  const [registryModels, setRegistryModels] = useState<
+    Array<{
+      name: string;
+      dimensions: number;
+      provider: string;
+      available: boolean;
+    }>
+  >([]);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -70,7 +98,12 @@ export default function EnvironmentPage() {
       setLoading(true);
 
       // Fetch config values, schema, telemetry, and embedding models in parallel
-      const [configResponse, schemaResponse, telemetryResponse, embeddingResponse] = await Promise.all([
+      const [
+        configResponse,
+        schemaResponse,
+        telemetryResponse,
+        embeddingResponse,
+      ] = await Promise.all([
         apiClient.get<{
           configs: Array<{
             key: string;
@@ -80,10 +113,22 @@ export default function EnvironmentPage() {
             is_sensitive: boolean;
           }>;
           total: number;
-        }>('/api/v1/config?mask_sensitive=true'),
-        apiClient.get<Record<string, any>>('/api/v1/config/schema'),
-        apiClient.get<Record<string, any>>('/api/v1/system/telemetry').catch(() => null),
-        apiClient.get<{ models: Array<{ name: string; dimensions: number; provider: string; available: boolean }>; default_model: string }>('/api/v1/system/embedding/models').catch(() => null),
+        }>("/api/v1/config?mask_sensitive=true"),
+        apiClient.get<Record<string, any>>("/api/v1/config/schema"),
+        apiClient
+          .get<Record<string, any>>("/api/v1/system/telemetry")
+          .catch(() => null),
+        apiClient
+          .get<{
+            models: Array<{
+              name: string;
+              dimensions: number;
+              provider: string;
+              available: boolean;
+            }>;
+            default_model: string;
+          }>("/api/v1/system/embedding/models")
+          .catch(() => null),
       ]);
       setTelemetry(telemetryResponse);
       if (embeddingResponse) {
@@ -93,12 +138,18 @@ export default function EnvironmentPage() {
       // Transform API response to ConfigData format with schema metadata
       const configData: ConfigData = {};
       configResponse.configs.forEach((item) => {
-        const value = item.value ?? ''; // Use empty string for null values
+        const value = item.value ?? ""; // Use empty string for null values
         const schema = schemaResponse[item.key];
 
         configData[item.key] = {
           value: value,
-          type: schema?.type || (typeof value === 'boolean' ? 'boolean' : typeof value === 'number' ? 'number' : 'string'),
+          type:
+            schema?.type ||
+            (typeof value === "boolean"
+              ? "boolean"
+              : typeof value === "number"
+                ? "number"
+                : "string"),
           sensitive: item.is_sensitive,
           category: item.category,
           description: schema?.description || item.description || undefined,
@@ -119,8 +170,8 @@ export default function EnvironmentPage() {
       setConfig(configData);
       setError(null);
     } catch (err) {
-      console.error('Failed to load config:', err);
-      setError(err instanceof Error ? err.message : 'Failed to load configuration');
+      console.error("Failed to load config:", err);
+      setError(err instanceof Error ? err.message : t("messages.loadError"));
     } finally {
       setLoading(false);
     }
@@ -133,8 +184,8 @@ export default function EnvironmentPage() {
   const handleSave = async () => {
     if (Object.keys(editedValues).length === 0) {
       toast({
-        title: t('messages.noChanges'),
-        description: t('messages.noChangesDesc'),
+        title: t("messages.noChanges"),
+        description: t("messages.noChangesDesc"),
       });
       return;
     }
@@ -143,22 +194,25 @@ export default function EnvironmentPage() {
       setSaving(true);
 
       // Batch update
-      await apiClient.post('/api/v1/config/batch', { updates: editedValues });
+      await apiClient.post("/api/v1/config/batch", { updates: editedValues });
 
       toast({
-        title: t('messages.saveSuccess'),
-        description: t('messages.saveSuccessDesc', { count: Object.keys(editedValues).length }),
+        title: t("messages.saveSuccess"),
+        description: t("messages.saveSuccessDesc", {
+          count: Object.keys(editedValues).length,
+        }),
       });
 
       // Reload config
       await loadConfig();
       setEditedValues({});
     } catch (err) {
-      console.error('Failed to save config:', err);
+      console.error("Failed to save config:", err);
       toast({
-        title: t('messages.saveError'),
-        description: err instanceof Error ? err.message : t('messages.saveErrorDesc'),
-        variant: 'destructive',
+        title: t("messages.saveError"),
+        description:
+          err instanceof Error ? err.message : t("messages.saveErrorDesc"),
+        variant: "destructive",
       });
     } finally {
       setSaving(false);
@@ -173,7 +227,7 @@ export default function EnvironmentPage() {
     const grouped: Record<string, Array<[string, ConfigValue]>> = {};
 
     Object.entries(config).forEach(([key, value]) => {
-      const category = value.category || 'other';
+      const category = value.category || "other";
       if (!grouped[category]) {
         grouped[category] = [];
       }
@@ -184,11 +238,12 @@ export default function EnvironmentPage() {
   };
 
   const renderConfigValue = (key: string, configValue: ConfigValue) => {
-    const currentValue = editedValues[key] !== undefined ? editedValues[key] : configValue.value;
+    const currentValue =
+      editedValues[key] !== undefined ? editedValues[key] : configValue.value;
     const isSensitive = configValue.sensitive;
     const isHidden = isSensitive && !showSensitive[key];
 
-    if (configValue.type === 'boolean') {
+    if (configValue.type === "boolean") {
       const isRestartRequired = configValue.requires_restart === true;
       return (
         <div className="flex items-center gap-2">
@@ -198,12 +253,14 @@ export default function EnvironmentPage() {
               if (!isRestartRequired) handleValueChange(key, checked);
             }}
             disabled={isRestartRequired}
-            className={isRestartRequired ? 'cursor-not-allowed opacity-60' : ''}
+            className={isRestartRequired ? "cursor-not-allowed opacity-60" : ""}
           />
-          <span className="text-sm">{currentValue ? 'Enabled' : 'Disabled'}</span>
+          <span className="text-sm">
+            {currentValue ? t("messages.enabled") : t("messages.disabled")}
+          </span>
           {isRestartRequired && (
             <span className="text-xs text-amber-600 dark:text-amber-400">
-              (Restart required to change)
+              ({t("actions.requiresRestart")})
             </span>
           )}
         </div>
@@ -214,8 +271,8 @@ export default function EnvironmentPage() {
       return (
         <div className="flex items-center gap-2">
           <Input
-            type={isHidden ? 'password' : 'text'}
-            value={isHidden ? '••••••••' : currentValue}
+            type={isHidden ? "password" : "text"}
+            value={isHidden ? "••••••••" : currentValue}
             onChange={(e) => handleValueChange(key, e.target.value)}
             className="flex-1 font-mono text-sm"
             readOnly={isHidden}
@@ -225,28 +282,36 @@ export default function EnvironmentPage() {
             size="sm"
             onClick={() => toggleSensitive(key)}
           >
-            {isHidden ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+            {isHidden ? (
+              <Eye className="h-4 w-4" />
+            ) : (
+              <EyeOff className="h-4 w-4" />
+            )}
           </Button>
         </div>
       );
     }
 
-    if (configValue.type === 'enum' && configValue.enum_values) {
+    if (configValue.type === "enum" && configValue.enum_values) {
       // Read-only ENUM display with valid values list
       return (
         <div className="space-y-2">
           <div className="flex items-center gap-2 p-2 bg-gray-50 dark:bg-gray-800 rounded border dark:border-gray-700">
-            <span className="font-mono text-sm font-medium">{currentValue}</span>
+            <span className="font-mono text-sm font-medium">
+              {currentValue}
+            </span>
             <span className="text-xs text-gray-500 dark:text-gray-400">
-              {configValue.enum_descriptions?.[currentValue as string] || ''}
+              {configValue.enum_descriptions?.[currentValue as string] || ""}
             </span>
           </div>
           <div className="text-xs text-gray-600 dark:text-gray-400">
-            <span className="font-medium">Valid values:</span>{' '}
+            <span className="font-medium">Valid values:</span>{" "}
             {configValue.enum_values.map((val, idx) => (
               <span key={val}>
-                <code className="px-1 py-0.5 bg-gray-100 dark:bg-gray-800 rounded">{val}</code>
-                {idx < configValue.enum_values!.length - 1 && ', '}
+                <code className="px-1 py-0.5 bg-gray-100 dark:bg-gray-800 rounded">
+                  {val}
+                </code>
+                {idx < configValue.enum_values!.length - 1 && ", "}
               </span>
             ))}
           </div>
@@ -254,20 +319,22 @@ export default function EnvironmentPage() {
       );
     }
 
-    if (configValue.type === 'number') {
+    if (configValue.type === "number") {
       return (
         <div className="space-y-1">
           <Input
             type="number"
-            step={currentValue.toString().includes('.') ? '0.01' : '1'}
+            step={currentValue.toString().includes(".") ? "0.01" : "1"}
             value={currentValue}
             onChange={(e) => handleValueChange(key, parseFloat(e.target.value))}
             className="font-mono text-sm"
             readOnly
           />
-          {(configValue.min_value !== undefined || configValue.max_value !== undefined) && (
+          {(configValue.min_value !== undefined ||
+            configValue.max_value !== undefined) && (
             <p className="text-xs text-gray-500">
-              Range: {configValue.min_value ?? '−∞'} to {configValue.max_value ?? '+∞'}
+              Range: {configValue.min_value ?? "−∞"} to{" "}
+              {configValue.max_value ?? "+∞"}
             </p>
           )}
         </div>
@@ -287,22 +354,22 @@ export default function EnvironmentPage() {
 
   const getCategoryIcon = (category: string) => {
     const icons: Record<string, string> = {
-      neural_memory: '🧠',
-      embedding: '📊',
-      search: '🔍',
-      memory: '💾',
-      system: '⚙️',
+      neural_memory: "🧠",
+      embedding: "📊",
+      search: "🔍",
+      memory: "💾",
+      system: "⚙️",
     };
-    return icons[category] || '📁';
+    return icons[category] || "📁";
   };
 
   const getCategoryTitle = (category: string) => {
     const titles: Record<string, string> = {
-      neural_memory: t('sections.neuralMemory'),
-      embedding: t('sections.embedding'),
-      search: t('sections.search'),
-      memory: t('sections.memory'),
-      system: t('sections.system'),
+      neural_memory: t("sections.neuralMemory"),
+      embedding: t("sections.embedding"),
+      search: t("sections.search"),
+      memory: t("sections.memory"),
+      system: t("sections.system"),
     };
     return titles[category] || category;
   };
@@ -310,8 +377,8 @@ export default function EnvironmentPage() {
   if (loading) {
     return (
       <PageContainer>
-        <PageHeader title={t('title')} description={t('loadingDesc')} />
-        <SpinnerLoading size="lg" message={t('messages.loading')} />
+        <PageHeader title={t("title")} description={t("loadingDesc")} />
+        <SpinnerLoading size="lg" message={t("messages.loading")} />
       </PageContainer>
     );
   }
@@ -319,7 +386,7 @@ export default function EnvironmentPage() {
   if (error) {
     return (
       <PageContainer>
-        <PageHeader title={t('title')} description={t('configManagement')} />
+        <PageHeader title={t("title")} description={t("configManagement")} />
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>{error}</AlertDescription>
@@ -334,10 +401,7 @@ export default function EnvironmentPage() {
   return (
     <PageContainer>
       <div className="flex items-start justify-between mb-6">
-        <PageHeader
-          title={t('titleFull')}
-          description={t('description')}
-        />
+        <PageHeader title={t("titleFull")} description={t("description")} />
 
         <div className="flex gap-2">
           <Button onClick={loadConfig} variant="outline" disabled={loading}>
@@ -346,12 +410,14 @@ export default function EnvironmentPage() {
             ) : (
               <RefreshCw className="h-4 w-4 mr-2" />
             )}
-            {t('actions.refresh')}
+            {t("actions.refresh")}
           </Button>
           {hasChanges && (
             <Button onClick={handleSave} disabled={saving}>
               <Save className="h-4 w-4 mr-2" />
-              {t('actions.saveChanges', { count: Object.keys(editedValues).length })}
+              {t("actions.saveChanges", {
+                count: Object.keys(editedValues).length,
+              })}
             </Button>
           )}
         </div>
@@ -361,7 +427,9 @@ export default function EnvironmentPage() {
         <Alert className="mb-6">
           <Settings className="h-4 w-4" />
           <AlertDescription>
-            {t('messages.unsavedChanges', { count: Object.keys(editedValues).length })}
+            {t("messages.unsavedChanges", {
+              count: Object.keys(editedValues).length,
+            })}
           </AlertDescription>
         </Alert>
       )}
@@ -373,28 +441,42 @@ export default function EnvironmentPage() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Server className="h-5 w-5" />
-                {t('systemStatus.title')}
+                {t("systemStatus.title")}
               </CardTitle>
-              <CardDescription>{t('systemStatus.description')}</CardDescription>
+              <CardDescription>{t("systemStatus.description")}</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {/* Embedding Config */}
                 <div className="p-4 border dark:border-gray-700 rounded-lg space-y-2">
-                  <div className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('systemStatus.embeddingConfig')}</div>
+                  <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                    {t("systemStatus.embeddingConfig")}
+                  </div>
                   {telemetry.embedding_config ? (
                     <div className="space-y-1 text-sm">
                       <div className="flex justify-between">
-                        <span className="text-gray-500">{t('systemStatus.provider')}</span>
-                        <code className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-xs">{telemetry.embedding_config.provider}</code>
+                        <span className="text-gray-500">
+                          {t("systemStatus.provider")}
+                        </span>
+                        <code className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-xs">
+                          {telemetry.embedding_config.provider}
+                        </code>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-gray-500">{t('systemStatus.model')}</span>
-                        <code className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-xs">{telemetry.embedding_config.model}</code>
+                        <span className="text-gray-500">
+                          {t("systemStatus.model")}
+                        </span>
+                        <code className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-xs">
+                          {telemetry.embedding_config.model}
+                        </code>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-gray-500">{t('systemStatus.dimensions')}</span>
-                        <span className="text-xs">{telemetry.embedding_config.dimensions}</span>
+                        <span className="text-gray-500">
+                          {t("systemStatus.dimensions")}
+                        </span>
+                        <span className="text-xs">
+                          {telemetry.embedding_config.dimensions}
+                        </span>
                       </div>
                     </div>
                   ) : (
@@ -404,74 +486,107 @@ export default function EnvironmentPage() {
 
                 {/* Ollama Status + Embedding Models */}
                 <div className="p-4 border dark:border-gray-700 rounded-lg space-y-2">
-                  <div className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('systemStatus.ollama')}</div>
+                  <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                    {t("systemStatus.ollama")}
+                  </div>
                   {telemetry.services?.ollama ? (
                     <div className="space-y-3">
                       <div className="flex items-center gap-2">
-                        {telemetry.services.ollama.status === 'ok' ? (
+                        {telemetry.services.ollama.status === "ok" ? (
                           <CheckCircle className="h-4 w-4 text-green-500" />
-                        ) : telemetry.services.ollama.status === 'not_configured' ? (
+                        ) : telemetry.services.ollama.status ===
+                          "not_configured" ? (
                           <XCircle className="h-4 w-4 text-gray-400" />
                         ) : (
                           <XCircle className="h-4 w-4 text-red-500" />
                         )}
-                        <span className="text-sm">{telemetry.services.ollama.status}</span>
+                        <span className="text-sm">
+                          {telemetry.services.ollama.status}
+                        </span>
                       </div>
-                      {telemetry.services.ollama.status === 'ok' && registryModels.length > 0 && (
-                        <div className="space-y-1">
-                          <div className="text-xs font-medium text-gray-500 dark:text-gray-400">{t('systemStatus.embeddingModelsTitle')}</div>
-                          {registryModels.filter(m => m.provider === 'ollama').map((model) => {
-                            const installedModels: string[] = telemetry.services?.ollama?.details?.models || [];
-                            const isInstalled = installedModels.some((m: string) => m.startsWith(model.name));
-                            return (
-                              <div key={model.name} className="flex items-center justify-between text-xs">
-                                <code className="font-mono">{model.name}</code>
-                                {isInstalled ? (
-                                  <span className="flex items-center gap-1 text-green-600 dark:text-green-400">
-                                    <CheckCircle className="h-3 w-3" /> {t('systemStatus.installed')}
-                                  </span>
-                                ) : (
-                                  <span className="flex items-center gap-1 text-gray-400">
-                                    <XCircle className="h-3 w-3" /> {t('systemStatus.notInstalled')}
-                                  </span>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
+                      {telemetry.services.ollama.status === "ok" &&
+                        registryModels.length > 0 && (
+                          <div className="space-y-1">
+                            <div className="text-xs font-medium text-gray-500 dark:text-gray-400">
+                              {t("systemStatus.embeddingModelsTitle")}
+                            </div>
+                            {registryModels
+                              .filter((m) => m.provider === "ollama")
+                              .map((model) => {
+                                const installedModels: string[] =
+                                  telemetry.services?.ollama?.details?.models ||
+                                  [];
+                                const isInstalled = installedModels.some(
+                                  (m: string) => m.startsWith(model.name),
+                                );
+                                return (
+                                  <div
+                                    key={model.name}
+                                    className="flex items-center justify-between text-xs"
+                                  >
+                                    <code className="font-mono">
+                                      {model.name}
+                                    </code>
+                                    {isInstalled ? (
+                                      <span className="flex items-center gap-1 text-green-600 dark:text-green-400">
+                                        <CheckCircle className="h-3 w-3" />{" "}
+                                        {t("systemStatus.installed")}
+                                      </span>
+                                    ) : (
+                                      <span className="flex items-center gap-1 text-gray-400">
+                                        <XCircle className="h-3 w-3" />{" "}
+                                        {t("systemStatus.notInstalled")}
+                                      </span>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                          </div>
+                        )}
                     </div>
                   ) : (
                     <div className="flex items-center gap-2">
                       <XCircle className="h-4 w-4 text-gray-400" />
-                      <span className="text-sm text-gray-400">{t('systemStatus.ollamaNotConfigured')}</span>
+                      <span className="text-sm text-gray-400">
+                        {t("systemStatus.ollamaNotConfigured")}
+                      </span>
                     </div>
                   )}
                 </div>
 
                 {/* Qdrant Collections */}
                 <div className="p-4 border dark:border-gray-700 rounded-lg space-y-2">
-                  <div className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('systemStatus.qdrantCollections')}</div>
-                  {telemetry.services?.qdrant?.status === 'ok' ? (
-                    telemetry.services.qdrant.details?.collection_names?.length > 0 ? (
+                  <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                    {t("systemStatus.qdrantCollections")}
+                  </div>
+                  {telemetry.services?.qdrant?.status === "ok" ? (
+                    telemetry.services.qdrant.details?.collection_names
+                      ?.length > 0 ? (
                       <div className="space-y-1">
-                        {telemetry.services.qdrant.details.collection_names.map((name: string) => (
-                          <div key={name} className="flex items-center gap-2">
-                            <div className="w-2 h-2 rounded-full bg-green-500" />
-                            <code className="text-xs font-mono">{name}</code>
-                          </div>
-                        ))}
+                        {telemetry.services.qdrant.details.collection_names.map(
+                          (name: string) => (
+                            <div key={name} className="flex items-center gap-2">
+                              <div className="w-2 h-2 rounded-full bg-green-500" />
+                              <code className="text-xs font-mono">{name}</code>
+                            </div>
+                          ),
+                        )}
                       </div>
                     ) : (
                       <div className="flex items-center gap-2">
                         <CheckCircle className="h-4 w-4 text-green-500" />
-                        <span className="text-sm text-gray-500">{t('systemStatus.qdrantNoCollections')}</span>
+                        <span className="text-sm text-gray-500">
+                          {t("systemStatus.qdrantNoCollections")}
+                        </span>
                       </div>
                     )
                   ) : (
                     <div className="flex items-center gap-2">
                       <XCircle className="h-4 w-4 text-red-500" />
-                      <span className="text-sm text-gray-500">{telemetry.services?.qdrant?.details?.error || t('systemStatus.qdrantError')}</span>
+                      <span className="text-sm text-gray-500">
+                        {telemetry.services?.qdrant?.details?.error ||
+                          t("systemStatus.qdrantError")}
+                      </span>
                     </div>
                   )}
                 </div>
@@ -488,17 +603,26 @@ export default function EnvironmentPage() {
                 {getCategoryTitle(category)}
               </CardTitle>
               <CardDescription>
-                {t('messages.configParams', { count: items.length, s: items.length !== 1 ? 's' : '' })}
+                {t("messages.configParams", {
+                  count: items.length,
+                  s: items.length !== 1 ? "s" : "",
+                })}
               </CardDescription>
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
                 {items.map(([key, configValue]) => (
-                  <div key={key} className="space-y-3 p-4 border dark:border-gray-700 rounded-lg bg-white dark:bg-gray-900">
+                  <div
+                    key={key}
+                    className="space-y-3 p-4 border dark:border-gray-700 rounded-lg bg-white dark:bg-gray-900"
+                  >
                     {/* Header with key name and badges */}
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
-                        <Label htmlFor={key} className="font-mono text-sm font-semibold">
+                        <Label
+                          htmlFor={key}
+                          className="font-mono text-sm font-semibold"
+                        >
                           {key}
                         </Label>
                         {configValue.requires_restart && (
@@ -506,61 +630,69 @@ export default function EnvironmentPage() {
                             Requires Restart
                           </Badge>
                         )}
-                        {configValue.type === 'enum' && (
+                        {configValue.type === "enum" && (
                           <Badge variant="outline" className="text-xs">
                             ENUM
                           </Badge>
                         )}
                       </div>
-                      {configValue.documentation_url && (
-                        <a
-                          href={configValue.documentation_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
-                        >
-                          <ExternalLink className="h-4 w-4" />
-                        </a>
-                      )}
                     </div>
 
                     {/* Description */}
                     {configValue.description && (
-                      <p className="text-sm text-gray-600 dark:text-gray-400">{configValue.description}</p>
+                      <p className="text-sm text-gray-600 dark:text-gray-400">
+                        {configValue.description}
+                      </p>
                     )}
 
                     {/* Value input */}
                     <div>{renderConfigValue(key, configValue)}</div>
 
                     {/* Extended metadata panel */}
-                    {(configValue.impact || configValue.recommended || configValue.examples) && (
+                    {(configValue.impact ||
+                      configValue.recommended ||
+                      configValue.examples) && (
                       <div className="mt-3 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-md space-y-2">
                         {configValue.impact && (
                           <div className="flex items-start gap-2">
                             <Info className="h-4 w-4 text-blue-600 dark:text-blue-400 mt-0.5 flex-shrink-0" />
                             <div>
-                              <p className="text-xs font-medium text-blue-900 dark:text-blue-100">Impact</p>
-                              <p className="text-xs text-blue-700 dark:text-blue-300">{configValue.impact}</p>
+                              <p className="text-xs font-medium text-blue-900 dark:text-blue-100">
+                                Impact
+                              </p>
+                              <p className="text-xs text-blue-700 dark:text-blue-300">
+                                {configValue.impact}
+                              </p>
                             </div>
                           </div>
                         )}
                         {configValue.recommended && (
                           <div className="text-xs">
-                            <span className="font-medium text-green-900 dark:text-green-100">Recommended:</span>{' '}
-                            <span className="text-green-700 dark:text-green-300">{configValue.recommended}</span>
+                            <span className="font-medium text-green-900 dark:text-green-100">
+                              Recommended:
+                            </span>{" "}
+                            <span className="text-green-700 dark:text-green-300">
+                              {configValue.recommended}
+                            </span>
                           </div>
                         )}
-                        {configValue.examples && configValue.examples.length > 0 && (
-                          <div className="text-xs">
-                            <span className="font-medium text-gray-700 dark:text-gray-300">Examples:</span>{' '}
-                            {configValue.examples.map((ex, idx) => (
-                              <span key={idx}>
-                                <code className="px-1 py-0.5 bg-white dark:bg-gray-800 rounded text-gray-800 dark:text-gray-200">{ex}</code>
-                                {idx < configValue.examples!.length - 1 && ', '}
-                              </span>
-                            ))}
-                          </div>
-                        )}
+                        {configValue.examples &&
+                          configValue.examples.length > 0 && (
+                            <div className="text-xs">
+                              <span className="font-medium text-gray-700 dark:text-gray-300">
+                                Examples:
+                              </span>{" "}
+                              {configValue.examples.map((ex, idx) => (
+                                <span key={idx}>
+                                  <code className="px-1 py-0.5 bg-white dark:bg-gray-800 rounded text-gray-800 dark:text-gray-200">
+                                    {ex}
+                                  </code>
+                                  {idx < configValue.examples!.length - 1 &&
+                                    ", "}
+                                </span>
+                              ))}
+                            </div>
+                          )}
                       </div>
                     )}
                   </div>
@@ -576,15 +708,21 @@ export default function EnvironmentPage() {
         <div className="fixed bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 px-6 py-3">
           <div className="container mx-auto flex items-center justify-between">
             <span className="text-sm text-muted-foreground">
-              {t('actions.saveChanges', { count: Object.keys(editedValues).length })}
+              {t("actions.saveChanges", {
+                count: Object.keys(editedValues).length,
+              })}
             </span>
             <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={() => setEditedValues({})}>
-                {t('actions.discard', { default: 'Discard' })}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setEditedValues({})}
+              >
+                {t("actions.discard", { default: "Discard" })}
               </Button>
               <Button size="sm" onClick={handleSave} disabled={saving}>
                 <Save className="h-4 w-4 mr-1" />
-                {t('actions.save', { default: 'Save' })}
+                {t("actions.save", { default: "Save" })}
               </Button>
             </div>
           </div>
