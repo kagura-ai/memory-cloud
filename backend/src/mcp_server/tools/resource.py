@@ -25,7 +25,6 @@ from mcp_server.tools._helpers import (
     _get_workspace_member_role,
     _log_tool_usage,
     _success_response,
-    execute_with_timeout,
 )
 
 logger = logging.getLogger(__name__)
@@ -669,21 +668,8 @@ async def handle_setup_resource(
             db.add(search_config)
             await db.flush()
 
-            # 9. Create Qdrant collection
-            from db.qdrant import get_collection_name
-
-            collection = get_collection_name(actual_embedding_model, actual_dimensions)
-
-            from db.qdrant import qdrant_manager
-
-            try:
-                await execute_with_timeout(
-                    qdrant_manager.get_or_create_collection(collection, actual_dimensions),
-                    operation_name="setup_resource",
-                )
-            except Exception as qe:
-                logger.warning(f"qdrant_collection_creation_warning: {qe}")
-                # Continue — collection may already exist or Qdrant may be offline
+            # 9. Qdrant collection is created lazily on first remember() call
+            # via MemoryService — no need to create it here.
 
             # 10. Check active token count against plan limit (workspace-scoped)
             from models.resource import ResourceToken
