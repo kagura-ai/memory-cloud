@@ -51,8 +51,8 @@ remember(
   source_type="file"
 )
 -> Verify: returns memory with id (UUID format)
--> Verify: response includes source_uri and source_type fields
 -> Save returned memory_id
+-> Note: source_uri/source_type are persisted but not in the remember response; validated via recall filters in step 4
 ```
 
 ### 4. Memory read tools
@@ -75,7 +75,6 @@ recall(context_id=..., query="smoke test memory", k=5, filters={"source_type": "
 
 reference(memory_id=..., context_id=...)
 -> Verify: returns full memory with summary, content, tags matching step 3
--> Verify: response includes source_uri="file:///smoke-test/test-memory.md" and source_type="file"
 
 explore(memory_id=..., context_id=..., depth=2, min_weight=0.0)
 -> Verify: returns response (total_activated >= 0, no error)
