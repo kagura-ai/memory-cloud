@@ -69,7 +69,6 @@ interface ConfigData {
 
 export default function EnvironmentPage() {
   const t = useTranslations("admin.environment");
-  const tCommon = useTranslations("admin.common");
 
   const [config, setConfig] = useState<ConfigData>({});
   const [loading, setLoading] = useState(true);
