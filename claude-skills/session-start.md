@@ -37,7 +37,7 @@ If multiple contexts exist, pick the one most relevant to the current project. I
 
 Then recall recent memories (last 7 days). The 7-day window balances recency with coverage — long enough to span a typical work week including weekends, short enough to avoid stale context drowning out current work.
 
-Calculate the date 7 days ago from today and use it as `created_after` filter. Run these recalls in parallel:
+Calculate the date 7 days ago from today and use it as `created_after` filter. Run these recalls in parallel. Only the first query enables `include_explore_hints` — it covers broad session context where graph discovery adds value; the other two are narrow, targeted queries where explore hints would add overhead without benefit.
 
 ```
 recall(context_id=..., query="session summary progress decision", k=5, filters={"created_after": "{7_days_ago_ISO8601}"}, include_explore_hints=true)
