@@ -1664,6 +1664,7 @@ async def introspect_token(
     Allows Resource Servers to validate access tokens.
 
     Args:
+        request: FastAPI request (for caller IP logging)
         token: Access token to introspect
 
     Returns:
