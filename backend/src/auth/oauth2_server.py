@@ -526,8 +526,9 @@ class RefreshTokenGrant(grants.RefreshTokenGrant):
         Args:
             credential: Old OAuth2Token instance
         """
-        credential.access_token_revoked_at = utcnow()
-        credential.refresh_token_revoked_at = utcnow()
+        now = utcnow()
+        credential.access_token_revoked_at = now
+        credential.refresh_token_revoked_at = now
         self.server.db_session.commit()
 
         logger.info(

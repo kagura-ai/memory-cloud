@@ -107,13 +107,18 @@ def decode_token_without_verification(token: str) -> dict | None:
         Do NOT use for authentication! Use verify_access_token() instead.
     """
     try:
+        if not isinstance(token, str) or not token:
+            return None
         # Manually decode the payload segment (no signature verification)
         parts = token.split(".")
-        if len(parts) != 3:
+        if len(parts) != 3 or not parts[1]:
             return None
         # Add only the missing padding required for base64url decoding
         payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
         payload_bytes = base64.urlsafe_b64decode(payload_b64)
-        return json.loads(payload_bytes)
-    except (ValueError, json.JSONDecodeError, UnicodeDecodeError, binascii.Error):
+        decoded = json.loads(payload_bytes)
+        if not isinstance(decoded, dict):
+            return None
+        return decoded
+    except (TypeError, ValueError, json.JSONDecodeError, UnicodeDecodeError, binascii.Error):
         return None
