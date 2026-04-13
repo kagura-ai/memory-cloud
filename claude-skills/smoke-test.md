@@ -63,8 +63,9 @@ recall(context_id=..., query="smoke test memory", k=5)
 -> Verify: at least one result matches the memory created in step 3
 
 recall(context_id=..., query="smoke test memory", k=5, include_explore_hints=true)
--> Verify: response contains explore_hints array
--> Verify: at least one hint has reason "top_result"
+-> Verify: response contains explore_hints field (array)
+-> Verify: if explore_hints is non-empty, at least one hint has reason "top_result"
+-> Verify: empty explore_hints is acceptable (best-effort generation) and should not fail the smoke test
 
 recall(context_id=..., query="smoke test memory", k=5, filters={"source_uri_prefix": "file:///smoke-test/"})
 -> Verify: returns results filtered to memories with matching source_uri
@@ -144,7 +145,7 @@ Note: Sleep tools (`get_sleep_history`, `get_sleep_report`, `rollback_sleep_run`
 
 ```
 delete_context(context_id=<merge_target_id>)
--> Verify: success response (merge target deleted — cascade-deletes merged memories)
+-> Verify: success response (merge target soft-deleted, along with its memories)
 
 forget(memory_id=<memory_id_2>, context_id=...)
 -> Verify: success response (memory 2 deleted from source)
@@ -185,7 +186,7 @@ Print a summary table:
 | 21 | create_context | Create merge target context | PASS/FAIL |
 | 22 | merge_contexts | Merge source into target | PASS/FAIL |
 | 23 | get_usage | Get workspace usage | PASS/FAIL |
-| 24 | delete_context | Delete merge target (cascade-deletes merged memories) | PASS/FAIL |
+| 24 | delete_context | Soft-delete merge target and its memories | PASS/FAIL |
 | 25 | forget | Delete memory 2 | PASS/FAIL |
 | 26 | delete_context | Delete source context | PASS/FAIL |
 
