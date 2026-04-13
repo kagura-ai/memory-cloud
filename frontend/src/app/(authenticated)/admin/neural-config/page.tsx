@@ -13,7 +13,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
 import { LoadingState } from "@/components/common/LoadingState";
-import { apiClient } from "@/lib/api";
+import { apiClient, ApiError } from "@/lib/api";
 import {
   Table,
   TableBody,
@@ -103,10 +103,13 @@ export default function AdminNeuralConfigPage() {
       });
       setEditing(null);
       loadConfigs();
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const apiErr = error instanceof ApiError ? error : null;
       toast({
         title: tCommon("error"),
-        description: error?.details?.detail || t("messages.updateError"),
+        description:
+          apiErr?.details?.detail ||
+          (error instanceof Error ? error.message : t("messages.updateError")),
         variant: "destructive",
       });
     } finally {

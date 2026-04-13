@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useTranslations } from "next-intl";
 import { updateOAuth2Client } from "@/lib/api/oauth";
+import { ApiError } from "@/lib/api/base";
 import type { OAuth2Client } from "@/lib/api/oauth";
 import { useToast } from "@/hooks/use-toast";
 import { X, Pencil } from "lucide-react";
@@ -84,15 +85,15 @@ export function EditOAuthClientDialog({
       onOpenChange(false);
       onSuccess();
     } catch (err: unknown) {
-      const apiError = err as {
-        message?: string;
-        details?: { detail?: string | Array<{ loc?: string[]; msg?: string }> };
-      };
+      const apiError = err instanceof ApiError ? err : null;
       // Handle Pydantic 422 field-level errors
-      const detail = apiError?.details?.detail;
-      if (Array.isArray(detail)) {
+      const rawDetail = apiError?.details?.["detail"] as unknown;
+      if (Array.isArray(rawDetail)) {
         const newFieldErrors: Record<string, string> = {};
-        for (const item of detail) {
+        for (const item of rawDetail as Array<{
+          loc?: string[];
+          msg?: string;
+        }>) {
           const field = item.loc?.slice(-1)[0];
           if (field) {
             newFieldErrors[field] = item.msg || "Invalid value";
@@ -104,13 +105,10 @@ export function EditOAuthClientDialog({
           return;
         }
       }
-      const fallbackMessage =
-        typeof apiError?.message === "string"
-          ? apiError.message
-          : typeof apiError?.details?.detail === "string"
-            ? apiError.details.detail
-            : t("editFieldError");
-      setError(fallbackMessage);
+      setError(
+        apiError?.details?.detail ||
+          (err instanceof Error ? err.message : t("editFieldError")),
+      );
     } finally {
       setSaving(false);
     }

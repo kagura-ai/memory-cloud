@@ -92,10 +92,6 @@ const DEFAULT_RERANKER_MODELS: Record<string, string> = {
   ollama: "dengcao/Qwen3-Reranker-8B:Q5_K_M",
 };
 
-function getErrorMessage(err: unknown, fallback: string): string {
-  return (err as { message?: string })?.message ?? fallback;
-}
-
 interface SearchSettingsSectionProps {
   contextId: string;
 }
@@ -151,7 +147,7 @@ export function SearchSettingsSection({
       setConfig(data);
       setEditedConfig({});
     } catch (err: unknown) {
-      const errorMsg = getErrorMessage(err, t("errorLoad"));
+      const errorMsg = err instanceof Error ? err.message : t("errorLoad");
       setError(errorMsg);
       toast({
         title: tCommon("error"),
@@ -201,7 +197,7 @@ export function SearchSettingsSection({
       toast({ title: tCommon("success"), description: t("configSaved") });
       await refreshConfig();
     } catch (err: unknown) {
-      const errorMsg = getErrorMessage(err, t("errorSave"));
+      const errorMsg = err instanceof Error ? err.message : t("errorSave");
       setError(errorMsg);
       toast({
         title: tCommon("error"),

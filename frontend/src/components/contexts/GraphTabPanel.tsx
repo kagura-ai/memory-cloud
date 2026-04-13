@@ -92,12 +92,7 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
       });
       setGraphData(result);
     } catch (err) {
-      let message = t("graphVizLoadError");
-      if (err !== null && typeof err === "object" && "message" in err) {
-        const m = (err as { message: unknown }).message;
-        if (typeof m === "string") message = m;
-      }
-      setError(message);
+      setError(err instanceof Error ? err.message : t("graphVizLoadError"));
     } finally {
       setLoading(false);
     }

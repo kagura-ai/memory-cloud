@@ -52,18 +52,9 @@ export function ConnectionsTabPanel({ contextId }: ConnectionsTabPanelProps) {
       setGraphData(dataResult);
       setStats(statsResult);
     } catch (err) {
-      // apiClient throws plain-object ApiError (see frontend/src/lib/api/base.ts),
-      // so `err instanceof Error` is false. Runtime shape check for a string
-      // `.message` — this also handles real Error instances transparently
-      // (Error.prototype.message is a string field).
-      let message = "Failed to load graph data";
-      if (err !== null && typeof err === "object" && "message" in err) {
-        const m = (err as { message: unknown }).message;
-        if (typeof m === "string") {
-          message = m;
-        }
-      }
-      setError(message);
+      setError(
+        err instanceof Error ? err.message : "Failed to load graph data",
+      );
     } finally {
       setLoading(false);
     }

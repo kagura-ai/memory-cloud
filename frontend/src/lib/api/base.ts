@@ -5,13 +5,30 @@
  * Handles authentication, error handling, and response parsing.
  */
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
-export interface ApiError {
-  error?: string;  // Error code from backend (e.g., "RES-001", "AUTH-001")
-  message: string;
-  status: number;
-  details?: unknown;
+export interface ApiErrorDetails {
+  detail?: string;
+  [key: string]: unknown;
+}
+
+export class ApiError extends Error {
+  readonly error?: string; // Error code from backend (e.g., "RES-001", "AUTH-001")
+  readonly status: number;
+  readonly details?: ApiErrorDetails;
+
+  constructor(init: {
+    error?: string;
+    message: string;
+    status: number;
+    details?: unknown;
+  }) {
+    super(init.message);
+    this.name = "ApiError";
+    this.error = init.error;
+    this.status = init.status;
+    this.details = init.details as ApiErrorDetails | undefined;
+  }
 }
 
 export class ApiClient {
@@ -26,12 +43,12 @@ export class ApiClient {
    */
   private async fetch<T>(
     endpoint: string,
-    options: RequestInit = {}
+    options: RequestInit = {},
   ): Promise<T> {
     const url = `${this.baseUrl}${endpoint}`;
 
     const defaultHeaders: HeadersInit = {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
     };
 
     // Merge headers
@@ -44,7 +61,7 @@ export class ApiClient {
       const response = await fetch(url, {
         ...options,
         headers,
-        credentials: 'include', // Include cookies for session management
+        credentials: "include", // Include cookies for session management
       });
 
       // Handle non-OK responses
@@ -59,44 +76,47 @@ export class ApiClient {
 
         // Backend returns { error: "RES-001", message: "...", details: {...} }
         // FastAPI may also return { detail: "..." }
-        const errorMessage = errorDetails.message || errorDetails.detail || `HTTP ${response.status}: ${response.statusText}`;
+        const errorMessage =
+          errorDetails.message ||
+          errorDetails.detail ||
+          `HTTP ${response.status}: ${response.statusText}`;
         const errorCode = errorDetails.error;
 
-        throw {
+        throw new ApiError({
           error: errorCode,
           message: errorMessage,
           status: response.status,
           details: errorDetails.details || errorDetails,
-        } as ApiError;
+        });
       }
 
       // Handle empty responses (e.g., 204 No Content)
-      const contentLength = response.headers.get('content-length');
-      const contentType = response.headers.get('content-type');
+      const contentLength = response.headers.get("content-length");
+      const contentType = response.headers.get("content-type");
 
       // No content or empty body
-      if (response.status === 204 || contentLength === '0' || !contentType) {
+      if (response.status === 204 || contentLength === "0" || !contentType) {
         return {} as T;
       }
 
       // Non-JSON response
-      if (!contentType.includes('application/json')) {
+      if (!contentType.includes("application/json")) {
         return {} as T;
       }
 
       return (await response.json()) as T;
     } catch (error) {
       // Re-throw ApiError
-      if ((error as ApiError).status) {
+      if (error instanceof ApiError) {
         throw error;
       }
 
       // Wrap network errors
-      throw {
-        message: error instanceof Error ? error.message : 'Network error',
+      throw new ApiError({
+        message: error instanceof Error ? error.message : "Network error",
         status: 0,
         details: error,
-      } as ApiError;
+      });
     }
   }
 
@@ -106,7 +126,7 @@ export class ApiClient {
   async get<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
     return this.fetch<T>(endpoint, {
       ...options,
-      method: 'GET',
+      method: "GET",
     });
   }
 
@@ -116,11 +136,11 @@ export class ApiClient {
   async post<T>(
     endpoint: string,
     body?: unknown,
-    options: RequestInit = {}
+    options: RequestInit = {},
   ): Promise<T> {
     return this.fetch<T>(endpoint, {
       ...options,
-      method: 'POST',
+      method: "POST",
       body: body ? JSON.stringify(body) : undefined,
     });
   }
@@ -131,11 +151,11 @@ export class ApiClient {
   async put<T>(
     endpoint: string,
     body?: unknown,
-    options: RequestInit = {}
+    options: RequestInit = {},
   ): Promise<T> {
     return this.fetch<T>(endpoint, {
       ...options,
-      method: 'PUT',
+      method: "PUT",
       body: body ? JSON.stringify(body) : undefined,
     });
   }
@@ -146,11 +166,11 @@ export class ApiClient {
   async patch<T>(
     endpoint: string,
     body?: unknown,
-    options: RequestInit = {}
+    options: RequestInit = {},
   ): Promise<T> {
     return this.fetch<T>(endpoint, {
       ...options,
-      method: 'PATCH',
+      method: "PATCH",
       body: body ? JSON.stringify(body) : undefined,
     });
   }
@@ -161,7 +181,7 @@ export class ApiClient {
   async delete<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
     return this.fetch<T>(endpoint, {
       ...options,
-      method: 'DELETE',
+      method: "DELETE",
     });
   }
 }
@@ -190,14 +210,14 @@ export interface UpdateUserProfileRequest {
  * Get current user profile
  */
 export async function getUserProfile(): Promise<UserProfile> {
-  return apiClient.get<UserProfile>('/api/v1/users/profile');
+  return apiClient.get<UserProfile>("/api/v1/users/profile");
 }
 
 /**
  * Update current user profile
  */
 export async function updateUserProfile(
-  data: UpdateUserProfileRequest
+  data: UpdateUserProfileRequest,
 ): Promise<UserProfile> {
-  return apiClient.put<UserProfile>('/api/v1/users/profile', data);
+  return apiClient.put<UserProfile>("/api/v1/users/profile", data);
 }

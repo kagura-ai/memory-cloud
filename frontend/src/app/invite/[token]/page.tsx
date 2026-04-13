@@ -1,4 +1,4 @@
-'use client';
+"use client";
 
 /**
  * Accept Invitation Page
@@ -17,27 +17,27 @@
  * Next.js 15: params is now a Promise and must be unwrapped with React.use()
  */
 
-import { use, useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
-import { useTranslations } from 'next-intl';
+import { use, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
 import {
   acceptInvitation,
   getInvitationInfo,
   AcceptInvitationResponse,
   InvitationInfo,
-} from '@/lib/api/invitations';
-import { apiClient } from '@/lib/api/base';
-import { SpinnerLoading } from '@/components/common/LoadingState';
-import { LanguageSelector } from '@/components/LanguageSelector';
-import { Check, AlertCircle, LogIn, Mail } from 'lucide-react';
+} from "@/lib/api/invitations";
+import { apiClient, ApiError } from "@/lib/api/base";
+import { SpinnerLoading } from "@/components/common/LoadingState";
+import { LanguageSelector } from "@/components/LanguageSelector";
+import { Check, AlertCircle, LogIn, Mail } from "lucide-react";
 
 type PageState =
-  | 'loading'
-  | 'login_required'
-  | 'email_mismatch'
-  | 'accepting'
-  | 'success'
-  | 'error';
+  | "loading"
+  | "login_required"
+  | "email_mismatch"
+  | "accepting"
+  | "success"
+  | "error";
 
 interface CurrentUser {
   user_id: string;
@@ -52,10 +52,12 @@ export default function AcceptInvitationPage({
 }) {
   const router = useRouter();
   const { token } = use(params);
-  const t = useTranslations('invitation');
+  const t = useTranslations("invitation");
 
-  const [state, setState] = useState<PageState>('loading');
-  const [invitationInfo, setInvitationInfo] = useState<InvitationInfo | null>(null);
+  const [state, setState] = useState<PageState>("loading");
+  const [invitationInfo, setInvitationInfo] = useState<InvitationInfo | null>(
+    null,
+  );
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [result, setResult] = useState<AcceptInvitationResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -66,7 +68,7 @@ export default function AcceptInvitationPage({
 
   const initializeAcceptanceFlow = async () => {
     try {
-      setState('loading');
+      setState("loading");
 
       // Step 1: Load invitation info (public endpoint)
       const info = await getInvitationInfo(token);
@@ -77,7 +79,7 @@ export default function AcceptInvitationPage({
 
       if (!user) {
         // Not authenticated → Show login prompt
-        setState('login_required');
+        setState("login_required");
         return;
       }
 
@@ -92,64 +94,72 @@ export default function AcceptInvitationPage({
 
       // Step 4: Attempt to accept invitation
       await attemptAcceptInvitation(user);
-    } catch (err: any) {
-      console.error('Initialization error:', err);
-      console.error('Error details:', JSON.stringify(err, null, 2));
+    } catch (err: unknown) {
+      console.error("Initialization error:", err);
 
-      // Extract error message with multiple fallbacks
-      let errorMessage = 'Failed to load invitation';
-
-      if (err.status === 404) {
-        errorMessage = 'Invitation not found or invalid';
-      } else if (err.status === 410) {
-        errorMessage = err.details?.detail || err.message || 'This invitation has expired or been accepted';
-      } else if (err.details?.detail) {
-        errorMessage = err.details.detail;
-      } else if (err.message) {
+      let errorMessage = "Failed to load invitation";
+      if (err instanceof ApiError) {
+        if (err.status === 404) {
+          errorMessage = "Invitation not found or invalid";
+        } else if (err.status === 410) {
+          errorMessage =
+            err.details?.detail ||
+            err.message ||
+            "This invitation has expired or been accepted";
+        } else if (err.details?.detail) {
+          errorMessage = err.details.detail;
+        } else {
+          errorMessage = err.message;
+        }
+      } else if (err instanceof Error) {
         errorMessage = err.message;
       }
 
       setError(errorMessage);
-      setState('error');
+      setState("error");
     }
   };
 
   const checkAuthentication = async (): Promise<CurrentUser | null> => {
     try {
-      const user = await apiClient.get<CurrentUser>('/api/v1/auth/me');
+      const user = await apiClient.get<CurrentUser>("/api/v1/auth/me");
       return user;
-    } catch (err: any) {
+    } catch {
       return null; // Not authenticated
     }
   };
 
   const attemptAcceptInvitation = async (user: CurrentUser) => {
     try {
-      setState('accepting');
+      setState("accepting");
       const response = await acceptInvitation(token);
       setResult(response);
-      setState('success');
+      setState("success");
 
       // Redirect after 3 seconds
       setTimeout(() => {
-        router.push('/workspace/members');
+        router.push("/workspace/members");
       }, 3000);
-    } catch (err: any) {
-      console.error('[INVITE] ❌ Acceptance failed');
-      console.error('[INVITE] Error object:', err);
-      console.error('[INVITE] Error stringified:', JSON.stringify(err, null, 2));
+    } catch (err: unknown) {
+      console.error("[INVITE] ❌ Acceptance failed:", err);
 
-      const errorMessage = err.details?.detail || err.message || 'Failed to accept invitation';
+      const apiError = err instanceof ApiError ? err : null;
+      const errorMessage =
+        apiError?.details?.detail ||
+        (err instanceof Error ? err.message : "Failed to accept invitation");
 
       // Check if it's an email mismatch error
-      if (errorMessage.includes('restricted to') && errorMessage.includes('logged in as')) {
-        setState('email_mismatch');
+      if (
+        errorMessage.includes("restricted to") &&
+        errorMessage.includes("logged in as")
+      ) {
+        setState("email_mismatch");
         setError(errorMessage);
-      } else if (errorMessage.includes('already a member')) {
+      } else if (errorMessage.includes("already a member")) {
         // Already a member - treat as success
-        router.push('/workspace/members');
+        router.push("/workspace/members");
       } else {
-        setState('error');
+        setState("error");
         setError(errorMessage);
       }
     }
@@ -158,7 +168,8 @@ export default function AcceptInvitationPage({
   const handleLogin = () => {
     const currentUrl = window.location.href;
     // Get backend API URL (defaults to localhost:8080 in dev)
-    const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+    const apiBaseUrl =
+      process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
     // Redirect to backend OAuth endpoint with full URL
     window.location.href = `${apiBaseUrl}/api/v1/auth/google/login?return_to=${encodeURIComponent(currentUrl)}`;
   };
@@ -166,35 +177,38 @@ export default function AcceptInvitationPage({
   const handleLogout = async () => {
     try {
       // Call logout API (POST)
-      await apiClient.post('/api/v1/auth/logout', {});
+      await apiClient.post("/api/v1/auth/logout", {});
       // Reload page to re-check auth status
       window.location.reload();
     } catch (err) {
-      console.error('Logout failed:', err);
+      console.error("Logout failed:", err);
       // Force reload anyway
       window.location.reload();
     }
   };
 
   const maskEmail = (email: string): string => {
-    if (!email || !email.includes('@')) return email;
+    if (!email || !email.includes("@")) return email;
 
-    const [localPart, domain] = email.split('@');
+    const [localPart, domain] = email.split("@");
 
     // Mask local part: show first 2 chars + *** + last char
     let maskedLocal = localPart;
     if (localPart.length > 3) {
-      maskedLocal = localPart.substring(0, 2) + '***' + localPart.substring(localPart.length - 1);
+      maskedLocal =
+        localPart.substring(0, 2) +
+        "***" +
+        localPart.substring(localPart.length - 1);
     } else if (localPart.length > 1) {
-      maskedLocal = localPart[0] + '***';
+      maskedLocal = localPart[0] + "***";
     }
 
     // Mask domain: show first char + *** + TLD
-    const domainParts = domain.split('.');
+    const domainParts = domain.split(".");
     if (domainParts.length > 1) {
       const baseDomain = domainParts[0];
-      const tld = domainParts.slice(1).join('.');
-      const maskedDomain = baseDomain[0] + '***.' + tld;
+      const tld = domainParts.slice(1).join(".");
+      const maskedDomain = baseDomain[0] + "***." + tld;
       return `${maskedLocal}@${maskedDomain}`;
     }
 
@@ -202,7 +216,7 @@ export default function AcceptInvitationPage({
   };
 
   // Loading State
-  if (state === 'loading' || state === 'accepting') {
+  if (state === "loading" || state === "accepting") {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
         <div className="absolute top-4 right-4">
@@ -210,7 +224,9 @@ export default function AcceptInvitationPage({
         </div>
         <div className="text-center">
           <SpinnerLoading
-            message={state === 'loading' ? t('status.loading') : t('status.accepting')}
+            message={
+              state === "loading" ? t("status.loading") : t("status.accepting")
+            }
           />
         </div>
       </div>
@@ -218,7 +234,7 @@ export default function AcceptInvitationPage({
   }
 
   // Login Required State
-  if (state === 'login_required') {
+  if (state === "login_required") {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 p-4">
         <div className="absolute top-4 right-4">
@@ -231,14 +247,15 @@ export default function AcceptInvitationPage({
             </div>
 
             <h2 className="text-2xl font-bold text-center text-gray-900 dark:text-gray-100 mb-2">
-              {t('loginRequired.title')}
+              {t("loginRequired.title")}
             </h2>
 
             <p className="text-center text-gray-600 dark:text-gray-400 mb-6">
-              {t('loginRequired.message')}
+              {t("loginRequired.message")}
               {invitationInfo && (
                 <>
-                  {' '}{t('loginRequired.messageTo')}{' '}
+                  {" "}
+                  {t("loginRequired.messageTo")}{" "}
                   <strong className="text-gray-900 dark:text-gray-100">
                     {invitationInfo.workspace_name}
                   </strong>
@@ -251,11 +268,11 @@ export default function AcceptInvitationPage({
               className="w-full px-6 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-lg font-medium mb-4"
             >
               <LogIn className="w-5 h-5" />
-              {t('loginRequired.loginButton')}
+              {t("loginRequired.loginButton")}
             </button>
 
             <p className="text-xs text-center text-gray-500 dark:text-gray-400">
-              {t('loginRequired.noAccount')}
+              {t("loginRequired.noAccount")}
             </p>
           </div>
         </div>
@@ -264,12 +281,14 @@ export default function AcceptInvitationPage({
   }
 
   // Email Mismatch State
-  if (state === 'email_mismatch') {
+  if (state === "email_mismatch") {
     // Extract emails from error message (capture full email with @domain)
-    const restrictedMatch = error?.match(/restricted to ([^\s]+@[^\s.]+\.[^\s]+)/);
+    const restrictedMatch = error?.match(
+      /restricted to ([^\s]+@[^\s.]+\.[^\s]+)/,
+    );
     const loggedInMatch = error?.match(/logged in as ([^\s]+@[^\s.]+\.[^\s]+)/);
-    const requiredEmail = restrictedMatch?.[1] || 'the invited email';
-    const userEmail = loggedInMatch?.[1] || currentUser?.email || 'unknown';
+    const requiredEmail = restrictedMatch?.[1] || "the invited email";
+    const userEmail = loggedInMatch?.[1] || currentUser?.email || "unknown";
 
     // Mask emails for privacy
     const maskedRequired = maskEmail(requiredEmail);
@@ -287,23 +306,25 @@ export default function AcceptInvitationPage({
             </div>
 
             <h2 className="text-2xl font-bold text-center text-gray-900 dark:text-gray-100 mb-2">
-              {t('emailMismatch.title')}
+              {t("emailMismatch.title")}
             </h2>
 
             <div className="space-y-4 mb-6">
               <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
                 <p className="text-sm text-blue-900 dark:text-blue-100 mb-2 font-medium">
-                  {t('emailMismatch.required')}
+                  {t("emailMismatch.required")}
                 </p>
                 <div className="flex items-center gap-2 text-blue-700 dark:text-blue-300">
                   <Mail className="w-4 h-4" />
-                  <span className="font-mono font-semibold">{maskedRequired}</span>
+                  <span className="font-mono font-semibold">
+                    {maskedRequired}
+                  </span>
                 </div>
               </div>
 
               <div className="bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
                 <p className="text-sm text-gray-700 dark:text-gray-300 mb-2">
-                  {t('emailMismatch.currentlyLoggedIn')}
+                  {t("emailMismatch.currentlyLoggedIn")}
                 </p>
                 <div className="flex items-center gap-2 text-gray-600 dark:text-gray-400">
                   <Mail className="w-4 h-4" />
@@ -317,11 +338,11 @@ export default function AcceptInvitationPage({
               className="w-full px-6 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-lg font-medium mb-4"
             >
               <LogIn className="w-5 h-5" />
-              {t('emailMismatch.logoutButton')}
+              {t("emailMismatch.logoutButton")}
             </button>
 
             <p className="text-xs text-center text-gray-500 dark:text-gray-400">
-              {t('emailMismatch.returnNote')}
+              {t("emailMismatch.returnNote")}
             </p>
           </div>
         </div>
@@ -330,7 +351,7 @@ export default function AcceptInvitationPage({
   }
 
   // Success State
-  if (state === 'success' && result) {
+  if (state === "success" && result) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 p-4">
         <div className="absolute top-4 right-4">
@@ -343,11 +364,11 @@ export default function AcceptInvitationPage({
             </div>
 
             <h2 className="text-2xl font-bold text-center text-gray-900 dark:text-gray-100 mb-2">
-              {t('success.title', { workspaceName: result.workspace.name })}
+              {t("success.title", { workspaceName: result.workspace.name })}
             </h2>
 
             <p className="text-center text-gray-600 dark:text-gray-400 mb-6">
-              {t('success.message')}{' '}
+              {t("success.message")}{" "}
               <strong className="text-blue-600 dark:text-blue-400">
                 {t(`roles.${result.member.role.toLowerCase()}`)}
               </strong>
@@ -355,20 +376,20 @@ export default function AcceptInvitationPage({
 
             <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-6">
               <p className="text-sm text-blue-800 dark:text-blue-200">
-                {t('success.accessNote')}
+                {t("success.accessNote")}
               </p>
             </div>
 
             <div className="text-center">
               <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-                {t('success.redirecting')}
+                {t("success.redirecting")}
               </p>
 
               <button
-                onClick={() => router.push('/workspace/members')}
+                onClick={() => router.push("/workspace/members")}
                 className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
               >
-                {t('success.goToWorkspace')}
+                {t("success.goToWorkspace")}
               </button>
             </div>
           </div>
@@ -378,7 +399,7 @@ export default function AcceptInvitationPage({
   }
 
   // Error State
-  if (state === 'error') {
+  if (state === "error") {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 p-4">
         <div className="absolute top-4 right-4">
@@ -391,26 +412,28 @@ export default function AcceptInvitationPage({
             </div>
 
             <h2 className="text-2xl font-bold text-center text-gray-900 dark:text-gray-100 mb-2">
-              {t('error.title')}
+              {t("error.title")}
             </h2>
 
-            <p className="text-center text-red-600 dark:text-red-400 mb-6">{error}</p>
+            <p className="text-center text-red-600 dark:text-red-400 mb-6">
+              {error}
+            </p>
 
             <div className="space-y-2 text-sm text-gray-600 dark:text-gray-400 mb-6">
-              <p>{t('error.mayHave')}</p>
+              <p>{t("error.mayHave")}</p>
               <ul className="list-disc list-inside space-y-1 ml-4">
-                <li>{t('error.alreadyAccepted')}</li>
-                <li>{t('error.expired')}</li>
-                <li>{t('error.revoked')}</li>
-                <li>{t('error.invalidToken')}</li>
+                <li>{t("error.alreadyAccepted")}</li>
+                <li>{t("error.expired")}</li>
+                <li>{t("error.revoked")}</li>
+                <li>{t("error.invalidToken")}</li>
               </ul>
             </div>
 
             <button
-              onClick={() => router.push('/workspace/dashboard')}
+              onClick={() => router.push("/workspace/dashboard")}
               className="w-full px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 transition-colors"
             >
-              {t('error.goToDashboard')}
+              {t("error.goToDashboard")}
             </button>
           </div>
         </div>

@@ -27,7 +27,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { RefreshCw, Eye, ChevronLeft, ChevronRight, Play } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import type { ApiError } from "@/lib/api";
+import { ApiError } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/utils/datetime";
 import {
   getSleepStatusColor,
@@ -123,12 +123,11 @@ export default function AdminSleepReportsPage() {
       });
       await loadReports();
     } catch (err) {
-      const apiErr = err as ApiError;
+      const apiErr = err instanceof ApiError ? err : null;
       if (apiErr?.status === 409) {
-        const details = apiErr.details as
-          | { running_report_id?: string }
+        const runningReportId = apiErr.details?.running_report_id as
+          | string
           | undefined;
-        const runningReportId = details?.running_report_id;
         toast({
           title: t("messages.runConflict"),
           description: runningReportId ? (
@@ -144,7 +143,8 @@ export default function AdminSleepReportsPage() {
       } else {
         toast({
           title: tCommon("error"),
-          description: apiErr?.message || t("messages.runError"),
+          description:
+            err instanceof Error ? err.message : t("messages.runError"),
           variant: "destructive",
         });
       }

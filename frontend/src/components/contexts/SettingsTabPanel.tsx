@@ -150,10 +150,9 @@ export function SettingsTabPanel({
       });
       await refreshContext();
     } catch (err: unknown) {
-      const apiError = err as { message?: string };
       toast({
         title: t("saveFailedTitle"),
-        description: apiError?.message || t("saveFailedDesc"),
+        description: err instanceof Error ? err.message : t("saveFailedDesc"),
         variant: "destructive",
         duration: 6000,
       });
