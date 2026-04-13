@@ -124,7 +124,6 @@ async def openid_configuration(request: Request):
         # Additional OpenID Connect fields (optional but recommended)
         "response_modes_supported": ["query"],
         "subject_types_supported": ["public"],
-        "id_token_signing_alg_values_supported": ["RS256", "HS256"],
     }
 
 
