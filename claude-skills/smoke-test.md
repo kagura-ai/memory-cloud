@@ -50,7 +50,7 @@ remember(
   source_uri="file:///smoke-test/test-memory.md",
   source_type="file"
 )
--> Verify: returns memory with id (UUID format)
+-> Verify: returns a success response containing memory_id (UUID format)
 -> Save returned memory_id
 -> Note: source_uri/source_type are persisted but not in the remember response; validated via recall filters in step 4
 ```
@@ -68,10 +68,10 @@ recall(context_id=..., query="smoke test memory", k=5, include_explore_hints=tru
 -> Verify: empty explore_hints is acceptable (best-effort generation) and should not fail the smoke test
 
 recall(context_id=..., query="smoke test memory", k=5, filters={"source_uri_prefix": "file:///smoke-test/"})
--> Verify: returns results filtered to memories with matching source_uri
+-> Verify: results contain the memory_id from step 3 (confirms source_uri filter works)
 
 recall(context_id=..., query="smoke test memory", k=5, filters={"source_type": "file"})
--> Verify: returns results filtered to memories with source_type="file"
+-> Verify: results contain the memory_id from step 3 (confirms source_type filter works)
 
 reference(memory_id=..., context_id=...)
 -> Verify: returns full memory with summary, content, tags matching step 3
