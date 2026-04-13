@@ -1329,7 +1329,7 @@ async def oauth_authorize_get(
         client_id=client_id,
         state=state,
         resource=resource,
-        pkce_present=code_challenge is not None,
+        pkce_present=bool(code_challenge),
         code_challenge_method=code_challenge_method,
     )
 
