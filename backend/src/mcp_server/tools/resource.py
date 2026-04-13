@@ -232,6 +232,8 @@ async def handle_get_resource_schema(
                     schema_version = int(schema_version)
                 except (ValueError, TypeError):
                     return _error_response("validation_error", "schema_version must be an integer.")
+                if schema_version < 1:
+                    return _error_response("validation_error", "schema_version must be >= 1.")
                 query = query.where(ResourceSchema.schema_version == schema_version)
             else:
                 query = query.order_by(ResourceSchema.schema_version.desc())
@@ -245,7 +247,7 @@ async def handle_get_resource_schema(
                 return _error_response(
                     "schema_not_found",
                     f"No schema found for resource '{resource_id}'."
-                    + (f" (version {schema_version})" if schema_version else ""),
+                    + (f" (version {schema_version})" if schema_version is not None else ""),
                     help="Use the REST API to create a schema first.",
                 )
 
@@ -498,11 +500,21 @@ async def handle_ingest_events(
                     errors.append({"index": i, "error": "importance must be between 0.0 and 1.0"})
                     continue
 
+                # Coerce version for delete (optional, may be None)
+                if op == "delete":
+                    version = event_data.get("version")
+                    if version is not None:
+                        try:
+                            version = int(version)
+                        except (ValueError, TypeError):
+                            errors.append({"index": i, "error": "version must be an integer"})
+                            continue
+
                 event = ResourceEvent(
                     resource_id=resource_id,
                     op=op,
                     doc_id=doc_id,
-                    version=event_data.get("version"),
+                    version=version,
                     payload=payload if op == "upsert" else None,
                     idempotency_key=event_data.get("idempotency_key"),
                     event_metadata=event_data.get("event_metadata", {}),
