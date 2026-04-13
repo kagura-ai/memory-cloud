@@ -311,8 +311,11 @@ async def handle_list_resource_tokens(
             from models.resource import ResourceToken
 
             include_revoked = args.get("include_revoked", True)
-            limit = min(int(args.get("limit", 50)), 100)
-            offset = max(int(args.get("offset", 0)), 0)
+            try:
+                limit = min(max(int(args.get("limit", 50)), 1), 100)
+                offset = max(int(args.get("offset", 0)), 0)
+            except (ValueError, TypeError):
+                return _error_response("validation_error", "limit and offset must be integers.")
 
             # Workspace-scoped token query using EXISTS subquery
             workspace_filter = exists().where(
@@ -452,14 +455,19 @@ async def handle_ingest_events(
 
                 payload = event_data.get("payload")
 
-                # Upsert requires payload
-                if op == "upsert" and not payload:
-                    errors.append({"index": i, "error": "payload required for upsert"})
-                    continue
+                # Upsert requires payload and version >= 1
+                if op == "upsert":
+                    if not payload:
+                        errors.append({"index": i, "error": "payload required for upsert"})
+                        continue
+                    version = event_data.get("version")
+                    if version is None or (isinstance(version, int) and version < 1):
+                        errors.append({"index": i, "error": "version >= 1 required for upsert"})
+                        continue
 
                 # Payload size check
                 if payload:
-                    payload_size = len(json.dumps(payload))
+                    payload_size = len(json.dumps(payload).encode("utf-8"))
                     if payload_size > _MAX_PAYLOAD_SIZE_BYTES:
                         errors.append(
                             {
@@ -701,14 +709,26 @@ async def handle_setup_resource(
                     help="Revoke unused tokens or upgrade your plan.",
                 )
 
-            # 11. Create resource token
+            # 11. Validate and create resource token
+            try:
+                quota_events_per_hour = int(args.get("quota_events_per_hour", 1000))
+            except (ValueError, TypeError):
+                return _error_response(
+                    "validation_error", "quota_events_per_hour must be an integer."
+                )
+            if quota_events_per_hour < 1 or quota_events_per_hour > 10000:
+                return _error_response(
+                    "validation_error",
+                    "quota_events_per_hour must be between 1 and 10000.",
+                )
+
             from auth.resource_tokens import ResourceTokenManager
 
             manager = ResourceTokenManager(db)
             plaintext_token, token_record = await manager.create_token(
                 resource_id=resource_id,
                 description=args.get("description"),
-                quota_events_per_hour=args.get("quota_events_per_hour", 1000),
+                quota_events_per_hour=quota_events_per_hour,
                 created_by=user_id,
             )
 
