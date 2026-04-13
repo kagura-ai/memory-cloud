@@ -55,7 +55,7 @@ def _validate_resource_id(resource_id: str) -> list[TextContent] | None:
         return _error_response(
             "validation_error",
             f"Invalid resource_id format: '{resource_id}'. "
-            "Must be lowercase alphanumeric and underscores only.",
+            "Must be lowercase alphanumeric, underscores, and hyphens only.",
         )
     return None
 
@@ -228,7 +228,11 @@ async def handle_get_resource_schema(
 
             schema_version = args.get("schema_version")
             if schema_version is not None:
-                query = query.where(ResourceSchema.schema_version == int(schema_version))
+                try:
+                    schema_version = int(schema_version)
+                except (ValueError, TypeError):
+                    return _error_response("validation_error", "schema_version must be an integer.")
+                query = query.where(ResourceSchema.schema_version == schema_version)
             else:
                 query = query.order_by(ResourceSchema.schema_version.desc())
 
@@ -461,7 +465,12 @@ async def handle_ingest_events(
                         errors.append({"index": i, "error": "payload required for upsert"})
                         continue
                     version = event_data.get("version")
-                    if version is None or (isinstance(version, int) and version < 1):
+                    try:
+                        version = int(version) if version is not None else None
+                    except (ValueError, TypeError):
+                        errors.append({"index": i, "error": "version must be an integer"})
+                        continue
+                    if version is None or version < 1:
                         errors.append({"index": i, "error": "version >= 1 required for upsert"})
                         continue
 
@@ -478,6 +487,17 @@ async def handle_ingest_events(
                         )
                         continue
 
+                # Validate importance range
+                importance = event_data.get("importance", 0.6)
+                try:
+                    importance = float(importance)
+                except (ValueError, TypeError):
+                    errors.append({"index": i, "error": "importance must be a number"})
+                    continue
+                if importance < 0.0 or importance > 1.0:
+                    errors.append({"index": i, "error": "importance must be between 0.0 and 1.0"})
+                    continue
+
                 event = ResourceEvent(
                     resource_id=resource_id,
                     op=op,
@@ -486,7 +506,7 @@ async def handle_ingest_events(
                     payload=payload if op == "upsert" else None,
                     idempotency_key=event_data.get("idempotency_key"),
                     event_metadata=event_data.get("event_metadata", {}),
-                    importance=event_data.get("importance", 0.6),
+                    importance=importance,
                 )
 
                 try:
@@ -759,7 +779,20 @@ async def handle_setup_resource(
         except Exception as e:
             await db.rollback()
             error_str = str(e)
-            if "already exists" in error_str:
+
+            # Map known constraint failures to sanitized responses
+            from sqlalchemy.exc import IntegrityError as SQLIntegrityError
+
+            if isinstance(e, SQLIntegrityError) or "already exists" in error_str:
+                if "unique_context_resource_id" in error_str or "resource_id" in error_str:
+                    sanitized_msg = f"resource_id '{resource_id}' is already in use."
+                    error_code = "resource_id_conflict"
+                elif "unique_context_name" in error_str or "already exists" in error_str:
+                    sanitized_msg = f"Context name '{name}' already exists in this workspace."
+                    error_code = "context_name_conflict"
+                else:
+                    sanitized_msg = "A uniqueness constraint was violated."
+                    error_code = "conflict"
                 await _log_tool_usage(
                     db,
                     user_id,
@@ -769,8 +802,8 @@ async def handle_setup_resource(
                     workspace_id=workspace_id,
                 )
                 return _error_response(
-                    "validation_error",
-                    error_str,
+                    error_code,
+                    sanitized_msg,
                     help="Check the context name and resource_id.",
                 )
             logger.error(f"setup_resource_failed: {e}", exc_info=True)
