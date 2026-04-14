@@ -45,6 +45,31 @@ Independent writes will silently diverge and break the invariant this
 migration is preparing. The legacy ``resource_id`` column will be
 dropped once every writer has switched over (tracked under epic #321).
 
+Restart semantics after a mid-migration failure
+-----------------------------------------------
+``autocommit_block`` commits the preceding transactional DDL (table
+creation, column adds, backfills, FKs, plain UNIQUE indexes) before
+entering the ``CREATE INDEX CONCURRENTLY`` section. If the concurrent
+build itself fails (disk, cancellation, duplicate rows inserted after
+Step 10's duplicate audit), the earlier DDL is already persisted:
+
+- the ``CREATE INDEX CONCURRENTLY IF NOT EXISTS`` guard on retry is
+  safe because the INVALID-index detection above it drops the broken
+  index before the re-run, mirroring the a96 pattern that has shipped
+  to production;
+- the preceding DDL is NOT guarded by ``IF NOT EXISTS`` — that would
+  require raw SQL for every ``op.create_table`` / ``op.add_column``.
+  A retry after a committed-then-failed run therefore requires the
+  operator to manually clean up (``DROP TABLE resources CASCADE`` and
+  the per-satellite ``ALTER TABLE ... DROP COLUMN resource_pk``)
+  before re-invoking the migration.
+
+This trade-off matches the a96 precedent. Splitting the concurrent
+index into a follow-up migration would remove the gap but would also
+fragment the Phase 1 schema step across two revisions; given the
+pre-v1 scale of ``resource_events``, the simpler single-migration
+shape is preferred.
+
 UNIQUE constraint semantics during Phase 1
 -------------------------------------------
 The three UNIQUE constraints are added as **partial indexes** with
@@ -168,7 +193,52 @@ def upgrade() -> None:
         )
     )
 
-    # --- Step 3: pre-migration audit (fail fast on orphans) ---------------
+    # --- Step 3a: cross-workspace ambiguity audit -------------------------
+    # a96 enforces uniqueness only among active contexts. If the same
+    # ``resource_id`` slug was once owned by workspace A (context later
+    # soft-deleted, which keeps resource_id populated) and is now owned
+    # by workspace B, the Step 5 backfill UPDATE — which joins satellite
+    # rows to ``resources`` on ``resource_id`` alone — would silently
+    # re-home workspace A's historical satellite rows onto workspace
+    # B's resources row. That is the exact tenancy-boundary violation
+    # this refactor is meant to prevent, so abort fast with operator
+    # guidance. Detection scans contexts (including deleted) plus
+    # satellite rows; the violation fires only when BOTH conditions
+    # hold (otherwise there is nothing to re-home).
+    ambiguity_rows = bind.execute(
+        sa.text(
+            "WITH resource_owners AS ( "
+            "  SELECT resource_id, COUNT(DISTINCT workspace_id) AS ws_count "
+            "  FROM contexts "
+            "  WHERE resource_id IS NOT NULL "
+            "  GROUP BY resource_id "
+            "  HAVING COUNT(DISTINCT workspace_id) > 1 "
+            "), satellite_slugs AS ( "
+            "  SELECT resource_id FROM resource_events "
+            "  UNION SELECT resource_id FROM resource_schemas "
+            "  UNION SELECT resource_id FROM indexer_state "
+            "  UNION SELECT resource_id FROM resource_tokens "
+            ") "
+            "SELECT ro.resource_id, ro.ws_count "
+            "FROM resource_owners ro "
+            "JOIN satellite_slugs ss ON ss.resource_id = ro.resource_id "
+            "LIMIT :limit"
+        ),
+        {"limit": _MAX_AUDIT_EXAMPLES},
+    ).fetchall()
+    if ambiguity_rows:
+        examples = ", ".join(f"'{rid}' owned by {wc} workspaces" for rid, wc in ambiguity_rows)
+        raise RuntimeError(
+            "Migration aborted: resource_id slugs exist across multiple "
+            "workspaces (including soft-deleted contexts) with satellite "
+            f"rows that would be re-homed to the wrong workspace (examples: "
+            f"{examples}). Rename or remove the duplicate slugs, or delete "
+            "the stale satellite rows from the non-current workspace, "
+            "before re-running this migration. This check prevents silent "
+            "cross-tenant data mixing during the shadow-column backfill."
+        )
+
+    # --- Step 3b: orphan audit (fail fast on rows without a matching active context)
     # Any satellite row whose resource_id has no resources entry would
     # survive Step 5 with resource_pk still NULL, leaving the backfill
     # incomplete. Raise with actionable examples so the operator can
@@ -223,15 +293,44 @@ def upgrade() -> None:
                 "WHERE r.resource_id = s.resource_id"
             )
         )
-        op.create_foreign_key(
-            f"fk_{table}_resource_pk",
-            table,
-            "resources",
-            ["resource_pk"],
-            ["id"],
-            ondelete="CASCADE",
-        )
-        if table != "resource_events":
+        if table == "resource_events":
+            # resource_events is the high-write append-only log — add the
+            # FK with NOT VALID so ADD CONSTRAINT skips the synchronous
+            # table scan (avoids an ACCESS EXCLUSIVE lock that would
+            # stall ingest for the scan duration). VALIDATE CONSTRAINT
+            # runs below under SHARE UPDATE EXCLUSIVE, which does not
+            # block reads/writes. Future inserts are checked as they
+            # happen, so the FK is enforced from the moment it is added
+            # — only the one-time validation of pre-existing rows is
+            # deferred.
+            op.execute(
+                sa.text(
+                    f"ALTER TABLE {table} "  # noqa: S608 -- table name is module-constant
+                    f"ADD CONSTRAINT fk_{table}_resource_pk "
+                    "FOREIGN KEY (resource_pk) "
+                    "REFERENCES resources (id) "
+                    "ON DELETE CASCADE "
+                    "NOT VALID"
+                )
+            )
+            op.execute(
+                sa.text(
+                    f"ALTER TABLE {table} "  # noqa: S608
+                    f"VALIDATE CONSTRAINT fk_{table}_resource_pk"
+                )
+            )
+            # The non-unique ix_resource_events_resource_pk index is
+            # built via CREATE INDEX CONCURRENTLY inside Step 10's
+            # autocommit_block, together with the partial UNIQUE.
+        else:
+            op.create_foreign_key(
+                f"fk_{table}_resource_pk",
+                table,
+                "resources",
+                ["resource_pk"],
+                ["id"],
+                ondelete="CASCADE",
+            )
             op.create_index(
                 f"ix_{table}_resource_pk",
                 table,
