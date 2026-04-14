@@ -432,7 +432,13 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 | `get_resource_schema` | Get field definitions for a resource |
 | `list_resource_tokens` | List resource tokens for your workspace |
 
-Most tools require `context_id`. Exceptions: `list_contexts`, `create_context`, `update_context`, `merge_contexts`, `get_usage` (no single context needed), `get_sleep_report` and `rollback_sleep_run` (use `report_id` instead), and all resource tools (`setup_resource`, `ingest_events`, `get_resource_impact`, `get_resource_schema`, `list_resource_tokens`) which use `resource_id` instead.
+Most context-scoped tools take a single `context_id`. Exceptions:
+
+- `list_contexts`, `create_context`, `get_usage` — no context identifier needed.
+- `update_context` — requires `context_id` (despite being a context-management tool).
+- `merge_contexts` — requires both `source_context_id` and `target_context_id`.
+- `get_sleep_report`, `rollback_sleep_run` — use `report_id` instead.
+- Resource tools (`setup_resource`, `ingest_events`, `get_resource_impact`, `get_resource_schema`, `list_resource_tokens`) — use `resource_id` instead.
 
 ---
 

@@ -129,28 +129,43 @@ async def handle_get_resource_impact(
             if boundary_err:
                 return boundary_err
 
-            # Combined stats query (same pattern as resource_schema.py)
+            # Combined stats query — all subqueries workspace-scoped to prevent
+            # cross-workspace leakage when resource_id collides across workspaces
+            # (resource_id is unique per workspace, not globally).
             from sqlalchemy import func, select
 
+            from models.auth import Context
             from models.memory import Memory
             from models.resource import ResourceSchema, ResourceToken
 
             token_count_subq = (
                 select(func.count(ResourceToken.id))
+                .join(Context, Context.resource_id == ResourceToken.resource_id)
                 .where(
                     ResourceToken.resource_id == resource_id,
                     ResourceToken.is_active == True,  # noqa: E712
+                    Context.workspace_id == workspace_id,
+                    Context.deleted_at.is_(None),
                 )
                 .scalar_subquery()
             )
             memory_count_subq = (
                 select(func.count(Memory.id))
-                .where(Memory.resource_id == resource_id, Memory.deleted_at.is_(None))
+                .where(
+                    Memory.resource_id == resource_id,
+                    Memory.deleted_at.is_(None),
+                    Memory.workspace_id == workspace_id,
+                )
                 .scalar_subquery()
             )
             schema_version_subq = (
                 select(func.max(ResourceSchema.schema_version))
-                .where(ResourceSchema.resource_id == resource_id)
+                .join(Context, Context.resource_id == ResourceSchema.resource_id)
+                .where(
+                    ResourceSchema.resource_id == resource_id,
+                    Context.workspace_id == workspace_id,
+                    Context.deleted_at.is_(None),
+                )
                 .scalar_subquery()
             )
 
@@ -222,9 +237,20 @@ async def handle_get_resource_schema(
 
             from sqlalchemy import select
 
+            from models.auth import Context
             from models.resource import ResourceSchema
 
-            query = select(ResourceSchema).where(ResourceSchema.resource_id == resource_id)
+            # Workspace-scope the schema lookup (resource_id is unique per workspace,
+            # not globally — join via Context to avoid cross-workspace leakage).
+            query = (
+                select(ResourceSchema)
+                .join(Context, Context.resource_id == ResourceSchema.resource_id)
+                .where(
+                    ResourceSchema.resource_id == resource_id,
+                    Context.workspace_id == workspace_id,
+                    Context.deleted_at.is_(None),
+                )
+            )
 
             schema_version = args.get("schema_version")
             if schema_version is not None:
@@ -302,8 +328,11 @@ async def handle_list_resource_tokens(
 
             resource_id = args.get("resource_id")
 
-            # Workspace boundary check if filtering by resource_id
+            # Validate + workspace boundary check if filtering by resource_id
             if resource_id:
+                format_err = _validate_resource_id(resource_id)
+                if format_err:
+                    return format_err
                 boundary_err = await _check_resource_workspace_boundary(
                     db, resource_id, workspace_id
                 )
@@ -553,7 +582,20 @@ async def handle_ingest_events(
                             }
                         )
                     else:
-                        errors.append({"index": i, "error": error_msg})
+                        # Do not leak raw DB constraint details to clients
+                        logger.warning(
+                            "ingest_events integrity error: resource_id=%s index=%s doc_id=%s",
+                            resource_id,
+                            i,
+                            doc_id,
+                            exc_info=ie,
+                        )
+                        errors.append(
+                            {
+                                "index": i,
+                                "error": "Unable to ingest event due to a constraint violation",
+                            }
+                        )
                     continue
 
             # Schedule indexer if any events were created
