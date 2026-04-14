@@ -121,7 +121,13 @@ def upgrade() -> None:
             nullable=False,
             index=True,
         ),
-        sa.Column("resource_id", sa.String(255), nullable=False),
+        # ``resource_id`` gets a standalone non-unique index so the Step
+        # 3 orphan audit and Step 5 backfill UPDATEs can resolve the
+        # ``resource_id`` slug without a sequential scan. The composite
+        # ``UNIQUE(workspace_id, resource_id)`` below cannot serve those
+        # lookups efficiently because the leading column is
+        # ``workspace_id``.
+        sa.Column("resource_id", sa.String(255), nullable=False, index=True),
         # name / created_by are populated by later setup flows (issue #324+);
         # the migration cannot infer them from contexts alone.
         sa.Column("name", sa.Text(), nullable=True),
@@ -193,6 +199,13 @@ def upgrade() -> None:
     # resource_pk stays nullable so existing writers that only supply
     # resource_id keep working until application updates land (#324).
     # The follow-up migration (#325) tightens to NOT NULL.
+    #
+    # Index creation is split by table: the three low-write satellites
+    # use a regular ``op.create_index`` (brief ACCESS EXCLUSIVE is fine
+    # at their volume), while ``resource_events`` — the append-only
+    # high-write log — gets its index built via
+    # ``CREATE INDEX CONCURRENTLY`` further below to avoid blocking
+    # writes during the build.
     for table in _SATELLITE_TABLES:
         op.add_column(
             table,
@@ -215,11 +228,12 @@ def upgrade() -> None:
             ["id"],
             ondelete="CASCADE",
         )
-        op.create_index(
-            f"ix_{table}_resource_pk",
-            table,
-            ["resource_pk"],
-        )
+        if table != "resource_events":
+            op.create_index(
+                f"ix_{table}_resource_pk",
+                table,
+                ["resource_pk"],
+            )
 
     # --- Step 7-9: resource_tokens.workspace_id shadow FK ----------------
     # Added separately from the resource_pk loop because the backfill
@@ -253,7 +267,57 @@ def upgrade() -> None:
         ["workspace_id"],
     )
 
-    # --- Step 10: partial UNIQUE indexes (Phase 1 semantics) --------------
+    # --- Step 10: pre-UNIQUE duplicate audit ------------------------------
+    # Baseline never enforced these UNIQUEs, so the backfilled rows may
+    # already violate them. Build the partial indexes only after proving
+    # the existing data is clean; otherwise CREATE INDEX raises a
+    # low-level ``duplicate key value violates unique constraint`` that
+    # leaves the operator without an actionable hint. The audit mirrors
+    # Step 3's orphan check pattern.
+    unique_audits: tuple[tuple[str, str, str], ...] = (
+        (
+            "resource_schemas",
+            "resource_pk, schema_version",
+            "resource_pk IS NOT NULL",
+        ),
+        (
+            "indexer_state",
+            "resource_pk, context_id",
+            "resource_pk IS NOT NULL",
+        ),
+        (
+            "resource_events",
+            "resource_pk, doc_id, version",
+            "op = 'upsert' AND resource_pk IS NOT NULL",
+        ),
+    )
+    duplicate_findings: list[tuple[str, str, int]] = []
+    for table, columns, predicate in unique_audits:
+        result = bind.execute(
+            sa.text(
+                # noqa: S608 -- audit query built from module-constant tuples
+                f"SELECT {columns}, COUNT(*) AS dup_count "
+                f"FROM {table} "
+                f"WHERE {predicate} "
+                f"GROUP BY {columns} "
+                "HAVING COUNT(*) > 1 "
+                "LIMIT :limit"
+            ),
+            {"limit": _MAX_AUDIT_EXAMPLES},
+        )
+        for row in result.fetchall():
+            dup_key = ", ".join(str(v) for v in row[:-1])
+            duplicate_findings.append((table, dup_key, row[-1]))
+
+    if duplicate_findings:
+        examples = ", ".join(f"{tbl}({keys})={cnt} rows" for tbl, keys, cnt in duplicate_findings)
+        raise RuntimeError(
+            "Migration aborted: duplicate rows exist that would violate the "
+            f"Phase 1 partial UNIQUE indexes (examples: {examples}). These "
+            "are pre-existing baseline duplicates — de-duplicate them via "
+            "the usual DELETE/merge flow before re-running this migration."
+        )
+
     # All three are partial on ``resource_pk IS NOT NULL`` so rows still
     # waiting for writer migration (resource_pk = NULL) do not collide
     # with each other and do not break ongoing traffic. Once #325
@@ -301,13 +365,26 @@ def upgrade() -> None:
                 "WHERE op = 'upsert' AND resource_pk IS NOT NULL"
             )
         )
+        # ``ix_resource_events_resource_pk`` is created concurrently for
+        # the same reason as the partial UNIQUE: resource_events is the
+        # high-write append-only log, so a blocking index build would
+        # stall ingest traffic for the duration. IF NOT EXISTS lets this
+        # path be safely re-run after a partial failure.
+        op.execute(
+            sa.text(
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+                "ix_resource_events_resource_pk ON resource_events (resource_pk)"
+            )
+        )
 
 
 def downgrade() -> None:
     """Reverse every upgrade step so the schema returns to a96 state."""
-    # Drop the partial UNIQUE first (same autocommit_block requirement).
+    # Drop the resource_events partial UNIQUE and non-unique resource_pk
+    # index concurrently, mirroring how they were created.
     with op.get_context().autocommit_block():
         op.execute(sa.text(f"DROP INDEX CONCURRENTLY IF EXISTS {_PARTIAL_UNIQUE_INDEX}"))
+        op.execute(sa.text("DROP INDEX CONCURRENTLY IF EXISTS ix_resource_events_resource_pk"))
 
     # Drop the two partial UNIQUE indexes (created via op.create_index,
     # not create_unique_constraint, so drop_index is the right inverse).
@@ -320,8 +397,11 @@ def downgrade() -> None:
     op.drop_column("resource_tokens", "workspace_id")
 
     # resource_pk teardown on satellite tables (reverse of step 4-6).
+    # resource_events' index was already dropped concurrently above, so
+    # we skip drop_index for that table here.
     for table in reversed(_SATELLITE_TABLES):
-        op.drop_index(f"ix_{table}_resource_pk", table_name=table)
+        if table != "resource_events":
+            op.drop_index(f"ix_{table}_resource_pk", table_name=table)
         op.drop_constraint(f"fk_{table}_resource_pk", table, type_="foreignkey")
         op.drop_column(table, "resource_pk")
 
