@@ -31,13 +31,18 @@ export function ResourceStatsStrip({ resource }: ResourceStatsStripProps) {
     resource.resource_id,
   )}`;
 
+  // Route number formatting through the app's next-intl locale so grouping /
+  // decimal rules match the UI (KpiCard's default toLocaleString() picks the
+  // runtime default locale, which can diverge from the operator's selection).
+  const numberFormatter = new Intl.NumberFormat(locale);
+
   return (
     <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
       <div className="relative">
         <KpiCard
           icon={Key}
           label={t("stats.activeTokens")}
-          value={resource.token_count}
+          value={numberFormatter.format(resource.token_count)}
         />
         <Link
           href={tokensHref}
@@ -50,7 +55,7 @@ export function ResourceStatsStrip({ resource }: ResourceStatsStripProps) {
       <KpiCard
         icon={Database}
         label={t("stats.memories")}
-        value={resource.memory_count}
+        value={numberFormatter.format(resource.memory_count)}
       />
 
       <KpiCard

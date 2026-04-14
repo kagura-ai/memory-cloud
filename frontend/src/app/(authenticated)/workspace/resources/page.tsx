@@ -40,6 +40,10 @@ export default function ResourcesListPage() {
   const { user } = useAuth();
   const locale = useLocale();
   const timezone = user?.timezone || "UTC";
+  // Route number formatting through next-intl locale so grouping rules match
+  // the selected UI language (e.g., 1,234 in en, 1,234 in ja for Latin digits
+  // but proper grouping semantics per locale).
+  const numberFormatter = new Intl.NumberFormat(locale);
 
   const [resources, setResources] = useState<ResourceListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -162,10 +166,10 @@ export default function ResourcesListPage() {
                       {r.context_display_name || r.context_name}
                     </TableCell>
                     <TableCell className="text-right">
-                      {r.token_count}
+                      {numberFormatter.format(r.token_count)}
                     </TableCell>
                     <TableCell className="text-right">
-                      {r.memory_count.toLocaleString()}
+                      {numberFormatter.format(r.memory_count)}
                     </TableCell>
                     <TableCell>
                       {r.current_schema_version !== null ? (
