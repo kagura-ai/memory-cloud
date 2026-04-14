@@ -447,19 +447,28 @@ def upgrade() -> None:
     # ``resource_pk IS NOT NULL`` (Phase 1 semantics). Mirror a96's
     # INVALID-index guard for resilience against a prior failed
     # CONCURRENTLY run.
-    invalid_index_result = bind.execute(
-        sa.text(
-            "SELECT 1 FROM pg_class c "
-            "JOIN pg_index i ON i.indexrelid = c.oid "
-            "WHERE c.relname = :index_name AND NOT i.indisvalid LIMIT 1"
-        ),
-        {"index_name": _PARTIAL_UNIQUE_INDEX},
-    )
-    has_invalid_index = invalid_index_result.fetchone() is not None
+    # Both concurrently-built indexes need the same INVALID-index guard:
+    # ``IF NOT EXISTS`` alone would skip the rebuild of a partially-built
+    # index left behind by a prior failed CONCURRENTLY run, silently
+    # leaving production without the index. Detect and drop any INVALID
+    # version first, then recreate.
+    concurrent_indexes = (_PARTIAL_UNIQUE_INDEX, "ix_resource_events_resource_pk")
+    invalid_names = {
+        row[0]
+        for row in bind.execute(
+            sa.text(
+                "SELECT c.relname FROM pg_class c "
+                "JOIN pg_index i ON i.indexrelid = c.oid "
+                "WHERE c.relname = ANY(:names) AND NOT i.indisvalid"
+            ),
+            {"names": list(concurrent_indexes)},
+        ).fetchall()
+    }
 
     with op.get_context().autocommit_block():
-        if has_invalid_index:
-            op.execute(sa.text(f"DROP INDEX CONCURRENTLY IF EXISTS {_PARTIAL_UNIQUE_INDEX}"))
+        for name in concurrent_indexes:
+            if name in invalid_names:
+                op.execute(sa.text(f"DROP INDEX CONCURRENTLY IF EXISTS {name}"))
         op.execute(
             sa.text(
                 f"CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {_PARTIAL_UNIQUE_INDEX} "
@@ -470,8 +479,7 @@ def upgrade() -> None:
         # ``ix_resource_events_resource_pk`` is created concurrently for
         # the same reason as the partial UNIQUE: resource_events is the
         # high-write append-only log, so a blocking index build would
-        # stall ingest traffic for the duration. IF NOT EXISTS lets this
-        # path be safely re-run after a partial failure.
+        # stall ingest traffic for the duration.
         op.execute(
             sa.text(
                 "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
