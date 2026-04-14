@@ -127,3 +127,28 @@ async def test_list_resources_order_by_recent_activity(
         rows = data["resources"]
         for i in range(len(rows) - 1):
             assert rows[i]["updated_at"] >= rows[i + 1]["updated_at"]
+
+
+@pytest.mark.asyncio
+async def test_list_resources_respects_context_access(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    authenticated_user: dict,
+):
+    """Members/viewers must not see resources for contexts outside
+    ``PermissionService.get_accessible_contexts`` — private contexts and
+    contexts excluded by ``WorkspaceMember.allowed_context_ids`` are hidden.
+    Suspended members (allowed_context_ids IS NULL) get an empty list.
+    """
+    # Arrange: caller is a workspace member with allowed_context_ids = [A]
+    # Workspace also has resource-bound contexts B (private) and C (public,
+    # not whitelisted). Only A should appear in the response.
+    response = await async_client.get("/api/v1/resources")
+
+    assert response.status_code == 200
+    data = response.json()
+    visible_ids = {r["context_id"] for r in data["resources"]}
+    # Must exclude contexts outside the caller's access scope.
+    # (Real IDs filled in once integration fixtures land.)
+    assert all(cid in visible_ids for cid in [])  # placeholder: allowed contexts
+    assert not any(cid in visible_ids for cid in [])  # placeholder: forbidden

@@ -22,6 +22,7 @@ from db.base import get_db
 from models.auth import Context
 from models.memory import Memory
 from models.resource import ResourceEvent, ResourceSchema, ResourceToken
+from services.permission_service import PermissionService
 from utils.datetime import to_utc_iso
 from utils.exceptions import AuthorizationError
 from utils.logger import get_logger
@@ -120,6 +121,25 @@ async def list_resources(
     if not current_workspace_id:
         raise AuthorizationError("User must belong to a workspace")
 
+    # Access-filter contexts BEFORE running the aggregate query so private
+    # contexts (and contexts excluded by WorkspaceMember.allowed_context_ids)
+    # don't leak resource_ids/stats to members/viewers. Owners/admins see all
+    # contexts in the workspace — this matches the contexts list behavior.
+    # Suspended members (allowed_context_ids IS NULL) and users with an empty
+    # whitelist get an empty list here and short-circuit out below.
+    accessible = await PermissionService(db).get_accessible_contexts(
+        user["user_id"], current_workspace_id
+    )
+    accessible_ids = [c.id for c in accessible]
+    if not accessible_ids:
+        logger.info(
+            "list_resources_success",
+            user_id=user["user_id"],
+            workspace_id=str(current_workspace_id),
+            count=0,
+        )
+        return ResourceListResponse(resources=[], total=0)
+
     # Correlated subqueries — one stats bundle per matching context row.
     # resource_* tables are keyed by resource_id only (see Migration 055 note on
     # per-workspace uniqueness). We scope to this workspace via the Context join
@@ -184,6 +204,8 @@ async def list_resources(
                 Context.workspace_id == current_workspace_id,
                 Context.resource_id.is_not(None),
                 Context.deleted_at.is_(None),
+                # Scope to the subset the caller can actually see, per RBAC.
+                Context.id.in_(accessible_ids),
             )
         )
         # "Most recent activity" = max across the three signals. PostgreSQL's
