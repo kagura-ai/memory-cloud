@@ -2724,7 +2724,7 @@
       "classification": "Classification",
       "indexHint": "Index hint",
       "description": "Description",
-      "required": "required",
+      "required": "Required",
       "versionLabel": "Current schema version: v{version}",
       "emptyTitle": "No schema registered",
       "emptyDescription": "This resource does not have a schema yet. Use the REST API or MCP tools to register field definitions."

@@ -37,8 +37,19 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockPush }),
 }));
 
+// Stable translator — a fresh function on every render invalidates
+// useCallback([t]) in the component and turns an effect that depends on
+// that callback into a tight re-fetch loop (masquerades as flaky tests).
+// Cache per-namespace in module scope, same idea as the detail page test.
+const translatorCache = new Map<string, (k: string) => string>();
 vi.mock("next-intl", () => ({
-  useTranslations: () => (key: string) => key,
+  useTranslations: (ns?: string) => {
+    const key = ns ?? "";
+    if (!translatorCache.has(key)) {
+      translatorCache.set(key, (k: string) => k);
+    }
+    return translatorCache.get(key)!;
+  },
   useLocale: () => "en",
 }));
 
