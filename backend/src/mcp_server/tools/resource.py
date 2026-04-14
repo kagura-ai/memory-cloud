@@ -682,11 +682,28 @@ async def handle_setup_resource(
                     f"Context '{name}' already exists in this workspace.",
                 )
 
-            # 4. Check plan supports resource tokens
+            # 4. Check resource_id not already bound to an existing context in this workspace.
+            # DB constraint `unique_context_resource_id_per_workspace` also enforces this,
+            # but an explicit pre-insert lookup returns a clean `resource_id_conflict`
+            # instead of relying on exception-based control flow.
             from sqlalchemy import func, select
 
             from config.plan_tiers import get_plan_tier
-            from models.auth import Workspace
+            from models.auth import Context, Workspace
+
+            resource_dup_result = await db.execute(
+                select(Context.id).where(
+                    Context.workspace_id == workspace_id,
+                    Context.resource_id == resource_id,
+                    Context.deleted_at.is_(None),
+                )
+            )
+            if resource_dup_result.scalar_one_or_none():
+                return _error_response(
+                    "resource_id_conflict",
+                    f"resource_id '{resource_id}' is already in use in this workspace.",
+                    help="Choose a different resource_id, or update the existing context.",
+                )
 
             ws_result = await db.execute(
                 select(Workspace.plan_name).where(Workspace.id == workspace_id)
@@ -729,8 +746,6 @@ async def handle_setup_resource(
                 actual_dimensions = settings.embedding_dimensions
 
             # 7. Create context (direct ORM — ContextService.create_context commits internally)
-            from models.auth import Context
-
             context = Context(
                 workspace_id=workspace_id,
                 name=name,

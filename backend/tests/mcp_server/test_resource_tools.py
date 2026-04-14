@@ -175,17 +175,21 @@ class TestSetupResourcePlanGating:
 
         # db.execute order:
         # 1) role check → owner
-        # 2) workspace plan_name lookup → "basic"
+        # 2) resource_id duplicate check → none
+        # 3) workspace plan_name lookup → "basic"
         # (context name duplicate check is patched below, so it does not touch db.execute)
         role_result = MagicMock()
         owner = MagicMock()
         owner.role = "owner"
         role_result.scalar_one_or_none.return_value = owner
 
+        resource_dup_result = MagicMock()
+        resource_dup_result.scalar_one_or_none.return_value = None
+
         plan_result = MagicMock()
         plan_result.scalar_one_or_none.return_value = "basic"
 
-        mock_db.execute.side_effect = [role_result, plan_result]
+        mock_db.execute.side_effect = [role_result, resource_dup_result, plan_result]
 
         async def mock_get_db():
             yield mock_db
@@ -478,3 +482,373 @@ class TestIngestEventsValidation:
         data = _json_of(result)
         assert data["error"] == "validation_error"
         assert "Batch size" in data["message"]
+
+
+# ============================================================================
+# Happy-path tests (one per handler)
+# ============================================================================
+
+
+class TestGetResourceImpactHappyPath:
+    @pytest.mark.asyncio
+    async def test_returns_stats(self):
+        """get_resource_impact returns token/memory/schema stats on success."""
+        workspace_id = uuid4()
+        mock_db = AsyncMock()
+
+        # 1) boundary check: resource found
+        boundary_result = MagicMock()
+        boundary_result.scalar_one_or_none.return_value = uuid4()
+
+        # 2) combined stats query: row with 3 counts
+        stats_row = MagicMock()
+        stats_row.token_count = 2
+        stats_row.memory_count = 47
+        stats_row.schema_version = 3
+        stats_result = MagicMock()
+        stats_result.one.return_value = stats_row
+
+        mock_db.execute.side_effect = [boundary_result, stats_result]
+        mock_db.commit = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        with patch("db.base.get_db", new=mock_get_db):
+            result = await handle_get_resource_impact({"resource_id": "res1"}, "user", workspace_id)
+        data = _json_of(result)
+        assert data["status"] == "success"
+        assert data["resource_id"] == "res1"
+        assert data["token_count"] == 2
+        assert data["memory_count"] == 47
+        assert data["current_schema_version"] == 3
+
+
+class TestGetResourceSchemaHappyPath:
+    @pytest.mark.asyncio
+    async def test_returns_latest_schema(self):
+        """get_resource_schema returns the highest schema_version when unspecified."""
+        from datetime import UTC, datetime
+
+        workspace_id = uuid4()
+        mock_db = AsyncMock()
+
+        # 1) boundary check: resource found
+        boundary_result = MagicMock()
+        boundary_result.scalar_one_or_none.return_value = uuid4()
+
+        # 2) schema query: schema row
+        schema_row = MagicMock()
+        schema_row.resource_id = "res1"
+        schema_row.schema_version = 4
+        schema_row.field_definitions = [{"name": "title", "type": "string"}]
+        schema_row.created_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        schema_result = MagicMock()
+        schema_result.scalar_one_or_none.return_value = schema_row
+
+        mock_db.execute.side_effect = [boundary_result, schema_result]
+        mock_db.commit = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        with patch("db.base.get_db", new=mock_get_db):
+            result = await handle_get_resource_schema({"resource_id": "res1"}, "user", workspace_id)
+        data = _json_of(result)
+        assert data["status"] == "success"
+        assert data["schema_version"] == 4
+        assert data["field_definitions"] == [{"name": "title", "type": "string"}]
+
+
+class TestListResourceTokensHappyPath:
+    @pytest.mark.asyncio
+    async def test_returns_paginated_tokens(self):
+        """list_resource_tokens returns total + paginated token list."""
+        from datetime import UTC, datetime
+
+        workspace_id = uuid4()
+        mock_db = AsyncMock()
+
+        # 1) role check → owner
+        role_result = MagicMock()
+        owner = MagicMock()
+        owner.role = "owner"
+        role_result.scalar_one_or_none.return_value = owner
+
+        # 2) total count query
+        total_result = MagicMock()
+        total_result.scalar.return_value = 5
+
+        # 3) paginated tokens query
+        token1 = MagicMock()
+        token1.id = 1
+        token1.resource_id = "res1"
+        token1.description = "t1"
+        token1.quota_events_per_hour = 1000
+        token1.is_active = True
+        token1.created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        token1.last_used_at = None
+
+        token2 = MagicMock()
+        token2.id = 2
+        token2.resource_id = "res2"
+        token2.description = None
+        token2.quota_events_per_hour = 500
+        token2.is_active = False
+        token2.created_at = datetime(2026, 1, 2, tzinfo=UTC)
+        token2.last_used_at = datetime(2026, 1, 3, tzinfo=UTC)
+
+        tokens_result = MagicMock()
+        tokens_result.scalars.return_value.all.return_value = [token1, token2]
+
+        mock_db.execute.side_effect = [role_result, total_result, tokens_result]
+        mock_db.commit = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        with patch("db.base.get_db", new=mock_get_db):
+            result = await handle_list_resource_tokens(
+                {"limit": 2, "offset": 0}, "user", workspace_id
+            )
+        data = _json_of(result)
+        assert data["status"] == "success"
+        assert data["total"] == 5
+        assert data["limit"] == 2
+        assert data["offset"] == 0
+        assert len(data["tokens"]) == 2
+        assert data["tokens"][0]["id"] == 1
+        assert data["tokens"][0]["is_active"] is True
+        assert data["tokens"][1]["is_active"] is False
+
+
+class TestIngestEventsHappyPath:
+    @pytest.mark.asyncio
+    async def test_creates_upsert_event(self):
+        """ingest_events persists valid upsert event and schedules indexer."""
+        workspace_id = uuid4()
+        mock_db = AsyncMock()
+
+        # 1) viewer role check → member
+        role_result = MagicMock()
+        m = MagicMock()
+        m.role = "member"
+        role_result.scalar_one_or_none.return_value = m
+        # 2) boundary check → found
+        boundary_result = MagicMock()
+        boundary_result.scalar_one_or_none.return_value = uuid4()
+        mock_db.execute.side_effect = [role_result, boundary_result]
+
+        # Capture the added event so we can assign an id before flush returns
+        added_events: list = []
+
+        def _add(obj):
+            obj.id = 123
+            added_events.append(obj)
+
+        # db.add is sync (AsyncMock defaults attributes to AsyncMock; override to MagicMock)
+        mock_db.add = MagicMock(side_effect=_add)
+        mock_db.flush = AsyncMock()
+        mock_db.commit = AsyncMock()
+
+        # begin_nested must return an async context manager
+        nested_cm = AsyncMock()
+        nested_cm.__aenter__ = AsyncMock(return_value=None)
+        nested_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_db.begin_nested = MagicMock(return_value=nested_cm)
+
+        async def mock_get_db():
+            yield mock_db
+
+        async def mock_schedule(db, resource_id):
+            return None
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "api.routes.resource_ingest._schedule_indexer_for_resource",
+                new=mock_schedule,
+            ),
+        ):
+            result = await handle_ingest_events(
+                {
+                    "resource_id": "res1",
+                    "events": [
+                        {
+                            "op": "upsert",
+                            "doc_id": "d1",
+                            "version": 1,
+                            "payload": {"x": 1},
+                            "importance": 0.7,
+                        }
+                    ],
+                },
+                "user",
+                workspace_id,
+            )
+
+        data = _json_of(result)
+        assert data["status"] == "success"
+        assert data["created_count"] == 1
+        assert data["failed_count"] == 0
+        assert data["event_ids"] == [123]
+        assert len(added_events) == 1
+        assert added_events[0].resource_id == "res1"
+        assert added_events[0].op == "upsert"
+        mock_db.commit.assert_awaited()
+
+
+class TestSetupResourceHappyPath:
+    @pytest.mark.asyncio
+    async def test_creates_context_search_config_and_token(self):
+        """setup_resource creates context + search config + token on Pro plan."""
+        workspace_id = uuid4()
+        context_uuid = uuid4()
+        mock_db = AsyncMock()
+
+        # db.execute sequence:
+        # 1) role check → owner
+        # 2) resource_id duplicate check → none
+        # 3) workspace plan_name lookup → "pro"
+        # 4) active token count → 0
+        role_result = MagicMock()
+        owner = MagicMock()
+        owner.role = "owner"
+        role_result.scalar_one_or_none.return_value = owner
+
+        resource_dup_result = MagicMock()
+        resource_dup_result.scalar_one_or_none.return_value = None
+
+        plan_result = MagicMock()
+        plan_result.scalar_one_or_none.return_value = "pro"
+
+        token_count_result = MagicMock()
+        token_count_result.scalar.return_value = 0
+
+        mock_db.execute.side_effect = [
+            role_result,
+            resource_dup_result,
+            plan_result,
+            token_count_result,
+        ]
+
+        # Capture added objects
+        added: list = []
+
+        def _add(obj):
+            # Assign ids so that db.refresh works
+            cls_name = type(obj).__name__
+            if cls_name == "Context":
+                obj.id = context_uuid
+            added.append(obj)
+
+        # db.add is sync
+        mock_db.add = MagicMock(side_effect=_add)
+        mock_db.flush = AsyncMock()
+        mock_db.refresh = AsyncMock()
+        mock_db.commit = AsyncMock()
+
+        # Mock services/managers
+        mock_token_record = MagicMock()
+        mock_token_record.id = 42
+
+        async def mock_create_token(self, **kwargs):
+            return ("plaintext-token-xyz", mock_token_record)
+
+        async def mock_can_create(self, wsid):
+            return (True, None)
+
+        async def mock_get_ctx_by_name(self, wsid, name):
+            return None
+
+        def mock_validate_name(name):
+            return None
+
+        async def mock_get_db():
+            yield mock_db
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "services.context_service.ContextService.validate_context_name",
+                new=mock_validate_name,
+            ),
+            patch(
+                "services.context_service.ContextService.get_context_by_name_for_workspace",
+                new=mock_get_ctx_by_name,
+            ),
+            patch(
+                "services.quota_service.QuotaService.check_context_creation_allowed",
+                new=mock_can_create,
+            ),
+            patch(
+                "auth.resource_tokens.ResourceTokenManager.create_token",
+                new=mock_create_token,
+            ),
+        ):
+            result = await handle_setup_resource(
+                {
+                    "name": "ctx-res1",
+                    "resource_id": "res1",
+                    "description": "smoke",
+                },
+                "user",
+                workspace_id,
+            )
+
+        data = _json_of(result)
+        assert data["status"] == "success"
+        assert data["resource_id"] == "res1"
+        assert data["token"] == "plaintext-token-xyz"
+        assert data["token_id"] == 42
+        assert data["context_id"] == str(context_uuid)
+        # Verify Context + ContextSearchConfig were added
+        type_names = [type(o).__name__ for o in added]
+        assert "Context" in type_names
+        assert "ContextSearchConfig" in type_names
+        mock_db.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_resource_id_conflict_pre_insert(self):
+        """setup_resource rejects duplicate resource_id with resource_id_conflict."""
+        workspace_id = uuid4()
+        mock_db = AsyncMock()
+
+        role_result = MagicMock()
+        owner = MagicMock()
+        owner.role = "owner"
+        role_result.scalar_one_or_none.return_value = owner
+
+        # resource_id duplicate check → existing context found
+        resource_dup_result = MagicMock()
+        resource_dup_result.scalar_one_or_none.return_value = uuid4()
+
+        mock_db.execute.side_effect = [role_result, resource_dup_result]
+
+        async def mock_get_db():
+            yield mock_db
+
+        async def mock_get_ctx_by_name(self, wsid, name):
+            return None
+
+        def mock_validate_name(name):
+            return None
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "services.context_service.ContextService.validate_context_name",
+                new=mock_validate_name,
+            ),
+            patch(
+                "services.context_service.ContextService.get_context_by_name_for_workspace",
+                new=mock_get_ctx_by_name,
+            ),
+        ):
+            result = await handle_setup_resource(
+                {"name": "ctx-res1", "resource_id": "res1"},
+                "user",
+                workspace_id,
+            )
+        data = _json_of(result)
+        assert data["error"] == "resource_id_conflict"
