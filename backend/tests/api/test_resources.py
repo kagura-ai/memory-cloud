@@ -109,7 +109,7 @@ async def test_list_resources_requires_current_workspace(
     """Users without a current_workspace_id get AuthorizationError (403)."""
     response = await async_client.get("/api/v1/resources")
 
-    assert response.status_code in (200, 403)
+    assert response.status_code == 403
 
 
 @pytest.mark.asyncio

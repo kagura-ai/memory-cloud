@@ -173,6 +173,21 @@ describe("ResourcesListPage", () => {
     });
   });
 
+  it("does not render the EmptyState 'No resources yet' copy on fetch error", async () => {
+    // Regression: resources=[] + error set used to render the ErrorBanner
+    // alongside the "No resources yet / Set one up" EmptyState, which
+    // misleadingly implied the workspace was empty rather than that the
+    // fetch had failed.
+    mockListResources.mockRejectedValue(new Error("backend offline"));
+
+    render(<ResourcesListPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("list.emptyTitle")).not.toBeInTheDocument();
+  });
+
   it("renders an accessible Link per row for navigation (not a row click handler)", async () => {
     mockListResources.mockResolvedValue({
       resources: [item({ resource_id: "foo_bar" })],

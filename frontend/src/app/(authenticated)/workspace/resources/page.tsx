@@ -111,7 +111,10 @@ export default function ResourcesListPage() {
 
       {loading ? (
         <TableLoadingState rows={5} />
-      ) : resources.length === 0 ? (
+      ) : error ? null : resources.length === 0 ? (
+        // Empty state is reserved for "request succeeded, zero results" —
+        // suppress it when the fetch errored so the ErrorBanner above isn't
+        // paired with a misleading "Set one up" CTA.
         <EmptyState
           icon={Database}
           title={t("list.emptyTitle")}
