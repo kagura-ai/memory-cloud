@@ -7,8 +7,11 @@ that currently key themselves by ``resource_id VARCHAR`` alone
 (``resource_events``, ``resource_schemas``, ``indexer_state``,
 ``resource_tokens``). Finally add the three UNIQUE constraints the model
 docstrings have always promised but the baseline migration never
-materialized, and make ``resource_tokens.workspace_id`` a NOT NULL FK so
-tenancy is enforced at the schema layer.
+materialized, and add/backfill ``resource_tokens.workspace_id`` as a
+nullable FK shadow column ahead of follow-up NOT NULL enforcement in
+#325 (so tenancy is ultimately enforced at the schema layer, once all
+writers have been migrated to populate it — see the Phase 1 section
+below).
 
 Revision ID: a97_resources_entity
 Revises: a96_ctx_resource_id_unique
@@ -181,8 +184,8 @@ def upgrade() -> None:
         examples = ", ".join(f"{tbl}.resource_id='{rid}' ({cnt} rows)" for tbl, rid, cnt in orphans)
         raise RuntimeError(
             "Migration aborted: satellite rows reference resource_id values that "
-            f"have no matching public context (examples: {examples}). Either "
-            "create the corresponding public contexts first or remove the "
+            f"have no matching active context (examples: {examples}). Either "
+            "create the corresponding active contexts first or remove the "
             "orphaned rows before re-running this migration."
         )
 
