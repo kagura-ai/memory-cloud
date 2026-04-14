@@ -3,7 +3,10 @@
 Issue #47: Web UI for resource management — backend list endpoint tests.
 
 Requires: async_client, authenticated_user fixtures (integration test infrastructure).
-These are skipped when fixtures are not available (no test DB connection).
+These are marked ``xfail(strict=True)`` until those fixtures land — the tests
+still run as expected failures today, and once fixtures exist they will XPASS,
+which strict=True converts into a CI failure that forces removal of the xfail
+marker (matching the pattern in ``test_resource_tokens.py``).
 """
 
 import pytest
