@@ -1,14 +1,22 @@
 """Tests for Resource Ingest API.
 
 Issue #238: Resource-driven incremental indexing.
+Issue #322: Workspace boundary enforcement on ingest (security hotfix).
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 
-from api.routes.resource_ingest import _check_event_quota
+from api.routes.resource_ingest import (
+    _check_event_quota,
+    _enforce_workspace_membership,
+    _resolve_authoritative_context,
+)
 from auth.resource_tokens import ResourceTokenManager
+from models.auth import Context
 from models.resource import ResourceToken
 from models.schemas import ResourceEventRequest
 from utils.exceptions import RateLimitError
@@ -151,3 +159,200 @@ class TestResourceEventIdempotency:
         """Test that duplicate idempotency_key returns existing event (idempotent)."""
         # This would be an integration test
         pass  # TODO: Implement after integration test setup
+
+
+def _mock_db_scalars(values):
+    """Build a mock async DB session whose single execute() returns `values`
+    from `.scalars().all()`. Accepts an empty list, one item, or many.
+    """
+    scalars_obj = MagicMock()
+    scalars_obj.all = MagicMock(return_value=list(values))
+    result = MagicMock()
+    result.scalars = MagicMock(return_value=scalars_obj)
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+    return db
+
+
+class TestResourceIngestWorkspaceBoundary:
+    """Workspace boundary enforcement in verify_resource_token (security hotfix)."""
+
+    @pytest.fixture
+    def workspace_id(self):
+        return uuid4()
+
+    @pytest.fixture
+    def mock_context(self, workspace_id):
+        ctx = MagicMock(spec=Context)
+        ctx.id = uuid4()
+        ctx.resource_id = "acme"
+        ctx.workspace_id = workspace_id
+        ctx.deleted_at = None
+        return ctx
+
+    @pytest.fixture
+    def mock_token(self):
+        token = MagicMock(spec=ResourceToken)
+        token.id = 42
+        token.resource_id = "acme"
+        token.created_by = "user_owner"
+        token.is_active = True
+        return token
+
+    @pytest.fixture
+    def mock_request(self):
+        request = MagicMock()
+        request.client.host = "203.0.113.7"
+        return request
+
+    # --- _resolve_authoritative_context ----------------------------------
+
+    @pytest.mark.asyncio
+    async def test_resolve_context_returns_single_active_match(self, mock_context):
+        db = _mock_db_scalars([mock_context])
+        got = await _resolve_authoritative_context(db, "acme")
+        assert got is mock_context
+
+    @pytest.mark.asyncio
+    async def test_resolve_context_returns_none_when_unbound(self):
+        """Helper returns None for unbound resource_id; caller (verify_resource_token)
+        owns the 404 + warning policy."""
+        db = _mock_db_scalars([])
+        got = await _resolve_authoritative_context(db, "orphan_id")
+        assert got is None
+
+    @pytest.mark.asyncio
+    async def test_resolve_context_raises_409_on_cross_workspace_collision(self, mock_context):
+        """Defensive: pre-migration cross-workspace collisions must fail closed
+        (409) rather than bubble MultipleResultsFound as a 500."""
+        other_ctx = MagicMock(spec=Context)
+        other_ctx.id = uuid4()
+        other_ctx.resource_id = "acme"
+        other_ctx.workspace_id = uuid4()
+        other_ctx.deleted_at = None
+        db = _mock_db_scalars([mock_context, other_ctx])
+
+        with patch("api.routes.resource_ingest.logger") as mock_logger:
+            with pytest.raises(HTTPException) as exc:
+                await _resolve_authoritative_context(db, "acme")
+
+            assert exc.value.status_code == 409
+            mock_logger.warning.assert_called_once_with(
+                "resource_id_ambiguous_on_ingest",
+                resource_id="acme",
+                match_count=2,
+            )
+
+    # --- _enforce_workspace_membership -----------------------------------
+
+    @pytest.mark.asyncio
+    async def test_membership_allowed_for_workspace_member(
+        self, mock_request, mock_token, mock_context
+    ):
+        db = MagicMock()
+        with patch(
+            "services.permission_service.PermissionService.check_workspace_access",
+            new=AsyncMock(return_value=MagicMock()),
+        ):
+            # Should not raise.
+            await _enforce_workspace_membership(db, mock_request, mock_token, mock_context)
+
+    @pytest.mark.asyncio
+    async def test_membership_denied_logs_cross_tenant_attempt(
+        self, mock_request, mock_token, mock_context
+    ):
+        """Attacker token (non-member) must be rejected with audit warning.
+        The log's `reason` kwarg carries the underlying auth failure detail
+        for forensics."""
+        db = MagicMock()
+        auth_error = HTTPException(
+            status_code=403,
+            detail="Not a member of workspace " + str(mock_context.workspace_id),
+        )
+        with (
+            patch(
+                "services.permission_service.PermissionService.check_workspace_access",
+                new=AsyncMock(side_effect=auth_error),
+            ),
+            patch("api.routes.resource_ingest.logger") as mock_logger,
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await _enforce_workspace_membership(db, mock_request, mock_token, mock_context)
+
+            assert exc.value.status_code == 403
+            mock_logger.warning.assert_called_once_with(
+                "cross_tenant_ingest_attempt",
+                resource_id=mock_context.resource_id,
+                token_id=mock_token.id,
+                target_workspace_id=str(mock_context.workspace_id),
+                token_creator=mock_token.created_by,
+                client_ip="203.0.113.7",
+                reason=auth_error.detail,
+            )
+
+    @pytest.mark.asyncio
+    async def test_membership_denied_when_workspace_soft_deleted(
+        self, mock_request, mock_token, mock_context
+    ):
+        """Soft-deleted workspace must deny ingest — the prior is_workspace_member
+        check silently allowed this. `check_workspace_access` now catches it."""
+        db = MagicMock()
+        soft_deleted_error = HTTPException(
+            status_code=403,
+            detail=f"Workspace {mock_context.workspace_id} not found or has been deleted",
+        )
+        with (
+            patch(
+                "services.permission_service.PermissionService.check_workspace_access",
+                new=AsyncMock(side_effect=soft_deleted_error),
+            ),
+            patch("api.routes.resource_ingest.logger") as mock_logger,
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await _enforce_workspace_membership(db, mock_request, mock_token, mock_context)
+
+            assert exc.value.status_code == 403
+            call_kwargs = mock_logger.warning.call_args.kwargs
+            assert "deleted" in call_kwargs["reason"]
+
+    @pytest.mark.asyncio
+    async def test_membership_denied_without_request_client(self, mock_token, mock_context):
+        """client_ip is None when request.client is None (FastAPI edge case)."""
+        req = MagicMock()
+        req.client = None
+        db = MagicMock()
+        auth_error = HTTPException(status_code=403, detail="Not a member")
+        with (
+            patch(
+                "services.permission_service.PermissionService.check_workspace_access",
+                new=AsyncMock(side_effect=auth_error),
+            ),
+            patch("api.routes.resource_ingest.logger") as mock_logger,
+        ):
+            with pytest.raises(HTTPException):
+                await _enforce_workspace_membership(db, req, mock_token, mock_context)
+
+            call_kwargs = mock_logger.warning.call_args.kwargs
+            assert call_kwargs["client_ip"] is None
+
+    @pytest.mark.asyncio
+    async def test_membership_denied_when_token_has_no_creator(self, mock_request, mock_context):
+        """Legacy tokens without created_by cannot be authorized, without hitting the DB."""
+        token = MagicMock(spec=ResourceToken)
+        token.id = 99
+        token.created_by = None
+        db = MagicMock()
+        db.execute = AsyncMock()
+
+        with patch("api.routes.resource_ingest.logger") as mock_logger:
+            with pytest.raises(HTTPException) as exc:
+                await _enforce_workspace_membership(db, mock_request, token, mock_context)
+
+            assert exc.value.status_code == 403
+            mock_logger.warning.assert_called_once_with(
+                "resource_ingest_missing_token_creator",
+                resource_id=mock_context.resource_id,
+                token_id=99,
+            )
+        # No permission check (and therefore no DB query) for unattributed tokens.
+        db.execute.assert_not_awaited()
