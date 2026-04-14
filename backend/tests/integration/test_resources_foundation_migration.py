@@ -367,11 +367,18 @@ class TestA97ResourcesMigration:
                 # Simulate a pre-#324 writer that only knows about
                 # ``resource_id`` — no resource_pk, no workspace_id on
                 # resource_tokens. Must succeed.
+                # Two identical upserts with resource_pk = NULL: the
+                # partial UNIQUE is ``WHERE resource_pk IS NOT NULL`` so
+                # NULL rows are excluded from the uniqueness check and
+                # the second INSERT must succeed. If this ever raises,
+                # the partial predicate has regressed and Phase 1
+                # writers would start throwing UniqueViolationError.
                 conn.execute(
                     text(
                         "INSERT INTO resource_events "
-                        "(resource_id, op, doc_id, version, importance) "
-                        "VALUES ('legacy-writer', 'upsert', 'doc-legacy', 1, 0.5)"
+                        "(resource_id, op, doc_id, version, importance) VALUES "
+                        "('legacy-writer', 'upsert', 'doc-legacy', 1, 0.5), "
+                        "('legacy-writer', 'upsert', 'doc-legacy', 1, 0.5)"
                     )
                 )
                 conn.execute(
@@ -409,5 +416,18 @@ class TestA97ResourcesMigration:
                         text(f"SELECT COUNT(*) FROM {table} WHERE resource_pk IS NULL")  # noqa: S608
                     ).scalar_one()
                     assert null_rows >= 1, f"{table} should accept NULL resource_pk in Phase 1"
+
+                # Both duplicate NULL upserts survived the partial UNIQUE.
+                dup_null_upserts = conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM resource_events "
+                        "WHERE resource_pk IS NULL AND doc_id = 'doc-legacy' "
+                        "AND version = 1 AND op = 'upsert'"
+                    )
+                ).scalar_one()
+                assert dup_null_upserts == 2, (
+                    "partial UNIQUE must exclude resource_pk=NULL rows so "
+                    "Phase 1 legacy writers do not collide with themselves"
+                )
         finally:
             engine.dispose()
