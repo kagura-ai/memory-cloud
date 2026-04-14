@@ -19,7 +19,7 @@ from auth.resource_tokens import ResourceTokenManager
 from models.auth import Context
 from models.resource import ResourceToken
 from models.schemas import ResourceEventRequest
-from utils.exceptions import RateLimitError
+from utils.exceptions import RateLimitError, RedisError
 
 
 class TestResourceTokenManager:
@@ -158,17 +158,19 @@ class TestResourceEventQuotaCheck:
             mock_incr.assert_awaited_once_with("resource:events:ec_products:1:hour", 50, ttl=3600)
 
     @pytest.mark.asyncio
-    async def test_quota_redis_failure_fails_open(self):
-        """Redis outage MUST NOT block ingest (SECURITY.md: fail-open rate limiting)."""
+    async def test_quota_fresh_key_proceeds(self):
+        """Fresh Redis key (GET returns None, which is also how get_cache signals a
+        swallowed read failure) → treated as count=0 and ingest proceeds."""
         with (
             patch("db.redis.get_cache", new_callable=AsyncMock) as mock_cache,
             patch("db.redis.incrby_counter", new_callable=AsyncMock) as mock_incr,
         ):
-            mock_cache.side_effect = RuntimeError("redis connection refused")
+            mock_cache.return_value = None
+            mock_incr.return_value = 1
 
             await _check_event_quota("ec_products", token_id=1, quota_per_hour=1000)
 
-            mock_incr.assert_not_awaited()
+            mock_incr.assert_awaited_once_with("resource:events:ec_products:1:hour", 1, ttl=3600)
 
     @pytest.mark.asyncio
     async def test_quota_incr_failure_fails_open(self):
@@ -178,9 +180,22 @@ class TestResourceEventQuotaCheck:
             patch("db.redis.incrby_counter", new_callable=AsyncMock) as mock_incr,
         ):
             mock_cache.return_value = "50"
-            mock_incr.side_effect = RuntimeError("redis write failed")
+            mock_incr.side_effect = RedisError("redis write failed")
 
             await _check_event_quota("ec_products", token_id=1, quota_per_hour=1000)
+
+    @pytest.mark.asyncio
+    async def test_quota_non_redis_error_surfaces(self):
+        """Non-Redis exceptions (programming bugs) must NOT be swallowed by fail-open."""
+        with (
+            patch("db.redis.get_cache", new_callable=AsyncMock) as mock_cache,
+            patch("db.redis.incrby_counter", new_callable=AsyncMock) as mock_incr,
+        ):
+            mock_cache.return_value = "50"
+            mock_incr.side_effect = ValueError("programming bug, not a Redis error")
+
+            with pytest.raises(ValueError):
+                await _check_event_quota("ec_products", token_id=1, quota_per_hour=1000)
 
 
 class TestResourceEventIdempotency:

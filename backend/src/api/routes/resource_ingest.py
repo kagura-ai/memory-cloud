@@ -24,7 +24,7 @@ from models.schemas import (
 )
 from services.permission_service import PermissionService
 from utils.datetime import utcnow
-from utils.exceptions import ConflictError, RateLimitError, ValidationError
+from utils.exceptions import ConflictError, RateLimitError, RedisError, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -586,11 +586,11 @@ async def _check_event_quota(
     Raises:
         RateLimitError: If quota exceeded (429)
     """
+    from db.redis import get_cache, incrby_counter
+
     redis_key = f"resource:events:{resource_id}:{token_id}:hour"
 
     try:
-        from db.redis import get_cache, incrby_counter
-
         current_count_str = await get_cache(redis_key)
         current_count = int(current_count_str) if current_count_str else 0
 
@@ -607,7 +607,6 @@ async def _check_event_quota(
                 retry_after=3600,  # Retry after 1 hour
             )
 
-        # TTL is nx-only so the 1-hour window anchors to the first event, not each call.
         new_count = await incrby_counter(redis_key, count, ttl=3600)
 
         logger.debug(
@@ -620,8 +619,9 @@ async def _check_event_quota(
 
     except RateLimitError:
         raise
-    except Exception as e:
+    except RedisError as e:
         # Fail-open per SECURITY.md "Rate Limiting": Redis outage must not block ingest.
+        # Narrow to RedisError so programming bugs (ValueError from parse, etc.) surface.
         logger.error("redis_quota_check_failed", error=str(e))
         return
 

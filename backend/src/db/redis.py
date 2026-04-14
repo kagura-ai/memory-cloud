@@ -135,16 +135,20 @@ async def increment_counter(key: str, ttl: int | None = None) -> int:
 
 
 async def incrby_counter(key: str, amount: int, ttl: int | None = None) -> int:
-    """Increment counter by `amount` in Redis, setting TTL only on first write.
+    """Increment counter by `amount` in Redis, setting TTL only if the key has none.
 
-    Uses EXPIRE with nx=True so the TTL is established exactly once per key lifetime,
-    avoiding TTL reset on every increment. Requires Redis >= 7.0.
+    Checks TTL after INCRBY and sets expiration only when absent. Works on any
+    Redis version (no dependency on EXPIRE NX / Redis 7.0+). Small race window
+    between TTL check and EXPIRE is acceptable for advisory rate limiting.
     """
     client = get_redis_client()
     try:
         count = await client.incrby(key, amount)
         if ttl:
-            await client.expire(key, ttl, nx=True)
+            # client.ttl returns -1 when the key has no TTL, -2 when missing.
+            remaining = await client.ttl(key)
+            if remaining < 0:
+                await client.expire(key, ttl)
         return count
     except Exception as e:
         logger.error("redis_incrby_failed", key=key, amount=amount, error=str(e))
