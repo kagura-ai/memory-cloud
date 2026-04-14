@@ -227,7 +227,7 @@ describe("ResourceDetailPage", () => {
     });
   });
 
-  it("renders ErrorBanner when resource_id is not found in list", async () => {
+  it("renders notFoundTitle when resource_id is not in the workspace list", async () => {
     mockParamsId = "missing_resource";
     mockListResources.mockResolvedValue({
       resources: [makeResource()],
@@ -242,7 +242,34 @@ describe("ResourceDetailPage", () => {
     await waitFor(() => {
       expect(screen.getByRole("alert")).toBeInTheDocument();
     });
+    // Not-found uses the dedicated title, not the generic "Resource" title
+    expect(
+      screen.getByText("resources.detail.notFoundTitle"),
+    ).toBeInTheDocument();
     expect(screen.getByText("resources.detail.backToList")).toBeInTheDocument();
+  });
+
+  it("renders generic title (not notFoundTitle) when a real fetch fails", async () => {
+    // Regression: a server error used to set error=notFound, making
+    // isFetchError true AND rendering the generic title — masking the
+    // real "backend error" intent as "resource doesn't exist".
+    mockListResources.mockRejectedValue(
+      new ApiError({ message: "backend offline", status: 500 }),
+    );
+    mockGetSchema.mockRejectedValue(
+      new ApiError({ message: "backend offline", status: 500 }),
+    );
+
+    render(<ResourceDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent("backend offline");
+    });
+    // Fetch error renders the generic title, NOT the not-found title
+    expect(screen.getByText("resources.detail.title")).toBeInTheDocument();
+    expect(
+      screen.queryByText("resources.detail.notFoundTitle"),
+    ).not.toBeInTheDocument();
   });
 
   it("exposes both tabs (overview + data) in the tablist", async () => {

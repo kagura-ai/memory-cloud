@@ -76,7 +76,10 @@ export default function ResourceDetailPage() {
         (r) => r.resource_id === resourceId,
       );
       if (!found) {
-        setError(t("detail.notFound"));
+        // Not-found is signalled by `resource === null` (leave `error` unset)
+        // so the render path renders `notFoundTitle` + the "not found" copy
+        // via the `error || t("detail.notFound")` ErrorBanner fallback, and
+        // `isFetchError` stays false for the PageHeader title branch.
         return;
       }
       setResource(found);
