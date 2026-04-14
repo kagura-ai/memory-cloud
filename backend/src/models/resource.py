@@ -78,7 +78,7 @@ class Resource(Base):
         nullable=False,
         index=True,
     )
-    resource_id = Column(String(255), nullable=False)
+    resource_id = Column(String(255), nullable=False, index=True)
     name = Column(Text, nullable=True)
     created_by = Column(String(255), nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())

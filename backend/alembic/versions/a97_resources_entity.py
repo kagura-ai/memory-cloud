@@ -119,15 +119,8 @@ def upgrade() -> None:
             UUID(as_uuid=True),
             sa.ForeignKey("workspaces.id", ondelete="CASCADE"),
             nullable=False,
-            index=True,
         ),
-        # ``resource_id`` gets a standalone non-unique index so the Step
-        # 3 orphan audit and Step 5 backfill UPDATEs can resolve the
-        # ``resource_id`` slug without a sequential scan. The composite
-        # ``UNIQUE(workspace_id, resource_id)`` below cannot serve those
-        # lookups efficiently because the leading column is
-        # ``workspace_id``.
-        sa.Column("resource_id", sa.String(255), nullable=False, index=True),
+        sa.Column("resource_id", sa.String(255), nullable=False),
         # name / created_by are populated by later setup flows (issue #324+);
         # the migration cannot infer them from contexts alone.
         sa.Column("name", sa.Text(), nullable=True),
@@ -144,6 +137,16 @@ def upgrade() -> None:
             name="uq_resources_workspace_resource_id",
         ),
     )
+    # Explicit indexes, emitted via op.create_index so they are visible
+    # to alembic autogenerate and so the migration's index footprint
+    # matches the ORM exactly (Resource.workspace_id + resource_id both
+    # declare ``index=True``). ``resource_id`` needs its own index — the
+    # composite UNIQUE above is keyed on (workspace_id, resource_id), so
+    # Postgres cannot serve ``resource_id``-only lookups via that index,
+    # and both the Step 3 orphan audit and the Step 5 backfill UPDATEs
+    # resolve the slug without the workspace context.
+    op.create_index("ix_resources_workspace_id", "resources", ["workspace_id"])
+    op.create_index("ix_resources_resource_id", "resources", ["resource_id"])
 
     # --- Step 2: seed resources from ACTIVE contexts only -----------------
     # Scoping the seed to active, non-deleted contexts keeps
@@ -167,8 +170,8 @@ def upgrade() -> None:
 
     # --- Step 3: pre-migration audit (fail fast on orphans) ---------------
     # Any satellite row whose resource_id has no resources entry would
-    # survive step 5 with resource_pk NULL and break step 6's NOT NULL
-    # tightening. Raise with actionable examples so the operator can
+    # survive Step 5 with resource_pk still NULL, leaving the backfill
+    # incomplete. Raise with actionable examples so the operator can
     # clean up before rerunning.
     orphans: list[tuple[str, str, int]] = []
     for table in _SATELLITE_TABLES:
