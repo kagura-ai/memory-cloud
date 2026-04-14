@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, func, select, text
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import APIKeyOrSessionUser
@@ -186,15 +186,17 @@ async def list_resources(
                 Context.deleted_at.is_(None),
             )
         )
-        # "Most recent activity" = max across the three signals. GREATEST
-        # ignores NULLs on PostgreSQL so a missing last_event_at still picks
-        # up context.updated_at (or created_at as the final fallback).
-        # ORDER BY references the SELECT alias so the correlated subquery is
-        # evaluated once per row, not twice — SQLAlchemy re-emits scalar_subquery
-        # objects at each use site, so text(alias) avoids that duplication.
+        # "Most recent activity" = max across the three signals. PostgreSQL's
+        # GREATEST ignores NULLs, so a missing last_event_at still picks up
+        # context.updated_at (or created_at as the final fallback).
+        # Note: SELECT aliases are not visible inside function calls in ORDER BY
+        # per PG's scoping rules, so we reference the scalar_subquery object
+        # directly here. This does cause the subquery to be emitted twice, but
+        # with < 50 resources/workspace the duplication is negligible, and PG's
+        # query planner can often hoist the correlated subquery to a join.
         .order_by(
             func.greatest(
-                text("last_event_at"),
+                last_event_subq,
                 Context.updated_at,
                 Context.created_at,
             ).desc(),
