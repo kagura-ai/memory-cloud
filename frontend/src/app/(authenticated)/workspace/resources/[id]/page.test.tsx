@@ -225,7 +225,9 @@ describe("ResourceDetailPage", () => {
       resources: [makeResource()],
       total: 1,
     });
-    mockGetSchema.mockRejectedValue(new ApiError({ message: "Not found", status: 404 }));
+    mockGetSchema.mockRejectedValue(
+      new ApiError({ message: "Not found", status: 404 }),
+    );
 
     render(<ResourceDetailPage />);
 
@@ -255,18 +257,41 @@ describe("ResourceDetailPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("url-decodes the resource_id from the URL param", async () => {
-    mockParamsId = "has%20spaces";
+  it("passes useParams() id through unchanged (App Router already decodes)", async () => {
+    // Simulate useParams()'s actual behavior: it returns the already-decoded
+    // route segment. So the fixture uses the decoded form directly.
+    mockParamsId = "has spaces";
     mockListResources.mockResolvedValue({
       resources: [makeResource({ resource_id: "has spaces" })],
       total: 1,
     });
-    mockGetSchema.mockRejectedValue(new ApiError({ message: "Not found", status: 404 }));
+    mockGetSchema.mockRejectedValue(
+      new ApiError({ message: "Not found", status: 404 }),
+    );
 
     render(<ResourceDetailPage />);
 
     await waitFor(() => {
       expect(mockGetSchema).toHaveBeenCalledWith("has spaces");
+    });
+  });
+
+  it("does not throw URIError on resource_ids containing a literal %", async () => {
+    // Regression: decodeURIComponent("%") throws URIError. Since useParams
+    // already decodes, the page must not re-decode — only apply decode() once.
+    mockParamsId = "50%-complete";
+    mockListResources.mockResolvedValue({
+      resources: [makeResource({ resource_id: "50%-complete" })],
+      total: 1,
+    });
+    mockGetSchema.mockRejectedValue(
+      new ApiError({ message: "Not found", status: 404 }),
+    );
+
+    render(<ResourceDetailPage />);
+
+    await waitFor(() => {
+      expect(mockGetSchema).toHaveBeenCalledWith("50%-complete");
     });
   });
 

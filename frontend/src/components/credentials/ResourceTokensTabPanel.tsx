@@ -8,7 +8,7 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
@@ -95,16 +95,26 @@ export function ResourceTokensTabPanel() {
   const searchParams = useSearchParams();
   const resourceIdFilter = searchParams.get("resource_id") || undefined;
 
-  // Reset pagination when the filter changes so a deep-link landing on page 2
-  // doesn't request an out-of-range offset on a smaller filtered result set.
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [resourceIdFilter]);
+  // Track the previous filter so we can detect an actual change and reset
+  // pagination within the same effect as the load. A separate reset effect
+  // would race with the load effect in the same commit and cause a duplicate
+  // fetch with the old offset before the reset takes effect.
+  const prevFilterRef = useRef(resourceIdFilter);
 
   // Load tokens on mount and page change
   useEffect(() => {
     if (!currentWorkspaceId) return;
     if (!isOwner) return; // Skip loading if not owner
+
+    // Filter change: reset pagination and skip this cycle's fetch —
+    // the setCurrentPage(1) will re-trigger this effect with the right offset.
+    if (prevFilterRef.current !== resourceIdFilter) {
+      prevFilterRef.current = resourceIdFilter;
+      if (currentPage !== 1) {
+        setCurrentPage(1);
+        return;
+      }
+    }
     loadTokens();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentWorkspaceId, currentPage, isOwner, resourceIdFilter]);

@@ -35,7 +35,10 @@ const RESOURCE_TABS = ["overview", "data"] as const;
 export default function ResourceDetailPage() {
   const params = useParams();
   const router = useRouter();
-  const resourceId = decodeURIComponent(params.id as string);
+  // Next.js App Router's useParams() returns route segments already decoded —
+  // calling decodeURIComponent here is redundant and throws URIError on any
+  // legitimate literal `%` (e.g., an encoded `%25` becomes `%` after useParams).
+  const resourceId = params.id as string;
   const t = useTranslations("resources");
   const { currentWorkspace } = useWorkspace();
 
