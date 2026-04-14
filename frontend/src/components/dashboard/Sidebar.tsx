@@ -95,6 +95,11 @@ const navigationGroups: NavGroup[] = [
         showContextCount: true,
       },
       {
+        nameKey: "resources",
+        href: "/workspace/resources",
+        icon: Database,
+      },
+      {
         nameKey: "members",
         href: "/workspace/members",
         icon: Users,

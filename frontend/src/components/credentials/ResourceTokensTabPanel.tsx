@@ -10,6 +10,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { Section } from "@/components/common/Section";
 import {
@@ -88,12 +89,19 @@ export function ResourceTokensTabPanel() {
   // Check if user is owner
   const isOwner = currentWorkspace?.current_user_role === "owner";
 
+  // Issue #47: Deep-link support — `?resource_id=<id>` pre-filters the token list.
+  // Passed through to the backend list endpoint; also gates the create dialog's
+  // initial resource selection.
+  const searchParams = useSearchParams();
+  const resourceIdFilter = searchParams.get("resource_id") || undefined;
+
   // Load tokens on mount and page change
   useEffect(() => {
     if (!currentWorkspaceId) return;
     if (!isOwner) return; // Skip loading if not owner
     loadTokens();
-  }, [currentWorkspaceId, currentPage, isOwner]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentWorkspaceId, currentPage, isOwner, resourceIdFilter]);
 
   const loadTokens = async () => {
     try {
@@ -101,7 +109,7 @@ export function ResourceTokensTabPanel() {
       setError(null);
       const offset = (currentPage - 1) * limit;
       const [tokensResponse, contextsData] = await Promise.all([
-        listResourceTokens(undefined, limit, offset),
+        listResourceTokens(resourceIdFilter, limit, offset),
         getContexts(),
       ]);
       // Handle paginated response
@@ -647,6 +655,7 @@ export function ResourceTokensTabPanel() {
             onClose={() => setShowCreateDialog(false)}
             onSuccess={handleCreateSuccess}
             currentTokens={tokens}
+            initialResourceId={resourceIdFilter}
           />
         )}
 

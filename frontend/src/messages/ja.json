@@ -46,6 +46,7 @@
     "dashboard": "ダッシュボード",
     "contexts": "コンテキスト",
     "contextsWithCount": "コンテキスト ({count})",
+    "resources": "リソース",
     "members": "メンバー",
     "membersWithCount": "メンバー ({count})",
     "integrations": "インテグレーション",
@@ -2679,5 +2680,64 @@
     "copied": "コピーしました！",
     "copyFailed": "コピーに失敗しました",
     "deleteFailed": "コンテキストの削除に失敗しました"
+  },
+  "resources": {
+    "list": {
+      "title": "リソース",
+      "description": "外部システムからこのワークスペースへ ingest されたリソース。",
+      "emptyTitle": "リソースがまだありません",
+      "emptyDescription": "このワークスペースにはリソースが設定されていません。MCPツール setup_resource() または Python SDK から作成後、このページを更新してください。",
+      "setupGuide": "セットアップガイド",
+      "fetchError": "リソース一覧の取得に失敗しました。",
+      "column": {
+        "resourceId": "Resource ID",
+        "context": "コンテキスト",
+        "tokens": "トークン",
+        "memories": "メモリ",
+        "schema": "スキーマ",
+        "lastActivity": "最終アクティビティ"
+      }
+    },
+    "detail": {
+      "title": "リソース",
+      "loading": "リソースを読み込み中…",
+      "notFoundTitle": "リソースが見つかりません",
+      "notFound": "このリソースはワークスペースに存在しないか、削除されています。",
+      "fetchError": "リソース詳細の取得に失敗しました。",
+      "backToList": "リソース一覧へ戻る"
+    },
+    "tabs": {
+      "overview": "概要",
+      "data": "データ"
+    },
+    "stats": {
+      "activeTokens": "有効トークン",
+      "memories": "メモリ数",
+      "schemaVersion": "スキーマ",
+      "noSchemaYet": "未登録",
+      "lastActivity": "最終アクティビティ",
+      "manage": "管理"
+    },
+    "schema": {
+      "field": "フィールド",
+      "type": "型",
+      "classification": "分類",
+      "indexHint": "インデックスヒント",
+      "description": "説明",
+      "required": "必須",
+      "versionLabel": "現在のスキーマバージョン: v{version}",
+      "emptyTitle": "スキーマ未登録",
+      "emptyDescription": "このリソースにはまだスキーマが登録されていません。REST API または MCP ツールからフィールド定義を登録してください。"
+    },
+    "data": {
+      "comingSoonTitle": "データブラウザは近日公開",
+      "comingSoonDescription": "スキーマ連動の key-value 表示 + raw JSON ペインによるページネーション付き記録ビューア。v0.13.0 で提供予定です。",
+      "trackProgress": "#316 で進捗を確認"
+    },
+    "planGate": {
+      "title": "リソース機能は Pro プラン必須",
+      "description": "リソースのセットアップと ingest は Pro 以上のプランで利用可能です。アップグレードして Web UI 可視化、MCP リソースツール、ingest クォータを解放しましょう。",
+      "action": "Pro にアップグレード"
+    }
   }
 }
