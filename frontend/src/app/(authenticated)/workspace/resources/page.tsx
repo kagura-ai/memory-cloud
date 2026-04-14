@@ -14,7 +14,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useTranslations, useLocale } from "next-intl";
 import { useAuth } from "@/contexts/AuthContext";
-import { Database, ExternalLink } from "lucide-react";
+import { Database } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { TableLoadingState } from "@/components/common/LoadingState";
@@ -119,16 +119,7 @@ export default function ResourcesListPage() {
           icon={Database}
           title={t("list.emptyTitle")}
           description={t("list.emptyDescription")}
-        >
-          <a
-            href="https://github.com/kagura-ai/memory-cloud/blob/main/docs/resources.md"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="mt-4 inline-flex items-center gap-1.5 text-sm text-brand-green-600 hover:text-brand-green-700 dark:text-brand-green-400"
-          >
-            {t("list.setupGuide")} <ExternalLink className="h-3.5 w-3.5" />
-          </a>
-        </EmptyState>
+        />
       ) : (
         <div className="rounded-lg border bg-card">
           <Table>

@@ -125,8 +125,8 @@ describe("ResourcesListPage", () => {
     await waitFor(() => {
       expect(screen.getByText("list.emptyTitle")).toBeInTheDocument();
     });
-    const link = screen.getByRole("link", { name: /list\.setupGuide/ });
-    expect(link.getAttribute("href")).toContain("kagura-ai/memory-cloud");
+    expect(screen.getByText("list.emptyDescription")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /setupGuide/i })).toBeNull();
   });
 
   it("renders upgrade CTA and skips fetch on basic plan", async () => {

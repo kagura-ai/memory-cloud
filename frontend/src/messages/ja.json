@@ -2687,7 +2687,6 @@
       "description": "外部システムからこのワークスペースへ ingest されたリソース。",
       "emptyTitle": "リソースがまだありません",
       "emptyDescription": "このワークスペースにはリソースが設定されていません。MCPツール setup_resource() または Python SDK から作成後、このページを更新してください。",
-      "setupGuide": "セットアップガイド",
       "fetchError": "リソース一覧の取得に失敗しました。",
       "column": {
         "resourceId": "リソースID",

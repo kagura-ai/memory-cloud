@@ -2687,7 +2687,6 @@
       "description": "Resources ingested into this workspace via external systems.",
       "emptyTitle": "No resources yet",
       "emptyDescription": "This workspace has no resources. Set one up via the MCP tool setup_resource() or the Python SDK, then refresh this page.",
-      "setupGuide": "Setup guide",
       "fetchError": "Failed to load resources.",
       "column": {
         "resourceId": "Resource ID",
