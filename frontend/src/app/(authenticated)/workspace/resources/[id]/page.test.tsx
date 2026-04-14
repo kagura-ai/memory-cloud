@@ -20,9 +20,11 @@ import ResourceDetailPage from "./page";
 const mockListResources = vi.fn();
 const mockGetSchema = vi.fn();
 const mockRouterReplace = vi.fn();
+const mockRouterPush = vi.fn();
 
 let mockParamsId = "ec_products";
 let mockSearchParams = new URLSearchParams();
+let mockCurrentWorkspace: { plan_name?: string } | null = null;
 
 vi.mock("@/lib/api/resources", () => ({
   listResources: (...args: unknown[]) => mockListResources(...args),
@@ -36,7 +38,11 @@ vi.mock("next/navigation", () => ({
   useParams: () => ({ id: mockParamsId }),
   useSearchParams: () => mockSearchParams,
   usePathname: () => "/workspace/resources/ec_products",
-  useRouter: () => ({ replace: mockRouterReplace }),
+  useRouter: () => ({ replace: mockRouterReplace, push: mockRouterPush }),
+}));
+
+vi.mock("@/contexts/WorkspaceContext", () => ({
+  useWorkspace: () => ({ currentWorkspace: mockCurrentWorkspace }),
 }));
 
 // Stable translator — a new function reference each render would invalidate
@@ -111,8 +117,10 @@ beforeEach(() => {
   mockListResources.mockReset();
   mockGetSchema.mockReset();
   mockRouterReplace.mockReset();
+  mockRouterPush.mockReset();
   mockParamsId = "ec_products";
   mockSearchParams = new URLSearchParams();
+  mockCurrentWorkspace = { plan_name: "pro" };
 });
 
 afterEach(() => {
@@ -239,5 +247,31 @@ describe("ResourceDetailPage", () => {
     await waitFor(() => {
       expect(mockGetSchema).toHaveBeenCalledWith("has spaces");
     });
+  });
+
+  it("renders upgrade CTA and skips fetch on basic plan", async () => {
+    mockCurrentWorkspace = { plan_name: "basic" };
+
+    render(<ResourceDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("resources.planGate.title")).toBeInTheDocument();
+    });
+    expect(mockListResources).not.toHaveBeenCalled();
+    expect(mockGetSchema).not.toHaveBeenCalled();
+  });
+
+  it("holds the fetch until WorkspaceContext hydrates", async () => {
+    mockCurrentWorkspace = null;
+    mockListResources.mockResolvedValue({
+      resources: [makeResource()],
+      total: 1,
+    });
+    mockGetSchema.mockResolvedValue(makeSchema());
+
+    render(<ResourceDetailPage />);
+
+    await Promise.resolve();
+    expect(mockListResources).not.toHaveBeenCalled();
   });
 });

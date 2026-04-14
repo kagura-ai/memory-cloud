@@ -10,10 +10,10 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
-import { ArrowLeft, ChevronRight, FileJson } from "lucide-react";
+import { ArrowLeft, ChevronRight, Database, FileJson } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SpinnerLoading } from "@/components/common/LoadingState";
@@ -27,13 +27,24 @@ import { SchemaFieldTable } from "@/components/resources/SchemaFieldTable";
 import { ResourceDataTabPlaceholder } from "@/components/resources/ResourceDataTabPlaceholder";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
+import { useWorkspace } from "@/contexts/WorkspaceContext";
 
 const RESOURCE_TABS = ["overview", "data"] as const;
 
 export default function ResourceDetailPage() {
   const params = useParams();
+  const router = useRouter();
   const resourceId = decodeURIComponent(params.id as string);
   const t = useTranslations("resources");
+  const { currentWorkspace } = useWorkspace();
+
+  // Match the list page's plan-gate posture — a deep-link direct to this URL
+  // on a Free/Basic workspace must see the upgrade CTA, not a generic
+  // not-found/error after a wasted API round-trip.
+  const planName = currentWorkspace?.plan_name;
+  const workspaceReady = currentWorkspace !== null && planName !== undefined;
+  const isPlanGated =
+    workspaceReady && (planName === "free" || planName === "basic");
 
   const [tab, setTab] = useTabParam("overview", "tab", RESOURCE_TABS);
 
@@ -78,8 +89,16 @@ export default function ResourceDetailPage() {
   }, [resourceId, t]);
 
   useEffect(() => {
+    // Hold the fetch until WorkspaceContext hydrates, then skip entirely for
+    // plan-gated workspaces — same rule as the list page so a direct deep-link
+    // on Free/Basic never fires an API call.
+    if (!workspaceReady) return;
+    if (isPlanGated) {
+      setLoading(false);
+      return;
+    }
     fetchResource();
-  }, [fetchResource]);
+  }, [fetchResource, isPlanGated, workspaceReady]);
 
   useEffect(() => {
     const title = resource
@@ -89,6 +108,21 @@ export default function ResourceDetailPage() {
       : t("detail.title");
     document.title = `${title} - Kagura Memory Cloud`;
   }, [resource, t]);
+
+  if (isPlanGated) {
+    return (
+      <PageContainer>
+        <PageHeader title={t("list.title")} />
+        <EmptyState
+          icon={Database}
+          title={t("planGate.title")}
+          description={t("planGate.description")}
+          actionLabel={t("planGate.action")}
+          onAction={() => router.push("/workspace/settings/billing")}
+        />
+      </PageContainer>
+    );
+  }
 
   if (loading) {
     return (

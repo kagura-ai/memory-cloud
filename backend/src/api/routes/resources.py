@@ -12,6 +12,8 @@ Complements the existing per-resource endpoints in ``resource_schema.py``
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, select, text
@@ -28,6 +30,19 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/resources", tags=["resources"])
+
+
+def _iso_utc(dt: datetime) -> str:
+    """Render a DB timestamp as ISO 8601 UTC with explicit Z suffix.
+
+    The project's DateTime columns are naive (TIMESTAMP WITHOUT TIME ZONE) and
+    stored by convention in UTC. ``datetime.isoformat()`` on a naive value omits
+    any offset, which browsers then parse as local time. Appending ``Z`` makes
+    the UTC contract explicit on the wire.
+    """
+    if dt.tzinfo is not None:
+        return dt.isoformat()
+    return dt.isoformat() + "Z"
 
 
 # ============================================================================
@@ -130,10 +145,15 @@ async def list_resources(
         .scalar_subquery()
     )
 
+    # Memory has a workspace_id column, so we can scope defensively here even
+    # though the other resource_* tables cannot (per the architectural invariant
+    # comment above). For Memory specifically this tightens the count against
+    # the unlikely case of a resource_id collision across workspaces.
     memory_count_subq = (
         select(func.count(Memory.id))
         .where(
             Memory.resource_id == Context.resource_id,
+            Memory.workspace_id == Context.workspace_id,
             Memory.deleted_at.is_(None),
         )
         .correlate(Context)
@@ -179,8 +199,14 @@ async def list_resources(
         # ORDER BY references the SELECT alias so the correlated subquery is
         # evaluated once per row, not twice. SQLAlchemy re-emits scalar_subquery
         # objects at each use site; referencing the alias via text() avoids that.
+        # The 3-level coalesce mirrors the response `updated_at` fallback so the
+        # server-side sort order agrees with the timestamp each row exposes.
         .order_by(
-            func.coalesce(text("last_event_at"), Context.updated_at).desc(),
+            func.coalesce(
+                text("last_event_at"),
+                Context.updated_at,
+                Context.created_at,
+            ).desc(),
         )
     )
     rows = result.all()
@@ -194,10 +220,11 @@ async def list_resources(
             token_count=row.token_count or 0,
             memory_count=row.memory_count or 0,
             current_schema_version=row.schema_version,
-            created_at=row.created_at.isoformat(),
+            created_at=_iso_utc(row.created_at),
             # Fall back through last_event → context.updated_at → context.created_at
-            # so we never call .isoformat() on None.
-            updated_at=(row.last_event_at or row.context_updated_at or row.created_at).isoformat(),
+            # so we never call .isoformat() on None. _iso_utc() appends the Z
+            # suffix that naive UTC timestamps need for JS clients to parse.
+            updated_at=_iso_utc(row.last_event_at or row.context_updated_at or row.created_at),
         )
         for row in rows
     ]

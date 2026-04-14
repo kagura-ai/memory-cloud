@@ -95,6 +95,12 @@ export function ResourceTokensTabPanel() {
   const searchParams = useSearchParams();
   const resourceIdFilter = searchParams.get("resource_id") || undefined;
 
+  // Reset pagination when the filter changes so a deep-link landing on page 2
+  // doesn't request an out-of-range offset on a smaller filtered result set.
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [resourceIdFilter]);
+
   // Load tokens on mount and page change
   useEffect(() => {
     if (!currentWorkspaceId) return;
