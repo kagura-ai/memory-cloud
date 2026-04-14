@@ -7,13 +7,14 @@ Provides endpoints for external systems (EC inventory, etc.) to push events.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.resource_tokens import ResourceTokenManager
 from db.base import get_db
+from models.auth import Context
 from models.resource import ResourceEvent, ResourceToken
 from models.schemas import (
     ResourceEventBatchRequest,
@@ -21,6 +22,7 @@ from models.schemas import (
     ResourceEventRequest,
     ResourceEventResponse,
 )
+from services.permission_service import PermissionService
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, RateLimitError, ValidationError
 from utils.logger import get_logger
@@ -40,21 +42,21 @@ MAX_PAYLOAD_SIZE_BYTES = 100_000
 
 async def verify_resource_token(
     resource_id: str,
+    request: Request,
     x_resource_api_key: str | None = Header(None, alias="X-Resource-API-Key"),
     db: AsyncSession = Depends(get_db),
-) -> tuple[ResourceToken, int]:
-    """Verify resource token and return (token_record, quota).
+) -> tuple[ResourceToken, int, Context]:
+    """Verify resource token and enforce workspace boundary.
 
-    Args:
-        resource_id: Resource ID from path parameter
-        x_resource_api_key: Resource API token from header
-        db: Database session
+    See SECURITY.md (2026-04-14 advisory) for the threat model.
 
     Returns:
-        Tuple of (token_record, quota_events_per_hour)
+        (token_record, quota_events_per_hour, context)
 
     Raises:
-        HTTPException: 401 if token is invalid/revoked
+        HTTPException 401: missing/invalid/revoked token
+        HTTPException 403: token creator is not a member of the Context's workspace
+        HTTPException 404: resource_id is not bound to any active Context
     """
     if not x_resource_api_key:
         raise HTTPException(
@@ -62,7 +64,6 @@ async def verify_resource_token(
             detail="X-Resource-API-Key header required",
         )
 
-    # Verify token
     manager = ResourceTokenManager(db)
     token_record = await manager.verify_token(x_resource_api_key, resource_id)
 
@@ -72,7 +73,114 @@ async def verify_resource_token(
             detail="Invalid or revoked resource token",
         )
 
-    return token_record, token_record.quota_events_per_hour
+    context = await _resolve_authoritative_context(db, resource_id)
+    if context is None:
+        logger.warning(
+            "resource_id_unbound_on_ingest",
+            resource_id=resource_id,
+            token_id=token_record.id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Resource is not bound to an active context",
+        )
+
+    await _enforce_workspace_membership(db, request, token_record, context)
+
+    return token_record, token_record.quota_events_per_hour, context
+
+
+async def _resolve_authoritative_context(
+    db: AsyncSession,
+    resource_id: str,
+) -> Context | None:
+    """Return the single active Context for resource_id, if any.
+
+    After migration a96, the partial UNIQUE index
+    ``ux_contexts_resource_id_active`` guarantees at most one active row
+    per resource_id. This helper defends against the window before that
+    migration runs: if pre-existing cross-workspace collisions are still
+    in the table, we fail closed (409) rather than silently picking one
+    row or bubbling an opaque 500.
+
+    Returns:
+        Single active Context, or None if no match.
+
+    Raises:
+        HTTPException 409: multiple active contexts share the resource_id
+            (only reachable pre-migration; run a96 to eliminate).
+    """
+    result = await db.execute(
+        select(Context).where(
+            Context.resource_id == resource_id,
+            Context.deleted_at.is_(None),
+        )
+    )
+    rows = result.scalars().all()
+    if not rows:
+        return None
+    if len(rows) > 1:
+        logger.warning(
+            "resource_id_ambiguous_on_ingest",
+            resource_id=resource_id,
+            match_count=len(rows),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "resource_id is ambiguous across workspaces — contact an "
+                "administrator to resolve the collision."
+            ),
+        )
+    return rows[0]
+
+
+async def _enforce_workspace_membership(
+    db: AsyncSession,
+    request: Request,
+    token_record: ResourceToken,
+    context: Context,
+) -> None:
+    """Reject ingest unless token creator is a member of context's workspace.
+
+    Uses ``PermissionService.is_workspace_member`` — the canonical
+    durable membership check (``WorkspaceMember`` row lookup). Does NOT
+    use ``User.current_workspace_id``, which is a mutable UI preference
+    and cannot be trusted for authorization.
+    """
+    if not token_record.created_by:
+        logger.warning(
+            "resource_ingest_missing_token_creator",
+            resource_id=context.resource_id,
+            token_id=token_record.id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Token is missing creator attribution and cannot be authorized.",
+        )
+
+    permissions = PermissionService(db)
+    is_member = await permissions.is_workspace_member(
+        user_id=token_record.created_by,
+        workspace_id=context.workspace_id,
+    )
+
+    if not is_member:
+        logger.warning(
+            "cross_tenant_ingest_attempt",
+            resource_id=context.resource_id,
+            token_id=token_record.id,
+            target_workspace_id=str(context.workspace_id),
+            token_creator=token_record.created_by,
+            client_ip=request.client.host if request.client else None,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Resource ingest denied: the token's creator is not a member "
+                "of the workspace that owns this resource."
+            ),
+        )
 
 
 # ============================================================================
@@ -88,7 +196,7 @@ async def verify_resource_token(
 async def ingest_event(
     resource_id: str,
     request: ResourceEventRequest,
-    auth: tuple = Depends(verify_resource_token),
+    auth: tuple[ResourceToken, int, Context] = Depends(verify_resource_token),
     db: AsyncSession = Depends(get_db),
 ):
     """Ingest a single resource event (upsert or delete).
@@ -128,7 +236,8 @@ async def ingest_event(
         - 422: Validation error (e.g., missing payload for upsert)
         - 429: Quota exceeded
     """
-    token_record, quota_per_hour = auth
+    # Context is resolved and workspace-verified in the dependency — always non-None here.
+    token_record, quota_per_hour, context = auth
 
     logger.info(
         "resource_event_ingest_started",
@@ -153,36 +262,7 @@ async def ingest_event(
                 detail=f"Payload too large: {payload_size} bytes (max {MAX_PAYLOAD_SIZE_BYTES})",
             )
 
-    # 3. SECURITY: Verify Context-Resource binding BEFORE creating event
-    # Issue #271 Code Review C-3: Validate before insert (avoid rollback)
-    from models.auth import Context, User
-
-    context_result = await db.execute(
-        select(Context).where(Context.resource_id == resource_id, Context.deleted_at.is_(None))
-    )
-    context = context_result.scalar_one_or_none()
-
-    if context and token_record.created_by:
-        # Get token creator's workspace
-        user_result = await db.execute(
-            select(User.current_workspace_id).where(User.user_id == token_record.created_by)
-        )
-        user_workspace_id = user_result.scalar_one_or_none()
-
-        # Verify context belongs to same workspace as token creator
-        if user_workspace_id and context.workspace_id != user_workspace_id:
-            logger.warning(
-                "resource_ingest_workspace_boundary_violation_prevented",
-                resource_id=resource_id,
-                context_workspace_id=str(context.workspace_id),
-                token_creator_org_id=str(user_workspace_id),
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Context-Resource binding validation failed. This resource is bound to a context in a different workspace.",
-            )
-
-    # 4. Create event record
+    # 3. Create event record
     try:
         event = ResourceEvent(
             resource_id=resource_id,
@@ -207,11 +287,10 @@ async def ingest_event(
             doc_id=request.doc_id,
         )
 
-        # 5. Schedule indexer run (find all contexts using this resource)
+        # 4. Schedule indexer run (find all contexts using this resource)
         await _schedule_indexer_for_resource(db, resource_id)
 
-        # 6. Log usage statistics (Issue #242)
-        # Context was already fetched in step 3 for validation
+        # 5. Log usage statistics (Issue #242)
         from utils.usage_logger import log_usage
 
         await log_usage(
@@ -221,8 +300,8 @@ async def ingest_event(
             method="POST",
             status_code=201,
             response_time_ms=None,
-            context_id=str(context.id) if context else None,  # Bugfix: Add context_id
-            workspace_id=str(context.workspace_id) if context else None,  # Bugfix: Add workspace_id
+            context_id=str(context.id),
+            workspace_id=str(context.workspace_id),
         )
 
         return ResourceEventResponse(
@@ -282,7 +361,7 @@ async def ingest_event(
 async def ingest_batch(
     resource_id: str,
     request: ResourceEventBatchRequest,
-    auth: tuple = Depends(verify_resource_token),
+    auth: tuple[ResourceToken, int, Context] = Depends(verify_resource_token),
     db: AsyncSession = Depends(get_db),
 ):
     """Ingest multiple resource events in a single request.
@@ -316,10 +395,13 @@ async def ingest_batch(
 
     Errors:
         - 401: Invalid/revoked token
+        - 403: Cross-tenant ingest blocked (Issue #322)
+        - 404: Resource not bound to an active Context
         - 422: Validation error (max 100 events)
         - 429: Quota exceeded
     """
-    token_record, quota_per_hour = auth
+    # Context is resolved and workspace-verified in the dependency — always non-None here.
+    token_record, quota_per_hour, context = auth
 
     logger.info(
         "resource_batch_ingest_started",
@@ -444,6 +526,8 @@ async def ingest_batch(
             method="POST",
             status_code=201,
             response_time_ms=None,
+            context_id=str(context.id),
+            workspace_id=str(context.workspace_id),
         )
 
     logger.info(

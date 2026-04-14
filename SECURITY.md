@@ -66,3 +66,40 @@ All Qdrant vector searches and PostgreSQL queries include isolation filters.
 - Context names validated against `^[a-z0-9_-]+$`
 - Request body validation via Pydantic models
 - UUID format validation on all ID parameters
+
+## Security Advisories
+
+### 2026-04-14 — Cross-tenant Resource ingest (fixed in v0.12.0)
+
+**Severity**: Critical (OWASP A01: Broken Access Control / CWE-639: Authorization Bypass Through User-Controlled Key)
+**Affected versions**: all pre-v0.12.0 deployments with Resource Ingest enabled (Issue #238 onward).
+**Discovered during**: internal design audit (#322 parent epic #321).
+
+#### Description
+
+The Resource Ingest API (`POST /api/v1/resources/{resource_id}/events`) authenticated tokens by `(token_hash, resource_id)` only and never verified that the token's creator was a member of the workspace whose Context owned that `resource_id`. Because `contexts.resource_id` had no global uniqueness constraint, two workspaces could legitimately create Contexts with the same `resource_id` string. An authenticated attacker (self-signup + PRO plan) could then:
+
+1. Create a Context in their own workspace with the same `resource_id` as a victim's Context
+2. Obtain a Resource Token for that `resource_id` (the existing per-workspace CRUD check allowed this)
+3. Send ingest events that the victim's indexer would consume and write into the victim's memory store
+
+#### Remediation (v0.12.0)
+
+1. **Ingest-path workspace boundary**: `verify_resource_token` now enforces `WorkspaceMember.user_id == ResourceToken.created_by AND WorkspaceMember.workspace_id == Context.workspace_id`. Mismatches return 403 and emit a `cross_tenant_ingest_attempt` structured warning log.
+2. **Schema-level tenant isolation**: Alembic migration `a96` adds a global partial UNIQUE index `ux_contexts_resource_id_active ON contexts (resource_id) WHERE resource_id IS NOT NULL AND deleted_at IS NULL`. Cross-workspace `resource_id` collisions are now impossible at the database level.
+3. **Audit logging**: Structured warnings are emitted for unbound resources, missing token attribution, and membership violations. No raw token material is ever logged — only the integer `token_id` (DB PK), the workspace UUIDs, and the request's client IP.
+
+#### Upgrade steps for self-hosted operators
+
+1. Before upgrading, run the collision audit query to detect pre-existing cross-workspace duplicates:
+   ```sql
+   SELECT resource_id, COUNT(DISTINCT workspace_id) AS ws_count
+   FROM contexts
+   WHERE resource_id IS NOT NULL AND deleted_at IS NULL
+   GROUP BY resource_id
+   HAVING COUNT(DISTINCT workspace_id) > 1;
+   ```
+2. If rows are returned, rename one side of each collision (`UPDATE contexts SET resource_id = ... WHERE id = ...`) before upgrading. The `a96` migration will abort if any active collisions remain.
+3. Run `make migrate` (or your standard Alembic upgrade step). `a96` uses `CREATE UNIQUE INDEX CONCURRENTLY` and does not hold a table lock.
+4. Restart API containers to pick up the updated `verify_resource_token` dependency.
+5. Monitor logs for `cross_tenant_ingest_attempt` warnings — ongoing hits indicate either active exploit attempts or legitimate callers whose token attribution needs review.
