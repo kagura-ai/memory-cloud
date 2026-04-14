@@ -463,6 +463,7 @@ async def handle_ingest_events(
                     continue
 
                 payload = event_data.get("payload")
+                version = None
 
                 # Upsert requires payload and version >= 1
                 if op == "upsert":
@@ -653,11 +654,12 @@ async def handle_setup_resource(
                 return _error_response("workspace_not_found", "Workspace not found.")
 
             plan = get_plan_tier(plan_name)
-            if plan.max_resource_tokens == 0:
+            # setup_resource creates a shared + public context; both require Pro.
+            # Basic has max_resource_tokens>0 but does NOT allow shared/public contexts.
+            if not plan.allows_shared_contexts or plan.max_resource_tokens == 0:
                 return _error_response(
                     "plan_required",
-                    "Resource Tokens require PRO plan. "
-                    "Public contexts are not available on Free or Basic plans.",
+                    "setup_resource requires PRO plan (public/shared contexts + resource tokens).",
                 )
 
             # 5. Check context creation quota

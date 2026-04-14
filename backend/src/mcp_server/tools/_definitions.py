@@ -1023,7 +1023,7 @@ Requires action recording (reports created before this feature have no actions t
                     "resource_id": {
                         "type": "string",
                         "description": (
-                            "Resource identifier (lowercase alphanumeric, underscores; "
+                            "Resource identifier (lowercase alphanumeric, hyphens, underscores; "
                             "max 255 chars). Must be unique in the workspace. "
                             "Example: 'ec_products'."
                         ),
