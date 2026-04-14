@@ -21,7 +21,7 @@ export interface ResourceListItem {
   current_schema_version: number | null;
   /** ISO 8601 UTC — context creation time. */
   created_at: string;
-  /** ISO 8601 UTC — max(context.updated_at, last_event_at). */
+  /** ISO 8601 UTC — max(last_event_at, context.updated_at, context.created_at). */
   updated_at: string;
 }
 

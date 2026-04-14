@@ -3,11 +3,14 @@
  *
  * Verifies:
  * - stats strip + schema table render on success
- * - schema absence (404) renders the "no schema" EmptyState
+ * - schema absence (ApiError 404) renders the "no schema" EmptyState
+ * - non-404 getSchema errors surface via ErrorBanner (not silenced)
  * - listResources() and getSchema() run in parallel (both start before either resolves)
  * - unknown resource_id renders ErrorBanner + back link
- * - data tab renders the #316 placeholder
- * - url-encoded resource_id is decoded before use
+ * - both tabs (overview + data) are exposed in the tablist
+ * - the route `id` from useParams() is used directly (App Router already decodes)
+ * - resource_ids containing a literal `%` do not throw URIError
+ * - Pro-plan gate + workspaceReady hydration guard
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";

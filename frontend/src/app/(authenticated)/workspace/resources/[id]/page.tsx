@@ -146,16 +146,22 @@ export default function ResourceDetailPage() {
   }
 
   if (error || !resource) {
+    // Separate "fetch failure" (server/network error) from "resource not found"
+    // (the workspace simply doesn't have this resource_id) so users don't see
+    // a misleading "Resource not found" banner on a 500.
+    const isFetchError = !!error;
     return (
       <PageContainer>
-        <PageHeader title={t("detail.notFoundTitle")} />
+        <PageHeader
+          title={isFetchError ? t("detail.title") : t("detail.notFoundTitle")}
+        />
         <ErrorBanner error={error || t("detail.notFound")} />
-        <Link href="/workspace/resources">
-          <Button variant="outline" className="mt-4">
+        <Button variant="outline" className="mt-4" asChild>
+          <Link href="/workspace/resources">
             <ArrowLeft className="h-4 w-4 mr-2" />
             {t("detail.backToList")}
-          </Button>
-        </Link>
+          </Link>
+        </Button>
       </PageContainer>
     );
   }
