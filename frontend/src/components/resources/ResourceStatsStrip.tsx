@@ -10,10 +10,11 @@
 "use client";
 
 import { Key, Database, FileJson, Clock } from "lucide-react";
-import { useTranslations } from "next-intl";
+import { useTranslations, useLocale } from "next-intl";
 import Link from "next/link";
 import { KpiCard } from "@/components/ui/kpi-card";
 import { formatRelativeTime } from "@/lib/utils/datetime";
+import { useAuth } from "@/contexts/AuthContext";
 import type { ResourceListItem } from "@/lib/api/resources";
 
 interface ResourceStatsStripProps {
@@ -22,6 +23,9 @@ interface ResourceStatsStripProps {
 
 export function ResourceStatsStrip({ resource }: ResourceStatsStripProps) {
   const t = useTranslations("resources");
+  const locale = useLocale();
+  const { user } = useAuth();
+  const timezone = user?.timezone || "UTC";
 
   const tokensHref = `/workspace/integrations/credentials?tab=resource-tokens&resource_id=${encodeURIComponent(
     resource.resource_id,
@@ -67,7 +71,7 @@ export function ResourceStatsStrip({ resource }: ResourceStatsStripProps) {
       <KpiCard
         icon={Clock}
         label={t("stats.lastActivity")}
-        value={formatRelativeTime(resource.updated_at)}
+        value={formatRelativeTime(resource.updated_at, timezone, locale)}
       />
     </div>
   );

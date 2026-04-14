@@ -12,7 +12,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { useTranslations } from "next-intl";
+import { useTranslations, useLocale } from "next-intl";
+import { useAuth } from "@/contexts/AuthContext";
 import { Database, ExternalLink } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -36,6 +37,9 @@ export default function ResourcesListPage() {
   const router = useRouter();
   const t = useTranslations("resources");
   const { currentWorkspace } = useWorkspace();
+  const { user } = useAuth();
+  const locale = useLocale();
+  const timezone = user?.timezone || "UTC";
 
   const [resources, setResources] = useState<ResourceListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -173,7 +177,7 @@ export default function ResourcesListPage() {
                       )}
                     </TableCell>
                     <TableCell className="text-muted-foreground text-sm">
-                      {formatRelativeTime(r.updated_at)}
+                      {formatRelativeTime(r.updated_at, timezone, locale)}
                     </TableCell>
                   </TableRow>
                 );

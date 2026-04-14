@@ -2690,7 +2690,7 @@
       "setupGuide": "セットアップガイド",
       "fetchError": "リソース一覧の取得に失敗しました。",
       "column": {
-        "resourceId": "Resource ID",
+        "resourceId": "リソースID",
         "context": "コンテキスト",
         "tokens": "トークン",
         "memories": "メモリ",

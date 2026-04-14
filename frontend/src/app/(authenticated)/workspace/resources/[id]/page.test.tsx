@@ -66,6 +66,11 @@ vi.mock("next-intl", () => ({
     }
     return translatorCache.get(ns)!;
   },
+  useLocale: () => "en",
+}));
+
+vi.mock("@/contexts/AuthContext", () => ({
+  useAuth: () => ({ user: { timezone: "UTC" } }),
 }));
 
 vi.mock("@/lib/utils/datetime", () => ({

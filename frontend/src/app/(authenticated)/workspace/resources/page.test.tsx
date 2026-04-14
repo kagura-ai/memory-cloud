@@ -39,10 +39,15 @@ vi.mock("next/navigation", () => ({
 
 vi.mock("next-intl", () => ({
   useTranslations: () => (key: string) => key,
+  useLocale: () => "en",
 }));
 
 vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => ({ currentWorkspace: mockCurrentWorkspace }),
+}));
+
+vi.mock("@/contexts/AuthContext", () => ({
+  useAuth: () => ({ user: { timezone: "UTC" } }),
 }));
 
 vi.mock("@/lib/utils/datetime", () => ({
