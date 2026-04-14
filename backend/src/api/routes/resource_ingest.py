@@ -575,7 +575,13 @@ async def _check_event_quota(
 ) -> None:
     """Check event ingestion quota (per token per hour).
 
-    Uses Redis counter with 1-hour TTL.
+    Uses Redis counter with 1-hour TTL. Reserves `count` units after a passing
+    check so concurrent callers observe the updated total.
+
+    Fail-open: if Redis is unavailable (RedisError), the function logs and returns
+    without raising. This matches SECURITY.md "Rate Limiting" policy — Redis
+    outages must not block ingest. Non-Redis exceptions (programming bugs) are
+    NOT swallowed and will propagate to the caller.
 
     Args:
         resource_id: Resource identifier
@@ -584,7 +590,7 @@ async def _check_event_quota(
         count: Number of events to check (default: 1)
 
     Raises:
-        RateLimitError: If quota exceeded (429)
+        RateLimitError: If quota exceeded (429).
     """
     from db.redis import get_cache, incrby_counter
 
