@@ -57,6 +57,8 @@ async def verify_resource_token(
         HTTPException 401: missing/invalid/revoked token
         HTTPException 403: token creator is not a member of the Context's workspace
         HTTPException 404: resource_id is not bound to any active Context
+        HTTPException 409: resource_id is ambiguous across active Context bindings
+            (only reachable pre-migration; see `_resolve_authoritative_context`)
     """
     if not x_resource_api_key:
         raise HTTPException(
@@ -128,8 +130,9 @@ async def _resolve_authoritative_context(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "resource_id is ambiguous across workspaces — contact an "
-                "administrator to resolve the collision."
+                "resource_id is ambiguous — multiple active contexts share "
+                "this identifier. Contact an administrator to resolve the "
+                "collision."
             ),
         )
     return rows[0]
