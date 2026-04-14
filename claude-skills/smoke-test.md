@@ -4,7 +4,7 @@ description: Run comprehensive smoke test of all MCP tools via live MCP connecti
 
 Verify MCP tools work correctly by executing them in sequence against temporary test contexts.
 Tests 18 of 21 memory/context tools (excludes 3 sleep tools that require a prior Sleep Maintenance run).
-Optionally tests 5 resource tools if the workspace has a PRO plan.
+Optionally tests 5 resource tools (6 PRO-only rows including delete_context cleanup) if the workspace has a PRO plan.
 Use this after deployments, tool description changes, or MCP server updates.
 
 **Prerequisite:** MCP server must be running and connected.

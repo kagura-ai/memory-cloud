@@ -448,6 +448,9 @@ async def handle_ingest_events(
             errors: list[dict] = []
 
             for i, event_data in enumerate(events):
+                if not isinstance(event_data, dict):
+                    errors.append({"index": i, "error": "event must be an object"})
+                    continue
                 op = event_data.get("op")
                 doc_id = event_data.get("doc_id")
 
@@ -500,14 +503,20 @@ async def handle_ingest_events(
                     errors.append({"index": i, "error": "importance must be between 0.0 and 1.0"})
                     continue
 
-                # Coerce version for delete (optional, may be None)
+                # Delete validation: payload must be null, version (if provided) must be >= 1
                 if op == "delete":
+                    if payload is not None:
+                        errors.append({"index": i, "error": "payload must be null for delete"})
+                        continue
                     version = event_data.get("version")
                     if version is not None:
                         try:
                             version = int(version)
                         except (ValueError, TypeError):
                             errors.append({"index": i, "error": "version must be an integer"})
+                            continue
+                        if version < 1:
+                            errors.append({"index": i, "error": "version must be >= 1"})
                             continue
 
                 event = ResourceEvent(
