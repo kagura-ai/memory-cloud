@@ -134,6 +134,23 @@ async def increment_counter(key: str, ttl: int | None = None) -> int:
         raise RedisError(f"Failed to increment counter: {e}") from e
 
 
+async def incrby_counter(key: str, amount: int, ttl: int | None = None) -> int:
+    """Increment counter by `amount` in Redis, setting TTL only on first write.
+
+    Uses EXPIRE with nx=True so the TTL is established exactly once per key lifetime,
+    avoiding TTL reset on every increment. Requires Redis >= 7.0.
+    """
+    client = get_redis_client()
+    try:
+        count = await client.incrby(key, amount)
+        if ttl:
+            await client.expire(key, ttl, nx=True)
+        return count
+    except Exception as e:
+        logger.error("redis_incrby_failed", key=key, amount=amount, error=str(e))
+        raise RedisError(f"Failed to increment counter: {e}") from e
+
+
 # ========================================================================
 # Co-activation Persistence (Issue #84 Phase 2C)
 # ========================================================================

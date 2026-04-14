@@ -589,13 +589,11 @@ async def _check_event_quota(
     redis_key = f"resource:events:{resource_id}:{token_id}:hour"
 
     try:
-        # Get current count without incrementing (fix off-by-one error)
-        from db.redis import get_cache
+        from db.redis import get_cache, incrby_counter
 
         current_count_str = await get_cache(redis_key)
         current_count = int(current_count_str) if current_count_str else 0
 
-        # Check quota BEFORE incrementing
         if current_count + count > quota_per_hour:
             logger.warning(
                 "resource_event_quota_exceeded",
@@ -609,21 +607,23 @@ async def _check_event_quota(
                 retry_after=3600,  # Retry after 1 hour
             )
 
+        # TTL is nx-only so the 1-hour window anchors to the first event, not each call.
+        new_count = await incrby_counter(redis_key, count, ttl=3600)
+
         logger.debug(
             "resource_event_quota_checked",
             resource_id=resource_id,
-            current=current_count,
+            previous=current_count,
+            reserved=new_count,
             quota=quota_per_hour,
         )
 
     except RateLimitError:
-        raise  # Re-raise RateLimitError
+        raise
     except Exception as e:
-        # Redis errors: Fail-closed for security (reject request)
+        # Fail-open per SECURITY.md "Rate Limiting": Redis outage must not block ingest.
         logger.error("redis_quota_check_failed", error=str(e))
-        raise RateLimitError(
-            message="Quota service unavailable. Please try again later.", retry_after=60
-        ) from e
+        return
 
 
 async def _schedule_indexer_for_resource(db: AsyncSession, resource_id: str) -> None:
