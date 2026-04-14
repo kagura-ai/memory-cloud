@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Mark as expected failure — requires integration test fixtures
 # (async_client, authenticated_user) that are not yet implemented.
 pytestmark = pytest.mark.xfail(
-    strict=False,
+    strict=True,
     reason="Integration test fixtures not available (async_client, authenticated_user)",
 )
 

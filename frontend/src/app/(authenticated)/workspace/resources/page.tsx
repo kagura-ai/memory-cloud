@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { Database, ExternalLink } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
@@ -76,12 +77,6 @@ export default function ResourcesListPage() {
     document.title = `${t("list.title")} - Kagura Memory Cloud`;
   }, [t]);
 
-  const handleRowClick = (resource: ResourceListItem) => {
-    router.push(
-      `/workspace/resources/${encodeURIComponent(resource.resource_id)}`,
-    );
-  };
-
   if (isPlanGated) {
     return (
       <PageContainer>
@@ -141,44 +136,48 @@ export default function ResourcesListPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {resources.map((r) => (
-                <TableRow
-                  key={r.resource_id}
-                  className="cursor-pointer hover:bg-muted/50"
-                  onClick={() => handleRowClick(r)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      handleRowClick(r);
-                    }
-                  }}
-                >
-                  <TableCell className="font-mono text-sm">
-                    {r.resource_id}
-                  </TableCell>
-                  <TableCell>
-                    {r.context_display_name || r.context_name}
-                  </TableCell>
-                  <TableCell className="text-right">{r.token_count}</TableCell>
-                  <TableCell className="text-right">
-                    {r.memory_count.toLocaleString()}
-                  </TableCell>
-                  <TableCell>
-                    {r.current_schema_version !== null ? (
-                      <Badge variant="secondary">
-                        v{r.current_schema_version}
-                      </Badge>
-                    ) : (
-                      <span className="text-muted-foreground">—</span>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground text-sm">
-                    {formatRelativeTime(r.updated_at)}
-                  </TableCell>
-                </TableRow>
-              ))}
+              {resources.map((r) => {
+                // Navigation is a <Link> inside the first cell rather than a
+                // click handler on the row itself — preserves <tr> table
+                // semantics for assistive tech, and enables browser affordances
+                // like middle-click / open-in-new-tab / copy-link-address.
+                const href = `/workspace/resources/${encodeURIComponent(
+                  r.resource_id,
+                )}`;
+                return (
+                  <TableRow key={r.resource_id} className="hover:bg-muted/50">
+                    <TableCell className="font-mono text-sm">
+                      <Link
+                        href={href}
+                        className="hover:underline focus:outline-none focus:ring-2 focus:ring-ring rounded"
+                      >
+                        {r.resource_id}
+                      </Link>
+                    </TableCell>
+                    <TableCell>
+                      {r.context_display_name || r.context_name}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {r.token_count}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {r.memory_count.toLocaleString()}
+                    </TableCell>
+                    <TableCell>
+                      {r.current_schema_version !== null ? (
+                        <Badge variant="secondary">
+                          v{r.current_schema_version}
+                        </Badge>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground text-sm">
+                      {formatRelativeTime(r.updated_at)}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
         </div>

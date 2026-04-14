@@ -157,7 +157,7 @@ describe("ResourcesListPage", () => {
     });
   });
 
-  it("navigates to detail page on row click", async () => {
+  it("renders an accessible Link per row for navigation (not a row click handler)", async () => {
     mockListResources.mockResolvedValue({
       resources: [item({ resource_id: "foo_bar" })],
       total: 1,
@@ -168,7 +168,9 @@ describe("ResourcesListPage", () => {
     await waitFor(() => {
       expect(screen.getByText("foo_bar")).toBeInTheDocument();
     });
-    fireEvent.click(screen.getByText("foo_bar"));
-    expect(mockPush).toHaveBeenCalledWith("/workspace/resources/foo_bar");
+    // Anchor preserves browser affordances (open-in-new-tab, copy-link, etc.)
+    // that a row-level onClick cannot. role=link is the expected a11y semantic.
+    const link = screen.getByRole("link", { name: "foo_bar" });
+    expect(link).toHaveAttribute("href", "/workspace/resources/foo_bar");
   });
 });

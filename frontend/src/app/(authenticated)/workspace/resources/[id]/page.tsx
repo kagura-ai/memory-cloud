@@ -22,6 +22,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useTabParam } from "@/hooks/useTabParam";
 import { listResources, type ResourceListItem } from "@/lib/api/resources";
 import { getSchema, type ResourceSchema } from "@/lib/api/schemas";
+import { ApiError } from "@/lib/api/base";
 import { ResourceStatsStrip } from "@/components/resources/ResourceStatsStrip";
 import { SchemaFieldTable } from "@/components/resources/SchemaFieldTable";
 import { ResourceDataTabPlaceholder } from "@/components/resources/ResourceDataTabPlaceholder";
@@ -77,10 +78,19 @@ export default function ResourceDetailPage() {
       }
       setResource(found);
 
-      // 404 from getSchema is expected when no schema has been registered yet.
-      setSchema(
-        schemaResult.status === "fulfilled" ? schemaResult.value : null,
-      );
+      // Schema is optional but only a 404 counts as "no schema yet"; other
+      // errors (auth, network, 5xx) should surface so we don't misleadingly
+      // show the "No schema registered" EmptyState while the server is broken.
+      if (schemaResult.status === "fulfilled") {
+        setSchema(schemaResult.value);
+      } else {
+        const err = schemaResult.reason;
+        if (err instanceof ApiError && err.status === 404) {
+          setSchema(null);
+        } else {
+          throw err;
+        }
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : t("detail.fetchError"));
     } finally {

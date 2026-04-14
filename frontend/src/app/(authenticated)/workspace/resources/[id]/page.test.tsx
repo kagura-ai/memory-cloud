@@ -14,6 +14,7 @@ import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup } from "@testing-library/react";
 
 import ResourceDetailPage from "./page";
+import { ApiError } from "@/lib/api/base";
 
 // ---------- Mocks ------------------------------------------------------------
 
@@ -146,12 +147,14 @@ describe("ResourceDetailPage", () => {
     expect(screen.getByText(/versionLabel.*"version":3/)).toBeInTheDocument();
   });
 
-  it("renders 'no schema' empty state when getSchema rejects", async () => {
+  it("renders 'no schema' empty state when getSchema returns ApiError(404)", async () => {
     mockListResources.mockResolvedValue({
       resources: [makeResource()],
       total: 1,
     });
-    mockGetSchema.mockRejectedValue(new Error("not found"));
+    mockGetSchema.mockRejectedValue(
+      new ApiError({ message: "Not found", status: 404 }),
+    );
 
     render(<ResourceDetailPage />);
 
@@ -159,6 +162,24 @@ describe("ResourceDetailPage", () => {
       expect(
         screen.getByText("resources.schema.emptyTitle"),
       ).toBeInTheDocument();
+    });
+  });
+
+  it("surfaces non-404 getSchema errors via ErrorBanner (not silenced as 'no schema')", async () => {
+    mockListResources.mockResolvedValue({
+      resources: [makeResource()],
+      total: 1,
+    });
+    mockGetSchema.mockRejectedValue(
+      new ApiError({ message: "Internal server error", status: 500 }),
+    );
+
+    render(<ResourceDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Internal server error",
+      );
     });
   });
 
@@ -204,7 +225,7 @@ describe("ResourceDetailPage", () => {
       resources: [makeResource()],
       total: 1,
     });
-    mockGetSchema.mockRejectedValue(new Error("not found"));
+    mockGetSchema.mockRejectedValue(new ApiError({ message: "Not found", status: 404 }));
 
     render(<ResourceDetailPage />);
 
@@ -240,7 +261,7 @@ describe("ResourceDetailPage", () => {
       resources: [makeResource({ resource_id: "has spaces" })],
       total: 1,
     });
-    mockGetSchema.mockRejectedValue(new Error("not found"));
+    mockGetSchema.mockRejectedValue(new ApiError({ message: "Not found", status: 404 }));
 
     render(<ResourceDetailPage />);
 

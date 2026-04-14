@@ -12,8 +12,6 @@ Complements the existing per-resource endpoints in ``resource_schema.py``
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, select, text
@@ -24,25 +22,13 @@ from db.base import get_db
 from models.auth import Context
 from models.memory import Memory
 from models.resource import ResourceEvent, ResourceSchema, ResourceToken
+from utils.datetime import to_utc_iso
 from utils.exceptions import AuthorizationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/resources", tags=["resources"])
-
-
-def _iso_utc(dt: datetime) -> str:
-    """Render a DB timestamp as ISO 8601 UTC with explicit Z suffix.
-
-    The project's DateTime columns are naive (TIMESTAMP WITHOUT TIME ZONE) and
-    stored by convention in UTC. ``datetime.isoformat()`` on a naive value omits
-    any offset, which browsers then parse as local time. Appending ``Z`` makes
-    the UTC contract explicit on the wire.
-    """
-    if dt.tzinfo is not None:
-        return dt.isoformat()
-    return dt.isoformat() + "Z"
 
 
 # ============================================================================
@@ -64,7 +50,11 @@ class ResourceListItem(BaseModel):
     )
     created_at: str = Field(..., description="Context creation time (ISO 8601 UTC)")
     updated_at: str = Field(
-        ..., description="Latest activity time — max(context.updated_at, last_event_at)"
+        ...,
+        description=(
+            "Most recent activity — GREATEST(last_event_at, context.updated_at, "
+            "context.created_at) as ISO 8601 UTC"
+        ),
     )
 
 
@@ -196,13 +186,14 @@ async def list_resources(
                 Context.deleted_at.is_(None),
             )
         )
+        # "Most recent activity" = max across the three signals. GREATEST
+        # ignores NULLs on PostgreSQL so a missing last_event_at still picks
+        # up context.updated_at (or created_at as the final fallback).
         # ORDER BY references the SELECT alias so the correlated subquery is
-        # evaluated once per row, not twice. SQLAlchemy re-emits scalar_subquery
-        # objects at each use site; referencing the alias via text() avoids that.
-        # The 3-level coalesce mirrors the response `updated_at` fallback so the
-        # server-side sort order agrees with the timestamp each row exposes.
+        # evaluated once per row, not twice — SQLAlchemy re-emits scalar_subquery
+        # objects at each use site, so text(alias) avoids that duplication.
         .order_by(
-            func.coalesce(
+            func.greatest(
                 text("last_event_at"),
                 Context.updated_at,
                 Context.created_at,
@@ -220,11 +211,19 @@ async def list_resources(
             token_count=row.token_count or 0,
             memory_count=row.memory_count or 0,
             current_schema_version=row.schema_version,
-            created_at=_iso_utc(row.created_at),
-            # Fall back through last_event → context.updated_at → context.created_at
-            # so we never call .isoformat() on None. _iso_utc() appends the Z
-            # suffix that naive UTC timestamps need for JS clients to parse.
-            updated_at=_iso_utc(row.last_event_at or row.context_updated_at or row.created_at),
+            created_at=to_utc_iso(row.created_at),
+            # Pick the most recent signal across the three timestamps, ignoring
+            # None — matches the ORDER BY greatest() above so the sort order
+            # agrees with the rendered value. to_utc_iso() handles None + adds
+            # the explicit Z suffix that JS clients need.
+            updated_at=to_utc_iso(
+                max(
+                    filter(
+                        None,
+                        (row.last_event_at, row.context_updated_at, row.created_at),
+                    )
+                )
+            ),
         )
         for row in rows
     ]
