@@ -91,15 +91,17 @@ The Resource Ingest API (`POST /api/v1/resources/{resource_id}/events`) authenti
 
 #### Upgrade steps for self-hosted operators
 
-1. Before upgrading, run the collision audit query to detect pre-existing cross-workspace duplicates:
+1. Before upgrading, run the collision audit query to detect any pre-existing active duplicates that would block the new UNIQUE index. Because the index is global on `resource_id` for active rows, **both same-workspace and cross-workspace duplicates** would abort the migration, so the query must match the index predicate with `COUNT(*) > 1`:
    ```sql
-   SELECT resource_id, COUNT(DISTINCT workspace_id) AS ws_count
+   SELECT resource_id,
+          COUNT(*) AS active_count,
+          COUNT(DISTINCT workspace_id) AS ws_count
    FROM contexts
    WHERE resource_id IS NOT NULL AND deleted_at IS NULL
    GROUP BY resource_id
-   HAVING COUNT(DISTINCT workspace_id) > 1;
+   HAVING COUNT(*) > 1;
    ```
-2. If rows are returned, rename one side of each collision (`UPDATE contexts SET resource_id = ... WHERE id = ...`) before upgrading. The `a96` migration will abort if any active collisions remain.
+2. If rows are returned, resolve each active duplicate (`UPDATE contexts SET resource_id = ... WHERE id = ...`) before upgrading. The `a96` migration will abort if any active duplicates remain.
 3. Run `make migrate` (or your standard Alembic upgrade step). `a96` uses `CREATE UNIQUE INDEX CONCURRENTLY` and does not hold a table lock.
 4. Restart API containers to pick up the updated `verify_resource_token` dependency.
 5. Monitor logs for `cross_tenant_ingest_attempt` warnings — ongoing hits indicate either active exploit attempts or legitimate callers whose token attribution needs review.
