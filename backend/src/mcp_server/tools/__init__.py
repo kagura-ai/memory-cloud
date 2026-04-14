@@ -34,6 +34,11 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
         "get_usage",
         "get_sleep_report",  # Uses report_id, not context_id
         "rollback_sleep_run",  # Uses report_id, not context_id
+        "setup_resource",  # Uses resource_id, not context_id
+        "ingest_events",  # Uses resource_id, not context_id
+        "get_resource_impact",  # Uses resource_id, not context_id
+        "get_resource_schema",  # Uses resource_id, not context_id
+        "list_resource_tokens",  # Uses resource_id, not context_id
     }
 )
 
@@ -46,6 +51,9 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         "list_edges",  # Read-only edge listing
         "get_sleep_history",  # Read-only sleep report listing
         "get_sleep_report",  # Read-only sleep report detail
+        "get_resource_impact",  # Read-only resource stats
+        "get_resource_schema",  # Read-only schema fetch
+        "list_resource_tokens",  # Read-only token listing
     }
 )
 
@@ -73,6 +81,13 @@ def _build_registry() -> dict[str, Any]:
         handle_delete_edge,
         handle_list_edges,
         handle_update_edge,
+    )
+    from mcp_server.tools.resource import (
+        handle_get_resource_impact,
+        handle_get_resource_schema,
+        handle_ingest_events,
+        handle_list_resource_tokens,
+        handle_setup_resource,
     )
     from mcp_server.tools.search_config import handle_update_search_config
     from mcp_server.tools.sleep import (
@@ -104,6 +119,11 @@ def _build_registry() -> dict[str, Any]:
         "get_sleep_history": handle_get_sleep_history,
         "get_sleep_report": handle_get_sleep_report,
         "rollback_sleep_run": handle_rollback_sleep_run,
+        "setup_resource": handle_setup_resource,
+        "ingest_events": handle_ingest_events,
+        "get_resource_impact": handle_get_resource_impact,
+        "get_resource_schema": handle_get_resource_schema,
+        "list_resource_tokens": handle_list_resource_tokens,
     }
 
 
