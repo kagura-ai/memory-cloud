@@ -4,8 +4,12 @@ Issue #322: Zero-downtime hotfix — enforce resource_id uniqueness across
 all workspaces for active (non-soft-deleted) contexts. Closes the routing
 ambiguity that enabled cross-tenant Resource ingest (OWASP A01 / CWE-639).
 
-Revision ID: a96_unique_contexts_resource_id_active
+Revision ID: a96_ctx_resource_id_unique
 Revises: a95_source_uri_declared_link
+
+NOTE: The revision ID is kept under 32 characters because
+`alembic_version.version_num` is `VARCHAR(32)` in this database
+(asyncpg raises `StringDataRightTruncationError` otherwise).
 """
 
 import sqlalchemy as sa
@@ -13,7 +17,7 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "a96_unique_contexts_resource_id_active"
+revision = "a96_ctx_resource_id_unique"
 down_revision = "a95_source_uri_declared_link"
 branch_labels = None
 depends_on = None
