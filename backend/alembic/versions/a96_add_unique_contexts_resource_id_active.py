@@ -95,8 +95,7 @@ def upgrade() -> None:
             op.execute(sa.text(f"DROP INDEX CONCURRENTLY IF EXISTS {INDEX_NAME}"))
         op.execute(
             sa.text(
-                "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "
-                "ux_contexts_resource_id_active "
+                f"CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {INDEX_NAME} "
                 "ON contexts (resource_id) "
                 "WHERE resource_id IS NOT NULL AND deleted_at IS NULL"
             )
@@ -104,5 +103,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the partial unique index (tolerant of missing/invalid state)."""
-    op.execute(sa.text("DROP INDEX IF EXISTS ux_contexts_resource_id_active"))
+    """Drop the partial unique index concurrently (zero-downtime parity)."""
+    # Mirror the upgrade path: DROP INDEX CONCURRENTLY is also forbidden
+    # inside a transaction, so we use autocommit_block here too. IF EXISTS
+    # keeps the downgrade tolerant of partially-applied or already-rolled-
+    # back state.
+    with op.get_context().autocommit_block():
+        op.execute(sa.text(f"DROP INDEX CONCURRENTLY IF EXISTS {INDEX_NAME}"))

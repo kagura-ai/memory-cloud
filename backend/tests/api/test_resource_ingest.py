@@ -251,8 +251,8 @@ class TestResourceIngestWorkspaceBoundary:
     ):
         db = MagicMock()
         with patch(
-            "services.permission_service.PermissionService.is_workspace_member",
-            new=AsyncMock(return_value=True),
+            "services.permission_service.PermissionService.check_workspace_access",
+            new=AsyncMock(return_value=MagicMock()),
         ):
             # Should not raise.
             await _enforce_workspace_membership(db, mock_request, mock_token, mock_context)
@@ -261,12 +261,18 @@ class TestResourceIngestWorkspaceBoundary:
     async def test_membership_denied_logs_cross_tenant_attempt(
         self, mock_request, mock_token, mock_context
     ):
-        """Attacker token (non-member) must be rejected with audit warning."""
+        """Attacker token (non-member) must be rejected with audit warning.
+        The log's `reason` kwarg carries the underlying auth failure detail
+        for forensics."""
         db = MagicMock()
+        auth_error = HTTPException(
+            status_code=403,
+            detail="Not a member of workspace " + str(mock_context.workspace_id),
+        )
         with (
             patch(
-                "services.permission_service.PermissionService.is_workspace_member",
-                new=AsyncMock(return_value=False),
+                "services.permission_service.PermissionService.check_workspace_access",
+                new=AsyncMock(side_effect=auth_error),
             ),
             patch("api.routes.resource_ingest.logger") as mock_logger,
         ):
@@ -281,7 +287,33 @@ class TestResourceIngestWorkspaceBoundary:
                 target_workspace_id=str(mock_context.workspace_id),
                 token_creator=mock_token.created_by,
                 client_ip="203.0.113.7",
+                reason=auth_error.detail,
             )
+
+    @pytest.mark.asyncio
+    async def test_membership_denied_when_workspace_soft_deleted(
+        self, mock_request, mock_token, mock_context
+    ):
+        """Soft-deleted workspace must deny ingest — the prior is_workspace_member
+        check silently allowed this. `check_workspace_access` now catches it."""
+        db = MagicMock()
+        soft_deleted_error = HTTPException(
+            status_code=403,
+            detail=f"Workspace {mock_context.workspace_id} not found or has been deleted",
+        )
+        with (
+            patch(
+                "services.permission_service.PermissionService.check_workspace_access",
+                new=AsyncMock(side_effect=soft_deleted_error),
+            ),
+            patch("api.routes.resource_ingest.logger") as mock_logger,
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await _enforce_workspace_membership(db, mock_request, mock_token, mock_context)
+
+            assert exc.value.status_code == 403
+            call_kwargs = mock_logger.warning.call_args.kwargs
+            assert "deleted" in call_kwargs["reason"]
 
     @pytest.mark.asyncio
     async def test_membership_denied_without_request_client(self, mock_token, mock_context):
@@ -289,10 +321,11 @@ class TestResourceIngestWorkspaceBoundary:
         req = MagicMock()
         req.client = None
         db = MagicMock()
+        auth_error = HTTPException(status_code=403, detail="Not a member")
         with (
             patch(
-                "services.permission_service.PermissionService.is_workspace_member",
-                new=AsyncMock(return_value=False),
+                "services.permission_service.PermissionService.check_workspace_access",
+                new=AsyncMock(side_effect=auth_error),
             ),
             patch("api.routes.resource_ingest.logger") as mock_logger,
         ):

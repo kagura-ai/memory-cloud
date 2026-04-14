@@ -112,11 +112,15 @@ async def _resolve_authoritative_context(
         HTTPException 409: multiple active contexts share the resource_id
             (only reachable pre-migration; run a96 to eliminate).
     """
+    # LIMIT 2 is enough to distinguish 0 / 1 / ambiguous — we do not need to
+    # know how many total duplicates exist, just that there are at least two.
     result = await db.execute(
-        select(Context).where(
+        select(Context)
+        .where(
             Context.resource_id == resource_id,
             Context.deleted_at.is_(None),
         )
+        .limit(2)
     )
     rows = result.scalars().all()
     if not rows:
@@ -144,12 +148,16 @@ async def _enforce_workspace_membership(
     token_record: ResourceToken,
     context: Context,
 ) -> None:
-    """Reject ingest unless token creator is a member of context's workspace.
+    """Reject ingest unless token creator has active workspace access.
 
-    Uses ``PermissionService.is_workspace_member`` — the canonical
-    durable membership check (``WorkspaceMember`` row lookup). Does NOT
-    use ``User.current_workspace_id``, which is a mutable UI preference
-    and cannot be trusted for authorization.
+    Uses ``PermissionService.check_workspace_access`` which enforces:
+    (a) the workspace exists and is not soft-deleted, and
+    (b) the token creator is still a ``WorkspaceMember``.
+    ``is_workspace_member`` was insufficient because it skipped (a) —
+    a deleted workspace would have left ingest open on lingering tokens.
+
+    Does NOT use ``User.current_workspace_id``, which is a mutable UI
+    preference and cannot be trusted for authorization.
     """
     if not token_record.created_by:
         logger.warning(
@@ -163,12 +171,16 @@ async def _enforce_workspace_membership(
         )
 
     permissions = PermissionService(db)
-    is_member = await permissions.is_workspace_member(
-        user_id=token_record.created_by,
-        workspace_id=context.workspace_id,
-    )
-
-    if not is_member:
+    try:
+        await permissions.check_workspace_access(
+            user_id=token_record.created_by,
+            workspace_id=context.workspace_id,
+            required_role="member",
+        )
+    except HTTPException as auth_error:
+        # `reason` captures the underlying cause (workspace deleted /
+        # non-member / role-too-low) for forensics without re-leaking the
+        # detail to the caller.
         logger.warning(
             "cross_tenant_ingest_attempt",
             resource_id=context.resource_id,
@@ -176,14 +188,15 @@ async def _enforce_workspace_membership(
             target_workspace_id=str(context.workspace_id),
             token_creator=token_record.created_by,
             client_ip=request.client.host if request.client else None,
+            reason=auth_error.detail,
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
-                "Resource ingest denied: the token's creator is not a member "
-                "of the workspace that owns this resource."
+                "Resource ingest denied: the token's creator does not have "
+                "active access to the workspace that owns this resource."
             ),
-        )
+        ) from auth_error
 
 
 # ============================================================================
