@@ -24,7 +24,7 @@ from models.schemas import (
 )
 from services.permission_service import PermissionService
 from utils.datetime import utcnow
-from utils.exceptions import ConflictError, RateLimitError, ValidationError
+from utils.exceptions import ConflictError, RateLimitError, RedisError, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -575,7 +575,13 @@ async def _check_event_quota(
 ) -> None:
     """Check event ingestion quota (per token per hour).
 
-    Uses Redis counter with 1-hour TTL.
+    Uses Redis counter with 1-hour TTL. Reserves `count` units after a passing
+    check so concurrent callers observe the updated total.
+
+    Fail-open: if Redis is unavailable (RedisError), the function logs and returns
+    without raising. This matches SECURITY.md "Rate Limiting" policy — Redis
+    outages must not block ingest. Non-Redis exceptions (programming bugs) are
+    NOT swallowed and will propagate to the caller.
 
     Args:
         resource_id: Resource identifier
@@ -584,18 +590,16 @@ async def _check_event_quota(
         count: Number of events to check (default: 1)
 
     Raises:
-        RateLimitError: If quota exceeded (429)
+        RateLimitError: If quota exceeded (429).
     """
+    from db.redis import get_cache, incrby_counter
+
     redis_key = f"resource:events:{resource_id}:{token_id}:hour"
 
     try:
-        # Get current count without incrementing (fix off-by-one error)
-        from db.redis import get_cache
-
         current_count_str = await get_cache(redis_key)
         current_count = int(current_count_str) if current_count_str else 0
 
-        # Check quota BEFORE incrementing
         if current_count + count > quota_per_hour:
             logger.warning(
                 "resource_event_quota_exceeded",
@@ -609,21 +613,23 @@ async def _check_event_quota(
                 retry_after=3600,  # Retry after 1 hour
             )
 
+        new_count = await incrby_counter(redis_key, count, ttl=3600)
+
         logger.debug(
             "resource_event_quota_checked",
             resource_id=resource_id,
-            current=current_count,
+            previous=current_count,
+            reserved=new_count,
             quota=quota_per_hour,
         )
 
     except RateLimitError:
-        raise  # Re-raise RateLimitError
-    except Exception as e:
-        # Redis errors: Fail-closed for security (reject request)
+        raise
+    except RedisError as e:
+        # Fail-open per SECURITY.md "Rate Limiting": Redis outage must not block ingest.
+        # Narrow to RedisError so programming bugs (ValueError from parse, etc.) surface.
         logger.error("redis_quota_check_failed", error=str(e))
-        raise RateLimitError(
-            message="Quota service unavailable. Please try again later.", retry_after=60
-        ) from e
+        return
 
 
 async def _schedule_indexer_for_resource(db: AsyncSession, resource_id: str) -> None:
