@@ -8,8 +8,9 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { Section } from "@/components/common/Section";
 import {
@@ -88,12 +89,35 @@ export function ResourceTokensTabPanel() {
   // Check if user is owner
   const isOwner = currentWorkspace?.current_user_role === "owner";
 
+  // Issue #47: Deep-link support — `?resource_id=<id>` pre-filters the token list.
+  // Passed through to the backend list endpoint; also gates the create dialog's
+  // initial resource selection.
+  const searchParams = useSearchParams();
+  const resourceIdFilter = searchParams.get("resource_id") || undefined;
+
+  // Track the previous filter so we can detect an actual change and reset
+  // pagination within the same effect as the load. A separate reset effect
+  // would race with the load effect in the same commit and cause a duplicate
+  // fetch with the old offset before the reset takes effect.
+  const prevFilterRef = useRef(resourceIdFilter);
+
   // Load tokens on mount and page change
   useEffect(() => {
     if (!currentWorkspaceId) return;
     if (!isOwner) return; // Skip loading if not owner
+
+    // Filter change: reset pagination and skip this cycle's fetch —
+    // the setCurrentPage(1) will re-trigger this effect with the right offset.
+    if (prevFilterRef.current !== resourceIdFilter) {
+      prevFilterRef.current = resourceIdFilter;
+      if (currentPage !== 1) {
+        setCurrentPage(1);
+        return;
+      }
+    }
     loadTokens();
-  }, [currentWorkspaceId, currentPage, isOwner]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentWorkspaceId, currentPage, isOwner, resourceIdFilter]);
 
   const loadTokens = async () => {
     try {
@@ -101,7 +125,7 @@ export function ResourceTokensTabPanel() {
       setError(null);
       const offset = (currentPage - 1) * limit;
       const [tokensResponse, contextsData] = await Promise.all([
-        listResourceTokens(undefined, limit, offset),
+        listResourceTokens(resourceIdFilter, limit, offset),
         getContexts(),
       ]);
       // Handle paginated response
@@ -647,6 +671,7 @@ export function ResourceTokensTabPanel() {
             onClose={() => setShowCreateDialog(false)}
             onSuccess={handleCreateSuccess}
             currentTokens={tokens}
+            initialResourceId={resourceIdFilter}
           />
         )}
 

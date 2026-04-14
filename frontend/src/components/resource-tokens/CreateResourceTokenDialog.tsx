@@ -47,6 +47,8 @@ interface CreateResourceTokenDialogProps {
   onClose: () => void;
   onSuccess: () => void;
   currentTokens: ResourceToken[];
+  /** Issue #47: Pre-select this resource_id when opened via deep-link. */
+  initialResourceId?: string;
 }
 
 // Plan-based quota defaults and limits
@@ -61,6 +63,7 @@ export function CreateResourceTokenDialog({
   onClose,
   onSuccess,
   currentTokens,
+  initialResourceId,
 }: CreateResourceTokenDialogProps) {
   const t = useTranslations("resourceTokens");
   const { currentWorkspace } = useWorkspace();
@@ -79,7 +82,7 @@ export function CreateResourceTokenDialog({
   const quotaMax = Math.min(remainingQuota, maxPerToken); // Max for this token: min(remaining, 10000)
   const quotaDefault = Math.min(remainingQuota, maxPerToken); // Default: same as max
 
-  const [resourceId, setResourceId] = useState("");
+  const [resourceId, setResourceId] = useState(initialResourceId ?? "");
   const [description, setDescription] = useState("");
   const [quotaInput, setQuotaInput] = useState(quotaDefault.toString()); // Fixed: use quotaMax, not remainingQuota
   const [loading, setLoading] = useState(false);
@@ -98,8 +101,13 @@ export function CreateResourceTokenDialog({
   useEffect(() => {
     if (isOpen) {
       loadResourceContexts();
+      // Re-sync pre-selected resource_id each time the dialog opens so a
+      // deep-linked operator can open, close, and re-open without losing scope.
+      if (initialResourceId) {
+        setResourceId(initialResourceId);
+      }
     }
-  }, [isOpen]);
+  }, [isOpen, initialResourceId]);
 
   const loadResourceContexts = async () => {
     try {

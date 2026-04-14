@@ -330,6 +330,7 @@ from api.routes import (  # noqa: E402
     resource_ingest,  # Issue #238: Resource Ingest API
     resource_schema,  # Issue #238: Schema Management API
     resource_tokens,  # Issue #242: Resource Token Management API
+    resources,  # Issue #47: Workspace resource list
     sleep_reports,  # Issue #179: Sleep Report admin UI
     system,
     system_admins,
@@ -412,6 +413,9 @@ app.include_router(resource_ingest.router, prefix="/api/v1")
 
 # Resource Schema routes (Issue #238 - Schema Registry)
 app.include_router(resource_schema.router, prefix="/api/v1")
+
+# Resource list route (Issue #47 - Web UI resource list)
+app.include_router(resources.router, prefix="/api/v1")
 
 # Resource Token routes (Issue #242 - Resource Token Management)
 app.include_router(resource_tokens.router, prefix="/api/v1")

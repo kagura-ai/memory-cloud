@@ -5,17 +5,17 @@
  * Issue #243 - Schema Management UI (Web-based)
  */
 
-import { apiClient } from './base';
+import { apiClient } from "./base";
 
 /**
  * Validation error keys for type safety
  * High Priority Fix: Added type-safe validation error keys
  */
 export type ValidationErrorKey =
-  | 'fieldNameRequired'
-  | 'fieldNamePattern'
-  | 'fieldNameTooLong'
-  | 'descriptionRequired';
+  | "fieldNameRequired"
+  | "fieldNamePattern"
+  | "fieldNameTooLong"
+  | "descriptionRequired";
 
 /**
  * Field Definition interface
@@ -23,9 +23,9 @@ export type ValidationErrorKey =
  */
 export interface FieldDefinition {
   name: string;
-  type: 'text' | 'number' | 'boolean' | 'date' | 'array' | 'object';
+  type: "text" | "number" | "boolean" | "date" | "array" | "object";
   description: string;
-  classification: 'public' | 'internal' | 'pii' | 'confidential';
+  classification: "public" | "internal" | "pii" | "confidential";
   index_hint: string;
   unit?: string | null;
   enum_values?: string[] | null;
@@ -70,16 +70,19 @@ export interface SchemaCreateRequest {
  */
 export async function getSchema(
   resourceId: string,
-  schemaVersion?: number
+  schemaVersion?: number,
 ): Promise<ResourceSchema> {
   const searchParams = new URLSearchParams();
   if (schemaVersion) {
-    searchParams.set('schema_version', schemaVersion.toString());
+    searchParams.set("schema_version", schemaVersion.toString());
   }
 
+  // encodeURIComponent protects against reserved chars in resource_id
+  // (e.g., a literal `%` or `/`) that would otherwise break the path.
+  const encodedId = encodeURIComponent(resourceId);
   const url = searchParams.toString()
-    ? `/api/v1/resources/${resourceId}/schema?${searchParams.toString()}`
-    : `/api/v1/resources/${resourceId}/schema`;
+    ? `/api/v1/resources/${encodedId}/schema?${searchParams.toString()}`
+    : `/api/v1/resources/${encodedId}/schema`;
 
   return apiClient.get<ResourceSchema>(url);
 }
@@ -90,8 +93,12 @@ export async function getSchema(
  *
  * @param resourceId - Resource identifier
  */
-export async function getResourceImpact(resourceId: string): Promise<ResourceImpact> {
-  return apiClient.get<ResourceImpact>(`/api/v1/resources/${resourceId}/impact`);
+export async function getResourceImpact(
+  resourceId: string,
+): Promise<ResourceImpact> {
+  return apiClient.get<ResourceImpact>(
+    `/api/v1/resources/${encodeURIComponent(resourceId)}/impact`,
+  );
 }
 
 /**
@@ -102,12 +109,15 @@ export async function getResourceImpact(resourceId: string): Promise<ResourceImp
  */
 export async function createSchema(
   resourceId: string,
-  fieldDefinitions: FieldDefinition[]
+  fieldDefinitions: FieldDefinition[],
 ): Promise<ResourceSchema> {
-  return apiClient.post<ResourceSchema>(`/api/v1/resources/${resourceId}/schema`, {
-    resource_id: resourceId,
-    field_definitions: fieldDefinitions,
-  });
+  return apiClient.post<ResourceSchema>(
+    `/api/v1/resources/${encodeURIComponent(resourceId)}/schema`,
+    {
+      resource_id: resourceId,
+      field_definitions: fieldDefinitions,
+    },
+  );
 }
 
 /**
@@ -115,11 +125,11 @@ export async function createSchema(
  */
 export function getEmptyField(): FieldDefinition {
   return {
-    name: '',
-    type: 'text',
-    description: '',
-    classification: 'public',
-    index_hint: '',
+    name: "",
+    type: "text",
+    description: "",
+    classification: "public",
+    index_hint: "",
     unit: null,
     enum_values: null,
     example: null,
@@ -133,16 +143,16 @@ export function getEmptyField(): FieldDefinition {
  */
 export function validateFieldName(name: string): ValidationErrorKey | null {
   if (!name.trim()) {
-    return 'fieldNameRequired';
+    return "fieldNameRequired";
   }
 
   const pattern = /^[a-z0-9_]+$/;
   if (!pattern.test(name)) {
-    return 'fieldNamePattern';
+    return "fieldNamePattern";
   }
 
   if (name.length > 100) {
-    return 'fieldNameTooLong';
+    return "fieldNameTooLong";
   }
 
   return null;
@@ -153,7 +163,9 @@ export function validateFieldName(name: string): ValidationErrorKey | null {
  */
 export function findDuplicateFieldNames(fields: FieldDefinition[]): string[] {
   const names = fields.map((f) => f.name.trim()).filter((n) => n.length > 0);
-  const duplicates = names.filter((name, index) => names.indexOf(name) !== index);
+  const duplicates = names.filter(
+    (name, index) => names.indexOf(name) !== index,
+  );
   return [...new Set(duplicates)];
 }
 
@@ -161,8 +173,13 @@ export function findDuplicateFieldNames(fields: FieldDefinition[]): string[] {
  * Helper: Validate all fields
  * Returns translation keys for error messages (type-safe where possible)
  */
-export function validateFields(fields: FieldDefinition[]): Record<number, Record<string, ValidationErrorKey | string>> {
-  const errors: Record<number, Record<string, ValidationErrorKey | string>> = {};
+export function validateFields(
+  fields: FieldDefinition[],
+): Record<number, Record<string, ValidationErrorKey | string>> {
+  const errors: Record<
+    number,
+    Record<string, ValidationErrorKey | string>
+  > = {};
 
   fields.forEach((field, index) => {
     const fieldErrors: Record<string, ValidationErrorKey | string> = {};
@@ -173,7 +190,7 @@ export function validateFields(fields: FieldDefinition[]): Record<number, Record
     }
 
     if (!field.description.trim()) {
-      fieldErrors.description = 'descriptionRequired' as ValidationErrorKey;
+      fieldErrors.description = "descriptionRequired" as ValidationErrorKey;
     }
 
     if (Object.keys(fieldErrors).length > 0) {

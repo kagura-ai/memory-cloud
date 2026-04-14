@@ -46,6 +46,7 @@
     "dashboard": "Dashboard",
     "contexts": "Contexts",
     "contextsWithCount": "Contexts ({count})",
+    "resources": "Resources",
     "members": "Members",
     "membersWithCount": "Members ({count})",
     "integrations": "Integrations",
@@ -2679,5 +2680,63 @@
     "copied": "Copied!",
     "copyFailed": "Failed to copy",
     "deleteFailed": "Failed to delete context"
+  },
+  "resources": {
+    "list": {
+      "title": "Resources",
+      "description": "Resources ingested into this workspace via external systems.",
+      "emptyTitle": "No resources yet",
+      "emptyDescription": "This workspace has no resources. Set one up via the MCP tool setup_resource() or the Python SDK, then refresh this page.",
+      "fetchError": "Failed to load resources.",
+      "column": {
+        "resourceId": "Resource ID",
+        "context": "Context",
+        "tokens": "Tokens",
+        "memories": "Memories",
+        "schema": "Schema",
+        "lastActivity": "Last activity"
+      }
+    },
+    "detail": {
+      "title": "Resource",
+      "loading": "Loading resource…",
+      "notFoundTitle": "Resource not found",
+      "notFound": "This resource does not exist in your workspace, or has been removed.",
+      "fetchError": "Failed to load resource details.",
+      "backToList": "Back to resources"
+    },
+    "tabs": {
+      "overview": "Overview",
+      "data": "Data"
+    },
+    "stats": {
+      "activeTokens": "Active tokens",
+      "memories": "Memories",
+      "schemaVersion": "Schema",
+      "noSchemaYet": "Not registered",
+      "lastActivity": "Last activity",
+      "manage": "Manage"
+    },
+    "schema": {
+      "field": "Field",
+      "type": "Type",
+      "classification": "Classification",
+      "indexHint": "Index hint",
+      "description": "Description",
+      "required": "Required",
+      "versionLabel": "Current schema version: v{version}",
+      "emptyTitle": "No schema registered",
+      "emptyDescription": "This resource does not have a schema yet. Use the REST API or MCP tools to register field definitions."
+    },
+    "data": {
+      "comingSoonTitle": "Data browser coming soon",
+      "comingSoonDescription": "Paginated record viewer with schema-driven key-value display and raw JSON pane. Planned for v0.13.0.",
+      "trackProgress": "Track progress on #316"
+    },
+    "planGate": {
+      "title": "Resources require Pro plan",
+      "description": "Resource setup and ingestion are available on Pro and higher plans. Upgrade to unlock Web UI visibility, MCP resource tools, and ingestion quotas.",
+      "action": "Upgrade to Pro"
+    }
   }
 }
