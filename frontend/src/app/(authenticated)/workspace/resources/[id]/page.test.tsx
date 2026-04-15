@@ -19,7 +19,13 @@
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup } from "@testing-library/react";
+import {
+  render,
+  screen,
+  waitFor,
+  cleanup,
+  fireEvent,
+} from "@testing-library/react";
 
 import ResourceDetailPage from "./page";
 import { ApiError } from "@/lib/api/base";
@@ -59,9 +65,19 @@ vi.mock("@/components/resources/IndexerStatusPanel", () => ({
   IndexerStatusPanel: () => <div data-testid="indexer-panel" />,
 }));
 
+// Props the dialog was last opened with — captured so tests can assert the
+// wiring (lockedResourceId, pre-fill fields) without rendering the real dialog.
+// Reset in beforeEach so each test starts from a clean slate.
+let capturedCreateSchemaDialogProps: Record<string, unknown> | null = null;
 vi.mock("@/components/schemas/CreateSchemaDialog", () => ({
-  CreateSchemaDialog: ({ isOpen }: { isOpen: boolean }) =>
-    isOpen ? <div role="dialog" data-testid="create-schema-dialog" /> : null,
+  CreateSchemaDialog: (props: Record<string, unknown>) => {
+    if (props.isOpen) {
+      capturedCreateSchemaDialogProps = props;
+    }
+    return props.isOpen ? (
+      <div role="dialog" data-testid="create-schema-dialog" />
+    ) : null;
+  },
 }));
 
 vi.mock("next/navigation", () => ({
@@ -165,6 +181,7 @@ beforeEach(() => {
   mockParamsId = "ec_products";
   mockSearchParams = new URLSearchParams();
   mockCurrentWorkspace = { plan_name: "pro" };
+  capturedCreateSchemaDialogProps = null;
 });
 
 afterEach(() => {
@@ -215,6 +232,66 @@ describe("ResourceDetailPage", () => {
     expect(
       screen.getByRole("button", { name: "resources.schema.createAction" }),
     ).toBeInTheDocument();
+  });
+
+  it("opens CreateSchemaDialog with lockedResourceId when the EmptyState Create action is clicked", async () => {
+    // Guards against a regression where the picker would be shown and the
+    // operator could write the new schema against a different resource —
+    // page.tsx pins the dialog to this page's resource via lockedResourceId.
+    mockSearchParams = new URLSearchParams("tab=schemas");
+    mockListResources.mockResolvedValue({
+      resources: [makeResource()],
+      total: 1,
+    });
+    mockGetSchema.mockRejectedValue(
+      new ApiError({ message: "Not found", status: 404 }),
+    );
+
+    render(<ResourceDetailPage />);
+
+    const createButton = await screen.findByRole("button", {
+      name: "resources.schema.createAction",
+    });
+    fireEvent.click(createButton);
+
+    expect(
+      await screen.findByTestId("create-schema-dialog"),
+    ).toBeInTheDocument();
+    expect(capturedCreateSchemaDialogProps).not.toBeNull();
+    expect(capturedCreateSchemaDialogProps?.lockedResourceId).toBe(
+      "ec_products",
+    );
+  });
+
+  it("opens CreateSchemaDialog with lockedResourceId when 'Create new version' is clicked", async () => {
+    // Regression guard for the v1=title / v2=price-only field-loss bug seen
+    // during #326 dev: schemas are immutable per version, so the "new version"
+    // dialog MUST end up pre-filled with the current version's fields. The
+    // dialog owns the pre-fill fetch (keyed on lockedResourceId); this page
+    // test pins the page-side contract — that the "new version" button opens
+    // the dialog with lockedResourceId set to the current resource. Without
+    // that, the dialog cannot know which resource to pre-fill from.
+    mockSearchParams = new URLSearchParams("tab=schemas");
+    mockListResources.mockResolvedValue({
+      resources: [makeResource()],
+      total: 1,
+    });
+    mockGetSchema.mockResolvedValue(makeSchema());
+
+    render(<ResourceDetailPage />);
+
+    const newVersionButton = await screen.findByRole("button", {
+      name: "resources.schema.createNewVersionAction",
+    });
+    fireEvent.click(newVersionButton);
+
+    expect(
+      await screen.findByTestId("create-schema-dialog"),
+    ).toBeInTheDocument();
+    expect(capturedCreateSchemaDialogProps).not.toBeNull();
+    expect(capturedCreateSchemaDialogProps?.lockedResourceId).toBe(
+      "ec_products",
+    );
   });
 
   it("surfaces non-404 getSchema errors via ErrorBanner (not silenced as 'no schema')", async () => {
