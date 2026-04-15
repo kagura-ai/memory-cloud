@@ -104,6 +104,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
 
 from alembic import op
+from db.constraint_names import RESOURCE_EVENTS_UPSERT_UNIQUE
 
 # revision identifiers, used by Alembic.
 revision = "a97_resources_entity"
@@ -123,7 +124,7 @@ _SATELLITE_TABLES = (
     "resource_tokens",
 )
 
-_PARTIAL_UNIQUE_INDEX = "ux_resource_events_upsert_version"
+_PARTIAL_UNIQUE_INDEX = RESOURCE_EVENTS_UPSERT_UNIQUE
 
 
 def upgrade() -> None:
