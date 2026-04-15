@@ -99,7 +99,7 @@ class TestResourceIndexerNamedVectorUpsert:
         schema = _make_schema()
         context = _make_context()
 
-        await indexer._apply_upsert(event, schema, context)
+        await indexer._apply_upsert(event, schema, context, "kagura_memories")
 
         # Qdrant upsert was called exactly once with a named-vector point.
         assert indexer.qdrant_client.upsert.await_count == 1
@@ -122,12 +122,58 @@ class TestResourceIndexerNamedVectorUpsert:
         schema = _make_schema()
         context = _make_context()
 
-        await indexer._apply_upsert(event, schema, context)
+        await indexer._apply_upsert(event, schema, context, "kagura_memories")
         first_id = indexer.qdrant_client.upsert.await_args.kwargs["points"][0].id
 
         indexer.qdrant_client.upsert.reset_mock()
 
-        await indexer._apply_upsert(event, schema, context)
+        await indexer._apply_upsert(event, schema, context, "kagura_memories")
         second_id = indexer.qdrant_client.upsert.await_args.kwargs["points"][0].id
 
         assert first_id == second_id
+
+
+class TestResolveCollectionForContext:
+    """Issue #334: per-context Qdrant collection routing.
+
+    Verify that the indexer reads ContextSearchConfig and resolves the
+    correct collection name via get_collection_name(model, dimensions).
+    """
+
+    @pytest.fixture
+    def indexer(self):
+        db = AsyncMock()
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            return ResourceIndexer(db)
+
+    @pytest.mark.asyncio
+    async def test_legacy_text_embedding_3_small_returns_kagura_memories(self, indexer):
+        cfg = MagicMock(embedding_model="text-embedding-3-small", embedding_dimensions=512)
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = cfg
+        indexer.db.execute = AsyncMock(return_value=result)
+
+        name = await indexer._resolve_collection_for_context(uuid4())
+
+        assert name == "kagura_memories"
+
+    @pytest.mark.asyncio
+    async def test_qwen3_8b_returns_namespaced_collection(self, indexer):
+        cfg = MagicMock(embedding_model="qwen3-embedding:8b", embedding_dimensions=4096)
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = cfg
+        indexer.db.execute = AsyncMock(return_value=result)
+
+        name = await indexer._resolve_collection_for_context(uuid4())
+
+        assert name == "kagura_memories_qwen3_embedding_8b_4096"
+
+    @pytest.mark.asyncio
+    async def test_no_search_config_falls_back_to_legacy(self, indexer):
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = None
+        indexer.db.execute = AsyncMock(return_value=result)
+
+        name = await indexer._resolve_collection_for_context(uuid4())
+
+        assert name == "kagura_memories"
