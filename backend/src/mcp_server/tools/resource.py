@@ -494,6 +494,11 @@ async def handle_ingest_events(
             # Process events
             from sqlalchemy.exc import IntegrityError
 
+            from db.constraint_names import (
+                RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE,
+                RESOURCE_EVENTS_UPSERT_UNIQUE,
+                integrity_error_constraint_name,
+            )
             from models.resource import ResourceEvent
 
             created_ids: list[int] = []
@@ -589,15 +594,15 @@ async def handle_ingest_events(
                         await db.flush()
                     created_ids.append(event.id)
                 except IntegrityError as ie:
-                    error_msg = str(ie)
-                    if "unique_resource_doc_version" in error_msg:
+                    constraint = integrity_error_constraint_name(ie)
+                    if constraint == RESOURCE_EVENTS_UPSERT_UNIQUE:
                         errors.append(
                             {
                                 "index": i,
                                 "error": f"Duplicate version for doc_id={doc_id}",
                             }
                         )
-                    elif "unique_idempotency_key" in error_msg:
+                    elif constraint == RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE:
                         errors.append(
                             {
                                 "index": i,
@@ -605,12 +610,14 @@ async def handle_ingest_events(
                             }
                         )
                     else:
-                        # Do not leak raw DB constraint details to clients
+                        # Do not leak raw DB constraint details to clients;
+                        # log the constraint name for triage instead.
                         logger.warning(
-                            "ingest_events integrity error: resource_id=%s index=%s doc_id=%s",
+                            "ingest_events integrity error: resource_id=%s index=%s doc_id=%s constraint=%s",
                             resource_id,
                             i,
                             doc_id,
+                            constraint,
                             exc_info=ie,
                         )
                         errors.append(
