@@ -29,15 +29,30 @@ from models.schemas import ResourceEventRequest
 from utils.exceptions import ConflictError
 
 
-def _make_integrity_error(constraint_name: str | None) -> IntegrityError:
-    """Build an IntegrityError with a psycopg-shaped ``orig.diag``.
+def _make_integrity_error(
+    constraint_name: str | None,
+    *,
+    shape: str = "asyncpg",
+) -> IntegrityError:
+    """Build an IntegrityError whose ``orig`` mimics a real driver exception.
 
-    Mirrors the structured diagnostic surface
-    ``integrity_error_constraint_name`` reads, so unit tests can pin the
-    dispatch without spinning up a real PostgreSQL connection.
+    ``shape="asyncpg"`` (default — production path): ``orig.constraint_name``
+    is a direct attribute, matching ``asyncpg.exceptions.UniqueViolationError``.
+
+    ``shape="psycopg"``: ``orig.diag.constraint_name`` indirection, matching
+    psycopg2/psycopg3. This path is exercised by the sync engine in
+    integration tests and by Alembic.
+
+    The helper must cover both shapes so unit tests catch a regression in
+    either branch of ``integrity_error_constraint_name``.
     """
-    diag = SimpleNamespace(constraint_name=constraint_name)
-    orig = SimpleNamespace(diag=diag)
+    if shape == "asyncpg":
+        orig = SimpleNamespace(constraint_name=constraint_name)
+    elif shape == "psycopg":
+        diag = SimpleNamespace(constraint_name=constraint_name)
+        orig = SimpleNamespace(diag=diag)
+    else:
+        raise ValueError(f"unknown shape: {shape}")
     err = IntegrityError(statement="INSERT ...", params=None, orig=Exception("test"))
     err.orig = orig  # type: ignore[assignment]
     return err
@@ -122,19 +137,27 @@ class TestResourceTokenManager:
 
 
 class TestIntegrityErrorConstraintNameHelper:
-    """Issue #318: structured constraint_name extraction."""
+    """Issue #318: structured constraint_name extraction across drivers."""
 
-    def test_returns_constraint_name_when_present(self):
-        err = _make_integrity_error(RESOURCE_EVENTS_UPSERT_UNIQUE)
+    def test_asyncpg_shape_returns_constraint_name(self):
+        err = _make_integrity_error(RESOURCE_EVENTS_UPSERT_UNIQUE, shape="asyncpg")
         assert integrity_error_constraint_name(err) == RESOURCE_EVENTS_UPSERT_UNIQUE
 
-    def test_returns_none_when_diag_constraint_name_is_none(self):
-        err = _make_integrity_error(None)
+    def test_psycopg_shape_returns_constraint_name(self):
+        err = _make_integrity_error(RESOURCE_EVENTS_UPSERT_UNIQUE, shape="psycopg")
+        assert integrity_error_constraint_name(err) == RESOURCE_EVENTS_UPSERT_UNIQUE
+
+    def test_asyncpg_shape_returns_none_when_name_is_none(self):
+        err = _make_integrity_error(None, shape="asyncpg")
         assert integrity_error_constraint_name(err) is None
 
-    def test_returns_none_when_orig_has_no_diag(self):
+    def test_psycopg_shape_returns_none_when_name_is_none(self):
+        err = _make_integrity_error(None, shape="psycopg")
+        assert integrity_error_constraint_name(err) is None
+
+    def test_returns_none_when_orig_has_neither_attr(self):
         err = IntegrityError(statement="INSERT ...", params=None, orig=Exception("plain"))
-        # plain exception has no .diag attribute
+        # plain Exception has neither .constraint_name nor .diag
         assert integrity_error_constraint_name(err) is None
 
     def test_returns_none_when_orig_is_none(self):
@@ -218,11 +241,16 @@ class TestResourceEventIdempotency:
         db.rollback.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_unknown_constraint_reraises_integrity_error(self, mock_event_request, mock_auth):
+    async def test_unknown_constraint_raises_500(self, mock_event_request, mock_auth):
+        """Unknown constraint must surface as HTTPException(500), not as a
+        raw IntegrityError — the app-wide SQLAlchemyError handler would
+        otherwise convert it to 503 "database_unavailable", which is wrong
+        (the DB is reachable; the write was rejected).
+        """
         db = self._build_db(_make_integrity_error("some_other_constraint"))
 
         with patch("api.routes.resource_ingest.check_event_quota", new=AsyncMock()):
-            with pytest.raises(IntegrityError):
+            with pytest.raises(HTTPException) as exc_info:
                 await ingest_event(
                     resource_id="ec_products",
                     request=mock_event_request,
@@ -230,6 +258,7 @@ class TestResourceEventIdempotency:
                     db=db,
                 )
 
+        assert exc_info.value.status_code == 500
         db.rollback.assert_awaited_once()
 
 

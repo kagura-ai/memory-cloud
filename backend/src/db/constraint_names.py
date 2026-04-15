@@ -27,13 +27,24 @@ RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE = "resource_events_idempotency_key_key"
 def integrity_error_constraint_name(error: IntegrityError) -> str | None:
     """Return the PostgreSQL constraint name for ``error``, or ``None``.
 
-    Reads ``error.orig.diag.constraint_name`` (psycopg's structured
-    diagnostic field). Robust against driver/locale changes, unlike
-    substring matching on ``str(error)``. Returns ``None`` when the
-    underlying driver did not surface a constraint name (e.g. non-Postgres
-    backend, or a non-constraint integrity violation).
+    Handles both driver shapes this project runs into:
+
+        - asyncpg (production): ``error.orig`` is an ``asyncpg.UniqueViolationError``
+          or similar with ``constraint_name`` as a direct attribute.
+        - psycopg / psycopg2 (sync integration tests, Alembic): ``error.orig``
+          exposes a ``diag`` namespace with ``constraint_name`` inside.
+
+    Checked in that order because the async path is the hot path. Returns
+    ``None`` when neither shape is present (non-Postgres backend, driver
+    without structured diagnostics, or non-constraint integrity violation).
     """
-    diag = getattr(getattr(error, "orig", None), "diag", None)
+    orig = getattr(error, "orig", None)
+    if orig is None:
+        return None
+    direct = getattr(orig, "constraint_name", None)
+    if direct:
+        return direct
+    diag = getattr(orig, "diag", None)
     if diag is None:
         return None
     return getattr(diag, "constraint_name", None)

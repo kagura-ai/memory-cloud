@@ -364,15 +364,21 @@ async def ingest_event(
                     estimated_indexing_time_seconds=0,
                 )
 
-        # Unknown constraint — re-raise so it surfaces as 500 with full
-        # context for alerting, instead of being masked as a generic
-        # "database constraint" message that hides the real failure.
+        # Unknown constraint. Raise HTTPException(500) rather than a bare
+        # re-raise of IntegrityError: the app-wide
+        # ``@app.exception_handler(SQLAlchemyError)`` in ``api/main.py``
+        # converts every SQLAlchemyError into a 503 "database_unavailable",
+        # which would be wrong here (the DB is fine; the write was rejected).
+        # The structured log above carries the constraint name for alerting.
         logger.error(
             "resource_event_integrity_error_unhandled",
             constraint=constraint,
             error=str(e),
         )
-        raise
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create event due to database constraint",
+        ) from e
 
 
 @router.post(
@@ -475,8 +481,13 @@ async def ingest_batch(
                 else 0.6,  # Issue #262
             )
 
-            db.add(event)
-            await db.flush()
+            # SAVEPOINT per event so an IntegrityError on one row does not
+            # abort the outer transaction and break partial-success for the
+            # sibling events. Mirrors the MCP batch path in
+            # ``mcp_server/tools/resource.py``.
+            async with db.begin_nested():
+                db.add(event)
+                await db.flush()
             created_ids.append(event.id)
 
         except IntegrityError as e:
