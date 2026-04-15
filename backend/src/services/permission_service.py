@@ -8,6 +8,7 @@ Manages access control at workspace and context levels.
 from uuid import UUID
 
 from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import Context, ContextMember, WorkspaceMember
@@ -125,6 +126,79 @@ class PermissionService:
             )
 
         return member
+
+    async def resolve_resource_by_slug(
+        self,
+        user_id: str,
+        resource_id: str,
+        *,
+        required_role: str = "member",
+    ) -> Context:
+        """Resolve a ``resource_id`` slug to the Context the caller can access.
+
+        Issue #326: shared helper for per-resource API endpoints that receive
+        a slug in the URL (e.g. ``GET /resources/{resource_id}/indexer-status``)
+        and need to check cross-tenant access before reading any resource state.
+
+        Contract:
+            - Never trusts ``User.current_workspace_id`` — a mutable UI
+              preference, unsuitable for authorization (same rationale as
+              ``resource_ingest._enforce_workspace_membership``).
+            - Enumerates every active Context with this slug. Under the #322
+              global partial UNIQUE index on ``contexts.resource_id``, the
+              candidate count is at most one for live rows, so the loop is
+              O(1) in practice.
+            - Delegates final authorization to ``check_workspace_access`` so
+              the workspace-deleted / non-member / role-too-low paths surface
+              uniformly.
+            - Returns **404** on "not found OR not accessible" — never 403.
+              A 403 would leak existence across workspace boundaries
+              (CWE-639 / OWASP A01). The detail string is intentionally
+              indistinguishable from a completely unknown slug.
+
+        Args:
+            user_id: Authenticated principal's user ID.
+            resource_id: Resource slug (URL path segment).
+            required_role: Minimum workspace role to accept. Defaults to
+                ``member`` — callers needing stricter access (e.g. writes)
+                can pass ``admin``/``owner``.
+
+        Returns:
+            The ``Context`` row owning this resource slug that the caller
+            has access to.
+
+        Raises:
+            HTTPException(404): slug does not exist, or exists only in
+                workspaces the caller cannot access.
+        """
+        candidates = (
+            (
+                await self.db.execute(
+                    select(Context).where(
+                        Context.resource_id == resource_id,
+                        Context.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        for ctx in candidates:
+            try:
+                await self.check_workspace_access(
+                    user_id=user_id,
+                    workspace_id=ctx.workspace_id,
+                    required_role=required_role,
+                )
+                return ctx
+            except HTTPException:
+                # Not this one — keep looking. Under a96's global UNIQUE there
+                # will be at most one live candidate, but we loop defensively
+                # in case the index is ever dropped for an operational reason.
+                continue
+
+        raise HTTPException(status_code=404, detail="Resource not found")
 
     async def check_workspace_owner(self, user_id: str, workspace_id: UUID) -> WorkspaceMember:
         """Check if user is workspace owner.

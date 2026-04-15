@@ -2519,6 +2519,7 @@
       "selectResourceId": "Select a resource ID",
       "resourceIdRequired": "Please select a resource ID",
       "existingSchemaWarning": "Schema v{version} already exists for this resource. Creating will add a new version (v{version, number, integer}+1).",
+      "existingSchemaPrefilled": "Fields below are pre-filled from the current version. Edit, add, or remove fields, then submit to create the next version. (Each version is a complete replacement — fields not in the new version will not be in it.)",
       "impactWarningTitle": "This resource \"{resourceId}\" is currently in use:",
       "activeTokens": "{count} active token(s) using this resource",
       "existingMemories": "{count} existing memor{count, plural, =1 {y} other {ies}} indexed from this resource",
@@ -2694,7 +2695,8 @@
         "tokens": "Tokens",
         "memories": "Memories",
         "schema": "Schema",
-        "lastActivity": "Last activity"
+        "lastActivity": "Last activity",
+        "open": "Open detail"
       }
     },
     "detail": {
@@ -2707,7 +2709,51 @@
     },
     "tabs": {
       "overview": "Overview",
-      "data": "Data"
+      "data": "Data",
+      "schemas": "Schemas",
+      "tokens": "Tokens",
+      "events": "Events"
+    },
+    "events": {
+      "comingSoonTitle": "Ingest event log coming soon",
+      "comingSoonDescription": "Per-resource ingest event timeline with cursor-based pagination. Until then, the latest five events appear in the Indexer Status panel on Overview."
+    },
+    "indexer": {
+      "fetchError": "Failed to load indexer status.",
+      "emptyTitle": "Indexer has not run yet",
+      "emptyDescription": "Once the indexer picks up the first ingest event for this resource, its runtime state and most recent events will appear here.",
+      "panelAriaLabel": "Indexer status panel",
+      "jobStatus": "Job status",
+      "jobStatusLabel": "Job status: {status}",
+      "status": {
+        "idle": "Idle",
+        "queued": "Queued",
+        "running": "Running",
+        "failed": "Failed"
+      },
+      "lastRun": "Last run",
+      "lagHigh": "Lag over 1 hour — check indexer health",
+      "appliedUpserts": "Upserts applied",
+      "appliedDeletes": "{count} deletes applied",
+      "errors": "Errors",
+      "skipped": {
+        "no_pending_events": "No pending events since the last run.",
+        "schema_not_found": "Last run was skipped: no schema is registered for this resource.",
+        "context_not_found": "Last run was skipped: the context bound to this resource could not be resolved.",
+        "empty_valid_points": "Last run produced no valid points to upsert (likely payload/schema mismatches)."
+      },
+      "noRecentEvents": "No ingest events in the log yet.",
+      "recentEvents": "Recent ingest events",
+      "event": {
+        "op": "Op",
+        "docId": "Document ID",
+        "version": "Version",
+        "createdAt": "Created",
+        "ops": {
+          "upsert": "Upsert",
+          "delete": "Delete"
+        }
+      }
     },
     "stats": {
       "activeTokens": "Active tokens",
@@ -2726,7 +2772,9 @@
       "required": "Required",
       "versionLabel": "Current schema version: v{version}",
       "emptyTitle": "No schema registered",
-      "emptyDescription": "This resource does not have a schema yet. Use the REST API or MCP tools to register field definitions."
+      "emptyDescription": "This resource does not have a schema yet. Use the REST API or MCP tools to register field definitions.",
+      "createAction": "Create schema",
+      "createNewVersionAction": "Create new version"
     },
     "data": {
       "comingSoonTitle": "Data browser coming soon",

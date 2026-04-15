@@ -13,13 +13,15 @@ from __future__ import annotations
 
 # Standard library imports (PEP8)
 import json  # Issue #262: JSON serialization for Memory content
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5  # Issue #262: uuid5 for deterministic point_id
 
 # Third-party imports (PEP8)
 from qdrant_client.models import PointStruct, SparseVector
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local application imports (PEP8)
@@ -31,7 +33,7 @@ from db.qdrant import (
 )
 from models.auth import Context
 from models.memory import Memory  # Issue #262: Memory model for resource data storage
-from models.resource import IndexerState, ResourceEvent, ResourceSchema
+from models.resource import IndexerState, Resource, ResourceEvent, ResourceSchema
 from services.embedding_service import EmbeddingService
 from utils.datetime import utcnow
 from utils.exceptions import QdrantError
@@ -64,6 +66,219 @@ class IndexerMetrics:
             "skipped": self.skipped,
             "reason": self.reason,
         }
+
+
+# Mirrors ``IndexerSkippedReason`` (Literal) in ``api/routes/resource_indexer.py``.
+# Kept here so the read service can degrade unknown DB values to None *before*
+# they hit the pydantic boundary — see the wire-shape Literal for the source
+# of truth and add new enum values to BOTH places (the OpenAPI snapshot test
+# fails when they drift).
+_KNOWN_SKIPPED_REASONS: frozenset[str] = frozenset(
+    {
+        "no_pending_events",
+        "schema_not_found",
+        "context_not_found",
+        "empty_valid_points",
+    }
+)
+
+
+async def get_indexer_status_for_context(
+    db: AsyncSession,
+    context: Context,
+    *,
+    recent_event_limit: int = 5,
+) -> dict[str, Any]:
+    """Read-only snapshot of indexer state + recent ingest events for a Context.
+
+    Issue #326: backing data for ``GET /resources/{id}/indexer-status``.
+
+    The reader intentionally lives outside ``ResourceIndexer`` because that
+    class wires up Qdrant + embedding clients eagerly in ``__init__`` — read
+    endpoints shouldn't pay that setup cost or fail when Qdrant is down.
+
+    Sort contract for the dual-row transition (Phase 1 shadow column, see
+    ``models.resource`` module docstring): rows whose ``resource_pk`` is
+    populated take precedence over legacy ``resource_pk=NULL`` rows sharing
+    the same context. Under the partial UNIQUE index
+    ``uq_indexer_state_resource_context`` this always yields at most one
+    authoritative row; ordering by ``id DESC`` is the tiebreaker for the
+    worst case during an in-flight writer migration.
+
+    Args:
+        db: Async DB session.
+        context: Pre-resolved Context (caller already checked workspace access).
+        recent_event_limit: Max ingest events to return, newest first.
+
+    Returns:
+        Dict with:
+            ``resource_id``: echo of ``context.resource_id``.
+            ``state``: indexer state dict or ``None`` if indexer never ran
+                for this context.
+            ``recent_events``: list of event dicts (up to ``recent_event_limit``).
+    """
+    resource_id = context.resource_id
+    assert resource_id is not None, "resolve_resource_by_slug returns only slugged contexts"
+
+    # Cross-tenant safety (Copilot review #347): filter satellite tables by
+    # the authoritative ``resources.id`` (UUID) rather than the slug. The
+    # ``contexts.resource_id`` global UNIQUE only covers active rows — a
+    # soft-deleted context releases the slug, so a string-only filter could
+    # surface events from a previously-deleted resource (potentially a
+    # different workspace) once the slug is reused. The Resource entity
+    # row, by contrast, is workspace-scoped (``UniqueConstraint(workspace_id,
+    # resource_id)``) and is what every satellite table's ``resource_pk``
+    # FK actually points at.
+    resource_pk = (
+        await db.execute(
+            select(Resource.id).where(
+                Resource.workspace_id == context.workspace_id,
+                Resource.resource_id == resource_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    # IndexerState lookup carries its own workspace boundary via
+    # ``context_id`` (Context FK is workspace-scoped), so the dual-row
+    # ordering contract from the docstring is restored here: prefer the
+    # post-#323 row with ``resource_pk`` populated, fall back to a legacy
+    # ``resource_pk IS NULL`` row scoped by slug + context_id when only the
+    # legacy form exists. ``id DESC`` is the secondary tiebreaker.
+    # Build the slug/pk predicate. The dual-row fallback is genuinely a
+    # disjunction during Phase 1: when a Resource row is present, accept
+    # either the ``resource_pk``-populated row OR the legacy ``resource_pk
+    # IS NULL`` row that still carries the matching slug — both can exist
+    # for the same logical state until the writer migration drains the
+    # NULL bucket. Without the OR, a context that hasn't been re-written
+    # since #323 would surface ``state: null`` despite legacy state being
+    # present. When the Resource row is absent, fall back to slug-only
+    # (workspace boundary still comes from context_id).
+    if resource_pk is not None:
+        state_predicate = or_(
+            IndexerState.resource_pk == resource_pk,
+            (IndexerState.resource_pk.is_(None)) & (IndexerState.resource_id == resource_id),
+        )
+    else:
+        state_predicate = IndexerState.resource_id == resource_id
+
+    state_row = (
+        await db.execute(
+            select(IndexerState)
+            .where(
+                IndexerState.context_id == context.id,
+                state_predicate,
+            )
+            .order_by(
+                # Prefer rows with resource_pk populated when both exist.
+                IndexerState.resource_pk.is_(None).asc(),
+                IndexerState.id.desc(),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    # ResourceEvent has no context_id column, so the slug alone is NOT a
+    # workspace boundary — a soft-deleted context can release its slug for
+    # reuse and surface old events from a prior workspace. Filter strictly
+    # by the authoritative ``resource_pk`` here. If the Resource entity row
+    # is genuinely missing (shouldn't happen for a slug that resolved
+    # through ``resolve_resource_by_slug``), fail-safe to empty events
+    # rather than fall back to slug filtering — "no recent activity" is
+    # always preferable to a cross-tenant leak.
+    events: Sequence[ResourceEvent]
+    if resource_pk is None:
+        events = []
+    else:
+        events = (
+            (
+                await db.execute(
+                    select(ResourceEvent)
+                    .where(ResourceEvent.resource_pk == resource_pk)
+                    .order_by(ResourceEvent.id.desc())
+                    .limit(recent_event_limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    state_dict: dict[str, Any] | None
+    if state_row is None:
+        state_dict = None
+    else:
+        last_run_at = state_row.last_run_at
+        lag_seconds: float | None
+        if last_run_at is None:
+            lag_seconds = None
+        else:
+            # `last_run_at` is stored as naive UTC; compare against timezone-aware now().
+            if last_run_at.tzinfo is None:
+                last_run_at_utc = last_run_at.replace(tzinfo=UTC)
+            else:
+                last_run_at_utc = last_run_at
+            lag_seconds = (datetime.now(tz=UTC) - last_run_at_utc).total_seconds()
+
+        metrics_raw = state_row.metrics or {}
+        # Coerce ``metrics.reason`` to the known enum set the API surfaces.
+        # The wire schema (`IndexerSkippedReason` Literal in
+        # ``api/routes/resource_indexer.py``) is a strict pydantic enum;
+        # if an older DB row carries a reason string the API doesn't know
+        # about, blindly passing it through would 500 on response_model
+        # validation. Degrade unknowns to None so the panel gracefully
+        # shows "skipped" without an Alert text — matching the behavior
+        # the route's `IndexerSkippedReason` docstring promises.
+        skipped_reason: str | None
+        if metrics_raw.get("skipped"):
+            raw_reason = metrics_raw.get("reason")
+            skipped_reason = raw_reason if raw_reason in _KNOWN_SKIPPED_REASONS else None
+        else:
+            # Don't surface a stale reason after a successful re-run.
+            skipped_reason = None
+
+        state_dict = {
+            "job_status": state_row.job_status,
+            "last_run_at": last_run_at.isoformat() + "Z"
+            if last_run_at and last_run_at.tzinfo is None
+            else (last_run_at.isoformat() if last_run_at else None),
+            "next_run_at": (
+                state_row.next_run_at.isoformat() + "Z"
+                if state_row.next_run_at and state_row.next_run_at.tzinfo is None
+                else (state_row.next_run_at.isoformat() if state_row.next_run_at else None)
+            ),
+            "active_version": state_row.active_version,
+            "last_offset": state_row.last_offset,
+            "lag_seconds": lag_seconds,
+            "metrics": {
+                "applied_upserts": int(metrics_raw.get("applied_upserts", 0) or 0),
+                "applied_deletes": int(metrics_raw.get("applied_deletes", 0) or 0),
+                "errors": int(metrics_raw.get("errors", 0) or 0),
+                "skipped_reason": skipped_reason,
+            },
+        }
+
+    event_dicts = []
+    for ev in events:
+        created_at = ev.created_at
+        created_iso = (
+            created_at.isoformat() + "Z"
+            if created_at and created_at.tzinfo is None
+            else (created_at.isoformat() if created_at else None)
+        )
+        event_dicts.append(
+            {
+                "id": ev.id,
+                "op": ev.op,
+                "doc_id": ev.doc_id,
+                "version": ev.version,
+                "created_at": created_iso,
+            }
+        )
+
+    return {
+        "resource_id": resource_id,
+        "state": state_dict,
+        "recent_events": event_dicts,
+    }
 
 
 class ResourceIndexer:

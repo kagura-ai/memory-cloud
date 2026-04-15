@@ -2519,6 +2519,7 @@
       "selectResourceId": "リソースIDを選択",
       "resourceIdRequired": "リソースIDを選択してください",
       "existingSchemaWarning": "このリソースには既にスキーマv{version}が存在します。作成すると新しいバージョン（v{version, number, integer}+1）が追加されます。",
+      "existingSchemaPrefilled": "下のフィールドは現バージョンから pre-fill されています。編集・追加・削除してから保存すると次バージョンになります（各バージョンはフィールド全体の差し替え — 残したいフィールドは新バージョンにも含めてください）。",
       "impactWarningTitle": "このリソース「{resourceId}」は現在使用中です：",
       "activeTokens": "{count}個のアクティブなトークンがこのリソースを使用中",
       "existingMemories": "{count}件の既存メモリーがインデックス済み",
@@ -2694,7 +2695,8 @@
         "tokens": "トークン",
         "memories": "メモリ",
         "schema": "スキーマ",
-        "lastActivity": "最終アクティビティ"
+        "lastActivity": "最終アクティビティ",
+        "open": "詳細を開く"
       }
     },
     "detail": {
@@ -2707,7 +2709,51 @@
     },
     "tabs": {
       "overview": "概要",
-      "data": "データ"
+      "data": "データ",
+      "schemas": "スキーマ",
+      "tokens": "トークン",
+      "events": "イベント"
+    },
+    "events": {
+      "comingSoonTitle": "Ingest イベントログは近日公開",
+      "comingSoonDescription": "リソース単位の ingest イベントタイムライン (カーソルページネーション)。それまでは概要タブの Indexer Status パネルで直近 5 件を確認できます。"
+    },
+    "indexer": {
+      "fetchError": "Indexer ステータスの取得に失敗しました。",
+      "emptyTitle": "Indexer はまだ実行されていません",
+      "emptyDescription": "このリソースに対する最初の ingest イベントを Indexer が処理すると、ランタイム状態と直近のイベントがここに表示されます。",
+      "panelAriaLabel": "Indexer ステータスパネル",
+      "jobStatus": "ジョブステータス",
+      "jobStatusLabel": "ジョブステータス: {status}",
+      "status": {
+        "idle": "アイドル",
+        "queued": "キュー登録済み",
+        "running": "実行中",
+        "failed": "失敗"
+      },
+      "lastRun": "最終実行",
+      "lagHigh": "1 時間以上遅延しています — Indexer の健全性を確認してください",
+      "appliedUpserts": "適用済み Upsert",
+      "appliedDeletes": "削除 {count} 件を適用",
+      "errors": "エラー",
+      "skipped": {
+        "no_pending_events": "直近の実行以降、未処理イベントはありません。",
+        "schema_not_found": "直近の実行はスキップされました: このリソースにスキーマが登録されていません。",
+        "context_not_found": "直近の実行はスキップされました: リソースに紐づくコンテキストを解決できませんでした。",
+        "empty_valid_points": "直近の実行で有効な upsert 対象が 0 件でした (payload / schema の不一致の可能性)。"
+      },
+      "noRecentEvents": "イベントログはまだありません。",
+      "recentEvents": "直近の ingest イベント",
+      "event": {
+        "op": "操作",
+        "docId": "ドキュメント ID",
+        "version": "バージョン",
+        "createdAt": "作成日時",
+        "ops": {
+          "upsert": "Upsert",
+          "delete": "削除"
+        }
+      }
     },
     "stats": {
       "activeTokens": "有効トークン",
@@ -2726,7 +2772,9 @@
       "required": "必須",
       "versionLabel": "現在のスキーマバージョン: v{version}",
       "emptyTitle": "スキーマ未登録",
-      "emptyDescription": "このリソースにはまだスキーマが登録されていません。REST API または MCP ツールからフィールド定義を登録してください。"
+      "emptyDescription": "このリソースにはまだスキーマが登録されていません。REST API または MCP ツールからフィールド定義を登録してください。",
+      "createAction": "スキーマを作成",
+      "createNewVersionAction": "新しいバージョンを作成"
     },
     "data": {
       "comingSoonTitle": "データブラウザは近日公開",

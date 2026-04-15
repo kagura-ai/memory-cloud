@@ -2,15 +2,20 @@
  * Tests for the Resource detail page.
  *
  * Verifies:
- * - stats strip + schema table render on success
- * - schema absence (ApiError 404) renders the "no schema" EmptyState
+ * - stats strip renders on success and the Schemas tab shows the schema table
+ * - schema absence (ApiError 404) renders the "no schema" EmptyState in the
+ *   Schemas tab with a "Create schema" action
  * - non-404 getSchema errors surface via ErrorBanner (not silenced)
  * - listResources() and getSchema() run in parallel (both start before either resolves)
  * - unknown resource_id renders ErrorBanner + back link
- * - both tabs (overview + data) are exposed in the tablist
+ * - all five tabs (overview / data / schemas / tokens / events) are exposed
  * - the route `id` from useParams() is used directly (App Router already decodes)
  * - resource_ids containing a literal `%` do not throw URIError
  * - Pro-plan gate + workspaceReady hydration guard
+ *
+ * `getIndexerStatus` is also called once the resource resolves; mocked here
+ * to a benign empty payload so the IndexerStatusPanel renders without
+ * coupling these tests to its surface.
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
@@ -23,6 +28,7 @@ import { ApiError } from "@/lib/api/base";
 
 const mockListResources = vi.fn();
 const mockGetSchema = vi.fn();
+const mockGetIndexerStatus = vi.fn();
 const mockRouterReplace = vi.fn();
 const mockRouterPush = vi.fn();
 
@@ -32,10 +38,30 @@ let mockCurrentWorkspace: { plan_name?: string } | null = null;
 
 vi.mock("@/lib/api/resources", () => ({
   listResources: (...args: unknown[]) => mockListResources(...args),
+  getIndexerStatus: (...args: unknown[]) => mockGetIndexerStatus(...args),
 }));
 
 vi.mock("@/lib/api/schemas", () => ({
   getSchema: (...args: unknown[]) => mockGetSchema(...args),
+}));
+
+// Heavy in-tab components are stubbed — they own their own coverage and
+// aren't part of this page-level contract.
+vi.mock("@/components/credentials/ResourceTokensTabPanel", () => ({
+  ResourceTokensTabPanel: ({
+    resourceIdFilter,
+  }: {
+    resourceIdFilter?: string;
+  }) => <div data-testid="tokens-panel" data-filter={resourceIdFilter} />,
+}));
+
+vi.mock("@/components/resources/IndexerStatusPanel", () => ({
+  IndexerStatusPanel: () => <div data-testid="indexer-panel" />,
+}));
+
+vi.mock("@/components/schemas/CreateSchemaDialog", () => ({
+  CreateSchemaDialog: ({ isOpen }: { isOpen: boolean }) =>
+    isOpen ? <div role="dialog" data-testid="create-schema-dialog" /> : null,
 }));
 
 vi.mock("next/navigation", () => ({
@@ -78,6 +104,7 @@ vi.mock("@/contexts/AuthContext", () => ({
 
 vi.mock("@/lib/utils/datetime", () => ({
   formatRelativeTime: (iso: string) => `rel(${iso})`,
+  formatDateTime: (iso: string) => `dt(${iso})`,
 }));
 
 vi.mock("next/link", () => ({
@@ -125,6 +152,14 @@ const makeSchema = (overrides = {}) => ({
 beforeEach(() => {
   mockListResources.mockReset();
   mockGetSchema.mockReset();
+  mockGetIndexerStatus.mockReset();
+  // Default to a benign empty payload so IndexerStatusPanel does not error
+  // and tests that don't exercise it stay focused.
+  mockGetIndexerStatus.mockResolvedValue({
+    resource_id: "ec_products",
+    state: null,
+    recent_events: [],
+  });
   mockRouterReplace.mockReset();
   mockRouterPush.mockReset();
   mockParamsId = "ec_products";
@@ -139,7 +174,10 @@ afterEach(() => {
 // ---------- Tests ------------------------------------------------------------
 
 describe("ResourceDetailPage", () => {
-  it("renders stats strip and schema table on success", async () => {
+  it("renders stats strip on success and exposes schema content under the Schemas tab", async () => {
+    // Open the page already on the Schemas tab — Radix Tabs only mounts the
+    // active tabpanel, so we can't grep schema content while Overview is up.
+    mockSearchParams = new URLSearchParams("tab=schemas");
     mockListResources.mockResolvedValue({
       resources: [makeResource()],
       total: 1,
@@ -155,7 +193,8 @@ describe("ResourceDetailPage", () => {
     expect(screen.getByText(/versionLabel.*"version":3/)).toBeInTheDocument();
   });
 
-  it("renders 'no schema' empty state when getSchema returns ApiError(404)", async () => {
+  it("renders 'no schema' empty state with a Create action when getSchema returns ApiError(404)", async () => {
+    mockSearchParams = new URLSearchParams("tab=schemas");
     mockListResources.mockResolvedValue({
       resources: [makeResource()],
       total: 1,
@@ -171,6 +210,11 @@ describe("ResourceDetailPage", () => {
         screen.getByText("resources.schema.emptyTitle"),
       ).toBeInTheDocument();
     });
+    // The action wiring is the #326 deliverable — pin that the actionable
+    // button is present, not just the empty-state copy.
+    expect(
+      screen.getByRole("button", { name: "resources.schema.createAction" }),
+    ).toBeInTheDocument();
   });
 
   it("surfaces non-404 getSchema errors via ErrorBanner (not silenced as 'no schema')", async () => {
@@ -216,7 +260,9 @@ describe("ResourceDetailPage", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    // Both must have started before either resolves — proves parallelism
+    // Both must have started before either resolves — proves parallelism.
+    // (The indexer-status fetch fires only after the resource resolves and
+    // is intentionally outside the parallel-pair contract this test pins.)
     expect(listStarted).toBe(true);
     expect(schemaStarted).toBe(true);
 
@@ -272,7 +318,7 @@ describe("ResourceDetailPage", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("exposes both tabs (overview + data) in the tablist", async () => {
+  it("exposes all five tabs (overview / data / schemas / tokens / events)", async () => {
     mockListResources.mockResolvedValue({
       resources: [makeResource()],
       total: 1,
@@ -284,12 +330,22 @@ describe("ResourceDetailPage", () => {
     await waitFor(() => {
       expect(screen.getByText("EC Products")).toBeInTheDocument();
     });
-    expect(
-      screen.getByRole("tab", { name: "resources.tabs.overview" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("tab", { name: "resources.tabs.data" }),
-    ).toBeInTheDocument();
+    for (const key of [
+      "overview",
+      "data",
+      "schemas",
+      "tokens",
+      "events",
+    ] as const) {
+      // Tabs carry an icon next to the label; matching by accessible name
+      // requires a regex because the label text is a substring of the rendered
+      // tab content.
+      expect(
+        screen.getByRole("tab", {
+          name: new RegExp(`resources\\.tabs\\.${key}`),
+        }),
+      ).toBeInTheDocument();
+    }
   });
 
   it("passes useParams() id through unchanged (App Router already decodes)", async () => {

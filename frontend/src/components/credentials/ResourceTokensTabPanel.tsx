@@ -53,7 +53,19 @@ import {
 import { ResourceTokensTable } from "@/components/resource-tokens/ResourceTokensTable";
 import { CreateResourceTokenDialog } from "@/components/resource-tokens/CreateResourceTokenDialog";
 
-export function ResourceTokensTabPanel() {
+interface ResourceTokensTabPanelProps {
+  /**
+   * Pre-filter the token list to a single resource. When provided, takes
+   * precedence over the `?resource_id=` URL query — used by the per-resource
+   * Tokens tab on `/workspace/resources/[id]` where the slug is in the path,
+   * not the query string.
+   */
+  resourceIdFilter?: string;
+}
+
+export function ResourceTokensTabPanel({
+  resourceIdFilter: resourceIdFilterProp,
+}: ResourceTokensTabPanelProps = {}) {
   const t = useTranslations("resourceTokens");
   const tCommon = useTranslations("common");
   const { currentWorkspaceId, currentWorkspace } = useWorkspace();
@@ -92,8 +104,11 @@ export function ResourceTokensTabPanel() {
   // Issue #47: Deep-link support — `?resource_id=<id>` pre-filters the token list.
   // Passed through to the backend list endpoint; also gates the create dialog's
   // initial resource selection.
+  // Issue #325: a `resourceIdFilter` prop wins over the URL query so the panel
+  // works inside the per-resource Tokens tab where the slug is a path segment.
   const searchParams = useSearchParams();
-  const resourceIdFilter = searchParams.get("resource_id") || undefined;
+  const resourceIdFilter =
+    resourceIdFilterProp || searchParams.get("resource_id") || undefined;
 
   // Track the previous filter so we can detect an actual change and reset
   // pagination within the same effect as the load. A separate reset effect
