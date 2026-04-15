@@ -99,7 +99,9 @@ class TestResourceIndexerNamedVectorUpsert:
         schema = _make_schema()
         context = _make_context()
 
-        await indexer._apply_upsert(event, schema, context, "kagura_memories")
+        await indexer._apply_upsert(
+            event, schema, context, "kagura_memories", indexer.embedding_service
+        )
 
         # Qdrant upsert was called exactly once with a named-vector point.
         assert indexer.qdrant_client.upsert.await_count == 1
@@ -122,22 +124,27 @@ class TestResourceIndexerNamedVectorUpsert:
         schema = _make_schema()
         context = _make_context()
 
-        await indexer._apply_upsert(event, schema, context, "kagura_memories")
+        await indexer._apply_upsert(
+            event, schema, context, "kagura_memories", indexer.embedding_service
+        )
         first_id = indexer.qdrant_client.upsert.await_args.kwargs["points"][0].id
 
         indexer.qdrant_client.upsert.reset_mock()
 
-        await indexer._apply_upsert(event, schema, context, "kagura_memories")
+        await indexer._apply_upsert(
+            event, schema, context, "kagura_memories", indexer.embedding_service
+        )
         second_id = indexer.qdrant_client.upsert.await_args.kwargs["points"][0].id
 
         assert first_id == second_id
 
 
-class TestResolveCollectionForContext:
-    """Issue #334: per-context Qdrant collection routing.
+class TestResolveRoutingForContext:
+    """Issue #334 (Layer B) + #338 (Layer C): per-context routing.
 
-    Verify that the indexer reads ContextSearchConfig and resolves the
-    correct collection name via get_collection_name(model, dimensions).
+    Verify the fused resolver returns a (collection_name, embedding_service)
+    tuple derived from the same ContextSearchConfig, so the generated embedding
+    dim always matches the target collection's dim.
     """
 
     @pytest.fixture
@@ -153,30 +160,49 @@ class TestResolveCollectionForContext:
         result.scalar_one_or_none.return_value = cfg
         indexer.db.execute = AsyncMock(return_value=result)
 
-        name = await indexer._resolve_collection_for_context(uuid4())
+        name, svc = await indexer._resolve_routing_for_context(uuid4())
 
         assert name == "kagura_memories"
+        assert svc.model == "text-embedding-3-small"
+        assert svc.dimensions == 512
 
     @pytest.mark.asyncio
-    async def test_qwen3_8b_returns_namespaced_collection(self, indexer):
+    async def test_qwen3_8b_returns_namespaced_collection_and_matching_service(self, indexer):
         cfg = MagicMock(embedding_model="qwen3-embedding:8b", embedding_dimensions=4096)
         result = MagicMock()
         result.scalar_one_or_none.return_value = cfg
         indexer.db.execute = AsyncMock(return_value=result)
 
-        name = await indexer._resolve_collection_for_context(uuid4())
+        name, svc = await indexer._resolve_routing_for_context(uuid4())
 
         assert name == "kagura_memories_qwen3_embedding_8b_4096"
+        assert svc.model == "qwen3-embedding:8b"
+        assert svc.dimensions == 4096
+        assert svc is not indexer.embedding_service
 
     @pytest.mark.asyncio
-    async def test_no_search_config_falls_back_to_legacy(self, indexer):
+    async def test_no_search_config_falls_back_to_legacy_and_default_service(self, indexer):
         result = MagicMock()
         result.scalar_one_or_none.return_value = None
         indexer.db.execute = AsyncMock(return_value=result)
 
-        name = await indexer._resolve_collection_for_context(uuid4())
+        name, svc = await indexer._resolve_routing_for_context(uuid4())
 
         assert name == "kagura_memories"
+        assert svc is indexer.embedding_service
+
+    @pytest.mark.asyncio
+    async def test_single_select_per_resolve_call(self, indexer):
+        """The fused resolver must issue exactly one SELECT — splitting
+        collection and embedding_service back into two methods would double it."""
+        cfg = MagicMock(embedding_model="qwen3-embedding:8b", embedding_dimensions=4096)
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = cfg
+        indexer.db.execute = AsyncMock(return_value=result)
+
+        await indexer._resolve_routing_for_context(uuid4())
+
+        assert indexer.db.execute.await_count == 1
 
 
 class TestApplyDeleteCollectionRouting:
@@ -222,10 +248,11 @@ class TestApplyDeleteCollectionRouting:
         )
 
 
-class TestProcessIncrementalResolvesCollectionOncePerBatch:
-    """Issue #334: collection_name MUST be resolved once per process_incremental
-    call (outside the per-event loop). If a future refactor moves the resolve
-    into the loop, points_count writes would suffer N+1 SELECTs."""
+class TestProcessIncrementalResolvesRoutingOncePerBatch:
+    """Issue #334 + #338: routing (collection_name + embedding_service) MUST
+    be resolved once per process_incremental call (outside the per-event loop).
+    If a future refactor moves the resolve into the loop, we regress into N+1
+    SELECTs AND risk the two-layer bug pattern (collection/service drift)."""
 
     @pytest.mark.asyncio
     async def test_resolve_called_once_for_multi_event_batch(self):
@@ -240,17 +267,22 @@ class TestProcessIncrementalResolvesCollectionOncePerBatch:
         )
         indexer._get_latest_schema = AsyncMock(return_value=_make_schema())
         indexer._get_context = AsyncMock(return_value=_make_context())
-        indexer._resolve_collection_for_context = AsyncMock(return_value="kagura_memories")
+        stub_embedding_service = MagicMock()
+        indexer._resolve_routing_for_context = AsyncMock(
+            return_value=("kagura_memories", stub_embedding_service)
+        )
         indexer._apply_upsert = AsyncMock()
         indexer._apply_delete = AsyncMock()
         indexer.db.commit = AsyncMock()
 
         await indexer.process_incremental("res_test", uuid4())
 
-        assert indexer._resolve_collection_for_context.await_count == 1, (
-            "collection_name resolution must be invoked exactly once per batch, "
-            "not per event — moving it inside the for-event loop is an N+1 regression."
+        assert indexer._resolve_routing_for_context.await_count == 1, (
+            "routing resolution must be invoked exactly once per batch, not per "
+            "event — moving it inside the for-event loop is an N+1 regression."
         )
         assert indexer._apply_upsert.await_count == 3
         for call in indexer._apply_upsert.await_args_list:
+            # (event, schema, context, collection_name, embedding_service)
             assert call.args[3] == "kagura_memories"
+            assert call.args[4] is stub_embedding_service
