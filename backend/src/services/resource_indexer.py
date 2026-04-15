@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local application imports (PEP8)
-from db.qdrant import KAGURA_MEMORIES_VECTOR_NAME, get_qdrant_client
+from db.qdrant import KAGURA_MEMORIES_VECTOR_NAME, get_collection_name, get_qdrant_client
 from models.auth import Context
 from models.memory import Memory  # Issue #262: Memory model for resource data storage
 from models.resource import IndexerState, ResourceEvent, ResourceSchema
@@ -127,14 +127,18 @@ class ResourceIndexer:
             # 4. Get context for workspace_id/context_id
             context = await self._get_context(context_id)
 
+            # Resolve Qdrant collection from context's embedding model (#334)
+            # Resolved once per batch — all events share the same context_id.
+            collection_name = await self._resolve_collection_for_context(context_id)
+
             # 5. Process each event
             for event in events:
                 try:
                     if event.op == "upsert":
-                        await self._apply_upsert(event, schema, context)
+                        await self._apply_upsert(event, schema, context, collection_name)
                         metrics.applied_upserts += 1
                     elif event.op == "delete":
-                        await self._apply_delete(event, context)
+                        await self._apply_delete(event, context, collection_name)
                         metrics.applied_deletes += 1
 
                     # Update offset after each successful event
@@ -253,16 +257,21 @@ class ResourceIndexer:
         event: ResourceEvent,
         schema: ResourceSchema,
         context: Context,
+        collection_name: str,
     ) -> None:
         """Apply upsert operation to Qdrant + PostgreSQL Memory.
-
-        Single Collection Migration: Always uses "kagura_memories" collection.
 
         Args:
             event: Resource event
             schema: Resource schema
             context: Context object
+            collection_name: Resolved Qdrant collection (per-context, see #334)
         """
+        # TODO(#338, Layer C): self.embedding_service still uses the global
+        # default model (settings.embedding_model). When the context's
+        # embedding_model differs (e.g. qwen3-embedding:8b), the generated
+        # embedding's dim will not match collection_name's dim and Qdrant will
+        # reject the upsert.
         if not event.payload:
             logger.warning("upsert_event_has_no_payload", event_id=event.id)
             return
@@ -326,12 +335,10 @@ class ResourceIndexer:
             },
         )
 
-        # 4. Upsert to Qdrant (single collection)
-        from db.qdrant import KAGURA_MEMORIES_COLLECTION
-
+        # 4. Upsert to Qdrant (per-context collection, see #334)
         try:
             await self.qdrant_client.upsert(
-                collection_name=KAGURA_MEMORIES_COLLECTION,
+                collection_name=collection_name,
                 points=[point],
                 wait=True,
             )
@@ -341,7 +348,7 @@ class ResourceIndexer:
                 "qdrant_upsert_success",
                 point_id=str(point_id_uuid),
                 point_id_source=point_id_str,
-                collection=KAGURA_MEMORIES_COLLECTION,
+                collection=collection_name,
             )
 
         except Exception as e:
@@ -490,7 +497,7 @@ class ResourceIndexer:
                         old_point_uuid = uuid5(NAMESPACE_DNS, old_point_str)
                         try:
                             await self.qdrant_client.delete(
-                                collection_name=KAGURA_MEMORIES_COLLECTION,
+                                collection_name=collection_name,
                                 points_selector=[str(old_point_uuid)],
                             )
                         except Exception:
@@ -528,10 +535,13 @@ class ResourceIndexer:
             # Re-raise to trigger transaction rollback
             raise
 
-    async def _apply_delete(self, event: ResourceEvent, context: Context) -> None:
+    async def _apply_delete(
+        self,
+        event: ResourceEvent,
+        context: Context,
+        collection_name: str,
+    ) -> None:
         """Apply delete operation to Qdrant + PostgreSQL Memory.
-
-        Single Collection Migration: Always uses "kagura_memories" collection.
 
         Behavior:
             - version=NULL: Delete all versions of doc_id
@@ -540,10 +550,9 @@ class ResourceIndexer:
         Args:
             event: Resource event
             context: Context object
+            collection_name: Resolved Qdrant collection (per-context, see #334)
         """
         from qdrant_client.models import FieldCondition, Filter, MatchValue
-
-        from db.qdrant import KAGURA_MEMORIES_COLLECTION
 
         try:
             if event.version is None:
@@ -553,7 +562,7 @@ class ResourceIndexer:
 
                 # Delete from Qdrant with 3-level isolation
                 await self.qdrant_client.delete(
-                    collection_name=KAGURA_MEMORIES_COLLECTION,
+                    collection_name=collection_name,
                     points_selector=Filter(
                         must=[
                             FieldCondition(
@@ -576,7 +585,7 @@ class ResourceIndexer:
                     "qdrant_delete_all_versions",
                     doc_id=event.doc_id,
                     resource_id=event.resource_id,
-                    collection=KAGURA_MEMORIES_COLLECTION,
+                    collection=collection_name,
                 )
 
                 # Delete from Memory table with 3-level isolation
@@ -614,7 +623,7 @@ class ResourceIndexer:
                 point_id_uuid = uuid5(NAMESPACE_DNS, point_id_str)
 
                 await self.qdrant_client.delete(
-                    collection_name=KAGURA_MEMORIES_COLLECTION,
+                    collection_name=collection_name,
                     points_selector=[str(point_id_uuid)],
                 )
 
@@ -623,7 +632,7 @@ class ResourceIndexer:
                     "qdrant_delete_version",
                     point_id=str(point_id_uuid),
                     point_id_source=point_id_str,
-                    collection=KAGURA_MEMORIES_COLLECTION,
+                    collection=collection_name,
                 )
 
                 # Delete from Memory table with 3-level isolation
@@ -748,3 +757,20 @@ class ResourceIndexer:
         if not context:
             raise ValueError(f"Context {context_id} not found")
         return context
+
+    async def _resolve_collection_for_context(self, context_id: UUID) -> str:
+        """Resolve Qdrant collection name for a context (#334).
+
+        Mirrors memory_service._get_context_collection_name() to keep routing
+        consistent across services. Falls back to the legacy `kagura_memories`
+        collection when no ContextSearchConfig row exists.
+        """
+        from models.config import ContextSearchConfig
+
+        result = await self.db.execute(
+            select(ContextSearchConfig).where(ContextSearchConfig.context_id == context_id)
+        )
+        config = result.scalar_one_or_none()
+        if config:
+            return get_collection_name(config.embedding_model, config.embedding_dimensions)
+        return get_collection_name("text-embedding-3-small", 512)
