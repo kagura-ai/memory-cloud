@@ -771,15 +771,18 @@ class ResourceIndexer:
         pattern seen in #324/#334/#338). Do NOT split this back into two
         methods without preserving the single-source-of-truth invariant.
 
-        Fallback (no ContextSearchConfig row): returns the indexer's default
-        EmbeddingService paired with the collection derived from that service's
-        own model/dimensions. With the out-of-the-box settings
-        (text-embedding-3-small/512) this resolves to `kagura_memories`; if the
-        operator overrides settings.embedding_model/embedding_dimensions, the
-        fallback follows those settings so the single-source-of-truth invariant
-        holds on the fallback path too. This intentionally diverges from
-        memory_service, which always returns the legacy `kagura_memories`
-        fallback — memory_service pre-dates multi-model settings.
+        Fallback (no ContextSearchConfig row): returns the legacy
+        `kagura_memories` collection + the indexer's default EmbeddingService,
+        matching memory_service._get_context_collection_name() exactly. The
+        legacy collection name is hardcoded on this path (not derived from
+        self.embedding_service) to keep memory_service and resource_indexer
+        reading/writing the same collection for legacy contexts, even when an
+        operator overrides settings.embedding_model — cross-service consistency
+        on the fallback path matters more than intra-service consistency,
+        because a split-brain (memory_service on legacy, indexer on overridden)
+        would silently hide writes. Operators who override settings MUST
+        create a ContextSearchConfig row per context to opt into the
+        per-context routing path above.
         """
         from models.config import ContextSearchConfig
 
@@ -797,13 +800,8 @@ class ResourceIndexer:
                 dimensions=config.embedding_dimensions,
             )
             return collection_name, embedding_service
-        # No ContextSearchConfig row: derive the fallback collection from the
-        # indexer's default EmbeddingService so model/dimensions and the
-        # collection stay consistent even when an operator overrides
-        # settings.embedding_model/embedding_dimensions (otherwise the fallback
-        # would reintroduce the two-layer bug: e.g. settings=qwen3/4096 but
-        # collection=kagura_memories/512).
-        fallback_collection = get_collection_name(
-            self.embedding_service.model, self.embedding_service.dimensions
-        )
-        return fallback_collection, self.embedding_service
+        # No ContextSearchConfig row: return the legacy kagura_memories
+        # collection exactly as memory_service does, so both services stay on
+        # the same collection for legacy contexts. See the docstring above for
+        # the cross-service consistency rationale.
+        return get_collection_name("text-embedding-3-small", 512), self.embedding_service
