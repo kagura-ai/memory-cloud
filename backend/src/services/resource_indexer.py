@@ -68,6 +68,21 @@ class IndexerMetrics:
         }
 
 
+# Mirrors ``IndexerSkippedReason`` (Literal) in ``api/routes/resource_indexer.py``.
+# Kept here so the read service can degrade unknown DB values to None *before*
+# they hit the pydantic boundary — see the wire-shape Literal for the source
+# of truth and add new enum values to BOTH places (the OpenAPI snapshot test
+# fails when they drift).
+_KNOWN_SKIPPED_REASONS: frozenset[str] = frozenset(
+    {
+        "no_pending_events",
+        "schema_not_found",
+        "context_not_found",
+        "empty_valid_points",
+    }
+)
+
+
 async def get_indexer_status_for_context(
     db: AsyncSession,
     context: Context,
@@ -123,30 +138,46 @@ async def get_indexer_status_for_context(
         )
     ).scalar_one_or_none()
 
-    # Common pattern: prefer ``resource_pk`` filtering when the Resource row
-    # exists (post-a97 — should be ~always now), and explicitly exclude
-    # legacy ``resource_pk IS NULL`` rows so the dual-row Phase 1 transition
-    # can't surface a stale event from before the writer migration. When
-    # ``resource_pk`` is None (Resource row genuinely absent — should never
-    # happen for a context produced by ``resolve_resource_by_slug``, but we
-    # fail-safe to "no events" rather than fall back to slug filtering),
-    # return empty results to avoid the cross-tenant leak vector entirely.
-    if resource_pk is None:
-        state_row = None
-        events: Sequence[ResourceEvent] = []
-    else:
-        state_row = (
-            await db.execute(
-                select(IndexerState)
-                .where(
-                    IndexerState.resource_pk == resource_pk,
-                    IndexerState.context_id == context.id,
-                )
-                .order_by(IndexerState.id.desc())
-                .limit(1)
+    # IndexerState lookup carries its own workspace boundary via
+    # ``context_id`` (Context FK is workspace-scoped), so the dual-row
+    # ordering contract from the docstring is restored here: prefer the
+    # post-#323 row with ``resource_pk`` populated, fall back to a legacy
+    # ``resource_pk IS NULL`` row scoped by slug + context_id when only the
+    # legacy form exists. ``id DESC`` is the secondary tiebreaker.
+    state_row = (
+        await db.execute(
+            select(IndexerState)
+            .where(
+                IndexerState.context_id == context.id,
+                # When a Resource row is present, accept either the
+                # ``resource_pk``-populated row OR the legacy NULL row that
+                # still carries the matching slug. When the Resource row is
+                # absent, fall back to slug-only scoped by context_id.
+                IndexerState.resource_pk == resource_pk
+                if resource_pk is not None
+                else IndexerState.resource_id == resource_id,
             )
-        ).scalar_one_or_none()
+            .order_by(
+                # Prefer rows with resource_pk populated.
+                IndexerState.resource_pk.is_(None).asc(),
+                IndexerState.id.desc(),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
 
+    # ResourceEvent has no context_id column, so the slug alone is NOT a
+    # workspace boundary — a soft-deleted context can release its slug for
+    # reuse and surface old events from a prior workspace. Filter strictly
+    # by the authoritative ``resource_pk`` here. If the Resource entity row
+    # is genuinely missing (shouldn't happen for a slug that resolved
+    # through ``resolve_resource_by_slug``), fail-safe to empty events
+    # rather than fall back to slug filtering — "no recent activity" is
+    # always preferable to a cross-tenant leak.
+    events: Sequence[ResourceEvent]
+    if resource_pk is None:
+        events = []
+    else:
         events = (
             (
                 await db.execute(
@@ -177,6 +208,22 @@ async def get_indexer_status_for_context(
             lag_seconds = (datetime.now(tz=UTC) - last_run_at_utc).total_seconds()
 
         metrics_raw = state_row.metrics or {}
+        # Coerce ``metrics.reason`` to the known enum set the API surfaces.
+        # The wire schema (`IndexerSkippedReason` Literal in
+        # ``api/routes/resource_indexer.py``) is a strict pydantic enum;
+        # if an older DB row carries a reason string the API doesn't know
+        # about, blindly passing it through would 500 on response_model
+        # validation. Degrade unknowns to None so the panel gracefully
+        # shows "skipped" without an Alert text — matching the behavior
+        # the route's `IndexerSkippedReason` docstring promises.
+        skipped_reason: str | None
+        if metrics_raw.get("skipped"):
+            raw_reason = metrics_raw.get("reason")
+            skipped_reason = raw_reason if raw_reason in _KNOWN_SKIPPED_REASONS else None
+        else:
+            # Don't surface a stale reason after a successful re-run.
+            skipped_reason = None
+
         state_dict = {
             "job_status": state_row.job_status,
             "last_run_at": last_run_at.isoformat() + "Z"
@@ -194,12 +241,7 @@ async def get_indexer_status_for_context(
                 "applied_upserts": int(metrics_raw.get("applied_upserts", 0) or 0),
                 "applied_deletes": int(metrics_raw.get("applied_deletes", 0) or 0),
                 "errors": int(metrics_raw.get("errors", 0) or 0),
-                # Only surface the skipped reason when the last run was
-                # actually skipped — otherwise stale reasons linger after a
-                # successful re-run and confuse operators.
-                "skipped_reason": (
-                    metrics_raw.get("reason") if metrics_raw.get("skipped") else None
-                ),
+                "skipped_reason": skipped_reason,
             },
         }
 
