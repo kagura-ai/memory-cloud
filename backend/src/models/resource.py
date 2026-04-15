@@ -41,6 +41,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from db.base import Base
+from db.constraint_names import RESOURCE_EVENTS_UPSERT_UNIQUE
 
 
 class Resource(Base):
@@ -142,7 +143,7 @@ class ResourceEvent(Base):
         # CONCURRENTLY in migration a97_resources_entity; the declarative
         # Index keeps alembic autogenerate from reporting spurious drift.
         Index(
-            "ux_resource_events_upsert_version",
+            RESOURCE_EVENTS_UPSERT_UNIQUE,
             "resource_pk",
             "doc_id",
             "version",
