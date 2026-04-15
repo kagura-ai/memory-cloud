@@ -492,9 +492,28 @@ async def handle_ingest_events(
                 )
 
             # Process events
+            from sqlalchemy import select
             from sqlalchemy.exc import IntegrityError
 
-            from models.resource import ResourceEvent
+            from db.constraint_names import (
+                RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE,
+                RESOURCE_EVENTS_UPSERT_UNIQUE,
+                integrity_error_constraint_name,
+            )
+            from models.resource import Resource, ResourceEvent
+
+            # Resolve resources.id once per batch so the partial UNIQUE on
+            # (resource_pk, doc_id, version) actually applies. Returns None
+            # when the resources row has not been created yet (Phase 1
+            # legacy state) — see the HTTP path for the full rationale.
+            resource_pk = (
+                await db.execute(
+                    select(Resource.id).where(
+                        Resource.workspace_id == workspace_id,
+                        Resource.resource_id == resource_id,
+                    )
+                )
+            ).scalar_one_or_none()
 
             created_ids: list[int] = []
             errors: list[dict] = []
@@ -574,6 +593,7 @@ async def handle_ingest_events(
 
                 event = ResourceEvent(
                     resource_id=resource_id,
+                    resource_pk=resource_pk,
                     op=op,
                     doc_id=doc_id,
                     version=version,
@@ -589,15 +609,15 @@ async def handle_ingest_events(
                         await db.flush()
                     created_ids.append(event.id)
                 except IntegrityError as ie:
-                    error_msg = str(ie)
-                    if "unique_resource_doc_version" in error_msg:
+                    constraint = integrity_error_constraint_name(ie)
+                    if constraint == RESOURCE_EVENTS_UPSERT_UNIQUE:
                         errors.append(
                             {
                                 "index": i,
                                 "error": f"Duplicate version for doc_id={doc_id}",
                             }
                         )
-                    elif "unique_idempotency_key" in error_msg:
+                    elif constraint == RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE:
                         errors.append(
                             {
                                 "index": i,
@@ -605,12 +625,14 @@ async def handle_ingest_events(
                             }
                         )
                     else:
-                        # Do not leak raw DB constraint details to clients
+                        # Do not leak raw DB constraint details to clients;
+                        # log the constraint name for triage instead.
                         logger.warning(
-                            "ingest_events integrity error: resource_id=%s index=%s doc_id=%s",
+                            "ingest_events integrity error: resource_id=%s index=%s doc_id=%s constraint=%s",
                             resource_id,
                             i,
                             doc_id,
+                            constraint,
                             exc_info=ie,
                         )
                         errors.append(

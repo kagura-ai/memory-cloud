@@ -4,20 +4,58 @@ Issue #238: Resource-driven incremental indexing.
 Issue #322: Workspace boundary enforcement on ingest (security hotfix).
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 
 from api.routes.resource_ingest import (
     _enforce_workspace_membership,
     _resolve_authoritative_context,
+    ingest_event,
 )
 from auth.resource_tokens import ResourceTokenManager
+from db.constraint_names import (
+    RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE,
+    RESOURCE_EVENTS_UPSERT_UNIQUE,
+    integrity_error_constraint_name,
+)
 from models.auth import Context
-from models.resource import ResourceToken
+from models.resource import ResourceEvent, ResourceToken
 from models.schemas import ResourceEventRequest
+from utils.exceptions import ConflictError
+
+
+def _make_integrity_error(
+    constraint_name: str | None,
+    *,
+    shape: str = "asyncpg",
+) -> IntegrityError:
+    """Build an IntegrityError whose ``orig`` mimics a real driver exception.
+
+    ``shape="asyncpg"`` (default — production path): ``orig.constraint_name``
+    is a direct attribute, matching ``asyncpg.exceptions.UniqueViolationError``.
+
+    ``shape="psycopg"``: ``orig.diag.constraint_name`` indirection, matching
+    psycopg2/psycopg3. This path is exercised by the sync engine in
+    integration tests and by Alembic.
+
+    The helper must cover both shapes so unit tests catch a regression in
+    either branch of ``integrity_error_constraint_name``.
+    """
+    if shape == "asyncpg":
+        orig = SimpleNamespace(constraint_name=constraint_name)
+    elif shape == "psycopg":
+        diag = SimpleNamespace(constraint_name=constraint_name)
+        orig = SimpleNamespace(diag=diag)
+    else:
+        raise ValueError(f"unknown shape: {shape}")
+    err = IntegrityError(statement="INSERT ...", params=None, orig=Exception("test"))
+    err.orig = orig  # type: ignore[assignment]
+    return err
 
 
 class TestResourceTokenManager:
@@ -98,12 +136,41 @@ class TestResourceTokenManager:
 # shared with the MCP ingest path). See ``tests/services/test_resource_quota_service.py``.
 
 
+class TestIntegrityErrorConstraintNameHelper:
+    """Issue #318: structured constraint_name extraction across drivers."""
+
+    def test_asyncpg_shape_returns_constraint_name(self):
+        err = _make_integrity_error(RESOURCE_EVENTS_UPSERT_UNIQUE, shape="asyncpg")
+        assert integrity_error_constraint_name(err) == RESOURCE_EVENTS_UPSERT_UNIQUE
+
+    def test_psycopg_shape_returns_constraint_name(self):
+        err = _make_integrity_error(RESOURCE_EVENTS_UPSERT_UNIQUE, shape="psycopg")
+        assert integrity_error_constraint_name(err) == RESOURCE_EVENTS_UPSERT_UNIQUE
+
+    def test_asyncpg_shape_returns_none_when_name_is_none(self):
+        err = _make_integrity_error(None, shape="asyncpg")
+        assert integrity_error_constraint_name(err) is None
+
+    def test_psycopg_shape_returns_none_when_name_is_none(self):
+        err = _make_integrity_error(None, shape="psycopg")
+        assert integrity_error_constraint_name(err) is None
+
+    def test_returns_none_when_orig_has_neither_attr(self):
+        err = IntegrityError(statement="INSERT ...", params=None, orig=Exception("plain"))
+        # plain Exception has neither .constraint_name nor .diag
+        assert integrity_error_constraint_name(err) is None
+
+    def test_returns_none_when_orig_is_none(self):
+        err = IntegrityError(statement="INSERT ...", params=None, orig=Exception("x"))
+        err.orig = None  # type: ignore[assignment]
+        assert integrity_error_constraint_name(err) is None
+
+
 class TestResourceEventIdempotency:
-    """Test idempotency handling."""
+    """Issue #318: ingest_event IntegrityError dispatch by constraint_name."""
 
     @pytest.fixture
     def mock_event_request(self):
-        """Create mock ResourceEventRequest."""
         return ResourceEventRequest(
             op="upsert",
             doc_id="PROD-12345",
@@ -112,18 +179,119 @@ class TestResourceEventIdempotency:
             idempotency_key="test-key-123",
         )
 
-    @pytest.mark.asyncio
-    async def test_duplicate_version_returns_conflict(self, mock_event_request):
-        """Test that duplicate version returns ConflictError."""
-        # This would be an integration test - testing full endpoint
-        # Mocking IntegrityError with unique_resource_doc_version constraint
-        pass  # TODO: Implement after integration test setup
+    @pytest.fixture
+    def mock_auth(self):
+        token = MagicMock(spec=ResourceToken)
+        token.id = 7
+        token.created_by = "user-1"
+        token.resource_pk = uuid4()
+        ctx = MagicMock(spec=Context)
+        ctx.id = uuid4()
+        ctx.workspace_id = uuid4()
+        return (token, 1000, ctx)
+
+    def _build_db(self, integrity_error: IntegrityError, existing_event: object | None = None):
+        """Mock AsyncSession that raises ``integrity_error`` on commit and
+        optionally returns ``existing_event`` on the lookup query that the
+        idempotency-key path issues.
+        """
+        db = MagicMock()
+        db.add = MagicMock()
+        db.commit = AsyncMock(side_effect=integrity_error)
+        db.rollback = AsyncMock()
+        db.refresh = AsyncMock()
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=existing_event)
+        db.execute = AsyncMock(return_value=result)
+        return db
 
     @pytest.mark.asyncio
-    async def test_duplicate_idempotency_key_returns_existing(self, mock_event_request):
-        """Test that duplicate idempotency_key returns existing event (idempotent)."""
-        # This would be an integration test
-        pass  # TODO: Implement after integration test setup
+    async def test_upsert_unique_violation_raises_conflict(self, mock_event_request, mock_auth):
+        db = self._build_db(_make_integrity_error(RESOURCE_EVENTS_UPSERT_UNIQUE))
+
+        with patch("api.routes.resource_ingest.check_event_quota", new=AsyncMock()):
+            with pytest.raises(ConflictError):
+                await ingest_event(
+                    resource_id="ec_products",
+                    request=mock_event_request,
+                    auth=mock_auth,
+                    db=db,
+                )
+
+        db.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_idempotency_key_collision_returns_existing(self, mock_event_request, mock_auth):
+        existing = MagicMock(spec=ResourceEvent)
+        existing.id = 999
+        db = self._build_db(
+            _make_integrity_error(RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE),
+            existing_event=existing,
+        )
+
+        with patch("api.routes.resource_ingest.check_event_quota", new=AsyncMock()):
+            response = await ingest_event(
+                resource_id="ec_products",
+                request=mock_event_request,
+                auth=mock_auth,
+                db=db,
+            )
+
+        assert response.event_id == 999
+        assert response.queued is False
+        db.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_insert_populates_resource_pk_from_token(self, mock_event_request, mock_auth):
+        """The inserted ResourceEvent must carry resource_pk from the token
+        so the partial UNIQUE (WHERE resource_pk IS NOT NULL) actually
+        applies. Without this, the dispatch code above is dead at runtime.
+        """
+        token_record, _, _ = mock_auth
+        db = MagicMock()
+        db.add = MagicMock()
+        db.commit = AsyncMock()
+        db.refresh = AsyncMock()
+        # The refresh shim populates event.id after flush
+        db.refresh.side_effect = lambda evt: setattr(evt, "id", 42)
+
+        with patch("api.routes.resource_ingest.check_event_quota", new=AsyncMock()):
+            with patch(
+                "api.routes.resource_ingest._schedule_indexer_for_resource",
+                new=AsyncMock(),
+            ):
+                with patch("utils.usage_logger.log_usage", new=AsyncMock()):
+                    await ingest_event(
+                        resource_id="ec_products",
+                        request=mock_event_request,
+                        auth=mock_auth,
+                        db=db,
+                    )
+
+        db.add.assert_called_once()
+        added_event = db.add.call_args[0][0]
+        assert added_event.resource_pk == token_record.resource_pk
+
+    @pytest.mark.asyncio
+    async def test_unknown_constraint_raises_500(self, mock_event_request, mock_auth):
+        """Unknown constraint must surface as HTTPException(500), not as a
+        raw IntegrityError — the app-wide SQLAlchemyError handler would
+        otherwise convert it to 503 "database_unavailable", which is wrong
+        (the DB is reachable; the write was rejected).
+        """
+        db = self._build_db(_make_integrity_error("some_other_constraint"))
+
+        with patch("api.routes.resource_ingest.check_event_quota", new=AsyncMock()):
+            with pytest.raises(HTTPException) as exc_info:
+                await ingest_event(
+                    resource_id="ec_products",
+                    request=mock_event_request,
+                    auth=mock_auth,
+                    db=db,
+                )
+
+        assert exc_info.value.status_code == 500
+        db.rollback.assert_awaited_once()
 
 
 def _mock_db_scalars(values):

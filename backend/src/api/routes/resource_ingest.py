@@ -14,6 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.resource_tokens import ResourceTokenManager
 from db.base import get_db
+from db.constraint_names import (
+    RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE,
+    RESOURCE_EVENTS_UPSERT_UNIQUE,
+    integrity_error_constraint_name,
+)
 from models.auth import Context
 from models.resource import ResourceEvent, ResourceToken
 from models.schemas import (
@@ -281,9 +286,19 @@ async def ingest_event(
             )
 
     # 3. Create event record
+    #
+    # ``resource_pk`` is sourced from the auth token (backfilled by migration
+    # a97 for existing tokens) so the partial UNIQUE
+    # ``WHERE op='upsert' AND resource_pk IS NOT NULL`` actually applies.
+    # If the token was issued before a97 and never backfilled, we pass
+    # ``None`` — ingest still works via the legacy ``resource_id`` column,
+    # the partial UNIQUE just skips those rows (same as pre-fix behavior).
+    # Migration #325 tightens ``resource_tokens.resource_pk`` to NOT NULL,
+    # at which point this branch goes away.
     try:
         event = ResourceEvent(
             resource_id=resource_id,
+            resource_pk=token_record.resource_pk,
             op=request.op,
             doc_id=request.doc_id,
             version=request.version,
@@ -331,17 +346,14 @@ async def ingest_event(
 
     except IntegrityError as e:
         await db.rollback()
-        error_msg = str(e)
+        constraint = integrity_error_constraint_name(e)
 
-        # Handle duplicate version error
-        if "unique_resource_doc_version" in error_msg:
+        if constraint == RESOURCE_EVENTS_UPSERT_UNIQUE:
             raise ConflictError(
                 f"Version {request.version} already exists for document {request.doc_id}"
             ) from e
 
-        # Handle duplicate idempotency key
-        if "unique_idempotency_key" in error_msg:
-            # Find existing event with this idempotency key
+        if constraint == RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE:
             result = await db.execute(
                 select(ResourceEvent).where(
                     ResourceEvent.idempotency_key == request.idempotency_key
@@ -355,16 +367,24 @@ async def ingest_event(
                     idempotency_key=request.idempotency_key,
                     existing_event_id=existing_event.id,
                 )
-                # Return existing event (202 Accepted - idempotent success)
                 return ResourceEventResponse(
                     status="success",
                     event_id=existing_event.id,
-                    queued=False,  # Already processed
+                    queued=False,
                     estimated_indexing_time_seconds=0,
                 )
 
-        # Unknown integrity error
-        logger.error("resource_event_integrity_error", error=error_msg)
+        # Unknown constraint. Raise HTTPException(500) rather than a bare
+        # re-raise of IntegrityError: the app-wide
+        # ``@app.exception_handler(SQLAlchemyError)`` in ``api/main.py``
+        # converts every SQLAlchemyError into a 503 "database_unavailable",
+        # which would be wrong here (the DB is fine; the write was rejected).
+        # The structured log above carries the constraint name for alerting.
+        logger.error(
+            "resource_event_integrity_error_unhandled",
+            constraint=constraint,
+            error=str(e),
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create event due to database constraint",
@@ -457,9 +477,10 @@ async def ingest_batch(
                     )
                     continue
 
-            # Create event
+            # Create event — see single-ingest path for the resource_pk rationale.
             event = ResourceEvent(
                 resource_id=resource_id,
+                resource_pk=token_record.resource_pk,
                 op=event_req.op,
                 doc_id=event_req.doc_id,
                 version=event_req.version,
@@ -471,15 +492,19 @@ async def ingest_batch(
                 else 0.6,  # Issue #262
             )
 
-            db.add(event)
-            await db.flush()
+            # SAVEPOINT per event so an IntegrityError on one row does not
+            # abort the outer transaction and break partial-success for the
+            # sibling events. Mirrors the MCP batch path in
+            # ``mcp_server/tools/resource.py``.
+            async with db.begin_nested():
+                db.add(event)
+                await db.flush()
             created_ids.append(event.id)
 
         except IntegrityError as e:
-            error_msg = str(e)
+            constraint = integrity_error_constraint_name(e)
 
-            # Duplicate version (skip silently)
-            if "unique_resource_doc_version" in error_msg:
+            if constraint == RESOURCE_EVENTS_UPSERT_UNIQUE:
                 logger.debug(
                     "duplicate_version_skipped",
                     doc_id=event_req.doc_id,
@@ -493,8 +518,7 @@ async def ingest_batch(
                     }
                 )
 
-            # Duplicate idempotency key (skip silently)
-            elif "unique_idempotency_key" in error_msg:
+            elif constraint == RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE:
                 logger.debug("duplicate_idempotency_key_skipped", key=event_req.idempotency_key)
                 errors.append(
                     {
@@ -505,8 +529,14 @@ async def ingest_batch(
                 )
 
             else:
-                # Unknown error
-                logger.error("batch_event_failed", index=idx, error=error_msg)
+                # Batch keeps partial-success: log + per-item error,
+                # do not re-raise (would abort sibling events).
+                logger.error(
+                    "batch_event_integrity_error_unhandled",
+                    index=idx,
+                    constraint=constraint,
+                    error=str(e),
+                )
                 errors.append(
                     {
                         "index": idx,
