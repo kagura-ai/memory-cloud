@@ -113,8 +113,10 @@ export interface IndexerStatusResponse {
 
 /**
  * Fetch indexer runtime state and recent ingest events for a resource.
- * The slug is encoded so paths like `sales/2024-q1` work; the backend
- * decodes it back from the path segment.
+ * The slug is URL-encoded for safety, but the backend's `Context.resource_id`
+ * column is constrained to a single path segment of `[a-z0-9_-]+` — `/`
+ * is not a valid character. The encode call is defensive; callers should
+ * pass a backend-validated slug.
  */
 export async function getIndexerStatus(
   resourceId: string,

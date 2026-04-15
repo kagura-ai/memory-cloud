@@ -2705,8 +2705,7 @@
       "notFoundTitle": "Resource not found",
       "notFound": "This resource does not exist in your workspace, or has been removed.",
       "fetchError": "Failed to load resource details.",
-      "backToList": "Back to resources",
-      "overviewPlaceholder": "Indexer status and schema actions will appear here. For now, switch tabs to view schemas, tokens, or upcoming events."
+      "backToList": "Back to resources"
     },
     "tabs": {
       "overview": "Overview",

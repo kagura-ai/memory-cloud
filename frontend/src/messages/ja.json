@@ -2705,8 +2705,7 @@
       "notFoundTitle": "リソースが見つかりません",
       "notFound": "このリソースはワークスペースに存在しないか、削除されています。",
       "fetchError": "リソース詳細の取得に失敗しました。",
-      "backToList": "リソース一覧へ戻る",
-      "overviewPlaceholder": "Indexer ステータスとスキーマ操作はここに表示されます。スキーマ・トークン・イベントは各タブから確認できます。"
+      "backToList": "リソース一覧へ戻る"
     },
     "tabs": {
       "overview": "概要",

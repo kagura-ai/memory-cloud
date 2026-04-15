@@ -263,13 +263,20 @@ export function CreateSchemaDialog({
                 {t("resourceId")} <span className="text-red-500">*</span>
               </Label>
               {lockedResourceId ? (
-                <div
+                // A read-only <input> (rather than a styled <div>) so the
+                // <Label htmlFor="resource-id"> association still works for
+                // assistive tech — a div is not a labelable form control,
+                // so screen readers would announce the label without the
+                // value. Keeps the same visual treatment via Tailwind.
+                <input
                   id="resource-id"
-                  className="rounded-md border bg-muted/30 px-3 py-2 font-mono text-sm"
+                  type="text"
+                  value={lockedResourceId}
+                  readOnly
                   aria-readonly="true"
-                >
-                  {lockedResourceId}
-                </div>
+                  tabIndex={-1}
+                  className="w-full rounded-md border bg-muted/30 px-3 py-2 font-mono text-sm focus:outline-none cursor-default"
+                />
               ) : (
                 <>
                   <Select
