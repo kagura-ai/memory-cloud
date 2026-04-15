@@ -11,9 +11,8 @@
 
 import { Key, Database, FileJson, Clock } from "lucide-react";
 import { useTranslations, useLocale } from "next-intl";
-import Link from "next/link";
 import { KpiCard } from "@/components/ui/kpi-card";
-import { formatRelativeTime } from "@/lib/utils/datetime";
+import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import { useAuth } from "@/contexts/AuthContext";
 import type { ResourceListItem } from "@/lib/api/resources";
 
@@ -27,11 +26,6 @@ export function ResourceStatsStrip({ resource }: ResourceStatsStripProps) {
   const { user } = useAuth();
   const timezone = user?.timezone || "UTC";
 
-  // Issue #325: Tokens tab now lives under the resource itself.
-  const tokensHref = `/workspace/resources/${encodeURIComponent(
-    resource.resource_id,
-  )}?tab=tokens`;
-
   // Route number formatting through the app's next-intl locale so grouping /
   // decimal rules match the UI (KpiCard's default toLocaleString() picks the
   // runtime default locale, which can diverge from the operator's selection).
@@ -42,6 +36,11 @@ export function ResourceStatsStrip({ resource }: ResourceStatsStripProps) {
   // signal, and tokens / schema_version are supporting context. Cards that
   // report a benign null state (no schema yet, no events yet) take the
   // ``muted`` tone so they recede instead of competing with the headline.
+  //
+  // The "Manage tokens" deep-link that used to overlay the Tokens KpiCard
+  // was removed in #326 polish — the Tokens tab is now reachable directly
+  // from the in-page tab bar, so the deep-link was redundant and
+  // inconsistent with how the other KpiCards behave.
   const hasSchema = resource.current_schema_version !== null;
 
   return (
@@ -57,23 +56,16 @@ export function ResourceStatsStrip({ resource }: ResourceStatsStripProps) {
         icon={Clock}
         label={t("stats.lastActivity")}
         value={formatRelativeTime(resource.updated_at, timezone, locale)}
+        valueTitle={formatDateTime(resource.updated_at, timezone, locale)}
         tone="secondary"
       />
 
-      <div className="relative">
-        <KpiCard
-          icon={Key}
-          label={t("stats.activeTokens")}
-          value={numberFormatter.format(resource.token_count)}
-          tone={resource.token_count > 0 ? "secondary" : "muted"}
-        />
-        <Link
-          href={tokensHref}
-          className="absolute right-3 top-3 text-xs text-muted-foreground hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring rounded"
-        >
-          {t("stats.manage")}
-        </Link>
-      </div>
+      <KpiCard
+        icon={Key}
+        label={t("stats.activeTokens")}
+        value={numberFormatter.format(resource.token_count)}
+        tone={resource.token_count > 0 ? "secondary" : "muted"}
+      />
 
       <KpiCard
         icon={FileJson}

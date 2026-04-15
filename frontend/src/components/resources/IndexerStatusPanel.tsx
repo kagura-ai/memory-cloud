@@ -37,7 +37,7 @@ import type {
   IndexerStatusResponse,
   ResourceEventItem,
 } from "@/lib/api/resources";
-import { formatRelativeTime } from "@/lib/utils/datetime";
+import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 
 type BadgeVariant = "default" | "secondary" | "destructive" | "outline";
 
@@ -151,6 +151,11 @@ export function IndexerStatusPanel({
               ? formatRelativeTime(state.last_run_at, timezone, locale)
               : "—"
           }
+          valueTitle={
+            state?.last_run_at
+              ? formatDateTime(state.last_run_at, timezone, locale)
+              : undefined
+          }
           subtext={
             state?.lag_seconds !== null &&
             state?.lag_seconds !== undefined &&
@@ -237,7 +242,13 @@ function RecentEventsTable({
               </TableCell>
               <TableCell className="font-mono text-xs">{ev.doc_id}</TableCell>
               <TableCell>{ev.version ?? "—"}</TableCell>
-              <TableCell>
+              <TableCell
+                title={
+                  ev.created_at
+                    ? formatDateTime(ev.created_at, timezone, locale)
+                    : undefined
+                }
+              >
                 {ev.created_at
                   ? formatRelativeTime(ev.created_at, timezone, locale)
                   : "—"}
