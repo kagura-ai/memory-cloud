@@ -11,7 +11,6 @@ import pytest
 from fastapi import HTTPException
 
 from api.routes.resource_ingest import (
-    _check_event_quota,
     _enforce_workspace_membership,
     _resolve_authoritative_context,
 )
@@ -19,7 +18,6 @@ from auth.resource_tokens import ResourceTokenManager
 from models.auth import Context
 from models.resource import ResourceToken
 from models.schemas import ResourceEventRequest
-from utils.exceptions import RateLimitError, RedisError
 
 
 class TestResourceTokenManager:
@@ -95,107 +93,9 @@ class TestResourceTokenManager:
         mock_db.flush.assert_not_awaited()
 
 
-class TestResourceEventQuotaCheck:
-    """Test event quota checking."""
-
-    @pytest.mark.asyncio
-    async def test_quota_within_limit(self):
-        """Test quota check when within limit — counter is reserved after pass."""
-        with (
-            patch("db.redis.get_cache", new_callable=AsyncMock) as mock_cache,
-            patch("db.redis.incrby_counter", new_callable=AsyncMock) as mock_incr,
-        ):
-            mock_cache.return_value = "50"
-            mock_incr.return_value = 51
-
-            await _check_event_quota("ec_products", token_id=1, quota_per_hour=1000)
-
-            mock_cache.assert_awaited_once()
-            mock_incr.assert_awaited_once_with("resource:events:ec_products:1:hour", 1, ttl=3600)
-
-    @pytest.mark.asyncio
-    async def test_quota_exceeded(self):
-        """Test quota check when exceeded — no increment on reject."""
-        with (
-            patch("db.redis.get_cache", new_callable=AsyncMock) as mock_cache,
-            patch("db.redis.incrby_counter", new_callable=AsyncMock) as mock_incr,
-        ):
-            mock_cache.return_value = "1001"
-
-            with pytest.raises(RateLimitError) as exc_info:
-                await _check_event_quota("ec_products", token_id=1, quota_per_hour=1000)
-
-            assert "Event quota exceeded" in str(exc_info.value.message)
-            assert exc_info.value.status_code == 429
-            mock_incr.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_quota_batch_check(self):
-        """Test quota check for batch (multiple events at once)."""
-        with (
-            patch("db.redis.get_cache", new_callable=AsyncMock) as mock_cache,
-            patch("db.redis.incrby_counter", new_callable=AsyncMock) as mock_incr,
-        ):
-            mock_cache.return_value = "990"  # 990 + 20 > 1000
-
-            with pytest.raises(RateLimitError):
-                await _check_event_quota("ec_products", token_id=1, quota_per_hour=1000, count=20)
-
-            mock_incr.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_quota_batch_reserves_amount(self):
-        """Batch ingest reserves `count` units, not 1 — prevents bypass via batching."""
-        with (
-            patch("db.redis.get_cache", new_callable=AsyncMock) as mock_cache,
-            patch("db.redis.incrby_counter", new_callable=AsyncMock) as mock_incr,
-        ):
-            mock_cache.return_value = "100"
-            mock_incr.return_value = 150
-
-            await _check_event_quota("ec_products", token_id=1, quota_per_hour=1000, count=50)
-
-            mock_incr.assert_awaited_once_with("resource:events:ec_products:1:hour", 50, ttl=3600)
-
-    @pytest.mark.asyncio
-    async def test_quota_fresh_key_proceeds(self):
-        """Fresh Redis key (GET returns None, which is also how get_cache signals a
-        swallowed read failure) → treated as count=0 and ingest proceeds."""
-        with (
-            patch("db.redis.get_cache", new_callable=AsyncMock) as mock_cache,
-            patch("db.redis.incrby_counter", new_callable=AsyncMock) as mock_incr,
-        ):
-            mock_cache.return_value = None
-            mock_incr.return_value = 1
-
-            await _check_event_quota("ec_products", token_id=1, quota_per_hour=1000)
-
-            mock_incr.assert_awaited_once_with("resource:events:ec_products:1:hour", 1, ttl=3600)
-
-    @pytest.mark.asyncio
-    async def test_quota_incr_failure_fails_open(self):
-        """If INCR fails after a passing check, fail-open rather than block ingest."""
-        with (
-            patch("db.redis.get_cache", new_callable=AsyncMock) as mock_cache,
-            patch("db.redis.incrby_counter", new_callable=AsyncMock) as mock_incr,
-        ):
-            mock_cache.return_value = "50"
-            mock_incr.side_effect = RedisError("redis write failed")
-
-            await _check_event_quota("ec_products", token_id=1, quota_per_hour=1000)
-
-    @pytest.mark.asyncio
-    async def test_quota_non_redis_error_surfaces(self):
-        """Non-Redis exceptions (programming bugs) must NOT be swallowed by fail-open."""
-        with (
-            patch("db.redis.get_cache", new_callable=AsyncMock) as mock_cache,
-            patch("db.redis.incrby_counter", new_callable=AsyncMock) as mock_incr,
-        ):
-            mock_cache.return_value = "50"
-            mock_incr.side_effect = ValueError("programming bug, not a Redis error")
-
-            with pytest.raises(ValueError):
-                await _check_event_quota("ec_products", token_id=1, quota_per_hour=1000)
+# Issue #332: ``_check_event_quota`` moved to
+# ``services/resource_quota_service.check_event_quota`` (workspace-scoped key
+# shared with the MCP ingest path). See ``tests/services/test_resource_quota_service.py``.
 
 
 class TestResourceEventIdempotency:

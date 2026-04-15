@@ -243,21 +243,30 @@ async def _get_workspace_member_role(
 ) -> str | None:
     """Get user's role in workspace.
 
+    Returns ``None`` when the workspace itself is soft-deleted
+    (``Workspace.deleted_at IS NOT NULL``) so MCP write tools do not
+    silently authorize ingest into a deleted workspace.
+
     Args:
         db: Database session
         user_id: User ID
         workspace_id: Workspace ID
 
     Returns:
-        Role string ('owner', 'admin', 'member', 'viewer') or None if not a member
+        Role string ('owner', 'admin', 'member', 'viewer') or ``None`` if
+        not a member or the workspace is soft-deleted.
     """
     from sqlalchemy import select
 
-    from models.auth import WorkspaceMember
+    from models.auth import Workspace, WorkspaceMember
 
     result = await db.execute(
-        select(WorkspaceMember).where(
-            WorkspaceMember.user_id == user_id, WorkspaceMember.workspace_id == workspace_id
+        select(WorkspaceMember)
+        .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
+        .where(
+            WorkspaceMember.user_id == user_id,
+            WorkspaceMember.workspace_id == workspace_id,
+            Workspace.deleted_at.is_(None),
         )
     )
     member = result.scalar_one_or_none()

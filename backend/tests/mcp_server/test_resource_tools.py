@@ -299,6 +299,22 @@ class TestIngestEventsValidation:
     need enough DB mock to pass viewer + boundary checks.
     """
 
+    @pytest.fixture(autouse=True)
+    def _stub_quota(self):
+        """Issue #332: ingest_events now consults a workspace-scoped quota helper.
+        These tests cover validation paths only, so stub the quota layer to a no-op."""
+        with (
+            patch(
+                "mcp_server.tools.resource.resolve_workspace_event_quota_per_hour",
+                new=AsyncMock(return_value=1000),
+            ),
+            patch(
+                "mcp_server.tools.resource.check_event_quota",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            yield
+
     def _make_db(self):
         mock_db = AsyncMock()
         # 1) viewer role check → member (write allowed)
@@ -622,9 +638,25 @@ class TestListResourceTokensHappyPath:
         assert data["tokens"][1]["is_active"] is False
 
 
+@pytest.fixture
+def _stub_quota_for_ingest():
+    """Issue #332: stub the workspace-scoped quota helper for ingest happy-paths."""
+    with (
+        patch(
+            "mcp_server.tools.resource.resolve_workspace_event_quota_per_hour",
+            new=AsyncMock(return_value=1000),
+        ),
+        patch(
+            "mcp_server.tools.resource.check_event_quota",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        yield
+
+
 class TestIngestEventsHappyPath:
     @pytest.mark.asyncio
-    async def test_creates_upsert_event(self):
+    async def test_creates_upsert_event(self, _stub_quota_for_ingest):
         """ingest_events persists valid upsert event and schedules indexer."""
         workspace_id = uuid4()
         mock_db = AsyncMock()

@@ -23,8 +23,9 @@ from models.schemas import (
     ResourceEventResponse,
 )
 from services.permission_service import PermissionService
+from services.resource_quota_service import check_event_quota
 from utils.datetime import utcnow
-from utils.exceptions import ConflictError, RateLimitError, RedisError, ValidationError
+from utils.exceptions import ConflictError, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -264,8 +265,9 @@ async def ingest_event(
         has_payload=request.payload is not None,
     )
 
-    # 1. Check quota (events per hour)
-    await _check_event_quota(resource_id, token_record.id, quota_per_hour)
+    # 1. Check quota (events per hour) — counter is workspace-scoped and shared
+    # with the MCP ingest path so combined traffic counts against one ceiling.
+    await check_event_quota(resource_id, context.workspace_id, quota_per_hour)
 
     # 2. Validate payload size
     if request.payload:
@@ -429,9 +431,9 @@ async def ingest_batch(
     if len(request.events) > 100:
         raise ValidationError("Batch size exceeds maximum (100 events)")
 
-    # 2. Check quota for entire batch
-    await _check_event_quota(
-        resource_id, token_record.id, quota_per_hour, count=len(request.events)
+    # 2. Check quota for entire batch (workspace-scoped counter shared with MCP)
+    await check_event_quota(
+        resource_id, context.workspace_id, quota_per_hour, count=len(request.events)
     )
 
     # 3. Process events
@@ -565,71 +567,6 @@ async def ingest_batch(
 # ============================================================================
 # Helper Functions
 # ============================================================================
-
-
-async def _check_event_quota(
-    resource_id: str,
-    token_id: int,
-    quota_per_hour: int,
-    count: int = 1,
-) -> None:
-    """Check event ingestion quota (per token per hour).
-
-    Uses Redis counter with 1-hour TTL. Reserves `count` units after a passing
-    check so concurrent callers observe the updated total.
-
-    Fail-open: if Redis is unavailable (RedisError), the function logs and returns
-    without raising. This matches SECURITY.md "Rate Limiting" policy — Redis
-    outages must not block ingest. Non-Redis exceptions (programming bugs) are
-    NOT swallowed and will propagate to the caller.
-
-    Args:
-        resource_id: Resource identifier
-        token_id: Token ID
-        quota_per_hour: Maximum events allowed per hour
-        count: Number of events to check (default: 1)
-
-    Raises:
-        RateLimitError: If quota exceeded (429).
-    """
-    from db.redis import get_cache, incrby_counter
-
-    redis_key = f"resource:events:{resource_id}:{token_id}:hour"
-
-    try:
-        current_count_str = await get_cache(redis_key)
-        current_count = int(current_count_str) if current_count_str else 0
-
-        if current_count + count > quota_per_hour:
-            logger.warning(
-                "resource_event_quota_exceeded",
-                resource_id=resource_id,
-                token_id=token_id,
-                current=current_count,
-                quota=quota_per_hour,
-            )
-            raise RateLimitError(
-                message=f"Event quota exceeded: {current_count}/{quota_per_hour} events per hour",
-                retry_after=3600,  # Retry after 1 hour
-            )
-
-        new_count = await incrby_counter(redis_key, count, ttl=3600)
-
-        logger.debug(
-            "resource_event_quota_checked",
-            resource_id=resource_id,
-            previous=current_count,
-            reserved=new_count,
-            quota=quota_per_hour,
-        )
-
-    except RateLimitError:
-        raise
-    except RedisError as e:
-        # Fail-open per SECURITY.md "Rate Limiting": Redis outage must not block ingest.
-        # Narrow to RedisError so programming bugs (ValueError from parse, etc.) surface.
-        logger.error("redis_quota_check_failed", error=str(e))
-        return
 
 
 async def _schedule_indexer_for_resource(db: AsyncSession, resource_id: str) -> None:
