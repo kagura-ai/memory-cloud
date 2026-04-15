@@ -47,6 +47,11 @@ _qdrant_client: AsyncQdrantClient | None = None
 # Single Collection Migration: Collection name constant
 KAGURA_MEMORIES_COLLECTION = "kagura_memories"
 
+# Named vector contract (Issue #16, #324): all kagura_memories collections use
+# `{"dense": VectorParams(...), "bm25": SparseVectorParams(...)}` — anonymous
+# vectors will fail with "Not existing vector name error".
+KAGURA_MEMORIES_VECTOR_NAME = "dense"
+
 
 def get_collection_name(model: str, dimensions: int) -> str:
     """Get Qdrant collection name for a given embedding model.
@@ -361,7 +366,7 @@ async def add_memory_to_qdrant(
 
     try:
         # Issue #16: Named vectors (dense + sparse BM25)
-        point_vector: dict[str, Any] = {"dense": vector}
+        point_vector: dict[str, Any] = {KAGURA_MEMORIES_VECTOR_NAME: vector}
         if sparse_indices and sparse_values:
             point_vector["bm25"] = SparseVector(indices=sparse_indices, values=sparse_values)
 
@@ -443,14 +448,14 @@ async def search_memories_qdrant(
     )
 
     try:
-        # Issue #16: Named vector "dense" for semantic search
+        # Issue #16: Named vector for semantic search
         results = await client.query_points(
             collection_name=collection_name,
             query=query_vector,
-            using="dense",
+            using=KAGURA_MEMORIES_VECTOR_NAME,
             limit=limit,
             query_filter=qdrant_filter,
-            with_vectors=["dense"] if include_vectors else False,
+            with_vectors=[KAGURA_MEMORIES_VECTOR_NAME] if include_vectors else False,
         )
 
         return [
@@ -459,7 +464,7 @@ async def search_memories_qdrant(
                 "score": point.score,
                 "payload": point.payload,
                 "embedding": (
-                    point.vector.get("dense", [])
+                    point.vector.get(KAGURA_MEMORIES_VECTOR_NAME, [])
                     if include_vectors and isinstance(point.vector, dict)
                     else []
                 ),
@@ -721,7 +726,7 @@ async def ensure_kagura_memories_collection(
         await client.create_collection(
             collection_name=collection_name,
             vectors_config={
-                "dense": VectorParams(
+                KAGURA_MEMORIES_VECTOR_NAME: VectorParams(
                     size=embedding_dim,
                     distance=Distance.COSINE,
                 ),
