@@ -21,7 +21,7 @@ from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5  # Issue #262: uuid5 for dete
 
 # Third-party imports (PEP8)
 from qdrant_client.models import PointStruct, SparseVector
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local application imports (PEP8)
@@ -144,21 +144,32 @@ async def get_indexer_status_for_context(
     # post-#323 row with ``resource_pk`` populated, fall back to a legacy
     # ``resource_pk IS NULL`` row scoped by slug + context_id when only the
     # legacy form exists. ``id DESC`` is the secondary tiebreaker.
+    # Build the slug/pk predicate. The dual-row fallback is genuinely a
+    # disjunction during Phase 1: when a Resource row is present, accept
+    # either the ``resource_pk``-populated row OR the legacy ``resource_pk
+    # IS NULL`` row that still carries the matching slug — both can exist
+    # for the same logical state until the writer migration drains the
+    # NULL bucket. Without the OR, a context that hasn't been re-written
+    # since #323 would surface ``state: null`` despite legacy state being
+    # present. When the Resource row is absent, fall back to slug-only
+    # (workspace boundary still comes from context_id).
+    if resource_pk is not None:
+        state_predicate = or_(
+            IndexerState.resource_pk == resource_pk,
+            (IndexerState.resource_pk.is_(None)) & (IndexerState.resource_id == resource_id),
+        )
+    else:
+        state_predicate = IndexerState.resource_id == resource_id
+
     state_row = (
         await db.execute(
             select(IndexerState)
             .where(
                 IndexerState.context_id == context.id,
-                # When a Resource row is present, accept either the
-                # ``resource_pk``-populated row OR the legacy NULL row that
-                # still carries the matching slug. When the Resource row is
-                # absent, fall back to slug-only scoped by context_id.
-                IndexerState.resource_pk == resource_pk
-                if resource_pk is not None
-                else IndexerState.resource_id == resource_id,
+                state_predicate,
             )
             .order_by(
-                # Prefer rows with resource_pk populated.
+                # Prefer rows with resource_pk populated when both exist.
                 IndexerState.resource_pk.is_(None).asc(),
                 IndexerState.id.desc(),
             )
