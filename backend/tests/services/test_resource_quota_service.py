@@ -139,6 +139,29 @@ class TestCheckEventQuota:
         mock_incr.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_negative_count_raises(self, redis_mocks):
+        """Defensive guard: a negative count would DECR the Redis counter and
+        silently relax the quota. All internal callers pass len(events) >= 1,
+        so negative count is never a valid input."""
+        mock_get, mock_incr = redis_mocks
+
+        with pytest.raises(ValueError, match="count must be >= 1"):
+            await check_event_quota("ec_products", WORKSPACE_ID, quota_per_hour=1000, count=-5)
+
+        mock_get.assert_not_awaited()
+        mock_incr.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_zero_count_raises(self, redis_mocks):
+        mock_get, mock_incr = redis_mocks
+
+        with pytest.raises(ValueError, match="count must be >= 1"):
+            await check_event_quota("ec_products", WORKSPACE_ID, quota_per_hour=1000, count=0)
+
+        mock_get.assert_not_awaited()
+        mock_incr.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_boundary_exact_limit_passes(self, redis_mocks):
         """current + count == quota_per_hour is allowed (strict > test)."""
         mock_get, mock_incr = redis_mocks

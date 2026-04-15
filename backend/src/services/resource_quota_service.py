@@ -66,6 +66,12 @@ async def check_event_quota(
     if quota_per_hour <= 0:
         return
 
+    if count <= 0:
+        # Defensive: a non-positive count would decrement the Redis counter via
+        # INCRBY and could silently bypass the per-hour ceiling. This is never
+        # valid input from callers (HTTP + MCP both pass len(events) >= 1).
+        raise ValueError(f"count must be >= 1, got {count}")
+
     key = _build_key(resource_id, workspace_id)
 
     try:

@@ -44,6 +44,12 @@ def _build_db_mock(*, role: str | None, boundary_ok: bool):
 
     mock_db = AsyncMock()
     mock_db.execute = AsyncMock(side_effect=[role_result, boundary_result])
+    # `db.add(event)` is a *sync* method on SQLAlchemy sessions — keep it as
+    # a plain MagicMock so AsyncMock doesn't hand back an un-awaited coroutine
+    # when the handler proceeds past the quota check into the ingest loop.
+    mock_db.add = MagicMock(side_effect=_assign_event_id)
+    mock_db.flush = AsyncMock()
+    mock_db.commit = AsyncMock()
 
     @asynccontextmanager
     async def _begin_nested():
@@ -51,6 +57,15 @@ def _build_db_mock(*, role: str | None, boundary_ok: bool):
 
     mock_db.begin_nested = _begin_nested
     return mock_db
+
+
+_EVENT_ID_COUNTER = {"next": 1}
+
+
+def _assign_event_id(event):
+    """Simulate SQLAlchemy assigning a primary key on flush by setting `.id`."""
+    event.id = _EVENT_ID_COUNTER["next"]
+    _EVENT_ID_COUNTER["next"] += 1
 
 
 @pytest.fixture
@@ -81,6 +96,10 @@ async def test_quota_check_invoked_after_permission_with_workspace_key(workspace
     with (
         _patch_get_db(mock_db),
         _patch_log_tool_usage(),
+        patch(
+            "api.routes.resource_ingest._schedule_indexer_for_resource",
+            new=AsyncMock(return_value=None),
+        ),
         patch(
             "mcp_server.tools.resource.resolve_workspace_event_quota_per_hour",
             new=AsyncMock(return_value=1000),
