@@ -2772,7 +2772,8 @@
       "versionLabel": "現在のスキーマバージョン: v{version}",
       "emptyTitle": "スキーマ未登録",
       "emptyDescription": "このリソースにはまだスキーマが登録されていません。REST API または MCP ツールからフィールド定義を登録してください。",
-      "createAction": "スキーマを作成"
+      "createAction": "スキーマを作成",
+      "createNewVersionAction": "新しいバージョンを作成"
     },
     "data": {
       "comingSoonTitle": "データブラウザは近日公開",

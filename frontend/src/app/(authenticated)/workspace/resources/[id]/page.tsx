@@ -304,9 +304,25 @@ export default function ResourceDetailPage() {
 
         <TabsContent value="schemas" className="mt-6">
           {schema ? (
+            // Schema rows are immutable per version (the version + JSONB
+            // payload is what indexer_state.active_version + resource_events
+            // pin against). "Edit" is therefore "create the next version" —
+            // the action wraps the same CreateSchemaDialog used for the
+            // first registration, so the operator has one consistent flow.
             <div className="space-y-4">
-              <div className="text-sm text-muted-foreground">
-                {t("schema.versionLabel", { version: schema.schema_version })}
+              <div className="flex items-center justify-between gap-4">
+                <div className="text-sm text-muted-foreground">
+                  {t("schema.versionLabel", {
+                    version: schema.schema_version,
+                  })}
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setCreateSchemaOpen(true)}
+                >
+                  {t("schema.createNewVersionAction")}
+                </Button>
               </div>
               <SchemaFieldTable fields={schema.field_definitions} />
             </div>
@@ -339,13 +355,13 @@ export default function ResourceDetailPage() {
       <CreateSchemaDialog
         isOpen={createSchemaOpen}
         onClose={() => setCreateSchemaOpen(false)}
+        // The dialog is pinned to this page's resource so the picker is
+        // hidden and the operator cannot accidentally write the new version
+        // against a different slug — the page would not reflect it and the
+        // wrong indexer would pick it up.
+        lockedResourceId={resourceId}
         onSuccess={(created) => {
-          // Only adopt the new schema for display when it belongs to the
-          // current resource — the dialog lets the user pick a resource, so
-          // a mismatched pick should close without mutating this page's view.
-          if (created.resource_id === resourceId) {
-            setSchema(created);
-          }
+          setSchema(created);
           setCreateSchemaOpen(false);
         }}
       />

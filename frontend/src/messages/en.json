@@ -2772,7 +2772,8 @@
       "versionLabel": "Current schema version: v{version}",
       "emptyTitle": "No schema registered",
       "emptyDescription": "This resource does not have a schema yet. Use the REST API or MCP tools to register field definitions.",
-      "createAction": "Create schema"
+      "createAction": "Create schema",
+      "createNewVersionAction": "Create new version"
     },
     "data": {
       "comingSoonTitle": "Data browser coming soon",
