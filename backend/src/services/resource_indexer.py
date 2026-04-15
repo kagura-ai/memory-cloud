@@ -14,15 +14,21 @@ from __future__ import annotations
 # Standard library imports (PEP8)
 import json  # Issue #262: JSON serialization for Memory content
 from dataclasses import dataclass
+from typing import Any
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5  # Issue #262: uuid5 for deterministic point_id
 
 # Third-party imports (PEP8)
-from qdrant_client.models import PointStruct
+from qdrant_client.models import PointStruct, SparseVector
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local application imports (PEP8)
-from db.qdrant import KAGURA_MEMORIES_VECTOR_NAME, get_collection_name, get_qdrant_client
+from db.qdrant import (
+    KAGURA_MEMORIES_BM25_VECTOR_NAME,
+    KAGURA_MEMORIES_VECTOR_NAME,
+    get_collection_name,
+    get_qdrant_client,
+)
 from models.auth import Context
 from models.memory import Memory  # Issue #262: Memory model for resource data storage
 from models.resource import IndexerState, ResourceEvent, ResourceSchema
@@ -30,6 +36,7 @@ from services.embedding_service import EmbeddingService
 from utils.datetime import utcnow
 from utils.exceptions import QdrantError
 from utils.logger import get_logger
+from utils.sparse_vector import build_resource_sparse_vector
 
 logger = get_logger(__name__)
 
@@ -315,11 +322,22 @@ class ResourceIndexer:
         # Generate Memory ID for new memories (may be overwritten if memory exists)
         memory_id = uuid4()
 
+        # Issue #335: Build sparse BM25 vector from the same fulltext_content
+        # used for the dense embedding, so resource points participate in
+        # hybrid search instead of scoring zero on BM25.
+        sparse_indices, sparse_values = build_resource_sparse_vector(content)
+
         # kagura_memories collections are configured with named vectors
         # (dense + sparse bm25); anonymous vectors are rejected at upsert.
+        point_vector: dict[str, Any] = {KAGURA_MEMORIES_VECTOR_NAME: embedding}
+        if sparse_indices and sparse_values:
+            point_vector[KAGURA_MEMORIES_BM25_VECTOR_NAME] = SparseVector(
+                indices=sparse_indices, values=sparse_values
+            )
+
         point = PointStruct(
             id=str(point_id_uuid),
-            vector={KAGURA_MEMORIES_VECTOR_NAME: embedding},
+            vector=point_vector,
             payload={
                 "workspace_id": str(context.workspace_id),  # 3-level isolation
                 "context_id": str(context.id),  # 3-level isolation

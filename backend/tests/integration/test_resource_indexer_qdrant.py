@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from qdrant_client import QdrantClient
@@ -26,12 +27,16 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     Distance,
     Modifier,
+    NamedSparseVector,
+    NamedVector,
     PointStruct,
+    SparseVector,
     SparseVectorParams,
     VectorParams,
 )
 
-from db.qdrant import KAGURA_MEMORIES_VECTOR_NAME
+from db.qdrant import KAGURA_MEMORIES_BM25_VECTOR_NAME, KAGURA_MEMORIES_VECTOR_NAME
+from utils.sparse_vector import build_resource_sparse_vector
 
 _EMBEDDING_DIM = 512
 
@@ -74,7 +79,7 @@ def named_vector_collection(qdrant_client: QdrantClient) -> Iterator[str]:
             ),
         },
         sparse_vectors_config={
-            "bm25": SparseVectorParams(modifier=Modifier.IDF),
+            KAGURA_MEMORIES_BM25_VECTOR_NAME: SparseVectorParams(modifier=Modifier.IDF),
         },
     )
     try:
@@ -147,3 +152,134 @@ class TestNamedVectorUpsertContract:
         qdrant_client.upsert(collection_name=named_vector_collection, points=[point], wait=True)
         count = qdrant_client.count(collection_name=named_vector_collection, exact=True)
         assert count.count == 1
+
+
+class TestResourceIndexerSparseBM25:
+    """Issue #335: resource_indexer must send `bm25` alongside `dense`.
+
+    These are contract tests against a real Qdrant — they verify the on-wire
+    shape and hybrid-search behavior, not the indexer's internal assembly
+    (covered by tests/services/test_resource_indexer.py).
+    """
+
+    def _upsert_resource_point(
+        self,
+        qdrant_client: QdrantClient,
+        collection: str,
+        point_id: str,
+        content: str,
+        with_bm25: bool = True,
+    ) -> None:
+        """Mirror what resource_indexer._apply_upsert produces on the wire."""
+        vector: dict[str, Any] = {KAGURA_MEMORIES_VECTOR_NAME: [0.1] * _EMBEDDING_DIM}
+        if with_bm25:
+            indices, values = build_resource_sparse_vector(content)
+            if indices and values:
+                vector[KAGURA_MEMORIES_BM25_VECTOR_NAME] = SparseVector(
+                    indices=indices, values=values
+                )
+        qdrant_client.upsert(
+            collection_name=collection,
+            points=[PointStruct(id=point_id, vector=vector, payload={"content": content})],
+            wait=True,
+        )
+
+    def test_upsert_carries_both_dense_and_bm25(
+        self, qdrant_client: QdrantClient, named_vector_collection: str
+    ) -> None:
+        """AC1: a resource-shaped point persists both `dense` and `bm25` vectors."""
+        point_id = str(uuid.uuid4())
+        self._upsert_resource_point(
+            qdrant_client, named_vector_collection, point_id, "PostgreSQL の migration 戦略"
+        )
+
+        retrieved = qdrant_client.retrieve(
+            collection_name=named_vector_collection,
+            ids=[point_id],
+            with_vectors=True,
+        )
+        assert len(retrieved) == 1
+        vectors = retrieved[0].vector
+        assert isinstance(vectors, dict)
+        assert KAGURA_MEMORIES_VECTOR_NAME in vectors
+        assert KAGURA_MEMORIES_BM25_VECTOR_NAME in vectors, (
+            "AC1: resource points must carry the bm25 sparse vector"
+        )
+
+    def test_bm25_only_query_hits_resource_point(
+        self, qdrant_client: QdrantClient, named_vector_collection: str
+    ) -> None:
+        """AC2: a sparse-only query against the bm25 vector finds resource points.
+
+        Pre-#335, resource points carried no bm25 vector → BM25 score was
+        always zero → `using="bm25"` queries returned nothing from resource
+        data. We assert presence in the hit list, not score value (DB PhD:
+        Modifier.IDF scoring drifts with collection size, so absolute scores
+        are flaky).
+        """
+        point_id = str(uuid.uuid4())
+        content = "Sudachi tokenizer による日本語の BM25 検索"
+        self._upsert_resource_point(qdrant_client, named_vector_collection, point_id, content)
+
+        # Query with the same content as the doc → guaranteed token overlap.
+        # Use the doc-side encoder for the query to keep the test
+        # self-contained; production uses build_query_sparse_vector but the
+        # token space is the same.
+        q_indices, q_values = build_resource_sparse_vector(content)
+        hits = qdrant_client.search(
+            collection_name=named_vector_collection,
+            query_vector=NamedSparseVector(
+                name=KAGURA_MEMORIES_BM25_VECTOR_NAME,
+                vector=SparseVector(indices=q_indices, values=q_values),
+            ),
+            limit=10,
+        )
+        assert any(h.id == point_id for h in hits), (
+            "AC2: bm25-only search must surface resource points"
+        )
+
+    def test_dense_only_backward_compat(
+        self, qdrant_client: QdrantClient, named_vector_collection: str
+    ) -> None:
+        """AC3: legacy points (dense-only, no bm25) still work for dense search.
+
+        Pre-#335 data — already on disk — must continue to be discoverable
+        via dense search even though they will never match a bm25-only query.
+        This guards the migration window where new and old shapes coexist.
+        """
+        point_id = str(uuid.uuid4())
+        self._upsert_resource_point(
+            qdrant_client,
+            named_vector_collection,
+            point_id,
+            "legacy point without bm25",
+            with_bm25=False,
+        )
+
+        dense_hits = qdrant_client.search(
+            collection_name=named_vector_collection,
+            query_vector=NamedVector(
+                name=KAGURA_MEMORIES_VECTOR_NAME,
+                vector=[0.1] * _EMBEDDING_DIM,
+            ),
+            limit=10,
+        )
+        assert any(h.id == point_id for h in dense_hits), (
+            "AC3: legacy dense-only points must remain searchable via dense vector"
+        )
+
+        # And bm25-only search must NOT return the legacy point — points
+        # without a sparse vector contribute zero to sparse retrieval, which
+        # is the contract that makes the migration window safe.
+        q_indices, q_values = build_resource_sparse_vector("legacy point without bm25")
+        sparse_hits = qdrant_client.search(
+            collection_name=named_vector_collection,
+            query_vector=NamedSparseVector(
+                name=KAGURA_MEMORIES_BM25_VECTOR_NAME,
+                vector=SparseVector(indices=q_indices, values=q_values),
+            ),
+            limit=10,
+        )
+        assert all(h.id != point_id for h in sparse_hits), (
+            "Sparse-vectorless points must not appear in bm25-only search results"
+        )

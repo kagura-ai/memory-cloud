@@ -51,6 +51,7 @@ KAGURA_MEMORIES_COLLECTION = "kagura_memories"
 # `{"dense": VectorParams(...), "bm25": SparseVectorParams(...)}` — anonymous
 # vectors will fail with "Not existing vector name error".
 KAGURA_MEMORIES_VECTOR_NAME = "dense"
+KAGURA_MEMORIES_BM25_VECTOR_NAME = "bm25"
 
 
 def get_collection_name(model: str, dimensions: int) -> str:
@@ -368,7 +369,9 @@ async def add_memory_to_qdrant(
         # Issue #16: Named vectors (dense + sparse BM25)
         point_vector: dict[str, Any] = {KAGURA_MEMORIES_VECTOR_NAME: vector}
         if sparse_indices and sparse_values:
-            point_vector["bm25"] = SparseVector(indices=sparse_indices, values=sparse_values)
+            point_vector[KAGURA_MEMORIES_BM25_VECTOR_NAME] = SparseVector(
+                indices=sparse_indices, values=sparse_values
+            )
 
         await client.upsert(
             collection_name=collection_name,
@@ -625,7 +628,7 @@ async def search_memories_fulltext(
         results = await client.query_points(
             collection_name=collection_name,
             query=SparseVector(indices=query_indices, values=query_values),
-            using="bm25",
+            using=KAGURA_MEMORIES_BM25_VECTOR_NAME,
             limit=limit,
             query_filter=qdrant_filter,
         )
@@ -692,7 +695,7 @@ async def ensure_kagura_memories_collection(
             info = await client.get_collection(collection_name)
             params = getattr(info.config, "params", None) if info.config else None
             sparse_cfg = getattr(params, "sparse_vectors", None) if params else None
-            has_sparse = sparse_cfg is not None and "bm25" in sparse_cfg
+            has_sparse = sparse_cfg is not None and KAGURA_MEMORIES_BM25_VECTOR_NAME in sparse_cfg
 
             if has_sparse:
                 # Collection is up-to-date, ensure keyword indexes
@@ -732,7 +735,7 @@ async def ensure_kagura_memories_collection(
                 ),
             },
             sparse_vectors_config={
-                "bm25": SparseVectorParams(
+                KAGURA_MEMORIES_BM25_VECTOR_NAME: SparseVectorParams(
                     modifier=Modifier.IDF,
                 ),
             },

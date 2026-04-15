@@ -3,14 +3,18 @@
 Issue #16: Converts Sudachi-tokenized text into sparse vectors
 using MurmurHash3 for deterministic token-to-index mapping.
 
-Used with Qdrant's SparseVectorParams(modifier=Modifier.IDF)
-which applies IDF weighting and document length normalization
-at query time (true BM25).
+Used with Qdrant's SparseVectorParams(modifier=Modifier.IDF),
+which applies IDF weighting at query time (dot-product with IDF).
+Length normalization and the k1/b saturation of textbook Okapi BM25
+are NOT performed by Modifier.IDF — pre-weight tf values in the
+document-side builders to shape ranking.
 """
 
 from collections import Counter
 
 import mmh3
+
+from utils.tokenizer import tokenize_for_search
 
 
 def tokens_to_sparse_vector(
@@ -73,6 +77,36 @@ def build_document_sparse_vector(
     indices = list(merged.keys())
     values = list(merged.values())
     return indices, values
+
+
+def build_resource_sparse_vector(fulltext_content: str) -> tuple[list[int], list[float]]:
+    """Build sparse BM25 vector for a resource_indexer document (Issue #335).
+
+    Resource payloads are flat — the indexer joins projected fields into a
+    single `fulltext_content` string and has no summary/body/reading
+    structure to weight separately (unlike Memory, see
+    build_document_sparse_vector). We tokenize with Sudachi and emit the
+    raw term frequencies at weight=1.0, intentionally matching the
+    memory-side `content` field weight so corpus-wide IDF stays consistent
+    across both write paths. The helper lives in utils/sparse_vector (not
+    the indexer) to keep memory_service and resource_indexer sharing a
+    single source of truth for doc-side sparse encoding.
+
+    Args:
+        fulltext_content: Projected fulltext string from ResourceIndexer
+
+    Returns:
+        (indices, values) tuple for SparseVector constructor.
+        Returns ([], []) for empty or tokenization-free input — callers
+        should skip attaching a bm25 vector in that case.
+    """
+    tokens = tokenize_for_search(fulltext_content)
+    if not tokens:
+        return [], []
+    merged = tokens_to_sparse_vector(tokens, weight=1.0)
+    if not merged:
+        return [], []
+    return list(merged.keys()), list(merged.values())
 
 
 def build_query_sparse_vector(query_tokens: str) -> tuple[list[int], list[float]]:

@@ -8,6 +8,7 @@ import mmh3
 from utils.sparse_vector import (
     build_document_sparse_vector,
     build_query_sparse_vector,
+    build_resource_sparse_vector,
     tokens_to_sparse_vector,
 )
 
@@ -90,6 +91,41 @@ class TestBuildDocumentSparseVector:
         indices, values = build_document_sparse_vector("", "", "")
         assert indices == []
         assert values == []
+
+
+class TestBuildResourceSparseVector:
+    """Test build_resource_sparse_vector (Issue #335)."""
+
+    def test_basic(self):
+        """Non-empty content yields equal-length indices/values."""
+        indices, values = build_resource_sparse_vector("hello world")
+        assert len(indices) > 0
+        assert len(values) == len(indices)
+
+    def test_weight_1x(self):
+        """Resource tokens are weighted at 1.0 to match memory-side `content`."""
+        indices, values = build_resource_sparse_vector("test")
+        idx = mmh3.hash("test", signed=False)
+        pos = indices.index(idx)
+        assert values[pos] == 1.0
+
+    def test_empty(self):
+        """Empty string returns empty lists (caller skips bm25 attach)."""
+        indices, values = build_resource_sparse_vector("")
+        assert indices == []
+        assert values == []
+
+    def test_japanese_content(self):
+        """Japanese fulltext is tokenized via Sudachi before hashing."""
+        indices, values = build_resource_sparse_vector("認証エラーの解決方法")
+        assert len(indices) > 0
+        assert all(v > 0 for v in values)
+
+    def test_deterministic(self):
+        """Same input produces identical output (idempotency for re-index)."""
+        a = build_resource_sparse_vector("PostgreSQL migration 戦略")
+        b = build_resource_sparse_vector("PostgreSQL migration 戦略")
+        assert a == b
 
 
 class TestBuildQuerySparseVector:
