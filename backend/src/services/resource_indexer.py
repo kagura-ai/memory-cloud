@@ -127,15 +127,18 @@ class ResourceIndexer:
             # 4. Get context for workspace_id/context_id
             context = await self._get_context(context_id)
 
-            # Resolve Qdrant collection from context's embedding model (#334)
-            # Resolved once per batch — all events share the same context_id.
-            collection_name = await self._resolve_collection_for_context(context_id)
+            # Resolve Qdrant collection + per-context EmbeddingService from the
+            # same ContextSearchConfig (#334 Layer B + #338 Layer C). Single
+            # SELECT per batch — all events share the same context_id.
+            collection_name, embedding_service = await self._resolve_routing_for_context(context_id)
 
             # 5. Process each event
             for event in events:
                 try:
                     if event.op == "upsert":
-                        await self._apply_upsert(event, schema, context, collection_name)
+                        await self._apply_upsert(
+                            event, schema, context, collection_name, embedding_service
+                        )
                         metrics.applied_upserts += 1
                     elif event.op == "delete":
                         await self._apply_delete(event, context, collection_name)
@@ -258,6 +261,7 @@ class ResourceIndexer:
         schema: ResourceSchema,
         context: Context,
         collection_name: str,
+        embedding_service: EmbeddingService,
     ) -> None:
         """Apply upsert operation to Qdrant + PostgreSQL Memory.
 
@@ -266,12 +270,10 @@ class ResourceIndexer:
             schema: Resource schema
             context: Context object
             collection_name: Resolved Qdrant collection (per-context, see #334)
+            embedding_service: Per-context EmbeddingService configured for the
+                context's embedding_model/dimensions (see #338). Generated
+                embedding dim must match collection_name's dim.
         """
-        # TODO(#338, Layer C): self.embedding_service still uses the global
-        # default model (settings.embedding_model). When the context's
-        # embedding_model differs (e.g. qwen3-embedding:8b), the generated
-        # embedding's dim will not match collection_name's dim and Qdrant will
-        # reject the upsert.
         if not event.payload:
             logger.warning("upsert_event_has_no_payload", event_id=event.id)
             return
@@ -293,7 +295,7 @@ class ResourceIndexer:
         try:
             # Generate embedding using workspace-scoped or owner's API key
             # Bugfix: Context uses 'created_by' not 'owner_id'
-            embedding = await self.embedding_service.embed(
+            embedding = await embedding_service.embed(
                 text=content,
                 user_id=str(context.created_by),
                 context_id=str(context.id),
@@ -758,12 +760,29 @@ class ResourceIndexer:
             raise ValueError(f"Context {context_id} not found")
         return context
 
-    async def _resolve_collection_for_context(self, context_id: UUID) -> str:
-        """Resolve Qdrant collection name for a context (#334).
+    async def _resolve_routing_for_context(self, context_id: UUID) -> tuple[str, EmbeddingService]:
+        """Resolve (collection_name, embedding_service) for a context (#334 + #338).
 
-        Mirrors memory_service._get_context_collection_name() to keep routing
-        consistent across services. Falls back to the legacy `kagura_memories`
-        collection when no ContextSearchConfig row exists.
+        Mirrors memory_service._get_context_collection_name() +
+        _get_embedding_service_for_config() and fuses them so the underlying
+        ContextSearchConfig row is fetched exactly once per batch. Both values
+        MUST come from the same config — otherwise the generated embedding's
+        dim can diverge from the target collection's dim (two-layer bug
+        pattern seen in #324/#334/#338). Do NOT split this back into two
+        methods without preserving the single-source-of-truth invariant.
+
+        Fallback (no ContextSearchConfig row): returns the legacy
+        `kagura_memories` collection + the indexer's default EmbeddingService,
+        matching memory_service._get_context_collection_name() exactly. The
+        legacy collection name is hardcoded on this path (not derived from
+        self.embedding_service) to keep memory_service and resource_indexer
+        reading/writing the same collection for legacy contexts, even when an
+        operator overrides settings.embedding_model — cross-service consistency
+        on the fallback path matters more than intra-service consistency,
+        because a split-brain (memory_service on legacy, indexer on overridden)
+        would silently hide writes. Operators who override settings MUST
+        create a ContextSearchConfig row per context to opt into the
+        per-context routing path above.
         """
         from models.config import ContextSearchConfig
 
@@ -772,5 +791,34 @@ class ResourceIndexer:
         )
         config = result.scalar_one_or_none()
         if config:
-            return get_collection_name(config.embedding_model, config.embedding_dimensions)
-        return get_collection_name("text-embedding-3-small", 512)
+            collection_name = get_collection_name(
+                config.embedding_model, config.embedding_dimensions
+            )
+            embedding_service = EmbeddingService(
+                self.db,
+                model=config.embedding_model,
+                dimensions=config.embedding_dimensions,
+            )
+            return collection_name, embedding_service
+        # No ContextSearchConfig row: return the legacy kagura_memories
+        # collection exactly as memory_service does, so both services stay on
+        # the same collection for legacy contexts. See the docstring above for
+        # the cross-service consistency rationale.
+        legacy_collection = get_collection_name("text-embedding-3-small", 512)
+        if (
+            self.embedding_service.model != "text-embedding-3-small"
+            or self.embedding_service.dimensions != 512
+        ):
+            # Operator overrode settings.embedding_model but has no
+            # ContextSearchConfig row for this context. Upserts will fail on
+            # Qdrant dim mismatch — surface the misconfiguration early.
+            logger.warning(
+                "resource_indexer_fallback_dim_mismatch",
+                context_id=str(context_id),
+                legacy_collection=legacy_collection,
+                legacy_dim=512,
+                service_model=self.embedding_service.model,
+                service_dim=self.embedding_service.dimensions,
+                hint="create a ContextSearchConfig row for this context to use the per-context routing path",
+            )
+        return legacy_collection, self.embedding_service
