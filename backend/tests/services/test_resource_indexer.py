@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import pytest
 
-from db.qdrant import KAGURA_MEMORIES_VECTOR_NAME
+from db.qdrant import KAGURA_MEMORIES_BM25_VECTOR_NAME, KAGURA_MEMORIES_VECTOR_NAME
 from services.resource_indexer import ResourceIndexer
 
 
@@ -115,6 +115,30 @@ class TestResourceIndexerNamedVectorUpsert:
         )
         assert KAGURA_MEMORIES_VECTOR_NAME in point.vector
         assert point.vector[KAGURA_MEMORIES_VECTOR_NAME] == [0.1] * 512
+
+    @pytest.mark.asyncio
+    async def test_apply_upsert_attaches_bm25_sparse_vector(self, indexer):
+        """Issue #335: PointStruct.vector must include `bm25` SparseVector
+        derived from the same fulltext_content as the dense embedding, so
+        resource points participate in hybrid search."""
+        from qdrant_client.models import SparseVector
+
+        event = _make_event()
+        schema = _make_schema()
+        context = _make_context()
+
+        await indexer._apply_upsert(
+            event, schema, context, "kagura_memories", indexer.embedding_service
+        )
+
+        point = indexer.qdrant_client.upsert.await_args.kwargs["points"][0]
+        assert KAGURA_MEMORIES_BM25_VECTOR_NAME in point.vector, (
+            "PointStruct.vector must carry both 'dense' and 'bm25' (#335)"
+        )
+        bm25 = point.vector[KAGURA_MEMORIES_BM25_VECTOR_NAME]
+        assert isinstance(bm25, SparseVector)
+        assert len(bm25.indices) == len(bm25.values) > 0
+        assert all(v > 0 for v in bm25.values)
 
     @pytest.mark.asyncio
     async def test_apply_upsert_uses_passed_embedding_service_not_self(self, indexer):
