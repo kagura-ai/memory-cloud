@@ -14,7 +14,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useTranslations, useLocale } from "next-intl";
 import { useAuth } from "@/contexts/AuthContext";
-import { Database } from "lucide-react";
+import { ChevronRight, Database } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { TableLoadingState } from "@/components/common/LoadingState";
@@ -135,23 +135,49 @@ export default function ResourcesListPage() {
                 </TableHead>
                 <TableHead>{t("list.column.schema")}</TableHead>
                 <TableHead>{t("list.column.lastActivity")}</TableHead>
+                {/* Trailing chevron column — pure navigation affordance,
+                    aria-label only since the icon is decorative for sighted
+                    users. The Link in the first cell carries the real
+                    accessible label for keyboard / screen-reader users. */}
+                <TableHead className="w-8" aria-label={t("list.column.open")} />
               </TableRow>
             </TableHeader>
             <TableBody>
               {resources.map((r) => {
-                // Navigation is a <Link> inside the first cell rather than a
-                // click handler on the row itself — preserves <tr> table
-                // semantics for assistive tech, and enables browser affordances
-                // like middle-click / open-in-new-tab / copy-link-address.
+                // Navigation strategy:
+                //   - The <Link> in the first cell is the canonical, a11y-
+                //     primary affordance — it carries the keyboard tab stop,
+                //     screen-reader semantics, middle-click open-in-new-tab,
+                //     copy-link-address, etc.
+                //   - The whole-row onClick + cursor-pointer is the *added*
+                //     UX: stronger discoverability so the operator does not
+                //     have to know to click the slug. We bail out when the
+                //     click target is itself an <a>/<button> (the slug Link)
+                //     so the browser's native handler (modifiers, middle-
+                //     click) is not double-fired and so interactive children
+                //     keep their own behavior.
+                //   - The trailing chevron is a visual hint only — the click
+                //     target is the row.
                 const href = `/workspace/resources/${encodeURIComponent(
                   r.resource_id,
                 )}`;
+                const handleRowClick = (
+                  ev: React.MouseEvent<HTMLTableRowElement>,
+                ) => {
+                  const target = ev.target as HTMLElement;
+                  if (target.closest("a, button")) return;
+                  router.push(href);
+                };
                 return (
-                  <TableRow key={r.resource_id} className="hover:bg-muted/50">
+                  <TableRow
+                    key={r.resource_id}
+                    className="cursor-pointer hover:bg-muted/50"
+                    onClick={handleRowClick}
+                  >
                     <TableCell className="font-mono text-sm">
                       <Link
                         href={href}
-                        className="hover:underline focus:outline-none focus:ring-2 focus:ring-ring rounded"
+                        className="text-primary underline-offset-4 hover:underline focus:outline-none focus:ring-2 focus:ring-ring rounded"
                       >
                         {r.resource_id}
                       </Link>
@@ -176,6 +202,9 @@ export default function ResourcesListPage() {
                     </TableCell>
                     <TableCell className="text-muted-foreground text-sm">
                       {formatRelativeTime(r.updated_at, timezone, locale)}
+                    </TableCell>
+                    <TableCell className="w-8 text-muted-foreground">
+                      <ChevronRight className="h-4 w-4" aria-hidden="true" />
                     </TableCell>
                   </TableRow>
                 );

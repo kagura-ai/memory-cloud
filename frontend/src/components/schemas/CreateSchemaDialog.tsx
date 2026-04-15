@@ -131,6 +131,16 @@ export function CreateSchemaDialog({
     try {
       const schema = await getSchema(resId);
       setExistingSchema(schema);
+      // When the dialog is opened from a per-resource page (lockedResourceId
+      // set), pre-populate the field list with the existing schema's fields
+      // so the operator edits/extends the current set rather than starting
+      // from one empty row. Without this, "create new version" silently
+      // wipes everything except the new fields the operator typed in —
+      // because each schema_version is an immutable replacement of the
+      // full field set, not a delta.
+      if (lockedResourceId && schema.field_definitions.length > 0) {
+        setFields(schema.field_definitions);
+      }
     } catch {
       // No existing schema (404) - this is fine
       setExistingSchema(null);
@@ -294,7 +304,11 @@ export function CreateSchemaDialog({
               )}
             </div>
 
-            {/* Existing Schema Warning */}
+            {/* Existing Schema Warning. When the dialog is locked to a
+                resource, the field list above is pre-populated from the
+                existing schema — call that out so the operator does not
+                think it's blank work. The base warning still names the
+                next version number. */}
             {existingSchema && (
               <Alert>
                 <AlertCircle className="h-4 w-4" />
@@ -302,6 +316,11 @@ export function CreateSchemaDialog({
                   {t("existingSchemaWarning", {
                     version: existingSchema.schema_version,
                   })}
+                  {lockedResourceId && (
+                    <span className="block mt-1 text-xs">
+                      {t("existingSchemaPrefilled")}
+                    </span>
+                  )}
                 </AlertDescription>
               </Alert>
             )}

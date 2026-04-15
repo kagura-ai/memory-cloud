@@ -2519,6 +2519,7 @@
       "selectResourceId": "リソースIDを選択",
       "resourceIdRequired": "リソースIDを選択してください",
       "existingSchemaWarning": "このリソースには既にスキーマv{version}が存在します。作成すると新しいバージョン（v{version, number, integer}+1）が追加されます。",
+      "existingSchemaPrefilled": "下のフィールドは現バージョンから pre-fill されています。編集・追加・削除してから保存すると次バージョンになります（各バージョンはフィールド全体の差し替え — 残したいフィールドは新バージョンにも含めてください）。",
       "impactWarningTitle": "このリソース「{resourceId}」は現在使用中です：",
       "activeTokens": "{count}個のアクティブなトークンがこのリソースを使用中",
       "existingMemories": "{count}件の既存メモリーがインデックス済み",
@@ -2694,7 +2695,8 @@
         "tokens": "トークン",
         "memories": "メモリ",
         "schema": "スキーマ",
-        "lastActivity": "最終アクティビティ"
+        "lastActivity": "最終アクティビティ",
+        "open": "詳細を開く"
       }
     },
     "detail": {
