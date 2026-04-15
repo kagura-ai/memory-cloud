@@ -2500,18 +2500,6 @@
       "facetHint": "Categorical filtering",
       "metadataHint": "Stored but not indexed"
     },
-    "table": {
-      "resourceId": "Resource ID",
-      "version": "Version",
-      "fieldCount": "Fields",
-      "created": "Created",
-      "actions": "Actions",
-      "view": "View",
-      "fields": "field(s)",
-      "noSchemas": "No schemas found",
-      "noSchemasDescription": "Create a schema to define field metadata for your resources.",
-      "loading": "Loading..."
-    },
     "createDialog": {
       "title": "Create Resource Schema",
       "subtitle": "Define field metadata for resource indexing",
@@ -2558,22 +2546,6 @@
       "preview": "Preview JSON",
       "create": "Create Schema",
       "createFailed": "Failed to create schema"
-    },
-    "viewDialog": {
-      "title": "Schema Details",
-      "created": "Created",
-      "fieldDefinitions": "Field Definitions",
-      "name": "Name",
-      "type": "Type",
-      "description": "Description",
-      "classification": "Classification",
-      "indexHint": "Index Hint",
-      "required": "Required",
-      "versionHistory": "Version History",
-      "currentVersion": "Current version",
-      "versionHistoryNote": "Future versions will be listed here",
-      "exportJSON": "Export as JSON",
-      "copied": "Copied to clipboard!"
     }
   },
   "contextDetail": {

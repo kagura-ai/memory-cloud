@@ -2500,18 +2500,6 @@
       "facetHint": "カテゴリフィルタリング",
       "metadataHint": "保存のみ（インデックスなし）"
     },
-    "table": {
-      "resourceId": "リソースID",
-      "version": "バージョン",
-      "fieldCount": "フィールド数",
-      "created": "作成日時",
-      "actions": "操作",
-      "view": "詳細",
-      "fields": "個のフィールド",
-      "noSchemas": "スキーマが見つかりません",
-      "noSchemasDescription": "スキーマを作成して、リソースのフィールドメタデータを定義してください。",
-      "loading": "読み込み中..."
-    },
     "createDialog": {
       "title": "リソーススキーマ作成",
       "subtitle": "リソースインデックス用のフィールドメタデータを定義",
@@ -2558,22 +2546,6 @@
       "preview": "JSONプレビュー",
       "create": "スキーマ作成",
       "createFailed": "スキーマの作成に失敗しました"
-    },
-    "viewDialog": {
-      "title": "スキーマ詳細",
-      "created": "作成日時",
-      "fieldDefinitions": "フィールド定義",
-      "name": "名前",
-      "type": "型",
-      "description": "説明",
-      "classification": "分類",
-      "indexHint": "インデックスヒント",
-      "required": "必須",
-      "versionHistory": "バージョン履歴",
-      "currentVersion": "現在のバージョン",
-      "versionHistoryNote": "今後のバージョンがここに表示されます",
-      "exportJSON": "JSONエクスポート",
-      "copied": "クリップボードにコピーしました！"
     }
   },
   "contextDetail": {
