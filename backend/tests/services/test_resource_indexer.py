@@ -24,6 +24,7 @@ def _make_event() -> MagicMock:
     event.payload = {"title": "hello", "price": 100}
     event.created_at = datetime(2026, 4, 15, tzinfo=UTC)
     event.op = "upsert"
+    event.importance = None
     return event
 
 
@@ -60,10 +61,26 @@ class TestResourceIndexerNamedVectorUpsert:
     @pytest.fixture
     def mock_db(self):
         db = AsyncMock()
-        # Memory existence check — no row → INSERT branch
+        # _apply_upsert issues two queries per call: (1) existing-memory lookup,
+        # (2) old-version cleanup scan. The first expects scalar_one_or_none,
+        # the second iterates result.scalars().all(). Without distinct return
+        # values, the second call sees a MagicMock from result 1 and the
+        # `if old_memories:` branch becomes non-deterministic.
         existing = MagicMock()
         existing.scalar_one_or_none.return_value = None
-        db.execute.return_value = existing
+        old_versions = MagicMock()
+        old_versions.scalars.return_value.all.return_value = []
+
+        call_count = 0
+
+        def _execute_side_effect(*_args, **_kwargs):
+            # Alternate per call: odd → existing-lookup, even → old-version scan.
+            nonlocal call_count
+            call_count += 1
+            return existing if call_count % 2 == 1 else old_versions
+
+        db.execute.side_effect = _execute_side_effect
+        db.add = MagicMock()
         return db
 
     @pytest.fixture
