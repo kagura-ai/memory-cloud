@@ -117,6 +117,27 @@ class TestResourceIndexerNamedVectorUpsert:
         assert point.vector[KAGURA_MEMORIES_VECTOR_NAME] == [0.1] * 512
 
     @pytest.mark.asyncio
+    async def test_apply_upsert_uses_passed_embedding_service_not_self(self, indexer):
+        """_apply_upsert must embed with the passed-in EmbeddingService, not
+        with self.embedding_service. This is the #338 Layer C contract: the
+        per-context service resolved by _resolve_routing_for_context flows all
+        the way into the Qdrant point vector."""
+        event = _make_event()
+        schema = _make_schema()
+        context = _make_context()
+
+        per_context_service = MagicMock()
+        sentinel_vector = [0.777] * 512
+        per_context_service.embed = AsyncMock(return_value=sentinel_vector)
+
+        await indexer._apply_upsert(event, schema, context, "kagura_memories", per_context_service)
+
+        per_context_service.embed.assert_awaited_once()
+        indexer.embedding_service.embed.assert_not_awaited()
+        point = indexer.qdrant_client.upsert.await_args.kwargs["points"][0]
+        assert point.vector[KAGURA_MEMORIES_VECTOR_NAME] == sentinel_vector
+
+    @pytest.mark.asyncio
     async def test_apply_upsert_point_id_is_deterministic_uuid(self, indexer):
         """uuid5 of resource_id:doc_id:v{version} must produce a stable point_id
         (idempotency for re-queue after Issue #324 backfill)."""

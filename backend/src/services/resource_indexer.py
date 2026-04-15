@@ -790,4 +790,13 @@ class ResourceIndexer:
                 dimensions=config.embedding_dimensions,
             )
             return collection_name, embedding_service
-        return get_collection_name("text-embedding-3-small", 512), self.embedding_service
+        # No ContextSearchConfig row: derive the fallback collection from the
+        # indexer's default EmbeddingService so model/dimensions and the
+        # collection stay consistent even when an operator overrides
+        # settings.embedding_model/embedding_dimensions (otherwise the fallback
+        # would reintroduce the two-layer bug: e.g. settings=qwen3/4096 but
+        # collection=kagura_memories/512).
+        fallback_collection = get_collection_name(
+            self.embedding_service.model, self.embedding_service.dimensions
+        )
+        return fallback_collection, self.embedding_service
