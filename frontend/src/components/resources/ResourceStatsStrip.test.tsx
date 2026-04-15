@@ -47,7 +47,7 @@ describe("ResourceStatsStrip", () => {
     expect(screen.getByText("v3")).toBeInTheDocument(); // schema version
   });
 
-  it("links 'Manage' to credentials page with encoded resource_id", () => {
+  it("links 'Manage' to per-resource Tokens tab with encoded slug", () => {
     render(
       <ResourceStatsStrip
         resource={make({ resource_id: "has spaces/weird" })}
@@ -56,7 +56,7 @@ describe("ResourceStatsStrip", () => {
     const link = screen.getByRole("link", { name: /stats\.manage/ });
     expect(link).toHaveAttribute(
       "href",
-      "/workspace/integrations/credentials?tab=resource-tokens&resource_id=has%20spaces%2Fweird",
+      "/workspace/resources/has%20spaces%2Fweird?tab=tokens",
     );
   });
 

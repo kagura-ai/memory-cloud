@@ -13,9 +13,8 @@ import {
 import { useTabParam } from "@/hooks/useTabParam";
 import { APIKeysTabPanel } from "@/components/credentials/APIKeysTabPanel";
 import { OAuthAppsTabPanel } from "@/components/credentials/OAuthAppsTabPanel";
-import { ResourceTokensTabPanel } from "@/components/credentials/ResourceTokensTabPanel";
 
-const CREDENTIAL_TABS = ["api-keys", "oauth-apps", "resource-tokens"] as const;
+const CREDENTIAL_TABS = ["api-keys", "oauth-apps"] as const;
 
 export default function CredentialsPage() {
   const t = useTranslations("credentials");
@@ -38,9 +37,6 @@ export default function CredentialsPage() {
           <CategoryTabsTrigger value={CREDENTIAL_TABS[1]}>
             {t("tabs.oauthApps")}
           </CategoryTabsTrigger>
-          <CategoryTabsTrigger value={CREDENTIAL_TABS[2]}>
-            {t("tabs.resourceTokens")}
-          </CategoryTabsTrigger>
         </CategoryTabsList>
 
         <CategoryTabsContent
@@ -55,13 +51,6 @@ export default function CredentialsPage() {
           helpText={t("tabs.oauthAppsHelp")}
         >
           <OAuthAppsTabPanel />
-        </CategoryTabsContent>
-
-        <CategoryTabsContent
-          value={CREDENTIAL_TABS[2]}
-          helpText={t("tabs.resourceTokensHelp")}
-        >
-          <ResourceTokensTabPanel />
         </CategoryTabsContent>
       </CategoryTabs>
     </PageContainer>

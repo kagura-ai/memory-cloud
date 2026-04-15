@@ -2703,11 +2703,19 @@
       "notFoundTitle": "Resource not found",
       "notFound": "This resource does not exist in your workspace, or has been removed.",
       "fetchError": "Failed to load resource details.",
-      "backToList": "Back to resources"
+      "backToList": "Back to resources",
+      "overviewPlaceholder": "Indexer status and schema actions will appear here. For now, switch tabs to view schemas, tokens, or upcoming events."
     },
     "tabs": {
       "overview": "Overview",
-      "data": "Data"
+      "data": "Data",
+      "schemas": "Schemas",
+      "tokens": "Tokens",
+      "events": "Events"
+    },
+    "events": {
+      "comingSoonTitle": "Ingest event log coming soon",
+      "comingSoonDescription": "Per-resource ingest event timeline with cursor-based pagination. Until then, the latest five events appear in the Indexer Status panel on Overview."
     },
     "stats": {
       "activeTokens": "Active tokens",

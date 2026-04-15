@@ -2703,11 +2703,19 @@
       "notFoundTitle": "リソースが見つかりません",
       "notFound": "このリソースはワークスペースに存在しないか、削除されています。",
       "fetchError": "リソース詳細の取得に失敗しました。",
-      "backToList": "リソース一覧へ戻る"
+      "backToList": "リソース一覧へ戻る",
+      "overviewPlaceholder": "Indexer ステータスとスキーマ操作はここに表示されます。スキーマ・トークン・イベントは各タブから確認できます。"
     },
     "tabs": {
       "overview": "概要",
-      "data": "データ"
+      "data": "データ",
+      "schemas": "スキーマ",
+      "tokens": "トークン",
+      "events": "イベント"
+    },
+    "events": {
+      "comingSoonTitle": "Ingest イベントログは近日公開",
+      "comingSoonDescription": "リソース単位の ingest イベントタイムライン (カーソルページネーション)。それまでは概要タブの Indexer Status パネルで直近 5 件を確認できます。"
     },
     "stats": {
       "activeTokens": "有効トークン",

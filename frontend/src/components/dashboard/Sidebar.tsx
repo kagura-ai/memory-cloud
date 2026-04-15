@@ -122,12 +122,6 @@ const navigationGroups: NavGroup[] = [
         icon: Puzzle,
       },
       {
-        nameKey: "resourceTokens",
-        href: "/workspace/integrations/credentials?tab=resource-tokens",
-        icon: Database,
-        requiredWorkspaceRole: "owner",
-      },
-      {
         nameKey: "externalKeys",
         href: "/workspace/integrations/external-keys",
         icon: KeyRound,

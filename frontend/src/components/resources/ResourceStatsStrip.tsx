@@ -27,9 +27,10 @@ export function ResourceStatsStrip({ resource }: ResourceStatsStripProps) {
   const { user } = useAuth();
   const timezone = user?.timezone || "UTC";
 
-  const tokensHref = `/workspace/integrations/credentials?tab=resource-tokens&resource_id=${encodeURIComponent(
+  // Issue #325: Tokens tab now lives under the resource itself.
+  const tokensHref = `/workspace/resources/${encodeURIComponent(
     resource.resource_id,
-  )}`;
+  )}?tab=tokens`;
 
   // Route number formatting through the app's next-intl locale so grouping /
   // decimal rules match the UI (KpiCard's default toLocaleString() picks the

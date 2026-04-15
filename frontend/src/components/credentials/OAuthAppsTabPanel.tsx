@@ -23,7 +23,7 @@ import {
   regenerateOAuth2ClientSecret,
   OAuth2Client,
 } from "@/lib/api/oauth";
-import { EditOAuthClientDialog } from "@/app/(authenticated)/workspace/integrations/oauth-apps/EditOAuthClientDialog";
+import { EditOAuthClientDialog } from "@/components/oauth/EditOAuthClientDialog";
 import { OAuthAppCard } from "@/components/oauth/OAuthAppCard";
 import { CreateCustomOAuthAppDialog } from "@/components/oauth/CreateCustomOAuthAppDialog";
 import { hideOAuthClientSecret } from "@/lib/api/member-credentials";

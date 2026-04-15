@@ -3,17 +3,24 @@
 /**
  * Resource Detail Page
  *
- * Two-tab layout (Overview = schema viewer, Data = #316 placeholder) plus a
+ * Five-tab layout (Overview / Data / Schemas / Tokens / Events) plus a
  * stats strip header. Follows the IA of workspace/contexts/[id]/page.tsx.
  *
- * Issue #47
+ * Issue #47 (initial), Issue #325 (IA reorg — top-level Resources nav
+ * with consolidated tabs replacing the orphaned credential routes).
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
-import { ArrowLeft, ChevronRight, Database, FileJson } from "lucide-react";
+import {
+  ArrowLeft,
+  ChevronRight,
+  Clock,
+  Database,
+  FileJson,
+} from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SpinnerLoading } from "@/components/common/LoadingState";
@@ -26,11 +33,18 @@ import { ApiError } from "@/lib/api/base";
 import { ResourceStatsStrip } from "@/components/resources/ResourceStatsStrip";
 import { SchemaFieldTable } from "@/components/resources/SchemaFieldTable";
 import { ResourceDataTabPlaceholder } from "@/components/resources/ResourceDataTabPlaceholder";
+import { ResourceTokensTabPanel } from "@/components/credentials/ResourceTokensTabPanel";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 
-const RESOURCE_TABS = ["overview", "data"] as const;
+const RESOURCE_TABS = [
+  "overview",
+  "data",
+  "schemas",
+  "tokens",
+  "events",
+] as const;
 
 export default function ResourceDetailPage() {
   const params = useParams();
@@ -200,9 +214,30 @@ export default function ResourceDetailPage() {
         <TabsList>
           <TabsTrigger value="overview">{t("tabs.overview")}</TabsTrigger>
           <TabsTrigger value="data">{t("tabs.data")}</TabsTrigger>
+          <TabsTrigger value="schemas">{t("tabs.schemas")}</TabsTrigger>
+          <TabsTrigger value="tokens">{t("tabs.tokens")}</TabsTrigger>
+          <TabsTrigger value="events">{t("tabs.events")}</TabsTrigger>
         </TabsList>
 
+        {/*
+          Overview is intentionally a slim landing for #325 — the stats strip
+          above already gives the at-a-glance picture. Issue #326 will fill it
+          in with an Indexer Status panel and a schema EmptyState wired to the
+          CreateSchemaDialog. The schema viewer lives in the Schemas tab.
+        */}
         <TabsContent value="overview" className="mt-6">
+          <EmptyState
+            icon={Database}
+            title={displayName}
+            description={t("detail.overviewPlaceholder")}
+          />
+        </TabsContent>
+
+        <TabsContent value="data" className="mt-6">
+          <ResourceDataTabPlaceholder />
+        </TabsContent>
+
+        <TabsContent value="schemas" className="mt-6">
           {schema ? (
             <div className="space-y-4">
               <div className="text-sm text-muted-foreground">
@@ -219,8 +254,16 @@ export default function ResourceDetailPage() {
           )}
         </TabsContent>
 
-        <TabsContent value="data" className="mt-6">
-          <ResourceDataTabPlaceholder />
+        <TabsContent value="tokens" className="mt-6">
+          <ResourceTokensTabPanel resourceIdFilter={resourceId} />
+        </TabsContent>
+
+        <TabsContent value="events" className="mt-6">
+          <EmptyState
+            icon={Clock}
+            title={t("events.comingSoonTitle")}
+            description={t("events.comingSoonDescription")}
+          />
         </TabsContent>
       </Tabs>
     </PageContainer>

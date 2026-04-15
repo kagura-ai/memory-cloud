@@ -464,7 +464,7 @@ export function SearchSettingsSection({
                   <p className="text-sm">
                     {t("configureRerankerKeys").split("External API Keys")[0]}
                     <Link
-                      href="/workspace/settings/external-keys"
+                      href="/workspace/integrations/external-keys"
                       className="underline font-medium"
                     >
                       External API Keys
@@ -566,7 +566,7 @@ export function SearchSettingsSection({
                                 )[0]
                               }
                               <Link
-                                href="/workspace/settings/external-keys"
+                                href="/workspace/integrations/external-keys"
                                 className="underline font-medium"
                               >
                                 External API Keys
