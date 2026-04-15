@@ -3,9 +3,12 @@
  *
  * Verifies:
  * - all four KpiCards render with expected values
- * - "Manage" deep-link URL contains encoded resource_id
  * - schema_version === null renders em-dash + "not registered" subtext
  * - schema_version > 0 renders "v<version>"
+ * - Last Activity card carries an absolute-time `title` for hover tooltip
+ *
+ * The "Manage" deep-link that used to overlay the Tokens KpiCard was removed
+ * in #326 polish — Tokens is now reachable via the in-page tab bar.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -24,6 +27,7 @@ vi.mock("@/contexts/AuthContext", () => ({
 
 vi.mock("@/lib/utils/datetime", () => ({
   formatRelativeTime: (iso: string) => `relative(${iso})`,
+  formatDateTime: (iso: string) => `dt(${iso})`,
 }));
 
 const make = (overrides: Partial<ResourceListItem> = {}): ResourceListItem => ({
@@ -47,16 +51,21 @@ describe("ResourceStatsStrip", () => {
     expect(screen.getByText("v3")).toBeInTheDocument(); // schema version
   });
 
-  it("links 'Manage' to per-resource Tokens tab with encoded slug", () => {
-    render(
-      <ResourceStatsStrip
-        resource={make({ resource_id: "has spaces/weird" })}
-      />,
+  it("does not render a 'Manage' deep-link (the Tokens tab replaces it)", () => {
+    render(<ResourceStatsStrip resource={make()} />);
+    expect(
+      screen.queryByRole("link", { name: /stats\.manage/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("surfaces the absolute timestamp as a tooltip on Last Activity", () => {
+    render(<ResourceStatsStrip resource={make()} />);
+    const lastActivityValue = screen.getByText(
+      "relative(2026-04-14T09:15:30Z)",
     );
-    const link = screen.getByRole("link", { name: /stats\.manage/ });
-    expect(link).toHaveAttribute(
-      "href",
-      "/workspace/resources/has%20spaces%2Fweird?tab=tokens",
+    expect(lastActivityValue).toHaveAttribute(
+      "title",
+      "dt(2026-04-14T09:15:30Z)",
     );
   });
 

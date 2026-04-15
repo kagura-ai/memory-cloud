@@ -32,6 +32,7 @@ vi.mock("@/contexts/AuthContext", () => ({
 
 vi.mock("@/lib/utils/datetime", () => ({
   formatRelativeTime: (iso: string) => `relative(${iso})`,
+  formatDateTime: (iso: string) => `dt(${iso})`,
 }));
 
 const baseEvent: ResourceEventItem = {
