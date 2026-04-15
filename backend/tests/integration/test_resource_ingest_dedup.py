@@ -48,7 +48,11 @@ def fresh_db_at_head():
         _reset_alembic_state()
         config = _get_alembic_config()
         command.upgrade(config, "head")
-        yield _sync_engine()
+        engine = _sync_engine()
+        try:
+            yield engine
+        finally:
+            engine.dispose()
 
 
 def _seed_minimal_resource(conn: sa.Connection, resource_id: str) -> uuid.UUID:
