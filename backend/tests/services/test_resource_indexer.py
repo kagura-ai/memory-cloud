@@ -177,3 +177,80 @@ class TestResolveCollectionForContext:
         name = await indexer._resolve_collection_for_context(uuid4())
 
         assert name == "kagura_memories"
+
+
+class TestApplyDeleteCollectionRouting:
+    """Issue #334: smoke-test that _apply_delete reaches Qdrant with the
+    per-context collection_name argument for both delete paths."""
+
+    @pytest.fixture
+    def indexer(self):
+        db = AsyncMock()
+        db.execute = AsyncMock(
+            return_value=MagicMock(
+                scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[]))),
+                scalar_one_or_none=MagicMock(return_value=None),
+            )
+        )
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            return ResourceIndexer(db)
+
+    @pytest.mark.asyncio
+    async def test_delete_all_versions_uses_passed_collection_name(self, indexer):
+        event = _make_event()
+        event.version = None
+        await indexer._apply_delete(
+            event, _make_context(), "kagura_memories_qwen3_embedding_8b_4096"
+        )
+        assert indexer.qdrant_client.delete.await_count == 1
+        assert (
+            indexer.qdrant_client.delete.await_args.kwargs["collection_name"]
+            == "kagura_memories_qwen3_embedding_8b_4096"
+        )
+
+    @pytest.mark.asyncio
+    async def test_delete_specific_version_uses_passed_collection_name(self, indexer):
+        event = _make_event()
+        event.version = 5
+        await indexer._apply_delete(
+            event, _make_context(), "kagura_memories_qwen3_embedding_4b_2560"
+        )
+        assert indexer.qdrant_client.delete.await_count == 1
+        assert (
+            indexer.qdrant_client.delete.await_args.kwargs["collection_name"]
+            == "kagura_memories_qwen3_embedding_4b_2560"
+        )
+
+
+class TestProcessIncrementalResolvesCollectionOncePerBatch:
+    """Issue #334: collection_name MUST be resolved once per process_incremental
+    call (outside the per-event loop). If a future refactor moves the resolve
+    into the loop, points_count writes would suffer N+1 SELECTs."""
+
+    @pytest.mark.asyncio
+    async def test_resolve_called_once_for_multi_event_batch(self):
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(AsyncMock())
+
+        # Stub out everything except the helper under inspection.
+        state = MagicMock(last_offset=0, last_run_at=None, metrics=None)
+        indexer._get_or_create_state = AsyncMock(return_value=state)
+        indexer._fetch_events = AsyncMock(
+            return_value=[_make_event(), _make_event(), _make_event()]
+        )
+        indexer._get_latest_schema = AsyncMock(return_value=_make_schema())
+        indexer._get_context = AsyncMock(return_value=_make_context())
+        indexer._resolve_collection_for_context = AsyncMock(return_value="kagura_memories")
+        indexer._apply_upsert = AsyncMock()
+        indexer._apply_delete = AsyncMock()
+        indexer.db.commit = AsyncMock()
+
+        await indexer.process_incremental("res_test", uuid4())
+
+        assert indexer._resolve_collection_for_context.await_count == 1, (
+            "collection_name resolution must be invoked exactly once per batch, "
+            "not per event — moving it inside the for-event loop is an N+1 regression."
+        )
+        assert indexer._apply_upsert.await_count == 3
+        for call in indexer._apply_upsert.await_args_list:
+            assert call.args[3] == "kagura_memories"

@@ -267,11 +267,11 @@ class ResourceIndexer:
             context: Context object
             collection_name: Resolved Qdrant collection (per-context, see #334)
         """
-        # TODO(#334 follow-up, Layer C): self.embedding_service still uses the
-        # global default model (settings.embedding_model). When the context's
+        # TODO(#338, Layer C): self.embedding_service still uses the global
+        # default model (settings.embedding_model). When the context's
         # embedding_model differs (e.g. qwen3-embedding:8b), the generated
         # embedding's dim will not match collection_name's dim and Qdrant will
-        # reject the upsert. Filed as a separate issue.
+        # reject the upsert.
         if not event.payload:
             logger.warning("upsert_event_has_no_payload", event_id=event.id)
             return
