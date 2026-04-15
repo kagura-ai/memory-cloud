@@ -804,4 +804,21 @@ class ResourceIndexer:
         # collection exactly as memory_service does, so both services stay on
         # the same collection for legacy contexts. See the docstring above for
         # the cross-service consistency rationale.
-        return get_collection_name("text-embedding-3-small", 512), self.embedding_service
+        legacy_collection = get_collection_name("text-embedding-3-small", 512)
+        if (
+            self.embedding_service.model != "text-embedding-3-small"
+            or self.embedding_service.dimensions != 512
+        ):
+            # Operator overrode settings.embedding_model but has no
+            # ContextSearchConfig row for this context. Upserts will fail on
+            # Qdrant dim mismatch — surface the misconfiguration early.
+            logger.warning(
+                "resource_indexer_fallback_dim_mismatch",
+                context_id=str(context_id),
+                legacy_collection=legacy_collection,
+                legacy_dim=512,
+                service_model=self.embedding_service.model,
+                service_dim=self.embedding_service.dimensions,
+                hint="create a ContextSearchConfig row for this context to use the per-context routing path",
+            )
+        return legacy_collection, self.embedding_service
