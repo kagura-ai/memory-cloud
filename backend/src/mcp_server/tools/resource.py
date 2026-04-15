@@ -492,6 +492,7 @@ async def handle_ingest_events(
                 )
 
             # Process events
+            from sqlalchemy import select
             from sqlalchemy.exc import IntegrityError
 
             from db.constraint_names import (
@@ -499,7 +500,20 @@ async def handle_ingest_events(
                 RESOURCE_EVENTS_UPSERT_UNIQUE,
                 integrity_error_constraint_name,
             )
-            from models.resource import ResourceEvent
+            from models.resource import Resource, ResourceEvent
+
+            # Resolve resources.id once per batch so the partial UNIQUE on
+            # (resource_pk, doc_id, version) actually applies. Returns None
+            # when the resources row has not been created yet (Phase 1
+            # legacy state) — see the HTTP path for the full rationale.
+            resource_pk = (
+                await db.execute(
+                    select(Resource.id).where(
+                        Resource.workspace_id == workspace_id,
+                        Resource.resource_id == resource_id,
+                    )
+                )
+            ).scalar_one_or_none()
 
             created_ids: list[int] = []
             errors: list[dict] = []
@@ -579,6 +593,7 @@ async def handle_ingest_events(
 
                 event = ResourceEvent(
                     resource_id=resource_id,
+                    resource_pk=resource_pk,
                     op=op,
                     doc_id=doc_id,
                     version=version,

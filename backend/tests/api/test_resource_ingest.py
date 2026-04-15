@@ -184,6 +184,7 @@ class TestResourceEventIdempotency:
         token = MagicMock(spec=ResourceToken)
         token.id = 7
         token.created_by = "user-1"
+        token.resource_pk = uuid4()
         ctx = MagicMock(spec=Context)
         ctx.id = uuid4()
         ctx.workspace_id = uuid4()
@@ -239,6 +240,37 @@ class TestResourceEventIdempotency:
         assert response.event_id == 999
         assert response.queued is False
         db.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_insert_populates_resource_pk_from_token(self, mock_event_request, mock_auth):
+        """The inserted ResourceEvent must carry resource_pk from the token
+        so the partial UNIQUE (WHERE resource_pk IS NOT NULL) actually
+        applies. Without this, the dispatch code above is dead at runtime.
+        """
+        token_record, _, _ = mock_auth
+        db = MagicMock()
+        db.add = MagicMock()
+        db.commit = AsyncMock()
+        db.refresh = AsyncMock()
+        # The refresh shim populates event.id after flush
+        db.refresh.side_effect = lambda evt: setattr(evt, "id", 42)
+
+        with patch("api.routes.resource_ingest.check_event_quota", new=AsyncMock()):
+            with patch(
+                "api.routes.resource_ingest._schedule_indexer_for_resource",
+                new=AsyncMock(),
+            ):
+                with patch("utils.usage_logger.log_usage", new=AsyncMock()):
+                    await ingest_event(
+                        resource_id="ec_products",
+                        request=mock_event_request,
+                        auth=mock_auth,
+                        db=db,
+                    )
+
+        db.add.assert_called_once()
+        added_event = db.add.call_args[0][0]
+        assert added_event.resource_pk == token_record.resource_pk
 
     @pytest.mark.asyncio
     async def test_unknown_constraint_raises_500(self, mock_event_request, mock_auth):

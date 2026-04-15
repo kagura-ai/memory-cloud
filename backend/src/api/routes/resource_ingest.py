@@ -286,9 +286,19 @@ async def ingest_event(
             )
 
     # 3. Create event record
+    #
+    # ``resource_pk`` is sourced from the auth token (backfilled by migration
+    # a97 for existing tokens) so the partial UNIQUE
+    # ``WHERE op='upsert' AND resource_pk IS NOT NULL`` actually applies.
+    # If the token was issued before a97 and never backfilled, we pass
+    # ``None`` — ingest still works via the legacy ``resource_id`` column,
+    # the partial UNIQUE just skips those rows (same as pre-fix behavior).
+    # Migration #325 tightens ``resource_tokens.resource_pk`` to NOT NULL,
+    # at which point this branch goes away.
     try:
         event = ResourceEvent(
             resource_id=resource_id,
+            resource_pk=token_record.resource_pk,
             op=request.op,
             doc_id=request.doc_id,
             version=request.version,
@@ -467,9 +477,10 @@ async def ingest_batch(
                     )
                     continue
 
-            # Create event
+            # Create event — see single-ingest path for the resource_pk rationale.
             event = ResourceEvent(
                 resource_id=resource_id,
+                resource_pk=token_record.resource_pk,
                 op=event_req.op,
                 doc_id=event_req.doc_id,
                 version=event_req.version,
