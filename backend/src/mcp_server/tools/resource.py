@@ -474,10 +474,12 @@ async def handle_ingest_events(
                 return boundary_err
 
             # MCP shares the per-hour ceiling with the HTTP ingest path via a
-            # workspace-scoped Redis counter. The cap is derived from the
-            # workspace's most permissive ResourceToken, with a default
-            # fallback when no token exists.
-            quota_per_hour = await resolve_workspace_event_quota_per_hour(db, workspace_id)
+            # workspace-scoped Redis counter. The cap is derived from the most
+            # permissive ResourceToken for this (workspace, resource) pair, with
+            # a default fallback when no token exists.
+            quota_per_hour = await resolve_workspace_event_quota_per_hour(
+                db, workspace_id, resource_id
+            )
             try:
                 await check_event_quota(
                     resource_id, workspace_id, quota_per_hour, count=len(events)

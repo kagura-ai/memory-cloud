@@ -194,23 +194,47 @@ class TestResolveWorkspaceEventQuotaPerHour:
     """Resolution of the per-hour ceiling for MCP ingest calls."""
 
     @pytest.mark.asyncio
-    async def test_returns_max_token_quota(self):
+    async def test_returns_max_token_quota_for_resource(self):
         mock_db = MagicMock()
         result_mock = MagicMock()
         result_mock.scalar_one_or_none.return_value = 5000
         mock_db.execute = AsyncMock(return_value=result_mock)
 
-        quota = await resolve_workspace_event_quota_per_hour(mock_db, WORKSPACE_ID)
+        quota = await resolve_workspace_event_quota_per_hour(mock_db, WORKSPACE_ID, "ec_products")
 
         assert quota == 5000
 
     @pytest.mark.asyncio
-    async def test_falls_back_to_default_when_no_tokens(self):
+    async def test_falls_back_to_default_when_no_token_for_resource(self):
         mock_db = MagicMock()
         result_mock = MagicMock()
         result_mock.scalar_one_or_none.return_value = None
         mock_db.execute = AsyncMock(return_value=result_mock)
 
-        quota = await resolve_workspace_event_quota_per_hour(mock_db, WORKSPACE_ID)
+        quota = await resolve_workspace_event_quota_per_hour(mock_db, WORKSPACE_ID, "ec_products")
 
         assert quota == MCP_INGEST_DEFAULT_QUOTA_PER_HOUR
+
+    @pytest.mark.asyncio
+    async def test_query_filters_on_resource_id(self):
+        """Regression for Copilot review: workspace-wide MAX would over-allow
+        ingest into a low-quota resource if a higher-quota token exists for a
+        sibling resource. The query MUST filter on resource_id."""
+        from models.resource import ResourceToken
+
+        mock_db = MagicMock()
+        result_mock = MagicMock()
+        result_mock.scalar_one_or_none.return_value = 100
+        mock_db.execute = AsyncMock(return_value=result_mock)
+
+        await resolve_workspace_event_quota_per_hour(mock_db, WORKSPACE_ID, "ec_products")
+
+        # Inspect the compiled WHERE clause includes a resource_id predicate.
+        called_stmt = mock_db.execute.await_args.args[0]
+        compiled = str(called_stmt.compile(compile_kwargs={"literal_binds": False}))
+        assert "resource_id" in compiled
+        assert "workspace_id" in compiled
+        assert "is_active" in compiled
+        # ResourceToken is referenced for the import side-effect; static
+        # analyzers should not flag it as unused.
+        assert ResourceToken is not None

@@ -294,6 +294,17 @@ async def _check_viewer_permission(
         return None
 
     user_role = await _get_workspace_member_role(db, user_id, workspace_id)
+    if user_role is None:
+        # Caller is not a member of this workspace, OR the workspace is
+        # soft-deleted (`_get_workspace_member_role` filters Workspace.deleted_at
+        # IS NULL). Either way: deny writes (fail-closed).
+        return _error_response(
+            "permission_denied",
+            f"Cannot {operation}: workspace not accessible.",
+            your_role="not_a_member",
+            required_role="member",
+            help="Verify the workspace is active and you are a member with at least 'member' role.",
+        )
     if user_role == "viewer":
         return _error_response(
             "permission_denied",

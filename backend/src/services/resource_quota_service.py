@@ -105,22 +105,29 @@ async def check_event_quota(
 async def resolve_workspace_event_quota_per_hour(
     db: AsyncSession,
     workspace_id: UUID,
+    resource_id: str,
 ) -> int:
     """Derive the effective per-hour event quota for an MCP ingest call.
 
     MCP authenticates via session user + workspace, not via ResourceToken,
     so it has no per-token ``quota_events_per_hour`` to read. We use the
-    maximum across the workspace's active resource tokens — ensuring an
-    MCP caller cannot exceed the most permissive token configured for the
-    workspace. Falls back to ``MCP_INGEST_DEFAULT_QUOTA_PER_HOUR`` when the
-    workspace has no token (e.g. resource created without tokens, or pre-#324
-    legacy tokens with ``workspace_id`` not yet backfilled).
+    maximum across the workspace's active tokens **for this resource_id** —
+    ensuring an MCP caller cannot exceed the most permissive token configured
+    for the resource being ingested into. Filtering by ``resource_id`` matches
+    the Redis key scope (`resource:events:{resource_id}:{workspace_id}:hour`),
+    so a high-quota token on resource B cannot relax the cap on resource A
+    in the same workspace.
+
+    Falls back to ``MCP_INGEST_DEFAULT_QUOTA_PER_HOUR`` when the resource has
+    no token in this workspace (e.g. resource created without tokens, or
+    pre-#324 legacy tokens with ``workspace_id`` not yet backfilled).
     """
     from models.resource import ResourceToken
 
     result = await db.execute(
         select(func.max(ResourceToken.quota_events_per_hour)).where(
             ResourceToken.workspace_id == workspace_id,
+            ResourceToken.resource_id == resource_id,
             ResourceToken.is_active.is_(True),
         )
     )
