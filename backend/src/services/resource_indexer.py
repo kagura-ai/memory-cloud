@@ -14,6 +14,7 @@ from __future__ import annotations
 # Standard library imports (PEP8)
 import json  # Issue #262: JSON serialization for Memory content
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5  # Issue #262: uuid5 for deterministic point_id
 
@@ -64,6 +65,143 @@ class IndexerMetrics:
             "skipped": self.skipped,
             "reason": self.reason,
         }
+
+
+async def get_indexer_status_for_context(
+    db: AsyncSession,
+    context: Context,
+    *,
+    recent_event_limit: int = 5,
+) -> dict[str, Any]:
+    """Read-only snapshot of indexer state + recent ingest events for a Context.
+
+    Issue #326: backing data for ``GET /resources/{id}/indexer-status``.
+
+    The reader intentionally lives outside ``ResourceIndexer`` because that
+    class wires up Qdrant + embedding clients eagerly in ``__init__`` — read
+    endpoints shouldn't pay that setup cost or fail when Qdrant is down.
+
+    Sort contract for the dual-row transition (Phase 1 shadow column, see
+    ``models.resource`` module docstring): rows whose ``resource_pk`` is
+    populated take precedence over legacy ``resource_pk=NULL`` rows sharing
+    the same context. Under the partial UNIQUE index
+    ``uq_indexer_state_resource_context`` this always yields at most one
+    authoritative row; ordering by ``id DESC`` is the tiebreaker for the
+    worst case during an in-flight writer migration.
+
+    Args:
+        db: Async DB session.
+        context: Pre-resolved Context (caller already checked workspace access).
+        recent_event_limit: Max ingest events to return, newest first.
+
+    Returns:
+        Dict with:
+            ``resource_id``: echo of ``context.resource_id``.
+            ``state``: indexer state dict or ``None`` if indexer never ran
+                for this context.
+            ``recent_events``: list of event dicts (up to ``recent_event_limit``).
+    """
+    resource_id = context.resource_id
+    assert resource_id is not None, "resolve_resource_by_slug returns only slugged contexts"
+
+    state_row = (
+        await db.execute(
+            select(IndexerState)
+            .where(
+                IndexerState.resource_id == resource_id,
+                IndexerState.context_id == context.id,
+            )
+            .order_by(
+                # Prefer the post-#323 row (resource_pk populated) over any
+                # legacy NULL row that survived the writer migration.
+                IndexerState.resource_pk.is_(None).asc(),
+                IndexerState.id.desc(),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    events = (
+        (
+            await db.execute(
+                select(ResourceEvent)
+                .where(
+                    ResourceEvent.resource_id == resource_id,
+                )
+                .order_by(ResourceEvent.id.desc())
+                .limit(recent_event_limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    state_dict: dict[str, Any] | None
+    if state_row is None:
+        state_dict = None
+    else:
+        last_run_at = state_row.last_run_at
+        lag_seconds: float | None
+        if last_run_at is None:
+            lag_seconds = None
+        else:
+            # `last_run_at` is stored as naive UTC; compare against timezone-aware now().
+            if last_run_at.tzinfo is None:
+                last_run_at_utc = last_run_at.replace(tzinfo=UTC)
+            else:
+                last_run_at_utc = last_run_at
+            lag_seconds = (datetime.now(tz=UTC) - last_run_at_utc).total_seconds()
+
+        metrics_raw = state_row.metrics or {}
+        state_dict = {
+            "job_status": state_row.job_status,
+            "last_run_at": last_run_at.isoformat() + "Z"
+            if last_run_at and last_run_at.tzinfo is None
+            else (last_run_at.isoformat() if last_run_at else None),
+            "next_run_at": (
+                state_row.next_run_at.isoformat() + "Z"
+                if state_row.next_run_at and state_row.next_run_at.tzinfo is None
+                else (state_row.next_run_at.isoformat() if state_row.next_run_at else None)
+            ),
+            "active_version": state_row.active_version,
+            "last_offset": state_row.last_offset,
+            "lag_seconds": lag_seconds,
+            "metrics": {
+                "applied_upserts": int(metrics_raw.get("applied_upserts", 0) or 0),
+                "applied_deletes": int(metrics_raw.get("applied_deletes", 0) or 0),
+                "errors": int(metrics_raw.get("errors", 0) or 0),
+                # Only surface the skipped reason when the last run was
+                # actually skipped — otherwise stale reasons linger after a
+                # successful re-run and confuse operators.
+                "skipped_reason": (
+                    metrics_raw.get("reason") if metrics_raw.get("skipped") else None
+                ),
+            },
+        }
+
+    event_dicts = []
+    for ev in events:
+        created_at = ev.created_at
+        created_iso = (
+            created_at.isoformat() + "Z"
+            if created_at and created_at.tzinfo is None
+            else (created_at.isoformat() if created_at else None)
+        )
+        event_dicts.append(
+            {
+                "id": ev.id,
+                "op": ev.op,
+                "doc_id": ev.doc_id,
+                "version": ev.version,
+                "created_at": created_iso,
+            }
+        )
+
+    return {
+        "resource_id": resource_id,
+        "state": state_dict,
+        "recent_events": event_dicts,
+    }
 
 
 class ResourceIndexer:

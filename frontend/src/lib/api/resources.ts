@@ -38,3 +38,88 @@ export interface ResourceListResponse {
 export async function listResources(): Promise<ResourceListResponse> {
   return apiClient.get<ResourceListResponse>("/api/v1/resources");
 }
+
+// ============================================================================
+// Issue #326 — Indexer Status
+// ============================================================================
+//
+// Types are hand-mirrored against the pydantic schema in
+// `backend/src/api/routes/resource_indexer.py`. The backend carries a
+// snapshot test (`test_resource_indexer_openapi_snapshot.py`) that fails
+// in CI when the OpenAPI shape drifts — that's the signal to update these
+// types. Switching to a generator is tracked as a separate DX epic.
+
+/** Lifecycle states of an indexer run, matching the backend Literal. */
+export type IndexerJobStatus = "idle" | "queued" | "running" | "failed";
+
+/**
+ * Reasons the indexer may record when it skips a run. Extending this union
+ * also means extending the backend Literal and re-running the OpenAPI
+ * snapshot — keep the two in lock-step.
+ */
+export type IndexerSkippedReason =
+  | "no_pending_events"
+  | "schema_not_found"
+  | "context_not_found"
+  | "empty_valid_points";
+
+export interface IndexerStateMetrics {
+  applied_upserts: number;
+  applied_deletes: number;
+  errors: number;
+  /**
+   * Non-null only when the last run was skipped. Stale reasons after a
+   * successful run are suppressed server-side — the UI can show the Alert
+   * unconditionally when this is set.
+   */
+  skipped_reason: IndexerSkippedReason | null;
+}
+
+export interface IndexerState {
+  job_status: IndexerJobStatus;
+  /** ISO-8601 UTC, null when the indexer has never run. */
+  last_run_at: string | null;
+  /** ISO-8601 UTC, null when no run is scheduled. */
+  next_run_at: string | null;
+  active_version: number;
+  last_offset: number;
+  /** Server-computed `now - last_run_at` in seconds; null when never run. */
+  lag_seconds: number | null;
+  metrics: IndexerStateMetrics;
+}
+
+export interface ResourceEventItem {
+  id: number;
+  op: "upsert" | "delete";
+  doc_id: string;
+  /** NULL version is valid for delete-all-versions (Issue #262). */
+  version: number | null;
+  /** ISO-8601 UTC; null only if the DB row has no created_at (shouldn't happen). */
+  created_at: string | null;
+}
+
+/** Response shape from `GET /api/v1/resources/{id}/indexer-status`. */
+export interface IndexerStatusResponse {
+  resource_id: string;
+  /**
+   * `null` means the indexer has never run for this resource/context. The
+   * UI branches on this sentinel rather than inferring emptiness from
+   * individual state fields.
+   */
+  state: IndexerState | null;
+  /** Newest first, server-capped at 5. */
+  recent_events: ResourceEventItem[];
+}
+
+/**
+ * Fetch indexer runtime state and recent ingest events for a resource.
+ * The slug is encoded so paths like `sales/2024-q1` work; the backend
+ * decodes it back from the path segment.
+ */
+export async function getIndexerStatus(
+  resourceId: string,
+): Promise<IndexerStatusResponse> {
+  return apiClient.get<IndexerStatusResponse>(
+    `/api/v1/resources/${encodeURIComponent(resourceId)}/indexer-status`,
+  );
+}

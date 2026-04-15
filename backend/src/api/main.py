@@ -132,6 +132,7 @@ openapi_tags = [
     {"name": "resource-tokens", "description": "Resource token management"},
     {"name": "resource-ingest", "description": "External data ingestion API"},
     {"name": "resource-schema", "description": "Resource schema registry"},
+    {"name": "resource-indexer", "description": "Resource indexer runtime state"},
     # Public API
     {"name": "public-search", "description": "Public REST API for search"},
     {"name": "mcp-api", "description": "MCP server tools listing and status"},
@@ -327,6 +328,7 @@ from api.routes import (  # noqa: E402
     neural_config,
     oauth,
     public_search,  # Issue #238: Public Search API
+    resource_indexer,  # Issue #326: Indexer status visibility API
     resource_ingest,  # Issue #238: Resource Ingest API
     resource_schema,  # Issue #238: Schema Management API
     resource_tokens,  # Issue #242: Resource Token Management API
@@ -413,6 +415,9 @@ app.include_router(resource_ingest.router, prefix="/api/v1")
 
 # Resource Schema routes (Issue #238 - Schema Registry)
 app.include_router(resource_schema.router, prefix="/api/v1")
+
+# Resource Indexer Status routes (Issue #326 - per-resource observability)
+app.include_router(resource_indexer.router, prefix="/api/v1")
 
 # Resource list route (Issue #47 - Web UI resource list)
 app.include_router(resources.router, prefix="/api/v1")

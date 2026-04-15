@@ -2717,6 +2717,43 @@
       "comingSoonTitle": "Ingest event log coming soon",
       "comingSoonDescription": "Per-resource ingest event timeline with cursor-based pagination. Until then, the latest five events appear in the Indexer Status panel on Overview."
     },
+    "indexer": {
+      "fetchError": "Failed to load indexer status.",
+      "emptyTitle": "Indexer has not run yet",
+      "emptyDescription": "Once the indexer picks up the first ingest event for this resource, its runtime state and most recent events will appear here.",
+      "panelAriaLabel": "Indexer status panel",
+      "jobStatus": "Job status",
+      "jobStatusLabel": "Job status: {status}",
+      "status": {
+        "idle": "Idle",
+        "queued": "Queued",
+        "running": "Running",
+        "failed": "Failed"
+      },
+      "lastRun": "Last run",
+      "lagHigh": "Lag over 1 hour — check indexer health",
+      "appliedUpserts": "Upserts applied",
+      "appliedDeletes": "{count} deletes applied",
+      "errors": "Errors",
+      "skipped": {
+        "no_pending_events": "No pending events since the last run.",
+        "schema_not_found": "Last run was skipped: no schema is registered for this resource.",
+        "context_not_found": "Last run was skipped: the context bound to this resource could not be resolved.",
+        "empty_valid_points": "Last run produced no valid points to upsert (likely payload/schema mismatches)."
+      },
+      "noRecentEvents": "No ingest events in the log yet.",
+      "recentEvents": "Recent ingest events",
+      "event": {
+        "op": "Op",
+        "docId": "Document ID",
+        "version": "Version",
+        "createdAt": "Created",
+        "ops": {
+          "upsert": "Upsert",
+          "delete": "Delete"
+        }
+      }
+    },
     "stats": {
       "activeTokens": "Active tokens",
       "memories": "Memories",
@@ -2734,7 +2771,8 @@
       "required": "Required",
       "versionLabel": "Current schema version: v{version}",
       "emptyTitle": "No schema registered",
-      "emptyDescription": "This resource does not have a schema yet. Use the REST API or MCP tools to register field definitions."
+      "emptyDescription": "This resource does not have a schema yet. Use the REST API or MCP tools to register field definitions.",
+      "createAction": "Create schema"
     },
     "data": {
       "comingSoonTitle": "Data browser coming soon",

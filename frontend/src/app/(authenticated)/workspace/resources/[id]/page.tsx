@@ -15,11 +15,15 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
 import {
+  Activity,
   ArrowLeft,
+  BarChart3,
   ChevronRight,
   Clock,
   Database,
   FileJson,
+  Key,
+  Layers,
 } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -33,10 +37,16 @@ import { ApiError } from "@/lib/api/base";
 import { ResourceStatsStrip } from "@/components/resources/ResourceStatsStrip";
 import { SchemaFieldTable } from "@/components/resources/SchemaFieldTable";
 import { ResourceDataTabPlaceholder } from "@/components/resources/ResourceDataTabPlaceholder";
+import { IndexerStatusPanel } from "@/components/resources/IndexerStatusPanel";
 import { ResourceTokensTabPanel } from "@/components/credentials/ResourceTokensTabPanel";
+import { CreateSchemaDialog } from "@/components/schemas/CreateSchemaDialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import {
+  getIndexerStatus,
+  type IndexerStatusResponse,
+} from "@/lib/api/resources";
 
 const RESOURCE_TABS = [
   "overview",
@@ -70,6 +80,19 @@ export default function ResourceDetailPage() {
   const [schema, setSchema] = useState<ResourceSchema | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Indexer status is fetched after the resource loads so a slow/failed
+  // indexer endpoint cannot gate the rest of the page. Kept independent of
+  // the schema/list fetch deliberately — the panel owns its own loading and
+  // error surfaces via ErrorBanner inside the Overview tab.
+  const [indexerStatus, setIndexerStatus] = useState<IndexerStatusResponse>();
+  const [indexerLoading, setIndexerLoading] = useState(false);
+  const [indexerError, setIndexerError] = useState<Error | null>(null);
+
+  // Schema-creation dialog visibility, opened from the Schemas tab EmptyState.
+  // State lives on the page (not inside the Schemas tab) so an `onSuccess` can
+  // refresh the parent's schema without re-mounting the dialog.
+  const [createSchemaOpen, setCreateSchemaOpen] = useState(false);
 
   const fetchResource = useCallback(async () => {
     try {
@@ -129,6 +152,27 @@ export default function ResourceDetailPage() {
     }
     fetchResource();
   }, [fetchResource, isPlanGated, workspaceReady]);
+
+  const fetchIndexerStatus = useCallback(async () => {
+    try {
+      setIndexerLoading(true);
+      setIndexerError(null);
+      const result = await getIndexerStatus(resourceId);
+      setIndexerStatus(result);
+    } catch (e) {
+      setIndexerError(e instanceof Error ? e : new Error(String(e)));
+    } finally {
+      setIndexerLoading(false);
+    }
+  }, [resourceId]);
+
+  useEffect(() => {
+    // Only fetch once the resource is confirmed accessible — avoids spamming
+    // 404s from the indexer endpoint when the user hits a resource they
+    // cannot see.
+    if (!resource) return;
+    fetchIndexerStatus();
+  }, [resource, fetchIndexerStatus]);
 
   useEffect(() => {
     const title = resource
@@ -190,46 +234,67 @@ export default function ResourceDetailPage() {
 
   return (
     <PageContainer>
-      {/* Breadcrumb */}
-      <nav className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 mb-4">
+      {/* Breadcrumb — slightly higher contrast on the parent link to make it
+          recognizably tappable, current segment carries weight via mono+bold. */}
+      <nav className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300 mb-4">
         <Link
           href="/workspace/resources"
-          className="hover:text-gray-900 dark:hover:text-gray-200 hover:underline"
+          className="hover:text-foreground hover:underline focus:outline-none focus:ring-2 focus:ring-ring rounded"
         >
           {t("list.title")}
         </Link>
-        <ChevronRight className="h-4 w-4" />
-        <span className="text-gray-900 dark:text-gray-100 font-mono">
+        <ChevronRight className="h-4 w-4 text-gray-400" />
+        <span className="text-foreground font-mono font-medium">
           {resource.resource_id}
         </span>
       </nav>
 
       <PageHeader title={displayName} description={resource.resource_id} />
 
-      <div className="mb-6">
+      <div className="mb-8">
         <ResourceStatsStrip resource={resource} />
       </div>
 
       <Tabs value={tab} onValueChange={setTab}>
-        <TabsList>
-          <TabsTrigger value="overview">{t("tabs.overview")}</TabsTrigger>
-          <TabsTrigger value="data">{t("tabs.data")}</TabsTrigger>
-          <TabsTrigger value="schemas">{t("tabs.schemas")}</TabsTrigger>
-          <TabsTrigger value="tokens">{t("tabs.tokens")}</TabsTrigger>
-          <TabsTrigger value="events">{t("tabs.events")}</TabsTrigger>
-        </TabsList>
+        {/* Sticky tab bar — keeps navigation reachable when token tables /
+            events get long. The negative margin is paired with horizontal
+            padding so the backdrop blur edge meets the page container. */}
+        <div className="sticky top-0 z-10 -mx-4 mb-2 bg-background/85 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/70">
+          <TabsList>
+            <TabsTrigger value="overview">
+              <BarChart3 className="mr-2 h-4 w-4" />
+              {t("tabs.overview")}
+            </TabsTrigger>
+            <TabsTrigger value="data">
+              <Database className="mr-2 h-4 w-4" />
+              {t("tabs.data")}
+            </TabsTrigger>
+            <TabsTrigger value="schemas">
+              <Layers className="mr-2 h-4 w-4" />
+              {t("tabs.schemas")}
+            </TabsTrigger>
+            <TabsTrigger value="tokens">
+              <Key className="mr-2 h-4 w-4" />
+              {t("tabs.tokens")}
+            </TabsTrigger>
+            <TabsTrigger value="events">
+              <Activity className="mr-2 h-4 w-4" />
+              {t("tabs.events")}
+            </TabsTrigger>
+          </TabsList>
+        </div>
 
         {/*
-          Overview is intentionally a slim landing for #325 — the stats strip
-          above already gives the at-a-glance picture. Issue #326 will fill it
-          in with an Indexer Status panel and a schema EmptyState wired to the
-          CreateSchemaDialog. The schema viewer lives in the Schemas tab.
+          Overview hosts the Indexer Status panel (Issue #326) so ingest
+          health is visible to operators without leaving the detail page.
+          Schema management lives in the Schemas tab — kept separate because
+          schema is a define-time concern and the indexer state is runtime.
         */}
         <TabsContent value="overview" className="mt-6">
-          <EmptyState
-            icon={Database}
-            title={displayName}
-            description={t("detail.overviewPlaceholder")}
+          <IndexerStatusPanel
+            data={indexerStatus}
+            isLoading={indexerLoading}
+            error={indexerError}
           />
         </TabsContent>
 
@@ -250,6 +315,9 @@ export default function ResourceDetailPage() {
               icon={FileJson}
               title={t("schema.emptyTitle")}
               description={t("schema.emptyDescription")}
+              actionLabel={t("schema.createAction")}
+              onAction={() => setCreateSchemaOpen(true)}
+              compact
             />
           )}
         </TabsContent>
@@ -263,9 +331,24 @@ export default function ResourceDetailPage() {
             icon={Clock}
             title={t("events.comingSoonTitle")}
             description={t("events.comingSoonDescription")}
+            compact
           />
         </TabsContent>
       </Tabs>
+
+      <CreateSchemaDialog
+        isOpen={createSchemaOpen}
+        onClose={() => setCreateSchemaOpen(false)}
+        onSuccess={(created) => {
+          // Only adopt the new schema for display when it belongs to the
+          // current resource — the dialog lets the user pick a resource, so
+          // a mismatched pick should close without mutating this page's view.
+          if (created.resource_id === resourceId) {
+            setSchema(created);
+          }
+          setCreateSchemaOpen(false);
+        }}
+      />
     </PageContainer>
   );
 }
