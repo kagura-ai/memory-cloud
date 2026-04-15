@@ -14,6 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.resource_tokens import ResourceTokenManager
 from db.base import get_db
+from db.constraint_names import (
+    RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE,
+    RESOURCE_EVENTS_UPSERT_UNIQUE,
+    integrity_error_constraint_name,
+)
 from models.auth import Context
 from models.resource import ResourceEvent, ResourceToken
 from models.schemas import (
@@ -331,17 +336,14 @@ async def ingest_event(
 
     except IntegrityError as e:
         await db.rollback()
-        error_msg = str(e)
+        constraint = integrity_error_constraint_name(e)
 
-        # Handle duplicate version error
-        if "unique_resource_doc_version" in error_msg:
+        if constraint == RESOURCE_EVENTS_UPSERT_UNIQUE:
             raise ConflictError(
                 f"Version {request.version} already exists for document {request.doc_id}"
             ) from e
 
-        # Handle duplicate idempotency key
-        if "unique_idempotency_key" in error_msg:
-            # Find existing event with this idempotency key
+        if constraint == RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE:
             result = await db.execute(
                 select(ResourceEvent).where(
                     ResourceEvent.idempotency_key == request.idempotency_key
@@ -355,20 +357,22 @@ async def ingest_event(
                     idempotency_key=request.idempotency_key,
                     existing_event_id=existing_event.id,
                 )
-                # Return existing event (202 Accepted - idempotent success)
                 return ResourceEventResponse(
                     status="success",
                     event_id=existing_event.id,
-                    queued=False,  # Already processed
+                    queued=False,
                     estimated_indexing_time_seconds=0,
                 )
 
-        # Unknown integrity error
-        logger.error("resource_event_integrity_error", error=error_msg)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create event due to database constraint",
-        ) from e
+        # Unknown constraint — re-raise so it surfaces as 500 with full
+        # context for alerting, instead of being masked as a generic
+        # "database constraint" message that hides the real failure.
+        logger.error(
+            "resource_event_integrity_error_unhandled",
+            constraint=constraint,
+            error=str(e),
+        )
+        raise
 
 
 @router.post(
@@ -476,10 +480,9 @@ async def ingest_batch(
             created_ids.append(event.id)
 
         except IntegrityError as e:
-            error_msg = str(e)
+            constraint = integrity_error_constraint_name(e)
 
-            # Duplicate version (skip silently)
-            if "unique_resource_doc_version" in error_msg:
+            if constraint == RESOURCE_EVENTS_UPSERT_UNIQUE:
                 logger.debug(
                     "duplicate_version_skipped",
                     doc_id=event_req.doc_id,
@@ -493,8 +496,7 @@ async def ingest_batch(
                     }
                 )
 
-            # Duplicate idempotency key (skip silently)
-            elif "unique_idempotency_key" in error_msg:
+            elif constraint == RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE:
                 logger.debug("duplicate_idempotency_key_skipped", key=event_req.idempotency_key)
                 errors.append(
                     {
@@ -505,8 +507,14 @@ async def ingest_batch(
                 )
 
             else:
-                # Unknown error
-                logger.error("batch_event_failed", index=idx, error=error_msg)
+                # Batch keeps partial-success: log + per-item error,
+                # do not re-raise (would abort sibling events).
+                logger.error(
+                    "batch_event_integrity_error_unhandled",
+                    index=idx,
+                    constraint=constraint,
+                    error=str(e),
+                )
                 errors.append(
                     {
                         "index": idx,
