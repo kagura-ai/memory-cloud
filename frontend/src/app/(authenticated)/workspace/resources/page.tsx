@@ -164,6 +164,22 @@ export default function ResourcesListPage() {
                 const handleRowClick = (
                   ev: React.MouseEvent<HTMLTableRowElement>,
                 ) => {
+                  // Mirror the browser's native <a> click semantics so the
+                  // row-level navigation never overrides what the operator
+                  // already expects from a link: modifier-clicks open in a
+                  // new tab/window, secondary-button clicks open context
+                  // menus, etc. Without these guards Cmd/Ctrl/Shift-clicking
+                  // the row would still router.push() in the same tab,
+                  // surprising muscle memory built up from the slug Link.
+                  if (
+                    ev.button !== 0 ||
+                    ev.metaKey ||
+                    ev.ctrlKey ||
+                    ev.shiftKey ||
+                    ev.altKey
+                  ) {
+                    return;
+                  }
                   const target = ev.target as HTMLElement;
                   if (target.closest("a, button")) return;
                   router.push(href);

@@ -20,9 +20,6 @@ from auth.dependencies import APIKeyOrSessionUser
 from db.base import get_db
 from services.permission_service import PermissionService
 from services.resource_indexer import get_indexer_status_for_context
-from utils.logger import get_logger
-
-logger = get_logger(__name__)
 
 router = APIRouter(prefix="/resources", tags=["resource-indexer"])
 

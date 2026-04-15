@@ -13,6 +13,7 @@ from __future__ import annotations
 
 # Standard library imports (PEP8)
 import json  # Issue #262: JSON serialization for Memory content
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -32,7 +33,7 @@ from db.qdrant import (
 )
 from models.auth import Context
 from models.memory import Memory  # Issue #262: Memory model for resource data storage
-from models.resource import IndexerState, ResourceEvent, ResourceSchema
+from models.resource import IndexerState, Resource, ResourceEvent, ResourceSchema
 from services.embedding_service import EmbeddingService
 from utils.datetime import utcnow
 from utils.exceptions import QdrantError
@@ -104,37 +105,60 @@ async def get_indexer_status_for_context(
     resource_id = context.resource_id
     assert resource_id is not None, "resolve_resource_by_slug returns only slugged contexts"
 
-    state_row = (
+    # Cross-tenant safety (Copilot review #347): filter satellite tables by
+    # the authoritative ``resources.id`` (UUID) rather than the slug. The
+    # ``contexts.resource_id`` global UNIQUE only covers active rows — a
+    # soft-deleted context releases the slug, so a string-only filter could
+    # surface events from a previously-deleted resource (potentially a
+    # different workspace) once the slug is reused. The Resource entity
+    # row, by contrast, is workspace-scoped (``UniqueConstraint(workspace_id,
+    # resource_id)``) and is what every satellite table's ``resource_pk``
+    # FK actually points at.
+    resource_pk = (
         await db.execute(
-            select(IndexerState)
-            .where(
-                IndexerState.resource_id == resource_id,
-                IndexerState.context_id == context.id,
+            select(Resource.id).where(
+                Resource.workspace_id == context.workspace_id,
+                Resource.resource_id == resource_id,
             )
-            .order_by(
-                # Prefer the post-#323 row (resource_pk populated) over any
-                # legacy NULL row that survived the writer migration.
-                IndexerState.resource_pk.is_(None).asc(),
-                IndexerState.id.desc(),
-            )
-            .limit(1)
         )
     ).scalar_one_or_none()
 
-    events = (
-        (
+    # Common pattern: prefer ``resource_pk`` filtering when the Resource row
+    # exists (post-a97 — should be ~always now), and explicitly exclude
+    # legacy ``resource_pk IS NULL`` rows so the dual-row Phase 1 transition
+    # can't surface a stale event from before the writer migration. When
+    # ``resource_pk`` is None (Resource row genuinely absent — should never
+    # happen for a context produced by ``resolve_resource_by_slug``, but we
+    # fail-safe to "no events" rather than fall back to slug filtering),
+    # return empty results to avoid the cross-tenant leak vector entirely.
+    if resource_pk is None:
+        state_row = None
+        events: Sequence[ResourceEvent] = []
+    else:
+        state_row = (
             await db.execute(
-                select(ResourceEvent)
+                select(IndexerState)
                 .where(
-                    ResourceEvent.resource_id == resource_id,
+                    IndexerState.resource_pk == resource_pk,
+                    IndexerState.context_id == context.id,
                 )
-                .order_by(ResourceEvent.id.desc())
-                .limit(recent_event_limit)
+                .order_by(IndexerState.id.desc())
+                .limit(1)
             )
+        ).scalar_one_or_none()
+
+        events = (
+            (
+                await db.execute(
+                    select(ResourceEvent)
+                    .where(ResourceEvent.resource_pk == resource_pk)
+                    .order_by(ResourceEvent.id.desc())
+                    .limit(recent_event_limit)
+                )
+            )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
 
     state_dict: dict[str, Any] | None
     if state_row is None:
