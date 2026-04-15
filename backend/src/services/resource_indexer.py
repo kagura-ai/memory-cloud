@@ -771,8 +771,15 @@ class ResourceIndexer:
         pattern seen in #324/#334/#338). Do NOT split this back into two
         methods without preserving the single-source-of-truth invariant.
 
-        Falls back to the legacy `kagura_memories` collection + the indexer's
-        default-model embedding service when no ContextSearchConfig row exists.
+        Fallback (no ContextSearchConfig row): returns the indexer's default
+        EmbeddingService paired with the collection derived from that service's
+        own model/dimensions. With the out-of-the-box settings
+        (text-embedding-3-small/512) this resolves to `kagura_memories`; if the
+        operator overrides settings.embedding_model/embedding_dimensions, the
+        fallback follows those settings so the single-source-of-truth invariant
+        holds on the fallback path too. This intentionally diverges from
+        memory_service, which always returns the legacy `kagura_memories`
+        fallback — memory_service pre-dates multi-model settings.
         """
         from models.config import ContextSearchConfig
 

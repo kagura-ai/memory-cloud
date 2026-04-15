@@ -202,15 +202,27 @@ class TestResolveRoutingForContext:
         assert svc is not indexer.embedding_service
 
     @pytest.mark.asyncio
-    async def test_no_search_config_falls_back_to_legacy_and_default_service(self, indexer):
+    async def test_no_search_config_falls_back_to_default_service_and_matching_collection(
+        self, indexer
+    ):
+        """When no ContextSearchConfig row exists, the resolver pairs the
+        indexer's default EmbeddingService with the collection derived from
+        that service's own model/dimensions. Out-of-the-box this resolves to
+        `kagura_memories`, but operator overrides to settings.embedding_model
+        must be honored here so the fallback single-source-of-truth invariant
+        holds even on the no-config path."""
+        from db.qdrant import get_collection_name
+
         result = MagicMock()
         result.scalar_one_or_none.return_value = None
         indexer.db.execute = AsyncMock(return_value=result)
 
         name, svc = await indexer._resolve_routing_for_context(uuid4())
 
-        assert name == "kagura_memories"
         assert svc is indexer.embedding_service
+        assert name == get_collection_name(
+            indexer.embedding_service.model, indexer.embedding_service.dimensions
+        )
 
     @pytest.mark.asyncio
     async def test_single_select_per_resolve_call(self, indexer):
