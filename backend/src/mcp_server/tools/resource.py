@@ -26,6 +26,11 @@ from mcp_server.tools._helpers import (
     _log_tool_usage,
     _success_response,
 )
+from services.resource_quota_service import (
+    check_event_quota,
+    resolve_workspace_event_quota_per_hour,
+)
+from utils.exceptions import RateLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -467,6 +472,24 @@ async def handle_ingest_events(
             boundary_err = await _check_resource_workspace_boundary(db, resource_id, workspace_id)
             if boundary_err:
                 return boundary_err
+
+            # MCP shares the per-hour ceiling with the HTTP ingest path via a
+            # workspace-scoped Redis counter. The cap is derived from the most
+            # permissive ResourceToken for this (workspace, resource) pair, with
+            # a default fallback when no token exists.
+            quota_per_hour = await resolve_workspace_event_quota_per_hour(
+                db, workspace_id, resource_id
+            )
+            try:
+                await check_event_quota(
+                    resource_id, workspace_id, quota_per_hour, count=len(events)
+                )
+            except RateLimitError as quota_err:
+                return _error_response(
+                    "quota_exceeded",
+                    quota_err.message,
+                    retry_after_seconds=quota_err.retry_after,
+                )
 
             # Process events
             from sqlalchemy.exc import IntegrityError

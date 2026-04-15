@@ -243,21 +243,30 @@ async def _get_workspace_member_role(
 ) -> str | None:
     """Get user's role in workspace.
 
+    Returns ``None`` when the workspace itself is soft-deleted
+    (``Workspace.deleted_at IS NOT NULL``) so MCP write tools do not
+    silently authorize ingest into a deleted workspace.
+
     Args:
         db: Database session
         user_id: User ID
         workspace_id: Workspace ID
 
     Returns:
-        Role string ('owner', 'admin', 'member', 'viewer') or None if not a member
+        Role string ('owner', 'admin', 'member', 'viewer') or ``None`` if
+        not a member or the workspace is soft-deleted.
     """
     from sqlalchemy import select
 
-    from models.auth import WorkspaceMember
+    from models.auth import Workspace, WorkspaceMember
 
     result = await db.execute(
-        select(WorkspaceMember).where(
-            WorkspaceMember.user_id == user_id, WorkspaceMember.workspace_id == workspace_id
+        select(WorkspaceMember)
+        .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
+        .where(
+            WorkspaceMember.user_id == user_id,
+            WorkspaceMember.workspace_id == workspace_id,
+            Workspace.deleted_at.is_(None),
         )
     )
     member = result.scalar_one_or_none()
@@ -285,6 +294,17 @@ async def _check_viewer_permission(
         return None
 
     user_role = await _get_workspace_member_role(db, user_id, workspace_id)
+    if user_role is None:
+        # Caller is not a member of this workspace, OR the workspace is
+        # soft-deleted (`_get_workspace_member_role` filters Workspace.deleted_at
+        # IS NULL). Either way: deny writes (fail-closed).
+        return _error_response(
+            "permission_denied",
+            f"Cannot {operation}: workspace not accessible.",
+            your_role="not_a_member",
+            required_role="member",
+            help="Verify the workspace is active and you are a member with at least 'member' role.",
+        )
     if user_role == "viewer":
         return _error_response(
             "permission_denied",

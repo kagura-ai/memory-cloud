@@ -146,6 +146,12 @@ class RateLimitError(MemoryCloudException):
     ):
         super().__init__(message, status_code=429, error_code="RATE-001", retry_after=retry_after)
 
+    @property
+    def retry_after(self) -> int | None:
+        """Seconds the client should wait before retrying, if known."""
+        retry = self.details.get("retry_after")
+        return int(retry) if retry is not None else None
+
 
 class QuotaExceededError(MemoryCloudException):
     """Quota exceeded (429)."""
