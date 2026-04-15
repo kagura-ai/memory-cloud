@@ -25,8 +25,10 @@ def _build_db_mock(*, role: str | None, boundary_ok: bool):
     """Build a mock DB whose db.execute returns role then boundary lookup.
 
     The MCP handler queries:
-      1. _get_workspace_member_role → SELECT WorkspaceMember.role JOIN Workspace
-         (the JOIN form added in #332 returns the role string directly via .scalar_one_or_none)
+      1. _get_workspace_member_role → SELECT WorkspaceMember JOIN Workspace.
+         .scalar_one_or_none returns a WorkspaceMember-like object whose
+         .role attribute is the role string, or None when no member row
+         matches (includes soft-deleted workspaces).
       2. _check_resource_workspace_boundary → SELECT Context.id, .scalar_one_or_none
     """
     role_result = MagicMock()

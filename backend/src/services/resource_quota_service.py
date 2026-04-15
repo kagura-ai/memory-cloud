@@ -92,7 +92,8 @@ async def check_event_quota(
             resource_id=resource_id,
             workspace_id=str(workspace_id),
             previous=current,
-            reserved=new_count,
+            reserved=count,
+            new_total=new_count,
             quota=quota_per_hour,
         )
     except RateLimitError:
