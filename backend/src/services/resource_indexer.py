@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local application imports (PEP8)
-from db.qdrant import get_qdrant_client
+from db.qdrant import KAGURA_MEMORIES_VECTOR_NAME, get_qdrant_client
 from models.auth import Context
 from models.memory import Memory  # Issue #262: Memory model for resource data storage
 from models.resource import IndexerState, ResourceEvent, ResourceSchema
@@ -304,10 +304,11 @@ class ResourceIndexer:
         # Generate Memory ID for new memories (may be overwritten if memory exists)
         memory_id = uuid4()
 
-        # Single Collection Migration: Add 3-level isolation to payload
+        # kagura_memories collections are configured with named vectors
+        # (dense + sparse bm25); anonymous vectors are rejected at upsert.
         point = PointStruct(
             id=str(point_id_uuid),
-            vector=embedding,
+            vector={KAGURA_MEMORIES_VECTOR_NAME: embedding},
             payload={
                 "workspace_id": str(context.workspace_id),  # 3-level isolation
                 "context_id": str(context.id),  # 3-level isolation
@@ -425,11 +426,9 @@ class ResourceIndexer:
                 summary = f"[{event.resource_id}] {event.doc_id} v{event.version}"
                 # P2-10: Safe truncation with ellipsis for context_summary
                 context_summary = content[:1997] + "..." if len(content) > 2000 else content
-                # Single Collection Migration: Set workspace_id/context_id
                 memory = Memory(
                     id=memory_id,
                     user_id=str(context.created_by),
-                    collection_name=KAGURA_MEMORIES_COLLECTION,  # Deprecated but kept for compatibility
                     workspace_id=context.workspace_id,
                     context_id=context.id,
                     summary=summary[:500],

@@ -47,6 +47,11 @@ _qdrant_client: AsyncQdrantClient | None = None
 # Single Collection Migration: Collection name constant
 KAGURA_MEMORIES_COLLECTION = "kagura_memories"
 
+# Named vector contract (Issue #16, #324): all kagura_memories collections use
+# `{"dense": VectorParams(...), "bm25": SparseVectorParams(...)}` — anonymous
+# vectors will fail with "Not existing vector name error".
+KAGURA_MEMORIES_VECTOR_NAME = "dense"
+
 
 def get_collection_name(model: str, dimensions: int) -> str:
     """Get Qdrant collection name for a given embedding model.
