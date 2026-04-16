@@ -13,9 +13,9 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.qdrant import get_collection_name, search_memories_fulltext, search_memories_qdrant
+from db.qdrant import search_memories_fulltext, search_memories_qdrant
 from repositories.config_repository import ContextSearchConfigRepository
-from services.context_routing import resolve_context_routing
+from services.context_routing import resolve_routing_from_config
 from services.embedding_service import EmbeddingService
 from services.reranker_service import RerankerService
 from utils.logger import get_logger
@@ -146,14 +146,13 @@ class SearchService:
             query_normalized=query != normalized_query,
         )
 
-        # Resolve per-context routing (#341: shared helper)
-        if primary_context_id:
-            collection, embed_svc = await resolve_context_routing(
-                self.db, UUID(primary_context_id), default_service=self.embedding_service
-            )
-        else:
-            collection = get_collection_name("text-embedding-3-small", 512)
-            embed_svc = self.embedding_service
+        # Resolve per-context routing (#341: shared helper).
+        # Reuse the config already loaded by _get_search_config to avoid a
+        # second SELECT on the same ContextSearchConfig row.
+        routing_config = config if hasattr(config, "context_id") else None
+        collection, embed_svc = resolve_routing_from_config(
+            self.db, routing_config, default_service=self.embedding_service
+        )
 
         semantic_results: list[dict] = []
         fulltext_results: list[dict] = []

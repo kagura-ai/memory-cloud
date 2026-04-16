@@ -99,6 +99,41 @@ async def resolve_context_routing(
     return legacy_collection, default_service
 
 
+def resolve_routing_from_config(
+    db: AsyncSession,
+    config: ContextSearchConfig | None,
+    *,
+    default_service: EmbeddingService,
+) -> tuple[str, EmbeddingService]:
+    """Derive (collection_name, EmbeddingService) from a preloaded config.
+
+    Use this when the caller has already fetched a ``ContextSearchConfig``
+    and wants to avoid a second SELECT.  Applies the same fallback and
+    ``default_service`` reuse logic as :func:`resolve_context_routing`.
+
+    Args:
+        db: Async SQLAlchemy session (needed only when constructing a new
+            EmbeddingService for non-default configs).
+        config: Preloaded ContextSearchConfig, or ``None`` for the legacy
+            fallback.
+        default_service: Pre-constructed EmbeddingService returned when
+            config is ``None`` or matches the default.
+    """
+    if config:
+        collection_name = get_collection_name(config.embedding_model, config.embedding_dimensions)
+        if (
+            default_service.model == config.embedding_model
+            and default_service.dimensions == config.embedding_dimensions
+        ):
+            return collection_name, default_service
+        return collection_name, EmbeddingService(
+            db,
+            model=config.embedding_model,
+            dimensions=config.embedding_dimensions,
+        )
+    return get_collection_name(_LEGACY_MODEL, _LEGACY_DIMS), default_service
+
+
 async def resolve_collection_name(
     db: AsyncSession,
     context_id: UUID,

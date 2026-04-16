@@ -12,14 +12,12 @@ class TestSearchService:
 
     @pytest.fixture(autouse=True)
     def _patch_routing(self):
-        """Patch resolve_context_routing so tests don't hit async db.execute."""
+        """Patch resolve_routing_from_config so tests don't hit DB."""
         with patch(
-            "services.search_service.resolve_context_routing",
-            new=AsyncMock(
-                return_value=(
-                    "kagura_memories",
-                    MagicMock(embed=AsyncMock(return_value=[0.1] * 512)),
-                )
+            "services.search_service.resolve_routing_from_config",
+            return_value=(
+                "kagura_memories",
+                MagicMock(embed=AsyncMock(return_value=[0.1] * 512)),
             ),
         ):
             yield
@@ -138,14 +136,12 @@ class TestSearchMode:
 
     @pytest.fixture(autouse=True)
     def _patch_routing(self):
-        """Patch resolve_context_routing so tests don't hit async db.execute."""
+        """Patch resolve_routing_from_config so tests don't hit DB."""
         with patch(
-            "services.search_service.resolve_context_routing",
-            new=AsyncMock(
-                return_value=(
-                    "kagura_memories",
-                    MagicMock(embed=AsyncMock(return_value=[0.1] * 512)),
-                )
+            "services.search_service.resolve_routing_from_config",
+            return_value=(
+                "kagura_memories",
+                MagicMock(embed=AsyncMock(return_value=[0.1] * 512)),
             ),
         ):
             yield
