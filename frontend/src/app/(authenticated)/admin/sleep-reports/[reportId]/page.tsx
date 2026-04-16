@@ -14,6 +14,7 @@ import { useTranslations, useLocale } from "next-intl";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { LoadingState } from "@/components/common/LoadingState";
+import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { apiClient } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -37,9 +38,13 @@ import {
   TrendingUp,
   Sparkles,
 } from "lucide-react";
-import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
+import {
+  buildHeadline,
+  buildPhaseNarrative,
+  type PhaseName,
+} from "@/lib/utils/sleep-narrative";
 import { getSleepStatusColor, type SleepStatus } from "@/lib/sleep-report";
 
 interface SleepReportDetail {
@@ -47,6 +52,7 @@ interface SleepReportDetail {
   user_id: string;
   workspace_id: string | null;
   context_id: string | null;
+  context_name: string | null;
   status: SleepStatus;
   started_at: string;
   completed_at: string | null;
@@ -102,74 +108,6 @@ function formatDuration(startedAt: string, completedAt: string | null): string {
   return `${minutes}m ${remainSec}s`;
 }
 
-/**
- * Extract a human-readable summary from a phase result's details dict.
- * Each phase writes different keys; we pick the most meaningful ones.
- */
-function getPhaseSummary(phaseKey: string, result: PhaseResult): string | null {
-  if (result.skipped) {
-    return result.skip_reason || "skipped";
-  }
-  if (result.error) {
-    return result.error;
-  }
-  const d = result.details || {};
-  const num = (k: string): number | null =>
-    typeof d[k] === "number" ? (d[k] as number) : null;
-  const str = (k: string): string | null =>
-    typeof d[k] === "string" ? (d[k] as string) : null;
-
-  switch (phaseKey) {
-    case "edgeDiscovery": {
-      const sampled = num("sampled");
-      const edges = num("edges_created");
-      if (sampled !== null || edges !== null) {
-        return `${sampled ?? 0} sampled → ${edges ?? 0} edges created`;
-      }
-      return null;
-    }
-    case "dedup": {
-      const candidates = num("candidates");
-      const clusters = num("clusters");
-      const merged = num("merged");
-      if (merged !== null || candidates !== null) {
-        return `${candidates ?? 0} candidates → ${clusters ?? 0} clusters → ${merged ?? 0} merged`;
-      }
-      return null;
-    }
-    case "importance": {
-      const updated = num("updated");
-      const candidates = num("candidates");
-      const message = str("message");
-      if (message) return message;
-      if (updated !== null || candidates !== null) {
-        return `${candidates ?? 0} candidates → ${updated ?? 0} updated`;
-      }
-      return null;
-    }
-    case "consolidation": {
-      const working = num("working_count");
-      const promoted = (num("rule_promoted") ?? 0) + (num("llm_promoted") ?? 0);
-      const archived = (num("rule_deleted") ?? 0) + (num("llm_archived") ?? 0);
-      if (working !== null) {
-        return `${working} working → ${promoted} promoted, ${archived} archived`;
-      }
-      return null;
-    }
-    case "reindex": {
-      const reindexed = num("reindexed");
-      const failed = num("failed");
-      if (reindexed !== null) {
-        return failed && failed > 0
-          ? `${reindexed} reindexed, ${failed} failed`
-          : `${reindexed} reindexed`;
-      }
-      return null;
-    }
-  }
-  return null;
-}
-
 function PhaseIcon({
   result,
 }: {
@@ -219,7 +157,6 @@ export default function AdminSleepReportDetailPage() {
     ? params.reportId[0]
     : (params.reportId ?? "");
   const t = useTranslations("admin.sleepReports");
-  const tCommon = useTranslations("admin.common");
   const locale = useLocale();
   const { user } = useAuth();
   const timezone = user?.timezone || "UTC";
@@ -227,13 +164,14 @@ export default function AdminSleepReportDetailPage() {
   const [detail, setDetail] = useState<SleepReportDetailResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [showMetadata, setShowMetadata] = useState(false);
-  const { toast } = useToast();
 
   useEffect(() => {
     const loadDetail = async () => {
       try {
         setLoading(true);
+        setLoadError(null);
         const data = await apiClient.get<SleepReportDetailResponse>(
           `/api/v1/admin/sleep-reports/${reportId}`,
         );
@@ -243,18 +181,14 @@ export default function AdminSleepReportDetailPage() {
         if (err?.status === 404) {
           setNotFound(true);
         } else {
-          toast({
-            title: tCommon("error"),
-            description: t("messages.loadError"),
-            variant: "destructive",
-          });
+          setLoadError(t("messages.loadError"));
         }
       } finally {
         setLoading(false);
       }
     };
     loadDetail();
-    // t/tCommon/toast are stable across renders; only reportId should trigger refetch
+    // t is stable across renders; only reportId should trigger refetch
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reportId]);
 
@@ -263,6 +197,21 @@ export default function AdminSleepReportDetailPage() {
       <PageContainer>
         <PageHeader title={t("title")} />
         <LoadingState lines={5} />
+      </PageContainer>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <PageContainer>
+        <PageHeader title={t("title")} />
+        <ErrorBanner error={loadError} />
+        <Link href="/admin/sleep-reports">
+          <Button variant="outline">
+            <ArrowLeft className="h-4 w-4 mr-2" />
+            {t("actions.back")}
+          </Button>
+        </Link>
       </PageContainer>
     );
   }
@@ -286,13 +235,15 @@ export default function AdminSleepReportDetailPage() {
 
   const { report, actions, action_count } = detail;
 
-  const phaseResults = [
+  const phaseResults: { key: PhaseName; result: PhaseResult | null }[] = [
     { key: "edgeDiscovery", result: report.edge_discovery_result },
     { key: "dedup", result: report.dedup_result },
     { key: "importance", result: report.importance_result },
     { key: "consolidation", result: report.consolidation_result },
     { key: "reindex", result: report.reindex_result },
   ];
+
+  const headline = buildHeadline(report.context_name, report);
 
   const relativeStarted = formatRelativeTime(
     report.started_at,
@@ -316,6 +267,16 @@ export default function AdminSleepReportDetailPage() {
       />
 
       <div className="space-y-6">
+        {(report.status === "failed" || report.error_message) && (
+          <ErrorBanner
+            error={
+              report.error_message
+                ? `${t("detail.errorMessage")}: ${report.error_message}`
+                : t(`status.${report.status}`)
+            }
+          />
+        )}
+
         <div className="p-6 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700">
           <div className="flex items-start justify-between gap-4 flex-wrap">
             <div className="flex items-center gap-3">
@@ -334,16 +295,9 @@ export default function AdminSleepReportDetailPage() {
               </div>
             </div>
           </div>
-          {report.error_message && (
-            <div className="mt-4 p-3 rounded bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
-              <div className="text-xs font-medium text-red-700 dark:text-red-300 mb-1">
-                {t("detail.errorMessage")}
-              </div>
-              <div className="text-sm text-red-600 dark:text-red-400 font-mono break-all">
-                {report.error_message}
-              </div>
-            </div>
-          )}
+          <div className="mt-4 text-sm text-gray-800 dark:text-gray-100">
+            {t(headline.key, headline.values)}
+          </div>
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
@@ -380,7 +334,7 @@ export default function AdminSleepReportDetailPage() {
           </CardHeader>
           <CardContent className="space-y-2">
             {phaseResults.map(({ key, result }) => {
-              const summary = result ? getPhaseSummary(key, result) : null;
+              const narrative = buildPhaseNarrative(key, result);
               return (
                 <details
                   key={key}
@@ -392,9 +346,9 @@ export default function AdminSleepReportDetailPage() {
                       <div className="text-sm font-medium text-gray-900 dark:text-gray-100">
                         {t(`detail.${key}`)}
                       </div>
-                      {summary && (
+                      {narrative && (
                         <div className="text-xs text-gray-500 dark:text-gray-400 truncate">
-                          {summary}
+                          {t(narrative.key, narrative.values)}
                         </div>
                       )}
                     </div>

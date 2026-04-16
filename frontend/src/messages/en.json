@@ -2214,7 +2214,35 @@
         "dedup": "Deduplication",
         "importance": "Importance Re-evaluation",
         "consolidation": "Consolidation",
-        "reindex": "Reindex"
+        "reindex": "Reindex",
+        "narrative": {
+          "headline": "{contextName} — processed {processed} memories: {merged} merged, {edges} edges, {promoted} promoted, {flagged} flagged",
+          "headlineNoContext": "Processed {processed} memories: {merged} merged, {edges} edges, {promoted} promoted, {flagged} flagged",
+          "skipped": "Skipped: {reason}",
+          "failed": "Failed: {error}",
+          "phases": {
+            "edgeDiscovery": {
+              "success": "Added {count, plural, one {# edge} other {# edges}} across {sampled} sampled",
+              "empty": "No new edges created"
+            },
+            "dedup": {
+              "success": "Detected {count, plural, one {# duplicate pair} other {# duplicate pairs}} → {merged} merged, {held} held below threshold",
+              "empty": "No duplicate candidates found"
+            },
+            "importance": {
+              "success": "Re-evaluated {candidates} memories → {updated} updated (α={alpha})",
+              "empty": "No importance changes this run"
+            },
+            "consolidation": {
+              "success": "Evaluated {candidates, plural, one {# promotion candidate} other {# promotion candidates}} → {rulePromoted} rule-promoted, {llmPromoted} LLM-promoted, {borderline} deferred",
+              "empty": "No promotions this run"
+            },
+            "reindex": {
+              "success": "Reindexed {count, plural, one {# memory} other {# memories}}{failed, plural, =0 {} other {, {failed} failed}}",
+              "empty": "Nothing to reindex"
+            }
+          }
+        }
       },
       "pagination": {
         "showing": "Showing {from}-{to} of {total}",

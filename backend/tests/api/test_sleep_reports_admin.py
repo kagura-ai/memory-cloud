@@ -59,6 +59,20 @@ def _make_mock_report(
     return r
 
 
+def _make_mock_context(
+    *,
+    name: str = "kagura-dev",
+    display_name: str | None = "Kagura Dev",
+    deleted: bool = False,
+):
+    ctx = MagicMock()
+    ctx.id = uuid4()
+    ctx.name = name
+    ctx.display_name = display_name
+    ctx.deleted_at = datetime(2026, 1, 1) if deleted else None
+    return ctx
+
+
 def _make_mock_action(phase: str = "edge_discovery", action_type: str = "create_edge"):
     a = MagicMock()
     a.id = 1
@@ -182,6 +196,7 @@ class TestGetSleepReportDetail:
 
     def test_returns_report_with_actions(self, client):
         report = _make_mock_report()
+        ctx = _make_mock_context()
         actions = [
             _make_mock_action(),
             _make_mock_action(phase="dedup_merge", action_type="merge"),
@@ -190,9 +205,11 @@ class TestGetSleepReportDetail:
         mock_db = AsyncMock()
         report_result = MagicMock()
         report_result.scalar_one_or_none.return_value = report
+        ctx_result = MagicMock()
+        ctx_result.scalar_one_or_none.return_value = ctx
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = actions
-        mock_db.execute.side_effect = [report_result, actions_result]
+        mock_db.execute.side_effect = [report_result, ctx_result, actions_result]
 
         _install_overrides(mock_db)
 
@@ -201,11 +218,86 @@ class TestGetSleepReportDetail:
         data = response.json()
         assert data["action_count"] == 2
         assert data["report"]["memories_processed"] == 7
+        assert data["report"]["context_name"] == "Kagura Dev"
         # Verify Z suffix on both report and action timestamps
         assert data["report"]["started_at"].endswith("Z")
         assert data["actions"][0]["created_at"].endswith("Z")
         assert data["actions"][0]["action_type"] == "create_edge"
         assert data["actions"][1]["action_type"] == "merge"
+
+    def test_falls_back_to_name_when_display_name_missing(self, client):
+        report = _make_mock_report()
+        ctx = _make_mock_context(name="kagura-dev", display_name=None)
+
+        mock_db = AsyncMock()
+        report_result = MagicMock()
+        report_result.scalar_one_or_none.return_value = report
+        ctx_result = MagicMock()
+        ctx_result.scalar_one_or_none.return_value = ctx
+        actions_result = MagicMock()
+        actions_result.scalars.return_value.all.return_value = []
+        mock_db.execute.side_effect = [report_result, ctx_result, actions_result]
+
+        _install_overrides(mock_db)
+
+        response = client.get(f"/api/v1/admin/sleep-reports/{report.id}")
+        assert response.status_code == 200
+        assert response.json()["report"]["context_name"] == "kagura-dev"
+
+    def test_deleted_context_returns_deleted_marker(self, client):
+        report = _make_mock_report()
+        ctx = _make_mock_context(deleted=True)
+
+        mock_db = AsyncMock()
+        report_result = MagicMock()
+        report_result.scalar_one_or_none.return_value = report
+        ctx_result = MagicMock()
+        ctx_result.scalar_one_or_none.return_value = ctx
+        actions_result = MagicMock()
+        actions_result.scalars.return_value.all.return_value = []
+        mock_db.execute.side_effect = [report_result, ctx_result, actions_result]
+
+        _install_overrides(mock_db)
+
+        response = client.get(f"/api/v1/admin/sleep-reports/{report.id}")
+        assert response.status_code == 200
+        assert response.json()["report"]["context_name"] == "(deleted)"
+
+    def test_missing_context_row_returns_deleted_marker(self, client):
+        report = _make_mock_report()
+
+        mock_db = AsyncMock()
+        report_result = MagicMock()
+        report_result.scalar_one_or_none.return_value = report
+        ctx_result = MagicMock()
+        ctx_result.scalar_one_or_none.return_value = None
+        actions_result = MagicMock()
+        actions_result.scalars.return_value.all.return_value = []
+        mock_db.execute.side_effect = [report_result, ctx_result, actions_result]
+
+        _install_overrides(mock_db)
+
+        response = client.get(f"/api/v1/admin/sleep-reports/{report.id}")
+        assert response.status_code == 200
+        assert response.json()["report"]["context_name"] == "(deleted)"
+
+    def test_null_context_id_omits_context_name(self, client):
+        report = _make_mock_report(context_id=False)
+        report.context_id = None
+
+        mock_db = AsyncMock()
+        report_result = MagicMock()
+        report_result.scalar_one_or_none.return_value = report
+        actions_result = MagicMock()
+        actions_result.scalars.return_value.all.return_value = []
+        # No Context query because context_id is None
+        mock_db.execute.side_effect = [report_result, actions_result]
+
+        _install_overrides(mock_db)
+
+        response = client.get(f"/api/v1/admin/sleep-reports/{report.id}")
+        assert response.status_code == 200
+        assert response.json()["report"]["context_name"] is None
 
     def test_not_found_returns_404(self, client):
         mock_db = AsyncMock()
@@ -228,13 +320,16 @@ class TestGetSleepReportDetail:
 
     def test_empty_actions_returns_zero_count(self, client):
         report = _make_mock_report()
+        ctx = _make_mock_context()
 
         mock_db = AsyncMock()
         report_result = MagicMock()
         report_result.scalar_one_or_none.return_value = report
+        ctx_result = MagicMock()
+        ctx_result.scalar_one_or_none.return_value = ctx
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = []
-        mock_db.execute.side_effect = [report_result, actions_result]
+        mock_db.execute.side_effect = [report_result, ctx_result, actions_result]
 
         _install_overrides(mock_db)
 
