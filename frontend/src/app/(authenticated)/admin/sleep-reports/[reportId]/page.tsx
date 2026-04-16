@@ -173,6 +173,7 @@ export default function AdminSleepReportDetailPage() {
       try {
         setLoading(true);
         setLoadError(null);
+        setNotFound(false);
         const data = await apiClient.get<SleepReportDetailResponse>(
           `/api/v1/admin/sleep-reports/${reportId}`,
         );

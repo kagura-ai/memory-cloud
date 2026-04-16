@@ -27,18 +27,21 @@ def _mock_admin_user() -> dict:
     }
 
 
+_SENTINEL = object()
+
+
 def _make_mock_report(
     *,
     status: str = "completed",
     memories_processed: int = 7,
-    context_id=None,
+    context_id=_SENTINEL,
     user_id: str = "local:admin",
 ):
     r = MagicMock()
     r.id = uuid4()
     r.user_id = user_id
     r.workspace_id = uuid4()
-    r.context_id = context_id or uuid4()
+    r.context_id = uuid4() if context_id is _SENTINEL else context_id
     r.status = status
     r.started_at = datetime(2026, 4, 6, 3, 0, 0)
     r.completed_at = datetime(2026, 4, 6, 3, 3, 0)
@@ -289,8 +292,7 @@ class TestGetSleepReportDetail:
         assert body["context_deleted"] is True
 
     def test_null_context_id_omits_context_fields(self, client):
-        report = _make_mock_report(context_id=False)
-        report.context_id = None
+        report = _make_mock_report(context_id=None)
 
         mock_db = AsyncMock()
         report_result = MagicMock()
