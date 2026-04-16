@@ -153,10 +153,11 @@ The updated `PermissionService.resolve_resource_by_slug` dependency and `verify_
 4. **Test an API call** to confirm slug acceptance is unchanged:
    ```bash
    curl -s -o /dev/null -w "%{http_code}" \
-     -H "Authorization: Bearer <your-resource-token>" \
+     -H "X-Resource-API-Key: <your-resource-api-key>" \
+     -H "Content-Type: application/json" \
      -X POST "http://localhost:8080/api/v1/resources/<your-resource-id>/events" \
-     -d '{"op": "upsert", "doc_id": "test", "version": 1, "content": "test"}'
-   # Should return 200 or 201
+     -d '{"op": "upsert", "doc_id": "test", "version": 1, "payload": "test"}'
+   # Should return 201
    ```
 
 ## API compatibility details
