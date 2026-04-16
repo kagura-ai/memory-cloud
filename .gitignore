@@ -260,3 +260,4 @@ next-env.d.ts
 backend/=*
 backend/uv.lock
 .playwright-mcp/
+.superpowers/
