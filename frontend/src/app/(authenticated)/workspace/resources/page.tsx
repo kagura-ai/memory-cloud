@@ -193,7 +193,7 @@ export default function ResourcesListPage() {
                     <TableCell className="font-mono text-sm">
                       <Link
                         href={href}
-                        className="text-primary underline-offset-4 hover:underline focus:outline-none focus:ring-2 focus:ring-ring rounded"
+                        className="text-primary focus:outline-none focus:ring-2 focus:ring-ring rounded"
                       >
                         {r.resource_id}
                       </Link>

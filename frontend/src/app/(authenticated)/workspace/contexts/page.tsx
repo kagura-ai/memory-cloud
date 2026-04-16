@@ -18,7 +18,6 @@ import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { formatRelativeTime } from "@/lib/utils/datetime";
 import {
   Plus,
-  RefreshCw,
   FolderOpen,
   Brain,
   AlertCircle,
@@ -221,10 +220,6 @@ export default function ContextsPage() {
     quickCreateDialogOpen,
     currentWorkspace?.current_user_role,
   ]);
-
-  const handleRefresh = () => {
-    fetchContexts();
-  };
 
   // Issue #169: Quick Create - minimal form, just name
   const handleQuickCreate = async () => {
@@ -434,22 +429,12 @@ export default function ContextsPage() {
         description={t("subtitle")}
         actions={
           <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleRefresh}
-              disabled={loading}
-            >
-              <RefreshCw
-                className={cn("h-4 w-4 mr-2", loading && "animate-spin")}
-              />
-              {tCommon("refresh")}
-            </Button>
             {/* Issue #169: Dropdown for Quick Create vs Advanced Create */}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
                   size="sm"
+                  className={colors.button.primary}
                   disabled={
                     hasOpenAIKey === false ||
                     currentWorkspace?.current_user_role === "member" ||
