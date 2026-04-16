@@ -2,7 +2,7 @@
 
 Release notes are published on [GitHub Releases](https://github.com/kagura-ai/memory-cloud/releases).
 
-## [Unreleased] v0.12.0 — Resource Foundation (security-driven)
+## [v0.12.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.12.0) — 2026-04-16
 
 ### Highlights
 
