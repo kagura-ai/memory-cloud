@@ -2214,7 +2214,43 @@
         "dedup": "重複排除",
         "importance": "重要度再評価",
         "consolidation": "統合",
-        "reindex": "再インデックス"
+        "reindex": "再インデックス",
+        "narrative": {
+          "headline": "{contextName} — {processed} 件のメモリを処理: マージ {merged} / エッジ {edges} / 昇格 {promoted} / 要確認 {flagged}",
+          "headlineNoContext": "{processed} 件のメモリを処理: マージ {merged} / エッジ {edges} / 昇格 {promoted} / 要確認 {flagged}",
+          "headlineDeletedContext": "(削除済みコンテキスト) — {processed} 件のメモリを処理: マージ {merged} / エッジ {edges} / 昇格 {promoted} / 要確認 {flagged}",
+          "runFailed": "実行に失敗しました: {error}",
+          "skippedNoReason": "スキップされました",
+          "skippedUnknown": "スキップ: {reason}",
+          "skipReasons": {
+            "budgetExhausted": "スキップ: LLM バジェット上限に到達",
+            "phaseDisabled": "スキップ: 設定でフェーズが無効",
+            "sleepMode": "スキップ: sleep モードが {mode}"
+          },
+          "failed": "失敗: {error}",
+          "phases": {
+            "edgeDiscovery": {
+              "success": "サンプル {sampled} 件から {count} 件のエッジを追加",
+              "empty": "新しいエッジは作成されませんでした"
+            },
+            "dedup": {
+              "success": "重複候補 {count} ペアを検出 → {merged} 件マージ",
+              "empty": "重複候補は見つかりませんでした"
+            },
+            "importance": {
+              "success": "{candidates} 件のメモリを再評価 → {updated} 件を更新 (α={alpha})",
+              "empty": "今回のランでは重要度の変更はありませんでした"
+            },
+            "consolidation": {
+              "success": "昇格候補 {candidates} 件を評価 → ルール昇格 {rulePromoted} / LLM 昇格 {llmPromoted} / 保留 {borderline}",
+              "empty": "今回のランでは昇格は発生しませんでした"
+            },
+            "reindex": {
+              "success": "{count} 件のメモリを再インデックス{failed, plural, =0 {} other {（{failed} 件失敗）}}",
+              "empty": "再インデックス対象はありませんでした"
+            }
+          }
+        }
       },
       "pagination": {
         "showing": "{total} 件中 {from}〜{to} 件目",
