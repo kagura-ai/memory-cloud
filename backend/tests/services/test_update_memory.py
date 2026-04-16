@@ -59,11 +59,13 @@ class TestUpdateMemoryInPlace:
             patch(
                 "services.memory_service.update_memory_payload_in_qdrant", new=AsyncMock()
             ) as mock_payload_update,
+            patch(
+                "services.memory_service.resolve_collection_name",
+                new=AsyncMock(return_value="kagura_memories"),
+            ),
         ):
             mock_perm = mock_perm_cls.return_value
             mock_perm.can_access_memory = AsyncMock(return_value=True)
-
-            service._get_context_collection_name = AsyncMock(return_value="kagura_memories")
 
             request = UpdateMemoryRequest(
                 memory_id=memory.id,

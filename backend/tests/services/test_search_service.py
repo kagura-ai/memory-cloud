@@ -10,6 +10,20 @@ from services.search_service import SearchService
 class TestSearchService:
     """Test SearchService for Hybrid Search (Semantic + BM25)."""
 
+    @pytest.fixture(autouse=True)
+    def _patch_routing(self):
+        """Patch resolve_context_routing so tests don't hit async db.execute."""
+        with patch(
+            "services.search_service.resolve_context_routing",
+            new=AsyncMock(
+                return_value=(
+                    "kagura_memories",
+                    MagicMock(embed=AsyncMock(return_value=[0.1] * 512)),
+                )
+            ),
+        ):
+            yield
+
     @pytest.fixture
     def mock_db(self):
         """Create mock database session."""
@@ -121,6 +135,20 @@ class TestSearchService:
 
 class TestSearchMode:
     """Test search_mode parameter (Issue #17)."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_routing(self):
+        """Patch resolve_context_routing so tests don't hit async db.execute."""
+        with patch(
+            "services.search_service.resolve_context_routing",
+            new=AsyncMock(
+                return_value=(
+                    "kagura_memories",
+                    MagicMock(embed=AsyncMock(return_value=[0.1] * 512)),
+                )
+            ),
+        ):
+            yield
 
     @pytest.fixture
     def mock_db(self):

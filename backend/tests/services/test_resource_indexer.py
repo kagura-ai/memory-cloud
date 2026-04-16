@@ -12,6 +12,7 @@ from uuid import uuid4
 import pytest
 
 from db.qdrant import KAGURA_MEMORIES_BM25_VECTOR_NAME, KAGURA_MEMORIES_VECTOR_NAME
+from services.context_routing import resolve_context_routing
 from services.resource_indexer import ResourceIndexer
 
 
@@ -144,7 +145,7 @@ class TestResourceIndexerNamedVectorUpsert:
     async def test_apply_upsert_uses_passed_embedding_service_not_self(self, indexer):
         """_apply_upsert must embed with the passed-in EmbeddingService, not
         with self.embedding_service. This is the #338 Layer C contract: the
-        per-context service resolved by _resolve_routing_for_context flows all
+        per-context service resolved by resolve_context_routing flows all
         the way into the Qdrant point vector."""
         event = _make_event()
         schema = _make_schema()
@@ -184,78 +185,88 @@ class TestResourceIndexerNamedVectorUpsert:
         assert first_id == second_id
 
 
-class TestResolveRoutingForContext:
-    """Issue #334 (Layer B) + #338 (Layer C): per-context routing.
+class TestResolveContextRouting:
+    """Issue #334 (Layer B) + #338 (Layer C) + #341 (shared helper).
 
-    Verify the fused resolver returns a (collection_name, embedding_service)
-    tuple derived from the same ContextSearchConfig, so the generated embedding
-    dim always matches the target collection's dim.
+    Verify the shared resolve_context_routing returns a
+    (collection_name, embedding_service) tuple derived from the same
+    ContextSearchConfig, so the generated embedding dim always matches the
+    target collection's dim.
     """
 
     @pytest.fixture
-    def indexer(self):
-        db = AsyncMock()
-        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
-            return ResourceIndexer(db)
+    def mock_db(self):
+        return AsyncMock()
+
+    @pytest.fixture
+    def default_service(self):
+        svc = MagicMock()
+        svc.model = "text-embedding-3-small"
+        svc.dimensions = 512
+        return svc
 
     @pytest.mark.asyncio
-    async def test_legacy_text_embedding_3_small_returns_kagura_memories(self, indexer):
+    async def test_legacy_text_embedding_3_small_returns_kagura_memories(
+        self, mock_db, default_service
+    ):
         cfg = MagicMock(embedding_model="text-embedding-3-small", embedding_dimensions=512)
         result = MagicMock()
         result.scalar_one_or_none.return_value = cfg
-        indexer.db.execute = AsyncMock(return_value=result)
+        mock_db.execute = AsyncMock(return_value=result)
 
-        name, svc = await indexer._resolve_routing_for_context(uuid4())
+        name, svc = await resolve_context_routing(mock_db, uuid4(), default_service=default_service)
 
         assert name == "kagura_memories"
         assert svc.model == "text-embedding-3-small"
         assert svc.dimensions == 512
 
     @pytest.mark.asyncio
-    async def test_qwen3_8b_returns_namespaced_collection_and_matching_service(self, indexer):
+    async def test_qwen3_8b_returns_namespaced_collection_and_matching_service(
+        self, mock_db, default_service
+    ):
         cfg = MagicMock(embedding_model="qwen3-embedding:8b", embedding_dimensions=4096)
         result = MagicMock()
         result.scalar_one_or_none.return_value = cfg
-        indexer.db.execute = AsyncMock(return_value=result)
+        mock_db.execute = AsyncMock(return_value=result)
 
-        name, svc = await indexer._resolve_routing_for_context(uuid4())
+        name, svc = await resolve_context_routing(mock_db, uuid4(), default_service=default_service)
 
         assert name == "kagura_memories_qwen3_embedding_8b_4096"
         assert svc.model == "qwen3-embedding:8b"
         assert svc.dimensions == 4096
-        assert svc is not indexer.embedding_service
+        assert svc is not default_service
 
     @pytest.mark.asyncio
-    async def test_no_search_config_falls_back_to_legacy_and_default_service(self, indexer):
+    async def test_no_search_config_falls_back_to_legacy_and_default_service(
+        self, mock_db, default_service
+    ):
         """When no ContextSearchConfig row exists, the resolver returns the
-        legacy `kagura_memories` collection (hardcoded, matching memory_service
-        exactly) paired with the indexer's default EmbeddingService. The
-        legacy collection is NOT derived from self.embedding_service — keeping
-        it static guarantees memory_service and resource_indexer read/write
-        the same collection for legacy contexts even when an operator
-        overrides settings.embedding_model (otherwise the two services would
-        split-brain onto different collections)."""
+        legacy `kagura_memories` collection (hardcoded) paired with the
+        caller-supplied default_service. The legacy collection is NOT derived
+        from default_service — keeping it static guarantees all services
+        read/write the same collection for legacy contexts even when an
+        operator overrides settings.embedding_model."""
         result = MagicMock()
         result.scalar_one_or_none.return_value = None
-        indexer.db.execute = AsyncMock(return_value=result)
+        mock_db.execute = AsyncMock(return_value=result)
 
-        name, svc = await indexer._resolve_routing_for_context(uuid4())
+        name, svc = await resolve_context_routing(mock_db, uuid4(), default_service=default_service)
 
         assert name == "kagura_memories"
-        assert svc is indexer.embedding_service
+        assert svc is default_service
 
     @pytest.mark.asyncio
-    async def test_single_select_per_resolve_call(self, indexer):
+    async def test_single_select_per_resolve_call(self, mock_db, default_service):
         """The fused resolver must issue exactly one SELECT — splitting
         collection and embedding_service back into two methods would double it."""
         cfg = MagicMock(embedding_model="qwen3-embedding:8b", embedding_dimensions=4096)
         result = MagicMock()
         result.scalar_one_or_none.return_value = cfg
-        indexer.db.execute = AsyncMock(return_value=result)
+        mock_db.execute = AsyncMock(return_value=result)
 
-        await indexer._resolve_routing_for_context(uuid4())
+        await resolve_context_routing(mock_db, uuid4(), default_service=default_service)
 
-        assert indexer.db.execute.await_count == 1
+        assert mock_db.execute.await_count == 1
 
 
 class TestApplyDeleteCollectionRouting:
@@ -321,16 +332,15 @@ class TestProcessIncrementalResolvesRoutingOncePerBatch:
         indexer._get_latest_schema = AsyncMock(return_value=_make_schema())
         indexer._get_context = AsyncMock(return_value=_make_context())
         stub_embedding_service = MagicMock()
-        indexer._resolve_routing_for_context = AsyncMock(
-            return_value=("kagura_memories", stub_embedding_service)
-        )
+        mock_resolve = AsyncMock(return_value=("kagura_memories", stub_embedding_service))
         indexer._apply_upsert = AsyncMock()
         indexer._apply_delete = AsyncMock()
         indexer.db.commit = AsyncMock()
 
-        await indexer.process_incremental("res_test", uuid4())
+        with patch("services.resource_indexer.resolve_context_routing", mock_resolve):
+            await indexer.process_incremental("res_test", uuid4())
 
-        assert indexer._resolve_routing_for_context.await_count == 1, (
+        assert mock_resolve.await_count == 1, (
             "routing resolution must be invoked exactly once per batch, not per "
             "event — moving it inside the for-event loop is an N+1 regression."
         )

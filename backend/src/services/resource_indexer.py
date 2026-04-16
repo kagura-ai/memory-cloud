@@ -28,12 +28,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.qdrant import (
     KAGURA_MEMORIES_BM25_VECTOR_NAME,
     KAGURA_MEMORIES_VECTOR_NAME,
-    get_collection_name,
     get_qdrant_client,
 )
 from models.auth import Context
 from models.memory import Memory  # Issue #262: Memory model for resource data storage
 from models.resource import IndexerState, Resource, ResourceEvent, ResourceSchema
+from services.context_routing import resolve_context_routing
 from services.embedding_service import EmbeddingService
 from utils.datetime import utcnow
 from utils.exceptions import QdrantError
@@ -352,7 +352,9 @@ class ResourceIndexer:
             # Resolve Qdrant collection + per-context EmbeddingService from the
             # same ContextSearchConfig (#334 Layer B + #338 Layer C). Single
             # SELECT per batch — all events share the same context_id.
-            collection_name, embedding_service = await self._resolve_routing_for_context(context_id)
+            collection_name, embedding_service = await resolve_context_routing(
+                self.db, context_id, default_service=self.embedding_service
+            )
 
             # 5. Process each event
             for event in events:
@@ -992,66 +994,3 @@ class ResourceIndexer:
         if not context:
             raise ValueError(f"Context {context_id} not found")
         return context
-
-    async def _resolve_routing_for_context(self, context_id: UUID) -> tuple[str, EmbeddingService]:
-        """Resolve (collection_name, embedding_service) for a context (#334 + #338).
-
-        Mirrors memory_service._get_context_collection_name() +
-        _get_embedding_service_for_config() and fuses them so the underlying
-        ContextSearchConfig row is fetched exactly once per batch. Both values
-        MUST come from the same config — otherwise the generated embedding's
-        dim can diverge from the target collection's dim (two-layer bug
-        pattern seen in #324/#334/#338). Do NOT split this back into two
-        methods without preserving the single-source-of-truth invariant.
-
-        Fallback (no ContextSearchConfig row): returns the legacy
-        `kagura_memories` collection + the indexer's default EmbeddingService,
-        matching memory_service._get_context_collection_name() exactly. The
-        legacy collection name is hardcoded on this path (not derived from
-        self.embedding_service) to keep memory_service and resource_indexer
-        reading/writing the same collection for legacy contexts, even when an
-        operator overrides settings.embedding_model — cross-service consistency
-        on the fallback path matters more than intra-service consistency,
-        because a split-brain (memory_service on legacy, indexer on overridden)
-        would silently hide writes. Operators who override settings MUST
-        create a ContextSearchConfig row per context to opt into the
-        per-context routing path above.
-        """
-        from models.config import ContextSearchConfig
-
-        result = await self.db.execute(
-            select(ContextSearchConfig).where(ContextSearchConfig.context_id == context_id)
-        )
-        config = result.scalar_one_or_none()
-        if config:
-            collection_name = get_collection_name(
-                config.embedding_model, config.embedding_dimensions
-            )
-            embedding_service = EmbeddingService(
-                self.db,
-                model=config.embedding_model,
-                dimensions=config.embedding_dimensions,
-            )
-            return collection_name, embedding_service
-        # No ContextSearchConfig row: return the legacy kagura_memories
-        # collection exactly as memory_service does, so both services stay on
-        # the same collection for legacy contexts. See the docstring above for
-        # the cross-service consistency rationale.
-        legacy_collection = get_collection_name("text-embedding-3-small", 512)
-        if (
-            self.embedding_service.model != "text-embedding-3-small"
-            or self.embedding_service.dimensions != 512
-        ):
-            # Operator overrode settings.embedding_model but has no
-            # ContextSearchConfig row for this context. Upserts will fail on
-            # Qdrant dim mismatch — surface the misconfiguration early.
-            logger.warning(
-                "resource_indexer_fallback_dim_mismatch",
-                context_id=str(context_id),
-                legacy_collection=legacy_collection,
-                legacy_dim=512,
-                service_model=self.embedding_service.model,
-                service_dim=self.embedding_service.dimensions,
-                hint="create a ContextSearchConfig row for this context to use the per-context routing path",
-            )
-        return legacy_collection, self.embedding_service

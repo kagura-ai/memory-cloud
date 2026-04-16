@@ -116,7 +116,7 @@ class TestRecall:
             id=context_id, workspace_id=workspace_id, is_private=True, created_by="test_user"
         )
         service.context_service.get_context = AsyncMock(return_value=mock_context)
-        service._get_context_search_config = AsyncMock(return_value=None)
+
         service.search_service.hybrid_search = AsyncMock(return_value=[])
 
         response = await service.recall(
@@ -458,7 +458,7 @@ class TestExploreHints:
             created_by="test_user",
         )
         service.context_service.get_context = AsyncMock(return_value=mock_context)
-        service._get_context_search_config = AsyncMock(return_value=None)
+
         service.search_service.hybrid_search = AsyncMock(return_value=[])
 
         response = await service.recall(

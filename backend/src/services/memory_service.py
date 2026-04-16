@@ -16,7 +16,6 @@ from config.retention import should_promote_to_persistent
 from db.qdrant import (
     add_memory_to_qdrant,
     delete_memory_from_qdrant,
-    get_collection_name,
     update_memory_payload_in_qdrant,
 )
 from models.auth import Context
@@ -40,6 +39,7 @@ from models.schemas import (
     UpdateMemoryResponse,
 )
 from repositories.memory import MemoryRepository
+from services.context_routing import resolve_collection_name
 from services.context_service import ContextService
 from services.embedding_service import EmbeddingService
 from services.search_service import SearchService
@@ -67,30 +67,6 @@ class MemoryService:
         self.embedding_service = EmbeddingService(db)
         self.search_service = SearchService(db)
         self.context_service = ContextService(db)
-
-    async def _get_context_search_config(self, context_id: UUID):
-        """Get ContextSearchConfig for a context."""
-        from models.config import ContextSearchConfig
-
-        result = await self.db.execute(
-            select(ContextSearchConfig).where(ContextSearchConfig.context_id == context_id)
-        )
-        return result.scalar_one_or_none()
-
-    async def _get_context_collection_name(self, context_id: UUID) -> str:
-        """Get Qdrant collection name for a context from its search config."""
-        config = await self._get_context_search_config(context_id)
-        if config:
-            return get_collection_name(config.embedding_model, config.embedding_dimensions)
-        return get_collection_name("text-embedding-3-small", 512)
-
-    def _get_embedding_service_for_config(self, config) -> EmbeddingService:
-        """Create EmbeddingService configured for a specific context's model."""
-        if config:
-            return EmbeddingService(
-                self.db, model=config.embedding_model, dimensions=config.embedding_dimensions
-            )
-        return self.embedding_service
 
     async def _get_context_isolation_params(
         self, user_id: str, context_id: UUID | None
@@ -457,7 +433,7 @@ class MemoryService:
             if payload_updates:
                 # Sync updated_at to Qdrant for date range filtering (Issue #78)
                 payload_updates["updated_at"] = utcnow().isoformat() + "Z"
-                collection = await self._get_context_collection_name(memory.context_id)
+                collection = await resolve_collection_name(self.db, memory.context_id)
                 await update_memory_payload_in_qdrant(
                     memory_id=memory.id,
                     payload_updates=payload_updates,
@@ -1016,7 +992,7 @@ class MemoryService:
                 await self.memory_repo.update(memory.id, memory)
 
                 # Hard delete from Qdrant (remove from search index)
-                del_collection = await self._get_context_collection_name(memory.context_id)
+                del_collection = await resolve_collection_name(self.db, memory.context_id)
                 await delete_memory_from_qdrant(
                     user_id, request.memory_id, collection_name=del_collection
                 )
@@ -1067,7 +1043,7 @@ class MemoryService:
                     await self.memory_repo.update(memory.id, memory)
 
                     # Hard delete from Qdrant
-                    del_collection = await self._get_context_collection_name(memory.context_id)
+                    del_collection = await resolve_collection_name(self.db, memory.context_id)
                     await delete_memory_from_qdrant(
                         user_id, memory_response.memory_id, collection_name=del_collection
                     )
@@ -1156,7 +1132,7 @@ class MemoryService:
             await self.memory_repo.delete(memory.id)
 
             # Delete from Qdrant
-            del_collection = await self._get_context_collection_name(memory.context_id)
+            del_collection = await resolve_collection_name(self.db, memory.context_id)
             await delete_memory_from_qdrant(user_id, memory.id, collection_name=del_collection)
 
             deleted_count += 1
@@ -1819,9 +1795,8 @@ async def process_pending_embedding(memory_id: UUID) -> None:
     from sqlalchemy import and_, or_, select, update
 
     from db.base import get_db
-    from db.qdrant import get_collection_name
     from models.memory import Memory
-    from repositories.config_repository import ContextSearchConfigRepository
+    from services.context_routing import resolve_context_routing
     from services.embedding_service import EmbeddingService
     from utils.sparse_vector import build_document_sparse_vector
     from utils.text import normalize_for_search
@@ -1867,16 +1842,12 @@ async def process_pending_embedding(memory_id: UUID) -> None:
             if not memory:
                 return
 
-            # Get search config
-            config_repo = ContextSearchConfigRepository(db)
-            config = await config_repo.get_by_context(memory.context_id)
-            if not config:
-                config = await config_repo.create_or_get(memory.context_id)
+            # Resolve per-context routing (#341: shared helper)
+            collection, embed_svc = await resolve_context_routing(
+                db, memory.context_id, default_service=EmbeddingService(db)
+            )
 
             # Generate embedding
-            embed_svc = EmbeddingService(
-                db, model=config.embedding_model, dimensions=config.embedding_dimensions
-            )
             vector = await embed_svc.embed(
                 memory.summary,
                 memory.user_id,
@@ -1920,7 +1891,6 @@ async def process_pending_embedding(memory_id: UUID) -> None:
             if memory.context:
                 payload["context"] = memory.context
 
-            collection = get_collection_name(config.embedding_model, config.embedding_dimensions)
             await add_memory_to_qdrant(
                 user_id=memory.user_id,
                 memory_id=memory_id,
