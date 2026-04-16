@@ -98,8 +98,11 @@ GROUP BY resource_id;
 
 ### 4. Back up your database
 
+`pg_dump` requires a libpq-compatible PostgreSQL URL. If your app uses a SQLAlchemy URL (e.g. `postgresql+asyncpg://...`), strip the driver suffix first:
+
 ```bash
-pg_dump -Fc -f kagura_pre_v0120_$(date +%Y%m%d).dump "$DATABASE_URL"
+export PGDUMP_URL="${DATABASE_URL/postgresql+asyncpg:\/\//postgresql:\/\/}"
+pg_dump -Fc -f kagura_pre_v0120_$(date +%Y%m%d).dump "$PGDUMP_URL"
 ```
 
 ## Migration steps
