@@ -10,6 +10,18 @@ from services.search_service import SearchService
 class TestSearchService:
     """Test SearchService for Hybrid Search (Semantic + BM25)."""
 
+    @pytest.fixture(autouse=True)
+    def _patch_routing(self):
+        """Patch resolve_routing_from_config so tests don't hit DB."""
+        with patch(
+            "services.search_service.resolve_routing_from_config",
+            return_value=(
+                "kagura_memories",
+                MagicMock(embed=AsyncMock(return_value=[0.1] * 512)),
+            ),
+        ):
+            yield
+
     @pytest.fixture
     def mock_db(self):
         """Create mock database session."""
@@ -121,6 +133,18 @@ class TestSearchService:
 
 class TestSearchMode:
     """Test search_mode parameter (Issue #17)."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_routing(self):
+        """Patch resolve_routing_from_config so tests don't hit DB."""
+        with patch(
+            "services.search_service.resolve_routing_from_config",
+            return_value=(
+                "kagura_memories",
+                MagicMock(embed=AsyncMock(return_value=[0.1] * 512)),
+            ),
+        ):
+            yield
 
     @pytest.fixture
     def mock_db(self):

@@ -13,8 +13,9 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.qdrant import get_collection_name, search_memories_fulltext, search_memories_qdrant
+from db.qdrant import search_memories_fulltext, search_memories_qdrant
 from repositories.config_repository import ContextSearchConfigRepository
+from services.context_routing import resolve_routing_from_config
 from services.embedding_service import EmbeddingService
 from services.reranker_service import RerankerService
 from utils.logger import get_logger
@@ -145,21 +146,18 @@ class SearchService:
             query_normalized=query != normalized_query,
         )
 
-        # Determine collection name from embedding config
-        embedding_model = getattr(config, "embedding_model", "text-embedding-3-small")
-        embedding_dims = getattr(config, "embedding_dimensions", 512)
-        collection = get_collection_name(embedding_model, embedding_dims)
+        # Resolve per-context routing (#341: shared helper).
+        # Reuse the config already loaded by _get_search_config to avoid a
+        # second SELECT on the same ContextSearchConfig row.
+        routing_config = config if hasattr(config, "context_id") else None
+        collection, embed_svc = resolve_routing_from_config(
+            self.db, routing_config, default_service=self.embedding_service
+        )
 
         semantic_results: list[dict] = []
         fulltext_results: list[dict] = []
 
         if search_mode in ("hybrid", "semantic"):
-            if embedding_model == self.embedding_service.model:
-                embed_svc = self.embedding_service
-            else:
-                embed_svc = EmbeddingService(
-                    self.db, model=embedding_model, dimensions=embedding_dims
-                )
             logger.debug(
                 "semantic_search_starting", query=normalized_query[:50], fetch_size=fetch_size
             )
