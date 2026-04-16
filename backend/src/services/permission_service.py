@@ -144,10 +144,10 @@ class PermissionService:
             External consumers (CI pipelines, MCP clients, Resource Tokens)
             address resources by human-readable slugs. Forcing UUID migration
             on every external caller would break existing integrations with no
-            user-facing benefit. This shim translates the incoming slug +
-            authenticated workspace into the internal UUID, keeping external
-            API contracts stable while all internal relationships travel
-            through ``resources.id`` (UUID PK).
+            user-facing benefit. This shim resolves the incoming slug to an
+            authorized ``Context``, keeping external API contracts stable
+            while callers that need internal identifiers can obtain them from
+            the returned context or related joins as appropriate.
 
         Contract:
             - Never trusts ``User.current_workspace_id`` — a mutable UI
