@@ -2220,8 +2220,13 @@
           "headlineNoContext": "{processed} 件のメモリを処理: マージ {merged} / エッジ {edges} / 昇格 {promoted} / 要確認 {flagged}",
           "headlineDeletedContext": "(削除済みコンテキスト) — {processed} 件のメモリを処理: マージ {merged} / エッジ {edges} / 昇格 {promoted} / 要確認 {flagged}",
           "runFailed": "実行に失敗しました: {error}",
-          "skipped": "スキップ: {reason}",
           "skippedNoReason": "スキップされました",
+          "skippedUnknown": "スキップ: {reason}",
+          "skipReasons": {
+            "budgetExhausted": "スキップ: LLM バジェット上限に到達",
+            "phaseDisabled": "スキップ: 設定でフェーズが無効",
+            "sleepMode": "スキップ: sleep モードが {mode}"
+          },
           "failed": "失敗: {error}",
           "phases": {
             "edgeDiscovery": {

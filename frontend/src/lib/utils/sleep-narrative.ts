@@ -125,13 +125,29 @@ export function buildPhaseNarrative(
   }
 
   if (result.skipped) {
-    if (result.skip_reason) {
+    if (!result.skip_reason) {
+      return { key: "detail.narrative.skippedNoReason", values: {} };
+    }
+    const knownReasons: Record<string, string> = {
+      budget_exhausted: "detail.narrative.skipReasons.budgetExhausted",
+      edge_discovery_disabled: "detail.narrative.skipReasons.phaseDisabled",
+      importance_reeval_disabled: "detail.narrative.skipReasons.phaseDisabled",
+      dedup_disabled: "detail.narrative.skipReasons.phaseDisabled",
+    };
+    const key = knownReasons[result.skip_reason];
+    if (key) {
+      return { key, values: {} };
+    }
+    if (result.skip_reason.startsWith("sleep_mode_")) {
       return {
-        key: "detail.narrative.skipped",
-        values: { reason: result.skip_reason },
+        key: "detail.narrative.skipReasons.sleepMode",
+        values: { mode: result.skip_reason.replace("sleep_mode_", "") },
       };
     }
-    return { key: "detail.narrative.skippedNoReason", values: {} };
+    return {
+      key: "detail.narrative.skippedUnknown",
+      values: { reason: result.skip_reason },
+    };
   }
 
   const d = result.details;

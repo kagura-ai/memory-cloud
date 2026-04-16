@@ -2220,8 +2220,13 @@
           "headlineNoContext": "Processed {processed, plural, one {# memory} other {# memories}}: {merged} merged, {edges} edges, {promoted} promoted, {flagged} flagged",
           "headlineDeletedContext": "(deleted context) — processed {processed, plural, one {# memory} other {# memories}}: {merged} merged, {edges} edges, {promoted} promoted, {flagged} flagged",
           "runFailed": "Run failed: {error}",
-          "skipped": "Skipped: {reason}",
           "skippedNoReason": "Skipped",
+          "skippedUnknown": "Skipped: {reason}",
+          "skipReasons": {
+            "budgetExhausted": "Skipped: LLM budget exhausted",
+            "phaseDisabled": "Skipped: phase disabled in configuration",
+            "sleepMode": "Skipped: sleep mode is {mode}"
+          },
           "failed": "Failed: {error}",
           "phases": {
             "edgeDiscovery": {

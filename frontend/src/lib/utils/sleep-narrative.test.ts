@@ -80,13 +80,38 @@ describe("buildPhaseNarrative", () => {
     expect(n?.values.error).toBe("boom");
   });
 
-  it("renders skipped with skip_reason", () => {
+  it("maps budget_exhausted to localized key", () => {
     const n = buildPhaseNarrative(
       "consolidation",
-      phase({ skipped: true, skip_reason: "LLM budget exhausted" }),
+      phase({ skipped: true, skip_reason: "budget_exhausted" }),
     );
-    expect(n?.key).toBe("detail.narrative.skipped");
-    expect(n?.values.reason).toBe("LLM budget exhausted");
+    expect(n?.key).toBe("detail.narrative.skipReasons.budgetExhausted");
+  });
+
+  it("maps disabled phase reasons to phaseDisabled key", () => {
+    const n = buildPhaseNarrative(
+      "dedup",
+      phase({ skipped: true, skip_reason: "dedup_disabled" }),
+    );
+    expect(n?.key).toBe("detail.narrative.skipReasons.phaseDisabled");
+  });
+
+  it("maps sleep_mode_* reasons to sleepMode key with mode value", () => {
+    const n = buildPhaseNarrative(
+      "edgeDiscovery",
+      phase({ skipped: true, skip_reason: "sleep_mode_edges_only" }),
+    );
+    expect(n?.key).toBe("detail.narrative.skipReasons.sleepMode");
+    expect(n?.values.mode).toBe("edges_only");
+  });
+
+  it("falls back to skippedUnknown for unrecognized reasons", () => {
+    const n = buildPhaseNarrative(
+      "reindex",
+      phase({ skipped: true, skip_reason: "some_future_reason" }),
+    );
+    expect(n?.key).toBe("detail.narrative.skippedUnknown");
+    expect(n?.values.reason).toBe("some_future_reason");
   });
 
   it("uses skippedNoReason key when skip_reason is null", () => {
