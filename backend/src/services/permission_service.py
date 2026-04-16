@@ -140,6 +140,15 @@ class PermissionService:
         a slug in the URL (e.g. ``GET /resources/{resource_id}/indexer-status``)
         and need to check cross-tenant access before reading any resource state.
 
+        Rationale for preserving slugs (Issue #327):
+            External consumers (CI pipelines, MCP clients, Resource Tokens)
+            address resources by human-readable slugs. Forcing UUID migration
+            on every external caller would break existing integrations with no
+            user-facing benefit. This shim resolves the incoming slug to an
+            authorized ``Context``, keeping external API contracts stable
+            while callers that need internal identifiers can obtain them from
+            the returned context or related joins as appropriate.
+
         Contract:
             - Never trusts ``User.current_workspace_id`` — a mutable UI
               preference, unsuitable for authorization (same rationale as

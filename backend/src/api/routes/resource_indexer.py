@@ -148,6 +148,13 @@ async def get_indexer_status(
 ) -> IndexerStatusResponse:
     """Return indexer state and recent ingest events for a resource.
 
+    The ``resource_id`` URL path parameter accepts the human-readable slug
+    (e.g. ``my-github-repo``), not an internal UUID. The slug is resolved to
+    the caller's workspace-scoped resource via
+    ``PermissionService.resolve_resource_by_slug``. This backward-compatible
+    contract is maintained so existing integrations continue to work without
+    modification after the v0.12.0 UUID FK migration.
+
     Authorization:
         - ``APIKeyOrSessionUser``: session cookie or API key. ``resource_token``
           is a write-scoped credential and is intentionally rejected here

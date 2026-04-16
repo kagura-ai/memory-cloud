@@ -225,6 +225,15 @@ async def ingest_event(
 
     Issue #238: Append-only event log for incremental indexing.
 
+    The ``resource_id`` URL path parameter accepts the human-readable slug
+    (e.g. ``my-github-repo``). Internally, token verification resolves the
+    request context from that identifier (see ``verify_resource_token`` and
+    ``_resolve_authoritative_context``), and workspace access is enforced as
+    a separate validation step. The authoritative resource record used for
+    writes is then taken from the verified token record
+    (``token_record.resource_pk``), so external callers never need to know or
+    supply UUIDs.
+
     Security:
         - Requires X-Resource-API-Key header
         - Token must be scoped to this resource_id
