@@ -115,6 +115,14 @@ describe("buildPhaseNarrative", () => {
       const n = buildPhaseNarrative("edgeDiscovery", phase({ details: null }));
       expect(n?.key).toBe("detail.narrative.phases.edgeDiscovery.empty");
     });
+
+    it("empty when edges_created is 0 even if sampled > 0", () => {
+      const n = buildPhaseNarrative(
+        "edgeDiscovery",
+        phase({ details: { edges_created: 0, sampled: 20 } }),
+      );
+      expect(n?.key).toBe("detail.narrative.phases.edgeDiscovery.empty");
+    });
   });
 
   describe("dedup", () => {

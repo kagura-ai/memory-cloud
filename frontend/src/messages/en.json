@@ -2225,7 +2225,7 @@
           "failed": "Failed: {error}",
           "phases": {
             "edgeDiscovery": {
-              "success": "Added {count, plural, one {# edge} other {# edges}} across {sampled} sampled",
+              "success": "Added {count, plural, one {# edge} other {# edges}} across {sampled, plural, one {# sampled memory} other {# sampled memories}}",
               "empty": "No new edges created"
             },
             "dedup": {

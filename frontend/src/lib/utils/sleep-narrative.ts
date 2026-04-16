@@ -140,7 +140,7 @@ export function buildPhaseNarrative(
     case "edgeDiscovery": {
       const edges = num(d, "edges_created") ?? 0;
       const sampled = num(d, "sampled") ?? 0;
-      if (edges === 0 && sampled === 0) {
+      if (edges === 0) {
         return {
           key: "detail.narrative.phases.edgeDiscovery.empty",
           values: {},
