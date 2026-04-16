@@ -118,7 +118,7 @@ describe("buildPhaseNarrative", () => {
   });
 
   describe("dedup", () => {
-    it("builds success and derives held count", () => {
+    it("builds success with candidates and merged", () => {
       const n = buildPhaseNarrative(
         "dedup",
         phase({
@@ -133,15 +133,7 @@ describe("buildPhaseNarrative", () => {
       expect(n?.key).toBe("detail.narrative.phases.dedup.success");
       expect(n?.values.count).toBe(12);
       expect(n?.values.merged).toBe(3);
-      expect(n?.values.held).toBe(9);
-    });
-
-    it("clamps held to 0 when merged exceeds candidates", () => {
-      const n = buildPhaseNarrative(
-        "dedup",
-        phase({ details: { candidates: 2, merged: 5 } }),
-      );
-      expect(n?.values.held).toBe(0);
+      expect(n?.values.clusters).toBe(5);
     });
 
     it("empty when neither candidates nor merged present", () => {

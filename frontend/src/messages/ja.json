@@ -2229,7 +2229,7 @@
               "empty": "新しいエッジは作成されませんでした"
             },
             "dedup": {
-              "success": "重複候補 {count} ペアを検出 → {merged} 件マージ、{held} 件は類似度不足で保留",
+              "success": "重複候補 {count} ペアを検出 → {merged} 件マージ",
               "empty": "重複候補は見つかりませんでした"
             },
             "importance": {

@@ -2216,9 +2216,9 @@
         "consolidation": "Consolidation",
         "reindex": "Reindex",
         "narrative": {
-          "headline": "{contextName} — processed {processed} memories: {merged} merged, {edges} edges, {promoted} promoted, {flagged} flagged",
-          "headlineNoContext": "Processed {processed} memories: {merged} merged, {edges} edges, {promoted} promoted, {flagged} flagged",
-          "headlineDeletedContext": "(deleted context) — processed {processed} memories: {merged} merged, {edges} edges, {promoted} promoted, {flagged} flagged",
+          "headline": "{contextName} — processed {processed, plural, one {# memory} other {# memories}}: {merged} merged, {edges} edges, {promoted} promoted, {flagged} flagged",
+          "headlineNoContext": "Processed {processed, plural, one {# memory} other {# memories}}: {merged} merged, {edges} edges, {promoted} promoted, {flagged} flagged",
+          "headlineDeletedContext": "(deleted context) — processed {processed, plural, one {# memory} other {# memories}}: {merged} merged, {edges} edges, {promoted} promoted, {flagged} flagged",
           "runFailed": "Run failed: {error}",
           "skipped": "Skipped: {reason}",
           "skippedNoReason": "Skipped",
@@ -2229,7 +2229,7 @@
               "empty": "No new edges created"
             },
             "dedup": {
-              "success": "Detected {count, plural, one {# duplicate pair} other {# duplicate pairs}} → {merged} merged, {held} held below threshold",
+              "success": "Detected {count, plural, one {# duplicate pair} other {# duplicate pairs}} → {merged} merged",
               "empty": "No duplicate candidates found"
             },
             "importance": {

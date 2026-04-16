@@ -159,16 +159,9 @@ export function buildPhaseNarrative(
       if (candidates === 0 && merged === 0) {
         return { key: "detail.narrative.phases.dedup.empty", values: {} };
       }
-      const heldCount = Math.max(candidates - merged, 0);
       return {
         key: "detail.narrative.phases.dedup.success",
-        values: {
-          count: candidates,
-          merged,
-          held: heldCount,
-          clusters,
-          deferred,
-        },
+        values: { count: candidates, merged, clusters, deferred },
       };
     }
     case "importance": {
