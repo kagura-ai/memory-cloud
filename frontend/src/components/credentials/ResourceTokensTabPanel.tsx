@@ -52,6 +52,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { ResourceTokensTable } from "@/components/resource-tokens/ResourceTokensTable";
 import { CreateResourceTokenDialog } from "@/components/resource-tokens/CreateResourceTokenDialog";
+import { colors } from "@/styles/design-tokens";
 
 interface ResourceTokensTabPanelProps {
   /**
@@ -616,6 +617,8 @@ export function ResourceTokensTabPanel({
             {isOwner && (
               <Button
                 onClick={() => setShowCreateDialog(true)}
+                size="sm"
+                className={colors.button.primary}
                 disabled={
                   !contexts.some((c) => c.resource_id) ||
                   currentWorkspace?.plan_name === "free"

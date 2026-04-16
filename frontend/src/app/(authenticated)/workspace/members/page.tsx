@@ -687,27 +687,30 @@ export default function WorkspaceMembersPage() {
                       </button>
                     )}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
-                    <div className="flex items-center justify-end gap-2">
-                      {/* Remove button - only for owner, not for owner members */}
-                      {member.role !== "owner" &&
-                        currentWorkspace?.current_user_role === "owner" && (
-                          <button
-                            onClick={() => handleRemoveMemberClick(member)}
-                            className="text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
-                            title={t("removeTitle")}
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        )}
-
-                      {/* Empty state for consistent spacing */}
-                      {member.user_id !== user?.id &&
-                        (member.role === "owner" ||
-                          currentWorkspace?.current_user_role !== "owner") && (
-                          <span className="text-gray-400 text-xs">—</span>
-                        )}
-                    </div>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm">
+                    {/* Issue #350: Remove button only renders for non-owner
+                        rows when the viewer is an owner. Every other case
+                        (owner rows, admin-viewing-admin rows, self rows)
+                        falls through to a centered muted em-dash so the
+                        actions column never reads as "still loading" to
+                        users. Remove button stays right-aligned; em-dash
+                        centers in the cell. */}
+                    {member.role !== "owner" &&
+                    currentWorkspace?.current_user_role === "owner" ? (
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          onClick={() => handleRemoveMemberClick(member)}
+                          className="text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
+                          title={t("removeTitle")}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="block text-center text-gray-400 text-xs">
+                        —
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))}

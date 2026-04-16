@@ -142,7 +142,12 @@ export default function WorkspaceStatsPage() {
               </SelectContent>
             </Select>
           )}
-          <Button onClick={fetchStats} variant="outline" disabled={loading}>
+          <Button
+            onClick={fetchStats}
+            variant="outline"
+            size="sm"
+            disabled={loading}
+          >
             {loading ? (
               <InlineSpinner size="sm" className="mr-2" />
             ) : (
