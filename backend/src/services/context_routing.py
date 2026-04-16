@@ -69,6 +69,14 @@ async def resolve_context_routing(
 
     if config:
         collection_name = get_collection_name(config.embedding_model, config.embedding_dimensions)
+        # Reuse default_service when it already matches the config to avoid
+        # constructing a redundant instance (and re-triggering the Ollama
+        # connectivity probe for Ollama-backed models).
+        if (
+            default_service.model == config.embedding_model
+            and default_service.dimensions == config.embedding_dimensions
+        ):
+            return collection_name, default_service
         embedding_service = EmbeddingService(
             db,
             model=config.embedding_model,
