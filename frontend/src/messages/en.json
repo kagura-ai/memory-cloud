@@ -2218,7 +2218,10 @@
         "narrative": {
           "headline": "{contextName} — processed {processed} memories: {merged} merged, {edges} edges, {promoted} promoted, {flagged} flagged",
           "headlineNoContext": "Processed {processed} memories: {merged} merged, {edges} edges, {promoted} promoted, {flagged} flagged",
+          "headlineDeletedContext": "(deleted context) — processed {processed} memories: {merged} merged, {edges} edges, {promoted} promoted, {flagged} flagged",
+          "runFailed": "Run failed: {error}",
           "skipped": "Skipped: {reason}",
+          "skippedNoReason": "Skipped",
           "failed": "Failed: {error}",
           "phases": {
             "edgeDiscovery": {

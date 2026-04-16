@@ -57,6 +57,7 @@ class SleepReportDetail(SleepReportSummary):
     """Sleep report full detail."""
 
     context_name: str | None = None
+    context_deleted: bool = False
     embedding_calls_made: int
     error_message: str | None
     edge_discovery_result: dict[str, Any] | None
@@ -177,11 +178,12 @@ async def get_sleep_report_detail(
         )
 
     context_name: str | None = None
+    context_deleted = False
     if report.context_id is not None:
         ctx_result = await db.execute(select(Context).where(Context.id == report.context_id))
         ctx = ctx_result.scalar_one_or_none()
         if ctx is None or ctx.deleted_at is not None:
-            context_name = "(deleted)"
+            context_deleted = True
         else:
             context_name = ctx.display_name or ctx.name
 
@@ -190,9 +192,11 @@ async def get_sleep_report_detail(
     )
     actions = list(actions_result.scalars().all())
 
-    # Inject the resolved context_name onto the ORM instance before validation;
-    # the SleepReport model itself has no such column.
+    # Inject resolved context fields onto the ORM instance before validation;
+    # the SleepReport model itself has no such columns. Localization of the
+    # deleted marker happens on the frontend via the context_deleted flag.
     report.context_name = context_name
+    report.context_deleted = context_deleted
     report_detail = SleepReportDetail.model_validate(report, from_attributes=True)
 
     return SleepReportDetailResponse(

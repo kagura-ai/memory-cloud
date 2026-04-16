@@ -53,6 +53,7 @@ interface SleepReportDetail {
   workspace_id: string | null;
   context_id: string | null;
   context_name: string | null;
+  context_deleted: boolean;
   status: SleepStatus;
   started_at: string;
   completed_at: string | null;
@@ -243,7 +244,13 @@ export default function AdminSleepReportDetailPage() {
     { key: "reindex", result: report.reindex_result },
   ];
 
-  const headline = buildHeadline(report.context_name, report);
+  const headline = buildHeadline(
+    {
+      context_name: report.context_name,
+      context_deleted: report.context_deleted,
+    },
+    report,
+  );
 
   const relativeStarted = formatRelativeTime(
     report.started_at,
@@ -271,7 +278,9 @@ export default function AdminSleepReportDetailPage() {
           <ErrorBanner
             error={
               report.error_message
-                ? `${t("detail.errorMessage")}: ${report.error_message}`
+                ? t("detail.narrative.runFailed", {
+                    error: report.error_message,
+                  })
                 : t(`status.${report.status}`)
             }
           />

@@ -32,6 +32,11 @@ export interface NarrativeHeadlineSource {
   memories_flagged: number;
 }
 
+export interface NarrativeHeadlineContext {
+  context_name: string | null;
+  context_deleted: boolean;
+}
+
 export interface Narrative {
   key: string;
   values: Record<string, string | number>;
@@ -58,29 +63,40 @@ function str(
 /**
  * Build the top-of-page headline narrative.
  *
- * - contextName = null → "Processed N memories: ..." (workspace-wide run, no context)
- * - contextName set    → "<contextName> — processed N memories: ..."
+ * Routing by context state:
+ *   - context.context_name set            → "headline" with the name
+ *   - context.context_deleted true        → "headlineDeletedContext" (localized marker)
+ *   - neither (workspace-wide run)        → "headlineNoContext"
  *
- * The "(deleted)" marker is already encoded in contextName by the backend when
- * the referenced context row is soft-deleted or missing.
+ * Localization of the "(deleted)" marker is the frontend's responsibility;
+ * the backend only reports the boolean flag.
  */
 export function buildHeadline(
-  contextName: string | null,
+  context: NarrativeHeadlineContext,
   report: NarrativeHeadlineSource,
 ): Narrative {
-  const values = {
-    contextName: contextName ?? "",
+  const baseValues = {
     processed: report.memories_processed,
     merged: report.memories_merged,
     edges: report.edges_created,
     promoted: report.memories_promoted,
     flagged: report.memories_flagged,
   };
+  if (context.context_name) {
+    return {
+      key: "detail.narrative.headline",
+      values: { contextName: context.context_name, ...baseValues },
+    };
+  }
+  if (context.context_deleted) {
+    return {
+      key: "detail.narrative.headlineDeletedContext",
+      values: baseValues,
+    };
+  }
   return {
-    key: contextName
-      ? "detail.narrative.headline"
-      : "detail.narrative.headlineNoContext",
-    values,
+    key: "detail.narrative.headlineNoContext",
+    values: baseValues,
   };
 }
 
@@ -109,19 +125,22 @@ export function buildPhaseNarrative(
   }
 
   if (result.skipped) {
-    return {
-      key: "detail.narrative.skipped",
-      values: { reason: result.skip_reason ?? "skipped" },
-    };
+    if (result.skip_reason) {
+      return {
+        key: "detail.narrative.skipped",
+        values: { reason: result.skip_reason },
+      };
+    }
+    return { key: "detail.narrative.skippedNoReason", values: {} };
   }
 
   const d = result.details;
 
   switch (phase) {
     case "edgeDiscovery": {
-      const edges = num(d, "edges_created");
-      const sampled = num(d, "sampled");
-      if (edges === null && sampled === null) {
+      const edges = num(d, "edges_created") ?? 0;
+      const sampled = num(d, "sampled") ?? 0;
+      if (edges === 0 && sampled === 0) {
         return {
           key: "detail.narrative.phases.edgeDiscovery.empty",
           values: {},
@@ -129,28 +148,25 @@ export function buildPhaseNarrative(
       }
       return {
         key: "detail.narrative.phases.edgeDiscovery.success",
-        values: { count: edges ?? 0, sampled: sampled ?? 0 },
+        values: { count: edges, sampled },
       };
     }
     case "dedup": {
-      const candidates = num(d, "candidates");
-      const merged = num(d, "merged");
-      const clusters = num(d, "clusters");
+      const candidates = num(d, "candidates") ?? 0;
+      const merged = num(d, "merged") ?? 0;
+      const clusters = num(d, "clusters") ?? 0;
       const deferred = num(d, "deferred_clusters") ?? 0;
-      if (candidates === null && merged === null) {
+      if (candidates === 0 && merged === 0) {
         return { key: "detail.narrative.phases.dedup.empty", values: {} };
       }
-      const heldCount =
-        candidates !== null && merged !== null
-          ? Math.max(candidates - merged, 0)
-          : 0;
+      const heldCount = Math.max(candidates - merged, 0);
       return {
         key: "detail.narrative.phases.dedup.success",
         values: {
-          count: candidates ?? 0,
-          merged: merged ?? 0,
+          count: candidates,
+          merged,
           held: heldCount,
-          clusters: clusters ?? 0,
+          clusters,
           deferred,
         },
       };
@@ -176,11 +192,16 @@ export function buildPhaseNarrative(
       };
     }
     case "consolidation": {
-      const working = num(d, "working_count");
+      const working = num(d, "working_count") ?? 0;
       const rulePromoted = num(d, "rule_promoted") ?? 0;
       const llmPromoted = num(d, "llm_promoted") ?? 0;
       const borderline = num(d, "borderline") ?? 0;
-      if (working === null && rulePromoted === 0 && llmPromoted === 0) {
+      if (
+        working === 0 &&
+        rulePromoted === 0 &&
+        llmPromoted === 0 &&
+        borderline === 0
+      ) {
         return {
           key: "detail.narrative.phases.consolidation.empty",
           values: {},
@@ -189,7 +210,7 @@ export function buildPhaseNarrative(
       return {
         key: "detail.narrative.phases.consolidation.success",
         values: {
-          candidates: working ?? 0,
+          candidates: working,
           rulePromoted,
           llmPromoted,
           borderline,
@@ -201,9 +222,9 @@ export function buildPhaseNarrative(
       if (message === "no_memories_to_reindex") {
         return { key: "detail.narrative.phases.reindex.empty", values: {} };
       }
-      const reindexed = num(d, "reindexed");
+      const reindexed = num(d, "reindexed") ?? 0;
       const failed = num(d, "failed") ?? 0;
-      if (reindexed === null) {
+      if (reindexed === 0 && failed === 0) {
         return { key: "detail.narrative.phases.reindex.empty", values: {} };
       }
       return {

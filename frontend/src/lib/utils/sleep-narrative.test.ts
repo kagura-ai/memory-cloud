@@ -28,23 +28,41 @@ function phase(
 
 describe("buildHeadline", () => {
   it("uses headline key when context name is present", () => {
-    const n = buildHeadline("kagura-dev", HEADLINE_SRC);
+    const n = buildHeadline(
+      { context_name: "kagura-dev", context_deleted: false },
+      HEADLINE_SRC,
+    );
     expect(n.key).toBe("detail.narrative.headline");
     expect(n.values.contextName).toBe("kagura-dev");
     expect(n.values.processed).toBe(42);
     expect(n.values.merged).toBe(3);
   });
 
-  it("uses headlineNoContext when context name is null", () => {
-    const n = buildHeadline(null, HEADLINE_SRC);
+  it("uses headlineNoContext when context is absent", () => {
+    const n = buildHeadline(
+      { context_name: null, context_deleted: false },
+      HEADLINE_SRC,
+    );
     expect(n.key).toBe("detail.narrative.headlineNoContext");
-    expect(n.values.contextName).toBe("");
+    expect(n.values.contextName).toBeUndefined();
   });
 
-  it("passes through (deleted) marker as-is", () => {
-    const n = buildHeadline("(deleted)", HEADLINE_SRC);
+  it("uses headlineDeletedContext when context_deleted is true", () => {
+    const n = buildHeadline(
+      { context_name: null, context_deleted: true },
+      HEADLINE_SRC,
+    );
+    expect(n.key).toBe("detail.narrative.headlineDeletedContext");
+    expect(n.values.contextName).toBeUndefined();
+  });
+
+  it("prefers context_name when both set (race: not expected but defined)", () => {
+    const n = buildHeadline(
+      { context_name: "kagura-dev", context_deleted: true },
+      HEADLINE_SRC,
+    );
     expect(n.key).toBe("detail.narrative.headline");
-    expect(n.values.contextName).toBe("(deleted)");
+    expect(n.values.contextName).toBe("kagura-dev");
   });
 });
 
@@ -71,9 +89,10 @@ describe("buildPhaseNarrative", () => {
     expect(n?.values.reason).toBe("LLM budget exhausted");
   });
 
-  it("falls back to generic reason when skip_reason is null", () => {
+  it("uses skippedNoReason key when skip_reason is null", () => {
     const n = buildPhaseNarrative("consolidation", phase({ skipped: true }));
-    expect(n?.values.reason).toBe("skipped");
+    expect(n?.key).toBe("detail.narrative.skippedNoReason");
+    expect(n?.values).toEqual({});
   });
 
   describe("edgeDiscovery", () => {

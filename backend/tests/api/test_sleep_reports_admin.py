@@ -219,6 +219,7 @@ class TestGetSleepReportDetail:
         assert data["action_count"] == 2
         assert data["report"]["memories_processed"] == 7
         assert data["report"]["context_name"] == "Kagura Dev"
+        assert data["report"]["context_deleted"] is False
         # Verify Z suffix on both report and action timestamps
         assert data["report"]["started_at"].endswith("Z")
         assert data["actions"][0]["created_at"].endswith("Z")
@@ -242,9 +243,11 @@ class TestGetSleepReportDetail:
 
         response = client.get(f"/api/v1/admin/sleep-reports/{report.id}")
         assert response.status_code == 200
-        assert response.json()["report"]["context_name"] == "kagura-dev"
+        body = response.json()["report"]
+        assert body["context_name"] == "kagura-dev"
+        assert body["context_deleted"] is False
 
-    def test_deleted_context_returns_deleted_marker(self, client):
+    def test_deleted_context_returns_deleted_flag(self, client):
         report = _make_mock_report()
         ctx = _make_mock_context(deleted=True)
 
@@ -261,9 +264,11 @@ class TestGetSleepReportDetail:
 
         response = client.get(f"/api/v1/admin/sleep-reports/{report.id}")
         assert response.status_code == 200
-        assert response.json()["report"]["context_name"] == "(deleted)"
+        body = response.json()["report"]
+        assert body["context_name"] is None
+        assert body["context_deleted"] is True
 
-    def test_missing_context_row_returns_deleted_marker(self, client):
+    def test_missing_context_row_returns_deleted_flag(self, client):
         report = _make_mock_report()
 
         mock_db = AsyncMock()
@@ -279,9 +284,11 @@ class TestGetSleepReportDetail:
 
         response = client.get(f"/api/v1/admin/sleep-reports/{report.id}")
         assert response.status_code == 200
-        assert response.json()["report"]["context_name"] == "(deleted)"
+        body = response.json()["report"]
+        assert body["context_name"] is None
+        assert body["context_deleted"] is True
 
-    def test_null_context_id_omits_context_name(self, client):
+    def test_null_context_id_omits_context_fields(self, client):
         report = _make_mock_report(context_id=False)
         report.context_id = None
 
@@ -297,7 +304,9 @@ class TestGetSleepReportDetail:
 
         response = client.get(f"/api/v1/admin/sleep-reports/{report.id}")
         assert response.status_code == 200
-        assert response.json()["report"]["context_name"] is None
+        body = response.json()["report"]
+        assert body["context_name"] is None
+        assert body["context_deleted"] is False
 
     def test_not_found_returns_404(self, client):
         mock_db = AsyncMock()
