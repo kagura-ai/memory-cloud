@@ -157,12 +157,16 @@ async def list_sleep_reports(
     context_ids = {r.context_id for r in reports if r.context_id}
     ctx_map: dict[UUID, str | None] = {}
     if context_ids:
-        ctx_result = await db.execute(select(Context).where(Context.id.in_(context_ids)))
-        for ctx in ctx_result.scalars().all():
-            if ctx.deleted_at is not None:
-                ctx_map[ctx.id] = None
+        ctx_result = await db.execute(
+            select(Context.id, Context.name, Context.display_name, Context.deleted_at).where(
+                Context.id.in_(context_ids)
+            )
+        )
+        for ctx_id, ctx_name, ctx_display_name, ctx_deleted_at in ctx_result.all():
+            if ctx_deleted_at is not None:
+                ctx_map[ctx_id] = None
             else:
-                ctx_map[ctx.id] = ctx.display_name or ctx.name
+                ctx_map[ctx_id] = ctx_display_name or ctx_name
 
     for r in reports:
         r.context_name = ctx_map.get(r.context_id) if r.context_id else None

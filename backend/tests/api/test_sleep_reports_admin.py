@@ -123,9 +123,9 @@ class TestListSleepReports:
         # Call 2: list query → scalars().all()=reports
         list_result = MagicMock()
         list_result.scalars.return_value.all.return_value = reports
-        # Call 3: batch context query → scalars().all()=[ctx]
+        # Call 3: batch context query → .all()=[(id, name, display_name, deleted_at)]
         ctx_result = MagicMock()
-        ctx_result.scalars.return_value.all.return_value = [ctx]
+        ctx_result.all.return_value = [(ctx.id, ctx.name, ctx.display_name, ctx.deleted_at)]
         mock_db.execute.side_effect = [count_result, list_result, ctx_result]
 
         _install_overrides(mock_db)
@@ -152,7 +152,7 @@ class TestListSleepReports:
             _make_mock_report(status="failed", context_id=ctx.id)
         ]
         ctx_result = MagicMock()
-        ctx_result.scalars.return_value.all.return_value = [ctx]
+        ctx_result.all.return_value = [(ctx.id, ctx.name, ctx.display_name, ctx.deleted_at)]
         mock_db.execute.side_effect = [count_result, list_result, ctx_result]
 
         _install_overrides(mock_db)
@@ -237,7 +237,7 @@ class TestListSleepReports:
         list_result = MagicMock()
         list_result.scalars.return_value.all.return_value = reports
         ctx_result = MagicMock()
-        ctx_result.scalars.return_value.all.return_value = [ctx]
+        ctx_result.all.return_value = [(ctx.id, ctx.name, ctx.display_name, ctx.deleted_at)]
         mock_db.execute.side_effect = [count_result, list_result, ctx_result]
 
         _install_overrides(mock_db)
@@ -257,7 +257,7 @@ class TestListSleepReports:
         list_result = MagicMock()
         list_result.scalars.return_value.all.return_value = reports
         ctx_result = MagicMock()
-        ctx_result.scalars.return_value.all.return_value = [ctx]
+        ctx_result.all.return_value = [(ctx.id, ctx.name, ctx.display_name, ctx.deleted_at)]
         mock_db.execute.side_effect = [count_result, list_result, ctx_result]
 
         _install_overrides(mock_db)
@@ -278,7 +278,7 @@ class TestListSleepReports:
         list_result = MagicMock()
         list_result.scalars.return_value.all.return_value = reports
         ctx_result = MagicMock()
-        ctx_result.scalars.return_value.all.return_value = []  # No matching context
+        ctx_result.all.return_value = []  # No matching context
         mock_db.execute.side_effect = [count_result, list_result, ctx_result]
 
         _install_overrides(mock_db)
