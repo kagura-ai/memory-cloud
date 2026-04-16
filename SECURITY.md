@@ -72,8 +72,10 @@ All Qdrant vector searches and PostgreSQL queries include isolation filters.
 ### 2026-04-14 — Cross-tenant Resource ingest (fixed in v0.12.0)
 
 **Severity**: Critical (OWASP A01: Broken Access Control / CWE-639: Authorization Bypass Through User-Controlled Key)
-**Affected versions**: all pre-v0.12.0 deployments with Resource Ingest enabled (Issue #238 onward).
+**Affected versions**: all versions before v0.12.0 with Resource Ingest enabled (Issue #238 onward).
+**Fixed in**: v0.12.0
 **Discovered during**: internal design audit (#322 parent epic #321).
+**Recommendation**: All self-hosted operators should upgrade to v0.12.0 as soon as possible. See [`docs/resource-foundation-migration.md`](docs/resource-foundation-migration.md) for the step-by-step migration guide.
 
 #### Description
 
