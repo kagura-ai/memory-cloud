@@ -113,7 +113,8 @@ class TestListSleepReports:
     """GET /api/v1/admin/sleep-reports"""
 
     def test_returns_paginated_list(self, client):
-        reports = [_make_mock_report() for _ in range(3)]
+        ctx = _make_mock_context()
+        reports = [_make_mock_report(context_id=ctx.id) for _ in range(3)]
 
         mock_db = AsyncMock()
         # Call 1: count query → scalar=3
@@ -122,7 +123,10 @@ class TestListSleepReports:
         # Call 2: list query → scalars().all()=reports
         list_result = MagicMock()
         list_result.scalars.return_value.all.return_value = reports
-        mock_db.execute.side_effect = [count_result, list_result]
+        # Call 3: batch context query → scalars().all()=[ctx]
+        ctx_result = MagicMock()
+        ctx_result.scalars.return_value.all.return_value = [ctx]
+        mock_db.execute.side_effect = [count_result, list_result, ctx_result]
 
         _install_overrides(mock_db)
 
@@ -135,14 +139,21 @@ class TestListSleepReports:
         assert len(data["reports"]) == 3
         # Verify timestamp has Z suffix (timezone fix)
         assert data["reports"][0]["started_at"].endswith("Z")
+        # Verify context_name is resolved via batch lookup
+        assert data["reports"][0]["context_name"] == "Kagura Dev"
 
     def test_filters_by_status(self, client):
+        ctx = _make_mock_context()
         mock_db = AsyncMock()
         count_result = MagicMock()
         count_result.scalar.return_value = 1
         list_result = MagicMock()
-        list_result.scalars.return_value.all.return_value = [_make_mock_report(status="failed")]
-        mock_db.execute.side_effect = [count_result, list_result]
+        list_result.scalars.return_value.all.return_value = [
+            _make_mock_report(status="failed", context_id=ctx.id)
+        ]
+        ctx_result = MagicMock()
+        ctx_result.scalars.return_value.all.return_value = [ctx]
+        mock_db.execute.side_effect = [count_result, list_result, ctx_result]
 
         _install_overrides(mock_db)
 
@@ -166,6 +177,7 @@ class TestListSleepReports:
         count_result.scalar.return_value = 100
         list_result = MagicMock()
         list_result.scalars.return_value.all.return_value = []
+        # No context query because reports list is empty
         mock_db.execute.side_effect = [count_result, list_result]
 
         _install_overrides(mock_db)
@@ -192,6 +204,88 @@ class TestListSleepReports:
         data = response.json()
         assert data["total"] == 0
         assert data["reports"] == []
+
+    def test_list_context_name_null_when_no_context(self, client):
+        """Reports with context_id=None should have context_name=None."""
+        reports = [_make_mock_report(context_id=None)]
+
+        mock_db = AsyncMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = 1
+        list_result = MagicMock()
+        list_result.scalars.return_value.all.return_value = reports
+        # No context query because all context_ids are None
+        mock_db.execute.side_effect = [count_result, list_result]
+
+        _install_overrides(mock_db)
+
+        response = client.get("/api/v1/admin/sleep-reports")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["reports"][0]["context_name"] is None
+        # Only 2 DB calls: count + list (no context batch query)
+        assert mock_db.execute.call_count == 2
+
+    def test_list_context_name_falls_back_to_name(self, client):
+        """When display_name is None, context_name should fall back to name."""
+        ctx = _make_mock_context(name="my-context", display_name=None)
+        reports = [_make_mock_report(context_id=ctx.id)]
+
+        mock_db = AsyncMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = 1
+        list_result = MagicMock()
+        list_result.scalars.return_value.all.return_value = reports
+        ctx_result = MagicMock()
+        ctx_result.scalars.return_value.all.return_value = [ctx]
+        mock_db.execute.side_effect = [count_result, list_result, ctx_result]
+
+        _install_overrides(mock_db)
+
+        response = client.get("/api/v1/admin/sleep-reports")
+        assert response.status_code == 200
+        assert response.json()["reports"][0]["context_name"] == "my-context"
+
+    def test_list_context_name_none_when_deleted(self, client):
+        """Deleted contexts should resolve to context_name=None."""
+        ctx = _make_mock_context(deleted=True)
+        reports = [_make_mock_report(context_id=ctx.id)]
+
+        mock_db = AsyncMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = 1
+        list_result = MagicMock()
+        list_result.scalars.return_value.all.return_value = reports
+        ctx_result = MagicMock()
+        ctx_result.scalars.return_value.all.return_value = [ctx]
+        mock_db.execute.side_effect = [count_result, list_result, ctx_result]
+
+        _install_overrides(mock_db)
+
+        response = client.get("/api/v1/admin/sleep-reports")
+        assert response.status_code == 200
+        assert response.json()["reports"][0]["context_name"] is None
+        # 3 DB calls: count + list + context batch query (deleted path exercised)
+        assert mock_db.execute.call_count == 3
+
+    def test_list_context_name_none_when_context_row_missing(self, client):
+        """Reports referencing a non-existent context should have context_name=None."""
+        reports = [_make_mock_report()]  # context_id is a random UUID
+
+        mock_db = AsyncMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = 1
+        list_result = MagicMock()
+        list_result.scalars.return_value.all.return_value = reports
+        ctx_result = MagicMock()
+        ctx_result.scalars.return_value.all.return_value = []  # No matching context
+        mock_db.execute.side_effect = [count_result, list_result, ctx_result]
+
+        _install_overrides(mock_db)
+
+        response = client.get("/api/v1/admin/sleep-reports")
+        assert response.status_code == 200
+        assert response.json()["reports"][0]["context_name"] is None
 
 
 class TestGetSleepReportDetail:

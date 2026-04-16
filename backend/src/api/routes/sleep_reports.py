@@ -37,6 +37,7 @@ class SleepReportSummary(BaseModel):
     user_id: str
     workspace_id: UUID | None
     context_id: UUID | None
+    context_name: str | None = None
     status: str
     started_at: datetime
     completed_at: datetime | None
@@ -56,7 +57,6 @@ class SleepReportSummary(BaseModel):
 class SleepReportDetail(SleepReportSummary):
     """Sleep report full detail."""
 
-    context_name: str | None = None
     context_deleted: bool = False
     embedding_calls_made: int
     error_message: str | None
@@ -150,6 +150,22 @@ async def list_sleep_reports(
         stmt.order_by(SleepReport.started_at.desc()).limit(limit).offset(offset)
     )
     reports = list(result.scalars().all())
+
+    # Batch-load referenced contexts in one query to avoid N+1.
+    # Same resolution rule as get_sleep_report_detail: display_name or name,
+    # None when deleted or missing.
+    context_ids = {r.context_id for r in reports if r.context_id}
+    ctx_map: dict[UUID, str | None] = {}
+    if context_ids:
+        ctx_result = await db.execute(select(Context).where(Context.id.in_(context_ids)))
+        for ctx in ctx_result.scalars().all():
+            if ctx.deleted_at is not None:
+                ctx_map[ctx.id] = None
+            else:
+                ctx_map[ctx.id] = ctx.display_name or ctx.name
+
+    for r in reports:
+        r.context_name = ctx_map.get(r.context_id) if r.context_id else None
 
     return SleepReportListResponse(
         reports=[SleepReportSummary.model_validate(r, from_attributes=True) for r in reports],

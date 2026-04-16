@@ -40,6 +40,7 @@ interface SleepReportSummary {
   user_id: string;
   workspace_id: string | null;
   context_id: string | null;
+  context_name: string | null;
   status: SleepStatus;
   started_at: string;
   completed_at: string | null;
@@ -244,6 +245,7 @@ export default function AdminSleepReportsPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead>{t("table.startedAt")}</TableHead>
+                  <TableHead>{t("table.context")}</TableHead>
                   <TableHead>{t("table.status")}</TableHead>
                   <TableHead className="text-right">
                     {t("table.memoriesProcessed")}
@@ -270,6 +272,9 @@ export default function AdminSleepReportsPage() {
                   <TableRow key={report.id}>
                     <TableCell className="text-sm whitespace-nowrap">
                       {formatRelativeTime(report.started_at, timezone, locale)}
+                    </TableCell>
+                    <TableCell className="text-sm">
+                      {report.context_name ?? "—"}
                     </TableCell>
                     <TableCell>
                       <span
