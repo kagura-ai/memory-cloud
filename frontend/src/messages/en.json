@@ -2238,7 +2238,7 @@
               "empty": "No duplicate candidates found"
             },
             "importance": {
-              "success": "Re-evaluated {candidates} memories → {updated} updated (α={alpha})",
+              "success": "Re-evaluated {candidates, plural, one {# memory} other {# memories}} → {updated} updated (α={alpha})",
               "empty": "No importance changes this run"
             },
             "consolidation": {
