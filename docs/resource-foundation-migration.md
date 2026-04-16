@@ -168,11 +168,13 @@ All per-resource endpoints (`/api/v1/resources/{resource_id}/...`) continue to a
 
 1. **Input**: `resource_id` slug from URL + authenticated user
 2. **Resolution**: `PermissionService.resolve_resource_by_slug()` finds the active context with this slug, verifies the caller has workspace membership
-3. **Output**: internal `Context` object (with `resources.id` UUID available via FK)
+3. **Output**: authorized internal `Context` object for that slug within the caller's workspace
+
+If a downstream writer or reader also needs the normalized `resources.id` UUID, it is obtained separately — for example via `resource_tokens.resource_pk`, or by joining `resources` on `(workspace_id, resource_id)`.
 
 **Error codes**:
 - `404` — slug does not exist, or exists in a workspace the caller cannot access. The 404 (not 403) is intentional: it prevents cross-workspace existence leakage (CWE-639 / OWASP A01).
-- `409` — collision detected during ingest (fail-secure behavior from the `a96` uniqueness constraint).
+- `409` — event-level uniqueness conflict (e.g., duplicate `(resource_id, doc_id, version)` for upsert events). After migration `a96`, cross-workspace slug collisions are prevented at the database level, so slug-level 409s no longer occur at runtime.
 
 ### MCP tools
 
