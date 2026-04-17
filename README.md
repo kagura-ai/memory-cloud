@@ -491,10 +491,16 @@ This project is designed to be developed **with** Claude Code and Kagura Memory 
 
 ## Documentation
 
+**API reference** — two complementary entry points:
+
+- **Concepts (markdown)**: [API Reference](docs/api-reference.md) — auth, base URLs, MCP endpoint, request/response examples
+- **Endpoint reference (live)**: `http://localhost:8080/redoc` — auto-generated from FastAPI, always in sync with the running backend
+
+**Concepts & guides:**
+
 - [Core Concepts](docs/concepts.md) — Workspace, Context, Memory, Neural Memory, MCP Tools
 - [Architecture](docs/architecture.md) — System design and data flow
 - [Getting Started](docs/getting-started.md) — Detailed setup guide
-- [API Reference](docs/api-reference.md) — REST API documentation
 - [Chunking Guide](docs/chunking-guide.md) — Best practices for memory storage
 - [Resource Tokens Guide](docs/resource-tokens-guide.md) — External data ingestion via resource tokens
 - [Neural Memory Evaluation](docs/neural-memory-evaluation.md) — Benchmark results, architecture decisions
