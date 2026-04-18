@@ -228,6 +228,85 @@ class TestGetSleepReport:
         assert data["status"] == "error"
         assert data["error"] == "invalid_report_id"
 
+    @pytest.mark.asyncio
+    async def test_get_sleep_report_includes_edge_discovery_metrics(self, user_id, workspace_id):
+        """Issue #306: edge_discovery_result JSON column passes new metric keys
+        through `_report_to_detail` to the MCP response untouched.
+
+        Verifies that the JSON column contract — sleep_reports.details written
+        by `execute()` → SQLAlchemy JSON serialize → `_report_to_detail` read —
+        round-trips the new keys (`llm_accepted`, `llm_rejected`,
+        `llm_call_failures`, `auto_accepted`, `edge_type_dist`,
+        `avg_confidence`, `confidence_histogram`, `llm_model`,
+        `prompt_revision`) without filtering or reshaping.
+        """
+        report_id = uuid4()
+        report = self._mock_report(report_id, user_id)
+        report.edge_discovery_result = {
+            "success": True,
+            "skipped": False,
+            "skip_reason": None,
+            "error": None,
+            "llm_calls": 2,
+            "memories_processed": 10,
+            "details": {
+                "sampled": 10,
+                "candidates": 6,
+                "filtered": 5,
+                "edges_created": 3,
+                "llm_accepted": 3,
+                "llm_rejected": 2,
+                "llm_call_failures": 0,
+                "auto_accepted": 0,
+                "edge_type_dist": {"related_to": 2, "depends_on": 1},
+                "avg_confidence": 0.78,
+                "confidence_histogram": {
+                    "0.0-0.5": 0,
+                    "0.5-0.7": 1,
+                    "0.7-0.85": 1,
+                    "0.85-1.0": 1,
+                },
+                "llm_model": "gpt-5-nano",
+                "prompt_revision": "v1",
+            },
+        }
+
+        mock_db = AsyncMock()
+        mock_report_result = MagicMock()
+        mock_report_result.scalar_one_or_none.return_value = report
+        mock_actions_result = MagicMock()
+        mock_actions_result.scalars.return_value.all.return_value = []
+        mock_log_result = MagicMock()
+        mock_db.execute.side_effect = [mock_report_result, mock_actions_result, mock_log_result]
+        mock_db.commit = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        with patch("db.base.get_db", new=mock_get_db):
+            result = await handle_get_sleep_report(
+                {"report_id": str(report_id)}, user_id, workspace_id
+            )
+
+        data = json.loads(result[0].text)
+        assert data["status"] == "success"
+        ed = data["report"]["edge_discovery_result"]["details"]
+        # Every #306 metric key must reach the MCP response untouched.
+        assert ed["llm_accepted"] == 3
+        assert ed["llm_rejected"] == 2
+        assert ed["llm_call_failures"] == 0
+        assert ed["auto_accepted"] == 0
+        assert ed["edge_type_dist"] == {"related_to": 2, "depends_on": 1}
+        assert ed["avg_confidence"] == 0.78
+        assert ed["confidence_histogram"] == {
+            "0.0-0.5": 0,
+            "0.5-0.7": 1,
+            "0.7-0.85": 1,
+            "0.85-1.0": 1,
+        }
+        assert ed["llm_model"] == "gpt-5-nano"
+        assert ed["prompt_revision"] == "v1"
+
 
 class TestRollbackSleepRun:
     """Test rollback_sleep_run MCP tool handler."""

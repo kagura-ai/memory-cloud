@@ -72,6 +72,10 @@ Example:
 # Phase 1: Edge Discovery
 # ============================================================================
 
+# Bump on every edit to EDGE_DISCOVERY_SYSTEM or EDGE_DISCOVERY_USER so
+# sleep_reports.details can distinguish runs that used different prompts.
+EDGE_DISCOVERY_PROMPT_REVISION = "v1"
+
 EDGE_DISCOVERY_SYSTEM = """\
 You are a knowledge graph edge discovery agent. You analyze pairs of memory \
 entries and determine if they are semantically related and should be connected \
