@@ -63,6 +63,7 @@ async def lifespan(app: FastAPI):
     # Start background task scheduler
     from tasks import (
         get_scheduler,
+        schedule_bm25_drift_tasks,
         schedule_credentials_tasks,
         schedule_embedding_tasks,
         schedule_mcp_tasks,
@@ -79,6 +80,7 @@ async def lifespan(app: FastAPI):
     schedule_embedding_tasks(scheduler)
     schedule_resource_indexer_jobs(scheduler)
     schedule_sleep_tasks(scheduler)
+    schedule_bm25_drift_tasks(scheduler)
     start_scheduler()
     logger.info("background_tasks_scheduled")
 
@@ -143,6 +145,15 @@ openapi_tags = [
     {
         "name": "sleep-reports",
         "description": "Admin: Sleep Maintenance execution reports and audit log",
+    },
+    {
+        "name": "bm25-drift (preview)",
+        "description": (
+            "Admin: BM25 IDF drift observability (Issue #343). "
+            "Cron is disabled by default and scheduled for production "
+            "enablement in v0.14.0 alongside Privacy Policy (#359) and "
+            "right-to-erasure (#360)."
+        ),
     },
     {"name": "system-admins", "description": "Admin: system administrator management"},
     # System
@@ -316,6 +327,7 @@ from api.routes import (  # noqa: E402
     api_keys,
     attachments,  # Issue #330: File attachment support
     auth,
+    bm25_drift,  # Issue #343: BM25 IDF drift admin (preview, cron disabled by default)
     config,
     context_search_config,
     contexts,
@@ -388,6 +400,9 @@ app.include_router(sleep_reports.router, prefix="/api/v1")
 
 # Admin Sleep trigger (Issue #247 - Manual Sleep Maintenance trigger)
 app.include_router(admin_sleep.router, prefix="/api/v1")
+
+# BM25 IDF Drift admin (Issue #343 - cron disabled by default until v0.14.0)
+app.include_router(bm25_drift.router, prefix="/api/v1")
 
 # External API Keys routes (Issue #45 - External keys management)
 app.include_router(external_keys.router, prefix="/api/v1")
