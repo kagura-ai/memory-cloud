@@ -1049,11 +1049,23 @@ async def list_context_members(
     user_result = await db.execute(user_stmt)
     users = {u.user_id: u for u in user_result.scalars().all()}
 
-    # Build response
-    response = []
+    # Build response. One row per user_id with this precedence:
+    #   1. Workspace owner/admin → shown with workspace role + is_workspace_admin=True.
+    #      Their workspace-level bypass access dominates any explicit ContextMember row
+    #      (removing the ContextMember row would not revoke their access).
+    #   2. Explicit ContextMember row (workspace member/viewer with context-level role).
+    #   3. Fallback workspace membership (member/viewer with implicit access via
+    #      allowed_context_ids=None or whitelist match).
+    explicit_by_user = {cm.user_id: cm for cm in explicit_members}
+    admin_user_ids = {om.user_id for om in accessible_members if om.role in ("owner", "admin")}
 
-    # Add all accessible workspace members
+    response = []
+    seen_user_ids: set[str] = set()
+
+    # Pass 1 — workspace owner/admin (dominant access layer)
     for om in accessible_members:
+        if om.role not in ("owner", "admin"):
+            continue
         user_info = users.get(om.user_id)
         response.append(
             ContextMemberResponse(
@@ -1062,9 +1074,44 @@ async def list_context_members(
                 user_email=user_info.email if user_info else None,
                 role=om.role,
                 added_at=om.joined_at.isoformat() if om.joined_at else None,
-                is_workspace_admin=om.role in ("owner", "admin"),
+                is_workspace_admin=True,
             )
         )
+        seen_user_ids.add(om.user_id)
+
+    # Pass 2 — explicit ContextMember rows for non-workspace-admin users
+    for cm in explicit_members:
+        if cm.user_id in seen_user_ids or cm.user_id in admin_user_ids:
+            continue
+        user_info = users.get(cm.user_id)
+        response.append(
+            ContextMemberResponse(
+                user_id=cm.user_id,
+                user_name=user_info.name if user_info else None,
+                user_email=user_info.email if user_info else None,
+                role=cm.role,
+                added_at=cm.created_at.isoformat() if cm.created_at else None,
+                is_workspace_admin=False,
+            )
+        )
+        seen_user_ids.add(cm.user_id)
+
+    # Pass 3 — remaining workspace members/viewers without explicit ContextMember
+    for om in accessible_members:
+        if om.user_id in seen_user_ids or om.user_id in explicit_by_user:
+            continue
+        user_info = users.get(om.user_id)
+        response.append(
+            ContextMemberResponse(
+                user_id=om.user_id,
+                user_name=user_info.name if user_info else None,
+                user_email=user_info.email if user_info else None,
+                role=om.role,
+                added_at=om.joined_at.isoformat() if om.joined_at else None,
+                is_workspace_admin=False,
+            )
+        )
+        seen_user_ids.add(om.user_id)
 
     return response
 
@@ -1107,6 +1154,15 @@ async def add_context_member(
             detail="Cannot add members to a private context. Change to Shared first.",
         )
 
+    # Issue #362: Reject user_ids that are not workspace members.
+    # Backend truth boundary — UI gating can be bypassed by a direct API call.
+    is_workspace_member = await perm_service.is_workspace_member(body.user_id, context.workspace_id)
+    if not is_workspace_member:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User is not a member of this workspace.",
+        )
+
     # Check if member already exists
 
     stmt = select(ContextMember).where(
@@ -1135,7 +1191,13 @@ async def add_context_member(
     await db.commit()
     await db.refresh(member)
 
-    logger.info(f"Added context member: {body.user_id} to context {context_id}")
+    logger.info(
+        "context_member_added",
+        context_id=str(context_id),
+        user_id=body.user_id,
+        role=body.role,
+        actor_user_id=user["user_id"],
+    )
 
     return ContextMemberResponse(
         user_id=member.user_id,
@@ -1182,6 +1244,19 @@ async def update_context_member_role(
             detail=f"Member {user_id} not found in context",
         )
 
+    # Issue #362: Prevent the last remaining owner from being demoted.
+    # Without this guard, an owner -> editor update followed by a delete would
+    # silently bypass the "Cannot remove context owner" check below and leave
+    # the context without a ContextMember owner.
+    if member.role == "owner" and body.role != "owner":
+        owner_count = await perm_service.count_context_owners(context_id)
+        if owner_count <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot demote the last context owner. "
+                "Promote another member to owner first.",
+            )
+
     # Update role
     member.role = body.role
     member.updated_at = func.now()
@@ -1189,7 +1264,13 @@ async def update_context_member_role(
     await db.commit()
     await db.refresh(member)
 
-    logger.info(f"Updated context member role: {user_id} -> {body.role}")
+    logger.info(
+        "context_member_role_updated",
+        context_id=str(context_id),
+        user_id=user_id,
+        role=body.role,
+        actor_user_id=current_user["user_id"],
+    )
 
     return ContextMemberResponse(
         user_id=member.user_id,
@@ -1224,6 +1305,15 @@ async def remove_context_member(
     # Issue #271 Code Review C-2: check_context_owner already verifies ownership
     await perm_service.check_context_owner(current_user["user_id"], context_id)
 
+    # Issue #362: Prevent self-removal even when the caller is an owner/admin.
+    # Governance change should always require another actor.
+    if user_id == current_user["user_id"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot remove yourself from the context. "
+            "Ask another owner or workspace admin to remove you.",
+        )
+
     # Get member
     stmt = select(ContextMember).where(
         ContextMember.context_id == context_id,
@@ -1249,7 +1339,12 @@ async def remove_context_member(
     await db.delete(member)
     await db.commit()
 
-    logger.info(f"Removed context member: {user_id} from context {context_id}")
+    logger.info(
+        "context_member_removed",
+        context_id=str(context_id),
+        user_id=user_id,
+        actor_user_id=current_user["user_id"],
+    )
 
 
 # ============================================================================
