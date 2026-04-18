@@ -275,7 +275,14 @@ class LLMService:
             logger.debug("llm_api_key_from_env", user_id=user_id)
             return env_key
 
+        if workspace_id:
+            raise ConfigurationError(
+                f"OpenAI API key not configured for workspace {workspace_id}. "
+                "Configure a workspace OpenAI API key in settings, or set the "
+                "OPENAI_API_KEY environment variable."
+            )
         raise ConfigurationError(
-            f"OpenAI API key not configured for user {user_id}. "
-            "Please set OPENAI_API_KEY environment variable or configure in settings."
+            "OpenAI API key not configured: no workspace context was provided. "
+            "Provide a workspace_id, configure a workspace OpenAI API key in "
+            "settings, or set the OPENAI_API_KEY environment variable."
         )

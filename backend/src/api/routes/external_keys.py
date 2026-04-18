@@ -114,11 +114,13 @@ async def validate_reranker_exclusivity(
     """Ensure only ONE reranker (Cohere OR Voyage) is enabled at a time per workspace.
 
     Issue #105: Reranker exclusivity validation.
-    Issue #385: scoped per workspace — was per user before, but external keys are
-        workspace-shared resources now and the partial unique index
-        uq_external_api_keys_workspace_provider_enabled enforces the same invariant
-        at the DB level. This application-layer check produces a friendlier 409
-        with provider details.
+    Issue #385: scoped per workspace — was per user before, because external keys
+        are workspace-shared resources now. The partial unique index
+        uq_external_api_keys_workspace_provider_enabled only guarantees at most
+        one enabled key per (workspace, provider) at the DB level — a different
+        invariant. This application-layer check is what enforces the
+        cross-provider reranker exclusivity (no Cohere AND Voyage enabled
+        simultaneously) and produces a friendly 409 with provider details.
 
     Rules:
     - OpenAI cannot be disabled (embeddings required)
