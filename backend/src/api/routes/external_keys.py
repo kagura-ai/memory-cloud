@@ -21,6 +21,12 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Issue #385: name of the partial unique index defined in migration a99 and
+# mirrored in models.auth.ExternalAPIKey.__table_args__. Used by the create /
+# toggle handlers to narrow IntegrityError → 409 mapping to this specific
+# constraint, so unrelated DB errors (FK / NOT NULL / etc.) still surface as 500.
+_PARTIAL_UNIQUE_INDEX = "uq_external_api_keys_workspace_provider_enabled"
+
 # Issue #381: All external API key routes are owner-only.
 # External API keys are workspace-level secrets (OpenAI/Cohere/Anthropic credentials)
 # that should only be managed by the workspace owner. Viewers, members, and admins
@@ -327,16 +333,20 @@ async def create_external_key(
             # Issue #385: a concurrent create/toggle could win the race between the
             # app-layer pre-check above and this commit, leaving the partial unique
             # index on (workspace_id, provider) WHERE enabled=true to reject us.
-            # Translate that to a friendly 409 — matches the pre-check's contract.
+            # Narrow to the specific constraint so unrelated IntegrityErrors
+            # (FK violations, unexpected constraints) still surface as 500 via
+            # db_transaction — only the known race becomes a friendly 409.
             await db.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    f"An enabled {request.provider} API key already exists in this "
-                    "workspace (concurrent create). Disable it first or update its "
-                    "value instead."
-                ),
-            ) from exc
+            if _PARTIAL_UNIQUE_INDEX in str(getattr(exc, "orig", exc)):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"An enabled {request.provider} API key already exists in "
+                        "this workspace (concurrent create). Disable it first or "
+                        "update its value instead."
+                    ),
+                ) from exc
+            raise
         await db.refresh(new_key)
 
         logger.info(
@@ -495,18 +505,20 @@ async def toggle_external_key(
         try:
             await db.commit()
         except IntegrityError as exc:
-            # Issue #385: see create_external_key for the same TOCTOU rationale —
-            # a concurrent toggle could race with this one against the partial
-            # unique index. Map the IntegrityError to a friendly 409.
+            # Issue #385: see create_external_key for the same TOCTOU + narrow-
+            # constraint rationale. Only the partial unique index becomes a 409;
+            # any other IntegrityError still surfaces as 500 via db_transaction.
             await db.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    f"Another enabled {key.provider} API key already exists in this "
-                    "workspace (concurrent toggle). Disable it first before enabling "
-                    "this one."
-                ),
-            ) from exc
+            if _PARTIAL_UNIQUE_INDEX in str(getattr(exc, "orig", exc)):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"Another enabled {key.provider} API key already exists in "
+                        "this workspace (concurrent toggle). Disable it first "
+                        "before enabling this one."
+                    ),
+                ) from exc
+            raise
         await db.refresh(key)
 
         logger.info(
