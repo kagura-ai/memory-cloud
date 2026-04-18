@@ -540,9 +540,15 @@ class TestLLMJudgeBatch:
         config = _make_config()
         budget = SleepBudget()
         _, batch, memory_map = _make_batch_pair(n=2)
+        # Use _labels_for to derive labels from sorted-UUID order (matches
+        # _llm_judge_batch's assignment). For n=2 with frozenset hallucination
+        # guard, hardcoded ("A", "B") happens to work today (orientation-
+        # agnostic), but using _labels_for is consistent with multi-pair tests
+        # and robust to a future tightening of the guard semantics.
+        labels = _labels_for(memory_map)
 
         llm_judge_phase.llm_service.complete_json.return_value = _make_llm_response(
-            [("A", "B", True, "garbage_type", 0.8)]
+            [(labels[batch[0][0]], labels[batch[0][1]], True, "garbage_type", 0.8)]
         )
 
         confirmed, stats = await llm_judge_phase._llm_judge_batch(
@@ -562,10 +568,11 @@ class TestLLMJudgeBatch:
         config = _make_config()
         budget = SleepBudget()
         _, batch, memory_map = _make_batch_pair(n=2)
+        labels = _labels_for(memory_map)
 
         llm_judge_phase.llm_service.complete_json.return_value = _make_llm_response(
             [
-                ("A", "B", True, "related_to", 0.9),
+                (labels[batch[0][0]], labels[batch[0][1]], True, "related_to", 0.9),
                 # Out-of-range labels — must be silently skipped.
                 ("X", "Y", True, "related_to", 0.9),
             ]
