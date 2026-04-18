@@ -158,8 +158,13 @@ def _summarize_confidences(confidences: list[float]) -> ConfidenceSummary:
     avg = sum(confidences) / n
     median = statistics.median(confidences)
     if n >= 2:
-        # statistics.quantiles(n=4) returns [Q1, Q2, Q3]
-        quartiles = statistics.quantiles(confidences, n=4)
+        # Use inclusive quartiles so small samples (n=2, n=3) do not
+        # extrapolate outside the observed confidence range. The default
+        # `exclusive` (Tukey) method can return values < min(data) or
+        # > max(data), which makes p25/p75 fall outside [0.0, 1.0] even
+        # though the inputs are clamped — uninterpretable for a confidence
+        # metric. statistics.quantiles(n=4) returns [Q1, Q2, Q3].
+        quartiles = statistics.quantiles(confidences, n=4, method="inclusive")
         p25, p75 = quartiles[0], quartiles[2]
     else:
         # Single sample — IQR is undefined; collapse to the lone value.

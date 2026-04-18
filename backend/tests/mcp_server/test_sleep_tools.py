@@ -261,6 +261,13 @@ class TestGetSleepReport:
                 "auto_accepted": 0,
                 "edge_type_dist": {"related_to": 2, "depends_on": 1},
                 "avg_confidence": 0.78,
+                # PhD-review additions (#306 follow-up): 5-number summary +
+                # sample size + imputation counter must also round-trip.
+                "median_confidence": 0.80,
+                "p25_confidence": 0.65,
+                "p75_confidence": 0.92,
+                "confidence_n": 3,
+                "confidence_imputed": 0,
                 "confidence_histogram": {
                     "0.0-0.5": 0,
                     "0.5-0.7": 1,
@@ -310,6 +317,14 @@ class TestGetSleepReport:
         # green when EDGE_DISCOVERY_PROMPT_REVISION is bumped on prompt edits
         # (addresses Copilot review #371 finding, loop 5).
         assert ed["prompt_revision"] == EDGE_DISCOVERY_PROMPT_REVISION
+        # PhD-review additions (#306 follow-up FB loop) — without these
+        # assertions, a future filter/reshape regression in _report_to_detail
+        # could silently drop the new keys.
+        assert ed["median_confidence"] == 0.80
+        assert ed["p25_confidence"] == 0.65
+        assert ed["p75_confidence"] == 0.92
+        assert ed["confidence_n"] == 3
+        assert ed["confidence_imputed"] == 0
 
 
 class TestRollbackSleepRun:

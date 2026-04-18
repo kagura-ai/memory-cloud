@@ -775,14 +775,15 @@ class TestExecuteAggregation:
         assert result.details["prompt_revision"] == EDGE_DISCOVERY_PROMPT_REVISION
         # PhD review additions (#306 follow-up): 5-number summary + sample size
         # confidences = [0.9, 0.7, 0.55, 0.95] → sorted [0.55, 0.7, 0.9, 0.95]
-        # statistics.quantiles default (exclusive Tukey method) on n=4:
-        #   position formula: i * (n+1) / 4 where n = len(data)
-        #   i=1: pos 1.25 → 0.55 + 0.25*(0.7-0.55) = 0.5875
-        #   i=2: pos 2.50 → 0.70 + 0.50*(0.9-0.70) = 0.8000 (median)
-        #   i=3: pos 3.75 → 0.90 + 0.75*(0.95-0.9) = 0.9375
+        # statistics.quantiles(n=4, method="inclusive") on n=4:
+        #   position formula: (n-1) * i/4 where n = len(data)
+        #   i=1: pos 0.75 → 0.55 + 0.75*(0.7-0.55) = 0.6625
+        #   i=2: pos 1.50 → 0.70 + 0.50*(0.9-0.70) = 0.8000 (median)
+        #   i=3: pos 2.25 → 0.90 + 0.25*(0.95-0.9) = 0.9125
+        # Inclusive method ensures small-N quartiles stay in [min(data), max(data)].
         assert result.details["median_confidence"] == pytest.approx(0.8)
-        assert result.details["p25_confidence"] == pytest.approx(0.5875)
-        assert result.details["p75_confidence"] == pytest.approx(0.9375)
+        assert result.details["p25_confidence"] == pytest.approx(0.6625)
+        assert result.details["p75_confidence"] == pytest.approx(0.9125)
         assert result.details["confidence_n"] == 4
         assert result.details["confidence_imputed"] == 0
 
@@ -818,60 +819,48 @@ class TestConfidenceImputed:
 
 class TestMetricsAliasing:
     """Defensive copy in _metrics_from_agg prevents result.details from
-    aliasing the live BatchStats / histogram (#306 PhD-review fix)."""
+    aliasing the live BatchStats / histogram (#306 PhD-review fix).
 
-    @pytest.mark.asyncio
-    async def test_result_details_does_not_alias_agg(self, llm_judge_phase):
-        """After execute() returns, mutating agg.edge_type_counts must NOT
-        affect result.details["edge_type_dist"]. Pre-fix this would silently
-        corrupt the recorded snapshot if any post-emit code touched agg."""
-        config = _make_config()
-        budget = SleepBudget()
-        mems = [_make_memory() for _ in range(3)]
-        candidates = [(mems[0].id, mems[1].id, 0.75), (mems[1].id, mems[2].id, 0.75)]
+    Note: this contract is verified directly via _metrics_from_agg unit test
+    rather than an end-to-end execute() test — the unit test captures the
+    source data structures and proves mutation isolation, which is the
+    precise invariant the defensive copy provides. An end-to-end test that
+    only mutates the result dict cannot demonstrate aliasing was prevented.
+    """
 
-        llm_judge_phase._sample_memories = AsyncMock(return_value=mems)
-        llm_judge_phase._find_candidates = AsyncMock(return_value=candidates)
-        llm_judge_phase._filter_existing_edges = AsyncMock(return_value=candidates)
-        llm_judge_phase.edge_repo.create_or_update_edge = AsyncMock()
+    def test_summarize_confidences_inclusive_quartiles_bounded(self):
+        """Loop FB fix: small-N quartiles MUST stay within [min(data), max(data)].
 
-        # Stub _llm_judge_batch to return a known shape with mutable state.
-        async def fake_judge(batch, *args, **kwargs):
-            stats = BatchStats(
-                accepted=1,
-                edge_type_counts={"related_to": 1},
-                confidences=[0.8],
-            )
-            confirmed = [(batch[0][0], batch[0][1], "related_to", 0.8)]
-            return confirmed, stats
+        statistics.quantiles default ("exclusive" Tukey method) extrapolates
+        outside the data range for n=2 and n=3 — uninterpretable when the
+        underlying data is clamped to [0, 1]. We use method="inclusive" to
+        guarantee p25/p75 ∈ [min, max] of the observed confidences.
+        """
+        from services.sleep.edge_discovery import _summarize_confidences
 
-        llm_judge_phase._llm_judge_batch = fake_judge
+        # n=2 case
+        s2 = _summarize_confidences([0.5, 0.9])
+        assert 0.5 <= s2.p25 <= 0.9
+        assert 0.5 <= s2.p75 <= 0.9
+        # Inclusive on n=2: positions are (n-1)*i/4 = 1*0.25 = 0.25 and 1*0.75 = 0.75
+        # Q1 = 0.5 + 0.25*(0.9-0.5) = 0.6; Q3 = 0.5 + 0.75*0.4 = 0.8
+        assert s2.p25 == pytest.approx(0.6)
+        assert s2.p75 == pytest.approx(0.8)
 
-        result = await llm_judge_phase.execute(config, "user-1", "ws-1", "ctx-1", budget)
+        # n=3 case
+        s3 = _summarize_confidences([0.5, 0.7, 0.9])
+        assert 0.5 <= s3.p25 <= 0.9
+        assert 0.5 <= s3.p75 <= 0.9
+        # Inclusive on n=3: positions are 2*0.25=0.5 and 2*0.75=1.5
+        # Q1 = 0.5 + 0.5*(0.7-0.5) = 0.6; Q3 = 0.7 + 0.5*(0.9-0.7) = 0.8
+        assert s3.p25 == pytest.approx(0.6)
+        assert s3.p75 == pytest.approx(0.8)
 
-        # Snapshot the dict reference, then mutate the source structures
-        # (simulating future code that touches agg or histogram after emit).
-        recorded_dist = result.details["edge_type_dist"]
-        recorded_hist = result.details["confidence_histogram"]
-        assert recorded_dist == {"related_to": 1}
-
-        # Mutate the recorded dict — the source must NOT change because they
-        # are independent objects after defensive copy.
-        recorded_dist["related_to"] = 999
-        recorded_hist["0.85-1.0"] = 999
-
-        # Re-read from result.details — the pre-mutation snapshot is preserved
-        # in NEITHER copy of the dict (because they're the same object), but
-        # the point of the defensive copy is that mutation here does NOT
-        # propagate to internal aggregator state. The assertion below would
-        # fail PRE-fix because result.details["edge_type_dist"] would alias
-        # the live BatchStats dict (now extinct, but the principle holds for
-        # any future post-emit reader).
-        assert result.details["edge_type_dist"] is recorded_dist  # the same object
-        assert result.details["edge_type_dist"]["related_to"] == 999  # mutation persists
-        # The defensive copy guarantees result.details was NOT a reference to
-        # the (now-discarded) `agg` instance — proven by the fact that we can
-        # mutate result.details freely without affecting the source.
+        # n=1 → quartiles collapse to median
+        s1 = _summarize_confidences([0.7])
+        assert s1.p25 == 0.7
+        assert s1.median == 0.7
+        assert s1.p75 == 0.7
 
     def test_metrics_from_agg_returns_independent_dicts(self):
         """Direct test: _metrics_from_agg copies edge_type_counts and the
