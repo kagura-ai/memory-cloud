@@ -29,11 +29,12 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    # Defensive pre-check: surface a clear error if any legacy NULL workspace_id rows
-    # remain. Phase 1 (#381) deleted /external-keys/import (the only producer of NULL
-    # workspace_id rows), and the owner confirmed pre-#146 data is gone (2026-04-19),
-    # but we don't want a stale staging DB to fail with a cryptic IntegrityError on
-    # the NOT NULL alter. Pattern mirrors a97_resources_entity's pre-flight audit.
+    # Defensive pre-check #1: surface a clear error if any legacy NULL workspace_id
+    # rows remain. Phase 1 (#381) deleted /external-keys/import (the only producer of
+    # NULL workspace_id rows), and the owner confirmed pre-#146 data is gone
+    # (2026-04-19), but we don't want a stale staging DB to fail with a cryptic
+    # IntegrityError on the NOT NULL alter. Pattern mirrors a97_resources_entity's
+    # pre-flight audit.
     conn = op.get_bind()
     null_count = conn.execute(
         sa.text("SELECT COUNT(*) FROM external_api_keys WHERE workspace_id IS NULL")
@@ -52,6 +53,34 @@ def upgrade() -> None:
         existing_type=postgresql.UUID(as_uuid=True),
         nullable=False,
     )
+
+    # Defensive pre-check #2: the partial unique index would fail if any
+    # (workspace_id, provider) pair already has 2+ enabled rows. Pre-#385 the
+    # invariant was per-user (different users in the same workspace could each have
+    # their own enabled provider key), so legacy data could violate. Surface a
+    # clear remediation path instead of a cryptic CREATE INDEX failure.
+    dup_rows = conn.execute(
+        sa.text(
+            "SELECT workspace_id, provider, COUNT(*) AS cnt "
+            "FROM external_api_keys "
+            "WHERE enabled = true "
+            "GROUP BY workspace_id, provider "
+            "HAVING COUNT(*) > 1 "
+            "ORDER BY cnt DESC "
+            "LIMIT 5"
+        )
+    ).fetchall()
+    if dup_rows:
+        examples = ", ".join(
+            f"workspace={row[0]} provider={row[1]} ({row[2]} enabled)" for row in dup_rows
+        )
+        raise RuntimeError(
+            "Migration aborted: external_api_keys has multiple enabled rows for the "
+            f"same (workspace_id, provider) pair (examples: {examples}). The new "
+            "partial unique index uq_external_api_keys_workspace_provider_enabled "
+            "requires at most one enabled key per (workspace, provider). Disable or "
+            "delete the duplicates before re-running this migration."
+        )
 
     op.create_index(
         "uq_external_api_keys_workspace_provider_enabled",

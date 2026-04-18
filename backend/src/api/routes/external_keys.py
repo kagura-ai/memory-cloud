@@ -275,6 +275,29 @@ async def create_external_key(
                 detail="An API key with this configuration already exists",
             )
 
+        # Issue #385: enforce the partial unique index invariant
+        # (workspace_id, provider) WHERE enabled=true at the application layer too,
+        # so an arbitrary key_name (different from a duplicate the SELECT above
+        # would have caught) doesn't escape with a 500 from the DB IntegrityError.
+        if request.enabled:
+            dup_result = await db.execute(
+                select(ExternalAPIKey).where(
+                    and_(
+                        ExternalAPIKey.workspace_id == current_workspace_id,
+                        ExternalAPIKey.provider == request.provider,
+                        ExternalAPIKey.enabled.is_(True),
+                    )
+                )
+            )
+            if dup_result.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"An enabled {request.provider} API key already exists in this "
+                        "workspace. Disable it first or update its value instead."
+                    ),
+                )
+
         # Validate reranker exclusivity per workspace (Issue #105 / #385).
         await validate_reranker_exclusivity(
             db=db,
@@ -415,6 +438,30 @@ async def toggle_external_key(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"External key '{key_name}' not found",
             )
+
+        # Issue #385: enforce the partial unique index invariant
+        # (workspace_id, provider) WHERE enabled=true at the application layer too,
+        # so toggling a disabled key to enabled while another enabled key for the
+        # same provider exists doesn't surface as a 500 from the DB IntegrityError.
+        if request.enabled and not bool(key.enabled):
+            dup_result = await db.execute(
+                select(ExternalAPIKey).where(
+                    and_(
+                        ExternalAPIKey.workspace_id == current_workspace_id,
+                        ExternalAPIKey.provider == key.provider,
+                        ExternalAPIKey.enabled.is_(True),
+                        ExternalAPIKey.id != key.id,
+                    )
+                )
+            )
+            if dup_result.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"Another enabled {key.provider} API key already exists in "
+                        "this workspace. Disable it first before enabling this one."
+                    ),
+                )
 
         # Validate reranker exclusivity per workspace (Issue #105 / #385).
         await validate_reranker_exclusivity(
