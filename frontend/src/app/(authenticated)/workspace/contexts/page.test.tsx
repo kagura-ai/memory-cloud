@@ -166,7 +166,7 @@ describe("ContextsPage empty-state CTA role gating (#382)", () => {
     expect(screen.queryByText("createFirstContext")).toBeNull();
   });
 
-  it("shows neither the Create button nor the non-admin message while currentWorkspace is hydrating", async () => {
+  it("shows neither the Create button nor the non-admin message while currentWorkspace is null (full hydration)", async () => {
     // During WorkspaceContext hydration, current_user_role is unknown. Rendering
     // the non-admin message would briefly mislead an owner/admin ("ask an
     // owner/admin"), and rendering the CTA would briefly mislead a
@@ -176,6 +176,40 @@ describe("ContextsPage empty-state CTA role gating (#382)", () => {
       refetchUser: vi.fn(),
     });
     mockUseWorkspace.mockReturnValue({ currentWorkspace: null });
+    mockGetContexts.mockResolvedValue({ contexts: [] });
+    mockCheckOpenAIKeyStatus.mockResolvedValue({ has_key: true });
+    mockGetEmbeddingModels.mockResolvedValue({
+      models: [],
+      default_model: "small",
+    });
+
+    render(<ContextsPage />);
+
+    await waitFor(() =>
+      expect(screen.getByText("noContextsYet")).toBeInTheDocument(),
+    );
+
+    expect(screen.queryByRole("button", { name: /^create$/i })).toBeNull();
+    expect(screen.queryByText("createFirstContextNonAdmin")).toBeNull();
+    expect(screen.queryByText("createFirstContext")).toBeNull();
+  });
+
+  it("shows neither the Create button nor the non-admin message during partial hydration (workspace present, role null)", async () => {
+    // Partial hydration: currentWorkspace object is populated but
+    // current_user_role has not resolved yet. Without the role-presence
+    // guard, hasWorkspaceRole(null, "admin") returns false and the
+    // non-admin message would flash for owner/admin users too.
+    mockUseAuth.mockReturnValue({
+      user: { current_workspace_id: WORKSPACE_ID },
+      refetchUser: vi.fn(),
+    });
+    mockUseWorkspace.mockReturnValue({
+      currentWorkspace: {
+        id: WORKSPACE_ID,
+        plan_name: "pro",
+        current_user_role: null,
+      },
+    });
     mockGetContexts.mockResolvedValue({ contexts: [] });
     mockCheckOpenAIKeyStatus.mockResolvedValue({ has_key: true });
     mockGetEmbeddingModels.mockResolvedValue({

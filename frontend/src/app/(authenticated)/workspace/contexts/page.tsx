@@ -870,7 +870,7 @@ export default function ContextsPage() {
                   </Button>
                 </div>
               </>
-            ) : !currentWorkspace ? null : !hasWorkspaceRole(
+            ) : !currentWorkspace?.current_user_role ? null : !hasWorkspaceRole(
                 currentWorkspace.current_user_role,
                 "admin",
               ) ? (
