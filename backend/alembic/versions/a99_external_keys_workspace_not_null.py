@@ -29,6 +29,23 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # Defensive pre-check: surface a clear error if any legacy NULL workspace_id rows
+    # remain. Phase 1 (#381) deleted /external-keys/import (the only producer of NULL
+    # workspace_id rows), and the owner confirmed pre-#146 data is gone (2026-04-19),
+    # but we don't want a stale staging DB to fail with a cryptic IntegrityError on
+    # the NOT NULL alter. Pattern mirrors a97_resources_entity's pre-flight audit.
+    conn = op.get_bind()
+    null_count = conn.execute(
+        sa.text("SELECT COUNT(*) FROM external_api_keys WHERE workspace_id IS NULL")
+    ).scalar()
+    if null_count and null_count > 0:
+        raise RuntimeError(
+            f"Migration aborted: {null_count} external_api_keys row(s) have NULL "
+            "workspace_id. Phase 1 (#381) was supposed to leave none. Either "
+            "backfill the workspace_id column or delete the legacy rows before "
+            "re-running this migration."
+        )
+
     op.alter_column(
         "external_api_keys",
         "workspace_id",
