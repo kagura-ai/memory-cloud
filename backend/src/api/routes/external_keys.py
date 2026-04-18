@@ -15,17 +15,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import APIKeyOrSessionUser, require_workspace_owner
 from db.base import get_db
+from db.constraint_names import (
+    EXTERNAL_API_KEYS_WORKSPACE_PROVIDER_ENABLED_UNIQUE,
+    integrity_error_constraint_name,
+)
 from models.auth import ExternalAPIKey
 from utils import db_transaction, get_user_email, mask_secret
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-# Issue #385: name of the partial unique index defined in migration a99 and
-# mirrored in models.auth.ExternalAPIKey.__table_args__. Used by the create /
-# toggle handlers to narrow IntegrityError → 409 mapping to this specific
-# constraint, so unrelated DB errors (FK / NOT NULL / etc.) still surface as 500.
-_PARTIAL_UNIQUE_INDEX = "uq_external_api_keys_workspace_provider_enabled"
 
 # Issue #381: All external API key routes are owner-only.
 # External API keys are workspace-level secrets (OpenAI/Cohere/Anthropic credentials)
@@ -198,10 +196,11 @@ async def list_external_keys(
 ):
     """List all external API keys for the current workspace.
 
-    Issue #82: Now context-scoped - returns external keys for current context only.
-    Issue #246: current_context_id removed - show all user keys
-    Issue #381: Owner-only (router-level dependency); members, admins, and viewers
+    Issue #381: owner-only (router-level dependency); members, admins, and viewers
     are rejected with 403 before reaching this handler.
+    Issue #385: workspace-scoped — returns every key registered in
+    `current_workspace_id` regardless of the original creator's user_id, since
+    the workspace owner is the sole manager of these keys.
 
     Returns masked values for security.
     """
@@ -337,7 +336,10 @@ async def create_external_key(
             # (FK violations, unexpected constraints) still surface as 500 via
             # db_transaction — only the known race becomes a friendly 409.
             await db.rollback()
-            if _PARTIAL_UNIQUE_INDEX in str(getattr(exc, "orig", exc)):
+            if (
+                integrity_error_constraint_name(exc)
+                == EXTERNAL_API_KEYS_WORKSPACE_PROVIDER_ENABLED_UNIQUE
+            ):
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
@@ -509,7 +511,10 @@ async def toggle_external_key(
             # constraint rationale. Only the partial unique index becomes a 409;
             # any other IntegrityError still surfaces as 500 via db_transaction.
             await db.rollback()
-            if _PARTIAL_UNIQUE_INDEX in str(getattr(exc, "orig", exc)):
+            if (
+                integrity_error_constraint_name(exc)
+                == EXTERNAL_API_KEYS_WORKSPACE_PROVIDER_ENABLED_UNIQUE
+            ):
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
