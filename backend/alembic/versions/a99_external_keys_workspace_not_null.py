@@ -162,6 +162,10 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index(
+        "uq_external_api_keys_workspace_key_name",
+        table_name="external_api_keys",
+    )
+    op.drop_index(
         "uq_external_api_keys_workspace_provider_enabled",
         table_name="external_api_keys",
     )

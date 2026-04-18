@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import APIKeyOrSessionUser, require_workspace_owner
 from db.base import get_db
 from db.constraint_names import (
+    EXTERNAL_API_KEYS_WORKSPACE_KEY_NAME_UNIQUE,
     EXTERNAL_API_KEYS_WORKSPACE_PROVIDER_ENABLED_UNIQUE,
     integrity_error_constraint_name,
 )
@@ -331,23 +332,30 @@ async def create_external_key(
         try:
             await db.commit()
         except IntegrityError as exc:
-            # Issue #385: a concurrent create/toggle could win the race between the
-            # app-layer pre-check above and this commit, leaving the partial unique
-            # index on (workspace_id, provider) WHERE enabled=true to reject us.
-            # Narrow to the specific constraint so unrelated IntegrityErrors
+            # Issue #385: a concurrent create could win a race against the
+            # partial unique index on (workspace_id, provider) WHERE enabled=true
+            # OR the full unique index on (workspace_id, key_name). Narrow to
+            # those two specific constraints so unrelated IntegrityErrors
             # (FK violations, unexpected constraints) still surface as 500 via
-            # db_transaction — only the known race becomes a friendly 409.
+            # db_transaction — only the known races become friendly 409s.
             await db.rollback()
-            if (
-                integrity_error_constraint_name(exc)
-                == EXTERNAL_API_KEYS_WORKSPACE_PROVIDER_ENABLED_UNIQUE
-            ):
+            constraint = integrity_error_constraint_name(exc)
+            if constraint == EXTERNAL_API_KEYS_WORKSPACE_PROVIDER_ENABLED_UNIQUE:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
                         f"An enabled {request.provider} API key already exists in "
                         "this workspace (concurrent create). Disable it first or "
                         "update its value instead."
+                    ),
+                ) from exc
+            if constraint == EXTERNAL_API_KEYS_WORKSPACE_KEY_NAME_UNIQUE:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"An API key named '{request.key_name}' already exists in "
+                        "this workspace (concurrent create). Choose a different "
+                        "key_name or update the existing key's value."
                     ),
                 ) from exc
             raise
