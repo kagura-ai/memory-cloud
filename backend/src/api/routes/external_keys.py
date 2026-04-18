@@ -10,6 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import and_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import APIKeyOrSessionUser, require_workspace_owner
@@ -320,7 +321,22 @@ async def create_external_key(
         )
 
         db.add(new_key)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError as exc:
+            # Issue #385: a concurrent create/toggle could win the race between the
+            # app-layer pre-check above and this commit, leaving the partial unique
+            # index on (workspace_id, provider) WHERE enabled=true to reject us.
+            # Translate that to a friendly 409 — matches the pre-check's contract.
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"An enabled {request.provider} API key already exists in this "
+                    "workspace (concurrent create). Disable it first or update its "
+                    "value instead."
+                ),
+            ) from exc
         await db.refresh(new_key)
 
         logger.info(
@@ -476,7 +492,21 @@ async def toggle_external_key(
         key.enabled = request.enabled
         key.updated_by = user_email
 
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError as exc:
+            # Issue #385: see create_external_key for the same TOCTOU rationale —
+            # a concurrent toggle could race with this one against the partial
+            # unique index. Map the IntegrityError to a friendly 409.
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Another enabled {key.provider} API key already exists in this "
+                    "workspace (concurrent toggle). Disable it first before enabling "
+                    "this one."
+                ),
+            ) from exc
         await db.refresh(key)
 
         logger.info(
