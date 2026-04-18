@@ -234,3 +234,34 @@ class TestMemoryAccessControl:
         with patch("services.context_service.ContextService", return_value=mock_ctx_svc):
             result = await service.can_access_memory("user2", "user1", uuid4(), uuid4())
         assert result is True
+
+
+class TestCountContextOwners:
+    """Test count_context_owners helper (Issue #362)."""
+
+    def _service_with_count(self, count_value: int) -> PermissionService:
+        db = MagicMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one.return_value = count_value
+        db.execute = AsyncMock(return_value=mock_result)
+        return PermissionService(db)
+
+    @pytest.mark.asyncio
+    async def test_returns_zero_when_no_owner_row(self):
+        service = self._service_with_count(0)
+        assert await service.count_context_owners(uuid4()) == 0
+
+    @pytest.mark.asyncio
+    async def test_returns_count_when_owners_present(self):
+        service = self._service_with_count(3)
+        assert await service.count_context_owners(uuid4()) == 3
+
+    @pytest.mark.asyncio
+    async def test_handles_none_result_as_zero(self):
+        """scalar_one returning None (no rows) should coerce to 0."""
+        db = MagicMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one.return_value = None
+        db.execute = AsyncMock(return_value=mock_result)
+        service = PermissionService(db)
+        assert await service.count_context_owners(uuid4()) == 0

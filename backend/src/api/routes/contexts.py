@@ -956,8 +956,18 @@ class ContextMemberResponse(BaseModel):
     user_name: str | None = None
     user_email: str | None = None
     role: str
-    added_at: str | None = None  # None for workspace owners/admins with automatic access
-    is_workspace_admin: bool = False  # True if access is via workspace role (owner/admin)
+    # ISO-8601 timestamp of when this access was established. For explicit
+    # ContextMember rows this is ContextMember.created_at; for workspace-
+    # derived rows (Pass 1 and Pass 3) it falls back to WorkspaceMember
+    # .joined_at. None only when the underlying source timestamp is missing.
+    added_at: str | None = None
+    # True when access is workspace-role-derived (owner / admin / viewer).
+    # Clients should treat these rows as read-only — even if a legacy
+    # explicit ContextMember row happens to exist for the user, the workspace
+    # role is authoritative (check_context_access returns the workspace-
+    # effective role regardless of ContextMember.role). Mutations via /members
+    # may succeed on the DB row but will not change effective access.
+    is_workspace_admin: bool = False
 
     class Config:
         from_attributes = True
@@ -1014,7 +1024,7 @@ async def list_context_members(
         .order_by(ContextMember.role.desc(), ContextMember.created_at)
     )
     result = await db.execute(stmt)
-    explicit_members = result.scalars().all()
+    explicit_members_raw = result.scalars().all()
 
     # Get all workspace members who have access to this context
     from models.auth import User
@@ -1026,20 +1036,32 @@ async def list_context_members(
     workspace_result = await db.execute(org_stmt)
     all_workspace_members = workspace_result.scalars().all()
 
-    # Filter members who have access to this context
+    # Filter workspace members by effective access. Mirrors check_context_access:
+    #   - owner/admin: always have access (bypass at L327-329)
+    #   - viewer: access via allowed_context_ids=None (all) or whitelist match (L332-347)
+    #   - member: NO implicit access here — they require an explicit ContextMember
+    #     row (check_context_access:349-361), surfaced via Pass 2 from
+    #     explicit_members. Separately, get_accessible_contexts treats
+    #     allowed_context_ids=None for members as suspended (Migration 042),
+    #     which is consistent with the "explicit membership required" rule.
     accessible_members = []
     for om in all_workspace_members:
         if om.role in ("owner", "admin"):
-            # Owners/admins always have access
             accessible_members.append(om)
-        elif om.role in ("member", "viewer"):
-            # Check allowed_context_ids
+        elif om.role == "viewer":
             if om.allowed_context_ids is None:
-                # No restriction - has access
                 accessible_members.append(om)
             elif context_id in om.allowed_context_ids:
-                # Whitelisted - has access
                 accessible_members.append(om)
+        # workspace member: skip — explicit ContextMember row is authoritative
+
+    # Filter explicit ContextMember rows to current workspace members only.
+    # Issue #362 Guard 3 now prevents new cross-workspace adds, but legacy
+    # orphan rows (created before the guard) may still exist. Surfacing them
+    # would leak user emails/names across workspaces to any viewer of this
+    # context, so drop them at the read path as well.
+    workspace_user_ids = {om.user_id for om in all_workspace_members}
+    explicit_members = [cm for cm in explicit_members_raw if cm.user_id in workspace_user_ids]
 
     # Get user info for all accessible members
     all_user_ids = list(
@@ -1049,11 +1071,38 @@ async def list_context_members(
     user_result = await db.execute(user_stmt)
     users = {u.user_id: u for u in user_result.scalars().all()}
 
-    # Build response
+    # Build response. One row per user_id with this precedence:
+    #   1. Workspace owner/admin → shown with workspace role + is_workspace_admin=True.
+    #      Their workspace-level bypass access dominates any explicit ContextMember row
+    #      (removing the ContextMember row would not revoke their access).
+    #   2. Explicit ContextMember row (authoritative for workspace members, who have
+    #      no implicit access per check_context_access:349-361 / Migration 042).
+    #   3. Fallback for workspace viewers without an explicit ContextMember row.
+    #      Workspace "member" users never reach Pass 3 — they were filtered out of
+    #      accessible_members above because they require an explicit row.
+    #
+    # is_workspace_admin semantics: TRUE when access is workspace-role-derived
+    # (Pass 1: owner/admin, Pass 3: viewer) — these rows cannot be mutated via
+    # the /members endpoints because there is no ContextMember row to delete
+    # or update. FALSE only for Pass 2 (explicit ContextMember rows that the
+    # caller can add/update/remove via the mutation endpoints).
+    #
+    # Workspace viewers are routed through Pass 3 (workspace-role-derived)
+    # even if they have an explicit ContextMember row, because
+    # check_context_access returns "viewer" for workspace viewers regardless
+    # of ContextMember role — the ContextMember row is ineffective for them.
+    # Derive this set from all_workspace_members (NOT accessible_members)
+    # so that viewers excluded by their allowed_context_ids whitelist are
+    # still kept out of Pass 2. Such viewers lack effective access per
+    # check_context_access and simply do not appear in the response at all.
+    workspace_viewer_ids = {om.user_id for om in all_workspace_members if om.role == "viewer"}
     response = []
+    seen_user_ids: set[str] = set()
 
-    # Add all accessible workspace members
+    # Pass 1 — workspace owner/admin (dominant access layer)
     for om in accessible_members:
+        if om.role not in ("owner", "admin"):
+            continue
         user_info = users.get(om.user_id)
         response.append(
             ContextMemberResponse(
@@ -1062,9 +1111,49 @@ async def list_context_members(
                 user_email=user_info.email if user_info else None,
                 role=om.role,
                 added_at=om.joined_at.isoformat() if om.joined_at else None,
-                is_workspace_admin=om.role in ("owner", "admin"),
+                is_workspace_admin=True,
             )
         )
+        seen_user_ids.add(om.user_id)
+
+    # Pass 2 — explicit ContextMember rows for non-workspace-admin users.
+    # Skip workspace viewers: their ContextMember row is ineffective
+    # (check_context_access:340-347 returns "viewer" regardless), so Pass 3
+    # routes them as workspace-derived view-only rows instead.
+    for cm in explicit_members:
+        if cm.user_id in seen_user_ids or cm.user_id in workspace_viewer_ids:
+            continue
+        user_info = users.get(cm.user_id)
+        response.append(
+            ContextMemberResponse(
+                user_id=cm.user_id,
+                user_name=user_info.name if user_info else None,
+                user_email=user_info.email if user_info else None,
+                role=cm.role,
+                added_at=cm.created_at.isoformat() if cm.created_at else None,
+                is_workspace_admin=False,
+            )
+        )
+        seen_user_ids.add(cm.user_id)
+
+    # Pass 3 — remaining workspace viewers without explicit ContextMember.
+    # is_workspace_admin=True because these rows have no ContextMember row to
+    # mutate; the Members UI should render them as view-only.
+    for om in accessible_members:
+        if om.user_id in seen_user_ids:
+            continue
+        user_info = users.get(om.user_id)
+        response.append(
+            ContextMemberResponse(
+                user_id=om.user_id,
+                user_name=user_info.name if user_info else None,
+                user_email=user_info.email if user_info else None,
+                role=om.role,
+                added_at=om.joined_at.isoformat() if om.joined_at else None,
+                is_workspace_admin=True,
+            )
+        )
+        seen_user_ids.add(om.user_id)
 
     return response
 
@@ -1107,6 +1196,15 @@ async def add_context_member(
             detail="Cannot add members to a private context. Change to Shared first.",
         )
 
+    # Issue #362: Reject user_ids that are not workspace members.
+    # Backend truth boundary — UI gating can be bypassed by a direct API call.
+    target_in_workspace = await perm_service.is_workspace_member(body.user_id, context.workspace_id)
+    if not target_in_workspace:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User is not a member of this workspace.",
+        )
+
     # Check if member already exists
 
     stmt = select(ContextMember).where(
@@ -1135,7 +1233,13 @@ async def add_context_member(
     await db.commit()
     await db.refresh(member)
 
-    logger.info(f"Added context member: {body.user_id} to context {context_id}")
+    logger.info(
+        "context_member_added",
+        context_id=str(context_id),
+        user_id=body.user_id,
+        role=body.role,
+        actor_user_id=user["user_id"],
+    )
 
     return ContextMemberResponse(
         user_id=member.user_id,
@@ -1182,6 +1286,25 @@ async def update_context_member_role(
             detail=f"Member {user_id} not found in context",
         )
 
+    # Issue #362: Prevent the last remaining owner from being demoted.
+    # Without this guard, an owner -> editor update followed by a delete would
+    # silently bypass the "Cannot remove context owner" check below and leave
+    # the context without a ContextMember owner.
+    #
+    # Known TOCTOU: two concurrent demote-owner requests on a 2-owner context
+    # can both see count=2 and both commit, leaving 0 owners. Accepted for
+    # v0.12.1 — this endpoint is admin-click frequency, and a workspace admin
+    # can always promote another member to recover. Revisit with row-level
+    # locking if traffic patterns change.
+    if member.role == "owner" and body.role != "owner":
+        owner_count = await perm_service.count_context_owners(context_id)
+        if owner_count <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot demote the last context owner. "
+                "Promote another member to owner first.",
+            )
+
     # Update role
     member.role = body.role
     member.updated_at = func.now()
@@ -1189,7 +1312,13 @@ async def update_context_member_role(
     await db.commit()
     await db.refresh(member)
 
-    logger.info(f"Updated context member role: {user_id} -> {body.role}")
+    logger.info(
+        "context_member_role_updated",
+        context_id=str(context_id),
+        user_id=user_id,
+        role=body.role,
+        actor_user_id=current_user["user_id"],
+    )
 
     return ContextMemberResponse(
         user_id=member.user_id,
@@ -1224,6 +1353,15 @@ async def remove_context_member(
     # Issue #271 Code Review C-2: check_context_owner already verifies ownership
     await perm_service.check_context_owner(current_user["user_id"], context_id)
 
+    # Issue #362: Prevent self-removal even when the caller is an owner/admin.
+    # Governance change should always require another actor.
+    if user_id == current_user["user_id"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot remove yourself from the context. "
+            "Ask another owner or workspace admin to remove you.",
+        )
+
     # Get member
     stmt = select(ContextMember).where(
         ContextMember.context_id == context_id,
@@ -1249,7 +1387,12 @@ async def remove_context_member(
     await db.delete(member)
     await db.commit()
 
-    logger.info(f"Removed context member: {user_id} from context {context_id}")
+    logger.info(
+        "context_member_removed",
+        context_id=str(context_id),
+        user_id=user_id,
+        actor_user_id=current_user["user_id"],
+    )
 
 
 # ============================================================================

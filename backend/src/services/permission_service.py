@@ -416,6 +416,38 @@ class PermissionService:
     # Utility Methods
     # ========================================================================
 
+    async def count_context_owners(self, context_id: UUID) -> int:
+        """Count explicit ContextMember rows with role='owner' for a context.
+
+        Used by update_context_member_role to prevent demoting the last
+        remaining explicit owner. remove_context_member rejects owner removal
+        unconditionally via a separate role-check, so this helper is
+        demotion-only today — re-wire into the remove flow if we ever relax
+        that to "remove allowed when >1 owners exist".
+
+        Workspace-level owner/admin bypass (check_context_access:327-329) is
+        not counted here — this reflects the real governance anchor stored in
+        the ContextMember table.
+
+        Args:
+            context_id: Context ID
+
+        Returns:
+            Number of ContextMember rows with role='owner'
+        """
+        from sqlalchemy import func
+
+        stmt = (
+            select(func.count())
+            .select_from(ContextMember)
+            .where(
+                ContextMember.context_id == context_id,
+                ContextMember.role == "owner",
+            )
+        )
+        result = await self.db.execute(stmt)
+        return int(result.scalar_one() or 0)
+
     async def get_accessible_contexts(
         self,
         user_id: str,
