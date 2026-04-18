@@ -120,13 +120,26 @@ def _make_batch_pair(n=2):
     `_llm_judge_batch` assigns labels by sorting all memory IDs by ``str(id)``
     before mapping them to A/B/.... The ``deterministic_shuffle`` fixture only
     disables the later `random.shuffle` used for display order; it does not
-    control label assignment itself. We construct the memories so the expected
-    labels can be derived from that sorted-ID mapping.
+    control label assignment itself. Use ``_labels_for(memory_map)`` to derive
+    the actual label assignment when constructing canned LLM responses.
     """
     mems = [_make_memory() for _ in range(n)]
     batch = [(mems[i].id, mems[i + 1].id, 0.75) for i in range(n - 1)]
     memory_map = {m.id: m for m in mems}
     return mems, batch, memory_map
+
+
+def _labels_for(memory_map):
+    """Return {memory_id: label} matching `_llm_judge_batch`'s sorted assignment.
+
+    `_llm_judge_batch` does `id_list = sorted(all_ids, key=str)` then assigns
+    labels A, B, C, ... in that order. Tests that construct canned LLM
+    responses must use labels derived from this same mapping — hardcoded
+    ("A", "B") would only work by coincidence on UUIDs that happen to sort
+    in insertion order. Loop 4 hallucination guard rejects pairs not in the
+    requested batch, so wrong labels manifest as silent test failures.
+    """
+    return {mid: chr(ord("A") + i) for i, mid in enumerate(sorted(memory_map.keys(), key=str))}
 
 
 class TestEdgeDiscoveryPhase:
@@ -445,11 +458,12 @@ class TestLLMJudgeBatch:
         config = _make_config()
         budget = SleepBudget()
         _, batch, memory_map = _make_batch_pair(n=3)
+        labels = _labels_for(memory_map)
 
         llm_judge_phase.llm_service.complete_json.return_value = _make_llm_response(
             [
-                ("A", "B", True, "related_to", 0.9),
-                ("B", "C", True, "depends_on", 0.85),
+                (labels[batch[0][0]], labels[batch[0][1]], True, "related_to", 0.9),
+                (labels[batch[1][0]], labels[batch[1][1]], True, "depends_on", 0.85),
             ]
         )
 
@@ -469,11 +483,12 @@ class TestLLMJudgeBatch:
         config = _make_config()
         budget = SleepBudget()
         _, batch, memory_map = _make_batch_pair(n=3)
+        labels = _labels_for(memory_map)
 
         llm_judge_phase.llm_service.complete_json.return_value = _make_llm_response(
             [
-                ("A", "B", False, "related_to", 0.2),
-                ("B", "C", False, "related_to", 0.3),
+                (labels[batch[0][0]], labels[batch[0][1]], False, "related_to", 0.2),
+                (labels[batch[1][0]], labels[batch[1][1]], False, "related_to", 0.3),
             ]
         )
 
@@ -493,11 +508,12 @@ class TestLLMJudgeBatch:
         config = _make_config()
         budget = SleepBudget()
         _, batch, memory_map = _make_batch_pair(n=3)
+        labels = _labels_for(memory_map)
 
         llm_judge_phase.llm_service.complete_json.return_value = _make_llm_response(
             [
-                ("A", "B", True, "learned_from", 0.75),
-                ("B", "C", False, "related_to", 0.4),
+                (labels[batch[0][0]], labels[batch[0][1]], True, "learned_from", 0.75),
+                (labels[batch[1][0]], labels[batch[1][1]], False, "related_to", 0.4),
             ]
         )
 
@@ -564,11 +580,12 @@ class TestLLMJudgeBatch:
         config = _make_config()
         budget = SleepBudget()
         _, batch, memory_map = _make_batch_pair(n=3)
+        labels = _labels_for(memory_map)
 
         llm_judge_phase.llm_service.complete_json.return_value = _make_llm_response(
             [
-                ("A", "B", True, "related_to", 1.5),  # over
-                ("B", "C", True, "related_to", -0.3),  # under
+                (labels[batch[0][0]], labels[batch[0][1]], True, "related_to", 1.5),  # over
+                (labels[batch[1][0]], labels[batch[1][1]], True, "related_to", -0.3),  # under
             ]
         )
 
@@ -604,6 +621,46 @@ class TestLLMJudgeBatch:
         # retries. Pre-fix, budget.consume(llm_calls=1) ran only on success
         # → max_llm_calls would be ignored when the LLM is failing.
         assert budget.llm_calls_used == 1
+
+    @pytest.mark.asyncio
+    async def test_hallucinated_pair_rejected(self, llm_judge_phase):
+        """Loop 4 fix: LLM may return pairs that were never in the requested
+        batch (hallucination). Such pairs MUST be silently dropped — they do
+        NOT contribute to accepted/rejected, do NOT create edges, and must
+        not inflate observability metrics. Orientation-agnostic match: the
+        LLM may flip the pair order; that is allowed and counted as a real
+        response, but a fully unrequested pair is not.
+        """
+        config = _make_config()
+        budget = SleepBudget()
+        # 3 memories: A, B, C. We request only the (A, B) pair.
+        mems = [_make_memory() for _ in range(3)]
+        memory_map = {m.id: m for m in mems}
+        # Sort to match production label assignment order. Only A and B are
+        # used in the requested batch — C exists in memory_map but is NOT in
+        # the batch, so any LLM-returned pair containing C must be rejected.
+        sorted_ids = sorted(memory_map.keys(), key=str)
+        a_id, b_id = sorted_ids[0], sorted_ids[1]
+        batch = [(a_id, b_id, 0.75)]  # only (A, B) requested
+
+        # LLM hallucinates: returns the requested (A, B) AND an unrequested (A, C).
+        llm_judge_phase.llm_service.complete_json.return_value = _make_llm_response(
+            [
+                ("A", "B", True, "related_to", 0.9),
+                ("A", "C", True, "related_to", 0.8),  # hallucinated — never asked
+            ]
+        )
+
+        confirmed, stats = await llm_judge_phase._llm_judge_batch(
+            batch, memory_map, "user-1", "ctx-1", "ws-1", budget, config
+        )
+
+        # Only the requested (A, B) is accepted; (A, C) is silently dropped.
+        assert len(confirmed) == 1
+        assert stats.accepted == 1
+        assert stats.rejected == 0  # hallucinated pairs are dropped, not rejected
+        assert stats.confidences == [0.9]
+        assert stats.edge_type_counts == {"related_to": 1}
 
     @pytest.mark.asyncio
     async def test_dst_outside_memory_map_skips_pair_no_keyerror(self, llm_judge_phase):

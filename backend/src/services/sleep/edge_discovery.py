@@ -538,11 +538,21 @@ class EdgeDiscoveryPhase:
         # → entire phase silently failed (closes #369). Skipped pairs are
         # NOT counted toward accepted/rejected/failures because they were
         # never judged by the LLM at all.
+        #
+        # Also build `requested_pairs` (orientation-agnostic) so the response
+        # parser can reject hallucinated/unrequested pairs the LLM may invent
+        # — the prompt only asks about specific pairs, but a misbehaving model
+        # could return arbitrary (label_a, label_b) combinations and the
+        # parser would otherwise create edges for them, inflating
+        # `edges_created` and skewing observability metrics. Addresses
+        # Copilot review #371 finding (loop 4).
         pair_lines = []
+        requested_pairs: set[frozenset[str]] = set()
         for src, dst, score in batch:
             if src not in id_to_label or dst not in id_to_label:
                 continue
             pair_lines.append(f"  ({id_to_label[src]}, {id_to_label[dst]}): similarity={score:.3f}")
+            requested_pairs.add(frozenset({id_to_label[src], id_to_label[dst]}))
 
         if not pair_lines:
             # All pairs in this batch had at least one end outside memory_map.
@@ -585,6 +595,13 @@ class EdgeDiscoveryPhase:
             pair = edge.get("pair", [])
             if len(pair) != 2 or pair[0] not in label_to_id or pair[1] not in label_to_id:
                 # Malformed pair → not counted toward accepted/rejected.
+                continue
+
+            # Reject hallucinated/unrequested pairs: the LLM may invent pair
+            # combinations that were never in `pair_lines`. Match
+            # orientation-agnostic via frozenset to allow the model to flip
+            # the pair order (the relationship is undirected at this stage).
+            if frozenset(pair) not in requested_pairs:
                 continue
 
             if not edge.get("related", False):
