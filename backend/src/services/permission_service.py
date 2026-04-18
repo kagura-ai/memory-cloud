@@ -419,10 +419,15 @@ class PermissionService:
     async def count_context_owners(self, context_id: UUID) -> int:
         """Count explicit ContextMember rows with role='owner' for a context.
 
-        Used to prevent demoting or removing the last remaining context owner.
-        Workspace-level owner/admin bypass (check_context_access:327-329) is not
-        counted here — this reflects the real governance anchor stored in the
-        ContextMember table.
+        Used by update_context_member_role to prevent demoting the last
+        remaining explicit owner. remove_context_member rejects owner removal
+        unconditionally via a separate role-check, so this helper is
+        demotion-only today — re-wire into the remove flow if we ever relax
+        that to "remove allowed when >1 owners exist".
+
+        Workspace-level owner/admin bypass (check_context_access:327-329) is
+        not counted here — this reflects the real governance anchor stored in
+        the ContextMember table.
 
         Args:
             context_id: Context ID

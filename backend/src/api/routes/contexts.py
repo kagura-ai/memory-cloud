@@ -957,7 +957,11 @@ class ContextMemberResponse(BaseModel):
     user_email: str | None = None
     role: str
     added_at: str | None = None  # None for workspace owners/admins with automatic access
-    is_workspace_admin: bool = False  # True if access is via workspace role (owner/admin)
+    # True when access is workspace-role-derived (owner / admin / viewer) and
+    # the row therefore has no explicit ContextMember entry to mutate. Clients
+    # should treat these rows as read-only — remove/update via /members
+    # endpoints will 404 or be ineffective.
+    is_workspace_admin: bool = False
 
     class Config:
         from_attributes = True
@@ -1063,15 +1067,17 @@ async def list_context_members(
     #   1. Workspace owner/admin → shown with workspace role + is_workspace_admin=True.
     #      Their workspace-level bypass access dominates any explicit ContextMember row
     #      (removing the ContextMember row would not revoke their access).
-    #   2. Explicit ContextMember row (workspace member/viewer with context-level role).
-    #   3. Fallback workspace membership (member/viewer with implicit access via
-    #      allowed_context_ids=None or whitelist match).
+    #   2. Explicit ContextMember row (authoritative for workspace members, who have
+    #      no implicit access per check_context_access:349-361 / Migration 042).
+    #   3. Fallback for workspace viewers without an explicit ContextMember row.
+    #      Workspace "member" users never reach Pass 3 — they were filtered out of
+    #      accessible_members above because they require an explicit row.
     #
     # is_workspace_admin semantics: TRUE when access is workspace-role-derived
-    # (Pass 1 and Pass 3) — these rows cannot be mutated via the /members
-    # endpoints because there is no ContextMember row to delete or update.
-    # FALSE only for Pass 2 (explicit ContextMember rows that the caller can
-    # add/update/remove via the mutation endpoints).
+    # (Pass 1: owner/admin, Pass 3: viewer) — these rows cannot be mutated via
+    # the /members endpoints because there is no ContextMember row to delete
+    # or update. FALSE only for Pass 2 (explicit ContextMember rows that the
+    # caller can add/update/remove via the mutation endpoints).
     #
     # Workspace viewers are routed through Pass 3 (workspace-role-derived)
     # even if they have an explicit ContextMember row, because
@@ -1118,7 +1124,7 @@ async def list_context_members(
         )
         seen_user_ids.add(cm.user_id)
 
-    # Pass 3 — remaining workspace members/viewers without explicit ContextMember.
+    # Pass 3 — remaining workspace viewers without explicit ContextMember.
     # is_workspace_admin=True because these rows have no ContextMember row to
     # mutate; the Members UI should render them as view-only.
     for om in accessible_members:
