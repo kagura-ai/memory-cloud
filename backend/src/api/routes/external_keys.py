@@ -5,6 +5,8 @@ Issue #45: Web UI Endpoint Implementation
 Issue #106: Refactored to use consolidated utilities
 """
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import and_, select
@@ -104,7 +106,7 @@ EMBEDDING_PROVIDERS = {"openai"}
 
 async def validate_reranker_exclusivity(
     db: AsyncSession,
-    workspace_id,
+    workspace_id: UUID,
     provider: str,
     enabled: bool,
     exclude_key_id: int | None = None,
