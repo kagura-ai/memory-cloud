@@ -366,7 +366,7 @@ describe("MembersSection — remove flow", () => {
       expect(screen.getByText("removeMemberTitle")).toBeInTheDocument();
     });
 
-    const confirmButton = screen.getByText(/removeMember:/);
+    const confirmButton = screen.getByText("remove");
     fireEvent.click(confirmButton);
 
     await waitFor(() => {

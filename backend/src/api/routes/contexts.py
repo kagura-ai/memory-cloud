@@ -1153,8 +1153,8 @@ async def add_context_member(
 
     # Issue #362: Reject user_ids that are not workspace members.
     # Backend truth boundary — UI gating can be bypassed by a direct API call.
-    is_workspace_member = await perm_service.is_workspace_member(body.user_id, context.workspace_id)
-    if not is_workspace_member:
+    target_in_workspace = await perm_service.is_workspace_member(body.user_id, context.workspace_id)
+    if not target_in_workspace:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User is not a member of this workspace.",
@@ -1245,6 +1245,12 @@ async def update_context_member_role(
     # Without this guard, an owner -> editor update followed by a delete would
     # silently bypass the "Cannot remove context owner" check below and leave
     # the context without a ContextMember owner.
+    #
+    # Known TOCTOU: two concurrent demote-owner requests on a 2-owner context
+    # can both see count=2 and both commit, leaving 0 owners. Accepted for
+    # v0.12.1 — this endpoint is admin-click frequency, and a workspace admin
+    # can always promote another member to recover. Revisit with row-level
+    # locking if traffic patterns change.
     if member.role == "owner" and body.role != "owner":
         owner_count = await perm_service.count_context_owners(context_id)
         if owner_count <= 1:

@@ -433,7 +433,7 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
               {submittingRemove && (
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
               )}
-              {t("removeMember", { name: "" })}
+              {tCommon("remove")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
