@@ -86,6 +86,7 @@ import {
   type EmbeddingModel,
 } from "@/lib/api/contexts";
 import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
+import { hasWorkspaceRole } from "@/lib/auth/rbac";
 import { ApiError } from "@/lib/api/base";
 import type { Context, ContextStats } from "@/lib/types/context";
 import { CONTEXT_TEMPLATES, getTemplate } from "@/lib/templates/usage-guide";
@@ -869,6 +870,11 @@ export default function ContextsPage() {
                   </Button>
                 </div>
               </>
+            ) : !currentWorkspace?.current_user_role ? null : !hasWorkspaceRole(
+                currentWorkspace.current_user_role,
+                "admin",
+              ) ? (
+              <>{t("createFirstContextNonAdmin")}</>
             ) : (
               <>
                 {t("createFirstContext")}

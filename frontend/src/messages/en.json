@@ -1216,6 +1216,7 @@
     "apiKeyRequired": "API Key Required",
     "apiKeyRequiredDesc": "Please configure an OpenAI API key first",
     "createFirstContext": "Create your first context to start organizing your memories.",
+    "createFirstContextNonAdmin": "No contexts have been created in this workspace yet. Ask a workspace owner or admin to create the first one.",
     "configureOpenAIKey": "Configure OpenAI API Key",
     "openAIKeyDialogDesc": "Add your OpenAI API key to enable context creation and memory storage. Your key is encrypted and stored securely.",
     "openAIApiKey": "OpenAI API Key",
