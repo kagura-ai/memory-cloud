@@ -73,7 +73,8 @@ Example:
 # ============================================================================
 
 # Bump on every edit to EDGE_DISCOVERY_SYSTEM or EDGE_DISCOVERY_USER so
-# sleep_reports.details can distinguish runs that used different prompts.
+# sleep_reports.edge_discovery_result.details can distinguish runs that used
+# different prompts.
 EDGE_DISCOVERY_PROMPT_REVISION = "v1"
 
 EDGE_DISCOVERY_SYSTEM = """\

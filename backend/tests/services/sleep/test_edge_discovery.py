@@ -117,10 +117,11 @@ def llm_judge_phase(edge_phase, deterministic_shuffle):
 def _make_batch_pair(n=2):
     """Return ((memory_map, batch), labels) aligned for deterministic A/B/...
 
-    With ``deterministic_shuffle`` active, `_llm_judge_batch` assigns labels
-    in `id_list` order, which is `set(memory_map).insertion_order` from the
-    pair-collection loop. We construct the memories so that the FIRST memory
-    in each pair gets label 'A', the second 'B', etc.
+    `_llm_judge_batch` assigns labels by sorting all memory IDs by ``str(id)``
+    before mapping them to A/B/.... The ``deterministic_shuffle`` fixture only
+    disables the later `random.shuffle` used for display order; it does not
+    control label assignment itself. We construct the memories so the expected
+    labels can be derived from that sorted-ID mapping.
     """
     mems = [_make_memory() for _ in range(n)]
     batch = [(mems[i].id, mems[i + 1].id, 0.75) for i in range(n - 1)]
@@ -599,6 +600,10 @@ class TestLLMJudgeBatch:
         assert stats.failures == 1
         assert stats.edge_type_counts == {}
         assert stats.confidences == []
+        # Loop 2 fix: failed attempts must consume budget to prevent runaway
+        # retries. Pre-fix, budget.consume(llm_calls=1) ran only on success
+        # → max_llm_calls would be ignored when the LLM is failing.
+        assert budget.llm_calls_used == 1
 
     @pytest.mark.asyncio
     async def test_dst_outside_memory_map_skips_pair_no_keyerror(self, llm_judge_phase):

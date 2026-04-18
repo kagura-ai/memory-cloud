@@ -554,6 +554,13 @@ class EdgeDiscoveryPhase:
             pairs="\n".join(pair_lines),
         )
 
+        # Consume the budget BEFORE the call so failed attempts are still
+        # counted. Otherwise a failing LLM provider could trigger many more
+        # batches than `max_llm_calls` permits — `execute()`'s budget check
+        # would never see the consumption from the failure path. Tokens are
+        # still only added on success (no tokens consumed when the call
+        # failed). Addresses Copilot review #371 finding (loop 2).
+        budget.consume(llm_calls=1)
         try:
             response, tokens = await self.llm_service.complete_json(
                 user_id=user_id,
@@ -564,7 +571,6 @@ class EdgeDiscoveryPhase:
                 model=config.sleep_llm_model,
                 provider=config.sleep_llm_provider,
             )
-            budget.consume(llm_calls=1)
             self._tokens_used += tokens
 
         except Exception as e:
