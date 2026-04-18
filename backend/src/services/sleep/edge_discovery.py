@@ -19,8 +19,11 @@ Academic notes:
 
 from __future__ import annotations
 
+import math
 import random
+import statistics
 import string
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -36,7 +39,11 @@ from models.memory import Memory, NeuralMemoryEdge
 from repositories.neural_edge import NeuralEdgeRepository
 from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService
-from services.sleep.prompts import EDGE_DISCOVERY_SYSTEM, EDGE_DISCOVERY_USER
+from services.sleep.prompts import (
+    EDGE_DISCOVERY_PROMPT_REVISION,
+    EDGE_DISCOVERY_SYSTEM,
+    EDGE_DISCOVERY_USER,
+)
 from services.sleep.reporter import PhaseResult, SleepBudget
 from utils.logger import get_logger
 
@@ -79,6 +86,162 @@ def _is_synthetic_seed_edge(edge: NeuralMemoryEdge) -> bool:
     )
 
 
+# Issue #306: Confidence histogram bucket boundaries.
+# Convention: right-open [a, b) for the first three buckets, last bucket [0.85, 1.0]
+# (inclusive at 1.0). Boundary values 0.5/0.7/0.85 fall into the higher bucket.
+# The 0.0-0.5 bucket exists because LLM returns can clamp accepted-edge confidence
+# anywhere in [0, 1] — pilot #249 demonstrated bimodal distribution detection
+# requires the lower-band bucket.
+# Annotated as `tuple[str, ...]` (not the inferred Literal tuple) so that
+# `dict.fromkeys(KEYS, 0)` widens to `dict[str, int]` for downstream consumers.
+CONFIDENCE_HISTOGRAM_KEYS: tuple[str, ...] = ("0.0-0.5", "0.5-0.7", "0.7-0.85", "0.85-1.0")
+
+
+@dataclass
+class BatchStats:
+    """Per-batch LLM Judge stats from `_llm_judge_batch` (#306).
+
+    Aggregated across batches in `execute()` before being unpacked into
+    `PhaseResult.details`. Per-batch invariant: `failures in {0, 1}` because
+    each batch makes exactly one `complete_json` call.
+
+    `confidences` holds raw confidence values for **accepted edges only** —
+    rejected-side confidence is not retained by the parser. This is a known
+    limitation: the resulting metrics represent `P(confidence | decision=accept)`
+    not the marginal `P(confidence)` over all judgments. See #372 for the
+    rejected-side retention follow-up that enables decision-boundary analysis.
+
+    `edge_type_counts` covers accepted edges only.
+
+    `confidence_imputed` counts how many parsed edges had their confidence
+    field replaced with the 0.5 default because the LLM returned a non-finite
+    value (NaN, Inf) or a non-numeric type. Surfaces silent imputation so
+    operators can detect prompt/model issues from production observability.
+    """
+
+    accepted: int = 0
+    rejected: int = 0
+    failures: int = 0
+    confidence_imputed: int = 0
+    edge_type_counts: dict[str, int] = field(default_factory=dict)
+    confidences: list[float] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ConfidenceSummary:
+    """5-number summary for accepted-edge confidences (#306).
+
+    `avg` (mean) is reported but is structurally inadequate for bimodal data
+    (textbook example: bimodal mean = midpoint of valley). `median`, `p25`,
+    `p75` give a robust picture of the distribution shape. Pair with
+    `confidence_histogram` for visual inspection. `n` lets readers gauge
+    sample-size noise (per-run N is typically small ≤ 30 — formal bimodality
+    detection requires cross-run aggregation, see #372).
+    """
+
+    avg: float
+    median: float
+    p25: float
+    p75: float
+    n: int
+
+
+def _summarize_confidences(confidences: list[float]) -> ConfidenceSummary:
+    """Compute mean + median + IQR + n from a list of confidences.
+
+    Handles small-N edge cases: n=0 → all zeros (caller convention),
+    n=1 → quartiles collapse to the single value (no IQR information).
+    """
+    n = len(confidences)
+    if n == 0:
+        return ConfidenceSummary(avg=0.0, median=0.0, p25=0.0, p75=0.0, n=0)
+    avg = sum(confidences) / n
+    median = statistics.median(confidences)
+    if n >= 2:
+        # Use inclusive quartiles so small samples (n=2, n=3) do not
+        # extrapolate outside the observed confidence range. The default
+        # `exclusive` (Tukey) method can return values < min(data) or
+        # > max(data), which makes p25/p75 fall outside [0.0, 1.0] even
+        # though the inputs are clamped — uninterpretable for a confidence
+        # metric. statistics.quantiles(n=4) returns [Q1, Q2, Q3].
+        quartiles = statistics.quantiles(confidences, n=4, method="inclusive")
+        p25, p75 = quartiles[0], quartiles[2]
+    else:
+        # Single sample — IQR is undefined; collapse to the lone value.
+        p25 = p75 = median
+    return ConfidenceSummary(avg=avg, median=median, p25=p25, p75=p75, n=n)
+
+
+def _metrics_from_agg(
+    agg: BatchStats,
+    auto_accepted: int,
+    confidence_summary: ConfidenceSummary,
+    confidence_histogram: dict[str, int],
+    config: NeuralMemoryConfig,
+) -> dict[str, object]:
+    """Build the #306 metric dict from aggregated values.
+
+    Single source of truth for the metric key names — `_empty_metrics()` and
+    `execute()`'s success-path `result.details` both go through here, so a key
+    rename or addition only requires editing this one function.
+
+    Mutable fields (`edge_type_counts`, `confidence_histogram`) are
+    **defensive-copied** so that the returned dict is decoupled from the
+    caller's `agg` and any local working state. Without this, the result dict
+    would alias the caller's mutable structures and any post-emit mutation
+    would silently corrupt `result.details`. The copy cost is negligible
+    (O(3) for edge_type, O(4) for histogram).
+    """
+    return {
+        "llm_accepted": agg.accepted,
+        "llm_rejected": agg.rejected,
+        "llm_call_failures": agg.failures,
+        "auto_accepted": auto_accepted,
+        "edge_type_dist": dict(agg.edge_type_counts),  # defensive copy
+        "avg_confidence": confidence_summary.avg,
+        "median_confidence": confidence_summary.median,
+        "p25_confidence": confidence_summary.p25,
+        "p75_confidence": confidence_summary.p75,
+        "confidence_n": confidence_summary.n,
+        "confidence_imputed": agg.confidence_imputed,
+        "confidence_histogram": dict(confidence_histogram),  # defensive copy
+        "llm_model": config.sleep_llm_model,
+        "prompt_revision": EDGE_DISCOVERY_PROMPT_REVISION,
+    }
+
+
+def _empty_metrics(config: NeuralMemoryConfig) -> dict[str, object]:
+    """Zero-initialized #306 metric keys for early-return paths.
+
+    Reader code (`get_sleep_report` MCP tool, admin UI) can use `.get(key, 0)`
+    safely, but emitting zero values keeps every sleep_report uniform.
+    `llm_model` and `prompt_revision` always reflect the config that *would*
+    be used if the LLM path ran, so historical reports stay comparable.
+    """
+    return _metrics_from_agg(
+        agg=BatchStats(),
+        auto_accepted=0,
+        confidence_summary=_summarize_confidences([]),
+        confidence_histogram=dict.fromkeys(CONFIDENCE_HISTOGRAM_KEYS, 0),
+        config=config,
+    )
+
+
+def _build_confidence_histogram(confidences: list[float]) -> dict[str, int]:
+    """Bucket accepted-edge confidence values per CONFIDENCE_HISTOGRAM_KEYS."""
+    histogram: dict[str, int] = dict.fromkeys(CONFIDENCE_HISTOGRAM_KEYS, 0)
+    for c in confidences:
+        if c < 0.5:
+            histogram["0.0-0.5"] += 1
+        elif c < 0.7:
+            histogram["0.5-0.7"] += 1
+        elif c < 0.85:
+            histogram["0.7-0.85"] += 1
+        else:
+            histogram["0.85-1.0"] += 1
+    return histogram
+
+
 class EdgeDiscoveryPhase:
     """Discover missing edges between semantically related memories."""
 
@@ -94,6 +257,9 @@ class EdgeDiscoveryPhase:
         self.edge_repo = NeuralEdgeRepository(db)
         self.collection_name = collection_name
         self.embedding_service = EmbeddingService(db, model=embedding_model)
+        # Reset on every execute(); init here so _llm_judge_batch can be called
+        # in isolation (e.g. from unit tests) without AttributeError (#306).
+        self._tokens_used = 0
 
     async def execute(
         self,
@@ -122,24 +288,47 @@ class EdgeDiscoveryPhase:
         # Step 1: Sample memories (recency-weighted)
         sampled = await self._sample_memories(user_id, workspace_id, context_id, sample_size)
         if not sampled:
-            result.details = {"message": "no_memories_to_sample"}
+            result.details = {
+                "message": "no_memories_to_sample",
+                "sampled": 0,
+                "candidates": 0,
+                "filtered": 0,
+                "edges_created": 0,
+                **_empty_metrics(config),
+            }
             return result
 
         # Step 2: Find medium-similarity candidates
         candidates = await self._find_candidates(sampled, user_id, workspace_id, context_id)
         if not candidates:
-            result.details = {"message": "no_edge_candidates"}
+            result.details = {
+                "message": "no_edge_candidates",
+                "sampled": len(sampled),
+                "candidates": 0,
+                "filtered": 0,
+                "edges_created": 0,
+                **_empty_metrics(config),
+            }
             return result
 
         # Step 3: Filter out existing edges
         filtered = await self._filter_existing_edges(candidates, user_id, workspace_id, context_id)
         if not filtered:
-            result.details = {"message": "all_candidates_already_connected"}
+            result.details = {
+                "message": "all_candidates_already_connected",
+                "sampled": len(sampled),
+                "candidates": len(candidates),
+                "filtered": 0,
+                "edges_created": 0,
+                **_empty_metrics(config),
+            }
             return result
 
         # Step 4: Judge candidates (LLM or auto-accept)
         edges_created = 0
         memory_map = {m.id: m for m in sampled}
+        agg = BatchStats()
+        auto_accepted = 0
 
         # Process in batches
         for batch_start in range(0, len(filtered), BATCH_SIZE):
@@ -149,7 +338,7 @@ class EdgeDiscoveryPhase:
             batch = filtered[batch_start : batch_start + BATCH_SIZE]
 
             if llm_enabled:
-                confirmed = await self._llm_judge_batch(
+                confirmed, batch_stats = await self._llm_judge_batch(
                     batch,
                     memory_map,
                     user_id,
@@ -158,9 +347,19 @@ class EdgeDiscoveryPhase:
                     budget,
                     config,
                 )
+                agg.accepted += batch_stats.accepted
+                agg.rejected += batch_stats.rejected
+                agg.failures += batch_stats.failures
+                agg.confidence_imputed += batch_stats.confidence_imputed
+                for k, v in batch_stats.edge_type_counts.items():
+                    agg.edge_type_counts[k] = agg.edge_type_counts.get(k, 0) + v
+                agg.confidences.extend(batch_stats.confidences)
             else:
-                # Without LLM, accept all candidates with default confidence
+                # Without LLM, accept all candidates with default confidence.
+                # Tracked separately as `auto_accepted` so it does NOT pollute
+                # avg_confidence / confidence_histogram / edge_type_dist (#306).
                 confirmed = [(src, dst, "related_to", 0.5) for src, dst, _score in batch]
+                auto_accepted += len(confirmed)
 
             for src_id, dst_id, edge_type, confidence in confirmed:
                 try:
@@ -197,6 +396,9 @@ class EdgeDiscoveryPhase:
                         error=str(e),
                     )
 
+        confidence_summary = _summarize_confidences(agg.confidences)
+        confidence_histogram = _build_confidence_histogram(agg.confidences)
+
         result.memories_processed = len(sampled)
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
         result.tokens_used = self._tokens_used
@@ -205,6 +407,9 @@ class EdgeDiscoveryPhase:
             "candidates": len(candidates),
             "filtered": len(filtered),
             "edges_created": edges_created,
+            **_metrics_from_agg(
+                agg, auto_accepted, confidence_summary, confidence_histogram, config
+            ),
         }
 
         logger.info(
@@ -212,6 +417,17 @@ class EdgeDiscoveryPhase:
             sampled=len(sampled),
             candidates=len(candidates),
             edges_created=edges_created,
+            llm_accepted=agg.accepted,
+            llm_rejected=agg.rejected,
+            llm_call_failures=agg.failures,
+            auto_accepted=auto_accepted,
+            edge_type_dist=agg.edge_type_counts,
+            avg_confidence=confidence_summary.avg,
+            median_confidence=confidence_summary.median,
+            confidence_n=confidence_summary.n,
+            confidence_imputed=agg.confidence_imputed,
+            confidence_histogram=confidence_histogram,
+            prompt_revision=EDGE_DISCOVERY_PROMPT_REVISION,
         )
 
         return result
@@ -339,11 +555,18 @@ class EdgeDiscoveryPhase:
         workspace_id: str | None,
         budget: SleepBudget,
         config: NeuralMemoryConfig,
-    ) -> list[tuple[UUID, UUID, str, float]]:
+    ) -> tuple[list[tuple[UUID, UUID, str, float]], BatchStats]:
         """Use LLM to judge edge candidates.
 
-        Returns list of (src_id, dst_id, edge_type, confidence) for confirmed edges.
+        Returns:
+            Tuple of (confirmed_edges, stats):
+              - confirmed_edges: list of (src_id, dst_id, edge_type, confidence)
+                for accepted edges.
+              - stats: BatchStats with per-batch counts. `failures` is 0 or 1
+                (one LLM call per batch).
         """
+        stats = BatchStats()
+
         # Collect all unique memories in batch, skip IDs not in memory_map
         all_ids: set[UUID] = set()
         for src, dst, _ in batch:
@@ -353,10 +576,16 @@ class EdgeDiscoveryPhase:
                 all_ids.add(dst)
 
         if not all_ids:
-            return []
+            return [], stats
 
-        # Assign short labels
-        id_list = list(all_ids)
+        # Assign short labels deterministically. `all_ids` is a set, so
+        # `list(all_ids)` would have non-reproducible iteration order across
+        # runs — sort by str(uuid) so the same batch always produces the same
+        # label↔UUID mapping. Positional bias for the LLM is then handled by
+        # `random.shuffle(shuffled_items)` below, which acts on the *display*
+        # order independently of label assignment (#306, addresses Copilot
+        # review #371 finding).
+        id_list = sorted(all_ids, key=str)
         labels = list(string.ascii_uppercase[: len(id_list)])
         id_to_label = dict(zip(id_list, labels, strict=True))
         label_to_id = dict(zip(labels, id_list, strict=True))
@@ -374,15 +603,58 @@ class EdgeDiscoveryPhase:
                     f"    summary: {mem.summary[:300]}"
                 )
 
+        # Build pair_lines, skipping pairs where either end is not in
+        # id_to_label. The all_ids collection above silently skips IDs not in
+        # memory_map; mirroring that filter here prevents a KeyError when
+        # `_find_candidates` returns a `dst` outside the sampled batch (the
+        # normal case in production with sample_size=30 and corpus≥100).
+        # Unguarded, this raised KeyError → caught by orchestrator try/except
+        # → entire phase silently failed (closes #369). Skipped pairs are
+        # NOT counted toward accepted/rejected/failures because they were
+        # never judged by the LLM at all.
+        #
+        # Also build `requested_pairs` (orientation-agnostic) so the response
+        # parser can reject hallucinated/unrequested pairs the LLM may invent
+        # — the prompt only asks about specific pairs, but a misbehaving model
+        # could return arbitrary (label_a, label_b) combinations and the
+        # parser would otherwise create edges for them, inflating
+        # `edges_created` and skewing observability metrics. Addresses
+        # Copilot review #371 finding (loop 4).
+        #
+        # KNOWN LIMITATION (#373): the `frozenset` match is orientation-agnostic,
+        # so the LLM may return (B, A) for our requested (A, B) pair and we
+        # accept it — then we use the LLM's order to populate src_id/dst_id.
+        # For `related_to` (undirected) this is correct. For `depends_on` /
+        # `learned_from` (directed) this can silently create the edge in the
+        # WRONG direction if the LLM flipped. The prompt does not currently
+        # forbid the flip, and we have no measurement of the flip rate. See
+        # #373 for the proposed fix (prompt clarification + directional
+        # canonicalization for directed edge_types).
         pair_lines = []
+        requested_pairs: set[frozenset[str]] = set()
         for src, dst, score in batch:
+            if src not in id_to_label or dst not in id_to_label:
+                continue
             pair_lines.append(f"  ({id_to_label[src]}, {id_to_label[dst]}): similarity={score:.3f}")
+            requested_pairs.add(frozenset({id_to_label[src], id_to_label[dst]}))
+
+        if not pair_lines:
+            # All pairs in this batch had at least one end outside memory_map.
+            # Skip the LLM call entirely — there is nothing to ask.
+            return [], stats
 
         prompt = EDGE_DISCOVERY_USER.format(
             memories="\n".join(memory_lines),
             pairs="\n".join(pair_lines),
         )
 
+        # Consume the budget BEFORE the call so failed attempts are still
+        # counted. Otherwise a failing LLM provider could trigger many more
+        # batches than `max_llm_calls` permits — `execute()`'s budget check
+        # would never see the consumption from the failure path. Tokens are
+        # still only added on success (no tokens consumed when the call
+        # failed). Addresses Copilot review #371 finding (loop 2).
+        budget.consume(llm_calls=1)
         try:
             response, tokens = await self.llm_service.complete_json(
                 user_id=user_id,
@@ -393,29 +665,52 @@ class EdgeDiscoveryPhase:
                 model=config.sleep_llm_model,
                 provider=config.sleep_llm_provider,
             )
-            budget.consume(llm_calls=1)
             self._tokens_used += tokens
 
         except Exception as e:
             logger.warning("edge_discovery_llm_failed", error=str(e))
-            return []
+            stats.failures = 1
+            return [], stats
 
         # Parse response with label validation
         confirmed: list[tuple[UUID, UUID, str, float]] = []
+        valid_edge_types = {"related_to", "depends_on", "learned_from"}
         for edge in response.get("edges", []):
-            if not edge.get("related", False):
-                continue
-
             pair = edge.get("pair", [])
             if len(pair) != 2 or pair[0] not in label_to_id or pair[1] not in label_to_id:
+                # Malformed pair → not counted toward accepted/rejected.
+                continue
+
+            # Reject hallucinated/unrequested pairs: the LLM may invent pair
+            # combinations that were never in `pair_lines`. Match
+            # orientation-agnostic via frozenset to allow the model to flip
+            # the pair order (the relationship is undirected at this stage).
+            if frozenset(pair) not in requested_pairs:
+                continue
+
+            if not edge.get("related", False):
+                stats.rejected += 1
                 continue
 
             # Validate edge_type against DB CHECK constraint
-            valid_edge_types = {"related_to", "depends_on", "learned_from"}
             raw_type = edge.get("edge_type", "related_to")
             edge_type = raw_type if raw_type in valid_edge_types else "related_to"
 
-            confidence = max(0.0, min(1.0, edge.get("confidence", 0.5)))
+            raw_conf = edge.get("confidence", 0.5)
+            # Guard against non-finite values (NaN/Inf): a NaN here would
+            # propagate to avg_confidence (also NaN, breaking JSON-strict
+            # serialization) and silently land in the "0.85-1.0" histogram
+            # bucket because all NaN comparisons return False (#306).
+            # Track the imputation count so operators can detect prompt/model
+            # issues from production observability (would otherwise be silent).
+            if not isinstance(raw_conf, (int, float)) or not math.isfinite(raw_conf):
+                raw_conf = 0.5
+                stats.confidence_imputed += 1
+            confidence = max(0.0, min(1.0, float(raw_conf)))
+
+            stats.accepted += 1
+            stats.edge_type_counts[edge_type] = stats.edge_type_counts.get(edge_type, 0) + 1
+            stats.confidences.append(confidence)
 
             confirmed.append(
                 (
@@ -426,4 +721,8 @@ class EdgeDiscoveryPhase:
                 )
             )
 
-        return confirmed
+        # Per-batch invariant: one LLM call → failures is 0 here. The except
+        # branch above already returned `BatchStats(failures=1)` for the failure
+        # case, so by construction `stats.failures == 0` at this point. The
+        # invariant is documented on `BatchStats`; no runtime assert needed.
+        return confirmed, stats
