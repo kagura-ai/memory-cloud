@@ -82,6 +82,39 @@ def upgrade() -> None:
             "delete the duplicates before re-running this migration."
         )
 
+    # Defensive pre-check #3: reranker exclusivity is now enforced per-workspace
+    # (Cohere XOR Voyage). Pre-#385 it was per-user, so a workspace could legitimately
+    # have both providers enabled across different users. The new partial unique index
+    # only covers same-provider duplicates, not cross-provider reranker conflicts, so
+    # those would slip past the schema and leave reranker_service picking a key
+    # nondeterministically. Abort with a clear remediation path.
+    reranker_conflicts = conn.execute(
+        sa.text(
+            "SELECT workspace_id, "
+            "       COUNT(*) AS cnt, "
+            "       STRING_AGG(provider, ', ' ORDER BY provider) AS providers "
+            "FROM external_api_keys "
+            "WHERE enabled = true "
+            "  AND provider IN ('cohere', 'voyage') "
+            "GROUP BY workspace_id "
+            "HAVING COUNT(*) > 1 "
+            "ORDER BY cnt DESC, workspace_id "
+            "LIMIT 5"
+        )
+    ).fetchall()
+    if reranker_conflicts:
+        examples = ", ".join(
+            f"workspace={row[0]} providers=[{row[2]}] ({row[1]} enabled reranker keys)"
+            for row in reranker_conflicts
+        )
+        raise RuntimeError(
+            "Migration aborted: some workspaces have multiple enabled reranker keys "
+            f"across Cohere/Voyage (examples: {examples}). The new per-workspace "
+            "reranker invariant requires choosing exactly one enabled reranker "
+            "provider per workspace. Disable or delete the extra Cohere/Voyage "
+            "keys before re-running this migration."
+        )
+
     op.create_index(
         "uq_external_api_keys_workspace_provider_enabled",
         "external_api_keys",

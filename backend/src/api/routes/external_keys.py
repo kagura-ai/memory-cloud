@@ -252,9 +252,11 @@ async def create_external_key(
 ):
     """Create a new external API key for the current workspace.
 
-    Issue #82: Auto-assigns external key to current context.
-    Issue #246: current_context_id removed - use context_id=None
-    Issue #381: Owner-only (router-level dependency).
+    Issue #381: owner-only (router-level dependency).
+    Issue #385: workspace-scoped — the new key is stored with the caller's
+    current_workspace_id and context_id=None. Per-workspace uniqueness is
+    enforced by (a) the app-layer pre-checks in this handler and (b) the
+    partial unique index on (workspace_id, provider) WHERE enabled=true.
     """
     user_id = user.get("user_id")
     user_email = get_user_email(user) or user_id
@@ -377,9 +379,10 @@ async def update_external_key(
 ):
     """Update an external API key value in the current workspace.
 
-    Issue #112: Now filters by context_id to handle duplicate key names across contexts.
-    Issue #246: current_context_id removed - use context_id=None
-    Issue #381: Owner-only (router-level dependency).
+    Issue #381: owner-only (router-level dependency).
+    Issue #385: workspace-scoped lookup by (key_name, workspace_id). Any owner
+    of the workspace can update any key registered in it, including keys
+    originally registered by a previous owner.
     """
     user_id = user.get("user_id")
     user_email = get_user_email(user) or user_id
@@ -551,9 +554,10 @@ async def delete_external_key(
 ):
     """Delete an external API key from the current workspace.
 
-    Issue #112: Now filters by context_id to handle duplicate key names across contexts.
-    Issue #246: current_context_id removed - no context filtering
-    Issue #381: Owner-only (router-level dependency).
+    Issue #381: owner-only (router-level dependency).
+    Issue #385: workspace-scoped lookup by (key_name, workspace_id); any owner
+    can delete any key registered in the workspace.
+    Issue #149: protected keys (in PROTECTED_KEYS) are refused with 400.
     """
     user_id = user.get("user_id")
     current_workspace_id = user.get("current_workspace_id")
