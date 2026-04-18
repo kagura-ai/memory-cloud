@@ -1297,6 +1297,7 @@
     "memberRoleColumn": "Role",
     "addFirstMemberHint": "Grant another workspace member access to this shared context.",
     "youLabel": "you",
+    "workspaceAccessNote": "Rows marked \"via workspace access\" have access through their workspace role and cannot be removed here — manage them in Workspace members.",
     "collectionNameCopied": "Collection name copied",
     "copyContextId": "Copy Context ID",
     "publicResourceId": "Resource ID",

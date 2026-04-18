@@ -1297,6 +1297,7 @@
     "memberRoleColumn": "ロール",
     "addFirstMemberHint": "別のワークスペースメンバーにこの共有Contextへのアクセス権を付与します。",
     "youLabel": "あなた",
+    "workspaceAccessNote": "「ワークスペースアクセス経由」と表示された行はワークスペースロール由来のアクセスで、ここからは削除できません。ワークスペースメンバー画面で管理してください。",
     "collectionNameCopied": "コレクション名をコピーしました",
     "copyContextId": "Context IDをコピー",
     "publicResourceId": "Resource ID",

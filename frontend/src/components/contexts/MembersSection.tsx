@@ -84,6 +84,7 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
   const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>(
     [],
   );
+  const [workspaceMembersLoaded, setWorkspaceMembersLoaded] = useState(false);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [addSelectedUserId, setAddSelectedUserId] = useState<string>("");
   const [addSelectedRole, setAddSelectedRole] = useState<ContextRole>("editor");
@@ -113,19 +114,22 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
     loadMembers();
   }, [canManage, loadMembers]);
 
-  // Lazy-load workspace members on first "Add" open
+  // Lazy-load workspace members on first "Add" open. The explicit loaded flag
+  // prevents re-fetching on every dialog open when the workspace legitimately
+  // has no assignable members (checking .length > 0 would not short-circuit).
   const ensureWorkspaceMembersLoaded = useCallback(async () => {
-    if (!currentWorkspaceId || workspaceMembers.length > 0) return;
+    if (!currentWorkspaceId || workspaceMembersLoaded) return;
     try {
       const result = await listMembers(currentWorkspaceId);
       setWorkspaceMembers(result);
+      setWorkspaceMembersLoaded(true);
     } catch {
       toast({
         title: t("loadWorkspaceMembersFailed"),
         variant: "destructive",
       });
     }
-  }, [currentWorkspaceId, workspaceMembers.length, toast, t]);
+  }, [currentWorkspaceId, workspaceMembersLoaded, toast, t]);
 
   const assignableWorkspaceMembers = useMemo(() => {
     const existingIds = new Set(members.map((m) => m.user_id));
@@ -322,7 +326,7 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
                 </tbody>
               </table>
               <p className="mt-3 text-xs text-muted-foreground">
-                {t("ownerAdminAutoAccess")}
+                {t("workspaceAccessNote")}
               </p>
             </div>
           )}
@@ -443,16 +447,20 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
 }
 
 function roleBadgeKey(m: ContextMember): string {
-  if (m.is_workspace_admin) return "workspaceRole";
+  // Show the actual role on every row. "via workspace access" rendered as
+  // the secondary hint already disambiguates workspace-derived rows.
   switch (m.role) {
     case "owner":
       return "owner";
+    case "admin":
+      return "admin";
+    case "member":
+      return "member";
     case "editor":
       return "contextRoleEditor";
     case "viewer":
       return "viewer";
     default:
-      // Defensive fallback — workspace roles shouldn't reach here.
       return "contextMember";
   }
 }

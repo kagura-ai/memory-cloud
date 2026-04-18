@@ -1056,6 +1056,12 @@ async def list_context_members(
     #   2. Explicit ContextMember row (workspace member/viewer with context-level role).
     #   3. Fallback workspace membership (member/viewer with implicit access via
     #      allowed_context_ids=None or whitelist match).
+    #
+    # is_workspace_admin semantics: TRUE when access is workspace-role-derived
+    # (Pass 1 and Pass 3) — these rows cannot be mutated via the /members
+    # endpoints because there is no ContextMember row to delete or update.
+    # FALSE only for Pass 2 (explicit ContextMember rows that the caller can
+    # add/update/remove via the mutation endpoints).
     response = []
     seen_user_ids: set[str] = set()
 
@@ -1093,7 +1099,9 @@ async def list_context_members(
         )
         seen_user_ids.add(cm.user_id)
 
-    # Pass 3 — remaining workspace members/viewers without explicit ContextMember
+    # Pass 3 — remaining workspace members/viewers without explicit ContextMember.
+    # is_workspace_admin=True because these rows have no ContextMember row to
+    # mutate; the Members UI should render them as view-only.
     for om in accessible_members:
         if om.user_id in seen_user_ids:
             continue
@@ -1105,7 +1113,7 @@ async def list_context_members(
                 user_email=user_info.email if user_info else None,
                 role=om.role,
                 added_at=om.joined_at.isoformat() if om.joined_at else None,
-                is_workspace_admin=False,
+                is_workspace_admin=True,
             )
         )
         seen_user_ids.add(om.user_id)
