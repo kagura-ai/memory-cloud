@@ -156,8 +156,18 @@ class TestSelfRemovalGuard:
 
 class TestLastOwnerDemotionGuard:
     def _setup_member_lookup(self, member_role: str):
-        """Return a db fixture whose member lookup yields a ContextMember with given role."""
-        member = MagicMock(role=member_role)
+        """Return a db fixture whose member lookup yields a ContextMember with given role.
+
+        Sets realistic attributes (including a real datetime for created_at) so
+        that the success path through ContextMemberResponse serialization does
+        not raise a 500.
+        """
+        from datetime import UTC, datetime
+
+        member = MagicMock()
+        member.user_id = OTHER_USER_ID
+        member.role = member_role
+        member.created_at = datetime(2026, 4, 18, 0, 0, 0, tzinfo=UTC)
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = member
 
@@ -228,10 +238,12 @@ class TestLastOwnerDemotionGuard:
                     f"/api/v1/contexts/{CONTEXT_ID}/members/{OTHER_USER_ID}",
                     json={"role": "editor"},
                 )
-            # Not 400 from guard — may be 200/500 depending on downstream but NEVER 400-last-owner
-            assert response.status_code != 400, (
-                f"Guard fired incorrectly when 2 owners exist: {response.json()}"
+            # Guard must NOT fire when 2 owners exist — success path should
+            # return 200 with the updated role.
+            assert response.status_code == 200, (
+                f"Expected 200 when 2 owners exist; got {response.status_code}: {response.json()}"
             )
+            assert response.json()["role"] == "editor"
         finally:
             app.dependency_overrides.clear()
 
@@ -266,7 +278,11 @@ class TestLastOwnerDemotionGuard:
                     json={"role": "owner"},
                 )
             count_spy.assert_not_called()
-            assert response.status_code != 400
+            assert response.status_code == 200, (
+                f"Expected 200 on editor→owner promotion; got "
+                f"{response.status_code}: {response.json()}"
+            )
+            assert response.json()["role"] == "owner"
         finally:
             app.dependency_overrides.clear()
 

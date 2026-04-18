@@ -240,9 +240,10 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
           </Button>
         </CardHeader>
         <CardContent>
-          {loadError && <ErrorBanner error={loadError} />}
           {loading ? (
             <TableLoadingState rows={3} />
+          ) : loadError ? (
+            <ErrorBanner error={loadError} />
           ) : members.length === 0 ? (
             <EmptyState
               compact

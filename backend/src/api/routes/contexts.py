@@ -1062,6 +1062,12 @@ async def list_context_members(
     # endpoints because there is no ContextMember row to delete or update.
     # FALSE only for Pass 2 (explicit ContextMember rows that the caller can
     # add/update/remove via the mutation endpoints).
+    #
+    # Workspace viewers are routed through Pass 3 (workspace-role-derived)
+    # even if they have an explicit ContextMember row, because
+    # check_context_access returns "viewer" for workspace viewers regardless
+    # of ContextMember role — the ContextMember row is ineffective for them.
+    workspace_viewer_ids = {om.user_id for om in accessible_members if om.role == "viewer"}
     response = []
     seen_user_ids: set[str] = set()
 
@@ -1082,9 +1088,12 @@ async def list_context_members(
         )
         seen_user_ids.add(om.user_id)
 
-    # Pass 2 — explicit ContextMember rows for non-workspace-admin users
+    # Pass 2 — explicit ContextMember rows for non-workspace-admin users.
+    # Skip workspace viewers: their ContextMember row is ineffective
+    # (check_context_access:340-347 returns "viewer" regardless), so Pass 3
+    # routes them as workspace-derived view-only rows instead.
     for cm in explicit_members:
-        if cm.user_id in seen_user_ids:
+        if cm.user_id in seen_user_ids or cm.user_id in workspace_viewer_ids:
             continue
         user_info = users.get(cm.user_id)
         response.append(

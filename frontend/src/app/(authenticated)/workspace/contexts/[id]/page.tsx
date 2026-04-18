@@ -25,6 +25,8 @@ import { getContext } from "@/lib/api/contexts";
 import type { Context } from "@/lib/types/context";
 import { useMemoryContext } from "@/contexts/MemoryContextContext";
 import { useAuth } from "@/contexts/AuthContext";
+import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { hasWorkspaceRole } from "@/lib/auth/rbac";
 import {
   Lock,
   Users,
@@ -56,6 +58,7 @@ export default function ContextDetailPage() {
   const t = useTranslations("contextDetail");
   const { user } = useAuth();
   const { currentContext } = useMemoryContext();
+  const { currentWorkspace } = useWorkspace();
 
   const [tab, setTab] = useTabParam("overview", "tab", CONTEXT_TABS);
   const [context, setContext] = useState<Context | null>(null);
@@ -206,8 +209,13 @@ export default function ContextDetailPage() {
           />
           <Separator className="my-8" />
           <SearchSettingsSection contextId={contextId} />
-          <Separator className="my-8" />
-          <MembersSection contextId={contextId} context={context} />
+          {!context.is_private &&
+            hasWorkspaceRole(currentWorkspace?.current_user_role, "admin") && (
+              <>
+                <Separator className="my-8" />
+                <MembersSection contextId={contextId} context={context} />
+              </>
+            )}
           <Separator className="my-8" />
           <ProtectionSection context={context} />
         </TabsContent>
