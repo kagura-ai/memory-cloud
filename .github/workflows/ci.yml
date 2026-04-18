@@ -28,6 +28,23 @@ jobs:
       - name: Format check
         run: cd backend && ruff format --check src/ tests/
 
+  backend-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install dependencies
+        run: cd backend && pip install -e ".[dev]"
+
+      - name: Run unit tests
+        run: cd backend && pytest --ignore=tests/e2e --ignore=tests/integration -v --maxfail=5
+
   frontend:
     runs-on: ubuntu-latest
     steps:
