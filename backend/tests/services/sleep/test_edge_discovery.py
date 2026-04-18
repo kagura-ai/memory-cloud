@@ -115,13 +115,14 @@ def llm_judge_phase(edge_phase, deterministic_shuffle):
 
 
 def _make_batch_pair(n=2):
-    """Return ((memory_map, batch), labels) aligned for deterministic A/B/...
+    """Return ``(mems, batch, memory_map)`` for deterministic A/B/... tests.
 
     `_llm_judge_batch` assigns labels by sorting all memory IDs by ``str(id)``
     before mapping them to A/B/.... The ``deterministic_shuffle`` fixture only
     disables the later `random.shuffle` used for display order; it does not
-    control label assignment itself. Use ``_labels_for(memory_map)`` to derive
-    the actual label assignment when constructing canned LLM responses.
+    control label assignment itself. This helper does not return labels; use
+    ``_labels_for(memory_map)`` to derive the actual label assignment when
+    constructing canned LLM responses.
     """
     mems = [_make_memory() for _ in range(n)]
     batch = [(mems[i].id, mems[i + 1].id, 0.75) for i in range(n - 1)]
