@@ -101,7 +101,7 @@ class BatchStats:
     """Per-batch LLM Judge stats from `_llm_judge_batch` (#306).
 
     Aggregated across batches in `execute()` before being unpacked into
-    `PhaseResult.details`. Per-batch invariant: `failures in (0, 1)` because
+    `PhaseResult.details`. Per-batch invariant: `failures in {0, 1}` because
     each batch makes exactly one `complete_json` call.
 
     `confidences` holds raw confidence values for accepted edges only —
