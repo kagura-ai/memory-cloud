@@ -600,6 +600,41 @@ class TestLLMJudgeBatch:
         assert stats.edge_type_counts == {}
         assert stats.confidences == []
 
+    @pytest.mark.asyncio
+    async def test_dst_outside_memory_map_skips_pair_no_keyerror(self, llm_judge_phase):
+        """Issue #369: when `_find_candidates` returns a pair whose `dst` is
+        outside the sampled batch (the normal case in production with
+        sample_size=30 and corpus≥100), `_llm_judge_batch` MUST NOT raise
+        `KeyError` on `id_to_label[dst]`. Instead, the pair is silently
+        skipped — it was never judged, so it counts toward neither accepted
+        nor rejected nor failures.
+        """
+        config = _make_config()
+        budget = SleepBudget()
+
+        # Build a batch with 1 pair where src IS in memory_map but dst is NOT.
+        mem_a = _make_memory()
+        unknown_dst = uuid4()
+        batch = [(mem_a.id, unknown_dst, 0.75)]
+        memory_map = {mem_a.id: mem_a}
+
+        # complete_json should NOT be called — the batch has no judgable pair
+        # after filtering. We assert this below.
+        confirmed, stats = await llm_judge_phase._llm_judge_batch(
+            batch, memory_map, "user-1", "ctx-1", "ws-1", budget, config
+        )
+
+        # Pre-fix this raised KeyError before complete_json ever ran. Post-fix,
+        # the pair is silently skipped and the batch returns the empty result.
+        assert confirmed == []
+        assert stats.accepted == 0
+        assert stats.rejected == 0
+        # CRITICAL: failures stays 0 — the LLM was never called, this is
+        # a "nothing to judge" path, not a "judging failed" path.
+        assert stats.failures == 0
+        # complete_json was not invoked: skipped before the LLM call.
+        llm_judge_phase.llm_service.complete_json.assert_not_called()
+
 
 class TestExecuteAggregation:
     """`execute()` aggregates BatchStats across multiple batches (#306)."""

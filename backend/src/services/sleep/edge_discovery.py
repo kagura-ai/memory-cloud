@@ -504,8 +504,14 @@ class EdgeDiscoveryPhase:
         if not all_ids:
             return [], stats
 
-        # Assign short labels
-        id_list = list(all_ids)
+        # Assign short labels deterministically. `all_ids` is a set, so
+        # `list(all_ids)` would have non-reproducible iteration order across
+        # runs — sort by str(uuid) so the same batch always produces the same
+        # label↔UUID mapping. Positional bias for the LLM is then handled by
+        # `random.shuffle(shuffled_items)` below, which acts on the *display*
+        # order independently of label assignment (#306, addresses Copilot
+        # review #371 finding).
+        id_list = sorted(all_ids, key=str)
         labels = list(string.ascii_uppercase[: len(id_list)])
         id_to_label = dict(zip(id_list, labels, strict=True))
         label_to_id = dict(zip(labels, id_list, strict=True))
@@ -523,9 +529,25 @@ class EdgeDiscoveryPhase:
                     f"    summary: {mem.summary[:300]}"
                 )
 
+        # Build pair_lines, skipping pairs where either end is not in
+        # id_to_label. The all_ids collection above silently skips IDs not in
+        # memory_map; mirroring that filter here prevents a KeyError when
+        # `_find_candidates` returns a `dst` outside the sampled batch (the
+        # normal case in production with sample_size=30 and corpus≥100).
+        # Unguarded, this raised KeyError → caught by orchestrator try/except
+        # → entire phase silently failed (closes #369). Skipped pairs are
+        # NOT counted toward accepted/rejected/failures because they were
+        # never judged by the LLM at all.
         pair_lines = []
         for src, dst, score in batch:
+            if src not in id_to_label or dst not in id_to_label:
+                continue
             pair_lines.append(f"  ({id_to_label[src]}, {id_to_label[dst]}): similarity={score:.3f}")
+
+        if not pair_lines:
+            # All pairs in this batch had at least one end outside memory_map.
+            # Skip the LLM call entirely — there is nothing to ask.
+            return [], stats
 
         prompt = EDGE_DISCOVERY_USER.format(
             memories="\n".join(memory_lines),
