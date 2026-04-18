@@ -17,6 +17,7 @@ a mystery failure for contributors without docker compose running.
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -35,8 +36,13 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from db.qdrant import KAGURA_MEMORIES_BM25_VECTOR_NAME, KAGURA_MEMORIES_VECTOR_NAME
-from utils.sparse_vector import build_resource_sparse_vector
+from db.qdrant import (
+    KAGURA_MEMORIES_BM25_VECTOR_NAME,
+    KAGURA_MEMORIES_VECTOR_NAME,
+    add_memory_to_qdrant,
+)
+from utils.sparse_vector import build_document_sparse_vector, build_resource_sparse_vector
+from utils.tokenizer import tokenize_for_search
 
 _EMBEDDING_DIM = 512
 
@@ -282,4 +288,196 @@ class TestResourceIndexerSparseBM25:
         )
         assert all(h.id != point_id for h in sparse_hits), (
             "Sparse-vectorless points must not appear in bm25-only search results"
+        )
+
+
+def _wait_for_point(
+    qdrant_client: QdrantClient,
+    collection: str,
+    point_id: str,
+    *,
+    timeout_s: float = 2.0,
+    interval_s: float = 0.05,
+) -> None:
+    """Poll until a point becomes visible after a wait=False upsert.
+
+    `add_memory_to_qdrant` issues the async upsert without `wait=True` (see
+    backend/src/db/qdrant.py:376); production doesn't block because the
+    ingest flow tolerates eventual visibility, but tests need determinism.
+    Polling here avoids patching the production signature just for tests.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if qdrant_client.retrieve(collection_name=collection, ids=[point_id], with_vectors=False):
+            return
+        time.sleep(interval_s)
+    raise AssertionError(f"Point {point_id} not visible in {collection} after {timeout_s}s")
+
+
+def _build_memory_sparse_vector(content: str) -> tuple[list[int], list[float]]:
+    """Build the bm25 sparse vector for a memory with a given content.
+
+    Routes through `content_tokens` (weight 1.0) only, leaving summary/
+    context_summary empty. This keeps the test's single-field doc weighting
+    analogous to the resource-side precedent (`build_resource_sparse_vector`,
+    weight 1.0) and avoids a misleading 3.0× term weight that would result
+    from passing the same tokens to both `summary_tokens` (weight 2.0) and
+    `content_tokens` (weight 1.0). Used for both the upsert side and the
+    query side so upsert-time and query-time indices are guaranteed to
+    match in the BM25-only search test.
+    """
+    tokens = tokenize_for_search(content)
+    indices, values = build_document_sparse_vector(
+        summary_tokens="",
+        context_summary_tokens="",
+        content_tokens=tokens,
+        summary_reading="",
+    )
+    if not indices:
+        raise AssertionError(
+            f"Test prerequisite: tokenize_for_search({content!r}) produced no tokens"
+        )
+    return indices, values
+
+
+async def _add_memory_via_production_path(
+    collection: str,
+    *,
+    content: str,
+    with_bm25: bool = True,
+) -> str:
+    """Upsert a Memory through the production `add_memory_to_qdrant` path.
+
+    Symmetric to TestResourceIndexerSparseBM25._upsert_resource_point, but
+    goes through the real memory-side write path — this is what makes the
+    mirrored tests actually cover the #345 contract (a raw client.upsert
+    would bypass the `sparse_indices and sparse_values` gate at qdrant.py:371).
+
+    `add_memory_to_qdrant` validates workspace_id and context_id via
+    `_validate_uuid_format`, so both must be parseable as UUIDs.
+    """
+    memory_id = uuid.uuid4()
+    indices: list[int] | None
+    values: list[float] | None
+    if with_bm25:
+        indices, values = _build_memory_sparse_vector(content)
+    else:
+        indices, values = None, None
+    await add_memory_to_qdrant(
+        user_id=str(uuid.uuid4()),
+        memory_id=memory_id,
+        vector=[0.1] * _EMBEDDING_DIM,
+        payload={"summary": content},
+        workspace_id=str(uuid.uuid4()),
+        context_id=str(uuid.uuid4()),
+        sparse_indices=indices,
+        sparse_values=values,
+        collection_name=collection,
+    )
+    return str(memory_id)
+
+
+class TestMemoryWriteSparseBM25:
+    """Issue #345: `add_memory_to_qdrant` must send `bm25` alongside `dense`.
+
+    Symmetric to TestResourceIndexerSparseBM25 (Issue #335). The memory
+    write path has emitted `bm25` since #16 but previously only had
+    unit-test coverage; these contract tests against a real Qdrant guard
+    against a refactor silently dropping the sparse vector.
+    """
+
+    async def test_add_memory_carries_both_dense_and_bm25(
+        self, qdrant_client: QdrantClient, named_vector_collection: str
+    ) -> None:
+        """AC1: a memory point persists both `dense` and `bm25` vectors."""
+        point_id = await _add_memory_via_production_path(
+            named_vector_collection,
+            content="PostgreSQL の migration 戦略",
+        )
+        _wait_for_point(qdrant_client, named_vector_collection, point_id)
+
+        retrieved = qdrant_client.retrieve(
+            collection_name=named_vector_collection,
+            ids=[point_id],
+            with_vectors=True,
+        )
+        assert len(retrieved) == 1
+        vectors = retrieved[0].vector
+        assert isinstance(vectors, dict)
+        assert KAGURA_MEMORIES_VECTOR_NAME in vectors
+        assert KAGURA_MEMORIES_BM25_VECTOR_NAME in vectors, (
+            "AC1: memory points must carry the bm25 sparse vector"
+        )
+
+    async def test_bm25_only_query_hits_memory_point(
+        self, qdrant_client: QdrantClient, named_vector_collection: str
+    ) -> None:
+        """AC2: a sparse-only query against the bm25 vector finds memory points.
+
+        We assert presence in the hit list, not score value (Modifier.IDF
+        scoring drifts with collection size, so absolute scores are flaky).
+        """
+        content = "Sudachi tokenizer による日本語 memory の BM25 検索"
+        point_id = await _add_memory_via_production_path(named_vector_collection, content=content)
+        _wait_for_point(qdrant_client, named_vector_collection, point_id)
+
+        # Same content and encoder on both sides → guaranteed token overlap.
+        # Production uses build_query_sparse_vector on the query side, but
+        # the token space (the hash index space) is identical so presence
+        # assertions hold regardless of which encoder we use here.
+        q_indices, q_values = _build_memory_sparse_vector(content)
+        hits = qdrant_client.search(
+            collection_name=named_vector_collection,
+            query_vector=NamedSparseVector(
+                name=KAGURA_MEMORIES_BM25_VECTOR_NAME,
+                vector=SparseVector(indices=q_indices, values=q_values),
+            ),
+            limit=10,
+        )
+        assert any(h.id == point_id for h in hits), (
+            "AC2: bm25-only search must surface memory points"
+        )
+
+    async def test_dense_only_backward_compat(
+        self, qdrant_client: QdrantClient, named_vector_collection: str
+    ) -> None:
+        """AC3: a memory upserted without sparse stays searchable via dense.
+
+        "backward compat" here names the sparse-omitted path (callers that
+        pass `sparse_indices=None`, e.g. reindex/restore), not the pre-#16
+        anonymous-vector shape — that regression is guarded by
+        TestNamedVectorUpsertContract::test_anonymous_vector_upsert_fails.
+        """
+        content = "legacy memory without bm25"
+        point_id = await _add_memory_via_production_path(
+            named_vector_collection, content=content, with_bm25=False
+        )
+        _wait_for_point(qdrant_client, named_vector_collection, point_id)
+
+        dense_hits = qdrant_client.search(
+            collection_name=named_vector_collection,
+            query_vector=NamedVector(
+                name=KAGURA_MEMORIES_VECTOR_NAME,
+                vector=[0.1] * _EMBEDDING_DIM,
+            ),
+            limit=10,
+        )
+        assert any(h.id == point_id for h in dense_hits), (
+            "AC3: sparse-omitted memories must remain searchable via dense vector"
+        )
+
+        # bm25-only search must NOT return the sparse-omitted point —
+        # memories without a sparse vector contribute zero to sparse
+        # retrieval, which is the contract that makes reindex/restore safe.
+        q_indices, q_values = _build_memory_sparse_vector(content)
+        sparse_hits = qdrant_client.search(
+            collection_name=named_vector_collection,
+            query_vector=NamedSparseVector(
+                name=KAGURA_MEMORIES_BM25_VECTOR_NAME,
+                vector=SparseVector(indices=q_indices, values=q_values),
+            ),
+            limit=10,
+        )
+        assert all(h.id != point_id for h in sparse_hits), (
+            "Sparse-vectorless memories must not appear in bm25-only search results"
         )
