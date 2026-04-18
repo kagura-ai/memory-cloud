@@ -55,6 +55,10 @@ memory.kagura-ai.com {
 		reverse_proxy ${API_UPSTREAM}:8080
 	}
 
+	handle /redoc* {
+		reverse_proxy ${API_UPSTREAM}:8080
+	}
+
 	handle /openapi.json {
 		reverse_proxy ${API_UPSTREAM}:8080
 	}
