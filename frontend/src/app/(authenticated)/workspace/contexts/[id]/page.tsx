@@ -37,6 +37,7 @@ import { OverviewTabPanel } from "@/components/contexts/OverviewTabPanel";
 import { ConnectionsTabPanel } from "@/components/contexts/ConnectionsTabPanel";
 import { SettingsTabPanel } from "@/components/contexts/SettingsTabPanel";
 import { SearchSettingsSection } from "@/components/contexts/SearchSettingsSection";
+import { MembersSection } from "@/components/contexts/MembersSection";
 import { ProtectionSection } from "@/components/contexts/ProtectionSection";
 // Issue #233: graph viz tab — lazy-loaded so d3 modules are code-split.
 const GraphTabPanel = dynamic(
@@ -205,6 +206,8 @@ export default function ContextDetailPage() {
           />
           <Separator className="my-8" />
           <SearchSettingsSection contextId={contextId} />
+          <Separator className="my-8" />
+          <MembersSection contextId={contextId} context={context} />
           <Separator className="my-8" />
           <ProtectionSection context={context} />
         </TabsContent>
