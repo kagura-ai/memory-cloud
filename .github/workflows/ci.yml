@@ -30,6 +30,20 @@ jobs:
 
   backend-unit:
     runs-on: ubuntu-latest
+    services:
+      # Redis is required at FastAPI lifespan startup (SessionManager eagerly
+      # connects via auth.session._get_or_create_redis_client). Without it,
+      # any test using TestClient(app) fails at app boot. DB/Qdrant are not
+      # required because tests/conftest.py::async_engine skips gracefully.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -43,6 +57,8 @@ jobs:
         run: cd backend && pip install -e ".[dev]"
 
       - name: Run unit tests
+        env:
+          REDIS_URL: redis://localhost:6379
         run: cd backend && pytest --ignore=tests/e2e --ignore=tests/integration -v --maxfail=5
 
   frontend:
