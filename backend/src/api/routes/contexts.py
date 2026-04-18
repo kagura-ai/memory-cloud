@@ -1091,7 +1091,11 @@ async def list_context_members(
     # even if they have an explicit ContextMember row, because
     # check_context_access returns "viewer" for workspace viewers regardless
     # of ContextMember role — the ContextMember row is ineffective for them.
-    workspace_viewer_ids = {om.user_id for om in accessible_members if om.role == "viewer"}
+    # Derive this set from all_workspace_members (NOT accessible_members)
+    # so that viewers excluded by their allowed_context_ids whitelist are
+    # still kept out of Pass 2. Such viewers lack effective access per
+    # check_context_access and simply do not appear in the response at all.
+    workspace_viewer_ids = {om.user_id for om in all_workspace_members if om.role == "viewer"}
     response = []
     seen_user_ids: set[str] = set()
 

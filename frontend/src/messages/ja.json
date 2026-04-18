@@ -1293,6 +1293,7 @@
     "roleUpdateFailed": "ロールの更新に失敗しました",
     "loadMembersFailed": "Contextメンバーの読み込みに失敗しました",
     "loadWorkspaceMembersFailed": "ワークスペースメンバーの読み込みに失敗しました",
+    "loadingWorkspaceMembers": "ワークスペースメンバーを読み込み中…",
     "memberUser": "ユーザー",
     "memberRoleColumn": "ロール",
     "addFirstMemberHint": "別のワークスペースメンバーにこの共有Contextへのアクセス権を付与します。",

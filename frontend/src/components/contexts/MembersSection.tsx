@@ -84,6 +84,10 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
     [],
   );
   const [workspaceMembersLoaded, setWorkspaceMembersLoaded] = useState(false);
+  const [workspaceMembersLoading, setWorkspaceMembersLoading] = useState(false);
+  const [workspaceMembersError, setWorkspaceMembersError] = useState<
+    string | null
+  >(null);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [addSelectedUserId, setAddSelectedUserId] = useState<string>("");
   const [addSelectedRole, setAddSelectedRole] = useState<ContextRole>("editor");
@@ -119,14 +123,19 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
   const ensureWorkspaceMembersLoaded = useCallback(async () => {
     if (!currentWorkspaceId || workspaceMembersLoaded) return;
     try {
+      setWorkspaceMembersLoading(true);
+      setWorkspaceMembersError(null);
       const result = await listMembers(currentWorkspaceId);
       setWorkspaceMembers(result);
       setWorkspaceMembersLoaded(true);
-    } catch {
-      toast({
-        title: t("loadWorkspaceMembersFailed"),
-        variant: "destructive",
-      });
+    } catch (err) {
+      const apiError = err instanceof ApiError ? err : null;
+      const message =
+        apiError?.details?.detail || t("loadWorkspaceMembersFailed");
+      setWorkspaceMembersError(message);
+      toast({ title: message, variant: "destructive" });
+    } finally {
+      setWorkspaceMembersLoading(false);
     }
   }, [currentWorkspaceId, workspaceMembersLoaded, toast, t]);
 
@@ -379,7 +388,14 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
               >
                 {t("selectWorkspaceMember")}
               </label>
-              {assignableWorkspaceMembers.length === 0 ? (
+              {workspaceMembersLoading ? (
+                <p className="text-sm text-muted-foreground flex items-center gap-2">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  {t("loadingWorkspaceMembers")}
+                </p>
+              ) : workspaceMembersError ? (
+                <ErrorBanner error={workspaceMembersError} />
+              ) : assignableWorkspaceMembers.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
                   {t("noWorkspaceMembersToAdd")}
                 </p>

@@ -1293,6 +1293,7 @@
     "roleUpdateFailed": "Failed to update role",
     "loadMembersFailed": "Failed to load context members",
     "loadWorkspaceMembersFailed": "Failed to load workspace members",
+    "loadingWorkspaceMembers": "Loading workspace members…",
     "memberUser": "User",
     "memberRoleColumn": "Role",
     "addFirstMemberHint": "Grant another workspace member access to this shared context.",
