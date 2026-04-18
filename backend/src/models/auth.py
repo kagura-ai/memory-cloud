@@ -312,6 +312,16 @@ class ExternalAPIKey(Base):
             unique=True,
             postgresql_where=text("enabled = true"),
         ),
+        # Issue #385: unique key_name per workspace. Guarantees the
+        # scalar_one_or_none() lookups in the update/toggle/delete handlers can
+        # never raise MultipleResultsFound (→ 500) on legacy data pre-#381 that
+        # had per-user uniqueness only.
+        Index(
+            "uq_external_api_keys_workspace_key_name",
+            "workspace_id",
+            "key_name",
+            unique=True,
+        ),
     )
 
     def __repr__(self) -> str:

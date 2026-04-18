@@ -115,12 +115,48 @@ def upgrade() -> None:
             "keys before re-running this migration."
         )
 
+    # Defensive pre-check #4: the update/toggle/delete handlers look up rows by
+    # (workspace_id, key_name) via scalar_one_or_none(), which would raise
+    # MultipleResultsFound (→ HTTP 500) if any legacy row pair shares the same
+    # (workspace_id, key_name). Pre-#381 multiple users could each create a key
+    # named "openai_primary" in the same workspace — schema allowed it because
+    # uniqueness was per-user. Detect and abort before creating the unique index
+    # below.
+    name_dupes = conn.execute(
+        sa.text(
+            "SELECT workspace_id, key_name, COUNT(*) AS cnt "
+            "FROM external_api_keys "
+            "GROUP BY workspace_id, key_name "
+            "HAVING COUNT(*) > 1 "
+            "ORDER BY cnt DESC, workspace_id, key_name "
+            "LIMIT 5"
+        )
+    ).fetchall()
+    if name_dupes:
+        examples = ", ".join(
+            f"workspace={row[0]} key_name='{row[1]}' ({row[2]} rows)" for row in name_dupes
+        )
+        raise RuntimeError(
+            "Migration aborted: external_api_keys has multiple rows sharing the same "
+            f"(workspace_id, key_name) pair (examples: {examples}). The new "
+            "unique index uq_external_api_keys_workspace_key_name requires names "
+            "to be unique within a workspace. Rename or delete the duplicates "
+            "before re-running this migration."
+        )
+
     op.create_index(
         "uq_external_api_keys_workspace_provider_enabled",
         "external_api_keys",
         ["workspace_id", "provider"],
         unique=True,
         postgresql_where=sa.text("enabled = true"),
+    )
+
+    op.create_index(
+        "uq_external_api_keys_workspace_key_name",
+        "external_api_keys",
+        ["workspace_id", "key_name"],
+        unique=True,
     )
 
 
