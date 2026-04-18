@@ -9,6 +9,7 @@ Implements scheduled tasks for:
 - Resource indexer (every 5 minutes) - Issue #238
 """
 
+from .bm25_drift_tasks import schedule_bm25_drift_tasks
 from .credentials_tasks import schedule_credentials_tasks
 from .embedding_tasks import schedule_embedding_tasks
 from .mcp_tasks import schedule_mcp_tasks
@@ -27,4 +28,5 @@ __all__ = [
     "schedule_embedding_tasks",
     "schedule_resource_indexer_jobs",
     "schedule_sleep_tasks",
+    "schedule_bm25_drift_tasks",
 ]
