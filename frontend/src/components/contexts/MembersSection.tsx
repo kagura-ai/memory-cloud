@@ -132,8 +132,14 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
   }, [currentWorkspaceId, workspaceMembersLoaded, toast, t]);
 
   const assignableWorkspaceMembers = useMemo(() => {
-    const existingIds = new Set(members.map((m) => m.user_id));
-    return workspaceMembers.filter((wm) => !existingIds.has(wm.user_id));
+    // Only exclude users who already have an explicit ContextMember row.
+    // Workspace-admin rows (is_workspace_admin=true) appear in the list via
+    // workspace access but have no ContextMember entry, so they are still
+    // valid candidates to grant an explicit context role.
+    const explicitIds = new Set(
+      members.filter((m) => !m.is_workspace_admin).map((m) => m.user_id),
+    );
+    return workspaceMembers.filter((wm) => !explicitIds.has(wm.user_id));
   }, [members, workspaceMembers]);
 
   const handleOpenAddDialog = async () => {

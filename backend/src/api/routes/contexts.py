@@ -1026,20 +1026,22 @@ async def list_context_members(
     workspace_result = await db.execute(org_stmt)
     all_workspace_members = workspace_result.scalars().all()
 
-    # Filter members who have access to this context
+    # Filter workspace members by effective access. Mirrors check_context_access:
+    #   - owner/admin: always have access (bypass)
+    #   - viewer: access via allowed_context_ids=None (all) or whitelist match
+    #   - member: NO implicit access here — they require an explicit ContextMember
+    #     row (surfaced via Pass 2 from explicit_members). Migration 042 treats
+    #     allowed_context_ids=None for members as suspended, matching this split.
     accessible_members = []
     for om in all_workspace_members:
         if om.role in ("owner", "admin"):
-            # Owners/admins always have access
             accessible_members.append(om)
-        elif om.role in ("member", "viewer"):
-            # Check allowed_context_ids
+        elif om.role == "viewer":
             if om.allowed_context_ids is None:
-                # No restriction - has access
                 accessible_members.append(om)
             elif context_id in om.allowed_context_ids:
-                # Whitelisted - has access
                 accessible_members.append(om)
+        # workspace member: skip — explicit ContextMember row is authoritative
 
     # Get user info for all accessible members
     all_user_ids = list(
