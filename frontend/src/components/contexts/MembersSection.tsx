@@ -214,11 +214,9 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
 
   if (!canManage) return null;
 
-  // Row-level action gates (no button rendered means no way to trigger the
-  // backend 400 guards — defense stays in backend either way).
-  const canChangeRole = (m: ContextMember) =>
-    !m.is_workspace_admin && m.role !== "owner" && m.user_id !== currentUserId;
-  const canRemove = (m: ContextMember) =>
+  // Row-level action gate. Rendering no button is a UX hint; backend still
+  // enforces the corresponding 400 guards independently.
+  const canModifyMember = (m: ContextMember) =>
     !m.is_workspace_admin && m.role !== "owner" && m.user_id !== currentUserId;
 
   return (
@@ -285,7 +283,7 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
                         )}
                       </td>
                       <td className="py-3 pr-4">
-                        {canChangeRole(m) ? (
+                        {canModifyMember(m) ? (
                           <select
                             className="rounded border bg-background px-2 py-1 text-sm"
                             value={m.role}
@@ -297,9 +295,7 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
                             <option value="editor">
                               {t("contextRoleEditor")}
                             </option>
-                            <option value="viewer">
-                              {t("contextRoleViewer")}
-                            </option>
+                            <option value="viewer">{t("viewer")}</option>
                           </select>
                         ) : (
                           <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-200">
@@ -308,7 +304,7 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
                         )}
                       </td>
                       <td className="py-3 text-right">
-                        {canRemove(m) && (
+                        {canModifyMember(m) && (
                           <Button
                             variant="ghost"
                             size="sm"
@@ -381,7 +377,7 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
                 aria-label={t("contextRoleLabel")}
               >
                 <option value="editor">{t("contextRoleEditor")}</option>
-                <option value="viewer">{t("contextRoleViewer")}</option>
+                <option value="viewer">{t("viewer")}</option>
               </select>
             </div>
           </div>
@@ -450,14 +446,13 @@ function roleBadgeKey(m: ContextMember): string {
   if (m.is_workspace_admin) return "workspaceRole";
   switch (m.role) {
     case "owner":
-      return "contextRoleOwner";
+      return "owner";
     case "editor":
       return "contextRoleEditor";
     case "viewer":
-      return "contextRoleViewer";
+      return "viewer";
     default:
-      // Workspace-level roles ("admin", "member") on non-workspace-admin rows
-      // should not reach here — fall back to a generic context-member label.
+      // Defensive fallback — workspace roles shouldn't reach here.
       return "contextMember";
   }
 }

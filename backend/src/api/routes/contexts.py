@@ -1056,9 +1056,6 @@ async def list_context_members(
     #   2. Explicit ContextMember row (workspace member/viewer with context-level role).
     #   3. Fallback workspace membership (member/viewer with implicit access via
     #      allowed_context_ids=None or whitelist match).
-    explicit_by_user = {cm.user_id: cm for cm in explicit_members}
-    admin_user_ids = {om.user_id for om in accessible_members if om.role in ("owner", "admin")}
-
     response = []
     seen_user_ids: set[str] = set()
 
@@ -1081,7 +1078,7 @@ async def list_context_members(
 
     # Pass 2 — explicit ContextMember rows for non-workspace-admin users
     for cm in explicit_members:
-        if cm.user_id in seen_user_ids or cm.user_id in admin_user_ids:
+        if cm.user_id in seen_user_ids:
             continue
         user_info = users.get(cm.user_id)
         response.append(
@@ -1098,7 +1095,7 @@ async def list_context_members(
 
     # Pass 3 — remaining workspace members/viewers without explicit ContextMember
     for om in accessible_members:
-        if om.user_id in seen_user_ids or om.user_id in explicit_by_user:
+        if om.user_id in seen_user_ids:
             continue
         user_info = users.get(om.user_id)
         response.append(
