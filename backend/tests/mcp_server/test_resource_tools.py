@@ -325,7 +325,10 @@ class TestIngestEventsValidation:
         # 2) boundary check → found
         boundary_result = MagicMock()
         boundary_result.scalar_one_or_none.return_value = uuid4()
-        mock_db.execute.side_effect = [role_result, boundary_result]
+        # 3) resource_pk lookup (PR #346): legacy state returns None
+        pk_result = MagicMock()
+        pk_result.scalar_one_or_none.return_value = None
+        mock_db.execute.side_effect = [role_result, boundary_result, pk_result]
         mock_db.commit = AsyncMock()
         return mock_db
 
@@ -669,7 +672,10 @@ class TestIngestEventsHappyPath:
         # 2) boundary check → found
         boundary_result = MagicMock()
         boundary_result.scalar_one_or_none.return_value = uuid4()
-        mock_db.execute.side_effect = [role_result, boundary_result]
+        # 3) resource_pk lookup (PR #346): legacy state returns None
+        pk_result = MagicMock()
+        pk_result.scalar_one_or_none.return_value = None
+        mock_db.execute.side_effect = [role_result, boundary_result, pk_result]
 
         # Capture the added event so we can assign an id before flush returns
         added_events: list = []
