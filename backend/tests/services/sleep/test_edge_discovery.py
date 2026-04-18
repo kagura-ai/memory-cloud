@@ -11,6 +11,7 @@ import pytest
 from services.sleep.edge_discovery import (
     BATCH_SIZE,
     CONFIDENCE_HISTOGRAM_KEYS,
+    DIRECTED_EDGE_TYPES,
     DISCOVERY_EDGE_WEIGHT,
     SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD,
     SIMILARITY_MAX,
@@ -710,6 +711,144 @@ class TestLLMJudgeBatch:
         assert stats.failures == 0
         # complete_json was not invoked: skipped before the LLM call.
         llm_judge_phase.llm_service.complete_json.assert_not_called()
+
+
+class TestDirectedEdgeOrientation:
+    """Issue #373: directional canonicalization in `_llm_judge_batch`.
+
+    `related_to` is undirected — the LLM may return the pair in either order
+    and the parser still accepts. `depends_on` and `learned_from` are directed
+    — if the LLM flips the input pair order, the parser MUST silently drop
+    that pair (same treatment as hallucinated/malformed pairs: no contribution
+    to accepted/rejected/failures). Without this, edges would be silently
+    stored in the wrong direction (PR #371 PhD-pl review finding).
+    """
+
+    def test_directed_edge_types_constant_matches_design(self):
+        """Sanity check: the constant covers exactly the two directed types
+        called out in the issue, so future additions to the schema must pass
+        through this list deliberately."""
+        assert DIRECTED_EDGE_TYPES == frozenset({"depends_on", "learned_from"})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("directed_edge_type", ["depends_on", "learned_from"])
+    async def test_directed_pair_flipped_silently_skipped(
+        self, llm_judge_phase, directed_edge_type
+    ):
+        """Directed edge_type with LLM-flipped pair order must be silently
+        dropped — not accepted (would store wrong direction), not rejected
+        (the LLM did not say "not related"), and not counted as a failure
+        (the LLM call itself succeeded). Same accounting as hallucinated /
+        malformed pairs."""
+        config = _make_config()
+        budget = SleepBudget()
+        _, batch, memory_map = _make_batch_pair(n=2)
+        labels = _labels_for(memory_map)
+        # Request (A, B); LLM returns the flipped (B, A) for a directed type.
+        src_label = labels[batch[0][0]]
+        dst_label = labels[batch[0][1]]
+
+        llm_judge_phase.llm_service.complete_json.return_value = _make_llm_response(
+            [(dst_label, src_label, True, directed_edge_type, 0.9)]
+        )
+
+        confirmed, stats = await llm_judge_phase._llm_judge_batch(
+            batch, memory_map, "user-1", "ctx-1", "ws-1", budget, config
+        )
+
+        assert confirmed == []
+        assert stats.accepted == 0
+        assert stats.rejected == 0
+        assert stats.failures == 0
+        assert stats.edge_type_counts == {}
+        assert stats.confidences == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("directed_edge_type", ["depends_on", "learned_from"])
+    async def test_directed_pair_correct_order_accepted(self, llm_judge_phase, directed_edge_type):
+        """Sanity: directed edge_type with the input pair order preserved is
+        accepted normally. Guards against an over-eager direction filter that
+        rejects every directed pair."""
+        config = _make_config()
+        budget = SleepBudget()
+        _, batch, memory_map = _make_batch_pair(n=2)
+        labels = _labels_for(memory_map)
+        src_label = labels[batch[0][0]]
+        dst_label = labels[batch[0][1]]
+
+        llm_judge_phase.llm_service.complete_json.return_value = _make_llm_response(
+            [(src_label, dst_label, True, directed_edge_type, 0.9)]
+        )
+
+        confirmed, stats = await llm_judge_phase._llm_judge_batch(
+            batch, memory_map, "user-1", "ctx-1", "ws-1", budget, config
+        )
+
+        assert len(confirmed) == 1
+        assert stats.accepted == 1
+        assert stats.rejected == 0
+        assert stats.edge_type_counts == {directed_edge_type: 1}
+        # src/dst preserved in the order the LLM returned (which equals the
+        # input order, by construction of this test).
+        assert confirmed[0][0] == batch[0][0]
+        assert confirmed[0][1] == batch[0][1]
+        assert confirmed[0][2] == directed_edge_type
+
+    @pytest.mark.asyncio
+    async def test_undirected_pair_flipped_still_accepted(self, llm_judge_phase):
+        """Undirected `related_to` is unaffected by #373 — the LLM may flip
+        the pair order and the parser still accepts. The orientation-agnostic
+        frozenset match (existing hallucination guard) is preserved for this
+        edge_type."""
+        config = _make_config()
+        budget = SleepBudget()
+        _, batch, memory_map = _make_batch_pair(n=2)
+        labels = _labels_for(memory_map)
+        src_label = labels[batch[0][0]]
+        dst_label = labels[batch[0][1]]
+
+        llm_judge_phase.llm_service.complete_json.return_value = _make_llm_response(
+            [(dst_label, src_label, True, "related_to", 0.9)]
+        )
+
+        confirmed, stats = await llm_judge_phase._llm_judge_batch(
+            batch, memory_map, "user-1", "ctx-1", "ws-1", budget, config
+        )
+
+        assert len(confirmed) == 1
+        assert stats.accepted == 1
+        assert stats.edge_type_counts == {"related_to": 1}
+        # The parser uses the LLM's pair order verbatim for undirected edges,
+        # so src/dst here reflect the flipped order. Semantically equivalent
+        # to (src=A, dst=B) for the consumer because `related_to` is symmetric.
+        assert confirmed[0][0] == batch[0][1]
+        assert confirmed[0][1] == batch[0][0]
+
+    @pytest.mark.asyncio
+    async def test_invalid_edge_type_flipped_treated_as_undirected(self, llm_judge_phase):
+        """An unknown edge_type is coerced to `related_to` (existing #306
+        behavior). Coercion happens BEFORE the directional check, so a
+        flipped pair with `garbage_type` lands in the undirected branch and
+        is accepted. This makes coercion direction-safe by construction —
+        operators don't get a silent-drop surprise from unknown types."""
+        config = _make_config()
+        budget = SleepBudget()
+        _, batch, memory_map = _make_batch_pair(n=2)
+        labels = _labels_for(memory_map)
+        src_label = labels[batch[0][0]]
+        dst_label = labels[batch[0][1]]
+
+        llm_judge_phase.llm_service.complete_json.return_value = _make_llm_response(
+            [(dst_label, src_label, True, "garbage_type", 0.8)]
+        )
+
+        confirmed, stats = await llm_judge_phase._llm_judge_batch(
+            batch, memory_map, "user-1", "ctx-1", "ws-1", budget, config
+        )
+
+        assert len(confirmed) == 1
+        assert confirmed[0][2] == "related_to"
+        assert stats.edge_type_counts == {"related_to": 1}
 
 
 class TestExecuteAggregation:

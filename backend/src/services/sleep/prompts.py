@@ -75,7 +75,9 @@ Example:
 # Bump on every edit to EDGE_DISCOVERY_SYSTEM or EDGE_DISCOVERY_USER so
 # sleep_reports.edge_discovery_result.details can distinguish runs that used
 # different prompts.
-EDGE_DISCOVERY_PROMPT_REVISION = "v1"
+# v2 (#373): added IMPORTANT directive forbidding pair-order flip for directed
+# edge_types and a depends_on example so the LLM can learn the directed pattern.
+EDGE_DISCOVERY_PROMPT_REVISION = "v2"
 
 EDGE_DISCOVERY_SYSTEM = """\
 You are a knowledge graph edge discovery agent. You analyze pairs of memory \
@@ -101,6 +103,11 @@ Memories:
 Pairs to evaluate (with cosine similarity scores):
 {pairs}
 
+IMPORTANT: For directed edge types ("depends_on", "learned_from"), preserve
+the input pair order. The first element of "pair" must remain the first
+element you received. Direction is encoded by input order; do not flip.
+For "related_to" (undirected), order does not matter.
+
 Respond with this exact JSON schema:
 {{
   "edges": [
@@ -123,6 +130,13 @@ Example:
       "edge_type": "related_to",
       "confidence": 0.85,
       "reason": "B describes the implementation of the pattern introduced in A"
+    }},
+    {{
+      "pair": ["C", "D"],
+      "related": true,
+      "edge_type": "depends_on",
+      "confidence": 0.78,
+      "reason": "C builds on the abstraction defined in D (C depends_on D)"
     }}
   ]
 }}\
