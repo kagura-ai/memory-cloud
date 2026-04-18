@@ -18,7 +18,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import {
   AlertDialog,
-  AlertDialogAction,
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
@@ -131,16 +130,26 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
     }
   }, [currentWorkspaceId, workspaceMembersLoaded, toast, t]);
 
+  // Track user_ids added in this session. Needed because workspace-admin
+  // rows (Pass 1 dominance) hide the explicit ContextMember row from the
+  // list response, so we cannot tell from `members` alone whether a given
+  // workspace admin already has an explicit row. Without this, repeated
+  // adds for the same admin user would hit the backend duplicate 400.
+  const [recentlyAddedIds, setRecentlyAddedIds] = useState<Set<string>>(
+    new Set(),
+  );
+
   const assignableWorkspaceMembers = useMemo(() => {
-    // Only exclude users who already have an explicit ContextMember row.
-    // Workspace-admin rows (is_workspace_admin=true) appear in the list via
-    // workspace access but have no ContextMember entry, so they are still
-    // valid candidates to grant an explicit context role.
-    const explicitIds = new Set(
-      members.filter((m) => !m.is_workspace_admin).map((m) => m.user_id),
-    );
-    return workspaceMembers.filter((wm) => !explicitIds.has(wm.user_id));
-  }, [members, workspaceMembers]);
+    // Exclude users who already have an explicit ContextMember row in the
+    // current response plus anyone the caller added this session (covered
+    // above). is_workspace_admin=true rows have no ContextMember entry, so
+    // they remain candidates unless recentlyAddedIds already marked them.
+    const excluded = new Set(recentlyAddedIds);
+    for (const m of members) {
+      if (!m.is_workspace_admin) excluded.add(m.user_id);
+    }
+    return workspaceMembers.filter((wm) => !excluded.has(wm.user_id));
+  }, [members, workspaceMembers, recentlyAddedIds]);
 
   const handleOpenAddDialog = async () => {
     setAddSelectedUserId("");
@@ -156,6 +165,11 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
       await addContextMember(contextId, {
         user_id: addSelectedUserId,
         role: addSelectedRole,
+      });
+      setRecentlyAddedIds((prev) => {
+        const next = new Set(prev);
+        next.add(addSelectedUserId);
+        return next;
       });
       toast({ title: t("addMemberSuccess") });
       setAddDialogOpen(false);
@@ -202,9 +216,16 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
 
   const handleRemoveConfirm = async () => {
     if (!removeTarget) return;
+    const removedUserId = removeTarget.user_id;
     try {
       setSubmittingRemove(true);
-      await removeContextMember(contextId, removeTarget.user_id);
+      await removeContextMember(contextId, removedUserId);
+      setRecentlyAddedIds((prev) => {
+        if (!prev.has(removedUserId)) return prev;
+        const next = new Set(prev);
+        next.delete(removedUserId);
+        return next;
+      });
       toast({
         title: t("memberRemoved"),
         description: t("memberRemovedSuccess"),
@@ -416,7 +437,11 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
       {/* Remove confirmation */}
       <AlertDialog
         open={removeTarget !== null}
-        onOpenChange={(open) => !open && setRemoveTarget(null)}
+        onOpenChange={(open) => {
+          // Block close while a delete is in flight so the spinner and
+          // error toast can surface against the open dialog.
+          if (!open && !submittingRemove) setRemoveTarget(null);
+        }}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -436,7 +461,12 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
             <AlertDialogCancel disabled={submittingRemove}>
               {tCommon("cancel")}
             </AlertDialogCancel>
-            <AlertDialogAction
+            {/* Use a regular Button (not AlertDialogAction) so the dialog
+                stays open during submission — that keeps the spinner and
+                disabled state visible, and lets the error toast surface
+                against the open dialog. handleRemoveConfirm closes the
+                dialog only on success via setRemoveTarget(null). */}
+            <Button
               onClick={handleRemoveConfirm}
               className="bg-red-600 hover:bg-red-700"
               disabled={submittingRemove}
@@ -445,7 +475,7 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
               )}
               {tCommon("remove")}
-            </AlertDialogAction>
+            </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

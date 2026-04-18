@@ -525,3 +525,156 @@ class TestUpdateMemberHappyPath:
             assert response.status_code == 404
         finally:
             app.dependency_overrides.clear()
+
+
+# ============================================================================
+# list_context_members — merge precedence regression (Issue #362)
+# ============================================================================
+
+
+class TestListContextMembersMerge:
+    """Regression coverage for the 3-pass merge in list_context_members.
+
+    Pre-fix behavior silently dropped explicit ContextMember rows from the
+    response. The merge now surfaces them with the following precedence:
+      Pass 1 — workspace owner/admin (is_workspace_admin=True, workspace role)
+      Pass 2 — explicit ContextMember for non-admin, non-viewer users
+      Pass 3 — workspace viewer or member-without-explicit (is_workspace_admin=True)
+    """
+
+    def _make_db_mock(
+        self,
+        context,
+        explicit_members: list,
+        workspace_members: list,
+        users: list,
+    ):
+        """Return a fake AsyncSession.execute side-effect iterator.
+
+        Mirrors the 3 queries fired by list_context_members:
+          1. Select ContextMember rows filtered by context_id
+          2. Select WorkspaceMember rows filtered by workspace_id
+          3. Select User rows for the union user_ids
+        """
+
+        def make_scalars(values):
+            mock = MagicMock()
+            mock.scalars.return_value.all.return_value = values
+            return mock
+
+        sequence = [
+            make_scalars(explicit_members),
+            make_scalars(workspace_members),
+            make_scalars(users),
+        ]
+        iterator = iter(sequence)
+        return AsyncMock(side_effect=lambda stmt: next(iterator))
+
+    def _user(self, user_id: str, email: str):
+        mock = MagicMock()
+        mock.user_id = user_id
+        mock.name = None
+        mock.email = email
+        return mock
+
+    def _ctx_member(self, user_id: str, role: str):
+        from datetime import UTC, datetime
+
+        m = MagicMock()
+        m.user_id = user_id
+        m.role = role
+        m.created_at = datetime(2026, 4, 18, 0, 0, 0, tzinfo=UTC)
+        return m
+
+    def _ws_member(self, user_id: str, role: str, allowed_context_ids=None):
+        m = MagicMock()
+        m.user_id = user_id
+        m.role = role
+        m.allowed_context_ids = allowed_context_ids
+        m.joined_at = None
+        return m
+
+    def test_3_pass_precedence(self, client):
+        """One call covers all three precedence cells at once."""
+        context = _mock_context()
+
+        # Set up four users to exercise each pass:
+        #   admin_user      — Pass 1 dominance (workspace admin, has explicit
+        #                     ContextMember row too — should be hidden)
+        #   explicit_editor — Pass 2 (workspace member + explicit editor row)
+        #   viewer_override — Pass 3 override (workspace viewer + accidental
+        #                     explicit editor row — must show as workspace role)
+        #   fallback_viewer — Pass 3 fallback (workspace viewer, no explicit)
+        workspace_members = [
+            self._ws_member(ADMIN_USER_ID, "admin"),
+            self._ws_member("explicit_editor", "member", allowed_context_ids=None),
+            self._ws_member("viewer_override", "viewer"),
+            self._ws_member("fallback_viewer", "viewer"),
+        ]
+        explicit_members = [
+            # Admin has accidental explicit row — must be hidden by Pass 1
+            self._ctx_member(ADMIN_USER_ID, "editor"),
+            # Workspace member with valid explicit editor role
+            self._ctx_member("explicit_editor", "editor"),
+            # Viewer with ineffective explicit editor row — must be dropped by Pass 2
+            self._ctx_member("viewer_override", "editor"),
+        ]
+        users = [
+            self._user(ADMIN_USER_ID, "admin@example.com"),
+            self._user("explicit_editor", "explicit@example.com"),
+            self._user("viewer_override", "viewer@example.com"),
+            self._user("fallback_viewer", "fallback@example.com"),
+        ]
+
+        fake_session = MagicMock()
+        fake_session.execute = self._make_db_mock(
+            context, explicit_members, workspace_members, users
+        )
+
+        async def override_db():
+            yield fake_session
+
+        from db.base import get_db
+
+        app.dependency_overrides[get_db] = override_db
+        try:
+            with (
+                patch(
+                    "api.routes.contexts.get_current_user",
+                    AsyncMock(return_value=_mock_user(OWNER_USER_ID)),
+                ),
+                patch(
+                    "services.permission_service.PermissionService.check_context_access",
+                    AsyncMock(return_value=(context, "owner")),
+                ),
+            ):
+                response = client.get(f"/api/v1/contexts/{CONTEXT_ID}/members")
+
+            assert response.status_code == 200, response.json()
+            body = response.json()
+            by_user = {row["user_id"]: row for row in body}
+
+            # Pass 1 — admin shown with workspace role, is_workspace_admin=True
+            assert ADMIN_USER_ID in by_user
+            assert by_user[ADMIN_USER_ID]["role"] == "admin"
+            assert by_user[ADMIN_USER_ID]["is_workspace_admin"] is True
+
+            # Pass 2 — explicit editor shown with context role, is_workspace_admin=False
+            assert "explicit_editor" in by_user
+            assert by_user["explicit_editor"]["role"] == "editor"
+            assert by_user["explicit_editor"]["is_workspace_admin"] is False
+
+            # Pass 3 override — viewer shown with workspace role, not editor
+            assert "viewer_override" in by_user
+            assert by_user["viewer_override"]["role"] == "viewer"
+            assert by_user["viewer_override"]["is_workspace_admin"] is True
+
+            # Pass 3 fallback — viewer without explicit row
+            assert "fallback_viewer" in by_user
+            assert by_user["fallback_viewer"]["role"] == "viewer"
+            assert by_user["fallback_viewer"]["is_workspace_admin"] is True
+
+            # Each user appears exactly once
+            assert len(body) == 4
+        finally:
+            app.dependency_overrides.clear()
