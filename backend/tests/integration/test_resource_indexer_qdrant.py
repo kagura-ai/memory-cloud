@@ -1,17 +1,28 @@
-"""Integration test for Issue #324: Qdrant named-vector upsert contract.
+"""Integration tests for the Qdrant named-vector write contract.
 
-Verifies the on-wire contract between the resource indexer and a real Qdrant
-instance configured with named vectors (`dense` + sparse `bm25`). The unit
-test in `tests/services/test_resource_indexer.py` asserts that the indexer
-*produces* `PointStruct(vector={"dense": ...})`; this test asserts that a
-real Qdrant accepts that shape and rejects the pre-fix anonymous shape.
+Verifies the on-wire contract between this repo's Qdrant writers and a real
+Qdrant instance configured with named vectors (`dense` + sparse `bm25`).
+Three classes live here, each pinned to a specific issue:
 
-Local-only: this test is not wired into CI yet. Run with:
+- TestNamedVectorUpsertContract — Issue #324: raw named-vector upsert shape
+  (rejects the pre-fix anonymous vector, idempotent re-queue).
+- TestResourceIndexerSparseBM25 — Issue #335 / PR #342: resource_indexer
+  emits `bm25` alongside `dense`; BM25-only search hits resource points.
+- TestMemoryWriteSparseBM25 — Issue #345: `add_memory_to_qdrant` (the
+  memory-side write path) emits `bm25` alongside `dense`; symmetric to the
+  resource-side tests above.
+
+The unit tests at tests/services/test_resource_indexer.py assert what
+indexers *produce*; this module asserts that a real Qdrant accepts those
+shapes and that search behavior matches the contract.
+
+Local-only: these tests are not wired into CI yet. Run with:
 
     make test-integration
 
-It skips automatically when `QDRANT_URL` is unreachable so it never becomes
-a mystery failure for contributors without docker compose running.
+Skips automatically when `QDRANT_URL` is unreachable so contributors without
+`docker compose up qdrant` get a clear skip message instead of a cryptic
+connection error.
 """
 
 from __future__ import annotations
