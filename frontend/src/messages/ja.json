@@ -1216,6 +1216,7 @@
     "apiKeyRequired": "APIキーが必要です",
     "apiKeyRequiredDesc": "先にOpenAI APIキーを設定してください",
     "createFirstContext": "最初のコンテキストを作成して、メモリーの整理を始めましょう。",
+    "createFirstContextNonAdmin": "このワークスペースにはまだコンテキストがありません。ワークスペースのオーナーまたは管理者に作成を依頼してください。",
     "configureOpenAIKey": "OpenAI APIキーの設定",
     "openAIKeyDialogDesc": "コンテキスト作成とメモリー保存を有効にするには、OpenAI APIキーを追加してください。キーは暗号化されて安全に保存されます。",
     "openAIApiKey": "OpenAI APIキー",
