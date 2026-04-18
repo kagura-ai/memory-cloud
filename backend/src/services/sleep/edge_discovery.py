@@ -711,8 +711,20 @@ class EdgeDiscoveryPhase:
             # the `related` check so the directional dispatch can run before
             # we accept or reject — a flipped directed pair is malformed
             # regardless of `related=true|false`.
+            #
+            # `isinstance(raw_type, str)` guard: LLM JSON could return a
+            # list/dict for `edge_type` (malformed schema). A non-string in
+            # `set.__contains__` raises `TypeError`, which would abort
+            # parsing of the entire successful LLM response — a single bad
+            # row would silently lose every other valid edge in the batch.
+            # Treat non-strings as invalid and coerce to `related_to`,
+            # matching the existing fallback for unknown string values.
             raw_type = edge.get("edge_type", "related_to")
-            edge_type = raw_type if raw_type in valid_edge_types else "related_to"
+            edge_type = (
+                raw_type
+                if isinstance(raw_type, str) and raw_type in valid_edge_types
+                else "related_to"
+            )
 
             # #373: directed edge_types must preserve input pair order. The
             # frozenset hallucination guard above is orientation-agnostic, so

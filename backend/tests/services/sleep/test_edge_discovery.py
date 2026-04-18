@@ -825,6 +825,62 @@ class TestDirectedEdgeOrientation:
         assert confirmed[0][1] == batch[0][0]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "raw_edge_type",
+        [
+            ["depends_on"],  # list — common LLM "I returned an array" mistake
+            {"type": "depends_on"},  # dict — schema confusion
+            42,  # int — wrong type entirely
+            None,  # explicit null
+        ],
+    )
+    async def test_non_string_edge_type_does_not_crash(self, llm_judge_phase, raw_edge_type):
+        """LLM may return a non-string `edge_type` (list, dict, int, null) due
+        to schema confusion. Pre-fix, `raw_type in valid_edge_types` raised
+        `TypeError` on unhashables, aborting parsing of EVERY edge in the
+        batch (including valid ones). The `isinstance(raw_type, str)` guard
+        coerces the bad row to `related_to` and lets the rest of the response
+        parse normally. Addresses Copilot review on PR #380."""
+        config = _make_config()
+        budget = SleepBudget()
+        _, batch, memory_map = _make_batch_pair(n=3)
+        labels = _labels_for(memory_map)
+
+        # Build the response by hand — _make_llm_response only takes str.
+        llm_judge_phase.llm_service.complete_json.return_value = (
+            {
+                "edges": [
+                    {
+                        "pair": [labels[batch[0][0]], labels[batch[0][1]]],
+                        "related": True,
+                        "edge_type": raw_edge_type,
+                        "confidence": 0.8,
+                    },
+                    # Valid follow-up row — must still be parsed even though
+                    # the first row had a non-string edge_type.
+                    {
+                        "pair": [labels[batch[1][0]], labels[batch[1][1]]],
+                        "related": True,
+                        "edge_type": "related_to",
+                        "confidence": 0.9,
+                    },
+                ]
+            },
+            100,
+        )
+
+        confirmed, stats = await llm_judge_phase._llm_judge_batch(
+            batch, memory_map, "user-1", "ctx-1", "ws-1", budget, config
+        )
+
+        # Both rows accepted: bad-row coerced to related_to, valid row passes
+        # through. Pre-fix, the TypeError would have aborted parsing → 0 edges.
+        assert len(confirmed) == 2
+        assert stats.accepted == 2
+        # Both end up as related_to (one coerced, one explicit).
+        assert stats.edge_type_counts == {"related_to": 2}
+
+    @pytest.mark.asyncio
     async def test_invalid_edge_type_flipped_treated_as_undirected(self, llm_judge_phase):
         """An unknown edge_type is coerced to `related_to` (existing #306
         behavior). Coercion happens BEFORE the directional check, so a
