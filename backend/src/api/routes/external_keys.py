@@ -357,12 +357,14 @@ async def create_external_key(
                     ),
                 ) from exc
             if constraint == EXTERNAL_API_KEYS_WORKSPACE_KEY_NAME_UNIQUE:
+                # Issue #223: don't reveal the submitted key_name — matches the
+                # non-revealing message used by the pre-check on line 281.
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
-                        f"An API key named '{request.key_name}' already exists in "
-                        "this workspace (concurrent create). Choose a different "
-                        "key_name or update the existing key's value."
+                        "An API key with this configuration already exists "
+                        "(concurrent create). Try a different name or update "
+                        "the existing key's value."
                     ),
                 ) from exc
             raise

@@ -1,9 +1,13 @@
 """Embedding service for vector generation.
 
-Uses user-specific OpenAI API keys stored in database (ExternalAPIKey table).
+Uses workspace-scoped OpenAI API keys stored in the ExternalAPIKey table (#385):
+the current workspace's enabled OpenAI key is shared by every member of that
+workspace. `user_id` on the key is creator metadata only, not a visibility filter.
+
 Issue #1: API keys are DB-managed, not in .env
 Issue #84 Phase 2A: Redis caching with xxHash keys (50-80% API reduction, 4x space savings)
 Issue #105: DB-first API key retrieval with environment variable fallback
+Issue #385: workspace-keyed lookup (was user-keyed pre-#385)
 """
 
 from __future__ import annotations

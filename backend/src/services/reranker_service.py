@@ -383,20 +383,26 @@ class RerankerService:
         context_id: str | None = None,
         workspace_id: str | None = None,  # NEW: Workspace ID (Issue #146)
     ) -> RerankerProvider | None:
-        """Get the active reranker provider for user/context/workspace.
+        """Get the active reranker provider for the current workspace context.
 
-        Queries ExternalAPIKey table for enabled reranker key.
-        Only ONE reranker can be enabled at a time (validated by external_keys.py).
+        Queries ExternalAPIKey for the enabled reranker key. Issue #105's
+        cross-provider exclusivity (one of Cohere / Voyage per workspace) is
+        enforced at validate_reranker_exclusivity call sites in external_keys.py
+        plus by the a99 migration's pre-flight check.
 
-        Priority: context-scoped > workspace-scoped > user-scoped > env var
+        Issue #385: key resolution is workspace-keyed. When workspace_id is
+        omitted, the reranker is treated as not configured (returns None) —
+        there is no user-scoped or global fallback tier anymore.
+
+        Priority within a workspace: context-scoped > workspace-scoped.
 
         Args:
-            user_id: User ID
-            context_id: Optional context ID (Issue #82: context-scoped keys)
-            workspace_id: Optional workspace ID (Issue #146: workspace-scoped keys)
+            user_id: Caller's user ID — logged for audit, NOT used as a filter (#385).
+            context_id: Optional context UUID (context-scoped keys take priority).
+            workspace_id: Workspace UUID; when omitted returns None.
 
         Returns:
-            RerankerProvider instance or None if no reranker enabled
+            RerankerProvider instance, or None if no reranker key configured.
         """
         from uuid import UUID
 

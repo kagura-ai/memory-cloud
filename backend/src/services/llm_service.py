@@ -3,8 +3,10 @@
 Issue #101: Multi-provider async LLM client for structured JSON completions.
 Supports OpenAI and Ollama via OpenAI-compatible API.
 
-API key retrieval follows the same priority pattern as EmbeddingService:
-context-scoped → workspace-scoped → user-scoped → env fallback.
+Issue #385: API key retrieval is workspace-keyed, matching EmbeddingService. The
+current workspace's enabled OpenAI key is shared by every workspace member;
+`user_id` on the key row is creator metadata only. Priority within a workspace:
+context-scoped > workspace-scoped > env var fallback. No user-scoped tier.
 """
 
 from __future__ import annotations
