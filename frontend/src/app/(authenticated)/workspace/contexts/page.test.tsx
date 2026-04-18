@@ -118,6 +118,9 @@ describe("ContextsPage empty-state CTA role gating (#382)", () => {
       expect(screen.getByText("noContextsYet")).toBeInTheDocument(),
     );
 
+    expect(
+      screen.getByRole("button", { name: /^create$/i }),
+    ).toBeInTheDocument();
     expect(screen.getByText("createFirstContext")).toBeInTheDocument();
     expect(screen.queryByText("createFirstContextNonAdmin")).toBeNull();
   });
@@ -130,6 +133,9 @@ describe("ContextsPage empty-state CTA role gating (#382)", () => {
       expect(screen.getByText("noContextsYet")).toBeInTheDocument(),
     );
 
+    expect(
+      screen.getByRole("button", { name: /^create$/i }),
+    ).toBeInTheDocument();
     expect(screen.getByText("createFirstContext")).toBeInTheDocument();
     expect(screen.queryByText("createFirstContextNonAdmin")).toBeNull();
   });
@@ -142,6 +148,7 @@ describe("ContextsPage empty-state CTA role gating (#382)", () => {
       expect(screen.getByText("noContextsYet")).toBeInTheDocument(),
     );
 
+    expect(screen.queryByRole("button", { name: /^create$/i })).toBeNull();
     expect(screen.getByText("createFirstContextNonAdmin")).toBeInTheDocument();
     expect(screen.queryByText("createFirstContext")).toBeNull();
   });
@@ -154,7 +161,31 @@ describe("ContextsPage empty-state CTA role gating (#382)", () => {
       expect(screen.getByText("noContextsYet")).toBeInTheDocument(),
     );
 
+    expect(screen.queryByRole("button", { name: /^create$/i })).toBeNull();
     expect(screen.getByText("createFirstContextNonAdmin")).toBeInTheDocument();
     expect(screen.queryByText("createFirstContext")).toBeNull();
+  });
+
+  it("hides the Create button while currentWorkspace is still hydrating (undefined role)", async () => {
+    mockUseAuth.mockReturnValue({
+      user: { current_workspace_id: WORKSPACE_ID },
+      refetchUser: vi.fn(),
+    });
+    mockUseWorkspace.mockReturnValue({ currentWorkspace: null });
+    mockGetContexts.mockResolvedValue({ contexts: [] });
+    mockCheckOpenAIKeyStatus.mockResolvedValue({ has_key: true });
+    mockGetEmbeddingModels.mockResolvedValue({
+      models: [],
+      default_model: "small",
+    });
+
+    render(<ContextsPage />);
+
+    await waitFor(() =>
+      expect(screen.getByText("noContextsYet")).toBeInTheDocument(),
+    );
+
+    expect(screen.queryByRole("button", { name: /^create$/i })).toBeNull();
+    expect(screen.getByText("createFirstContextNonAdmin")).toBeInTheDocument();
   });
 });
