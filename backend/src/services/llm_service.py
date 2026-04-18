@@ -205,66 +205,59 @@ class LLMService:
         context_id: str | None = None,
         workspace_id: str | None = None,
     ) -> str:
-        """Get user's OpenAI API key from database or environment.
+        """Resolve the LLM (OpenAI) API key for the calling user's workspace context.
 
-        Same priority as EmbeddingService._get_user_api_key():
-        1. Context-scoped key (most specific)
-        2. Workspace-scoped key (workspace-wide)
-        3. User-scoped key (personal)
-        4. Environment variable (OPENAI_API_KEY) fallback
+        Mirrors EmbeddingService._get_user_api_key — same Issue #385 contract:
+        the lookup is workspace-keyed; user_id is for audit logging only, not a
+        visibility filter. Any workspace member uses the owner-registered key.
+
+        Priority:
+        1. Context-scoped key (context_id matches AND workspace_id matches)
+        2. Workspace-scoped key (workspace_id matches AND context_id IS NULL)
+        3. Environment variable (OPENAI_API_KEY) — development fallback only
 
         Args:
-            user_id: User ID
-            context_id: Optional context ID
-            workspace_id: Optional workspace ID
+            user_id: Caller's user ID — logged for audit, NOT used as a filter (#385).
+            context_id: Optional context UUID.
+            workspace_id: Workspace UUID; when omitted the DB lookup is skipped.
 
         Returns:
-            Decrypted API key
+            Decrypted API key.
 
         Raises:
-            ConfigurationError: If no API key found
+            ConfigurationError: If neither a DB key nor an env var is available.
         """
         from uuid import UUID
 
         from sqlalchemy import or_
 
-        conditions = [
-            ExternalAPIKey.user_id == user_id,
-            ExternalAPIKey.provider == "openai",
-            ExternalAPIKey.enabled.is_(True),
-        ]
-
-        scope_conditions = []
-        if context_id:
-            context_uuid = UUID(context_id) if isinstance(context_id, str) else context_id
-            scope_conditions.append(ExternalAPIKey.context_id == context_uuid)
+        api_key_entry = None
         if workspace_id:
             workspace_uuid = UUID(workspace_id) if isinstance(workspace_id, str) else workspace_id
-            scope_conditions.append(ExternalAPIKey.workspace_id == workspace_uuid)
-
-        if scope_conditions:
-            conditions.append(
-                or_(
-                    *scope_conditions,
-                    and_(
+            conditions = [
+                ExternalAPIKey.workspace_id == workspace_uuid,
+                ExternalAPIKey.provider == "openai",
+                ExternalAPIKey.enabled.is_(True),
+            ]
+            if context_id:
+                context_uuid = UUID(context_id) if isinstance(context_id, str) else context_id
+                conditions.append(
+                    or_(
+                        ExternalAPIKey.context_id == context_uuid,
                         ExternalAPIKey.context_id.is_(None),
-                        ExternalAPIKey.workspace_id.is_(None),
-                    ),
+                    )
                 )
-            )
+            else:
+                conditions.append(ExternalAPIKey.context_id.is_(None))
 
-        query = (
-            select(ExternalAPIKey)
-            .where(and_(*conditions))
-            .order_by(
-                ExternalAPIKey.context_id.desc().nulls_last(),
-                ExternalAPIKey.workspace_id.desc().nulls_last(),
+            query = (
+                select(ExternalAPIKey)
+                .where(and_(*conditions))
+                .order_by(ExternalAPIKey.context_id.desc().nulls_last())
+                .limit(1)
             )
-            .limit(1)
-        )
-
-        result = await self.db.execute(query)
-        api_key_entry = result.scalar_one_or_none()
+            result = await self.db.execute(query)
+            api_key_entry = result.scalar_one_or_none()
 
         if api_key_entry:
             encryptor = get_encryptor()
@@ -273,6 +266,7 @@ class LLMService:
                 "llm_api_key_from_db",
                 user_id=user_id,
                 context_id=context_id,
+                workspace_id=workspace_id,
             )
             return api_key
 
