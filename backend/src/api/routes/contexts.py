@@ -956,7 +956,11 @@ class ContextMemberResponse(BaseModel):
     user_name: str | None = None
     user_email: str | None = None
     role: str
-    added_at: str | None = None  # None for workspace owners/admins with automatic access
+    # ISO-8601 timestamp of when this access was established. For explicit
+    # ContextMember rows this is ContextMember.created_at; for workspace-
+    # derived rows (Pass 1 and Pass 3) it falls back to WorkspaceMember
+    # .joined_at. None only when the underlying source timestamp is missing.
+    added_at: str | None = None
     # True when access is workspace-role-derived (owner / admin / viewer).
     # Clients should treat these rows as read-only — even if a legacy
     # explicit ContextMember row happens to exist for the user, the workspace
@@ -1033,11 +1037,13 @@ async def list_context_members(
     all_workspace_members = workspace_result.scalars().all()
 
     # Filter workspace members by effective access. Mirrors check_context_access:
-    #   - owner/admin: always have access (bypass)
-    #   - viewer: access via allowed_context_ids=None (all) or whitelist match
+    #   - owner/admin: always have access (bypass at L327-329)
+    #   - viewer: access via allowed_context_ids=None (all) or whitelist match (L332-347)
     #   - member: NO implicit access here — they require an explicit ContextMember
-    #     row (surfaced via Pass 2 from explicit_members). Migration 042 treats
-    #     allowed_context_ids=None for members as suspended, matching this split.
+    #     row (check_context_access:349-361), surfaced via Pass 2 from
+    #     explicit_members. Separately, get_accessible_contexts treats
+    #     allowed_context_ids=None for members as suspended (Migration 042),
+    #     which is consistent with the "explicit membership required" rule.
     accessible_members = []
     for om in all_workspace_members:
         if om.role in ("owner", "admin"):
