@@ -96,6 +96,15 @@ def _is_synthetic_seed_edge(edge: NeuralMemoryEdge) -> bool:
 # `dict.fromkeys(KEYS, 0)` widens to `dict[str, int]` for downstream consumers.
 CONFIDENCE_HISTOGRAM_KEYS: tuple[str, ...] = ("0.0-0.5", "0.5-0.7", "0.7-0.85", "0.85-1.0")
 
+# Issue #373: edge_type directionality semantics.
+# `related_to` is undirected (A related_to B ⇔ B related_to A); the parser
+# accepts the LLM's pair order as-is. `depends_on` and `learned_from` are
+# directed (A depends_on B ≠ B depends_on A); the parser MUST reject pairs
+# where the LLM flipped the input order, otherwise edges are silently stored
+# in the wrong direction (PR #371 PhD-pl review finding). Module-level so
+# tests can import the same source of truth.
+DIRECTED_EDGE_TYPES: frozenset[str] = frozenset({"depends_on", "learned_from"})
+
 
 @dataclass
 class BatchStats:
@@ -191,6 +200,16 @@ def _metrics_from_agg(
     would alias the caller's mutable structures and any post-emit mutation
     would silently corrupt `result.details`. The copy cost is negligible
     (O(3) for edge_type, O(4) for histogram).
+
+    Directional semantics (#373): `edge_type_dist` only counts edges that
+    survived the parser's directional canonicalization in `_llm_judge_batch`.
+    Undirected `related_to` matches the LLM response orientation-agnostically
+    (frozenset). Directed `depends_on` / `learned_from` require the LLM to
+    preserve the input pair order (`requested_ordered_pairs` ordered-tuple
+    match); flipped directed pairs are silently dropped — they do NOT
+    contribute to `llm_accepted`, `llm_rejected`, or `llm_call_failures`.
+    `prompt_revision` distinguishes pre/post-#373 prompts so historical
+    counts can be interpreted under the correct semantics.
     """
     return {
         "llm_accepted": agg.accepted,
@@ -621,22 +640,22 @@ class EdgeDiscoveryPhase:
         # `edges_created` and skewing observability metrics. Addresses
         # Copilot review #371 finding (loop 4).
         #
-        # KNOWN LIMITATION (#373): the `frozenset` match is orientation-agnostic,
-        # so the LLM may return (B, A) for our requested (A, B) pair and we
-        # accept it — then we use the LLM's order to populate src_id/dst_id.
-        # For `related_to` (undirected) this is correct. For `depends_on` /
-        # `learned_from` (directed) this can silently create the edge in the
-        # WRONG direction if the LLM flipped. The prompt does not currently
-        # forbid the flip, and we have no measurement of the flip rate. See
-        # #373 for the proposed fix (prompt clarification + directional
-        # canonicalization for directed edge_types).
+        # `requested_ordered_pairs` (#373): same pairs as `requested_pairs` but
+        # preserves the (src_label, dst_label) input order. The parser uses
+        # this for directed edge_types (`depends_on`, `learned_from`) so that
+        # an LLM-flipped pair is detected and silently dropped, preventing the
+        # edge from being stored in the wrong direction. Undirected
+        # `related_to` continues to use `requested_pairs` (orientation-agnostic).
         pair_lines = []
         requested_pairs: set[frozenset[str]] = set()
+        requested_ordered_pairs: set[tuple[str, str]] = set()
         for src, dst, score in batch:
             if src not in id_to_label or dst not in id_to_label:
                 continue
-            pair_lines.append(f"  ({id_to_label[src]}, {id_to_label[dst]}): similarity={score:.3f}")
-            requested_pairs.add(frozenset({id_to_label[src], id_to_label[dst]}))
+            src_label, dst_label = id_to_label[src], id_to_label[dst]
+            pair_lines.append(f"  ({src_label}, {dst_label}): similarity={score:.3f}")
+            requested_pairs.add(frozenset({src_label, dst_label}))
+            requested_ordered_pairs.add((src_label, dst_label))
 
         if not pair_lines:
             # All pairs in this batch had at least one end outside memory_map.
@@ -683,18 +702,48 @@ class EdgeDiscoveryPhase:
 
             # Reject hallucinated/unrequested pairs: the LLM may invent pair
             # combinations that were never in `pair_lines`. Match
-            # orientation-agnostic via frozenset to allow the model to flip
-            # the pair order (the relationship is undirected at this stage).
+            # orientation-agnostic via frozenset; directional canonicalization
+            # is applied below per `edge_type`.
             if frozenset(pair) not in requested_pairs:
+                continue
+
+            # Validate edge_type against DB CHECK constraint. Hoisted above
+            # the `related` check so the directional dispatch can run before
+            # we accept or reject — a flipped directed pair is malformed
+            # regardless of `related=true|false`.
+            #
+            # `isinstance(raw_type, str)` guard: LLM JSON could return a
+            # list/dict for `edge_type` (malformed schema). A non-string in
+            # `set.__contains__` raises `TypeError`, which would abort
+            # parsing of the entire successful LLM response — a single bad
+            # row would silently lose every other valid edge in the batch.
+            # Treat non-strings as invalid and coerce to `related_to`,
+            # matching the existing fallback for unknown string values.
+            raw_type = edge.get("edge_type", "related_to")
+            edge_type = (
+                raw_type
+                if isinstance(raw_type, str) and raw_type in valid_edge_types
+                else "related_to"
+            )
+
+            # #373: directed edge_types must preserve input pair order. The
+            # frozenset hallucination guard above is orientation-agnostic, so
+            # an LLM that flipped (A, B) → (B, A) for `depends_on` / `learned_from`
+            # would otherwise be accepted and the edge stored as B→A. Silently
+            # skip flipped directed pairs — same treatment as hallucinated /
+            # malformed pairs (no contribution to accepted/rejected/failures).
+            # Undirected `related_to` is unaffected; coerced edge_types fall
+            # through to the undirected path because `related_to` is the
+            # coercion target.
+            if (
+                edge_type in DIRECTED_EDGE_TYPES
+                and (pair[0], pair[1]) not in requested_ordered_pairs
+            ):
                 continue
 
             if not edge.get("related", False):
                 stats.rejected += 1
                 continue
-
-            # Validate edge_type against DB CHECK constraint
-            raw_type = edge.get("edge_type", "related_to")
-            edge_type = raw_type if raw_type in valid_edge_types else "related_to"
 
             raw_conf = edge.get("confidence", 0.5)
             # Guard against non-finite values (NaN/Inf): a NaN here would
