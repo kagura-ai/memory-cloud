@@ -370,7 +370,10 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium">
+              <label
+                htmlFor="add-member-user-select"
+                className="text-sm font-medium"
+              >
                 {t("selectWorkspaceMember")}
               </label>
               {assignableWorkspaceMembers.length === 0 ? (
@@ -379,10 +382,10 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
                 </p>
               ) : (
                 <select
+                  id="add-member-user-select"
                   className="w-full rounded border bg-background px-2 py-2 text-sm"
                   value={addSelectedUserId}
                   onChange={(e) => setAddSelectedUserId(e.target.value)}
-                  aria-label={t("selectWorkspaceMember")}
                 >
                   <option value="" disabled>
                     {t("selectWorkspaceMemberPlaceholder")}
@@ -396,17 +399,20 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
               )}
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">
+              <label
+                htmlFor="add-member-role-select"
+                className="text-sm font-medium"
+              >
                 {t("contextRoleLabel")}
               </label>
               <select
+                id="add-member-role-select"
                 className="w-full rounded border bg-background px-2 py-2 text-sm"
                 value={addSelectedRole}
                 onChange={(e) => {
                   const v = e.target.value;
                   if (isContextRole(v)) setAddSelectedRole(v);
                 }}
-                aria-label={t("contextRoleLabel")}
               >
                 <option value="editor">{t("contextRoleEditor")}</option>
                 <option value="viewer">{t("viewer")}</option>
@@ -467,8 +473,8 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
                 against the open dialog. handleRemoveConfirm closes the
                 dialog only on success via setRemoveTarget(null). */}
             <Button
+              variant="destructive"
               onClick={handleRemoveConfirm}
-              className="bg-red-600 hover:bg-red-700"
               disabled={submittingRemove}
             >
               {submittingRemove && (

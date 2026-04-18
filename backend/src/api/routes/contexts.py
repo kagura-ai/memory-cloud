@@ -1014,7 +1014,7 @@ async def list_context_members(
         .order_by(ContextMember.role.desc(), ContextMember.created_at)
     )
     result = await db.execute(stmt)
-    explicit_members = result.scalars().all()
+    explicit_members_raw = result.scalars().all()
 
     # Get all workspace members who have access to this context
     from models.auth import User
@@ -1042,6 +1042,14 @@ async def list_context_members(
             elif context_id in om.allowed_context_ids:
                 accessible_members.append(om)
         # workspace member: skip — explicit ContextMember row is authoritative
+
+    # Filter explicit ContextMember rows to current workspace members only.
+    # Issue #362 Guard 3 now prevents new cross-workspace adds, but legacy
+    # orphan rows (created before the guard) may still exist. Surfacing them
+    # would leak user emails/names across workspaces to any viewer of this
+    # context, so drop them at the read path as well.
+    workspace_user_ids = {om.user_id for om in all_workspace_members}
+    explicit_members = [cm for cm in explicit_members_raw if cm.user_id in workspace_user_ids]
 
     # Get user info for all accessible members
     all_user_ids = list(
