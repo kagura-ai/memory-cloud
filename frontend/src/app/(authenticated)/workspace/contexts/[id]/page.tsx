@@ -207,17 +207,20 @@ export default function ContextDetailPage() {
             context={context}
             onContextUpdated={handleContextUpdated}
           />
-          <Separator className="my-8" />
-          <SearchSettingsSection contextId={contextId} />
-          {!context.is_private &&
-            hasWorkspaceRole(currentWorkspace?.current_user_role, "admin") && (
-              <>
-                <Separator className="my-8" />
-                <MembersSection contextId={contextId} context={context} />
-              </>
-            )}
-          <Separator className="my-8" />
-          <ProtectionSection context={context} />
+          {hasWorkspaceRole(currentWorkspace?.current_user_role, "admin") && (
+            <>
+              <Separator className="my-8" />
+              <SearchSettingsSection contextId={contextId} />
+              {!context.is_private && (
+                <>
+                  <Separator className="my-8" />
+                  <MembersSection contextId={contextId} context={context} />
+                </>
+              )}
+              <Separator className="my-8" />
+              <ProtectionSection context={context} />
+            </>
+          )}
         </TabsContent>
       </Tabs>
     </PageContainer>
