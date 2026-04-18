@@ -168,7 +168,10 @@ async def validate_reranker_exclusivity(
     if exclude_key_id:
         conditions.append(ExternalAPIKey.id != exclude_key_id)
 
-    result = await db.execute(select(ExternalAPIKey).where(and_(*conditions)))
+    # Existence check only — .limit(1) makes scalar_one_or_none() safe even
+    # against legacy/dirty data with multiple matching rows (would otherwise
+    # raise MultipleResultsFound → 500).
+    result = await db.execute(select(ExternalAPIKey).where(and_(*conditions)).limit(1))
     conflicting_key = result.scalar_one_or_none()
 
     if conflicting_key:
@@ -289,14 +292,18 @@ async def create_external_key(
         # so an arbitrary key_name (different from a duplicate the SELECT above
         # would have caught) doesn't escape with a 500 from the DB IntegrityError.
         if request.enabled:
+            # Existence check only; .limit(1) makes scalar_one_or_none() resilient
+            # to legacy/dirty data that has multiple matching rows.
             dup_result = await db.execute(
-                select(ExternalAPIKey).where(
+                select(ExternalAPIKey)
+                .where(
                     and_(
                         ExternalAPIKey.workspace_id == current_workspace_id,
                         ExternalAPIKey.provider == request.provider,
                         ExternalAPIKey.enabled.is_(True),
                     )
                 )
+                .limit(1)
             )
             if dup_result.scalar_one_or_none():
                 raise HTTPException(
@@ -483,8 +490,10 @@ async def toggle_external_key(
         # so toggling a disabled key to enabled while another enabled key for the
         # same provider exists doesn't surface as a 500 from the DB IntegrityError.
         if request.enabled and not bool(key.enabled):
+            # Existence check only — same rationale as create_external_key.
             dup_result = await db.execute(
-                select(ExternalAPIKey).where(
+                select(ExternalAPIKey)
+                .where(
                     and_(
                         ExternalAPIKey.workspace_id == current_workspace_id,
                         ExternalAPIKey.provider == key.provider,
@@ -492,6 +501,7 @@ async def toggle_external_key(
                         ExternalAPIKey.id != key.id,
                     )
                 )
+                .limit(1)
             )
             if dup_result.scalar_one_or_none():
                 raise HTTPException(
