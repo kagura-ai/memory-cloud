@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import WorkspaceMember
+from auth.dependencies import APIKeyOrSessionUser, require_workspace_owner
 from db.base import get_db
 from models.auth import ExternalAPIKey
 from utils import db_transaction, get_user_email, mask_secret
@@ -18,7 +18,15 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/external-keys", tags=["external-keys"])
+# Issue #381: All external API key routes are owner-only.
+# External API keys are workspace-level secrets (OpenAI/Cohere/Anthropic credentials)
+# that should only be managed by the workspace owner. Viewers, members, and admins
+# cannot list/create/update/toggle/delete keys.
+router = APIRouter(
+    prefix="/external-keys",
+    tags=["external-keys"],
+    dependencies=[Depends(require_workspace_owner)],
+)
 
 
 # ============================================================================
@@ -172,14 +180,15 @@ async def validate_reranker_exclusivity(
 
 @router.get("", response_model=ExternalKeyListResponse)
 async def list_external_keys(
-    user: WorkspaceMember,
+    user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
-    """List all external API keys for the authenticated user's current context.
+    """List all external API keys for the current workspace.
 
     Issue #82: Now context-scoped - returns external keys for current context only.
     Issue #246: current_context_id removed - show all user keys
-    Issue #59: Viewers cannot access external keys.
+    Issue #381: Owner-only (router-level dependency); members, admins, and viewers
+    are rejected with 403 before reaching this handler.
 
     Returns masked values for security.
     """
@@ -253,14 +262,14 @@ async def list_external_keys(
 @router.post("", response_model=ExternalKeyResponse)
 async def create_external_key(
     request: ExternalKeyCreate,
-    user: WorkspaceMember,
+    user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new external API key for current context.
+    """Create a new external API key for the current workspace.
 
     Issue #82: Auto-assigns external key to current context.
     Issue #246: current_context_id removed - use context_id=None
-    Issue #59: Viewers cannot access external keys.
+    Issue #381: Owner-only (router-level dependency).
     """
     user_id = user.get("user_id")
     user_email = get_user_email(user) or user_id
@@ -343,14 +352,14 @@ async def create_external_key(
 async def update_external_key(
     key_name: str,
     request: ExternalKeyUpdate,
-    user: WorkspaceMember,
+    user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
-    """Update an external API key value in current context.
+    """Update an external API key value in the current workspace.
 
     Issue #112: Now filters by context_id to handle duplicate key names across contexts.
     Issue #246: current_context_id removed - use context_id=None
-    Issue #59: Viewers cannot access external keys.
+    Issue #381: Owner-only (router-level dependency).
     """
     user_id = user.get("user_id")
     user_email = get_user_email(user) or user_id
@@ -421,7 +430,7 @@ async def update_external_key(
 async def toggle_external_key(
     key_name: str,
     request: ExternalKeyToggle,
-    user: WorkspaceMember,
+    user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
     """Toggle enabled/disabled state without re-entering API key value.
@@ -433,7 +442,7 @@ async def toggle_external_key(
     - OpenAI keys cannot be disabled
     - Only ONE reranker (Cohere/Voyage) can be enabled at a time
 
-    Issue #59: Viewers cannot access external keys.
+    Issue #381: Owner-only (router-level dependency).
     """
     user_id = user.get("user_id")
     user_email = get_user_email(user) or user_id
@@ -516,14 +525,14 @@ async def toggle_external_key(
 @router.delete("/{key_name}")
 async def delete_external_key(
     key_name: str,
-    user: WorkspaceMember,
+    user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete an external API key from current context.
+    """Delete an external API key from the current workspace.
 
     Issue #112: Now filters by context_id to handle duplicate key names across contexts.
     Issue #246: current_context_id removed - no context filtering
-    Issue #59: Viewers cannot access external keys.
+    Issue #381: Owner-only (router-level dependency).
     """
     user_id = user.get("user_id")
     # Issue #246: current_context_id removed
@@ -583,75 +592,3 @@ async def delete_external_key(
         logger.info(f"external_key_deleted: key_name={key_name}, user={user_id}")
 
         return {"message": f"External key '{key_name}' deleted successfully"}
-
-
-@router.post("/import")
-async def import_external_keys(
-    user: WorkspaceMember,
-    db: AsyncSession = Depends(get_db),
-):
-    """Import external API keys from .env.cloud file.
-
-    Reads .env.cloud and imports OPENAI_API_KEY, COHERE_API_KEY if present.
-    """
-    from pathlib import Path
-
-    user_id = user.get("user_id")
-    user_email = get_user_email(user) or user_id
-
-    env_file = Path("/app/.env.cloud")
-    if not env_file.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=".env.cloud file not found",
-        )
-
-    imported: list[str] = []
-    errors: list[str] = []
-
-    # Mapping of env var names to (key_name, provider)
-    key_mapping = {
-        "OPENAI_API_KEY": ("openai_api_key", "openai"),
-        "COHERE_API_KEY": ("cohere_api_key", "cohere"),
-    }
-
-    async with db_transaction(db, "import_external_keys", "Failed to import external API keys"):
-        # Parse .env file
-        with open(env_file) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-
-                env_key, value = line.split("=", 1)
-                env_key = env_key.strip()
-                value = value.strip().strip('"').strip("'")
-
-                if env_key in key_mapping and value:
-                    key_name, provider = key_mapping[env_key]
-                    try:
-                        encrypted = encrypt_value(value)
-                        new_key = ExternalAPIKey(
-                            key_name=key_name,
-                            provider=provider,
-                            encrypted_value=encrypted,
-                            user_id=user_id,
-                            updated_by=user_email,
-                        )
-                        db.add(new_key)
-                        imported.append(key_name)
-                    except Exception as e:
-                        errors.append(f"{key_name}: {str(e)}")
-
-        await db.commit()
-
-        logger.info(
-            f"external_keys_imported: user={user_id}, "
-            f"imported={len(imported)}, errors={len(errors)}"
-        )
-
-        return {
-            "message": f"Imported {len(imported)} external API keys",
-            "imported": imported,
-            "errors": errors,
-        }

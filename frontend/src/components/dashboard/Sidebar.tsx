@@ -121,12 +121,6 @@ const navigationGroups: NavGroup[] = [
         href: "/workspace/integrations/credentials?tab=oauth-apps",
         icon: Puzzle,
       },
-      {
-        nameKey: "externalKeys",
-        href: "/workspace/integrations/external-keys",
-        icon: KeyRound,
-        requiredWorkspaceRole: "member", // Issue #59: Hide from viewers
-      },
     ],
   },
   {
@@ -138,6 +132,12 @@ const navigationGroups: NavGroup[] = [
         href: "/workspace/settings/general",
         icon: Sliders,
         requiredWorkspaceRole: "owner",
+      },
+      {
+        nameKey: "externalKeys",
+        href: "/workspace/integrations/external-keys",
+        icon: KeyRound,
+        requiredWorkspaceRole: "owner", // Issue #381: Owner-only (workspace-level secrets)
       },
     ],
   },
