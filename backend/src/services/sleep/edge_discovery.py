@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import math
 import random
+import statistics
 import string
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -104,39 +105,101 @@ class BatchStats:
     `PhaseResult.details`. Per-batch invariant: `failures in {0, 1}` because
     each batch makes exactly one `complete_json` call.
 
-    `confidences` holds raw confidence values for accepted edges only —
-    rejected-side confidence is not retained by the parser.
+    `confidences` holds raw confidence values for **accepted edges only** —
+    rejected-side confidence is not retained by the parser. This is a known
+    limitation: the resulting metrics represent `P(confidence | decision=accept)`
+    not the marginal `P(confidence)` over all judgments. See #372 for the
+    rejected-side retention follow-up that enables decision-boundary analysis.
+
     `edge_type_counts` covers accepted edges only.
+
+    `confidence_imputed` counts how many parsed edges had their confidence
+    field replaced with the 0.5 default because the LLM returned a non-finite
+    value (NaN, Inf) or a non-numeric type. Surfaces silent imputation so
+    operators can detect prompt/model issues from production observability.
     """
 
     accepted: int = 0
     rejected: int = 0
     failures: int = 0
+    confidence_imputed: int = 0
     edge_type_counts: dict[str, int] = field(default_factory=dict)
     confidences: list[float] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ConfidenceSummary:
+    """5-number summary for accepted-edge confidences (#306).
+
+    `avg` (mean) is reported but is structurally inadequate for bimodal data
+    (textbook example: bimodal mean = midpoint of valley). `median`, `p25`,
+    `p75` give a robust picture of the distribution shape. Pair with
+    `confidence_histogram` for visual inspection. `n` lets readers gauge
+    sample-size noise (per-run N is typically small ≤ 30 — formal bimodality
+    detection requires cross-run aggregation, see #372).
+    """
+
+    avg: float
+    median: float
+    p25: float
+    p75: float
+    n: int
+
+
+def _summarize_confidences(confidences: list[float]) -> ConfidenceSummary:
+    """Compute mean + median + IQR + n from a list of confidences.
+
+    Handles small-N edge cases: n=0 → all zeros (caller convention),
+    n=1 → quartiles collapse to the single value (no IQR information).
+    """
+    n = len(confidences)
+    if n == 0:
+        return ConfidenceSummary(avg=0.0, median=0.0, p25=0.0, p75=0.0, n=0)
+    avg = sum(confidences) / n
+    median = statistics.median(confidences)
+    if n >= 2:
+        # statistics.quantiles(n=4) returns [Q1, Q2, Q3]
+        quartiles = statistics.quantiles(confidences, n=4)
+        p25, p75 = quartiles[0], quartiles[2]
+    else:
+        # Single sample — IQR is undefined; collapse to the lone value.
+        p25 = p75 = median
+    return ConfidenceSummary(avg=avg, median=median, p25=p25, p75=p75, n=n)
 
 
 def _metrics_from_agg(
     agg: BatchStats,
     auto_accepted: int,
-    avg_confidence: float,
+    confidence_summary: ConfidenceSummary,
     confidence_histogram: dict[str, int],
     config: NeuralMemoryConfig,
 ) -> dict[str, object]:
     """Build the #306 metric dict from aggregated values.
 
-    Single source of truth for the 9 metric key names — `_empty_metrics()` and
+    Single source of truth for the metric key names — `_empty_metrics()` and
     `execute()`'s success-path `result.details` both go through here, so a key
     rename or addition only requires editing this one function.
+
+    Mutable fields (`edge_type_counts`, `confidence_histogram`) are
+    **defensive-copied** so that the returned dict is decoupled from the
+    caller's `agg` and any local working state. Without this, the result dict
+    would alias the caller's mutable structures and any post-emit mutation
+    would silently corrupt `result.details`. The copy cost is negligible
+    (O(3) for edge_type, O(4) for histogram).
     """
     return {
         "llm_accepted": agg.accepted,
         "llm_rejected": agg.rejected,
         "llm_call_failures": agg.failures,
         "auto_accepted": auto_accepted,
-        "edge_type_dist": agg.edge_type_counts,
-        "avg_confidence": avg_confidence,
-        "confidence_histogram": confidence_histogram,
+        "edge_type_dist": dict(agg.edge_type_counts),  # defensive copy
+        "avg_confidence": confidence_summary.avg,
+        "median_confidence": confidence_summary.median,
+        "p25_confidence": confidence_summary.p25,
+        "p75_confidence": confidence_summary.p75,
+        "confidence_n": confidence_summary.n,
+        "confidence_imputed": agg.confidence_imputed,
+        "confidence_histogram": dict(confidence_histogram),  # defensive copy
         "llm_model": config.sleep_llm_model,
         "prompt_revision": EDGE_DISCOVERY_PROMPT_REVISION,
     }
@@ -153,7 +216,7 @@ def _empty_metrics(config: NeuralMemoryConfig) -> dict[str, object]:
     return _metrics_from_agg(
         agg=BatchStats(),
         auto_accepted=0,
-        avg_confidence=0.0,
+        confidence_summary=_summarize_confidences([]),
         confidence_histogram=dict.fromkeys(CONFIDENCE_HISTOGRAM_KEYS, 0),
         config=config,
     )
@@ -282,6 +345,7 @@ class EdgeDiscoveryPhase:
                 agg.accepted += batch_stats.accepted
                 agg.rejected += batch_stats.rejected
                 agg.failures += batch_stats.failures
+                agg.confidence_imputed += batch_stats.confidence_imputed
                 for k, v in batch_stats.edge_type_counts.items():
                     agg.edge_type_counts[k] = agg.edge_type_counts.get(k, 0) + v
                 agg.confidences.extend(batch_stats.confidences)
@@ -327,7 +391,7 @@ class EdgeDiscoveryPhase:
                         error=str(e),
                     )
 
-        avg_confidence = sum(agg.confidences) / len(agg.confidences) if agg.confidences else 0.0
+        confidence_summary = _summarize_confidences(agg.confidences)
         confidence_histogram = _build_confidence_histogram(agg.confidences)
 
         result.memories_processed = len(sampled)
@@ -338,7 +402,9 @@ class EdgeDiscoveryPhase:
             "candidates": len(candidates),
             "filtered": len(filtered),
             "edges_created": edges_created,
-            **_metrics_from_agg(agg, auto_accepted, avg_confidence, confidence_histogram, config),
+            **_metrics_from_agg(
+                agg, auto_accepted, confidence_summary, confidence_histogram, config
+            ),
         }
 
         logger.info(
@@ -351,7 +417,10 @@ class EdgeDiscoveryPhase:
             llm_call_failures=agg.failures,
             auto_accepted=auto_accepted,
             edge_type_dist=agg.edge_type_counts,
-            avg_confidence=avg_confidence,
+            avg_confidence=confidence_summary.avg,
+            median_confidence=confidence_summary.median,
+            confidence_n=confidence_summary.n,
+            confidence_imputed=agg.confidence_imputed,
             confidence_histogram=confidence_histogram,
             prompt_revision=EDGE_DISCOVERY_PROMPT_REVISION,
         )
@@ -546,6 +615,16 @@ class EdgeDiscoveryPhase:
         # parser would otherwise create edges for them, inflating
         # `edges_created` and skewing observability metrics. Addresses
         # Copilot review #371 finding (loop 4).
+        #
+        # KNOWN LIMITATION (#373): the `frozenset` match is orientation-agnostic,
+        # so the LLM may return (B, A) for our requested (A, B) pair and we
+        # accept it — then we use the LLM's order to populate src_id/dst_id.
+        # For `related_to` (undirected) this is correct. For `depends_on` /
+        # `learned_from` (directed) this can silently create the edge in the
+        # WRONG direction if the LLM flipped. The prompt does not currently
+        # forbid the flip, and we have no measurement of the flip rate. See
+        # #373 for the proposed fix (prompt clarification + directional
+        # canonicalization for directed edge_types).
         pair_lines = []
         requested_pairs: set[frozenset[str]] = set()
         for src, dst, score in batch:
@@ -617,8 +696,11 @@ class EdgeDiscoveryPhase:
             # propagate to avg_confidence (also NaN, breaking JSON-strict
             # serialization) and silently land in the "0.85-1.0" histogram
             # bucket because all NaN comparisons return False (#306).
+            # Track the imputation count so operators can detect prompt/model
+            # issues from production observability (would otherwise be silent).
             if not isinstance(raw_conf, (int, float)) or not math.isfinite(raw_conf):
                 raw_conf = 0.5
+                stats.confidence_imputed += 1
             confidence = max(0.0, min(1.0, float(raw_conf)))
 
             stats.accepted += 1
