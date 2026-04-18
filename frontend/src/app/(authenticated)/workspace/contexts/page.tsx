@@ -870,8 +870,8 @@ export default function ContextsPage() {
                   </Button>
                 </div>
               </>
-            ) : !hasWorkspaceRole(
-                currentWorkspace?.current_user_role,
+            ) : !currentWorkspace ? null : !hasWorkspaceRole(
+                currentWorkspace.current_user_role,
                 "admin",
               ) ? (
               <>{t("createFirstContextNonAdmin")}</>

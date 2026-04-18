@@ -166,7 +166,11 @@ describe("ContextsPage empty-state CTA role gating (#382)", () => {
     expect(screen.queryByText("createFirstContext")).toBeNull();
   });
 
-  it("hides the Create button while currentWorkspace is still hydrating (undefined role)", async () => {
+  it("shows neither the Create button nor the non-admin message while currentWorkspace is hydrating", async () => {
+    // During WorkspaceContext hydration, current_user_role is unknown. Rendering
+    // the non-admin message would briefly mislead an owner/admin ("ask an
+    // owner/admin"), and rendering the CTA would briefly mislead a
+    // member/viewer. Render a neutral empty state until the role is known.
     mockUseAuth.mockReturnValue({
       user: { current_workspace_id: WORKSPACE_ID },
       refetchUser: vi.fn(),
@@ -186,6 +190,7 @@ describe("ContextsPage empty-state CTA role gating (#382)", () => {
     );
 
     expect(screen.queryByRole("button", { name: /^create$/i })).toBeNull();
-    expect(screen.getByText("createFirstContextNonAdmin")).toBeInTheDocument();
+    expect(screen.queryByText("createFirstContextNonAdmin")).toBeNull();
+    expect(screen.queryByText("createFirstContext")).toBeNull();
   });
 });
