@@ -140,15 +140,18 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
   );
 
   const assignableWorkspaceMembers = useMemo(() => {
-    // Exclude users who already have an explicit ContextMember row in the
-    // current response plus anyone the caller added this session (covered
-    // above). is_workspace_admin=true rows have no ContextMember entry, so
-    // they remain candidates unless recentlyAddedIds already marked them.
+    // Only workspace-role "member" users benefit from an explicit
+    // ContextMember grant. Owners/admins already have workspace-level bypass
+    // access (Pass 1), and viewers are always rendered as workspace-derived
+    // in the list response (Pass 3 override), so adding them creates
+    // redundant or operationally-invisible rows.
     const excluded = new Set(recentlyAddedIds);
     for (const m of members) {
       if (!m.is_workspace_admin) excluded.add(m.user_id);
     }
-    return workspaceMembers.filter((wm) => !excluded.has(wm.user_id));
+    return workspaceMembers.filter(
+      (wm) => wm.role === "member" && !excluded.has(wm.user_id),
+    );
   }, [members, workspaceMembers, recentlyAddedIds]);
 
   const handleOpenAddDialog = async () => {

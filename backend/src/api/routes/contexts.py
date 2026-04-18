@@ -957,10 +957,12 @@ class ContextMemberResponse(BaseModel):
     user_email: str | None = None
     role: str
     added_at: str | None = None  # None for workspace owners/admins with automatic access
-    # True when access is workspace-role-derived (owner / admin / viewer) and
-    # the row therefore has no explicit ContextMember entry to mutate. Clients
-    # should treat these rows as read-only — remove/update via /members
-    # endpoints will 404 or be ineffective.
+    # True when access is workspace-role-derived (owner / admin / viewer).
+    # Clients should treat these rows as read-only — even if a legacy
+    # explicit ContextMember row happens to exist for the user, the workspace
+    # role is authoritative (check_context_access returns the workspace-
+    # effective role regardless of ContextMember.role). Mutations via /members
+    # may succeed on the DB row but will not change effective access.
     is_workspace_admin: bool = False
 
     class Config:
