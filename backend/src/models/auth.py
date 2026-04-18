@@ -32,6 +32,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import relationship
@@ -281,10 +282,11 @@ class ExternalAPIKey(Base):
     )
 
     # Issue #146: Workspace-scoped external keys
+    # Issue #385: NOT NULL — every external API key belongs to exactly one workspace.
     workspace_id = Column(
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
-        nullable=True,
+        nullable=False,
         index=True,
     )
 
@@ -301,9 +303,15 @@ class ExternalAPIKey(Base):
         Index("idx_external_user_provider", "user_id", "provider"),
         Index("idx_external_updated", "updated_at"),
         Index("idx_external_enabled", "user_id", "provider", "enabled"),  # Issue #105
-        # Issue #223: Unique constraint includes workspace_id for workspace-scoped keys
-        # Actual constraint in DB is idx_external_unique_with_project_and_org
-        # which uses COALESCE for NULL handling - enforced at DB level
+        # Issue #385: at most one enabled key per (workspace, provider). Disabled keys
+        # are intentionally exempt so an owner can hold a spare key in disabled state.
+        Index(
+            "uq_external_api_keys_workspace_provider_enabled",
+            "workspace_id",
+            "provider",
+            unique=True,
+            postgresql_where=text("enabled = true"),
+        ),
     )
 
     def __repr__(self) -> str:
