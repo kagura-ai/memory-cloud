@@ -62,7 +62,7 @@ class TestSleepOrchestrator:
             for i, MockPhase in enumerate([MockED, MockDM, MockIR, MockCP]):
                 instance = AsyncMock()
 
-                async def make_result(cfg, uid, ws, ctx, budget, idx=i):
+                async def make_result(cfg, uid, ws, ctx, budget, idx=i, **kwargs):
                     names = ["edge_discovery", "dedup_merge", "importance_reeval", "consolidation"]
                     phase_names_executed.append(names[idx])
                     return PhaseResult(phase_name=names[idx])
@@ -124,7 +124,7 @@ class TestSleepOrchestrator:
             # Dedup works fine
             dm_instance = AsyncMock()
 
-            async def dm_exec(cfg, uid, ws, ctx, budget):
+            async def dm_exec(cfg, uid, ws, ctx, budget, **kwargs):
                 phases_completed.append("dedup_merge")
                 return PhaseResult(phase_name="dedup_merge")
 
@@ -135,7 +135,7 @@ class TestSleepOrchestrator:
             for MockPhase, name in [(MockIR, "importance_reeval"), (MockCP, "consolidation")]:
                 inst = AsyncMock()
 
-                async def phase_exec(cfg, uid, ws, ctx, budget, n=name):
+                async def phase_exec(cfg, uid, ws, ctx, budget, n=name, **kwargs):
                     phases_completed.append(n)
                     return PhaseResult(phase_name=n)
 
@@ -283,7 +283,7 @@ class TestSleepMode:
             ]:
                 inst = AsyncMock()
 
-                async def make_result(cfg, uid, ws, ctx, budget, n=name):
+                async def make_result(cfg, uid, ws, ctx, budget, n=name, **kwargs):
                     phases_run.append(n)
                     return PhaseResult(phase_name=n)
 
