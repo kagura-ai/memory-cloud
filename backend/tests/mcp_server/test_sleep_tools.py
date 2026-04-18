@@ -15,6 +15,7 @@ from mcp_server.tools.sleep import (
     handle_get_sleep_report,
     handle_rollback_sleep_run,
 )
+from services.sleep.prompts import EDGE_DISCOVERY_PROMPT_REVISION
 
 
 class TestGetSleepHistory:
@@ -267,7 +268,7 @@ class TestGetSleepReport:
                     "0.85-1.0": 1,
                 },
                 "llm_model": "gpt-5-nano",
-                "prompt_revision": "v1",
+                "prompt_revision": EDGE_DISCOVERY_PROMPT_REVISION,
             },
         }
 
@@ -305,7 +306,10 @@ class TestGetSleepReport:
             "0.85-1.0": 1,
         }
         assert ed["llm_model"] == "gpt-5-nano"
-        assert ed["prompt_revision"] == "v1"
+        # Track the constant rather than hardcoding "v1" so this test stays
+        # green when EDGE_DISCOVERY_PROMPT_REVISION is bumped on prompt edits
+        # (addresses Copilot review #371 finding, loop 5).
+        assert ed["prompt_revision"] == EDGE_DISCOVERY_PROMPT_REVISION
 
 
 class TestRollbackSleepRun:
