@@ -133,7 +133,7 @@ describe("ResourcesListPage", () => {
   });
 
   it("renders upgrade CTA and skips fetch on basic plan", async () => {
-    mockCurrentWorkspace = { plan_name: "basic" };
+    mockCurrentWorkspace = { plan_name: "basic", current_user_role: "owner" };
 
     render(<ResourcesListPage />);
 
@@ -144,7 +144,7 @@ describe("ResourcesListPage", () => {
   });
 
   it("upgrade CTA button navigates to billing", async () => {
-    mockCurrentWorkspace = { plan_name: "free" };
+    mockCurrentWorkspace = { plan_name: "free", current_user_role: "owner" };
 
     render(<ResourcesListPage />);
 

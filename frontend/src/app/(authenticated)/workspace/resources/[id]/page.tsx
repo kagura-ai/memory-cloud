@@ -157,7 +157,17 @@ export default function ResourceDetailPage() {
       return;
     }
     fetchResource();
-  }, [fetchResource, isPlanGated, workspaceReady, currentWorkspace, router]);
+    // router from next/navigation is stable and is intentionally excluded
+    // from the dependency array; watching currentWorkspace?.current_user_role
+    // as a scalar avoids re-running on every object-ref churn from
+    // WorkspaceContext's selector.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    fetchResource,
+    isPlanGated,
+    workspaceReady,
+    currentWorkspace?.current_user_role,
+  ]);
 
   const fetchIndexerStatus = useCallback(async () => {
     try {

@@ -86,7 +86,17 @@ export default function ResourcesListPage() {
       return;
     }
     fetchResources();
-  }, [fetchResources, isPlanGated, workspaceReady, currentWorkspace, router]);
+    // router from next/navigation is stable and is intentionally excluded
+    // from the dependency array; watching currentWorkspace?.current_user_role
+    // as a scalar avoids re-running on every object-ref churn from
+    // WorkspaceContext's selector.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    fetchResources,
+    isPlanGated,
+    workspaceReady,
+    currentWorkspace?.current_user_role,
+  ]);
 
   useEffect(() => {
     document.title = `${t("list.title")} - Kagura Memory Cloud`;

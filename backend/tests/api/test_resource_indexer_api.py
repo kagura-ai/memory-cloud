@@ -18,7 +18,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from api.main import app
-from auth.dependencies import get_user_from_api_key_or_session
+from auth.dependencies import get_user_from_api_key_or_session, require_workspace_owner
 
 WORKSPACE_A = uuid4()
 WORKSPACE_B = uuid4()
@@ -40,7 +40,14 @@ def client_workspace_a():
     async def mock_auth(request=None, api_key=None, db=None):
         return user
 
+    async def mock_owner():
+        # Issue #389: endpoint is now gated by ``WorkspaceOwner``. This fixture
+        # represents a workspace owner, so the gate passes without hitting the
+        # real ``check_workspace_owner`` DB path.
+        return (user["user_id"], WORKSPACE_A)
+
     app.dependency_overrides[get_user_from_api_key_or_session] = mock_auth
+    app.dependency_overrides[require_workspace_owner] = mock_owner
     with TestClient(app, raise_server_exceptions=False) as client:
         yield client
     app.dependency_overrides.clear()

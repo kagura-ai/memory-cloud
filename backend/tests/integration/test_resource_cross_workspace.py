@@ -32,7 +32,6 @@ from auth.dependencies import (
 from db.base import get_db
 from models.auth import Context, Workspace, WorkspaceMember
 
-
 SLUG_IN_WORKSPACE_B = "ws_b_only_slug"
 
 

@@ -467,7 +467,7 @@ describe("ResourceDetailPage", () => {
   });
 
   it("renders upgrade CTA and skips fetch on basic plan", async () => {
-    mockCurrentWorkspace = { plan_name: "basic" };
+    mockCurrentWorkspace = { plan_name: "basic", current_user_role: "owner" };
 
     render(<ResourceDetailPage />);
 
