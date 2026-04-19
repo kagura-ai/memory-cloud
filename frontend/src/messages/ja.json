@@ -55,6 +55,7 @@
     "resourceTokens": "リソーストークン",
     "externalKeys": "外部APIキー",
     "noExternalKeys": "APIキー未設定 — OpenAIキーを追加してメモリ機能を有効化",
+    "noContexts": "コンテキストがありません",
     "settings": "設定",
     "workspaceSettings": "ワークスペース",
     "admin": "管理",

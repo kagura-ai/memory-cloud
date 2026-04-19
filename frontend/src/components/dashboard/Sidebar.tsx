@@ -229,22 +229,32 @@ export function Sidebar() {
   const router = useRouter();
   const { user, logout } = useAuth();
 
-  // Load context count on mount
+  // Load context count on mount / workspace switch.
+  // Reset to null on each run so the warning icon does not show a stale
+  // "0 contexts" value from the previous workspace while the new fetch is
+  // in flight. Cancellation guard prevents a late fetch from clobbering a
+  // newer workspace's state (same pattern as hasExternalKeys below).
   useEffect(() => {
-    if (currentWorkspaceId) {
-      getContexts()
-        .then((data) => {
-          setContextCount(data.contexts.length);
-        })
-        .catch((error) => {
-          if (process.env.NODE_ENV === "development") {
-            console.error("Failed to load context count for sidebar:", error);
-          }
-          setContextCount(null);
-          // Note: Error not shown in UI to keep sidebar clean
-          // Users can see detailed error on /workspace/contexts page
-        });
-    }
+    setContextCount(null);
+    if (!currentWorkspaceId) return;
+
+    let cancelled = false;
+    getContexts()
+      .then((data) => {
+        if (!cancelled) setContextCount(data.contexts.length);
+      })
+      .catch((error) => {
+        if (process.env.NODE_ENV === "development") {
+          console.error("Failed to load context count for sidebar:", error);
+        }
+        if (!cancelled) setContextCount(null);
+        // Note: Error not shown in UI to keep sidebar clean
+        // Users can see detailed error on /workspace/contexts page
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [currentWorkspaceId]);
 
   // Load external key status (with race condition guard).
@@ -605,7 +615,6 @@ export function Sidebar() {
                       >
                         <Icon className="h-5 w-5 flex-shrink-0" />
                         <span className="flex-1">{itemName}</span>
-                        {/* Show warning if contexts menu and no contexts or load error */}
                         {item.nameKey === "externalKeys" &&
                           hasExternalKeys === false && (
                             <span
@@ -621,25 +630,15 @@ export function Sidebar() {
                               />
                             </span>
                           )}
-                        {item.nameKey === "contexts" &&
-                          (contextCount === 0 || contextCount === null) && (
-                            <span
-                              title={
-                                contextCount === null
-                                  ? "Failed to load contexts"
-                                  : "No contexts found"
-                              }
-                            >
-                              <AlertTriangle
-                                className="h-4 w-4 text-yellow-500 flex-shrink-0"
-                                aria-label={
-                                  contextCount === null
-                                    ? "Failed to load contexts"
-                                    : "No contexts found"
-                                }
-                              />
-                            </span>
-                          )}
+                        {/* null = loading-or-error (stay quiet; errors surface on /workspace/contexts) */}
+                        {item.nameKey === "contexts" && contextCount === 0 && (
+                          <span title={t("noContexts")}>
+                            <AlertTriangle
+                              className="h-4 w-4 text-yellow-500 flex-shrink-0"
+                              aria-label={t("noContexts")}
+                            />
+                          </span>
+                        )}
                       </Link>
                     );
                   })}

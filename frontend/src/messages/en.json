@@ -55,6 +55,7 @@
     "resourceTokens": "Resource Tokens",
     "externalKeys": "External Keys",
     "noExternalKeys": "No API keys configured — add OpenAI key to enable memory features",
+    "noContexts": "No contexts found",
     "settings": "Settings",
     "workspaceSettings": "Workspace",
     "admin": "Admin",
