@@ -605,7 +605,6 @@ export function Sidebar() {
                       >
                         <Icon className="h-5 w-5 flex-shrink-0" />
                         <span className="flex-1">{itemName}</span>
-                        {/* Show warning if contexts menu and no contexts or load error */}
                         {item.nameKey === "externalKeys" &&
                           hasExternalKeys === false && (
                             <span
@@ -621,25 +620,15 @@ export function Sidebar() {
                               />
                             </span>
                           )}
-                        {item.nameKey === "contexts" &&
-                          (contextCount === 0 || contextCount === null) && (
-                            <span
-                              title={
-                                contextCount === null
-                                  ? "Failed to load contexts"
-                                  : "No contexts found"
-                              }
-                            >
-                              <AlertTriangle
-                                className="h-4 w-4 text-yellow-500 flex-shrink-0"
-                                aria-label={
-                                  contextCount === null
-                                    ? "Failed to load contexts"
-                                    : "No contexts found"
-                                }
-                              />
-                            </span>
-                          )}
+                        {/* null = loading-or-error (stay quiet; errors surface on /workspace/contexts) */}
+                        {item.nameKey === "contexts" && contextCount === 0 && (
+                          <span title={t("noContexts")}>
+                            <AlertTriangle
+                              className="h-4 w-4 text-yellow-500 flex-shrink-0"
+                              aria-label={t("noContexts")}
+                            />
+                          </span>
+                        )}
                       </Link>
                     );
                   })}
