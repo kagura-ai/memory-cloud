@@ -330,12 +330,17 @@ class TestResourceIngestWorkspaceBoundary:
         return ctx
 
     @pytest.fixture
-    def mock_token(self):
+    def mock_token(self, workspace_id):
         token = MagicMock(spec=ResourceToken)
         token.id = 42
         token.resource_id = "acme"
         token.created_by = "user_owner"
         token.is_active = True
+        # Issue #390 Phase 2: token carries its workspace binding so the
+        # ingest-side cross-check (token.workspace_id == context.workspace_id)
+        # passes for the happy-path "matching workspace" fixture. Tests that
+        # exercise the mismatch path (CWE-639 auth vector) override this.
+        token.workspace_id = workspace_id
         return token
 
     @pytest.fixture
@@ -495,3 +500,40 @@ class TestResourceIngestWorkspaceBoundary:
             )
         # No permission check (and therefore no DB query) for unattributed tokens.
         db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_membership_denied_on_token_workspace_mismatch(
+        self, mock_request, mock_token, mock_context
+    ):
+        """CWE-639 auth-boundary fix: reject when token.workspace_id does NOT
+        match context.workspace_id.
+
+        Copilot catch on PR #392 loop 7 + 9. The slug-reuse attack path:
+          1) verify_token pins T to workspace A via resource_pk JOIN
+          2) resolve_authoritative_context returns workspace B's Context
+             (A's Context soft-deleted, B's Context live with same slug)
+          3) enforce_workspace_membership's check_workspace_access passes
+             because T.created_by is a member of workspace B
+          4) Without the cross-check, the handler writes events to A's
+             resource (via T.resource_pk) from what looks like a B API call
+        """
+        db = MagicMock()
+        # Force mismatch: token pinned to a different workspace than context.
+        mock_token.workspace_id = uuid4()  # NOT mock_context.workspace_id
+
+        with (
+            patch(
+                "services.permission_service.PermissionService.check_workspace_access",
+                new=AsyncMock(return_value=MagicMock()),
+            ),
+            patch("api.routes.resource_ingest.logger") as mock_logger,
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await _enforce_workspace_membership(db, mock_request, mock_token, mock_context)
+
+            assert exc.value.status_code == 403
+            # Verify the forensics log captures the mismatch for post-mortem.
+            mock_logger.warning.assert_called_once()
+            call_kwargs = mock_logger.warning.call_args.kwargs
+            assert call_kwargs.get("token_workspace_id") == str(mock_token.workspace_id)
+            assert call_kwargs.get("context_workspace_id") == str(mock_context.workspace_id)

@@ -204,6 +204,40 @@ async def _enforce_workspace_membership(
             ),
         ) from auth_error
 
+    # Issue #390 Phase 2 — close the CWE-639 auth-boundary variant
+    # (Copilot catch on PR #392 loops 7 + 9). Even after verify_token
+    # pins the token to a single Resource via the resource_pk JOIN, the
+    # slug-reused case can let the ingest pipeline:
+    #   1) verify T pinned to workspace A's Resource (via resource_pk)
+    #   2) resolve_authoritative_context return workspace B's Context
+    #      (A's Context soft-deleted, B's Context active, same slug)
+    #   3) enforce_workspace_membership pass because the token creator is
+    #      ALSO a member of workspace B
+    #   4) handler write the event with T.resource_pk = A's Resource ID,
+    #      despite the request looking like a workspace-B operation
+    #
+    # The fix: reject when the token's bound workspace (via its Resource)
+    # does not match the Context's workspace. Both must agree for ingest
+    # to proceed. This is the same contract the read-path hardening
+    # enforces — resource_pk FK pins workspace by construction.
+    if token_record.workspace_id is not None and token_record.workspace_id != context.workspace_id:
+        logger.warning(
+            "cross_tenant_ingest_token_workspace_mismatch",
+            resource_id=context.resource_id,
+            token_id=token_record.id,
+            token_workspace_id=str(token_record.workspace_id),
+            context_workspace_id=str(context.workspace_id),
+            token_creator=token_record.created_by,
+            client_ip=request.client.host if request.client else None,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Resource ingest denied: the token's workspace does not match "
+                "the context's workspace for this resource."
+            ),
+        )
+
 
 # ============================================================================
 # Resource Ingest Endpoints
