@@ -386,16 +386,30 @@ async def test_multi_workspace_member_probe_returns_404(
 
 @pytest_asyncio.fixture
 async def cross_workspace_list_scenario(async_engine, db_session):
-    """Owner-of-A probes list endpoints while workspace B has a live resource.
+    """Exercise the real CWE-639 list-endpoint leak path (Copilot catch loop 10).
 
-    Yields auth overrides that make the caller owner of workspace A. The
-    list endpoints called under these overrides must NOT return any row
-    whose data came from workspace B (identifiable by the canary resource
-    ``ws_b_list_canary``).
+    Earlier revision only put data in workspace B and asserted A's list was
+    empty — but ``list_resources`` filters ``Context.workspace_id ==
+    current_workspace_id`` so an empty response was trivially guaranteed
+    regardless of satellite-subquery scoping. To catch a real leak, we need:
+
+    - Workspace A: **also** owns the reused slug with its own Context +
+      Resource + ResourceSchema (v1). A's list row should reflect A's
+      schema version and zero tokens.
+    - Workspace B: had the slug first, then soft-deleted its Context.
+      The orphan ResourceSchema (v9 — distinct number so a mis-scoped
+      subquery surfaces) and ResourceToken rows linger in the DB, still
+      bound to B's Resource via resource_pk.
+
+    If the ``list_resources`` correlated subqueries were still keyed by
+    slug-only, A's list row would pick up B's schema_version=9 and
+    token_count=1 — that's the CWE-639 leak. The resource_pk-scoped
+    subqueries this PR introduces must isolate A's stats from B's
+    orphans.
     """
     owner_a_id = f"owner_a_{uuid4().hex[:8]}"
     owner_b_id = f"owner_b_{uuid4().hex[:8]}"
-    canary_slug = f"ws_b_list_canary_{uuid4().hex[:8]}"
+    reused_slug = f"reused_list_{uuid4().hex[:8]}"
 
     ws_a = Workspace(
         id=uuid4(),
@@ -415,26 +429,61 @@ async def cross_workspace_list_scenario(async_engine, db_session):
         daily_api_limit=50000,
         weekly_api_limit=250000,
     )
+
+    # Workspace A owns the reused slug NOW: Context + Resource + schema v1
+    # + zero tokens.
+    resource_a = Resource(
+        id=uuid4(),
+        workspace_id=ws_a.id,
+        resource_id=reused_slug,
+        name="ws-a-current",
+        created_by=owner_a_id,
+    )
+    ctx_a = Context(
+        id=uuid4(),
+        workspace_id=ws_a.id,
+        name=f"ctx-a-{uuid4().hex[:8]}",
+        resource_id=reused_slug,
+        created_by=owner_a_id,
+    )
+    schema_a = ResourceSchema(
+        resource_pk=resource_a.id,
+        resource_id=reused_slug,
+        schema_version=1,
+        field_definitions=[{"name": "a_field", "type": "text"}],
+    )
+
+    # Workspace B had the slug first; Context is soft-deleted. Its
+    # Resource + orphan ResourceSchema (v9) + ResourceToken linger.
     resource_b = Resource(
         id=uuid4(),
         workspace_id=ws_b.id,
-        resource_id=canary_slug,
-        name="ws-b-list-canary",
+        resource_id=reused_slug,
+        name="ws-b-orphan",
         created_by=owner_b_id,
     )
     ctx_b = Context(
         id=uuid4(),
         workspace_id=ws_b.id,
         name=f"ctx-b-{uuid4().hex[:8]}",
-        resource_id=canary_slug,
+        resource_id=reused_slug,
         created_by=owner_b_id,
     )
-    token_b = ResourceToken(
+    ctx_b.deleted_at = utcnow()
+    schema_b_orphan = ResourceSchema(
         resource_pk=resource_b.id,
-        resource_id=canary_slug,
+        resource_id=reused_slug,
+        schema_version=9,  # deliberately higher than A's v1 so a leak
+        # via slug-only subquery would surface as
+        # current_schema_version=9 on A's row.
+        field_definitions=[{"name": "b_orphan_field", "type": "text"}],
+    )
+    token_b_orphan = ResourceToken(
+        resource_pk=resource_b.id,
+        resource_id=reused_slug,
         workspace_id=ws_b.id,
         token_hash="canary_hash_" + uuid4().hex,
-        description="ws-b list canary token",
+        description="ws-b orphan token (should not surface in A's count)",
         quota_events_per_hour=100,
         created_by=owner_b_id,
     )
@@ -445,9 +494,13 @@ async def cross_workspace_list_scenario(async_engine, db_session):
             ws_b,
             WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role="owner"),
             WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role="owner"),
+            resource_a,
             resource_b,
+            ctx_a,
             ctx_b,
-            token_b,
+            schema_a,
+            schema_b_orphan,
+            token_b_orphan,
         ]
     )
     await db_session.commit()
@@ -471,17 +524,25 @@ async def cross_workspace_list_scenario(async_engine, db_session):
     yield {
         "owner_a_id": owner_a_id,
         "ws_a_id": ws_a.id,
-        "canary_slug": canary_slug,
+        "reused_slug": reused_slug,
+        "expected_schema_version": 1,  # A's own version
+        "expected_token_count": 0,  # A has zero tokens
     }
 
     app.dependency_overrides.clear()
 
     try:
         await db_session.execute(
-            ResourceToken.__table__.delete().where(ResourceToken.id == token_b.id)
+            ResourceToken.__table__.delete().where(ResourceToken.id == token_b_orphan.id)
         )
+        await db_session.execute(
+            ResourceSchema.__table__.delete().where(ResourceSchema.resource_id == reused_slug)
+        )
+        await db_session.delete(ctx_a)
         await db_session.delete(ctx_b)
-        await db_session.execute(Resource.__table__.delete().where(Resource.id == resource_b.id))
+        await db_session.execute(
+            Resource.__table__.delete().where(Resource.id.in_([resource_a.id, resource_b.id]))
+        )
         await db_session.execute(
             WorkspaceMember.__table__.delete().where(
                 WorkspaceMember.workspace_id.in_([ws_a.id, ws_b.id])
@@ -497,24 +558,51 @@ async def cross_workspace_list_scenario(async_engine, db_session):
 
 @pytest.mark.asyncio
 async def test_resources_list_excludes_other_workspace_rows(cross_workspace_list_scenario):
-    """GET /api/v1/resources from owner-of-A must not include workspace B's canary.
+    """GET /api/v1/resources from owner-of-A must isolate reused-slug stats.
 
-    Status code alone (200) does not distinguish isolated from leaky on a
-    list endpoint — we must inspect the body. The canary slug lives only
-    in workspace B; workspace A's response body must not contain it.
+    This regression exercises the real CWE-639 risk on the list endpoint:
+    workspace B previously owned the slug (now soft-deleted with orphan
+    ResourceSchema v9 and orphan ResourceToken still keyed to B's
+    Resource), workspace A now owns the same slug with its own schema
+    v1 and zero tokens. If the correlated subqueries in
+    ``list_resources`` were still keyed by slug, A's row would show B's
+    orphan schema_version=9 and token_count=1. After the resource_pk
+    hardening, A's row must show A's v1 and zero tokens.
+
+    Copilot catch on PR #392 loop 10: the prior "empty response"
+    assertion was too weak — list_resources filters on
+    ``Context.workspace_id`` so an empty body was trivially guaranteed
+    even if satellite subqueries leaked.
     """
-    canary = cross_workspace_list_scenario["canary_slug"]
+    reused_slug = cross_workspace_list_scenario["reused_slug"]
+    expected_schema_version = cross_workspace_list_scenario["expected_schema_version"]
+    expected_token_count = cross_workspace_list_scenario["expected_token_count"]
 
     with TestClient(app, raise_server_exceptions=False) as client:
         response = client.get("/api/v1/resources")
 
     assert response.status_code == 200, f"Unexpected status: {response.status_code}"
     data = response.json()
-    resource_ids = [r["resource_id"] for r in data.get("resources", [])]
-    assert canary not in resource_ids, (
-        f"Cross-workspace leak: GET /api/v1/resources from owner-of-A "
-        f"returned workspace B's canary slug '{canary}'. "
-        f"Full response: {resource_ids}"
+    rows = data.get("resources", [])
+    # Workspace A should see its own row for the reused slug, with its
+    # own stats — not workspace B's orphan stats.
+    a_rows = [r for r in rows if r["resource_id"] == reused_slug]
+    assert len(a_rows) == 1, (
+        f"Expected workspace A's row for reused slug {reused_slug!r}; "
+        f"got {len(a_rows)} rows. Full response: {rows}"
+    )
+    a_row = a_rows[0]
+    assert a_row["current_schema_version"] == expected_schema_version, (
+        f"Cross-workspace leak via slug-only subquery: workspace A's list row "
+        f"shows schema_version={a_row['current_schema_version']} "
+        f"(expected A's v{expected_schema_version}). If v9 surfaces, the "
+        f"subquery is still keyed by slug and picks up B's orphan schema."
+    )
+    assert a_row["token_count"] == expected_token_count, (
+        f"Cross-workspace leak via slug-only subquery: workspace A's list row "
+        f"shows token_count={a_row['token_count']} "
+        f"(expected A's {expected_token_count}). Non-zero means B's orphan "
+        f"token is surfacing in A's stats."
     )
 
 
@@ -686,7 +774,7 @@ async def test_resource_tokens_list_excludes_other_workspace_rows(
     rows surfacing here with the canary ``resource_id`` would prove a
     cross-workspace leak.
     """
-    canary = cross_workspace_list_scenario["canary_slug"]
+    reused_slug = cross_workspace_list_scenario["reused_slug"]
 
     with TestClient(app, raise_server_exceptions=False) as client:
         response = client.get("/api/v1/resource-tokens")
@@ -694,8 +782,15 @@ async def test_resource_tokens_list_excludes_other_workspace_rows(
     assert response.status_code == 200, f"Unexpected status: {response.status_code}"
     data = response.json()
     token_resource_ids = [t["resource_id"] for t in data.get("tokens", [])]
-    assert canary not in token_resource_ids, (
+    # Workspace B's orphan token (created_by=owner_b_id, resource_pk=B's
+    # Resource) must not surface in owner-of-A's list. The REST manager
+    # filters by created_by=user_id at the query level, so an orphan
+    # created by owner_b already falls out — but the assertion still
+    # guards against a future refactor that loosens that filter without
+    # restoring workspace scoping. A non-empty match for the reused
+    # slug here would prove the leak.
+    assert reused_slug not in token_resource_ids, (
         f"Cross-workspace leak: GET /api/v1/resource-tokens from owner-of-A "
-        f"returned workspace B's canary token ({canary!r}). "
+        f"returned workspace B's orphan token for slug {reused_slug!r}. "
         f"Full response resource_ids: {token_resource_ids}"
     )

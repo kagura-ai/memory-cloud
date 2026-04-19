@@ -278,24 +278,32 @@ def _backfill_resource_tokens_workspace_id(conn: sa.Connection) -> None:
     )
 
 
-def _seed_missing_resources_from_active_contexts(conn: sa.Connection) -> None:
-    """Ensure every active Context has a workspace-scoped ``resources`` row.
+def _seed_missing_resources_from_all_contexts(conn: sa.Connection) -> None:
+    """Ensure every Context (active OR soft-deleted) has a workspace-scoped
+    ``resources`` row so the ambiguity audit sees the full picture.
 
     a97 (Phase 1) seeded ``resources`` from the then-active contexts at
     migration time. Contexts created between a97 ship and the Phase 2
     writer update (``handle_setup_resource`` didn't start upserting
     ``Resource`` rows until this PR) can exist without a backing
     ``resources`` row. The ambiguity audit + slug-only backfill assume
-    that invariant holds; if it doesn't, a workspace with an active
-    Context but no ``resources`` row leaves its orphan satellite rows
-    unmatched — and the slug-only backfill JOIN can silently re-home
-    them to a different workspace's Resource that happens to share the
-    slug. Reintroducing the CWE-639 leak this migration is supposed to
-    close.
+    that invariant holds.
 
-    Re-seed from the same shape a97 used, but with a ``NOT EXISTS``
-    guard so existing rows are preserved. Copilot catch on PR #392
-    loop 6 (re-entry).
+    **Include soft-deleted contexts** (Copilot catch on PR #392 loop
+    10): if a post-a97 Context was soft-deleted before the Phase 2
+    writer shipped, its orphan satellite rows live on — but restricting
+    the seed to active contexts leaves the slug mapping to zero
+    ``resources`` rows in that workspace. When another workspace later
+    reuses the slug and DOES have an active Resource, the audit sees
+    COUNT(resources) = 1 (only the live workspace) and does not abort,
+    then the slug-only backfill silently re-homes the soft-deleted
+    workspace's orphan satellites to the live workspace's Resource.
+    Seeding from all contexts (soft-deleted included) ensures
+    COUNT(resources) reflects every workspace that has ever owned the
+    slug, so ambiguity is correctly detected.
+
+    ``NOT EXISTS`` guard preserves existing rows — re-running is a
+    no-op.
     """
     conn.execute(
         sa.text(
@@ -303,8 +311,7 @@ def _seed_missing_resources_from_active_contexts(conn: sa.Connection) -> None:
             INSERT INTO resources (workspace_id, resource_id)
             SELECT DISTINCT c.workspace_id, c.resource_id
             FROM contexts c
-            WHERE c.deleted_at IS NULL
-              AND c.resource_id IS NOT NULL
+            WHERE c.resource_id IS NOT NULL
               AND NOT EXISTS (
                 SELECT 1 FROM resources r
                 WHERE r.workspace_id = c.workspace_id
@@ -318,10 +325,12 @@ def _seed_missing_resources_from_active_contexts(conn: sa.Connection) -> None:
 def upgrade() -> None:
     conn = op.get_bind()
 
-    # Step 1: seed missing ``resources`` rows from active contexts. Ensures
-    # every live (workspace_id, resource_id) has a Resource row BEFORE the
-    # audit runs, so audit COUNT(resources) reflects the complete set.
-    _seed_missing_resources_from_active_contexts(conn)
+    # Step 1: seed missing ``resources`` rows from ALL contexts
+    # (including soft-deleted). Ensures every (workspace_id, resource_id)
+    # that has ever been bound to a Context has a Resource row BEFORE the
+    # audit runs, so audit COUNT(resources) reflects every workspace that
+    # ever owned the slug — not just the workspaces currently live.
+    _seed_missing_resources_from_all_contexts(conn)
 
     # Step 2: abort if any slug-only orphan is ambiguous across workspaces.
     _audit_cross_workspace_ambiguity(conn)

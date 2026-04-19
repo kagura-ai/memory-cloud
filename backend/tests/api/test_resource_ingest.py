@@ -336,10 +336,12 @@ class TestResourceIngestWorkspaceBoundary:
         token.resource_id = "acme"
         token.created_by = "user_owner"
         token.is_active = True
-        # Issue #390 Phase 2: token carries its workspace binding so the
-        # ingest-side cross-check (token.workspace_id == context.workspace_id)
-        # passes for the happy-path "matching workspace" fixture. Tests that
-        # exercise the mismatch path (CWE-639 auth vector) override this.
+        # Issue #390 Phase 2 happy-path fixture: legacy token shape
+        # (resource_pk IS NULL, workspace_id populated by a97 backfill).
+        # The ingest-side cross-check falls through to the workspace_id
+        # shadow column fallback. Tests exercising the CWE-639 mismatch
+        # path override both fields.
+        token.resource_pk = None
         token.workspace_id = workspace_id
         return token
 
@@ -519,7 +521,12 @@ class TestResourceIngestWorkspaceBoundary:
         """
         db = MagicMock()
         # Force mismatch: token pinned to a different workspace than context.
-        mock_token.workspace_id = uuid4()  # NOT mock_context.workspace_id
+        # Uses the workspace_id shadow column fallback (resource_pk IS NULL)
+        # to keep the mock lightweight; the resource_pk-primary path is
+        # exercised in integration tests where a real Resource row exists.
+        mismatched_workspace_id = uuid4()
+        mock_token.resource_pk = None
+        mock_token.workspace_id = mismatched_workspace_id
 
         with (
             patch(
@@ -535,5 +542,5 @@ class TestResourceIngestWorkspaceBoundary:
             # Verify the forensics log captures the mismatch for post-mortem.
             mock_logger.warning.assert_called_once()
             call_kwargs = mock_logger.warning.call_args.kwargs
-            assert call_kwargs.get("token_workspace_id") == str(mock_token.workspace_id)
+            assert call_kwargs.get("token_workspace_id") == str(mismatched_workspace_id)
             assert call_kwargs.get("context_workspace_id") == str(mock_context.workspace_id)
