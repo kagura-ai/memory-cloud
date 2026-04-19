@@ -268,23 +268,65 @@ def _backfill_resource_tokens_workspace_id(conn: sa.Connection) -> None:
     )
 
 
+def _seed_missing_resources_from_active_contexts(conn: sa.Connection) -> None:
+    """Ensure every active Context has a workspace-scoped ``resources`` row.
+
+    a97 (Phase 1) seeded ``resources`` from the then-active contexts at
+    migration time. Contexts created between a97 ship and the Phase 2
+    writer update (``handle_setup_resource`` didn't start upserting
+    ``Resource`` rows until this PR) can exist without a backing
+    ``resources`` row. The ambiguity audit + slug-only backfill assume
+    that invariant holds; if it doesn't, a workspace with an active
+    Context but no ``resources`` row leaves its orphan satellite rows
+    unmatched — and the slug-only backfill JOIN can silently re-home
+    them to a different workspace's Resource that happens to share the
+    slug. Reintroducing the CWE-639 leak this migration is supposed to
+    close.
+
+    Re-seed from the same shape a97 used, but with a ``NOT EXISTS``
+    guard so existing rows are preserved. Copilot catch on PR #392
+    loop 6 (re-entry).
+    """
+    conn.execute(
+        sa.text(
+            """
+            INSERT INTO resources (workspace_id, resource_id)
+            SELECT DISTINCT c.workspace_id, c.resource_id
+            FROM contexts c
+            WHERE c.deleted_at IS NULL
+              AND c.resource_id IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM resources r
+                WHERE r.workspace_id = c.workspace_id
+                  AND r.resource_id = c.resource_id
+              )
+            """
+        )
+    )
+
+
 def upgrade() -> None:
     conn = op.get_bind()
 
-    # Step 1: abort if any slug-only orphan is ambiguous across workspaces.
+    # Step 1: seed missing ``resources`` rows from active contexts. Ensures
+    # every live (workspace_id, resource_id) has a Resource row BEFORE the
+    # audit runs, so audit COUNT(resources) reflects the complete set.
+    _seed_missing_resources_from_active_contexts(conn)
+
+    # Step 2: abort if any slug-only orphan is ambiguous across workspaces.
     _audit_cross_workspace_ambiguity(conn)
 
-    # Step 2: backfill the context-scoped table (safest JOIN shape).
+    # Step 3: backfill the context-scoped table (safest JOIN shape).
     _backfill_indexer_state(conn)
 
-    # Step 3: backfill resource_tokens (workspace-safe pass + slug-only fallback).
+    # Step 4: backfill resource_tokens (workspace-safe pass + slug-only fallback).
     _backfill_resource_tokens(conn)
 
-    # Step 4: backfill the pure slug-only satellite tables (events, schemas).
+    # Step 5: backfill the pure slug-only satellite tables (events, schemas).
     for table_name in _SATELLITE_TABLES_SLUG_ONLY:
         _backfill_slug_only_table(conn, table_name)
 
-    # Step 5: finish a97 Phase 1's ``workspace_id`` backfill for any
+    # Step 6: finish a97 Phase 1's ``workspace_id`` backfill for any
     # newly-populated ``resource_pk`` values on resource_tokens.
     _backfill_resource_tokens_workspace_id(conn)
 
