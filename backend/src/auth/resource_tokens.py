@@ -14,7 +14,7 @@ from uuid import UUID
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.resource import ResourceToken
+from models.resource import Resource, ResourceToken
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -131,6 +131,16 @@ class ResourceTokenManager:
     async def verify_token(self, token: str, resource_id: str) -> ResourceToken | None:
         """Verify resource token and return token record.
 
+        Issue #390 Phase 2: JOIN on ``Resource`` via ``resource_pk`` so
+        the auth query is workspace-scoped by construction. Without this
+        join, a still-valid token from a soft-deleted workspace whose
+        slug has been reused in a different live workspace could
+        authenticate for the new workspace's resource — the same
+        CWE-639 leak that the read-path hardening closes, but on the
+        auth boundary. Legacy tokens with ``resource_pk IS NULL`` are
+        rejected here (backfilled by migration b01 before this code
+        ships; no legacy NULL tokens are expected in production).
+
         Args:
             token: Plaintext token to verify
             resource_id: Expected resource_id (must match token's scope)
@@ -140,12 +150,17 @@ class ResourceTokenManager:
         """
         token_hash = self._hash_token(token)
 
-        # Query token with resource_id validation
+        # Query token with resource_id validation via Resource JOIN — the
+        # JOIN pins workspace even when the slug is reused across
+        # workspaces, because each token's resource_pk FK identifies
+        # exactly one Resource (and therefore one workspace).
         result = await self.db.execute(
-            select(ResourceToken).where(
+            select(ResourceToken)
+            .join(Resource, Resource.id == ResourceToken.resource_pk)
+            .where(
                 and_(
                     ResourceToken.token_hash == token_hash,
-                    ResourceToken.resource_id == resource_id,
+                    Resource.resource_id == resource_id,
                     ResourceToken.is_active == True,  # noqa: E712
                 )
             )
