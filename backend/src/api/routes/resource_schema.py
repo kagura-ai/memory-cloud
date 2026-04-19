@@ -120,9 +120,16 @@ async def get_schema(
     )
 
     # Workspace boundary + cross-workspace 404 disclosure.
+    # required_role="owner" is load-bearing: WorkspaceOwner only verifies
+    # ownership of the caller's *current* workspace, not the workspace that
+    # owns the slug. A user who is owner of workspace A AND member (or
+    # admin) of workspace B could otherwise probe B's slug with this helper
+    # at default required_role="member" and receive B's schema data. See
+    # Copilot catch on PR #391.
     await PermissionService(db).resolve_resource_by_slug(
         user_id=user_id,
         resource_id=resource_id,
+        required_role="owner",
     )
 
     # Build query
@@ -275,10 +282,12 @@ async def get_resource_impact(
     user_id, _ = owner
     logger.info("get_resource_impact_request", resource_id=resource_id, user_id=user_id)
 
-    # Workspace boundary + cross-workspace 404 disclosure.
+    # Workspace boundary + cross-workspace 404 disclosure. See get_schema
+    # for the required_role="owner" rationale (multi-workspace member case).
     await PermissionService(db).resolve_resource_by_slug(
         user_id=user_id,
         resource_id=resource_id,
+        required_role="owner",
     )
 
     # Performance: Get all stats in a single query using subqueries

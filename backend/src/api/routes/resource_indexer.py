@@ -163,9 +163,16 @@ async def get_indexer_status(
     """
     user_id, _ = owner
     permissions = PermissionService(db)
+    # required_role="owner" is load-bearing: WorkspaceOwner only verifies
+    # ownership of the caller's *current* workspace, not the workspace that
+    # owns the slug. A user who is owner of workspace A AND member (or admin)
+    # of workspace B could otherwise probe B's slug with this helper at
+    # default required_role="member" and receive B's indexer state. See
+    # Copilot catch on PR #391.
     context = await permissions.resolve_resource_by_slug(
         user_id=user_id,
         resource_id=resource_id,
+        required_role="owner",
     )
 
     payload = await get_indexer_status_for_context(db, context)

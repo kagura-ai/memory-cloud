@@ -151,3 +151,129 @@ async def test_cross_workspace_probe_returns_404(cross_workspace_scenario, path_
         f"GET {path} returned {response.status_code}, expected 404 "
         f"(CWE-639 uniform disclosure contract)"
     )
+
+
+# ============================================================================
+# Multi-workspace membership case (Copilot catch on PR #391)
+# ============================================================================
+#
+# The base fixture covers "owner of A, NOT a member of B". The more subtle
+# case is "owner of A, also a member/admin of B". Without required_role="owner"
+# on resolve_resource_by_slug, WorkspaceOwner only verifies ownership of the
+# caller's *current* workspace (A), while the helper's default required_role=
+# "member" would pass the B-membership check and leak B's resource data.
+# Pinning this case prevents the bug from being reintroduced.
+
+
+@pytest_asyncio.fixture
+async def cross_workspace_multi_member_scenario(db_session):
+    """user_a owns workspace A AND is a ``member`` of workspace B.
+
+    Probes for ``SLUG_IN_WORKSPACE_B`` from user_a must still return 404 —
+    the owner-of-A current-workspace check is not enough; the helper must
+    enforce owner role in the *resource's* owning workspace.
+    """
+    owner_a_id = f"owner_a_{uuid4().hex[:8]}"
+    owner_b_id = f"owner_b_{uuid4().hex[:8]}"
+
+    ws_a = Workspace(
+        id=uuid4(),
+        name=f"ws-a-{uuid4().hex[:8]}",
+        plan_name="pro",
+        owner_user_id=owner_a_id,
+        memory_limit=100000,
+        daily_api_limit=50000,
+        weekly_api_limit=250000,
+    )
+    ws_b = Workspace(
+        id=uuid4(),
+        name=f"ws-b-{uuid4().hex[:8]}",
+        plan_name="pro",
+        owner_user_id=owner_b_id,
+        memory_limit=100000,
+        daily_api_limit=50000,
+        weekly_api_limit=250000,
+    )
+    ctx_b = Context(
+        id=uuid4(),
+        workspace_id=ws_b.id,
+        name=f"ctx-b-{uuid4().hex[:8]}",
+        resource_id=SLUG_IN_WORKSPACE_B,
+        created_by=owner_b_id,
+    )
+    # user_a is owner of A AND member of B — the subtle case.
+    db_session.add_all(
+        [
+            ws_a,
+            ws_b,
+            WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role="owner"),
+            WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role="owner"),
+            WorkspaceMember(workspace_id=ws_b.id, user_id=owner_a_id, role="member"),
+            ctx_b,
+        ]
+    )
+    await db_session.commit()
+
+    async def override_get_db():
+        yield db_session
+
+    async def override_auth():
+        return {
+            "user_id": owner_a_id,
+            "email": f"{owner_a_id}@test.com",
+            "role": "user",
+            "current_workspace_id": ws_a.id,
+            "workspace_role": "owner",
+        }
+
+    async def override_require_workspace_owner():
+        return (owner_a_id, ws_a.id)
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_user_from_api_key_or_session] = override_auth
+    app.dependency_overrides[require_workspace_owner] = override_require_workspace_owner
+
+    yield {
+        "owner_a_id": owner_a_id,
+        "ws_a_id": ws_a.id,
+        "probe_slug": SLUG_IN_WORKSPACE_B,
+    }
+
+    app.dependency_overrides.clear()
+
+    try:
+        await db_session.delete(ctx_b)
+        await db_session.execute(
+            WorkspaceMember.__table__.delete().where(
+                WorkspaceMember.workspace_id.in_([ws_a.id, ws_b.id])
+            )
+        )
+        await db_session.delete(ws_a)
+        await db_session.delete(ws_b)
+        await db_session.commit()
+    except Exception:
+        await db_session.rollback()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path_template", SLUG_PATH_ENDPOINTS)
+async def test_multi_workspace_member_probe_returns_404(
+    cross_workspace_multi_member_scenario, path_template
+):
+    """Owner-of-A who is also a member-of-B must still get 404 on B's slug.
+
+    Regression pin for the required_role="owner" fix on resolve_resource_by_slug.
+    Without it, the helper's default required_role="member" would pass for this
+    caller and leak workspace B's resource data.
+    """
+    slug = cross_workspace_multi_member_scenario["probe_slug"]
+    path = path_template.format(slug=slug)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get(path)
+
+    assert response.status_code == 404, (
+        f"GET {path} returned {response.status_code}, expected 404 "
+        f"(multi-workspace member must not leak via resolve_resource_by_slug "
+        f"default required_role=member)"
+    )
