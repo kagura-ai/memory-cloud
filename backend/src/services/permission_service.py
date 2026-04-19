@@ -5,6 +5,7 @@ Issue #115 Phase B-2: Workspace-level Multi-tenancy
 Manages access control at workspace and context levels.
 """
 
+from typing import NewType
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -16,6 +17,12 @@ from services.workspace_service import WorkspaceService
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Brand types for authz identities (Issue #383).
+# NewType is zero-cost at runtime but prevents str/str argument swaps at pyright.
+# Mint at authz function boundaries; do not leak these into repository layers.
+CallerId = NewType("CallerId", str)
+MemoryAuthorId = NewType("MemoryAuthorId", str)
 
 # Role hierarchy weights (higher = more privilege)
 ORG_ROLE_WEIGHTS = {
@@ -574,8 +581,9 @@ class PermissionService:
 
     async def can_access_memory(
         self,
-        user_id: str,
-        memory_user_id: str,
+        *,
+        user_id: CallerId,
+        memory_user_id: MemoryAuthorId,
         workspace_id: UUID,
         context_id: UUID,
     ) -> bool:

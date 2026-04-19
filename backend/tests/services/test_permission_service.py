@@ -9,6 +9,8 @@ from fastapi import HTTPException
 from services.permission_service import (
     CONTEXT_ROLE_WEIGHTS,
     ORG_ROLE_WEIGHTS,
+    CallerId,
+    MemoryAuthorId,
     PermissionService,
 )
 
@@ -207,7 +209,12 @@ class TestMemoryAccessControl:
     @pytest.mark.asyncio
     async def test_owner_can_access_own_memory(self, service):
         """Memory owner always has access."""
-        result = await service.can_access_memory("user1", "user1", uuid4(), uuid4())
+        result = await service.can_access_memory(
+            user_id=CallerId("user1"),
+            memory_user_id=MemoryAuthorId("user1"),
+            workspace_id=uuid4(),
+            context_id=uuid4(),
+        )
         assert result is True
 
     @pytest.mark.asyncio
@@ -219,7 +226,12 @@ class TestMemoryAccessControl:
         mock_ctx_svc.is_context_shared = AsyncMock(return_value=False)
 
         with patch("services.context_service.ContextService", return_value=mock_ctx_svc):
-            result = await service.can_access_memory("user2", "user1", uuid4(), uuid4())
+            result = await service.can_access_memory(
+                user_id=CallerId("user2"),
+                memory_user_id=MemoryAuthorId("user1"),
+                workspace_id=uuid4(),
+                context_id=uuid4(),
+            )
         assert result is False
 
     @pytest.mark.asyncio
@@ -232,7 +244,12 @@ class TestMemoryAccessControl:
         service.workspace_service.get_member = AsyncMock(return_value=MagicMock(role="member"))
 
         with patch("services.context_service.ContextService", return_value=mock_ctx_svc):
-            result = await service.can_access_memory("user2", "user1", uuid4(), uuid4())
+            result = await service.can_access_memory(
+                user_id=CallerId("user2"),
+                memory_user_id=MemoryAuthorId("user1"),
+                workspace_id=uuid4(),
+                context_id=uuid4(),
+            )
         assert result is True
 
 
