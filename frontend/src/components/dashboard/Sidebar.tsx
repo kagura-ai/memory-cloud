@@ -229,22 +229,32 @@ export function Sidebar() {
   const router = useRouter();
   const { user, logout } = useAuth();
 
-  // Load context count on mount
+  // Load context count on mount / workspace switch.
+  // Reset to null on each run so the warning icon does not show a stale
+  // "0 contexts" value from the previous workspace while the new fetch is
+  // in flight. Cancellation guard prevents a late fetch from clobbering a
+  // newer workspace's state (same pattern as hasExternalKeys below).
   useEffect(() => {
-    if (currentWorkspaceId) {
-      getContexts()
-        .then((data) => {
-          setContextCount(data.contexts.length);
-        })
-        .catch((error) => {
-          if (process.env.NODE_ENV === "development") {
-            console.error("Failed to load context count for sidebar:", error);
-          }
-          setContextCount(null);
-          // Note: Error not shown in UI to keep sidebar clean
-          // Users can see detailed error on /workspace/contexts page
-        });
-    }
+    setContextCount(null);
+    if (!currentWorkspaceId) return;
+
+    let cancelled = false;
+    getContexts()
+      .then((data) => {
+        if (!cancelled) setContextCount(data.contexts.length);
+      })
+      .catch((error) => {
+        if (process.env.NODE_ENV === "development") {
+          console.error("Failed to load context count for sidebar:", error);
+        }
+        if (!cancelled) setContextCount(null);
+        // Note: Error not shown in UI to keep sidebar clean
+        // Users can see detailed error on /workspace/contexts page
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [currentWorkspaceId]);
 
   // Load external key status (with race condition guard).
