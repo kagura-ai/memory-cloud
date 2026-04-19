@@ -435,23 +435,29 @@ class NeuralEdgeRepository:
 
     async def get_all_edges(
         self,
-        user_id: str,
+        user_id: str | None = None,
         min_weight: float = 0.0,
         workspace_id: str | None = None,
         context_id: str | None = None,
     ) -> list[NeuralMemoryEdge]:
-        """Get all edges for a user with 3-level isolation.
+        """Get all edges in a context with 3-level isolation.
 
         Single Collection Migration: Added workspace_id and context_id filtering.
+        Issue #383: ``user_id`` is now optional — when ``None``, all edges in the
+        workspace+context are returned regardless of creator (shared context
+        mode). When set, results are restricted to that creator (private context
+        mode or creator-scoped admin paths).
 
         Args:
-            user_id: User identifier
+            user_id: Optional creator filter. ``None`` returns all edges in
+                the workspace+context (use for shared-context reads where
+                authorization is enforced upstream).
             min_weight: Minimum edge weight threshold
             workspace_id: Workspace ID (for isolation)
             context_id: Context ID (for isolation)
 
         Returns:
-            List of all edges (context-filtered)
+            List of edges in the context that pass the creator filter.
 
         Raises:
             ValueError: If workspace_id or context_id is None (Issue #273 H-2)
@@ -459,10 +465,9 @@ class NeuralEdgeRepository:
         # Issue #273 H-2: Enforce workspace_id/context_id for 3-level isolation
         self._validate_isolation_params(workspace_id, context_id)
 
-        conditions = [
-            NeuralMemoryEdge.user_id == user_id,
-            NeuralMemoryEdge.weight >= min_weight,
-        ]
+        conditions = [NeuralMemoryEdge.weight >= min_weight]
+        if user_id is not None:
+            conditions.append(NeuralMemoryEdge.user_id == user_id)
 
         # Single Collection Migration: Use workspace_id/context_id for filtering
         if workspace_id:
@@ -632,16 +637,20 @@ class NeuralEdgeRepository:
 
     async def get_stats(
         self,
-        user_id: str,
+        user_id: str | None = None,
         workspace_id: str | None = None,
         context_id: str | None = None,
     ) -> dict[str, int | float]:
-        """Get graph statistics for a user with 3-level isolation.
+        """Get graph statistics for a context with 3-level isolation.
 
         Single Collection Migration: Added workspace_id and context_id filtering.
+        Issue #383: ``user_id`` is now optional — ``None`` aggregates over all
+        creators in the workspace+context (shared context), otherwise restricts
+        to that single creator (private context).
 
         Args:
-            user_id: User identifier
+            user_id: Optional creator filter. ``None`` aggregates over all
+                creators in the workspace+context.
             workspace_id: Workspace ID (for isolation)
             context_id: Context ID (for isolation)
 
@@ -659,7 +668,9 @@ class NeuralEdgeRepository:
         self._validate_isolation_params(workspace_id, context_id)
 
         # Build conditions
-        conditions = [NeuralMemoryEdge.user_id == user_id]
+        conditions: list = []
+        if user_id is not None:
+            conditions.append(NeuralMemoryEdge.user_id == user_id)
 
         # Single Collection Migration: Use workspace_id/context_id for filtering
         if workspace_id:
@@ -731,7 +742,7 @@ class NeuralEdgeRepository:
 
     async def get_top_connected_nodes(
         self,
-        user_id: str,
+        user_id: str | None = None,
         limit: int = 10,
         workspace_id: str | None = None,
         context_id: str | None = None,
@@ -739,9 +750,11 @@ class NeuralEdgeRepository:
         """Get most connected nodes (highest total degree).
 
         Single Collection Migration: Added workspace_id/context_id for filtering.
+        Issue #383: ``user_id`` is now optional — ``None`` aggregates across all
+        creators in the workspace+context (shared context mode).
 
         Args:
-            user_id: User identifier
+            user_id: Optional creator filter. ``None`` = all creators.
             limit: Number of top nodes to return
             workspace_id: Workspace ID (for isolation)
             context_id: Context ID (for isolation)
@@ -750,7 +763,9 @@ class NeuralEdgeRepository:
             List of (node_id, total_degree) tuples sorted by degree descending
         """
         # Build filter conditions
-        conditions = [NeuralMemoryEdge.user_id == user_id]
+        conditions: list = []
+        if user_id is not None:
+            conditions.append(NeuralMemoryEdge.user_id == user_id)
         if workspace_id:
             conditions.append(NeuralMemoryEdge.workspace_id == UUID(workspace_id))
         if context_id:

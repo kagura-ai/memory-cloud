@@ -93,47 +93,85 @@ async def get_graph_stats(
     db: AsyncSession = Depends(get_db),
     context_service: ContextService = Depends(lambda db=Depends(get_db): ContextService(db)),
 ):
-    """Get Neural Memory graph statistics for specified or current context.
+    """Get Neural Memory graph statistics for specified context.
 
-    Issue #82: Now context-scoped - returns graph stats for specified or current context.
+    Issue #82: Context-scoped stats.
+    Issue #383: Authorization is delegated to ``PermissionService``. Previously
+    this endpoint hard-filtered by ``user_id == caller``, hiding shared-context
+    memories authored by other workspace members. Now:
+
+        - Shared context (``is_private = false``): any workspace member sees
+          the full graph for the context.
+        - Private context (``is_private = true``): only the creator of each
+          edge/memory sees their own subgraph.
+        - Cross-workspace probes surface as 404 (CWE-639 / OWASP A01 uniform
+          disclosure) rather than 403 to avoid existence leakage.
 
     Args:
-        context_id: Optional context ID (defaults to current context)
+        context_id: Optional context ID. When absent, returns an empty graph
+            (no scope = no visible edges).
 
     Returns:
         Graph statistics including node/edge counts, top connections, etc.
-
-    Raises:
-        HTTPException: 404 if graph not found
     """
     try:
         user_id = user["user_id"]
-        # Issue #246: current_context_id removed - use provided context_id or None
-        target_context_id = context_id if context_id else None
 
-        # Single Collection Migration: Graph uses workspace_id/context_id for filtering
-        # Get context for workspace_id resolution if context_id provided
-        workspace_id = None
-        str_context_id = None
-        if target_context_id:
-            context_result = await db.execute(
-                select(Context).where(Context.id == target_context_id)
+        # Without context scope there is no visible graph (Issue #383).
+        if not context_id:
+            return GraphStatsResponse(
+                user_id=user_id,
+                stats=GraphStats(
+                    total_nodes=0,
+                    total_edges=0,
+                    avg_edge_weight=0.0,
+                    max_edge_weight=0.0,
+                    min_edge_weight=0.0,
+                    density=0.0,
+                    top_connections=[],
+                    recent_edges=[],
+                ),
+                last_updated=utcnow().isoformat(),
             )
-            context = context_result.scalar_one_or_none()
-            if context:
-                workspace_id = str(context.workspace_id)
-                str_context_id = str(context.id)
+
+        # Resolve context → workspace + privacy. Unified 404 on miss/forbidden.
+        context_result = await db.execute(select(Context).where(Context.id == context_id))
+        context = context_result.scalar_one_or_none()
+        if not context:
+            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+
+        from services.permission_service import PermissionService
+
+        perm_service = PermissionService(db)
+        try:
+            await perm_service.check_workspace_access(
+                user_id=user_id,
+                workspace_id=context.workspace_id,
+                required_role="member",
+            )
+        except HTTPException:
+            # CWE-639 uniform disclosure: cross-workspace probes look identical
+            # to non-existent contexts. Do NOT reveal workspace membership state.
+            raise HTTPException(status_code=404, detail=f"Context {context_id} not found") from None
+
+        workspace_id = str(context.workspace_id)
+        str_context_id = str(context.id)
+
+        # Issue #383: visibility-aware creator filter.
+        # - private context: only the caller's own edges are visible
+        # - shared context: all workspace members' edges are visible (no filter)
+        owner_filter = user_id if context.is_private else None
 
         # SQL backend: edges are in neural_memory_edges table (Issue #84)
         graph_service = GraphService(
             user_id, db, workspace_id=workspace_id, context_id=str_context_id
         )
-        # Get basic stats with 3-level isolation
-        stats = await graph_service.stats()
+        # Get basic stats with 3-level isolation (Issue #383 visibility filter)
+        stats = await graph_service.stats(owner_filter=owner_filter)
 
-        # Get top connected nodes (by degree) - SQL backend with isolation
+        # Get top connected nodes (by degree) - SQL backend with isolation (#383)
         top_nodes_data = await graph_service.edge_repo.get_top_connected_nodes(
-            user_id,
+            user_id=owner_filter,
             limit=10,
             workspace_id=workspace_id,
             context_id=str_context_id,
@@ -213,22 +251,40 @@ async def get_graph_data(
     try:
         user_id = user["user_id"]
 
-        # Resolve workspace_id from context (required)
+        # Resolve context → workspace + privacy. Unified 404 on miss/forbidden.
         context_result = await db.execute(select(Context).where(Context.id == context_id))
         context = context_result.scalar_one_or_none()
         if not context:
             raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+
+        from services.permission_service import PermissionService
+
+        perm_service = PermissionService(db)
+        try:
+            await perm_service.check_workspace_access(
+                user_id=user_id,
+                workspace_id=context.workspace_id,
+                required_role="member",
+            )
+        except HTTPException:
+            # CWE-639 uniform disclosure (Issue #383): cross-workspace probes
+            # surface as 404, not 403, to avoid leaking workspace membership.
+            raise HTTPException(status_code=404, detail=f"Context {context_id} not found") from None
+
         workspace_id = str(context.workspace_id)
         str_context_id = str(context.id)
+
+        # Issue #383: visibility-aware creator filter.
+        owner_filter = user_id if context.is_private else None
 
         # SQL backend: Load graph (Issue #84)
         graph_service = GraphService(
             user_id, db, workspace_id=workspace_id, context_id=str_context_id
         )
 
-        # Get all edges with 3-level isolation
+        # Get all edges with 3-level isolation (Issue #383 visibility filter)
         all_edges = await graph_service.edge_repo.get_all_edges(
-            user_id,
+            user_id=owner_filter,
             min_weight=min_weight,
             workspace_id=workspace_id,
             context_id=str_context_id,
@@ -263,7 +319,7 @@ async def get_graph_data(
             node_scores.append((node_id_str, score, degree, memory))
 
         if not node_scores:
-            stats = await graph_service.stats()
+            stats = await graph_service.stats(owner_filter=owner_filter)
             return GraphDataResponse(
                 nodes=[],
                 edges=[],
@@ -313,8 +369,8 @@ async def get_graph_data(
                     )
                 )
 
-        # Get statistics
-        graph_stats = await graph_service.stats()
+        # Get statistics (Issue #383 visibility filter)
+        graph_stats = await graph_service.stats(owner_filter=owner_filter)
         stats = {
             "total_nodes": graph_stats["total_nodes"],
             "total_edges": graph_stats["total_edges"],

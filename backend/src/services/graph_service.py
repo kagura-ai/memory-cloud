@@ -298,14 +298,26 @@ class GraphService:
     # Statistics
     # ========================================================================
 
-    async def stats(self) -> dict[str, Any]:
+    async def stats(self, *, owner_filter: str | None = None) -> dict[str, Any]:
         """Get graph statistics with 3-level isolation.
+
+        Issue #383: visibility-aware. ``owner_filter`` controls creator scoping:
+
+        - ``None`` (default): aggregate over all creators in workspace+context
+          (shared-context mode). Use this for HTTP graph endpoints after the
+          caller's workspace membership has been verified upstream.
+        - ``str`` (creator user_id): restrict to edges created by that user.
+          Use this for private-context reads where only the creator's own
+          subgraph should be visible.
+
+        Args:
+            owner_filter: Optional creator filter — see above.
 
         Returns:
             Stats dict with edge counts and weights
         """
         edge_stats = await self.edge_repo.get_stats(
-            self.user_id,
+            owner_filter,
             workspace_id=self.workspace_id,
             context_id=self.context_id,
         )
@@ -315,8 +327,10 @@ class GraphService:
 
         from models.memory import NeuralMemoryEdge
 
-        # Build conditions for node queries with 3-level isolation
-        conditions = [NeuralMemoryEdge.user_id == self.user_id]
+        # Build conditions for node queries with 3-level isolation (#383)
+        conditions: list = []
+        if owner_filter is not None:
+            conditions.append(NeuralMemoryEdge.user_id == owner_filter)
         if self.workspace_id:
             conditions.append(NeuralMemoryEdge.workspace_id == UUID(self.workspace_id))
         if self.context_id:

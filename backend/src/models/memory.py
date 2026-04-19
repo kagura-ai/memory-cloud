@@ -320,6 +320,12 @@ class NeuralMemoryEdge(Base):
         ),
         Index("idx_edges_user_src", "user_id", "src_id"),
         Index("idx_edges_user_dst", "user_id", "dst_id"),
+        # Issue #383: composite indexes matching the new PermissionService-driven
+        # graph read path. ``(workspace_id, context_id)``-leading, so leftmost-
+        # prefix matches ``WHERE workspace_id = :ws AND context_id = :ctx`` for
+        # shared-context visualization without relying on ``user_id``.
+        Index("idx_edges_ws_ctx_src", "workspace_id", "context_id", "src_id"),
+        Index("idx_edges_ws_ctx_dst", "workspace_id", "context_id", "dst_id"),
     )
 
     def __repr__(self) -> str:
