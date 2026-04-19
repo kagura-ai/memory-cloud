@@ -383,20 +383,28 @@ class RerankerService:
         context_id: str | None = None,
         workspace_id: str | None = None,  # NEW: Workspace ID (Issue #146)
     ) -> RerankerProvider | None:
-        """Get the active reranker provider for user/context/workspace.
+        """Get the active reranker provider for the current workspace context.
 
-        Queries ExternalAPIKey table for enabled reranker key.
-        Only ONE reranker can be enabled at a time (validated by external_keys.py).
+        Queries ExternalAPIKey for the enabled reranker key. Issue #105's
+        cross-provider exclusivity (one of Cohere / Voyage per workspace) is
+        enforced at runtime by validate_reranker_exclusivity call sites in
+        external_keys.py (create / toggle). The a99 migration has a matching
+        pre-flight check, but that check only runs once during upgrade — it
+        is a legacy-data safeguard, not a runtime enforcement mechanism.
 
-        Priority: context-scoped > workspace-scoped > user-scoped > env var
+        Issue #385: key resolution is workspace-keyed. When workspace_id is
+        omitted, the reranker is treated as not configured (returns None) —
+        there is no user-scoped or global fallback tier anymore.
+
+        Priority within a workspace: context-scoped > workspace-scoped.
 
         Args:
-            user_id: User ID
-            context_id: Optional context ID (Issue #82: context-scoped keys)
-            workspace_id: Optional workspace ID (Issue #146: workspace-scoped keys)
+            user_id: Caller's user ID — logged for audit, NOT used as a filter (#385).
+            context_id: Optional context UUID (context-scoped keys take priority).
+            workspace_id: Workspace UUID; when omitted returns None.
 
         Returns:
-            RerankerProvider instance or None if no reranker enabled
+            RerankerProvider instance, or None if no reranker key configured.
         """
         from uuid import UUID
 
@@ -423,38 +431,37 @@ class RerankerService:
                 logger.debug("using_ollama_reranker", user_id=user_id, model=model)
                 return OllamaReranker(base_url=settings.ollama_base_url, model=model)
 
-        # API-key providers (Voyage, Cohere)
+        # API-key providers (Voyage, Cohere).
+        # Issue #385: workspace-keyed lookup; user_id is for audit, not a filter.
+        # Without a workspace context the reranker is treated as not configured —
+        # API-key reranker rows live in the external_api_keys table which is now
+        # workspace-scoped (NOT NULL), so a no-workspace caller has nothing to find.
+        if not workspace_id:
+            logger.debug("no_reranker_configured", user_id=user_id, reason="no_workspace_context")
+            return None
+
+        workspace_uuid = UUID(workspace_id) if isinstance(workspace_id, str) else workspace_id
         conditions = [
-            ExternalAPIKey.user_id == user_id,
+            ExternalAPIKey.workspace_id == workspace_uuid,
             ExternalAPIKey.provider.in_(RERANKER_PROVIDERS),
             ExternalAPIKey.enabled.is_(True),
         ]
-
-        scope_conditions = []
         if context_id:
             context_uuid = UUID(context_id) if isinstance(context_id, str) else context_id
-            scope_conditions.append(ExternalAPIKey.context_id == context_uuid)
-        if workspace_id:
-            workspace_uuid = UUID(workspace_id) if isinstance(workspace_id, str) else workspace_id
-            scope_conditions.append(ExternalAPIKey.workspace_id == workspace_uuid)
-
-        if scope_conditions:
+            # Context-scoped key wins; fall back to workspace-scoped (context_id IS NULL).
             conditions.append(
                 or_(
-                    *scope_conditions,
-                    and_(
-                        ExternalAPIKey.context_id.is_(None), ExternalAPIKey.workspace_id.is_(None)
-                    ),
+                    ExternalAPIKey.context_id == context_uuid,
+                    ExternalAPIKey.context_id.is_(None),
                 )
             )
+        else:
+            conditions.append(ExternalAPIKey.context_id.is_(None))
 
         query = (
             select(ExternalAPIKey)
             .where(and_(*conditions))
-            .order_by(
-                ExternalAPIKey.context_id.desc().nulls_last(),
-                ExternalAPIKey.workspace_id.desc().nulls_last(),
-            )
+            .order_by(ExternalAPIKey.context_id.desc().nulls_last())
             .limit(1)
         )
 

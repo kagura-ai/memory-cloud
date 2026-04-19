@@ -1,11 +1,11 @@
-import { apiClient } from './base';
+import { apiClient } from "./base";
 
 export interface ExternalAPIKey {
   id: number;
   key_name: string;
   provider: string;
   masked_value: string;
-  enabled: boolean;  // Issue #105
+  enabled: boolean; // Issue #105
   created_at: string;
   updated_at: string;
   updated_by: string | null;
@@ -15,7 +15,7 @@ export interface CreateExternalAPIKeyRequest {
   key_name: string;
   provider: string;
   value: string;
-  enabled?: boolean;  // Issue #105, defaults to true
+  enabled?: boolean; // Issue #105, defaults to true
 }
 
 export interface UpdateExternalAPIKeyRequest {
@@ -26,12 +26,6 @@ export interface ToggleExternalAPIKeyRequest {
   enabled: boolean;
 }
 
-export interface ImportResult {
-  created: string[];
-  skipped: string[];
-  failed: [string, string][];
-}
-
 export interface ExternalKeyListResponse {
   keys: ExternalAPIKey[];
   total: number;
@@ -40,24 +34,35 @@ export interface ExternalKeyListResponse {
 /**
  * List all external API keys, optionally filtered by provider
  */
-export async function listExternalAPIKeys(provider?: string): Promise<ExternalAPIKey[]> {
-  const params = provider ? `?provider=${provider}` : '';
-  const response = await apiClient.get<ExternalKeyListResponse>(`/api/v1/external-keys${params}`);
+export async function listExternalAPIKeys(
+  provider?: string,
+): Promise<ExternalAPIKey[]> {
+  const params = provider ? `?provider=${provider}` : "";
+  const response = await apiClient.get<ExternalKeyListResponse>(
+    `/api/v1/external-keys${params}`,
+  );
   return response.keys;
 }
 
 /**
  * Create a new external API key
  */
-export async function createExternalAPIKey(data: CreateExternalAPIKeyRequest): Promise<ExternalAPIKey> {
-  return apiClient.post<ExternalAPIKey>('/api/v1/external-keys', data);
+export async function createExternalAPIKey(
+  data: CreateExternalAPIKeyRequest,
+): Promise<ExternalAPIKey> {
+  return apiClient.post<ExternalAPIKey>("/api/v1/external-keys", data);
 }
 
 /**
  * Update an existing external API key
  */
-export async function updateExternalAPIKey(keyName: string, value: string): Promise<ExternalAPIKey> {
-  return apiClient.put<ExternalAPIKey>(`/api/v1/external-keys/${keyName}`, { value });
+export async function updateExternalAPIKey(
+  keyName: string,
+  value: string,
+): Promise<ExternalAPIKey> {
+  return apiClient.put<ExternalAPIKey>(`/api/v1/external-keys/${keyName}`, {
+    value,
+  });
 }
 
 /**
@@ -65,11 +70,11 @@ export async function updateExternalAPIKey(keyName: string, value: string): Prom
  */
 export async function toggleExternalAPIKey(
   keyName: string,
-  enabled: boolean
+  enabled: boolean,
 ): Promise<ExternalAPIKey> {
   return apiClient.patch<ExternalAPIKey>(
     `/api/v1/external-keys/${keyName}/toggle`,
-    { enabled }
+    { enabled },
   );
 }
 
@@ -78,11 +83,4 @@ export async function toggleExternalAPIKey(
  */
 export async function deleteExternalAPIKey(keyName: string): Promise<void> {
   await apiClient.delete(`/api/v1/external-keys/${keyName}`);
-}
-
-/**
- * Import API keys from .env.cloud file
- */
-export async function importExternalAPIKeys(): Promise<ImportResult> {
-  return apiClient.post<ImportResult>('/api/v1/external-keys/import', {});
 }

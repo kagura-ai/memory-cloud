@@ -23,6 +23,27 @@ RESOURCE_EVENTS_UPSERT_UNIQUE = "ux_resource_events_upsert_version"
 # ``sa.UniqueConstraint("idempotency_key")`` in baseline 157247e0df86.
 RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE = "resource_events_idempotency_key_key"
 
+# Issue #385: partial unique index on
+# (workspace_id, context_id, provider) WHERE enabled=true
+# with NULLS NOT DISTINCT (PG 15+). Created by migration a99 + mirrored in
+# models.auth.ExternalAPIKey.__table_args__. The three-column key supports the
+# service-layer's context > workspace priority contract: a context-scoped
+# enabled key and a workspace-scoped (context_id IS NULL) fallback for the same
+# provider coexist, while NULLS NOT DISTINCT blocks two workspace-scoped rows
+# for the same provider.
+#
+# Used by external_keys routes (create / toggle) to map IntegrityError → 409
+# only when this specific constraint fires; other IntegrityErrors stay as 500.
+EXTERNAL_API_KEYS_WORKSPACE_PROVIDER_ENABLED_UNIQUE = (
+    "uq_external_api_keys_workspace_provider_enabled"
+)
+
+# Issue #385: full unique index on (workspace_id, key_name). Guarantees that
+# scalar_one_or_none() lookups in update/toggle/delete handlers cannot raise
+# MultipleResultsFound on legacy data (pre-#381, multiple users could each create
+# keys with the same key_name in one workspace). Created by migration a99.
+EXTERNAL_API_KEYS_WORKSPACE_KEY_NAME_UNIQUE = "uq_external_api_keys_workspace_key_name"
+
 
 def integrity_error_constraint_name(error: IntegrityError) -> str | None:
     """Return the PostgreSQL constraint name for ``error``, or ``None``.

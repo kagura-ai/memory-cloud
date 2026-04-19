@@ -5,20 +5,36 @@ Issue #45: Web UI Endpoint Implementation
 Issue #106: Refactored to use consolidated utilities
 """
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import and_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import WorkspaceMember
+from auth.dependencies import APIKeyOrSessionUser, require_workspace_owner
 from db.base import get_db
+from db.constraint_names import (
+    EXTERNAL_API_KEYS_WORKSPACE_KEY_NAME_UNIQUE,
+    EXTERNAL_API_KEYS_WORKSPACE_PROVIDER_ENABLED_UNIQUE,
+    integrity_error_constraint_name,
+)
 from models.auth import ExternalAPIKey
 from utils import db_transaction, get_user_email, mask_secret
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/external-keys", tags=["external-keys"])
+# Issue #381: All external API key routes are owner-only.
+# External API keys are workspace-level secrets (OpenAI/Cohere/Anthropic credentials)
+# that should only be managed by the workspace owner. Viewers, members, and admins
+# cannot list/create/update/toggle/delete keys.
+router = APIRouter(
+    prefix="/external-keys",
+    tags=["external-keys"],
+    dependencies=[Depends(require_workspace_owner)],
+)
 
 
 # ============================================================================
@@ -96,24 +112,31 @@ EMBEDDING_PROVIDERS = {"openai"}
 
 async def validate_reranker_exclusivity(
     db: AsyncSession,
-    user_id: str,
+    workspace_id: UUID,
     provider: str,
     enabled: bool,
     exclude_key_id: int | None = None,
 ) -> None:
-    """Ensure only ONE reranker (Cohere OR Voyage) is enabled at a time.
+    """Ensure only ONE reranker (Cohere OR Voyage) is enabled at a time per workspace.
 
     Issue #105: Reranker exclusivity validation.
-    Issue #246: current_context_id parameter removed (no context filtering).
+    Issue #385: scoped per workspace — was per user before, because external keys
+        are workspace-shared resources now. The partial unique index
+        uq_external_api_keys_workspace_provider_enabled only guarantees at most
+        one enabled key per (workspace, context, provider) at the DB level — a
+        different invariant. This application-layer check is what enforces the
+        cross-provider reranker exclusivity (no Cohere AND Voyage enabled
+        simultaneously per workspace) and produces a friendly 409 with provider
+        details.
 
     Rules:
     - OpenAI cannot be disabled (embeddings required)
-    - Only ONE of Cohere/Voyage enabled
+    - Only ONE of Cohere/Voyage enabled per workspace
     - Disabling rerankers is always allowed
 
     Args:
         db: Database session
-        user_id: User ID
+        workspace_id: Workspace UUID — the conflict check is scoped to this workspace.
         provider: Provider name (openai, cohere, voyage)
         enabled: Desired enabled state
         exclude_key_id: Key ID to exclude from conflict check (for updates)
@@ -135,20 +158,21 @@ async def validate_reranker_exclusivity(
     if not enabled or provider not in RERANKER_PROVIDERS:
         return
 
-    # Check for conflicting enabled reranker
+    # Check for a conflicting enabled reranker in the same workspace.
     conditions = [
-        ExternalAPIKey.user_id == user_id,
+        ExternalAPIKey.workspace_id == workspace_id,
         ExternalAPIKey.enabled.is_(True),
         ExternalAPIKey.provider.in_(RERANKER_PROVIDERS),
         ExternalAPIKey.provider != provider,
     ]
 
-    # Issue #246: current_context_id filtering removed
-
     if exclude_key_id:
         conditions.append(ExternalAPIKey.id != exclude_key_id)
 
-    result = await db.execute(select(ExternalAPIKey).where(and_(*conditions)))
+    # Existence check only — .limit(1) makes scalar_one_or_none() safe even
+    # against legacy/dirty data with multiple matching rows (would otherwise
+    # raise MultipleResultsFound → 500).
+    result = await db.execute(select(ExternalAPIKey).where(and_(*conditions)).limit(1))
     conflicting_key = result.scalar_one_or_none()
 
     if conflicting_key:
@@ -172,55 +196,30 @@ async def validate_reranker_exclusivity(
 
 @router.get("", response_model=ExternalKeyListResponse)
 async def list_external_keys(
-    user: WorkspaceMember,
+    user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
-    """List all external API keys for the authenticated user's current context.
+    """List all external API keys for the current workspace.
 
-    Issue #82: Now context-scoped - returns external keys for current context only.
-    Issue #246: current_context_id removed - show all user keys
-    Issue #59: Viewers cannot access external keys.
+    Issue #381: owner-only (router-level dependency); members, admins, and viewers
+    are rejected with 403 before reaching this handler.
+    Issue #385: workspace-scoped — returns every key registered in
+    `current_workspace_id` regardless of the original creator's user_id, since
+    the workspace owner is the sole manager of these keys.
 
     Returns masked values for security.
     """
     user_id = user.get("user_id")
-    # Issue #246: current_context_id removed
-    # current_context_id = user.get("current_context_id")
-    current_workspace_id = user.get("current_workspace_id")  # Issue #146
+    current_workspace_id = user.get("current_workspace_id")
 
     async with db_transaction(db, "list_external_keys", "Failed to list external API keys"):
-        # Build query with workspace filter (Issue #146)
-        # Show workspace-scoped keys to all workspace members (not just creator)
-        from sqlalchemy import or_
-
-        if current_workspace_id:
-            # Workspace-scoped: Show all keys for current workspace (shared across workspace members)
-            # User-scoped: Show only user's own keys (workspace_id = NULL AND user_id = current_user)
-            result = await db.execute(
-                select(ExternalAPIKey)
-                .where(
-                    or_(
-                        ExternalAPIKey.workspace_id
-                        == current_workspace_id,  # Workspace-scoped (all members can see)
-                        and_(
-                            ExternalAPIKey.user_id == user_id,
-                            ExternalAPIKey.workspace_id.is_(None),
-                        ),  # User-scoped (own keys only)
-                    )
-                )
-                .order_by(ExternalAPIKey.created_at.desc())
-            )
-        else:
-            # No workspace context - show only user-scoped keys
-            result = await db.execute(
-                select(ExternalAPIKey)
-                .where(
-                    ExternalAPIKey.user_id == user_id,
-                    ExternalAPIKey.workspace_id.is_(None),
-                )
-                .order_by(ExternalAPIKey.created_at.desc())
-            )
-
+        # Issue #385: workspace_id is NOT NULL — every key belongs to exactly one workspace.
+        # The router-level require_workspace_owner dep guarantees current_workspace_id is set.
+        result = await db.execute(
+            select(ExternalAPIKey)
+            .where(ExternalAPIKey.workspace_id == current_workspace_id)
+            .order_by(ExternalAPIKey.created_at.desc())
+        )
         keys = list(result.scalars().all())
 
         # Decrypt and mask values
@@ -253,40 +252,33 @@ async def list_external_keys(
 @router.post("", response_model=ExternalKeyResponse)
 async def create_external_key(
     request: ExternalKeyCreate,
-    user: WorkspaceMember,
+    user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new external API key for current context.
+    """Create a new external API key for the current workspace.
 
-    Issue #82: Auto-assigns external key to current context.
-    Issue #246: current_context_id removed - use context_id=None
-    Issue #59: Viewers cannot access external keys.
+    Issue #381: owner-only (router-level dependency).
+    Issue #385: workspace-scoped — the new key is stored with the caller's
+    current_workspace_id and context_id=None. Per-workspace uniqueness is
+    enforced by (a) the app-layer pre-checks in this handler and (b) the
+    partial unique index on (workspace_id, context_id, provider) WHERE enabled=true (NULLS NOT DISTINCT).
     """
     user_id = user.get("user_id")
     user_email = get_user_email(user) or user_id
-    # Issue #246: current_context_id removed
-    # current_context_id = user.get("current_context_id")
-    current_workspace_id = user.get("current_workspace_id")  # Issue #146: Workspace-scoped keys
+    current_workspace_id = user.get("current_workspace_id")
 
     async with db_transaction(db, "create_external_key", "Failed to create external API key"):
-        # Issue #223: Check if key already exists in current workspace/context
-        # For workspace-scoped keys: unique on (workspace_id, key_name)
-        # For user-scoped keys: unique on (user_id, key_name, context_id)
-        # Issue #246: current_context_id removed - context_id always None
-        conditions = [ExternalAPIKey.key_name == request.key_name]
-
-        if current_workspace_id:
-            # Workspace-scoped key: check within workspace
-            conditions.append(ExternalAPIKey.workspace_id == current_workspace_id)
-        else:
-            # User-scoped key (legacy): check within user + context
-            conditions.append(ExternalAPIKey.workspace_id.is_(None))
-            conditions.append(ExternalAPIKey.user_id == user_id)
-            # Issue #246: current_context_id removed
-            # if current_context_id:
-            #     conditions.append(ExternalAPIKey.context_id == current_context_id)
-
-        result = await db.execute(select(ExternalAPIKey).where(and_(*conditions)))
+        # Issue #385: workspace-scoped duplicate check — name uniqueness is per-workspace.
+        # The partial unique index (workspace_id, context_id, provider) WHERE enabled=true (NULLS NOT DISTINCT) gives DB-level
+        # enforcement on top; the application-layer check below produces a friendlier 409.
+        result = await db.execute(
+            select(ExternalAPIKey).where(
+                and_(
+                    ExternalAPIKey.key_name == request.key_name,
+                    ExternalAPIKey.workspace_id == current_workspace_id,
+                )
+            )
+        )
         existing = result.scalar_one_or_none()
 
         if existing:
@@ -296,11 +288,44 @@ async def create_external_key(
                 detail="An API key with this configuration already exists",
             )
 
-        # Validate reranker exclusivity (Issue #105)
-        # Issue #246: current_context_id removed - use None
+        # Issue #385: enforce the partial unique index invariant
+        # (workspace_id, context_id, provider) WHERE enabled=true at the application layer too,
+        # so an arbitrary key_name (different from a duplicate the SELECT above
+        # would have caught) doesn't escape with a 500 from the DB IntegrityError.
+        if request.enabled:
+            # Existence check only; .limit(1) makes scalar_one_or_none() resilient
+            # to legacy/dirty data that has multiple matching rows. Scope the
+            # check to context_id IS NULL to match the partial unique index's
+            # (workspace_id, context_id, provider) key — create_external_key
+            # always stores context_id=None, so a context-scoped enabled key
+            # for the same provider legitimately coexists at the DB level and
+            # should not block creation of the workspace-scoped fallback.
+            dup_result = await db.execute(
+                select(ExternalAPIKey)
+                .where(
+                    and_(
+                        ExternalAPIKey.workspace_id == current_workspace_id,
+                        ExternalAPIKey.context_id.is_(None),
+                        ExternalAPIKey.provider == request.provider,
+                        ExternalAPIKey.enabled.is_(True),
+                    )
+                )
+                .limit(1)
+            )
+            if dup_result.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"An enabled workspace-scoped {request.provider} API key "
+                        "already exists in this workspace. Disable it first or "
+                        "update its value instead."
+                    ),
+                )
+
+        # Validate reranker exclusivity per workspace (Issue #105 / #385).
         await validate_reranker_exclusivity(
             db=db,
-            user_id=user_id,
+            workspace_id=current_workspace_id,
             provider=request.provider,
             enabled=request.enabled,
         )
@@ -319,7 +344,38 @@ async def create_external_key(
         )
 
         db.add(new_key)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError as exc:
+            # Issue #385: a concurrent create could win a race against the
+            # partial unique index on (workspace_id, context_id, provider) WHERE enabled=true (NULLS NOT DISTINCT)
+            # OR the full unique index on (workspace_id, key_name). Narrow to
+            # those two specific constraints so unrelated IntegrityErrors
+            # (FK violations, unexpected constraints) still surface as 500 via
+            # db_transaction — only the known races become friendly 409s.
+            await db.rollback()
+            constraint = integrity_error_constraint_name(exc)
+            if constraint == EXTERNAL_API_KEYS_WORKSPACE_PROVIDER_ENABLED_UNIQUE:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"An enabled {request.provider} API key already exists in "
+                        "this workspace (concurrent create). Disable it first or "
+                        "update its value instead."
+                    ),
+                ) from exc
+            if constraint == EXTERNAL_API_KEYS_WORKSPACE_KEY_NAME_UNIQUE:
+                # Issue #223: don't reveal the submitted key_name — matches the
+                # non-revealing message used by the pre-check on line 281.
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "An API key with this configuration already exists "
+                        "(concurrent create). Try a different name or update "
+                        "the existing key's value."
+                    ),
+                ) from exc
+            raise
         await db.refresh(new_key)
 
         logger.info(
@@ -343,36 +399,33 @@ async def create_external_key(
 async def update_external_key(
     key_name: str,
     request: ExternalKeyUpdate,
-    user: WorkspaceMember,
+    user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
-    """Update an external API key value in current context.
+    """Update an external API key value in the current workspace.
 
-    Issue #112: Now filters by context_id to handle duplicate key names across contexts.
-    Issue #246: current_context_id removed - use context_id=None
-    Issue #59: Viewers cannot access external keys.
+    Issue #381: owner-only (router-level dependency).
+    Issue #385: workspace-scoped lookup by (key_name, workspace_id). Any owner
+    of the workspace can update any key registered in it, including keys
+    originally registered by a previous owner.
     """
     user_id = user.get("user_id")
     user_email = get_user_email(user) or user_id
-    # Issue #246: current_context_id removed
-    # current_context_id = user.get("current_context_id")
-
-    # SECURITY: Get current workspace for boundary check
-    # Issue #269: Workspace boundary violation prevention
     current_workspace_id = user.get("current_workspace_id")
 
     async with db_transaction(db, "update_external_key", "Failed to update external API key"):
-        # Get existing key (Issue #112: filter by context too)
-        # Issue #246: current_context_id removed - no context filtering
-        conditions = [
-            ExternalAPIKey.key_name == key_name,
-            ExternalAPIKey.user_id == user_id,
-        ]
-        # Issue #246: current_context_id removed
-        # if current_context_id:
-        #     conditions.append(ExternalAPIKey.context_id == current_context_id)
-
-        result = await db.execute(select(ExternalAPIKey).where(and_(*conditions)))
+        # Issue #385: workspace-scoped lookup. Any owner of this workspace can update
+        # any key registered in it (including keys originally created by a previous
+        # owner) — the previous user_id == caller filter was a creator-only check that
+        # broke ownership transitions.
+        result = await db.execute(
+            select(ExternalAPIKey).where(
+                and_(
+                    ExternalAPIKey.key_name == key_name,
+                    ExternalAPIKey.workspace_id == current_workspace_id,
+                )
+            )
+        )
         key = result.scalar_one_or_none()
 
         if not key:
@@ -380,21 +433,6 @@ async def update_external_key(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"External key '{key_name}' not found",
             )
-
-        # SECURITY: Verify key belongs to current workspace
-        # Issue #269: Prevent updating keys from other workspaces
-        if key.workspace_id is not None:
-            # Workspace-scoped key: must match current_workspace_id
-            if not current_workspace_id:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No workspace selected. Please select an workspace first.",
-                )
-            if key.workspace_id != current_workspace_id:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="This API key belongs to a different workspace.",
-                )
 
         # Encrypt and update
         key.encrypted_value = encrypt_value(request.value)
@@ -421,7 +459,7 @@ async def update_external_key(
 async def toggle_external_key(
     key_name: str,
     request: ExternalKeyToggle,
-    user: WorkspaceMember,
+    user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
     """Toggle enabled/disabled state without re-entering API key value.
@@ -433,29 +471,22 @@ async def toggle_external_key(
     - OpenAI keys cannot be disabled
     - Only ONE reranker (Cohere/Voyage) can be enabled at a time
 
-    Issue #59: Viewers cannot access external keys.
+    Issue #381: Owner-only (router-level dependency).
     """
     user_id = user.get("user_id")
     user_email = get_user_email(user) or user_id
-    # Issue #246: current_context_id removed
-    # current_context_id = user.get("current_context_id")
-
-    # SECURITY: Get current workspace for boundary check
-    # Issue #269: Workspace boundary violation prevention
     current_workspace_id = user.get("current_workspace_id")
 
     async with db_transaction(db, "toggle_external_key", "Failed to toggle external API key"):
-        # Get existing key
-        # Issue #246: current_context_id removed - no context filtering
-        conditions = [
-            ExternalAPIKey.key_name == key_name,
-            ExternalAPIKey.user_id == user_id,
-        ]
-        # Issue #246: current_context_id removed
-        # if current_context_id:
-        #     conditions.append(ExternalAPIKey.context_id == current_context_id)
-
-        result = await db.execute(select(ExternalAPIKey).where(and_(*conditions)))
+        # Issue #385: workspace-scoped lookup (see update_external_key for rationale).
+        result = await db.execute(
+            select(ExternalAPIKey).where(
+                and_(
+                    ExternalAPIKey.key_name == key_name,
+                    ExternalAPIKey.workspace_id == current_workspace_id,
+                )
+            )
+        )
         key = result.scalar_one_or_none()
 
         if not key:
@@ -464,26 +495,43 @@ async def toggle_external_key(
                 detail=f"External key '{key_name}' not found",
             )
 
-        # SECURITY: Verify key belongs to current workspace
-        # Issue #269: Prevent toggling keys from other workspaces
-        if key.workspace_id is not None:
-            # Workspace-scoped key: must match current_workspace_id
-            if not current_workspace_id:
+        # Issue #385: enforce the partial unique index invariant
+        # (workspace_id, context_id, provider) WHERE enabled=true at the application layer too,
+        # so toggling a disabled key to enabled while another enabled key for the
+        # same provider exists doesn't surface as a 500 from the DB IntegrityError.
+        if request.enabled and not bool(key.enabled):
+            # Existence check only — same rationale as create_external_key.
+            # Scope to the same context_id as the row being toggled so the
+            # pre-check matches the (workspace_id, context_id, provider)
+            # partial unique index. key.context_id may be NULL (workspace-
+            # scoped) or a context UUID; the comparison handles both via
+            # the same IS-NULL-vs-equal split SQLAlchemy applies normally.
+            dup_conditions = [
+                ExternalAPIKey.workspace_id == current_workspace_id,
+                ExternalAPIKey.provider == key.provider,
+                ExternalAPIKey.enabled.is_(True),
+                ExternalAPIKey.id != key.id,
+            ]
+            if key.context_id is None:
+                dup_conditions.append(ExternalAPIKey.context_id.is_(None))
+            else:
+                dup_conditions.append(ExternalAPIKey.context_id == key.context_id)
+            dup_result = await db.execute(
+                select(ExternalAPIKey).where(and_(*dup_conditions)).limit(1)
+            )
+            if dup_result.scalar_one_or_none():
                 raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No workspace selected. Please select an workspace first.",
-                )
-            if key.workspace_id != current_workspace_id:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="This API key belongs to a different workspace.",
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"Another enabled {key.provider} API key already exists in "
+                        "this workspace. Disable it first before enabling this one."
+                    ),
                 )
 
-        # Validate reranker exclusivity (Issue #105)
-        # Issue #246: current_context_id removed - use None
+        # Validate reranker exclusivity per workspace (Issue #105 / #385).
         await validate_reranker_exclusivity(
             db=db,
-            user_id=user_id,
+            workspace_id=current_workspace_id,
             provider=key.provider,
             enabled=request.enabled,
             exclude_key_id=key.id,
@@ -493,7 +541,26 @@ async def toggle_external_key(
         key.enabled = request.enabled
         key.updated_by = user_email
 
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError as exc:
+            # Issue #385: see create_external_key for the same TOCTOU + narrow-
+            # constraint rationale. Only the partial unique index becomes a 409;
+            # any other IntegrityError still surfaces as 500 via db_transaction.
+            await db.rollback()
+            if (
+                integrity_error_constraint_name(exc)
+                == EXTERNAL_API_KEYS_WORKSPACE_PROVIDER_ENABLED_UNIQUE
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"Another enabled {key.provider} API key already exists in "
+                        "this workspace (concurrent toggle). Disable it first "
+                        "before enabling this one."
+                    ),
+                ) from exc
+            raise
         await db.refresh(key)
 
         logger.info(
@@ -516,35 +583,29 @@ async def toggle_external_key(
 @router.delete("/{key_name}")
 async def delete_external_key(
     key_name: str,
-    user: WorkspaceMember,
+    user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete an external API key from current context.
+    """Delete an external API key from the current workspace.
 
-    Issue #112: Now filters by context_id to handle duplicate key names across contexts.
-    Issue #246: current_context_id removed - no context filtering
-    Issue #59: Viewers cannot access external keys.
+    Issue #381: owner-only (router-level dependency).
+    Issue #385: workspace-scoped lookup by (key_name, workspace_id); any owner
+    can delete any key registered in the workspace.
+    Issue #149: protected keys (in PROTECTED_KEYS) are refused with 400.
     """
     user_id = user.get("user_id")
-    # Issue #246: current_context_id removed
-    # current_context_id = user.get("current_context_id")
-
-    # SECURITY: Get current workspace for boundary check
-    # Issue #269: Workspace boundary violation prevention
     current_workspace_id = user.get("current_workspace_id")
 
     async with db_transaction(db, "delete_external_key", "Failed to delete external API key"):
-        # Get existing key (Issue #112: filter by context too)
-        # Issue #246: current_context_id removed - no context filtering
-        conditions = [
-            ExternalAPIKey.key_name == key_name,
-            ExternalAPIKey.user_id == user_id,
-        ]
-        # Issue #246: current_context_id removed
-        # if current_context_id:
-        #     conditions.append(ExternalAPIKey.context_id == current_context_id)
-
-        result = await db.execute(select(ExternalAPIKey).where(and_(*conditions)))
+        # Issue #385: workspace-scoped lookup (see update_external_key for rationale).
+        result = await db.execute(
+            select(ExternalAPIKey).where(
+                and_(
+                    ExternalAPIKey.key_name == key_name,
+                    ExternalAPIKey.workspace_id == current_workspace_id,
+                )
+            )
+        )
         key = result.scalar_one_or_none()
 
         if not key:
@@ -552,21 +613,6 @@ async def delete_external_key(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"External key '{key_name}' not found",
             )
-
-        # SECURITY: Verify key belongs to current workspace
-        # Issue #269: Prevent deleting keys from other workspaces
-        if key.workspace_id is not None:
-            # Workspace-scoped key: must match current_workspace_id
-            if not current_workspace_id:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No workspace selected. Please select an workspace first.",
-                )
-            if key.workspace_id != current_workspace_id:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="This API key belongs to a different workspace.",
-                )
 
         # Issue #149: Prevent deletion of protected keys (required for system operations)
         from config.plan_tiers import PROTECTED_KEYS
@@ -583,75 +629,3 @@ async def delete_external_key(
         logger.info(f"external_key_deleted: key_name={key_name}, user={user_id}")
 
         return {"message": f"External key '{key_name}' deleted successfully"}
-
-
-@router.post("/import")
-async def import_external_keys(
-    user: WorkspaceMember,
-    db: AsyncSession = Depends(get_db),
-):
-    """Import external API keys from .env.cloud file.
-
-    Reads .env.cloud and imports OPENAI_API_KEY, COHERE_API_KEY if present.
-    """
-    from pathlib import Path
-
-    user_id = user.get("user_id")
-    user_email = get_user_email(user) or user_id
-
-    env_file = Path("/app/.env.cloud")
-    if not env_file.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=".env.cloud file not found",
-        )
-
-    imported: list[str] = []
-    errors: list[str] = []
-
-    # Mapping of env var names to (key_name, provider)
-    key_mapping = {
-        "OPENAI_API_KEY": ("openai_api_key", "openai"),
-        "COHERE_API_KEY": ("cohere_api_key", "cohere"),
-    }
-
-    async with db_transaction(db, "import_external_keys", "Failed to import external API keys"):
-        # Parse .env file
-        with open(env_file) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-
-                env_key, value = line.split("=", 1)
-                env_key = env_key.strip()
-                value = value.strip().strip('"').strip("'")
-
-                if env_key in key_mapping and value:
-                    key_name, provider = key_mapping[env_key]
-                    try:
-                        encrypted = encrypt_value(value)
-                        new_key = ExternalAPIKey(
-                            key_name=key_name,
-                            provider=provider,
-                            encrypted_value=encrypted,
-                            user_id=user_id,
-                            updated_by=user_email,
-                        )
-                        db.add(new_key)
-                        imported.append(key_name)
-                    except Exception as e:
-                        errors.append(f"{key_name}: {str(e)}")
-
-        await db.commit()
-
-        logger.info(
-            f"external_keys_imported: user={user_id}, "
-            f"imported={len(imported)}, errors={len(errors)}"
-        )
-
-        return {
-            "message": f"Imported {len(imported)} external API keys",
-            "imported": imported,
-            "errors": errors,
-        }

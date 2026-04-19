@@ -121,12 +121,6 @@ const navigationGroups: NavGroup[] = [
         href: "/workspace/integrations/credentials?tab=oauth-apps",
         icon: Puzzle,
       },
-      {
-        nameKey: "externalKeys",
-        href: "/workspace/integrations/external-keys",
-        icon: KeyRound,
-        requiredWorkspaceRole: "member", // Issue #59: Hide from viewers
-      },
     ],
   },
   {
@@ -138,6 +132,12 @@ const navigationGroups: NavGroup[] = [
         href: "/workspace/settings/general",
         icon: Sliders,
         requiredWorkspaceRole: "owner",
+      },
+      {
+        nameKey: "externalKeys",
+        href: "/workspace/integrations/external-keys",
+        icon: KeyRound,
+        requiredWorkspaceRole: "owner", // Issue #381: Owner-only (workspace-level secrets)
       },
     ],
   },
@@ -246,10 +246,16 @@ export function Sidebar() {
     }
   }, [currentWorkspaceId]);
 
-  // Load external key status (with race condition guard)
+  // Load external key status (with race condition guard).
+  // Issue #381: external keys are owner-only. Non-owners would get 403 — skip the
+  // fetch entirely for them to avoid noisy auth logs / avoidable network traffic.
+  // The AlertTriangle indicator on the nav item is owner-only too, so this also
+  // keeps the `hasExternalKeys=null` path unreachable for non-owners.
+  const currentWorkspaceRole = currentWorkspace?.current_user_role;
   useEffect(() => {
     setHasExternalKeys(null);
     if (!currentWorkspaceId) return;
+    if (currentWorkspaceRole !== "owner") return;
 
     let cancelled = false;
     listExternalAPIKeys()
@@ -263,7 +269,7 @@ export function Sidebar() {
     return () => {
       cancelled = true;
     };
-  }, [currentWorkspaceId]);
+  }, [currentWorkspaceId, currentWorkspaceRole]);
 
   // Sync collapse state across browser tabs
   useEffect(() => {

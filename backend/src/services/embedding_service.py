@@ -1,9 +1,13 @@
 """Embedding service for vector generation.
 
-Uses user-specific OpenAI API keys stored in database (ExternalAPIKey table).
+Uses workspace-scoped OpenAI API keys stored in the ExternalAPIKey table (#385):
+the current workspace's enabled OpenAI key is shared by every member of that
+workspace. `user_id` on the key is creator metadata only, not a visibility filter.
+
 Issue #1: API keys are DB-managed, not in .env
 Issue #84 Phase 2A: Redis caching with xxHash keys (50-80% API reduction, 4x space savings)
 Issue #105: DB-first API key retrieval with environment variable fallback
+Issue #385: workspace-keyed lookup (was user-keyed pre-#385)
 """
 
 from __future__ import annotations
@@ -71,74 +75,66 @@ class EmbeddingService:
         self,
         user_id: str,
         context_id: str | None = None,
-        workspace_id: str | None = None,  # NEW: Workspace ID (Issue #146)
+        workspace_id: str | None = None,  # Issue #146
     ) -> str:
-        """Get user's OpenAI API key from database or environment.
+        """Resolve the OpenAI API key for the calling user's workspace context.
 
-        Issue #105: DB-first API key retrieval with environment variable fallback.
-        Issue #146: Added workspace-scoped key support.
+        Issue #105: DB-first lookup with environment variable fallback.
+        Issue #146: workspace-scoped keys.
+        Issue #385: the lookup is workspace-keyed, not user-keyed — any workspace
+            member can use the owner-registered workspace API key. The `user_id`
+            parameter is retained for audit logging only; it is NOT a visibility
+            filter.
 
         Priority:
-        1. Context-scoped key (most specific)
-        2. Workspace-scoped key (workspace-wide)
-        3. User-scoped key (personal)
-        4. Environment variable (OPENAI_API_KEY) - fallback for development
+        1. Context-scoped key (context_id matches AND workspace_id matches)
+        2. Workspace-scoped key (workspace_id matches AND context_id IS NULL)
+        3. Environment variable (OPENAI_API_KEY) — development fallback only
 
         Args:
-            user_id: User ID
-            context_id: Optional project ID (Issue #82: context-scoped keys)
-            workspace_id: Optional workspace ID (Issue #146: workspace-scoped keys)
+            user_id: Caller's user ID — logged for audit, NOT used as a filter (#385).
+            context_id: Optional context UUID (#82: context-scoped keys take priority).
+            workspace_id: Workspace UUID (#146); when omitted the DB lookup is skipped
+                and only the env-var fallback can satisfy the request.
 
         Returns:
-            Decrypted OpenAI API key
+            Decrypted OpenAI API key.
 
         Raises:
-            ConfigurationError: If API key not configured
+            ConfigurationError: If neither a DB key nor an env var is available.
         """
         from uuid import UUID
 
         from sqlalchemy import or_
 
-        # 1. Try DB first (production mode)
-        conditions = [
-            ExternalAPIKey.user_id == user_id,
-            ExternalAPIKey.provider == "openai",
-            ExternalAPIKey.enabled.is_(True),
-        ]
-
-        # Add scope filters with priority (context OR workspace OR user-only)
-        scope_conditions = []
-        if context_id:
-            context_uuid = UUID(context_id) if isinstance(context_id, str) else context_id
-            scope_conditions.append(ExternalAPIKey.context_id == context_uuid)
+        api_key_entry = None
         if workspace_id:
             workspace_uuid = UUID(workspace_id) if isinstance(workspace_id, str) else workspace_id
-            scope_conditions.append(ExternalAPIKey.workspace_id == workspace_uuid)
-
-        if scope_conditions:
-            # Match: (project_id OR workspace_id) OR (no context AND no workspace = user-scoped)
-            conditions.append(
-                or_(
-                    *scope_conditions,
-                    and_(
-                        ExternalAPIKey.context_id.is_(None), ExternalAPIKey.workspace_id.is_(None)
-                    ),
+            conditions = [
+                ExternalAPIKey.workspace_id == workspace_uuid,
+                ExternalAPIKey.provider == "openai",
+                ExternalAPIKey.enabled.is_(True),
+            ]
+            if context_id:
+                context_uuid = UUID(context_id) if isinstance(context_id, str) else context_id
+                # Context-scoped key wins; fall back to workspace-scoped (context_id IS NULL).
+                conditions.append(
+                    or_(
+                        ExternalAPIKey.context_id == context_uuid,
+                        ExternalAPIKey.context_id.is_(None),
+                    )
                 )
-            )
+            else:
+                conditions.append(ExternalAPIKey.context_id.is_(None))
 
-        # Priority ordering: context > workspace > user
-        query = (
-            select(ExternalAPIKey)
-            .where(and_(*conditions))
-            .order_by(
-                ExternalAPIKey.context_id.desc().nulls_last(),
-                ExternalAPIKey.workspace_id.desc().nulls_last(),
+            query = (
+                select(ExternalAPIKey)
+                .where(and_(*conditions))
+                .order_by(ExternalAPIKey.context_id.desc().nulls_last())
+                .limit(1)
             )
-            .limit(1)
-        )
-
-        result = await self.db.execute(query)
-        api_key_entry = result.scalar_one_or_none()
+            result = await self.db.execute(query)
+            api_key_entry = result.scalar_one_or_none()
 
         if api_key_entry:
             encryptor = get_encryptor()
@@ -147,10 +143,11 @@ class EmbeddingService:
                 "openai_api_key_from_db",
                 user_id=user_id,
                 context_id=context_id,
+                workspace_id=workspace_id,
             )
             return api_key
 
-        # 2. Fallback to environment variable (development mode)
+        # Fallback to environment variable (development / env-only deployments).
         env_key = os.getenv("OPENAI_API_KEY")
         if env_key:
             logger.debug(
@@ -159,10 +156,16 @@ class EmbeddingService:
             )
             return env_key
 
-        # 3. No API key found
+        if workspace_id:
+            raise ConfigurationError(
+                f"OpenAI API key not configured for workspace {workspace_id}. "
+                "Configure a workspace OpenAI API key in settings, or set the "
+                "OPENAI_API_KEY environment variable."
+            )
         raise ConfigurationError(
-            f"OpenAI API key not configured for user {user_id}. "
-            "Please set OPENAI_API_KEY environment variable or configure in settings."
+            "OpenAI API key not configured: no workspace context was provided. "
+            "Provide a workspace_id, configure a workspace OpenAI API key in "
+            "settings, or set the OPENAI_API_KEY environment variable."
         )
 
     async def _get_client(
