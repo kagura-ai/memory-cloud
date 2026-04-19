@@ -409,7 +409,13 @@ async def require_workspace_owner(
     from services.permission_service import PermissionService
 
     perm_service = PermissionService(db)
-    await perm_service.check_workspace_owner(user_id, workspace_id)
+    try:
+        await perm_service.check_workspace_owner(user_id, workspace_id)
+    except HTTPException:
+        # WARN on deny so audit pipelines can surface workspace-owner violations
+        # (audit / incident-response concern flagged by #389 gate1 review).
+        logger.warning("workspace_owner_denied", user_id=user_id, workspace_id=str(workspace_id))
+        raise
 
     logger.info("workspace_owner_verified", user_id=user_id, workspace_id=str(workspace_id))
 

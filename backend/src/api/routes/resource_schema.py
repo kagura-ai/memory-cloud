@@ -12,12 +12,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import APIKeyOrSessionUser, WorkspaceOwner
+from auth.dependencies import WorkspaceOwner
 from db.base import get_db
-from models.auth import Context, User
 from models.memory import Memory
 from models.resource import ResourceSchema, ResourceToken
-from utils.exceptions import AuthorizationError, NotFoundException, ValidationError
+from services.permission_service import PermissionService
+from utils.exceptions import NotFoundException, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -98,26 +98,57 @@ class ResourceImpactResponse(BaseModel):
 @router.get("/{resource_id}/schema", response_model=SchemaResponse)
 async def get_schema(
     resource_id: str,
-    user: APIKeyOrSessionUser,
+    owner: WorkspaceOwner,
     schema_version: int | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     """Get resource schema (latest or specific version).
 
+    Authorization (Issue #389):
+        - ``WorkspaceOwner``: non-owner roles (admin / member / viewer) are
+          rejected with 403 before the handler runs.
+        - ``PermissionService.resolve_resource_by_slug``: resolves the slug
+          to a workspace-scoped ``Context`` and returns 404 (uniform
+          disclosure, CWE-639) if the slug exists only in another workspace.
+
+    The downstream ``ResourceSchema`` query still filters by the slug alone
+    during the v0.12.2 hotfix — the narrower residual CWE-639 / slug-reuse
+    leak is tracked in #390 for v0.13.0 together with the Phase 2 writer
+    migration that populates ``resource_pk``.
+
     Args:
-        resource_id: Resource identifier
-        schema_version: Optional schema version (default: latest)
-        user: Current user
-        db: Database session
+        resource_id: Resource slug (URL path).
+        owner: Workspace owner tuple ``(user_id, workspace_id)`` from the
+            ``WorkspaceOwner`` dependency.
+        schema_version: Optional schema version (default: latest).
+        db: Database session.
 
     Returns:
-        Schema with field definitions
+        Schema with field definitions.
+
+    Raises:
+        HTTPException(403): Non-owner role (enforced by ``WorkspaceOwner``).
+        HTTPException(404): Slug not found OR lives in another workspace
+            (enforced by ``resolve_resource_by_slug``).
+        NotFoundException: No schema rows for the resolved resource.
 
     Example:
         GET /api/v1/resources/ec_products/schema
         GET /api/v1/resources/ec_products/schema?schema_version=2
     """
-    logger.info("get_schema_request", resource_id=resource_id, schema_version=schema_version)
+    user_id, _ = owner
+    logger.info(
+        "get_schema_request",
+        resource_id=resource_id,
+        schema_version=schema_version,
+        user_id=user_id,
+    )
+
+    # Workspace boundary + cross-workspace 404 disclosure.
+    await PermissionService(db).resolve_resource_by_slug(
+        user_id=user_id,
+        resource_id=resource_id,
+    )
 
     # Build query
     query = select(ResourceSchema).where(ResourceSchema.resource_id == resource_id)
@@ -252,25 +283,37 @@ async def create_schema(
 @router.get("/{resource_id}/impact", response_model=ResourceImpactResponse)
 async def get_resource_impact(
     resource_id: str,
-    user: APIKeyOrSessionUser,
+    owner: WorkspaceOwner,
     db: AsyncSession = Depends(get_db),
 ):
     """Get resource change impact information.
 
     Issue #266: Shows the impact of creating/modifying a schema for this resource.
-    Security Fix: Added workspace boundary check to prevent IDOR vulnerability.
+
+    Authorization (Issue #389):
+        - ``WorkspaceOwner``: non-owner roles (admin / member / viewer) are
+          rejected with 403 before the handler runs.
+        - ``PermissionService.resolve_resource_by_slug``: workspace boundary
+          + 404 uniform disclosure (CWE-639) for cross-workspace probes —
+          supersedes the prior manual ``User.current_workspace_id`` /
+          ``Context`` lookup.
+
+    The downstream impact aggregates still filter by the slug alone during
+    the v0.12.2 hotfix. Narrower residual CWE-639 leak (slug reuse after
+    soft-delete) is tracked in #390.
 
     Args:
-        resource_id: Resource identifier
-        user: Current user
-        db: Database session
+        resource_id: Resource slug (URL path).
+        owner: Workspace owner tuple ``(user_id, workspace_id)`` from the
+            ``WorkspaceOwner`` dependency.
+        db: Database session.
 
     Returns:
-        Impact information including token count, memory count, and current schema version
+        Impact information including token count, memory count, and current schema version.
 
     Raises:
-        NotFoundException: If resource_id doesn't exist
-        AuthorizationError: If user doesn't have access to this resource
+        HTTPException(403): Non-owner role.
+        HTTPException(404): Slug not found OR lives in another workspace.
 
     Example:
         GET /api/v1/resources/ec_products/impact
@@ -283,27 +326,14 @@ async def get_resource_impact(
             "current_schema_version": 2
         }
     """
-    logger.info("get_resource_impact_request", resource_id=resource_id, user_id=user["user_id"])
+    user_id, _ = owner
+    logger.info("get_resource_impact_request", resource_id=resource_id, user_id=user_id)
 
-    # Security: Verify resource_id belongs to user's workspace
-    user_result = await db.execute(
-        select(User.current_workspace_id).where(User.user_id == user["user_id"])
+    # Workspace boundary + cross-workspace 404 disclosure.
+    await PermissionService(db).resolve_resource_by_slug(
+        user_id=user_id,
+        resource_id=resource_id,
     )
-    current_workspace_id = user_result.scalar_one_or_none()
-
-    if not current_workspace_id:
-        raise AuthorizationError("User must belong to an workspace")
-
-    # Check if resource_id exists and belongs to user's workspace
-    context_result = await db.execute(
-        select(Context.id).where(
-            Context.resource_id == resource_id, Context.workspace_id == current_workspace_id
-        )
-    )
-    context = context_result.scalar_one_or_none()
-
-    if not context:
-        raise NotFoundException("resource", resource_id)
 
     # Performance: Get all stats in a single query using subqueries
     token_count_subq = (

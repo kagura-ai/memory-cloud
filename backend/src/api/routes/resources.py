@@ -17,14 +17,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import APIKeyOrSessionUser
+from auth.dependencies import WorkspaceOwner
 from db.base import get_db
 from models.auth import Context
 from models.memory import Memory
 from models.resource import ResourceEvent, ResourceSchema, ResourceToken
 from services.permission_service import PermissionService
 from utils.datetime import to_utc_iso
-from utils.exceptions import AuthorizationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -73,7 +72,7 @@ class ResourceListResponse(BaseModel):
 
 @router.get("", response_model=ResourceListResponse)
 async def list_resources(
-    user: APIKeyOrSessionUser,
+    owner: WorkspaceOwner,
     db: AsyncSession = Depends(get_db),
 ):
     """List all resources in the caller's current workspace.
@@ -82,15 +81,23 @@ async def list_resources(
     non-null ``resource_id``, with aggregated counts joined from the
     resource_tokens, memories, resource_schemas, and resource_events tables.
 
+    Issue #389: workspace-owner-only. Non-owners (admin / member / viewer)
+    are rejected with 403 at the ``WorkspaceOwner`` dependency before the
+    handler runs. The legacy ``get_accessible_contexts`` filter below is
+    retained for defense-in-depth — for owners it is a no-op (they see every
+    context in the workspace), but it keeps the read path safe if the role
+    gate ever regresses.
+
     Args:
-        user: Current user (session or API key).
+        owner: Workspace owner tuple ``(user_id, workspace_id)`` from the
+            ``WorkspaceOwner`` dependency.
         db: Database session.
 
     Returns:
         ResourceListResponse with resources[] and total count.
 
     Raises:
-        AuthorizationError: User has no current workspace.
+        HTTPException(403): Non-owner role (enforced by ``WorkspaceOwner``).
 
     Example:
         GET /api/v1/resources
@@ -113,28 +120,18 @@ async def list_resources(
             "total": 1
         }
     """
-    logger.info("list_resources_request", user_id=user["user_id"])
+    user_id, current_workspace_id = owner
+    logger.info("list_resources_request", user_id=user_id)
 
-    # auth.dependencies injects current_workspace_id into the user dict already —
-    # no extra SELECT needed.
-    current_workspace_id = user.get("current_workspace_id")
-    if not current_workspace_id:
-        raise AuthorizationError("User must belong to a workspace")
-
-    # Access-filter contexts BEFORE running the aggregate query so private
-    # contexts (and contexts excluded by WorkspaceMember.allowed_context_ids)
-    # don't leak resource_ids/stats to members/viewers. Owners/admins see all
-    # contexts in the workspace — this matches the contexts list behavior.
-    # Suspended members (allowed_context_ids IS NULL) and users with an empty
-    # whitelist get an empty list here and short-circuit out below.
-    accessible = await PermissionService(db).get_accessible_contexts(
-        user["user_id"], current_workspace_id
-    )
+    # Defense-in-depth: owners see every context, so this is a no-op for the
+    # intended caller; retained so a future role-gate regression does not
+    # leak stats for private / allowed_context_ids-restricted contexts.
+    accessible = await PermissionService(db).get_accessible_contexts(user_id, current_workspace_id)
     accessible_ids = [c.id for c in accessible]
     if not accessible_ids:
         logger.info(
             "list_resources_success",
-            user_id=user["user_id"],
+            user_id=user_id,
             workspace_id=str(current_workspace_id),
             count=0,
         )
@@ -254,7 +251,7 @@ async def list_resources(
 
     logger.info(
         "list_resources_success",
-        user_id=user["user_id"],
+        user_id=user_id,
         workspace_id=str(current_workspace_id),
         count=len(resources),
     )

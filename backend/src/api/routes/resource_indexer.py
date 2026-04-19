@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import APIKeyOrSessionUser
+from auth.dependencies import WorkspaceOwner
 from db.base import get_db
 from services.permission_service import PermissionService
 from services.resource_indexer import get_indexer_status_for_context
@@ -143,7 +143,7 @@ class IndexerStatusResponse(BaseModel):
 @router.get("/{resource_id}/indexer-status", response_model=IndexerStatusResponse)
 async def get_indexer_status(
     resource_id: str,
-    user: APIKeyOrSessionUser,
+    owner: WorkspaceOwner,
     db: AsyncSession = Depends(get_db),
 ) -> IndexerStatusResponse:
     """Return indexer state and recent ingest events for a resource.
@@ -155,10 +155,11 @@ async def get_indexer_status(
     contract is maintained so existing integrations continue to work without
     modification after the v0.12.0 UUID FK migration.
 
-    Authorization:
-        - ``APIKeyOrSessionUser``: session cookie or API key. ``resource_token``
-          is a write-scoped credential and is intentionally rejected here
-          (enforced by the dependency choice, pinned by isolation tests).
+    Authorization (Issue #389):
+        - ``WorkspaceOwner``: non-owner roles (admin / member / viewer) are
+          rejected with 403 before the handler runs. ``resource_token``
+          credentials are write-scoped and are rejected by the same
+          dependency (pinned by isolation tests).
         - Workspace boundary: resolved via
           ``PermissionService.resolve_resource_by_slug``, which returns 404
           (not 403) when the slug exists only in another workspace. 404 keeps
@@ -166,7 +167,8 @@ async def get_indexer_status(
 
     Args:
         resource_id: Resource slug from the URL path.
-        user: Authenticated principal (session or API key).
+        owner: Workspace owner tuple ``(user_id, workspace_id)`` from the
+            ``WorkspaceOwner`` dependency.
         db: Async DB session.
 
     Returns:
@@ -174,11 +176,13 @@ async def get_indexer_status(
 
     Raises:
         HTTPException(401): no valid authentication.
+        HTTPException(403): non-owner role.
         HTTPException(404): resource not found OR not accessible by the caller.
     """
+    user_id, _ = owner
     permissions = PermissionService(db)
     context = await permissions.resolve_resource_by_slug(
-        user_id=user["user_id"],
+        user_id=user_id,
         resource_id=resource_id,
     )
 
