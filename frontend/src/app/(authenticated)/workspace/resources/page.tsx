@@ -74,12 +74,19 @@ export default function ResourcesListPage() {
     // Hold until the workspace context has hydrated; avoids a free/basic user
     // issuing an authenticated round-trip before the CTA renders.
     if (!workspaceReady) return;
+    // Issue #389: Owner-only access. Non-owner roles (admin / member /
+    // viewer) never hit the API call below — silent redirect matches the
+    // UX used by #365 (settings/general) and #381 (external-keys).
+    if (currentWorkspace && currentWorkspace.current_user_role !== "owner") {
+      router.push("/workspace/dashboard");
+      return;
+    }
     if (isPlanGated) {
       setLoading(false);
       return;
     }
     fetchResources();
-  }, [fetchResources, isPlanGated, workspaceReady]);
+  }, [fetchResources, isPlanGated, workspaceReady, currentWorkspace, router]);
 
   useEffect(() => {
     document.title = `${t("list.title")} - Kagura Memory Cloud`;

@@ -146,12 +146,18 @@ export default function ResourceDetailPage() {
     // plan-gated workspaces — same rule as the list page so a direct deep-link
     // on Free/Basic never fires an API call.
     if (!workspaceReady) return;
+    // Issue #389: Owner-only access. Mirrors the gate on the list page so a
+    // direct deep-link to /workspace/resources/[id] behaves identically.
+    if (currentWorkspace && currentWorkspace.current_user_role !== "owner") {
+      router.push("/workspace/dashboard");
+      return;
+    }
     if (isPlanGated) {
       setLoading(false);
       return;
     }
     fetchResource();
-  }, [fetchResource, isPlanGated, workspaceReady]);
+  }, [fetchResource, isPlanGated, workspaceReady, currentWorkspace, router]);
 
   const fetchIndexerStatus = useCallback(async () => {
     try {
