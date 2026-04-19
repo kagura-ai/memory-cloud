@@ -23,6 +23,7 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.main import app
 from auth.dependencies import (
@@ -35,8 +36,32 @@ from models.auth import Context, Workspace, WorkspaceMember
 SLUG_IN_WORKSPACE_B = "ws_b_only_slug"
 
 
+def _make_fresh_session_override(engine):
+    """Yield a fresh AsyncSession per request for the given engine.
+
+    Copilot catch on PR #391 loop 3: yielding the pytest-scoped
+    ``db_session`` directly into the FastAPI app runs the HTTP call in
+    ``TestClient``'s own event loop/thread, which can raise cross-event-loop
+    or cross-thread errors on the reused session. Creating a fresh session
+    via ``async_sessionmaker(engine)`` per request avoids this — it mirrors
+    the reference pattern in ``backend/tests/api/test_api_integration.py``.
+    Setup data committed on the pytest-scoped ``db_session`` is visible to
+    the fresh sessions because they share the same underlying DB.
+    """
+    session_maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def override_get_db():
+        async with session_maker() as session:
+            try:
+                yield session
+            finally:
+                await session.rollback()
+
+    return override_get_db
+
+
 @pytest_asyncio.fixture
-async def cross_workspace_scenario(db_session):
+async def cross_workspace_scenario(async_engine, db_session):
     """Create two workspaces where user_A owns A and a resource slug lives only in B.
 
     Yields the user_A identifier + workspace_A id. A probe from user_A for
@@ -81,9 +106,6 @@ async def cross_workspace_scenario(db_session):
     )
     await db_session.commit()
 
-    async def override_get_db():
-        yield db_session
-
     async def override_auth():
         return {
             "user_id": owner_a_id,
@@ -98,7 +120,7 @@ async def cross_workspace_scenario(db_session):
         # return the (user_id, workspace_id) tuple the handlers unpack.
         return (owner_a_id, ws_a.id)
 
-    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_db] = _make_fresh_session_override(async_engine)
     app.dependency_overrides[get_user_from_api_key_or_session] = override_auth
     app.dependency_overrides[require_workspace_owner] = override_require_workspace_owner
 
@@ -171,7 +193,7 @@ async def test_cross_workspace_probe_returns_404(cross_workspace_scenario, path_
 
 
 @pytest_asyncio.fixture
-async def cross_workspace_multi_member_scenario(db_session):
+async def cross_workspace_multi_member_scenario(async_engine, db_session):
     """user_a owns workspace A AND is a ``member`` of workspace B.
 
     Probes for ``SLUG_IN_WORKSPACE_B`` from user_a must still return 404 —
@@ -219,9 +241,6 @@ async def cross_workspace_multi_member_scenario(db_session):
     )
     await db_session.commit()
 
-    async def override_get_db():
-        yield db_session
-
     async def override_auth():
         return {
             "user_id": owner_a_id,
@@ -234,7 +253,7 @@ async def cross_workspace_multi_member_scenario(db_session):
     async def override_require_workspace_owner():
         return (owner_a_id, ws_a.id)
 
-    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_db] = _make_fresh_session_override(async_engine)
     app.dependency_overrides[get_user_from_api_key_or_session] = override_auth
     app.dependency_overrides[require_workspace_owner] = override_require_workspace_owner
 

@@ -19,7 +19,7 @@ The mocked user role in ``non_owner_client`` is arbitrary (set to
 (identical rationale as ``test_rbac_issue59.py`` lines 53-56).
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -31,6 +31,7 @@ from auth.dependencies import (
     get_user_from_api_key_or_session,
     require_workspace_owner,
 )
+from db.base import get_db
 
 WORKSPACE_ID = uuid4()
 
@@ -70,7 +71,14 @@ def non_owner_client():
 
 @pytest.fixture
 def owner_client():
-    """Client authenticated as a workspace owner — ``WorkspaceOwner`` passes."""
+    """Client authenticated as a workspace owner — ``WorkspaceOwner`` passes.
+
+    ``get_db`` is overridden to yield a stub session so the fixture does
+    not open a real DB connection. Tests in this suite mock the
+    ``PermissionService`` methods that would otherwise touch the session,
+    so the stub never receives a query — it just satisfies the FastAPI
+    dependency graph for routes that declare ``db: AsyncSession = Depends(get_db)``.
+    """
     user = _mock_user("owner")
 
     async def mock_auth():
@@ -79,8 +87,15 @@ def owner_client():
     async def mock_owner():
         return (user["user_id"], WORKSPACE_ID)
 
+    async def mock_db():
+        # MagicMock (not AsyncMock) is safe here because no awaited method
+        # is ever invoked on this stub — the PermissionService methods are
+        # patched at the class level upstream of the session.
+        yield MagicMock()
+
     app.dependency_overrides[get_user_from_api_key_or_session] = mock_auth
     app.dependency_overrides[require_workspace_owner] = mock_owner
+    app.dependency_overrides[get_db] = mock_db
     with TestClient(app, raise_server_exceptions=False) as client:
         yield client
     app.dependency_overrides.clear()
