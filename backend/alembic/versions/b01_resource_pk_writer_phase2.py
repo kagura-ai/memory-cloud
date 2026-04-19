@@ -74,9 +74,18 @@ def _audit_cross_workspace_ambiguity(conn: sa.Connection) -> None:
     prevented.
     """
     ambiguities: list[str] = []
-    # The audit runs on all 4 satellite tables regardless of context_id
-    # presence, so unpack just the name.
-    for table_name, _ in _SATELLITE_TABLES:
+    # Only audit tables that CANNOT disambiguate via ``context_id`` —
+    # those whose backfill JOIN key is slug-only. ``indexer_state`` has a
+    # ``context_id`` FK that pins the workspace via ``contexts.workspace_id``,
+    # so ``_backfill_indexer_state`` already resolves the correct Resource
+    # row per (workspace_id, resource_id) tuple even when the slug maps to
+    # >1 live Resource globally. Auditing indexer_state would falsely abort
+    # whenever two workspaces legitimately share a slug (a common case —
+    # slugs are per-workspace unique, not globally unique). Skip those tables
+    # here and let the workspace-aware JOIN handle them safely in step 2.
+    for table_name, has_context_id in _SATELLITE_TABLES:
+        if has_context_id:
+            continue
         # Table name is a module-constant from ``_SATELLITE_TABLES``; slug
         # values never appear in the f-string (only the whole-table scan
         # does). Matches the a97 precedent (``# noqa: S608 -- table names

@@ -79,6 +79,7 @@ _KNOWN_SKIPPED_REASONS: frozenset[str] = frozenset(
         "schema_not_found",
         "context_not_found",
         "empty_valid_points",
+        "resource_entity_missing",
     }
 )
 
