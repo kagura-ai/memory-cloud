@@ -102,10 +102,15 @@ async def get_graph_stats(
 
         - Shared context (``is_private = false``): any workspace member sees
           the full graph for the context.
-        - Private context (``is_private = true``): only the creator of each
-          edge/memory sees their own subgraph.
-        - Cross-workspace probes surface as 404 (CWE-639 / OWASP A01 uniform
-          disclosure) rather than 403 to avoid existence leakage.
+        - Private context (``is_private = true``): only the private-context
+          creator can access the graph for that context. Non-creators are
+          denied at the context level by ``resolve_context_for_workspace_read``
+          and surface as 404 (same uniform disclosure as cross-workspace
+          probes), matching ``can_access_memory`` / ``check_context_access``
+          semantics across the rest of the API.
+        - Cross-workspace probes and private-context access by non-creators
+          both surface as 404 (CWE-639 / OWASP A01 uniform disclosure)
+          rather than 403 to avoid existence leakage.
 
     Args:
         context_id: Optional context ID. When absent, returns an empty graph
