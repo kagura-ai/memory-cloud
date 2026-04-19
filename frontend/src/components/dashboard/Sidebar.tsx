@@ -98,6 +98,7 @@ const navigationGroups: NavGroup[] = [
         nameKey: "resources",
         href: "/workspace/resources",
         icon: Database,
+        requiredWorkspaceRole: "owner", // Issue #389: Owner-only (resource tokens + schema decisions)
       },
       {
         nameKey: "members",

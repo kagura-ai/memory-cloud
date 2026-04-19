@@ -40,7 +40,10 @@ const mockRouterPush = vi.fn();
 
 let mockParamsId = "ec_products";
 let mockSearchParams = new URLSearchParams();
-let mockCurrentWorkspace: { plan_name?: string } | null = null;
+let mockCurrentWorkspace: {
+  plan_name?: string;
+  current_user_role?: string;
+} | null = null;
 
 vi.mock("@/lib/api/resources", () => ({
   listResources: (...args: unknown[]) => mockListResources(...args),
@@ -180,7 +183,7 @@ beforeEach(() => {
   mockRouterPush.mockReset();
   mockParamsId = "ec_products";
   mockSearchParams = new URLSearchParams();
-  mockCurrentWorkspace = { plan_name: "pro" };
+  mockCurrentWorkspace = { plan_name: "pro", current_user_role: "owner" };
   capturedCreateSchemaDialogProps = null;
 });
 
@@ -464,7 +467,7 @@ describe("ResourceDetailPage", () => {
   });
 
   it("renders upgrade CTA and skips fetch on basic plan", async () => {
-    mockCurrentWorkspace = { plan_name: "basic" };
+    mockCurrentWorkspace = { plan_name: "basic", current_user_role: "owner" };
 
     render(<ResourceDetailPage />);
 
@@ -488,4 +491,21 @@ describe("ResourceDetailPage", () => {
     await Promise.resolve();
     expect(mockListResources).not.toHaveBeenCalled();
   });
+
+  // Issue #389: owner-only access on the detail page — same rule as the
+  // list page, applied identically so a direct deep-link behaves the same.
+  it.each([["admin"], ["member"], ["viewer"]])(
+    "redirects to /workspace/dashboard for role=%s and does not fetch",
+    async (role) => {
+      mockCurrentWorkspace = { plan_name: "pro", current_user_role: role };
+
+      render(<ResourceDetailPage />);
+
+      await waitFor(() => {
+        expect(mockRouterPush).toHaveBeenCalledWith("/workspace/dashboard");
+      });
+      expect(mockListResources).not.toHaveBeenCalled();
+      expect(mockGetSchema).not.toHaveBeenCalled();
+    },
+  );
 });

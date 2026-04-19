@@ -12,12 +12,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import APIKeyOrSessionUser, WorkspaceOwner
+from auth.dependencies import WorkspaceOwner
 from db.base import get_db
-from models.auth import Context, User
 from models.memory import Memory
 from models.resource import ResourceSchema, ResourceToken
-from utils.exceptions import AuthorizationError, NotFoundException, ValidationError
+from services.permission_service import PermissionService
+from utils.exceptions import NotFoundException, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -98,26 +98,39 @@ class ResourceImpactResponse(BaseModel):
 @router.get("/{resource_id}/schema", response_model=SchemaResponse)
 async def get_schema(
     resource_id: str,
-    user: APIKeyOrSessionUser,
+    owner: WorkspaceOwner,
     schema_version: int | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     """Get resource schema (latest or specific version).
 
-    Args:
-        resource_id: Resource identifier
-        schema_version: Optional schema version (default: latest)
-        user: Current user
-        db: Database session
-
-    Returns:
-        Schema with field definitions
+    Owner-only (#389): ``WorkspaceOwner`` rejects non-owners with 403;
+    ``resolve_resource_by_slug`` returns 404 on cross-workspace probes.
 
     Example:
         GET /api/v1/resources/ec_products/schema
         GET /api/v1/resources/ec_products/schema?schema_version=2
     """
-    logger.info("get_schema_request", resource_id=resource_id, schema_version=schema_version)
+    user_id, _ = owner
+    logger.info(
+        "get_schema_request",
+        resource_id=resource_id,
+        schema_version=schema_version,
+        user_id=user_id,
+    )
+
+    # Workspace boundary + cross-workspace 404 disclosure.
+    # required_role="owner" is load-bearing: WorkspaceOwner only verifies
+    # ownership of the caller's *current* workspace, not the workspace that
+    # owns the slug. A user who is owner of workspace A AND member (or
+    # admin) of workspace B could otherwise probe B's slug with this helper
+    # at default required_role="member" and receive B's schema data. See
+    # Copilot catch on PR #391.
+    await PermissionService(db).resolve_resource_by_slug(
+        user_id=user_id,
+        resource_id=resource_id,
+        required_role="owner",
+    )
 
     # Build query
     query = select(ResourceSchema).where(ResourceSchema.resource_id == resource_id)
@@ -252,58 +265,30 @@ async def create_schema(
 @router.get("/{resource_id}/impact", response_model=ResourceImpactResponse)
 async def get_resource_impact(
     resource_id: str,
-    user: APIKeyOrSessionUser,
+    owner: WorkspaceOwner,
     db: AsyncSession = Depends(get_db),
 ):
     """Get resource change impact information.
 
-    Issue #266: Shows the impact of creating/modifying a schema for this resource.
-    Security Fix: Added workspace boundary check to prevent IDOR vulnerability.
-
-    Args:
-        resource_id: Resource identifier
-        user: Current user
-        db: Database session
-
-    Returns:
-        Impact information including token count, memory count, and current schema version
-
-    Raises:
-        NotFoundException: If resource_id doesn't exist
-        AuthorizationError: If user doesn't have access to this resource
+    Issue #266: Shows the impact of creating/modifying a schema.
+    Owner-only (#389): same two-layer gate as ``get_schema`` —
+    ``WorkspaceOwner`` → 403 for non-owners, ``resolve_resource_by_slug`` →
+    404 on cross-workspace probes. The prior manual workspace-boundary
+    SELECT block was superseded by the helper.
 
     Example:
         GET /api/v1/resources/ec_products/impact
-
-        Response:
-        {
-            "resource_id": "ec_products",
-            "token_count": 3,
-            "memory_count": 1234,
-            "current_schema_version": 2
-        }
     """
-    logger.info("get_resource_impact_request", resource_id=resource_id, user_id=user["user_id"])
+    user_id, _ = owner
+    logger.info("get_resource_impact_request", resource_id=resource_id, user_id=user_id)
 
-    # Security: Verify resource_id belongs to user's workspace
-    user_result = await db.execute(
-        select(User.current_workspace_id).where(User.user_id == user["user_id"])
+    # Workspace boundary + cross-workspace 404 disclosure. See get_schema
+    # for the required_role="owner" rationale (multi-workspace member case).
+    await PermissionService(db).resolve_resource_by_slug(
+        user_id=user_id,
+        resource_id=resource_id,
+        required_role="owner",
     )
-    current_workspace_id = user_result.scalar_one_or_none()
-
-    if not current_workspace_id:
-        raise AuthorizationError("User must belong to an workspace")
-
-    # Check if resource_id exists and belongs to user's workspace
-    context_result = await db.execute(
-        select(Context.id).where(
-            Context.resource_id == resource_id, Context.workspace_id == current_workspace_id
-        )
-    )
-    context = context_result.scalar_one_or_none()
-
-    if not context:
-        raise NotFoundException("resource", resource_id)
 
     # Performance: Get all stats in a single query using subqueries
     token_count_subq = (

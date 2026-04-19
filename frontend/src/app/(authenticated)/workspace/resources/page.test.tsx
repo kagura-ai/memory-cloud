@@ -27,7 +27,10 @@ import type { ResourceListItem } from "@/lib/api/resources";
 const mockListResources = vi.fn();
 const mockPush = vi.fn();
 
-let mockCurrentWorkspace: { plan_name?: string } | null = null;
+let mockCurrentWorkspace: {
+  plan_name?: string;
+  current_user_role?: string;
+} | null = null;
 
 vi.mock("@/lib/api/resources", () => ({
   listResources: (...args: unknown[]) => mockListResources(...args),
@@ -83,7 +86,7 @@ const item = (overrides: Partial<ResourceListItem> = {}): ResourceListItem => ({
 beforeEach(() => {
   mockListResources.mockReset();
   mockPush.mockReset();
-  mockCurrentWorkspace = { plan_name: "pro" };
+  mockCurrentWorkspace = { plan_name: "pro", current_user_role: "owner" };
 });
 
 afterEach(() => {
@@ -130,7 +133,7 @@ describe("ResourcesListPage", () => {
   });
 
   it("renders upgrade CTA and skips fetch on basic plan", async () => {
-    mockCurrentWorkspace = { plan_name: "basic" };
+    mockCurrentWorkspace = { plan_name: "basic", current_user_role: "owner" };
 
     render(<ResourcesListPage />);
 
@@ -141,7 +144,7 @@ describe("ResourcesListPage", () => {
   });
 
   it("upgrade CTA button navigates to billing", async () => {
-    mockCurrentWorkspace = { plan_name: "free" };
+    mockCurrentWorkspace = { plan_name: "free", current_user_role: "owner" };
 
     render(<ResourcesListPage />);
 
@@ -204,4 +207,20 @@ describe("ResourcesListPage", () => {
     const link = screen.getByRole("link", { name: "foo_bar" });
     expect(link).toHaveAttribute("href", "/workspace/resources/foo_bar");
   });
+
+  // Issue #389: owner-only access. Non-owner roles silently redirect to the
+  // dashboard before any API call fires, matching the #365/#381 UX.
+  it.each([["admin"], ["member"], ["viewer"]])(
+    "redirects to /workspace/dashboard for role=%s and does not fetch",
+    async (role) => {
+      mockCurrentWorkspace = { plan_name: "pro", current_user_role: role };
+
+      render(<ResourcesListPage />);
+
+      await waitFor(() => {
+        expect(mockPush).toHaveBeenCalledWith("/workspace/dashboard");
+      });
+      expect(mockListResources).not.toHaveBeenCalled();
+    },
+  );
 });
