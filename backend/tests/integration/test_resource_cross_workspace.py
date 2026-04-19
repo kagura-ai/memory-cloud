@@ -110,7 +110,11 @@ async def cross_workspace_scenario(db_session):
 
     app.dependency_overrides.clear()
 
-    # Best-effort cleanup — commit persisted data; don't leak into other tests.
+    # Cleanup — commit persisted data; don't leak into other tests. Re-raise
+    # on failure so cleanup problems surface as test failures rather than
+    # silently accumulating rows in the shared test DB (per-PR #391 Copilot
+    # catch: swallowed cleanup exceptions cause hard-to-diagnose follow-on
+    # failures).
     try:
         await db_session.delete(ctx_b)
         await db_session.execute(
@@ -123,6 +127,7 @@ async def cross_workspace_scenario(db_session):
         await db_session.commit()
     except Exception:
         await db_session.rollback()
+        raise
 
 
 SLUG_PATH_ENDPOINTS = [
@@ -241,6 +246,8 @@ async def cross_workspace_multi_member_scenario(db_session):
 
     app.dependency_overrides.clear()
 
+    # See the base fixture's cleanup comment — re-raise on failure so
+    # accumulated rows in the shared test DB surface deterministically.
     try:
         await db_session.delete(ctx_b)
         await db_session.execute(
@@ -253,6 +260,7 @@ async def cross_workspace_multi_member_scenario(db_session):
         await db_session.commit()
     except Exception:
         await db_session.rollback()
+        raise
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,7 @@ The mocked user role in ``non_owner_client`` is arbitrary (set to
 (identical rationale as ``test_rbac_issue59.py`` lines 53-56).
 """
 
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -67,6 +68,24 @@ def non_owner_client():
     app.dependency_overrides.clear()
 
 
+@pytest.fixture
+def owner_client():
+    """Client authenticated as a workspace owner — ``WorkspaceOwner`` passes."""
+    user = _mock_user("owner")
+
+    async def mock_auth():
+        return user
+
+    async def mock_owner():
+        return (user["user_id"], WORKSPACE_ID)
+
+    app.dependency_overrides[get_user_from_api_key_or_session] = mock_auth
+    app.dependency_overrides[require_workspace_owner] = mock_owner
+    with TestClient(app, raise_server_exceptions=False) as client:
+        yield client
+    app.dependency_overrides.clear()
+
+
 # ============================================================================
 # Tests
 # ============================================================================
@@ -90,3 +109,43 @@ class TestResourcesOwnerOnly:
         assert response.status_code == 403, (
             f"{method} {path} returned {response.status_code}, expected 403"
         )
+
+
+class TestResourcesOwnerHappyPath:
+    """Issue #389: owner must reach the handler body (route-wiring smoke).
+
+    The 403-only suite above would still pass if ``WorkspaceOwner`` were
+    miswired to reject every caller. This smoke proves the dependency
+    accepts an owner tuple and the handler executes. Covers ``GET
+    /api/v1/resources`` specifically because the existing
+    ``tests/api/test_resources.py`` suite xfails on missing async_client /
+    authenticated_user fixtures — without this smoke the owner path has no
+    non-xfail coverage for that endpoint. The three slug-path endpoints
+    (schema / impact / indexer-status) receive owner-path coverage from
+    ``tests/api/test_resource_indexer_api.py`` and the real-DB integration
+    tests in ``tests/integration/test_resource_cross_workspace.py``; those
+    reach handler bodies and prove the same route-wiring contract.
+    """
+
+    def test_owner_can_list_resources(self, owner_client):
+        """``GET /api/v1/resources`` returns 200 for a workspace owner.
+
+        ``get_accessible_contexts`` is mocked to return an empty list so
+        the handler short-circuits to the empty-response path without
+        needing a real DB. The assertion is on ``status_code == 200`` and
+        the empty-body shape — route wiring is the contract under test.
+        """
+
+        async def mock_get_accessible_contexts(self, user_id, workspace_id):
+            return []
+
+        with patch(
+            "services.permission_service.PermissionService.get_accessible_contexts",
+            new=mock_get_accessible_contexts,
+        ):
+            response = owner_client.get("/api/v1/resources")
+
+        assert response.status_code == 200, (
+            f"GET /api/v1/resources returned {response.status_code}, expected 200"
+        )
+        assert response.json() == {"resources": [], "total": 0}
