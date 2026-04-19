@@ -7,6 +7,8 @@ Provides endpoints for external systems (EC inventory, etc.) to push events.
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -20,7 +22,7 @@ from db.constraint_names import (
     integrity_error_constraint_name,
 )
 from models.auth import Context
-from models.resource import ResourceEvent, ResourceToken
+from models.resource import Resource, ResourceEvent, ResourceToken
 from models.schemas import (
     ResourceEventBatchRequest,
     ResourceEventBatchResponse,
@@ -203,6 +205,55 @@ async def _enforce_workspace_membership(
                 "active access to the workspace that owns this resource."
             ),
         ) from auth_error
+
+    # Issue #390 Phase 2 — close the CWE-639 auth-boundary variant
+    # (Copilot catches on PR #392 loops 7, 9, 10). Even after verify_token
+    # pins the token to a single Resource via the resource_pk JOIN, the
+    # slug-reused case can let the ingest pipeline:
+    #   1) verify T pinned to workspace A's Resource (via resource_pk)
+    #   2) resolve_authoritative_context return workspace B's Context
+    #      (A's Context soft-deleted, B's Context active, same slug)
+    #   3) enforce_workspace_membership pass because the token creator is
+    #      ALSO a member of workspace B
+    #   4) handler write the event with T.resource_pk = A's Resource ID,
+    #      despite the request looking like a workspace-B operation
+    #
+    # The fix: resolve the authoritative workspace via ``Resource.workspace_id``
+    # (via token's ``resource_pk`` FK) and reject if it does not match the
+    # Context's workspace. The token's own ``workspace_id`` column is still
+    # a Phase 1 nullable shadow — relying on it alone would let legacy
+    # NULL-workspace_id tokens bypass the check (loop 10 catch). The FK
+    # ``resource_pk → Resource`` is the authoritative binding.
+    resource_workspace_id: UUID | None = None
+    if token_record.resource_pk is not None:
+        resource_workspace_id = (
+            await db.execute(
+                select(Resource.workspace_id).where(Resource.id == token_record.resource_pk)
+            )
+        ).scalar_one_or_none()
+    elif token_record.workspace_id is not None:
+        # Fallback: legacy token with resource_pk IS NULL but workspace_id
+        # populated (transient state between a97 workspace_id backfill and
+        # b01 resource_pk backfill). Use the shadow column directly.
+        resource_workspace_id = token_record.workspace_id
+
+    if resource_workspace_id is not None and resource_workspace_id != context.workspace_id:
+        logger.warning(
+            "cross_tenant_ingest_token_workspace_mismatch",
+            resource_id=context.resource_id,
+            token_id=token_record.id,
+            token_workspace_id=str(resource_workspace_id),
+            context_workspace_id=str(context.workspace_id),
+            token_creator=token_record.created_by,
+            client_ip=request.client.host if request.client else None,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Resource ingest denied: the token's workspace does not match "
+                "the context's workspace for this resource."
+            ),
+        )
 
 
 # ============================================================================

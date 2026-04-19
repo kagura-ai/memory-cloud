@@ -11,15 +11,32 @@ Provides ORM models for:
     - ``resource_tokens`` — Resource API authentication
     - ``workspace_addons`` — Addon purchase system
 
-Phase 1 rollout (Issue #323): ``resource_pk`` and
-``resource_tokens.workspace_id`` are nullable shadow columns populated
-by migration ``a97_resources_entity`` on existing rows. Writers that
-have not yet been updated (tracked under #324) still work because the
-columns are nullable during Phase 1; once all writers populate them,
-migration #325 tightens them to NOT NULL. Application code MUST NOT
-write ``resource_id`` independently of ``resource_pk`` once the
-writer migration begins — see the migration docstring for the full
-rationale.
+Phase 1 (Issue #323, shipped v0.12.0): ``resource_pk`` and
+``resource_tokens.workspace_id`` introduced as nullable shadow columns
+populated by migration ``a97_resources_entity`` on existing rows.
+
+Phase 2 (Issue #390, v0.12.3): all application writers now populate
+``resource_pk`` on insert, and the ``before_insert`` event listener at
+the bottom of this module enforces the invariant at the ORM layer —
+inserts with ``resource_id`` set but ``resource_pk`` NULL raise
+``IntegrityError``. Orphan backfill migration ``b01_resource_pk_ph2``
+(file: ``b01_resource_pk_writer_phase2.py``) closes any rows written
+between a97 and the writer migration, and includes a cross-workspace
+slug ambiguity audit that aborts on the rare soft-delete-plus-reuse
+shape the CWE-639 fix is meant to close.
+
+Phase C (Issue #325, v0.13.0 follow-up): after a prod observation
+window confirms no new NULL rows, ``resource_pk`` (and
+``resource_tokens.workspace_id``) are tightened to NOT NULL, the
+partial UNIQUE indexes are promoted to full UNIQUE, and a matching
+PostgreSQL CHECK constraint is added. The app-layer listener becomes
+redundant at that point but stays in place as defense-in-depth.
+
+Dual-write prohibition: application code MUST NOT write
+``resource_id`` independently of ``resource_pk``. The legacy
+``resource_id`` column is a read-only mirror and will be dropped in a
+Phase C+ cleanup once all external API contracts have migrated to
+UUID-based identifiers.
 """
 
 from sqlalchemy import (
@@ -35,10 +52,12 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.exc import IntegrityError
 
 from db.base import Base
 from db.constraint_names import RESOURCE_EVENTS_UPSERT_UNIQUE
@@ -359,3 +378,43 @@ class WorkspaceAddon(Base):
         ),
         CheckConstraint("quantity > 0", name="check_quantity_positive"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Writer invariant (Issue #390 — Phase 2)
+# ---------------------------------------------------------------------------
+# Application-layer enforcement of the dual-write prohibition spelled out in
+# this module's top docstring: once Phase 2 writers are migrated, any INSERT
+# that sets ``resource_id`` without also setting ``resource_pk`` is a bug.
+# Catching it here prevents future writer paths from silently producing
+# orphan rows that reintroduce the CWE-639 slug-reuse leak. The DB-level
+# CHECK constraint equivalent is intentionally deferred to Phase C (#325) so
+# the prod observation window (``resource_pk IS NULL`` row count should
+# drain to zero over one week) is not invalidated by a hard schema gate.
+
+
+def _enforce_resource_pk_invariant(mapper, connection, target) -> None:
+    """Raise if ``resource_id`` is populated without a matching ``resource_pk``.
+
+    Hooked into ``before_insert`` for every satellite model. UPDATE paths
+    are NOT hooked — a single-column ``resource_pk`` clearing is unreachable
+    through normal ORM use (FK column, not user-settable in any route), and
+    adding ``before_update`` would fire on every unrelated column write with
+    no load-bearing invariant to check.
+    """
+    del mapper, connection  # SQLAlchemy event contract — we only inspect target.
+    if target.resource_id is not None and target.resource_pk is None:
+        raise IntegrityError(
+            statement=None,
+            params=None,
+            orig=ValueError(
+                f"{type(target).__name__}: resource_pk must be populated "
+                f"when resource_id is set (resource_id={target.resource_id!r}). "
+                "See models/resource.py top docstring for the Phase 2 writer "
+                "contract."
+            ),
+        )
+
+
+for _model in (ResourceEvent, ResourceSchema, IndexerState, ResourceToken):
+    event.listen(_model, "before_insert", _enforce_resource_pk_invariant)

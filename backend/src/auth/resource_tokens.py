@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+from uuid import UUID
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.resource import ResourceToken
+from models.resource import Resource, ResourceToken
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -63,6 +64,9 @@ class ResourceTokenManager:
     async def create_token(
         self,
         resource_id: str,
+        *,
+        resource_pk: UUID,
+        workspace_id: UUID,
         description: str | None = None,
         quota_events_per_hour: int = 1000,
         created_by: str | None = None,
@@ -71,6 +75,14 @@ class ResourceTokenManager:
 
         Args:
             resource_id: Resource identifier this token is scoped to
+            resource_pk: Authoritative ``resources.id`` UUID (Issue #390
+                Phase 2). Keyword-only so every caller is forced to resolve
+                it — the ``before_insert`` event listener on ResourceToken
+                rejects inserts with resource_id but no resource_pk, so a
+                forgotten value surfaces as a hard error at test time.
+            workspace_id: Owning workspace UUID (Issue #390 Phase 2).
+                Keyword-only for the same reason; populates the Phase 1
+                shadow column that Phase C (#325) will tighten to NOT NULL.
             description: Human-readable description
             quota_events_per_hour: Event ingestion quota (default: 1000/hour)
             created_by: User ID who created this token
@@ -89,9 +101,13 @@ class ResourceTokenManager:
         token = self._generate_token()
         token_hash = self._hash_token(token)
 
-        # Create database record
+        # Create database record. ``resource_pk`` + ``workspace_id`` are
+        # populated from the caller's resolved values so the event listener
+        # invariant (models/resource.py) passes.
         new_token = ResourceToken(
+            resource_pk=resource_pk,
             resource_id=resource_id,
+            workspace_id=workspace_id,
             token_hash=token_hash,
             description=description,
             quota_events_per_hour=quota_events_per_hour,
@@ -104,6 +120,8 @@ class ResourceTokenManager:
         logger.info(
             "resource_token_created",
             resource_id=resource_id,
+            resource_pk=str(resource_pk),
+            workspace_id=str(workspace_id),
             quota=quota_events_per_hour,
             created_by=created_by,
         )
@@ -112,6 +130,16 @@ class ResourceTokenManager:
 
     async def verify_token(self, token: str, resource_id: str) -> ResourceToken | None:
         """Verify resource token and return token record.
+
+        Issue #390 Phase 2: JOIN on ``Resource`` via ``resource_pk`` so
+        the auth query is workspace-scoped by construction. Without this
+        join, a still-valid token from a soft-deleted workspace whose
+        slug has been reused in a different live workspace could
+        authenticate for the new workspace's resource — the same
+        CWE-639 leak that the read-path hardening closes, but on the
+        auth boundary. Legacy tokens with ``resource_pk IS NULL`` are
+        rejected here (backfilled by migration b01 before this code
+        ships; no legacy NULL tokens are expected in production).
 
         Args:
             token: Plaintext token to verify
@@ -122,12 +150,17 @@ class ResourceTokenManager:
         """
         token_hash = self._hash_token(token)
 
-        # Query token with resource_id validation
+        # Query token with resource_id validation via Resource JOIN — the
+        # JOIN pins workspace even when the slug is reused across
+        # workspaces, because each token's resource_pk FK identifies
+        # exactly one Resource (and therefore one workspace).
         result = await self.db.execute(
-            select(ResourceToken).where(
+            select(ResourceToken)
+            .join(Resource, Resource.id == ResourceToken.resource_pk)
+            .where(
                 and_(
                     ResourceToken.token_hash == token_hash,
-                    ResourceToken.resource_id == resource_id,
+                    Resource.resource_id == resource_id,
                     ResourceToken.is_active == True,  # noqa: E712
                 )
             )

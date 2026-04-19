@@ -11,14 +11,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import get_current_user_optional
 from db.base import get_db
 from db.redis import increment_counter
 from models.auth import Context
-from models.resource import ResourceSchema
+from services.resource_lookup import get_latest_schema
 from services.search_service import SearchService
 from utils.datetime import utcnow
 from utils.exceptions import AuthorizationError, NotFoundException, RateLimitError
@@ -264,16 +263,12 @@ async def public_search(
             search_mode=request.search_mode,
         )
 
-        # 4. Load schema for response formatting (if resource-backed)
-        schema = None
-        if context.resource_id is not None:
-            schema_result = await db.execute(
-                select(ResourceSchema)
-                .where(ResourceSchema.resource_id == context.resource_id)
-                .order_by(ResourceSchema.schema_version.desc())
-                .limit(1)
-            )
-            schema = schema_result.scalar_one_or_none()
+        # 4. Load schema for response formatting (if resource-backed).
+        schema = (
+            await get_latest_schema(db, context.workspace_id, context.resource_id)
+            if context.resource_id is not None
+            else None
+        )
 
         # 5. Format results with schema-aware metadata
         formatted_results = []
@@ -387,16 +382,12 @@ async def get_public_context_info(
     if context.is_public is not True:
         raise AuthorizationError("This context is not public")
 
-    # Load schema if resource-backed
-    schema = None
-    if context.resource_id is not None:
-        schema_result = await db.execute(
-            select(ResourceSchema)
-            .where(ResourceSchema.resource_id == context.resource_id)
-            .order_by(ResourceSchema.schema_version.desc())
-            .limit(1)
-        )
-        schema = schema_result.scalar_one_or_none()
+    # Load schema if resource-backed.
+    schema = (
+        await get_latest_schema(db, context.workspace_id, context.resource_id)
+        if context.resource_id is not None
+        else None
+    )
 
     return {
         "context_id": str(context_id),

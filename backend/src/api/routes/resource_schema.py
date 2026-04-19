@@ -17,6 +17,7 @@ from db.base import get_db
 from models.memory import Memory
 from models.resource import ResourceSchema, ResourceToken
 from services.permission_service import PermissionService
+from services.resource_lookup import resolve_resource_pk
 from utils.exceptions import NotFoundException, ValidationError
 from utils.logger import get_logger
 
@@ -126,14 +127,23 @@ async def get_schema(
     # admin) of workspace B could otherwise probe B's slug with this helper
     # at default required_role="member" and receive B's schema data. See
     # Copilot catch on PR #391.
-    await PermissionService(db).resolve_resource_by_slug(
+    context = await PermissionService(db).resolve_resource_by_slug(
         user_id=user_id,
         resource_id=resource_id,
         required_role="owner",
     )
 
-    # Build query
-    query = select(ResourceSchema).where(ResourceSchema.resource_id == resource_id)
+    # Issue #390 Phase 2: strict ``resource_pk`` filter on the satellite
+    # table. ``ResourceSchema`` has no ``context_id`` column, so a slug-only
+    # filter is not workspace-safe — soft-delete + slug reuse would surface
+    # the prior workspace's schemas. Fail-safe to 404 when the Resource row
+    # is absent (pre-a97 orphan or migration gap) rather than fall back to
+    # slug filtering.
+    resource_pk = await resolve_resource_pk(db, context.workspace_id, resource_id)
+    if resource_pk is None:
+        raise NotFoundException("Resource schema", resource_id)
+
+    query = select(ResourceSchema).where(ResourceSchema.resource_pk == resource_pk)
 
     if schema_version:
         query = query.where(ResourceSchema.schema_version == schema_version)
@@ -224,18 +234,36 @@ async def create_schema(
     if request.resource_id != resource_id:
         raise ValidationError("resource_id in body must match URL parameter")
 
-    # Get next schema version
+    # Issue #390 Phase 2: resolve ``resource_pk`` so the writer populates
+    # both columns atomically. The before_insert event listener on
+    # ResourceSchema rejects inserts that set resource_id without
+    # resource_pk — surfacing this Phase 2 contract at the model layer
+    # rather than relying on every future writer to remember.
+    resource_pk = await resolve_resource_pk(db, workspace_id, resource_id)
+    if resource_pk is None:
+        # Schema creation is owner-only and goes through WorkspaceOwner +
+        # resolve_resource_by_slug upstream (added in the read-path hardening
+        # for #390), but the POST endpoint here does not currently resolve
+        # the slug — the route pre-dates #326. A missing Resource row at
+        # this point means the caller supplied a slug that is not bound to
+        # any live Context in their workspace; reject with 404 for uniform
+        # disclosure (matches the GET side's cross-workspace probe contract).
+        raise NotFoundException("Resource", resource_id)
+
+    # Get next schema version (strict resource_pk filter — see get_schema).
     result = await db.execute(
         select(ResourceSchema.schema_version)
-        .where(ResourceSchema.resource_id == resource_id)
+        .where(ResourceSchema.resource_pk == resource_pk)
         .order_by(ResourceSchema.schema_version.desc())
         .limit(1)
     )
     max_version = result.scalar()
     new_version = (max_version or 0) + 1
 
-    # Create schema
+    # Create schema with both resource_pk (authoritative FK) and resource_id
+    # (legacy mirror, kept for API read contracts until Phase C drops it).
     schema = ResourceSchema(
+        resource_pk=resource_pk,
         resource_id=resource_id,
         schema_version=new_version,
         field_definitions=[f.model_dump() for f in request.field_definitions],
@@ -284,28 +312,54 @@ async def get_resource_impact(
 
     # Workspace boundary + cross-workspace 404 disclosure. See get_schema
     # for the required_role="owner" rationale (multi-workspace member case).
-    await PermissionService(db).resolve_resource_by_slug(
+    context = await PermissionService(db).resolve_resource_by_slug(
         user_id=user_id,
         resource_id=resource_id,
         required_role="owner",
     )
 
-    # Performance: Get all stats in a single query using subqueries
+    # Issue #390 Phase 2: resolve ``resource_pk`` so impact subqueries
+    # scope by authoritative FK instead of by slug. At this point
+    # ``resolve_resource_by_slug`` has already confirmed the Context
+    # exists and the caller has owner access, so ``resource_pk is None``
+    # means a data-integrity gap (Context persists without a backing
+    # Resource entity row — setup_resource never ran or the row was
+    # deleted). Returning 200 with zeroed counts would silently hide
+    # this; raise 404 with an actionable hint instead.
+    resource_pk = await resolve_resource_pk(db, context.workspace_id, resource_id)
+    if resource_pk is None:
+        logger.warning(
+            "resource_entity_missing_on_impact",
+            resource_id=resource_id,
+            workspace_id=str(context.workspace_id),
+            user_id=user_id,
+        )
+        raise NotFoundException("Resource", resource_id)
+
+    # Performance: Get all stats in a single query using subqueries.
+    # ResourceToken + ResourceSchema use strict ``resource_pk`` filter.
+    # Memory still uses resource_id (slug) because its workspace_id column
+    # scopes the query defensively — this is the pre-existing behavior and
+    # not part of the #390 Phase A scope.
     token_count_subq = (
         select(func.count(ResourceToken.id))
-        .where(ResourceToken.resource_id == resource_id, ResourceToken.is_active == True)  # noqa: E712
+        .where(ResourceToken.resource_pk == resource_pk, ResourceToken.is_active == True)  # noqa: E712
         .scalar_subquery()
     )
 
     memory_count_subq = (
         select(func.count(Memory.id))
-        .where(Memory.resource_id == resource_id, Memory.deleted_at.is_(None))
+        .where(
+            Memory.resource_id == resource_id,
+            Memory.workspace_id == context.workspace_id,
+            Memory.deleted_at.is_(None),
+        )
         .scalar_subquery()
     )
 
     schema_version_subq = (
         select(func.max(ResourceSchema.schema_version))
-        .where(ResourceSchema.resource_id == resource_id)
+        .where(ResourceSchema.resource_pk == resource_pk)
         .scalar_subquery()
     )
 

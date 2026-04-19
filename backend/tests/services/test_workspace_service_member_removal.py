@@ -131,9 +131,26 @@ async def test_remove_member_comprehensive_cleanup(db_session):
         db_session.add(memory)
 
     # 3d. Resource token created by member (resource_id matches context_by_member.resource_id
-    # so cleanup_member_resource_tokens can find and transfer it via Context.resource_id)
-    resource_token = ResourceToken(
+    # so cleanup_member_resource_tokens can find and transfer it via Context.resource_id).
+    # Issue #390 Phase 2: ResourceToken requires resource_pk — create a
+    # backing Resource entity row first so the before_insert invariant
+    # listener passes.
+    from models.resource import Resource
+
+    member_resource = Resource(
+        id=uuid4(),
+        workspace_id=workspace.id,
         resource_id=member_resource_id,
+        name="member-test-resource",
+        created_by=member_id,
+    )
+    db_session.add(member_resource)
+    await db_session.flush()
+
+    resource_token = ResourceToken(
+        resource_pk=member_resource.id,
+        resource_id=member_resource_id,
+        workspace_id=workspace.id,
         token_hash="test_hash_123",
         created_by=member_id,
         description="Test token",

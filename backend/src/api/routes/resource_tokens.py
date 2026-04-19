@@ -20,6 +20,7 @@ from auth.dependencies import WorkspaceOwner
 from auth.resource_tokens import ResourceTokenManager
 from db.base import get_db
 from models.resource import ResourceToken
+from services.resource_lookup import resolve_resource_pk
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -340,9 +341,33 @@ async def create_resource_token(
                         detail=f"Token limit reached. Your {plan_name.upper()} plan allows {plan.max_resource_tokens} active tokens. Please revoke unused tokens or upgrade your plan.",
                     )
 
+        # Issue #390 Phase 2: resolve authoritative ``resource_pk`` + pass
+        # ``workspace_id`` so the ResourceToken insert satisfies the
+        # before_insert event listener invariant (models/resource.py).
+        # The context-existence check above already confirmed the Resource
+        # is bound to this workspace; if resolve_resource_pk still returns
+        # None it indicates either a delete race between the two queries or
+        # a data-integrity gap (Context exists without a backing Resource
+        # row), NOT an authorization failure. Surface 409 CONFLICT with an
+        # actionable hint so operators can distinguish "not authorized" from
+        # "resource binding is inconsistent" in logs and error reports.
+        resource_pk = await resolve_resource_pk(db, workspace_id, data.resource_id)
+        if resource_pk is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Resource ID '{data.resource_id}' exists as a Context but has no "
+                    "backing Resource entity row. This is either a delete race or a "
+                    "data-integrity gap. Retry in a moment, or run setup_resource() "
+                    "to rebind."
+                ),
+            )
+
         # Create token (returns plaintext + token object)
         plaintext_token, new_token = await manager.create_token(
             resource_id=data.resource_id,
+            resource_pk=resource_pk,
+            workspace_id=workspace_id,
             description=data.description,
             quota_events_per_hour=data.quota_events_per_hour,
             created_by=user_id,
