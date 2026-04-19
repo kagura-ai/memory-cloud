@@ -336,12 +336,14 @@ async def test_private_context_creator_sees_own_edges(visibility_scenario):
 
 
 @pytest.mark.asyncio
-async def test_private_context_non_creator_member_sees_empty(visibility_scenario):
-    """Workspace member who is NOT the private-context creator sees empty.
+async def test_private_context_non_creator_member_returns_404(visibility_scenario):
+    """Workspace member who is NOT the private-context creator gets uniform 404.
 
-    member_a passes ``check_workspace_access`` (200, not 404) but the
-    visibility filter restricts results to member_a's own edges in the context
-    — of which there are none because private contexts are single-owner.
+    Matches the ``can_access_memory`` rule ("private → only creator can
+    access") and the rest-of-API convention established by
+    ``PermissionService.check_context_access``. Copilot catch on PR #394
+    loop 2: returning an empty 200 leaked "a private context with this ID
+    exists, and you are not its creator" — the 404 hides that differential.
     """
     _as(visibility_scenario["member_a_id"], visibility_scenario["ws_a_id"])
 
@@ -351,10 +353,7 @@ async def test_private_context_non_creator_member_sees_empty(visibility_scenario
             params={"context_id": str(visibility_scenario["ctx_private_id"])},
         )
 
-    assert response.status_code == 200, response.text
-    assert response.json()["stats"]["total_edges"] == 0, (
-        "Non-creator workspace member must NOT see private-context edges"
-    )
+    assert response.status_code == 404, response.text
 
 
 @pytest.mark.asyncio

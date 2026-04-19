@@ -255,13 +255,25 @@ class PermissionService:
         )
         context = context_result.scalar_one_or_none()
         if context is None:
-            # Indistinguishable from "cross-workspace probe" to the caller (both
-            # surface as 404) — but logged distinctly so forensics can tell a
-            # stale-UUID / deleted-context miss from an active enumeration probe.
             logger.info(
                 "context_read_denied",
                 reason="not_found",
                 context_id=str(context_id),
+                user_id=user_id,
+            )
+            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+
+        # Private context: creator-only. Enforce here so graph / other
+        # UUID-addressed read endpoints match ``can_access_memory`` semantics
+        # (private → only the creator sees anything) instead of returning an
+        # empty 200 that leaks "a private context with this ID exists in
+        # this workspace, and you're not its owner".
+        if context.is_private and context.created_by != user_id:
+            logger.warning(
+                "context_read_denied",
+                reason="private_non_creator",
+                context_id=str(context_id),
+                context_workspace_id=str(context.workspace_id),
                 user_id=user_id,
             )
             raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
@@ -272,13 +284,23 @@ class PermissionService:
                 workspace_id=context.workspace_id,
                 required_role=required_role,
             )
-        except HTTPException:
-            # A valid-looking UUID for a workspace the caller does not belong to:
-            # the signal worth alerting on. Surfaced as the same uniform 404 as
-            # the "not_found" branch (CWE-639 / OWASP A01 uniform disclosure).
+        except HTTPException as exc:
+            # Classify the deny reason by the detail string so observability
+            # distinguishes cross-tenant probes (enumeration signal worth
+            # alerting on) from routine role-too-low / workspace-deleted paths.
+            # External 404 stays uniform regardless (CWE-639 / OWASP A01).
+            detail = str(exc.detail or "")
+            if "deleted" in detail:
+                reason = "workspace_deleted"
+            elif detail.startswith("Not a member"):
+                reason = "not_a_member"
+            elif "role" in detail.lower():
+                reason = "role_too_low"
+            else:
+                reason = "workspace_access_denied"
             logger.warning(
                 "context_read_denied",
-                reason="cross_workspace",
+                reason=reason,
                 context_id=str(context_id),
                 context_workspace_id=str(context.workspace_id),
                 user_id=user_id,

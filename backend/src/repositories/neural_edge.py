@@ -770,7 +770,18 @@ class NeuralEdgeRepository:
 
         Returns:
             List of (node_id, total_degree) tuples sorted by degree descending
+
+        Raises:
+            ValueError: If workspace_id or context_id is None (Issue #273 H-2).
+                Mirrors the guard on sibling read methods so ``user_id=None``
+                cannot devolve into an unscoped full-table aggregation
+                (Copilot catch on PR #394 loop 2).
         """
+        # Issue #273 H-2 / Issue #383: Enforce workspace_id/context_id even when
+        # user_id is None (shared-context mode) — without both, the shared mode
+        # would aggregate across tenants.
+        self._validate_isolation_params(workspace_id, context_id)
+
         # Build filter conditions
         conditions: list = []
         if user_id is not None:
