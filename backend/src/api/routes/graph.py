@@ -13,10 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser
 from db.base import get_db
-from models.auth import Context
 from models.memory import Memory
 from services.context_service import ContextService
 from services.graph_service import GraphService
+from services.permission_service import PermissionService
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -134,42 +134,18 @@ async def get_graph_stats(
                 last_updated=utcnow().isoformat(),
             )
 
-        # Resolve context → workspace + privacy. Unified 404 on miss/forbidden.
-        context_result = await db.execute(select(Context).where(Context.id == context_id))
-        context = context_result.scalar_one_or_none()
-        if not context:
-            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
-
-        from services.permission_service import PermissionService
-
-        perm_service = PermissionService(db)
-        try:
-            await perm_service.check_workspace_access(
-                user_id=user_id,
-                workspace_id=context.workspace_id,
-                required_role="member",
-            )
-        except HTTPException:
-            # CWE-639 uniform disclosure: cross-workspace probes look identical
-            # to non-existent contexts. Do NOT reveal workspace membership state.
-            raise HTTPException(status_code=404, detail=f"Context {context_id} not found") from None
-
+        context = await PermissionService(db).resolve_context_for_workspace_read(
+            user_id=user_id, context_id=context_id
+        )
         workspace_id = str(context.workspace_id)
         str_context_id = str(context.id)
-
-        # Issue #383: visibility-aware creator filter.
-        # - private context: only the caller's own edges are visible
-        # - shared context: all workspace members' edges are visible (no filter)
         owner_filter = user_id if context.is_private else None
 
-        # SQL backend: edges are in neural_memory_edges table (Issue #84)
         graph_service = GraphService(
             user_id, db, workspace_id=workspace_id, context_id=str_context_id
         )
-        # Get basic stats with 3-level isolation (Issue #383 visibility filter)
         stats = await graph_service.stats(owner_filter=owner_filter)
 
-        # Get top connected nodes (by degree) - SQL backend with isolation (#383)
         top_nodes_data = await graph_service.edge_repo.get_top_connected_nodes(
             user_id=owner_filter,
             limit=10,
@@ -178,9 +154,6 @@ async def get_graph_stats(
         )
 
         # Fetch memory summaries for top nodes
-
-        from models.memory import Memory
-
         top_node_ids = [node_id for node_id, _ in top_nodes_data]
         memories_result = await db.execute(select(Memory).where(Memory.id.in_(top_node_ids)))
         memories_map = {str(m.id): m for m in memories_result.scalars().all()}
@@ -251,38 +224,17 @@ async def get_graph_data(
     try:
         user_id = user["user_id"]
 
-        # Resolve context → workspace + privacy. Unified 404 on miss/forbidden.
-        context_result = await db.execute(select(Context).where(Context.id == context_id))
-        context = context_result.scalar_one_or_none()
-        if not context:
-            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
-
-        from services.permission_service import PermissionService
-
-        perm_service = PermissionService(db)
-        try:
-            await perm_service.check_workspace_access(
-                user_id=user_id,
-                workspace_id=context.workspace_id,
-                required_role="member",
-            )
-        except HTTPException:
-            # CWE-639 uniform disclosure (Issue #383): cross-workspace probes
-            # surface as 404, not 403, to avoid leaking workspace membership.
-            raise HTTPException(status_code=404, detail=f"Context {context_id} not found") from None
-
+        context = await PermissionService(db).resolve_context_for_workspace_read(
+            user_id=user_id, context_id=context_id
+        )
         workspace_id = str(context.workspace_id)
         str_context_id = str(context.id)
-
-        # Issue #383: visibility-aware creator filter.
         owner_filter = user_id if context.is_private else None
 
-        # SQL backend: Load graph (Issue #84)
         graph_service = GraphService(
             user_id, db, workspace_id=workspace_id, context_id=str_context_id
         )
 
-        # Get all edges with 3-level isolation (Issue #383 visibility filter)
         all_edges = await graph_service.edge_repo.get_all_edges(
             user_id=owner_filter,
             min_weight=min_weight,
@@ -319,13 +271,12 @@ async def get_graph_data(
             node_scores.append((node_id_str, score, degree, memory))
 
         if not node_scores:
-            stats = await graph_service.stats(owner_filter=owner_filter)
             return GraphDataResponse(
                 nodes=[],
                 edges=[],
                 stats={
-                    "total_nodes": stats["total_nodes"],
-                    "total_edges": stats["total_edges"],
+                    "total_nodes": len(all_node_ids),
+                    "total_edges": len(all_edges),
                     "filtered_nodes": 0,
                     "filtered_edges": 0,
                 },
@@ -369,11 +320,12 @@ async def get_graph_data(
                     )
                 )
 
-        # Get statistics (Issue #383 visibility filter)
-        graph_stats = await graph_service.stats(owner_filter=owner_filter)
+        # total_nodes/total_edges are derived from ``all_edges`` already loaded
+        # above — a second ``stats()`` call would re-run 3 queries for data we
+        # already have. filtered_* reflect the post-limit/post-memory_types cut.
         stats = {
-            "total_nodes": graph_stats["total_nodes"],
-            "total_edges": graph_stats["total_edges"],
+            "total_nodes": len(all_node_ids),
+            "total_edges": len(all_edges),
             "filtered_nodes": len(nodes),
             "filtered_edges": len(edges),
         }

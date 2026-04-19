@@ -216,6 +216,53 @@ class PermissionService:
 
         raise HTTPException(status_code=404, detail="Resource not found")
 
+    async def resolve_context_for_workspace_read(
+        self,
+        user_id: str,
+        context_id: UUID,
+        *,
+        required_role: str = "member",
+    ) -> Context:
+        """Resolve a ``context_id`` to a Context the caller can read, with uniform 404.
+
+        Issue #383: centralizes the "look up a Context + verify workspace
+        membership" chokepoint for UUID-addressed context reads. Returns a
+        unified 404 on either "context does not exist" or "caller is not a
+        workspace member" so cross-workspace existence does not leak
+        (CWE-639 / OWASP A01 uniform disclosure — same principle as
+        ``resolve_resource_by_slug`` for slug-addressed paths).
+
+        Args:
+            user_id: Authenticated principal.
+            context_id: UUID of the context to resolve.
+            required_role: Minimum workspace role to accept. Defaults to
+                ``member`` — suitable for read endpoints like ``/graph/*``.
+                Writers should pass ``admin`` or ``owner``.
+
+        Returns:
+            The ``Context`` row for ``context_id`` if the caller has the
+            required workspace role.
+
+        Raises:
+            HTTPException(404): context does not exist, or the caller is not
+                a member of its owning workspace with the required role.
+        """
+        context_result = await self.db.execute(select(Context).where(Context.id == context_id))
+        context = context_result.scalar_one_or_none()
+        if context is None:
+            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+
+        try:
+            await self.check_workspace_access(
+                user_id=user_id,
+                workspace_id=context.workspace_id,
+                required_role=required_role,
+            )
+        except HTTPException:
+            raise HTTPException(status_code=404, detail=f"Context {context_id} not found") from None
+
+        return context
+
     async def check_workspace_owner(self, user_id: str, workspace_id: UUID) -> WorkspaceMember:
         """Check if user is workspace owner.
 

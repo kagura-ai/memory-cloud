@@ -327,7 +327,6 @@ class GraphService:
 
         from models.memory import NeuralMemoryEdge
 
-        # Build conditions for node queries with 3-level isolation (#383)
         conditions: list = []
         if owner_filter is not None:
             conditions.append(NeuralMemoryEdge.user_id == owner_filter)
