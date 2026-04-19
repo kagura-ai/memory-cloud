@@ -319,17 +319,22 @@ async def get_resource_impact(
     )
 
     # Issue #390 Phase 2: resolve ``resource_pk`` so impact subqueries
-    # scope by authoritative FK instead of by slug. Fail-safe to "no
-    # impact" if the Resource row is absent — matches the uniform
-    # disclosure contract of get_schema.
+    # scope by authoritative FK instead of by slug. At this point
+    # ``resolve_resource_by_slug`` has already confirmed the Context
+    # exists and the caller has owner access, so ``resource_pk is None``
+    # means a data-integrity gap (Context persists without a backing
+    # Resource entity row — setup_resource never ran or the row was
+    # deleted). Returning 200 with zeroed counts would silently hide
+    # this; raise 404 with an actionable hint instead.
     resource_pk = await resolve_resource_pk(db, context.workspace_id, resource_id)
     if resource_pk is None:
-        return ResourceImpactResponse(
+        logger.warning(
+            "resource_entity_missing_on_impact",
             resource_id=resource_id,
-            token_count=0,
-            memory_count=0,
-            current_schema_version=None,
+            workspace_id=str(context.workspace_id),
+            user_id=user_id,
         )
+        raise NotFoundException("Resource", resource_id)
 
     # Performance: Get all stats in a single query using subqueries.
     # ResourceToken + ResourceSchema use strict ``resource_pk`` filter.

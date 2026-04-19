@@ -267,10 +267,17 @@ async def handle_get_resource_schema(
             # Phase 1 writer gap.
             resource_pk = await resolve_resource_pk(db, workspace_id, resource_id)
             if resource_pk is None:
+                # The workspace boundary check passed but no Resource entity
+                # row exists — this is a data-integrity gap (setup_resource
+                # never ran, or the Resource row was dropped while the
+                # Context persists). Returning ``schema_not_found`` would
+                # mislead callers into creating a schema for a resource
+                # that cannot accept it. Surface a distinct error so the
+                # next step is "bind the resource", not "create a schema".
                 return _error_response(
-                    "schema_not_found",
-                    f"No schema found for resource '{resource_id}'.",
-                    help="Use the REST API to create a schema first.",
+                    "resource_not_found",
+                    f"Resource '{resource_id}' is not initialized or is no longer bound in this workspace.",
+                    help="Run setup_resource for this resource or rebind it before requesting its schema.",
                 )
 
             query = select(ResourceSchema).where(ResourceSchema.resource_pk == resource_pk)
