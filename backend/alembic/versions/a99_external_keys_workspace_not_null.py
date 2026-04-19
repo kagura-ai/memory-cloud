@@ -6,9 +6,17 @@ and confirmed that no legacy pre-#146 data remains. This migration tightens the 
 
 1. Drop the historical NULL allowance on workspace_id — every external API key now belongs
    to exactly one workspace, never to a "global / personal" scope.
-2. Enforce at most one enabled key per (workspace, provider) pair via a partial unique
-   index. Disabled keys are intentionally exempt so an owner can hold a "spare" key for a
-   provider in a disabled state without conflicting with the active one.
+2. Enforce at most one enabled key per (workspace, context, provider) triple via a partial
+   unique index with NULLS NOT DISTINCT (PG 15+). The context_id column is included so the
+   service-layer's context > workspace priority contract (embedding / llm / reranker) can
+   have BOTH a context-scoped enabled key AND a workspace-scoped (context_id IS NULL)
+   fallback for the same provider coexist. NULLS NOT DISTINCT makes NULL context_ids
+   collide, so two workspace-scoped rows for the same provider are still blocked.
+   Disabled keys are intentionally exempt so an owner can hold a "spare" key in a
+   disabled state without conflicting with the active one.
+3. Enforce key_name uniqueness per workspace via a full unique index on
+   (workspace_id, key_name), so the update / toggle / delete handlers'
+   scalar_one_or_none() lookups cannot raise MultipleResultsFound on legacy data.
 
 Revision ID: a99_ext_keys_ws_not_null
 Revises: a98_bm25_idf_drift_log

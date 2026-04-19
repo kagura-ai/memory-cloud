@@ -123,10 +123,11 @@ async def validate_reranker_exclusivity(
     Issue #385: scoped per workspace — was per user before, because external keys
         are workspace-shared resources now. The partial unique index
         uq_external_api_keys_workspace_provider_enabled only guarantees at most
-        one enabled key per (workspace, provider) at the DB level — a different
-        invariant. This application-layer check is what enforces the
+        one enabled key per (workspace, context, provider) at the DB level — a
+        different invariant. This application-layer check is what enforces the
         cross-provider reranker exclusivity (no Cohere AND Voyage enabled
-        simultaneously) and produces a friendly 409 with provider details.
+        simultaneously per workspace) and produces a friendly 409 with provider
+        details.
 
     Rules:
     - OpenAI cannot be disabled (embeddings required)
@@ -260,7 +261,7 @@ async def create_external_key(
     Issue #385: workspace-scoped — the new key is stored with the caller's
     current_workspace_id and context_id=None. Per-workspace uniqueness is
     enforced by (a) the app-layer pre-checks in this handler and (b) the
-    partial unique index on (workspace_id, provider) WHERE enabled=true.
+    partial unique index on (workspace_id, context_id, provider) WHERE enabled=true (NULLS NOT DISTINCT).
     """
     user_id = user.get("user_id")
     user_email = get_user_email(user) or user_id
@@ -268,7 +269,7 @@ async def create_external_key(
 
     async with db_transaction(db, "create_external_key", "Failed to create external API key"):
         # Issue #385: workspace-scoped duplicate check — name uniqueness is per-workspace.
-        # The partial unique index (workspace_id, provider) WHERE enabled=true gives DB-level
+        # The partial unique index (workspace_id, context_id, provider) WHERE enabled=true (NULLS NOT DISTINCT) gives DB-level
         # enforcement on top; the application-layer check below produces a friendlier 409.
         result = await db.execute(
             select(ExternalAPIKey).where(
@@ -288,7 +289,7 @@ async def create_external_key(
             )
 
         # Issue #385: enforce the partial unique index invariant
-        # (workspace_id, provider) WHERE enabled=true at the application layer too,
+        # (workspace_id, context_id, provider) WHERE enabled=true at the application layer too,
         # so an arbitrary key_name (different from a duplicate the SELECT above
         # would have caught) doesn't escape with a 500 from the DB IntegrityError.
         if request.enabled:
@@ -340,7 +341,7 @@ async def create_external_key(
             await db.commit()
         except IntegrityError as exc:
             # Issue #385: a concurrent create could win a race against the
-            # partial unique index on (workspace_id, provider) WHERE enabled=true
+            # partial unique index on (workspace_id, context_id, provider) WHERE enabled=true (NULLS NOT DISTINCT)
             # OR the full unique index on (workspace_id, key_name). Narrow to
             # those two specific constraints so unrelated IntegrityErrors
             # (FK violations, unexpected constraints) still surface as 500 via
@@ -488,7 +489,7 @@ async def toggle_external_key(
             )
 
         # Issue #385: enforce the partial unique index invariant
-        # (workspace_id, provider) WHERE enabled=true at the application layer too,
+        # (workspace_id, context_id, provider) WHERE enabled=true at the application layer too,
         # so toggling a disabled key to enabled while another enabled key for the
         # same provider exists doesn't surface as a 500 from the DB IntegrityError.
         if request.enabled and not bool(key.enabled):

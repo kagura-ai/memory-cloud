@@ -23,10 +23,17 @@ RESOURCE_EVENTS_UPSERT_UNIQUE = "ux_resource_events_upsert_version"
 # ``sa.UniqueConstraint("idempotency_key")`` in baseline 157247e0df86.
 RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE = "resource_events_idempotency_key_key"
 
-# Issue #385: partial unique index on (workspace_id, provider) WHERE enabled=true.
-# Created by migration a99 + mirrored in models.auth.ExternalAPIKey.__table_args__.
-# Used by external_keys routes (create / toggle) to map IntegrityError → 409 only
-# when this specific constraint fires; other IntegrityErrors stay as 500.
+# Issue #385: partial unique index on
+# (workspace_id, context_id, provider) WHERE enabled=true
+# with NULLS NOT DISTINCT (PG 15+). Created by migration a99 + mirrored in
+# models.auth.ExternalAPIKey.__table_args__. The three-column key supports the
+# service-layer's context > workspace priority contract: a context-scoped
+# enabled key and a workspace-scoped (context_id IS NULL) fallback for the same
+# provider coexist, while NULLS NOT DISTINCT blocks two workspace-scoped rows
+# for the same provider.
+#
+# Used by external_keys routes (create / toggle) to map IntegrityError → 409
+# only when this specific constraint fires; other IntegrityErrors stay as 500.
 EXTERNAL_API_KEYS_WORKSPACE_PROVIDER_ENABLED_UNIQUE = (
     "uq_external_api_keys_workspace_provider_enabled"
 )
