@@ -411,10 +411,19 @@ async def require_workspace_owner(
     perm_service = PermissionService(db)
     try:
         await perm_service.check_workspace_owner(user_id, workspace_id)
-    except HTTPException:
+    except HTTPException as exc:
         # WARN on deny so audit pipelines can surface workspace-owner violations
         # (audit / incident-response concern flagged by #389 gate1 review).
-        logger.warning("workspace_owner_denied", user_id=user_id, workspace_id=str(workspace_id))
+        # status_code + sanitized detail let downstream consumers distinguish
+        # a pure role violation (403) from other deny paths (e.g. 404 if the
+        # workspace was deleted mid-session), reducing false positives.
+        logger.warning(
+            "workspace_owner_denied",
+            user_id=user_id,
+            workspace_id=str(workspace_id),
+            status_code=exc.status_code,
+            detail=exc.detail if isinstance(exc.detail, str) else None,
+        )
         raise
 
     logger.info("workspace_owner_verified", user_id=user_id, workspace_id=str(workspace_id))

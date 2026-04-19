@@ -32,6 +32,7 @@ from auth.dependencies import (
 )
 from db.base import get_db
 from models.auth import Context, Workspace, WorkspaceMember
+from models.resource import ResourceSchema
 
 SLUG_IN_WORKSPACE_B = "ws_b_only_slug"
 
@@ -95,6 +96,18 @@ async def cross_workspace_scenario(async_engine, db_session):
         resource_id=SLUG_IN_WORKSPACE_B,
         created_by=owner_b_id,
     )
+    # A ResourceSchema row for the slug is load-bearing for the regression
+    # contract: without it, /schema would return 404 simply because no
+    # schema exists, and the test would pass for the wrong reason if the
+    # boundary check regressed. With this row present, a regression that
+    # removes required_role="owner" (or bypasses resolve_resource_by_slug
+    # entirely) would return 200 + this schema's data, correctly failing
+    # the 404 assertion. Copilot catch on PR #391 loop 4.
+    schema_b = ResourceSchema(
+        resource_id=SLUG_IN_WORKSPACE_B,
+        schema_version=1,
+        field_definitions=[{"name": "canary_field", "type": "text"}],
+    )
     db_session.add_all(
         [
             ws_a,
@@ -102,6 +115,7 @@ async def cross_workspace_scenario(async_engine, db_session):
             WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role="owner"),
             WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role="owner"),
             ctx_b,
+            schema_b,
         ]
     )
     await db_session.commit()
@@ -138,6 +152,11 @@ async def cross_workspace_scenario(async_engine, db_session):
     # catch: swallowed cleanup exceptions cause hard-to-diagnose follow-on
     # failures).
     try:
+        await db_session.execute(
+            ResourceSchema.__table__.delete().where(
+                ResourceSchema.resource_id == SLUG_IN_WORKSPACE_B
+            )
+        )
         await db_session.delete(ctx_b)
         await db_session.execute(
             WorkspaceMember.__table__.delete().where(
@@ -228,6 +247,14 @@ async def cross_workspace_multi_member_scenario(async_engine, db_session):
         resource_id=SLUG_IN_WORKSPACE_B,
         created_by=owner_b_id,
     )
+    # Same ResourceSchema canary as the base fixture — makes the 404
+    # assertion on /schema a true boundary check rather than a
+    # "no-schema-exists" coincidence. See the base fixture docstring.
+    schema_b = ResourceSchema(
+        resource_id=SLUG_IN_WORKSPACE_B,
+        schema_version=1,
+        field_definitions=[{"name": "canary_field", "type": "text"}],
+    )
     # user_a is owner of A AND member of B — the subtle case.
     db_session.add_all(
         [
@@ -237,6 +264,7 @@ async def cross_workspace_multi_member_scenario(async_engine, db_session):
             WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role="owner"),
             WorkspaceMember(workspace_id=ws_b.id, user_id=owner_a_id, role="member"),
             ctx_b,
+            schema_b,
         ]
     )
     await db_session.commit()
@@ -268,6 +296,11 @@ async def cross_workspace_multi_member_scenario(async_engine, db_session):
     # See the base fixture's cleanup comment — re-raise on failure so
     # accumulated rows in the shared test DB surface deterministically.
     try:
+        await db_session.execute(
+            ResourceSchema.__table__.delete().where(
+                ResourceSchema.resource_id == SLUG_IN_WORKSPACE_B
+            )
+        )
         await db_session.delete(ctx_b)
         await db_session.execute(
             WorkspaceMember.__table__.delete().where(
