@@ -301,12 +301,21 @@ async def get_graph_data(
             node_scores.append((node_id_str, score, degree, memory))
 
         if not node_scores:
+            # Same post-Memory-scope stats as the main path below — counting
+            # edges that reference out-of-scope/deleted memories would report
+            # "edges exist" when nothing is actually renderable.
+            visible_node_ids = set(memories_map.keys())
+            visible_edges = [
+                edge
+                for edge in all_edges
+                if str(edge.src_id) in visible_node_ids and str(edge.dst_id) in visible_node_ids
+            ]
             return GraphDataResponse(
                 nodes=[],
                 edges=[],
                 stats={
-                    "total_nodes": len(all_node_ids),
-                    "total_edges": len(all_edges),
+                    "total_nodes": len(visible_node_ids),
+                    "total_edges": len(visible_edges),
                     "filtered_nodes": 0,
                     "filtered_edges": 0,
                 },
