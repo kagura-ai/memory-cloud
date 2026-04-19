@@ -303,14 +303,22 @@ class ExternalAPIKey(Base):
         Index("idx_external_user_provider", "user_id", "provider"),
         Index("idx_external_updated", "updated_at"),
         Index("idx_external_enabled", "user_id", "provider", "enabled"),  # Issue #105
-        # Issue #385: at most one enabled key per (workspace, provider). Disabled keys
-        # are intentionally exempt so an owner can hold a spare key in disabled state.
+        # Issue #385: at most one enabled key per (workspace, context, provider).
+        # Includes context_id so the service-layer context > workspace priority
+        # contract (embedding / llm / reranker) permits a context-scoped key and
+        # a workspace-scoped (context_id IS NULL) fallback to coexist for the
+        # same provider. Disabled keys are exempt so an owner can hold a spare
+        # key in disabled state. NULLS NOT DISTINCT (PG 15+) makes NULL
+        # context_ids collide, blocking two workspace-scoped rows for the same
+        # provider.
         Index(
             "uq_external_api_keys_workspace_provider_enabled",
             "workspace_id",
+            "context_id",
             "provider",
             unique=True,
             postgresql_where=text("enabled = true"),
+            postgresql_nulls_not_distinct=True,
         ),
         # Issue #385: unique key_name per workspace. Guarantees the
         # scalar_one_or_none() lookups in the update/toggle/delete handlers can

@@ -387,8 +387,10 @@ class RerankerService:
 
         Queries ExternalAPIKey for the enabled reranker key. Issue #105's
         cross-provider exclusivity (one of Cohere / Voyage per workspace) is
-        enforced at validate_reranker_exclusivity call sites in external_keys.py
-        plus by the a99 migration's pre-flight check.
+        enforced at runtime by validate_reranker_exclusivity call sites in
+        external_keys.py (create / toggle). The a99 migration has a matching
+        pre-flight check, but that check only runs once during upgrade — it
+        is a legacy-data safeguard, not a runtime enforcement mechanism.
 
         Issue #385: key resolution is workspace-keyed. When workspace_id is
         omitted, the reranker is treated as not configured (returns None) —

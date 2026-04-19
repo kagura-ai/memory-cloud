@@ -55,16 +55,18 @@ def upgrade() -> None:
     )
 
     # Defensive pre-check #2: the partial unique index would fail if any
-    # (workspace_id, provider) pair already has 2+ enabled rows. Pre-#385 the
-    # invariant was per-user (different users in the same workspace could each have
-    # their own enabled provider key), so legacy data could violate. Surface a
-    # clear remediation path instead of a cryptic CREATE INDEX failure.
+    # (workspace_id, context_id, provider) triple already has 2+ enabled rows.
+    # Pre-#385 the invariant was per-user (different users in the same workspace
+    # could each have their own enabled provider key), so legacy data could
+    # violate. Surface a clear remediation path instead of a cryptic CREATE
+    # INDEX failure. Groups include context_id so the service-layer contract
+    # (context-scoped key + workspace-scoped fallback can coexist) stays intact.
     dup_rows = conn.execute(
         sa.text(
-            "SELECT workspace_id, provider, COUNT(*) AS cnt "
+            "SELECT workspace_id, context_id, provider, COUNT(*) AS cnt "
             "FROM external_api_keys "
             "WHERE enabled = true "
-            "GROUP BY workspace_id, provider "
+            "GROUP BY workspace_id, context_id, provider "
             "HAVING COUNT(*) > 1 "
             "ORDER BY cnt DESC "
             "LIMIT 5"
@@ -72,14 +74,16 @@ def upgrade() -> None:
     ).fetchall()
     if dup_rows:
         examples = ", ".join(
-            f"workspace={row[0]} provider={row[1]} ({row[2]} enabled)" for row in dup_rows
+            f"workspace={row[0]} context={row[1]} provider={row[2]} ({row[3]} enabled)"
+            for row in dup_rows
         )
         raise RuntimeError(
             "Migration aborted: external_api_keys has multiple enabled rows for the "
-            f"same (workspace_id, provider) pair (examples: {examples}). The new "
-            "partial unique index uq_external_api_keys_workspace_provider_enabled "
-            "requires at most one enabled key per (workspace, provider). Disable or "
-            "delete the duplicates before re-running this migration."
+            f"same (workspace_id, context_id, provider) triple (examples: {examples}). "
+            "The new partial unique index "
+            "uq_external_api_keys_workspace_provider_enabled requires at most one "
+            "enabled key per (workspace, context, provider). Disable or delete the "
+            "duplicates before re-running this migration."
         )
 
     # Defensive pre-check #3: reranker exclusivity is now enforced per-workspace
@@ -144,12 +148,20 @@ def upgrade() -> None:
             "before re-running this migration."
         )
 
+    # Include context_id in the partial unique so the service-layer
+    # context > workspace priority contract (EmbeddingService / LLMService /
+    # RerankerService) can have BOTH a context-scoped enabled key AND a
+    # workspace-scoped (context_id IS NULL) fallback for the same provider
+    # coexist in the same workspace. NULLS NOT DISTINCT (PG 15+) makes NULL
+    # context_ids collide with each other so two workspace-scoped rows for the
+    # same provider are still caught.
     op.create_index(
         "uq_external_api_keys_workspace_provider_enabled",
         "external_api_keys",
-        ["workspace_id", "provider"],
+        ["workspace_id", "context_id", "provider"],
         unique=True,
         postgresql_where=sa.text("enabled = true"),
+        postgresql_nulls_not_distinct=True,
     )
 
     op.create_index(
