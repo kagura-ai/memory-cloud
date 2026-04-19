@@ -5,6 +5,7 @@ Issue #115 Phase B-2: Workspace-level Multi-tenancy
 Manages access control at workspace and context levels.
 """
 
+from typing import NewType
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -16,6 +17,12 @@ from services.workspace_service import WorkspaceService
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Brand types for authz identities (Issue #383).
+# NewType is zero-cost at runtime but prevents str/str argument swaps at pyright.
+# Mint at authz function boundaries; do not leak these into repository layers.
+CallerId = NewType("CallerId", str)
+MemoryAuthorId = NewType("MemoryAuthorId", str)
 
 # Role hierarchy weights (higher = more privilege)
 ORG_ROLE_WEIGHTS = {
@@ -208,6 +215,99 @@ class PermissionService:
                 continue
 
         raise HTTPException(status_code=404, detail="Resource not found")
+
+    async def resolve_context_for_workspace_read(
+        self,
+        user_id: str,
+        context_id: UUID,
+        *,
+        required_role: str = "member",
+    ) -> Context:
+        """Resolve a ``context_id`` to a Context the caller can read, with uniform 404.
+
+        Issue #383: centralizes the "look up a Context + verify workspace
+        membership" chokepoint for UUID-addressed context reads. Returns a
+        unified 404 on either "context does not exist" or "caller is not a
+        workspace member" so cross-workspace existence does not leak
+        (CWE-639 / OWASP A01 uniform disclosure — same principle as
+        ``resolve_resource_by_slug`` for slug-addressed paths).
+
+        Args:
+            user_id: Authenticated principal.
+            context_id: UUID of the context to resolve.
+            required_role: Minimum workspace role to accept. Defaults to
+                ``member`` — suitable for read endpoints like ``/graph/*``.
+                Writers should pass ``admin`` or ``owner``.
+
+        Returns:
+            The ``Context`` row for ``context_id`` if the caller has the
+            required workspace role.
+
+        Raises:
+            HTTPException(404): context does not exist, or the caller is not
+                a member of its owning workspace with the required role.
+        """
+        context_result = await self.db.execute(
+            select(Context).where(
+                Context.id == context_id,
+                Context.deleted_at.is_(None),
+            )
+        )
+        context = context_result.scalar_one_or_none()
+        if context is None:
+            logger.info(
+                "context_read_denied",
+                reason="not_found",
+                context_id=str(context_id),
+                user_id=user_id,
+            )
+            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+
+        # Private context: creator-only. Enforce here so graph / other
+        # UUID-addressed read endpoints match ``can_access_memory`` semantics
+        # (private → only the creator sees anything) instead of returning an
+        # empty 200 that leaks "a private context with this ID exists in
+        # this workspace, and you're not its owner".
+        if context.is_private and context.created_by != user_id:
+            logger.warning(
+                "context_read_denied",
+                reason="private_non_creator",
+                context_id=str(context_id),
+                context_workspace_id=str(context.workspace_id),
+                user_id=user_id,
+            )
+            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+
+        try:
+            await self.check_workspace_access(
+                user_id=user_id,
+                workspace_id=context.workspace_id,
+                required_role=required_role,
+            )
+        except HTTPException as exc:
+            # Classify the deny reason by the detail string so observability
+            # distinguishes cross-tenant probes (enumeration signal worth
+            # alerting on) from routine role-too-low / workspace-deleted paths.
+            # External 404 stays uniform regardless (CWE-639 / OWASP A01).
+            detail = str(exc.detail or "")
+            if "deleted" in detail:
+                reason = "workspace_deleted"
+            elif detail.startswith("Not a member"):
+                reason = "not_a_member"
+            elif "role" in detail.lower():
+                reason = "role_too_low"
+            else:
+                reason = "workspace_access_denied"
+            logger.warning(
+                "context_read_denied",
+                reason=reason,
+                context_id=str(context_id),
+                context_workspace_id=str(context.workspace_id),
+                user_id=user_id,
+            )
+            raise HTTPException(status_code=404, detail=f"Context {context_id} not found") from None
+
+        return context
 
     async def check_workspace_owner(self, user_id: str, workspace_id: UUID) -> WorkspaceMember:
         """Check if user is workspace owner.
@@ -574,8 +674,9 @@ class PermissionService:
 
     async def can_access_memory(
         self,
-        user_id: str,
-        memory_user_id: str,
+        *,
+        user_id: CallerId,
+        memory_user_id: MemoryAuthorId,
         workspace_id: UUID,
         context_id: UUID,
     ) -> bool:

@@ -13,10 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser
 from db.base import get_db
-from models.auth import Context
 from models.memory import Memory
-from services.context_service import ContextService
 from services.graph_service import GraphService
+from services.permission_service import PermissionService
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -88,63 +87,95 @@ class GraphDataResponse(BaseModel):
 async def get_graph_stats(
     user: SessionUser,
     context_id: UUID | None = Query(
-        None, description="Optional context ID (defaults to current context)"
+        None,
+        description="Optional context ID. When absent, returns an empty graph "
+        "(no scope = no visible edges) per Issue #383.",
     ),
     db: AsyncSession = Depends(get_db),
-    context_service: ContextService = Depends(lambda db=Depends(get_db): ContextService(db)),
 ):
-    """Get Neural Memory graph statistics for specified or current context.
+    """Get Neural Memory graph statistics for specified context.
 
-    Issue #82: Now context-scoped - returns graph stats for specified or current context.
+    Issue #82: Context-scoped stats.
+    Issue #383: Authorization is delegated to ``PermissionService``. Previously
+    this endpoint hard-filtered by ``user_id == caller``, hiding shared-context
+    memories authored by other workspace members. Now:
+
+        - Shared context (``is_private = false``): any workspace member sees
+          the full graph for the context.
+        - Private context (``is_private = true``): only the private-context
+          creator can access the graph for that context. The creator-only
+          rule matches ``can_access_memory`` (returns ``False`` for
+          non-creators) and ``check_context_access`` (raises 403 for
+          non-creators). This endpoint deliberately **remaps that denial
+          to 404**, unifying with the cross-workspace-probe shape so
+          neither path leaks existence — an intentional divergence from
+          ``check_context_access``'s 403 status code, not from its
+          authorization semantics.
+        - Cross-workspace probes and private-context access by non-creators
+          both surface as 404 (CWE-639 / OWASP A01 uniform disclosure)
+          to avoid existence leakage.
 
     Args:
-        context_id: Optional context ID (defaults to current context)
+        context_id: Optional context ID. When absent, returns an empty graph
+            (no scope = no visible edges).
 
     Returns:
         Graph statistics including node/edge counts, top connections, etc.
-
-    Raises:
-        HTTPException: 404 if graph not found
     """
     try:
         user_id = user["user_id"]
-        # Issue #246: current_context_id removed - use provided context_id or None
-        target_context_id = context_id if context_id else None
 
-        # Single Collection Migration: Graph uses workspace_id/context_id for filtering
-        # Get context for workspace_id resolution if context_id provided
-        workspace_id = None
-        str_context_id = None
-        if target_context_id:
-            context_result = await db.execute(
-                select(Context).where(Context.id == target_context_id)
+        # Without context scope there is no visible graph (Issue #383).
+        if not context_id:
+            return GraphStatsResponse(
+                user_id=user_id,
+                stats=GraphStats(
+                    total_nodes=0,
+                    total_edges=0,
+                    avg_edge_weight=0.0,
+                    max_edge_weight=0.0,
+                    min_edge_weight=0.0,
+                    density=0.0,
+                    top_connections=[],
+                    recent_edges=[],
+                ),
+                last_updated=utcnow().isoformat(),
             )
-            context = context_result.scalar_one_or_none()
-            if context:
-                workspace_id = str(context.workspace_id)
-                str_context_id = str(context.id)
 
-        # SQL backend: edges are in neural_memory_edges table (Issue #84)
+        context = await PermissionService(db).resolve_context_for_workspace_read(
+            user_id=user_id, context_id=context_id
+        )
+        workspace_id = str(context.workspace_id)
+        str_context_id = str(context.id)
+        owner_filter = user_id if context.is_private else None
+
         graph_service = GraphService(
             user_id, db, workspace_id=workspace_id, context_id=str_context_id
         )
-        # Get basic stats with 3-level isolation
-        stats = await graph_service.stats()
+        stats = await graph_service.stats(owner_filter=owner_filter)
 
-        # Get top connected nodes (by degree) - SQL backend with isolation
         top_nodes_data = await graph_service.edge_repo.get_top_connected_nodes(
-            user_id,
+            user_id=owner_filter,
             limit=10,
             workspace_id=workspace_id,
             context_id=str_context_id,
         )
 
-        # Fetch memory summaries for top nodes
-
-        from models.memory import Memory
-
+        # Fetch memory summaries for top nodes.
+        # Defense in depth against a stale/corrupt edge row that references a
+        # Memory outside the resolved (workspace_id, context_id): re-scope the
+        # Memory lookup itself so cross-context metadata cannot leak via summaries
+        # even if the edge invariant is violated. Follow-up AC 6 enforces the
+        # invariant at write time; this keeps the read path safe in the meantime.
         top_node_ids = [node_id for node_id, _ in top_nodes_data]
-        memories_result = await db.execute(select(Memory).where(Memory.id.in_(top_node_ids)))
+        memories_result = await db.execute(
+            select(Memory).where(
+                Memory.id.in_(top_node_ids),
+                Memory.workspace_id == context.workspace_id,
+                Memory.context_id == context.id,
+                Memory.deleted_at.is_(None),
+            )
+        )
         memories_map = {str(m.id): m for m in memories_result.scalars().all()}
 
         top_connections = []
@@ -213,22 +244,19 @@ async def get_graph_data(
     try:
         user_id = user["user_id"]
 
-        # Resolve workspace_id from context (required)
-        context_result = await db.execute(select(Context).where(Context.id == context_id))
-        context = context_result.scalar_one_or_none()
-        if not context:
-            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+        context = await PermissionService(db).resolve_context_for_workspace_read(
+            user_id=user_id, context_id=context_id
+        )
         workspace_id = str(context.workspace_id)
         str_context_id = str(context.id)
+        owner_filter = user_id if context.is_private else None
 
-        # SQL backend: Load graph (Issue #84)
         graph_service = GraphService(
             user_id, db, workspace_id=workspace_id, context_id=str_context_id
         )
 
-        # Get all edges with 3-level isolation
         all_edges = await graph_service.edge_repo.get_all_edges(
-            user_id,
+            user_id=owner_filter,
             min_weight=min_weight,
             workspace_id=workspace_id,
             context_id=str_context_id,
@@ -240,8 +268,18 @@ async def get_graph_data(
             all_node_ids.add(edge.src_id)
             all_node_ids.add(edge.dst_id)
 
-        # Fetch memories for all nodes
-        memories_result = await db.execute(select(Memory).where(Memory.id.in_(list(all_node_ids))))
+        # Fetch memories for all nodes — scoped to (workspace_id, context_id)
+        # for the same defense-in-depth reason as /graph/stats: prevents stale
+        # or invariant-violating edge rows from leaking cross-context memory
+        # metadata even before AC 6 (edge invariant) enforcement lands.
+        memories_result = await db.execute(
+            select(Memory).where(
+                Memory.id.in_(list(all_node_ids)),
+                Memory.workspace_id == context.workspace_id,
+                Memory.context_id == context.id,
+                Memory.deleted_at.is_(None),
+            )
+        )
         memories_map = {str(m.id): m for m in memories_result.scalars().all()}
 
         # Calculate node degrees from edges
@@ -263,13 +301,21 @@ async def get_graph_data(
             node_scores.append((node_id_str, score, degree, memory))
 
         if not node_scores:
-            stats = await graph_service.stats()
+            # Same post-Memory-scope stats as the main path below — counting
+            # edges that reference out-of-scope/deleted memories would report
+            # "edges exist" when nothing is actually renderable.
+            visible_node_ids = set(memories_map.keys())
+            visible_edges = [
+                edge
+                for edge in all_edges
+                if str(edge.src_id) in visible_node_ids and str(edge.dst_id) in visible_node_ids
+            ]
             return GraphDataResponse(
                 nodes=[],
                 edges=[],
                 stats={
-                    "total_nodes": stats["total_nodes"],
-                    "total_edges": stats["total_edges"],
+                    "total_nodes": len(visible_node_ids),
+                    "total_edges": len(visible_edges),
                     "filtered_nodes": 0,
                     "filtered_edges": 0,
                 },
@@ -313,11 +359,22 @@ async def get_graph_data(
                     )
                 )
 
-        # Get statistics
-        graph_stats = await graph_service.stats()
+        # Base totals on the post-Memory-scope set so they stay consistent
+        # with what the UI can actually render. A stale edge whose src/dst
+        # Memory has been soft-deleted or has drifted out of the resolved
+        # (workspace_id, context_id) scope is counted in ``all_edges`` but
+        # cannot be rendered — including it in ``total_edges`` would produce
+        # a "10 edges, 0 rendered" mismatch that confuses the viewer.
+        visible_node_ids = set(memories_map.keys())
+        visible_edges = [
+            edge
+            for edge in all_edges
+            if str(edge.src_id) in visible_node_ids and str(edge.dst_id) in visible_node_ids
+        ]
+        # total_* = post-Memory-scope; filtered_* = post-limit/post-memory_types cut.
         stats = {
-            "total_nodes": graph_stats["total_nodes"],
-            "total_edges": graph_stats["total_edges"],
+            "total_nodes": len(visible_node_ids),
+            "total_edges": len(visible_edges),
             "filtered_nodes": len(nodes),
             "filtered_edges": len(edges),
         }

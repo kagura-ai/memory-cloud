@@ -47,6 +47,14 @@ class GraphService:
         db: AsyncSession for database access
     """
 
+    # Sentinel for ``stats(owner_filter=...)`` to distinguish "caller did not
+    # pass the argument, use the legacy self.user_id default" from "caller
+    # explicitly requested the no-filter (shared-context) mode by passing None".
+    # Without this sentinel, the shared-mode default would silently regress
+    # existing per-user callers (sleep/consolidation, neural_tasks) that invoke
+    # ``stats()`` with no arguments and rely on implicit creator scoping.
+    _STATS_OWNER_DEFAULT: Any = object()
+
     NODE_TYPES = ["memory", "user", "topic"]
     EDGE_TYPES = [
         "neural_association",
@@ -298,14 +306,33 @@ class GraphService:
     # Statistics
     # ========================================================================
 
-    async def stats(self) -> dict[str, Any]:
+    async def stats(self, *, owner_filter: Any = _STATS_OWNER_DEFAULT) -> dict[str, Any]:
         """Get graph statistics with 3-level isolation.
+
+        Issue #383: visibility-aware. ``owner_filter`` controls creator scoping:
+
+        - **Omitted** (default, backward-compatible): filter by ``self.user_id``
+          — the pre-#383 "per-user metrics" semantics that sleep/consolidation,
+          neural_tasks, and internal callers rely on. Does NOT aggregate across
+          the whole workspace, which would distort consolidation heuristics.
+        - ``None`` (explicit): no creator filter — aggregate across all creators
+          in workspace+context (shared-context HTTP reads). Only pass this when
+          the caller's workspace membership has been verified upstream.
+        - ``str`` (creator user_id): restrict to edges created by that user.
+          Private-context reads or admin paths pass this explicitly.
+
+        Args:
+            owner_filter: Optional creator filter — see above. The sentinel
+                default distinguishes "omitted" from "explicit None".
 
         Returns:
             Stats dict with edge counts and weights
         """
+        effective_filter: str | None = (
+            self.user_id if owner_filter is self._STATS_OWNER_DEFAULT else owner_filter
+        )
         edge_stats = await self.edge_repo.get_stats(
-            self.user_id,
+            effective_filter,
             workspace_id=self.workspace_id,
             context_id=self.context_id,
         )
@@ -315,8 +342,9 @@ class GraphService:
 
         from models.memory import NeuralMemoryEdge
 
-        # Build conditions for node queries with 3-level isolation
-        conditions = [NeuralMemoryEdge.user_id == self.user_id]
+        conditions: list = []
+        if effective_filter is not None:
+            conditions.append(NeuralMemoryEdge.user_id == effective_filter)
         if self.workspace_id:
             conditions.append(NeuralMemoryEdge.workspace_id == UUID(self.workspace_id))
         if self.context_id:

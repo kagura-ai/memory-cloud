@@ -332,10 +332,12 @@ class MemoryService:
             raise NotFoundException("Memory", str(request.memory_id))
 
         # Permission check
+        from services.permission_service import CallerId, MemoryAuthorId
+
         perm_service = PermissionService(self.db)
         can_access = await perm_service.can_access_memory(
-            user_id=user_id,
-            memory_user_id=memory.user_id,
+            user_id=CallerId(user_id),
+            memory_user_id=MemoryAuthorId(memory.user_id),
             workspace_id=memory.workspace_id,
             context_id=memory.context_id,
         )
@@ -530,12 +532,12 @@ class MemoryService:
             raise NotFoundException("Memory", str(memory_id))
 
         # Issue #XXX: Team collaboration - verify access permission
-        from services.permission_service import PermissionService
+        from services.permission_service import CallerId, MemoryAuthorId, PermissionService
 
         perm_service = PermissionService(self.db)
         can_access = await perm_service.can_access_memory(
-            user_id=user_id,
-            memory_user_id=memory.user_id,
+            user_id=CallerId(user_id),
+            memory_user_id=MemoryAuthorId(memory.user_id),
             workspace_id=memory.workspace_id,
             context_id=memory.context_id,
         )
@@ -956,12 +958,12 @@ class MemoryService:
 
             if memory:
                 # Issue #XXX: Team collaboration - verify delete permission
-                from services.permission_service import PermissionService
+                from services.permission_service import CallerId, MemoryAuthorId, PermissionService
 
                 perm_service = PermissionService(self.db)
                 can_access = await perm_service.can_access_memory(
-                    user_id=user_id,
-                    memory_user_id=memory.user_id,
+                    user_id=CallerId(user_id),
+                    memory_user_id=MemoryAuthorId(memory.user_id),
                     workspace_id=memory.workspace_id,
                     context_id=memory.context_id,
                 )
@@ -1194,12 +1196,12 @@ class MemoryService:
             raise NotFoundException(f"Memory {request.memory_id} not found")
 
         # Issue #XXX: Team collaboration - verify access permission
-        from services.permission_service import PermissionService
+        from services.permission_service import CallerId, MemoryAuthorId, PermissionService
 
         perm_service = PermissionService(self.db)
         can_access = await perm_service.can_access_memory(
-            user_id=user_id,
-            memory_user_id=seed_memory.user_id,
+            user_id=CallerId(user_id),
+            memory_user_id=MemoryAuthorId(seed_memory.user_id),
             workspace_id=seed_memory.workspace_id,
             context_id=seed_memory.context_id,
         )
