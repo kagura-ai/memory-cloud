@@ -94,8 +94,24 @@ def _audit_cross_workspace_ambiguity(conn: sa.Connection) -> None:
     """
     ambiguities: list[str] = []
 
+    # Pre-aggregate the "slug → workspace count" map once for the whole
+    # audit pass. This avoids the correlated per-orphan-row subquery
+    # shape (O(N*M)) the earlier revision used — on large
+    # ``resource_events`` tables the correlated form could make the
+    # migration unexpectedly slow. JOIN against the pre-aggregated CTE
+    # is O(N + M) with the planner's choice of hash or merge join.
+    # Copilot catch on PR #392 loop 8.
+    ambiguous_cte = """
+        WITH ambiguous_slugs AS (
+            SELECT resource_id
+            FROM resources
+            GROUP BY resource_id
+            HAVING COUNT(*) > 1
+        )
+    """
+
     # Straight slug-only tables: resource_events, resource_schemas.
-    # Any orphan row whose slug maps to >1 live Resource is ambiguous.
+    # Any orphan row whose slug appears in ``ambiguous_slugs`` is unsafe.
     for table_name in _SATELLITE_TABLES_SLUG_ONLY:
         # Table name is a module-constant; slug values never appear in the
         # f-string (only the whole-table scan does). Matches the a97
@@ -103,14 +119,11 @@ def _audit_cross_workspace_ambiguity(conn: sa.Connection) -> None:
         result = conn.execute(
             sa.text(
                 f"""
+                {ambiguous_cte}
                 SELECT DISTINCT s.resource_id
                 FROM {table_name} s
+                JOIN ambiguous_slugs a ON a.resource_id = s.resource_id
                 WHERE s.resource_pk IS NULL
-                  AND (
-                    SELECT COUNT(*)
-                    FROM resources r
-                    WHERE r.resource_id = s.resource_id
-                  ) > 1
                 """  # noqa: S608 -- table names are module-constant
             )
         ).fetchall()
@@ -125,15 +138,12 @@ def _audit_cross_workspace_ambiguity(conn: sa.Connection) -> None:
         result = conn.execute(
             sa.text(
                 f"""
+                {ambiguous_cte}
                 SELECT DISTINCT s.resource_id
                 FROM {table_name} s
+                JOIN ambiguous_slugs a ON a.resource_id = s.resource_id
                 WHERE s.resource_pk IS NULL
                   AND s.workspace_id IS NULL
-                  AND (
-                    SELECT COUNT(*)
-                    FROM resources r
-                    WHERE r.resource_id = s.resource_id
-                  ) > 1
                 """  # noqa: S608 -- table names are module-constant
             )
         ).fetchall()
