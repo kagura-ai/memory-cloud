@@ -648,11 +648,20 @@ class NeuralEdgeRepository:
         creators in the workspace+context (shared context), otherwise restricts
         to that single creator (private context).
 
+        **Caller contract**: ``workspace_id`` and ``context_id`` are **always**
+        required (enforced by ``_validate_isolation_params`` below). The
+        ``user_id`` axis is the only optional one. "All edges authored by this
+        user across all contexts" is NOT a supported use case for this method —
+        that access pattern would bypass the 3-level isolation and is rejected
+        by the validator. The pre-existing ``neural/decay.py:get_decay_statistics``
+        caller is currently on a latent error path and is uncalled (dead code);
+        see Issue #383 PR body for the tracked follow-up.
+
         Args:
             user_id: Optional creator filter. ``None`` aggregates over all
                 creators in the workspace+context.
-            workspace_id: Workspace ID (for isolation)
-            context_id: Context ID (for isolation)
+            workspace_id: Workspace ID (required for isolation)
+            context_id: Context ID (required for isolation)
 
         Returns:
             Dictionary with graph metrics:

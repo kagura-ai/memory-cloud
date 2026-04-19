@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import SessionUser
 from db.base import get_db
 from models.memory import Memory
-from services.context_service import ContextService
 from services.graph_service import GraphService
 from services.permission_service import PermissionService
 from utils.datetime import utcnow
@@ -88,10 +87,11 @@ class GraphDataResponse(BaseModel):
 async def get_graph_stats(
     user: SessionUser,
     context_id: UUID | None = Query(
-        None, description="Optional context ID (defaults to current context)"
+        None,
+        description="Optional context ID. When absent, returns an empty graph "
+        "(no scope = no visible edges) per Issue #383.",
     ),
     db: AsyncSession = Depends(get_db),
-    context_service: ContextService = Depends(lambda db=Depends(get_db): ContextService(db)),
 ):
     """Get Neural Memory graph statistics for specified context.
 
@@ -153,9 +153,21 @@ async def get_graph_stats(
             context_id=str_context_id,
         )
 
-        # Fetch memory summaries for top nodes
+        # Fetch memory summaries for top nodes.
+        # Defense in depth against a stale/corrupt edge row that references a
+        # Memory outside the resolved (workspace_id, context_id): re-scope the
+        # Memory lookup itself so cross-context metadata cannot leak via summaries
+        # even if the edge invariant is violated. Follow-up AC 6 enforces the
+        # invariant at write time; this keeps the read path safe in the meantime.
         top_node_ids = [node_id for node_id, _ in top_nodes_data]
-        memories_result = await db.execute(select(Memory).where(Memory.id.in_(top_node_ids)))
+        memories_result = await db.execute(
+            select(Memory).where(
+                Memory.id.in_(top_node_ids),
+                Memory.workspace_id == context.workspace_id,
+                Memory.context_id == context.id,
+                Memory.deleted_at.is_(None),
+            )
+        )
         memories_map = {str(m.id): m for m in memories_result.scalars().all()}
 
         top_connections = []
@@ -248,8 +260,18 @@ async def get_graph_data(
             all_node_ids.add(edge.src_id)
             all_node_ids.add(edge.dst_id)
 
-        # Fetch memories for all nodes
-        memories_result = await db.execute(select(Memory).where(Memory.id.in_(list(all_node_ids))))
+        # Fetch memories for all nodes — scoped to (workspace_id, context_id)
+        # for the same defense-in-depth reason as /graph/stats: prevents stale
+        # or invariant-violating edge rows from leaking cross-context memory
+        # metadata even before AC 6 (edge invariant) enforcement lands.
+        memories_result = await db.execute(
+            select(Memory).where(
+                Memory.id.in_(list(all_node_ids)),
+                Memory.workspace_id == context.workspace_id,
+                Memory.context_id == context.id,
+                Memory.deleted_at.is_(None),
+            )
+        )
         memories_map = {str(m.id): m for m in memories_result.scalars().all()}
 
         # Calculate node degrees from edges
