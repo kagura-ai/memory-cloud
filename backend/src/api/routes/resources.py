@@ -21,7 +21,7 @@ from auth.dependencies import WorkspaceOwner
 from db.base import get_db
 from models.auth import Context
 from models.memory import Memory
-from models.resource import ResourceEvent, ResourceSchema, ResourceToken
+from models.resource import Resource, ResourceEvent, ResourceSchema, ResourceToken
 from services.permission_service import PermissionService
 from utils.datetime import to_utc_iso
 from utils.logger import get_logger
@@ -105,25 +105,25 @@ async def list_resources(
         )
         return ResourceListResponse(resources=[], total=0)
 
-    # Correlated subqueries — one stats bundle per matching context row.
-    # resource_* tables are keyed by resource_id only (see Migration 055 note on
-    # per-workspace uniqueness). We scope to this workspace via the Context join
-    # on the outer query; collisions across workspaces are a pre-existing
-    # architectural invariant tracked separately.
+    # Issue #390 Phase 2: satellite stats are scoped by ``resource_pk``
+    # (authoritative FK to ``resources.id``) instead of by slug. The outer
+    # query joins ``Context`` to ``Resource`` via
+    # ``(workspace_id, resource_id)`` so each row carries the UUID that the
+    # correlated subqueries filter against — this closes the cross-workspace
+    # slug-reuse leak that could otherwise surface counts from a different
+    # workspace's soft-deleted resource.
     token_count_subq = (
         select(func.count(ResourceToken.id))
         .where(
-            ResourceToken.resource_id == Context.resource_id,
+            ResourceToken.resource_pk == Resource.id,
             ResourceToken.is_active == True,  # noqa: E712
         )
-        .correlate(Context)
+        .correlate(Resource)
         .scalar_subquery()
     )
 
-    # Memory has a workspace_id column, so we can scope defensively here even
-    # though the other resource_* tables cannot (per the architectural invariant
-    # comment above). For Memory specifically this tightens the count against
-    # the unlikely case of a resource_id collision across workspaces.
+    # Memory has a workspace_id column and is not part of the resource_pk
+    # migration — keep the slug + workspace_id filter. Context carries both.
     memory_count_subq = (
         select(func.count(Memory.id))
         .where(
@@ -137,20 +137,25 @@ async def list_resources(
 
     schema_version_subq = (
         select(func.max(ResourceSchema.schema_version))
-        .where(ResourceSchema.resource_id == Context.resource_id)
-        .correlate(Context)
+        .where(ResourceSchema.resource_pk == Resource.id)
+        .correlate(Resource)
         .scalar_subquery()
     )
 
     last_event_subq = (
         select(func.max(ResourceEvent.created_at))
-        .where(ResourceEvent.resource_id == Context.resource_id)
-        .correlate(Context)
+        .where(ResourceEvent.resource_pk == Resource.id)
+        .correlate(Resource)
         .scalar_subquery()
     )
 
     # Main query: workspace-scoped, resource-bound contexts with aggregated stats.
     # ORDER BY coalesces the most recent signal (last event vs context update).
+    # Resource is joined via (workspace_id, resource_id) and the subqueries
+    # above correlate against ``Resource.id`` (the authoritative resource_pk).
+    # LEFT OUTER JOIN: Contexts with a resource_id but no Resource row yet
+    # (pre-a97 migration gap) still appear in the list with zero stats,
+    # preserving backward visibility during the Phase 1 → Phase 2 transition.
     result = await db.execute(
         select(
             Context.id.label("context_id"),
@@ -163,6 +168,14 @@ async def list_resources(
             memory_count_subq.label("memory_count"),
             schema_version_subq.label("schema_version"),
             last_event_subq.label("last_event_at"),
+        )
+        .select_from(Context)
+        .outerjoin(
+            Resource,
+            and_(
+                Resource.workspace_id == Context.workspace_id,
+                Resource.resource_id == Context.resource_id,
+            ),
         )
         .where(
             and_(

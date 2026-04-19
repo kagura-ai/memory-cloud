@@ -20,6 +20,7 @@ from auth.dependencies import WorkspaceOwner
 from auth.resource_tokens import ResourceTokenManager
 from db.base import get_db
 from models.resource import ResourceToken
+from services.resource_lookup import resolve_resource_pk
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -340,9 +341,25 @@ async def create_resource_token(
                         detail=f"Token limit reached. Your {plan_name.upper()} plan allows {plan.max_resource_tokens} active tokens. Please revoke unused tokens or upgrade your plan.",
                     )
 
+        # Issue #390 Phase 2: resolve authoritative ``resource_pk`` + pass
+        # ``workspace_id`` so the ResourceToken insert satisfies the
+        # before_insert event listener invariant (models/resource.py).
+        # The context-existence check above already confirmed the Resource
+        # is bound to this workspace, so resolve_resource_pk should always
+        # return a non-None UUID; guard defensively for the race where the
+        # resource is deleted between the two queries.
+        resource_pk = await resolve_resource_pk(db, workspace_id, data.resource_id)
+        if resource_pk is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Resource ID '{data.resource_id}' not found in your workspace or you don't have access to it.",
+            )
+
         # Create token (returns plaintext + token object)
         plaintext_token, new_token = await manager.create_token(
             resource_id=data.resource_id,
+            resource_pk=resource_pk,
+            workspace_id=workspace_id,
             description=data.description,
             quota_events_per_hour=data.quota_events_per_hour,
             created_by=user_id,

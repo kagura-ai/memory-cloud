@@ -325,9 +325,13 @@ class TestIngestEventsValidation:
         # 2) boundary check → found
         boundary_result = MagicMock()
         boundary_result.scalar_one_or_none.return_value = uuid4()
-        # 3) resource_pk lookup (PR #346): legacy state returns None
+        # 3) resource_pk lookup (Issue #390 Phase 2): returns a valid UUID
+        # so the batch is not rejected up front. Legacy None-returning
+        # state is now an error path — the prior test that asserted "works
+        # with resource_pk=None" was structurally wrong after the writer
+        # invariant landed and has been updated accordingly.
         pk_result = MagicMock()
-        pk_result.scalar_one_or_none.return_value = None
+        pk_result.scalar_one_or_none.return_value = uuid4()
         mock_db.execute.side_effect = [role_result, boundary_result, pk_result]
         mock_db.commit = AsyncMock()
         return mock_db
@@ -519,7 +523,11 @@ class TestGetResourceImpactHappyPath:
         boundary_result = MagicMock()
         boundary_result.scalar_one_or_none.return_value = uuid4()
 
-        # 2) combined stats query: row with 3 counts
+        # 2) resolve_resource_pk (Issue #390 Phase 2)
+        pk_result = MagicMock()
+        pk_result.scalar_one_or_none.return_value = uuid4()
+
+        # 3) combined stats query: row with 3 counts
         stats_row = MagicMock()
         stats_row.token_count = 2
         stats_row.memory_count = 47
@@ -527,7 +535,7 @@ class TestGetResourceImpactHappyPath:
         stats_result = MagicMock()
         stats_result.one.return_value = stats_row
 
-        mock_db.execute.side_effect = [boundary_result, stats_result]
+        mock_db.execute.side_effect = [boundary_result, pk_result, stats_result]
         mock_db.commit = AsyncMock()
 
         async def mock_get_db():
@@ -556,7 +564,11 @@ class TestGetResourceSchemaHappyPath:
         boundary_result = MagicMock()
         boundary_result.scalar_one_or_none.return_value = uuid4()
 
-        # 2) schema query: schema row
+        # 2) resolve_resource_pk (Issue #390 Phase 2)
+        pk_result = MagicMock()
+        pk_result.scalar_one_or_none.return_value = uuid4()
+
+        # 3) schema query: schema row
         schema_row = MagicMock()
         schema_row.resource_id = "res1"
         schema_row.schema_version = 4
@@ -565,7 +577,7 @@ class TestGetResourceSchemaHappyPath:
         schema_result = MagicMock()
         schema_result.scalar_one_or_none.return_value = schema_row
 
-        mock_db.execute.side_effect = [boundary_result, schema_result]
+        mock_db.execute.side_effect = [boundary_result, pk_result, schema_result]
         mock_db.commit = AsyncMock()
 
         async def mock_get_db():
@@ -672,9 +684,13 @@ class TestIngestEventsHappyPath:
         # 2) boundary check → found
         boundary_result = MagicMock()
         boundary_result.scalar_one_or_none.return_value = uuid4()
-        # 3) resource_pk lookup (PR #346): legacy state returns None
+        # 3) resource_pk lookup (Issue #390 Phase 2): returns a valid UUID
+        # so the batch is not rejected up front. Legacy None-returning
+        # state is now an error path — the prior test that asserted "works
+        # with resource_pk=None" was structurally wrong after the writer
+        # invariant landed and has been updated accordingly.
         pk_result = MagicMock()
-        pk_result.scalar_one_or_none.return_value = None
+        pk_result.scalar_one_or_none.return_value = uuid4()
         mock_db.execute.side_effect = [role_result, boundary_result, pk_result]
 
         # Capture the added event so we can assign an id before flush returns
@@ -748,7 +764,8 @@ class TestSetupResourceHappyPath:
         # 1) role check → owner
         # 2) resource_id duplicate check → none
         # 3) workspace plan_name lookup → "pro"
-        # 4) active token count → 0
+        # 4) upsert_resource: resolve_resource_pk → existing uuid (Issue #390 Phase 2)
+        # 5) active token count → 0
         role_result = MagicMock()
         owner = MagicMock()
         owner.role = "owner"
@@ -760,6 +777,9 @@ class TestSetupResourceHappyPath:
         plan_result = MagicMock()
         plan_result.scalar_one_or_none.return_value = "pro"
 
+        resource_pk_result = MagicMock()
+        resource_pk_result.scalar_one_or_none.return_value = uuid4()
+
         token_count_result = MagicMock()
         token_count_result.scalar.return_value = 0
 
@@ -767,6 +787,7 @@ class TestSetupResourceHappyPath:
             role_result,
             resource_dup_result,
             plan_result,
+            resource_pk_result,
             token_count_result,
         ]
 

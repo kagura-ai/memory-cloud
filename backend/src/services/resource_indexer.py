@@ -317,12 +317,33 @@ class ResourceIndexer:
         metrics = IndexerMetrics()
 
         try:
-            # 1. Get or create indexer state
-            state = await self._get_or_create_state(resource_id, context_id)
+            # 1. Resolve context first so workspace_id is available for
+            # ``resource_pk`` lookup (Issue #390 Phase 2). All satellite
+            # queries below filter by resource_pk to avoid the CWE-639
+            # slug-reuse leak when a soft-deleted context releases its slug.
+            context = await self._get_context(context_id)
+
+            from services.resource_lookup import resolve_resource_pk
+
+            resource_pk = await resolve_resource_pk(self.db, context.workspace_id, resource_id)
+            if resource_pk is None:
+                # Pre-a97 orphan or writer gap: refuse to index rather than
+                # surface potentially cross-tenant rows via slug fallback.
+                metrics.skipped = True
+                metrics.reason = "resource_entity_missing"
+                logger.warning(
+                    "indexer_resource_entity_missing",
+                    resource_id=resource_id,
+                    context_id=context_id,
+                )
+                return metrics
+
+            # 2. Get or create indexer state
+            state = await self._get_or_create_state(resource_id, context_id, resource_pk)
             last_offset = state.last_offset
 
-            # 2. Fetch pending events
-            events = await self._fetch_events(resource_id, after_id=last_offset, limit=batch_size)
+            # 3. Fetch pending events
+            events = await self._fetch_events(resource_pk, after_id=last_offset, limit=batch_size)
 
             if not events:
                 metrics.skipped = True
@@ -335,8 +356,8 @@ class ResourceIndexer:
                 )
                 return metrics
 
-            # 3. Load schema for JSONB projection
-            schema = await self._get_latest_schema(resource_id)
+            # 4. Load schema for JSONB projection
+            schema = await self._get_latest_schema(resource_pk)
             if not schema:
                 logger.warning(
                     "indexer_schema_not_found",
@@ -345,9 +366,6 @@ class ResourceIndexer:
                 metrics.skipped = True
                 metrics.reason = "schema_not_found"
                 return metrics
-
-            # 4. Get context for workspace_id/context_id
-            context = await self._get_context(context_id)
 
             # Resolve Qdrant collection + per-context EmbeddingService from the
             # same ContextSearchConfig (#334 Layer B + #338 Layer C). Single
@@ -904,26 +922,54 @@ class ResourceIndexer:
     # Helper Methods
     # ========================================================================
 
-    async def _get_or_create_state(self, resource_id: str, context_id: UUID) -> IndexerState:
+    async def _get_or_create_state(
+        self,
+        resource_id: str,
+        context_id: UUID,
+        resource_pk: UUID,
+    ) -> IndexerState:
         """Get or create indexer state.
 
+        Issue #390 Phase 2: lookup uses the dual-row OR fallback pattern
+        (resource_indexer.get_indexer_status_for_context:156-162) so
+        legacy ``resource_pk IS NULL`` rows still resolve correctly during
+        the writer transition. Newly created rows populate both columns,
+        satisfying the before_insert invariant listener.
+
         Args:
-            resource_id: Resource ID
-            context_id: Context ID
+            resource_id: Resource ID (slug, legacy mirror)
+            context_id: Context ID (workspace-scoped FK)
+            resource_pk: Authoritative ``resources.id`` UUID
 
         Returns:
             IndexerState record
         """
+        # Prefer rows with resource_pk populated; fall back to legacy
+        # ``resource_pk IS NULL`` rows scoped by slug + context_id during
+        # the Phase 1 → Phase 2 transition window.
         result = await self.db.execute(
-            select(IndexerState).where(
-                IndexerState.resource_id == resource_id,
+            select(IndexerState)
+            .where(
                 IndexerState.context_id == context_id,
+                or_(
+                    IndexerState.resource_pk == resource_pk,
+                    (IndexerState.resource_pk.is_(None))
+                    & (IndexerState.resource_id == resource_id),
+                ),
             )
+            .order_by(
+                # Populated rows sort before legacy NULLs; id DESC is the
+                # tiebreaker if an in-flight writer leaves both shapes.
+                IndexerState.resource_pk.is_(None).asc(),
+                IndexerState.id.desc(),
+            )
+            .limit(1)
         )
         state = result.scalar_one_or_none()
 
         if not state:
             state = IndexerState(
+                resource_pk=resource_pk,
                 resource_id=resource_id,
                 context_id=context_id,
                 last_offset=0,
@@ -936,24 +982,19 @@ class ResourceIndexer:
 
     async def _fetch_events(
         self,
-        resource_id: str,
+        resource_pk: UUID,
         after_id: int,
         limit: int,
     ) -> list[ResourceEvent]:
         """Fetch pending events since last_offset.
 
-        Args:
-            resource_id: Resource ID
-            after_id: Last processed event ID
-            limit: Max events to fetch
-
-        Returns:
-            List of ResourceEvent records (ordered by ID)
+        ResourceEvent has no ``context_id`` column, so slug is not a
+        workspace boundary — filter strictly by ``resource_pk``.
         """
         result = await self.db.execute(
             select(ResourceEvent)
             .where(
-                ResourceEvent.resource_id == resource_id,
+                ResourceEvent.resource_pk == resource_pk,
                 ResourceEvent.id > after_id,
             )
             .order_by(ResourceEvent.id)
@@ -961,18 +1002,14 @@ class ResourceIndexer:
         )
         return list(result.scalars().all())
 
-    async def _get_latest_schema(self, resource_id: str) -> ResourceSchema | None:
-        """Get latest schema version for resource.
-
-        Args:
-            resource_id: Resource ID
-
-        Returns:
-            ResourceSchema or None if not found
-        """
+    async def _get_latest_schema(
+        self,
+        resource_pk: UUID,
+    ) -> ResourceSchema | None:
+        """Get latest schema version for resource (strict resource_pk filter)."""
         result = await self.db.execute(
             select(ResourceSchema)
-            .where(ResourceSchema.resource_id == resource_id)
+            .where(ResourceSchema.resource_pk == resource_pk)
             .order_by(ResourceSchema.schema_version.desc())
             .limit(1)
         )

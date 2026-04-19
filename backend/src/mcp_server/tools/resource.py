@@ -134,23 +134,42 @@ async def handle_get_resource_impact(
             if boundary_err:
                 return boundary_err
 
-            # Combined stats query — all subqueries workspace-scoped to prevent
-            # cross-workspace leakage when resource_id collides across workspaces
-            # (resource_id is unique per workspace, not globally).
+            # Issue #390 Phase 2: resolve ``resource_pk`` and filter the
+            # satellite queries by authoritative FK instead of slug. This
+            # closes the cross-workspace slug-reuse leak vector on
+            # ResourceToken and ResourceSchema (neither has a context_id
+            # column to enforce the workspace boundary at query time).
             from sqlalchemy import func, select
 
-            from models.auth import Context
             from models.memory import Memory
             from models.resource import ResourceSchema, ResourceToken
+            from services.resource_lookup import resolve_resource_pk
+
+            resource_pk = await resolve_resource_pk(db, workspace_id, resource_id)
+            if resource_pk is None:
+                # Boundary check passed but no Resource row — pre-a97
+                # orphan or post-a97 gap. Return zero impact rather than
+                # surface slug-only counts.
+                await _log_tool_usage(
+                    db,
+                    user_id,
+                    "get_resource_impact",
+                    start_time,
+                    200,
+                    workspace_id=workspace_id,
+                )
+                return _success_response(
+                    resource_id=resource_id,
+                    token_count=0,
+                    memory_count=0,
+                    current_schema_version=None,
+                )
 
             token_count_subq = (
                 select(func.count(ResourceToken.id))
-                .join(Context, Context.resource_id == ResourceToken.resource_id)
                 .where(
-                    ResourceToken.resource_id == resource_id,
+                    ResourceToken.resource_pk == resource_pk,
                     ResourceToken.is_active == True,  # noqa: E712
-                    Context.workspace_id == workspace_id,
-                    Context.deleted_at.is_(None),
                 )
                 .scalar_subquery()
             )
@@ -165,12 +184,7 @@ async def handle_get_resource_impact(
             )
             schema_version_subq = (
                 select(func.max(ResourceSchema.schema_version))
-                .join(Context, Context.resource_id == ResourceSchema.resource_id)
-                .where(
-                    ResourceSchema.resource_id == resource_id,
-                    Context.workspace_id == workspace_id,
-                    Context.deleted_at.is_(None),
-                )
+                .where(ResourceSchema.resource_pk == resource_pk)
                 .scalar_subquery()
             )
 
@@ -242,20 +256,24 @@ async def handle_get_resource_schema(
 
             from sqlalchemy import select
 
-            from models.auth import Context
             from models.resource import ResourceSchema
+            from services.resource_lookup import resolve_resource_pk
 
-            # Workspace-scope the schema lookup (resource_id is unique per workspace,
-            # not globally — join via Context to avoid cross-workspace leakage).
-            query = (
-                select(ResourceSchema)
-                .join(Context, Context.resource_id == ResourceSchema.resource_id)
-                .where(
-                    ResourceSchema.resource_id == resource_id,
-                    Context.workspace_id == workspace_id,
-                    Context.deleted_at.is_(None),
+            # Issue #390 Phase 2: resolve ``resource_pk`` once and filter the
+            # schema lookup by authoritative FK. ResourceSchema has no
+            # context_id, so the prior Context-JOIN pattern was defensive
+            # but not definitive — soft-deleted context slug reuse could
+            # still have surfaced another workspace's schema under the
+            # Phase 1 writer gap.
+            resource_pk = await resolve_resource_pk(db, workspace_id, resource_id)
+            if resource_pk is None:
+                return _error_response(
+                    "schema_not_found",
+                    f"No schema found for resource '{resource_id}'.",
+                    help="Use the REST API to create a schema first.",
                 )
-            )
+
+            query = select(ResourceSchema).where(ResourceSchema.resource_pk == resource_pk)
 
             schema_version = args.get("schema_version")
             if schema_version is not None:
@@ -344,11 +362,10 @@ async def handle_list_resource_tokens(
                 if boundary_err:
                     return boundary_err
 
-            from sqlalchemy import and_, exists, func
+            from sqlalchemy import and_, func
             from sqlalchemy import select as sa_select
 
-            from models.auth import Context
-            from models.resource import ResourceToken
+            from models.resource import Resource, ResourceToken
 
             include_revoked = args.get("include_revoked", True)
             try:
@@ -357,26 +374,30 @@ async def handle_list_resource_tokens(
             except (ValueError, TypeError):
                 return _error_response("validation_error", "limit and offset must be integers.")
 
-            # Workspace-scoped token query using EXISTS subquery
-            workspace_filter = exists().where(
-                Context.resource_id == ResourceToken.resource_id,
-                Context.workspace_id == workspace_id,
-                Context.deleted_at.is_(None),
-            )
-
-            conditions = [workspace_filter]
+            # Issue #390 Phase 2: filter tokens by ``resource_pk`` instead of
+            # the Context-JOIN / slug pattern. Workspace scope is enforced by
+            # joining against ``resources`` (workspace-scoped by table
+            # invariant ``uq_resources_workspace_resource_id``) — a token's
+            # resource_pk FK guarantees it belongs to exactly one workspace.
+            # Legacy resource_pk IS NULL rows are excluded from the list view;
+            # they are draining in production within the observation window
+            # before Phase C tightens the column to NOT NULL.
+            conditions = [Resource.workspace_id == workspace_id]
             if resource_id:
-                conditions.append(ResourceToken.resource_id == resource_id)
+                conditions.append(Resource.resource_id == resource_id)
             if not include_revoked:
                 conditions.append(ResourceToken.is_active == True)  # noqa: E712
 
             total_result = await db.execute(
-                sa_select(func.count(ResourceToken.id)).where(and_(*conditions))
+                sa_select(func.count(ResourceToken.id))
+                .join(Resource, Resource.id == ResourceToken.resource_pk)
+                .where(and_(*conditions))
             )
             total = total_result.scalar() or 0
 
             tokens_result = await db.execute(
                 sa_select(ResourceToken)
+                .join(Resource, Resource.id == ResourceToken.resource_pk)
                 .where(and_(*conditions))
                 .order_by(ResourceToken.created_at.desc())
                 .offset(offset)
@@ -492,7 +513,6 @@ async def handle_ingest_events(
                 )
 
             # Process events
-            from sqlalchemy import select
             from sqlalchemy.exc import IntegrityError
 
             from db.constraint_names import (
@@ -500,20 +520,24 @@ async def handle_ingest_events(
                 RESOURCE_EVENTS_UPSERT_UNIQUE,
                 integrity_error_constraint_name,
             )
-            from models.resource import Resource, ResourceEvent
+            from models.resource import ResourceEvent
+            from services.resource_lookup import resolve_resource_pk
 
-            # Resolve resources.id once per batch so the partial UNIQUE on
-            # (resource_pk, doc_id, version) actually applies. Returns None
-            # when the resources row has not been created yet (Phase 1
-            # legacy state) — see the HTTP path for the full rationale.
-            resource_pk = (
-                await db.execute(
-                    select(Resource.id).where(
-                        Resource.workspace_id == workspace_id,
-                        Resource.resource_id == resource_id,
-                    )
+            # Resolve resources.id once per batch via the shared chokepoint
+            # (Issue #390 Phase 2). If the Resource entity row does not
+            # exist, ingest cannot safely proceed — the before_insert
+            # invariant listener on ResourceEvent would raise IntegrityError
+            # for every event in the batch and the errors would be masked
+            # as generic "constraint violation" strings. Reject the batch
+            # up front with an actionable error so the caller knows to run
+            # ``setup_resource`` first.
+            resource_pk = await resolve_resource_pk(db, workspace_id, resource_id)
+            if resource_pk is None:
+                return _error_response(
+                    "resource_not_found",
+                    f"Resource '{resource_id}' has no backing entity row in your workspace.",
+                    help="Run setup_resource() first to bind the resource to a Context + Resource entity.",
                 )
-            ).scalar_one_or_none()
 
             created_ids: list[int] = []
             errors: list[dict] = []
@@ -790,7 +814,25 @@ async def handle_setup_resource(
             else:
                 actual_dimensions = settings.embedding_dimensions
 
-            # 7. Create context (direct ORM — ContextService.create_context commits internally)
+            # 7a. Upsert Resource entity (Issue #390 Phase 2). Every satellite
+            # table write (IndexerState, ResourceEvent, ResourceSchema,
+            # ResourceToken) references ``resources.id`` as ``resource_pk``;
+            # the entity row must exist before any satellite write fires its
+            # ``before_insert`` invariant listener. Pre-a97 deployments
+            # backfilled Resource rows from existing Contexts; post-a97
+            # setup_resource calls create the Resource row themselves to
+            # close that gap.
+            from services.resource_lookup import upsert_resource
+
+            resource_pk = await upsert_resource(
+                db,
+                workspace_id=workspace_id,
+                resource_id=resource_id,
+                name=args.get("display_name") or name,
+                created_by=user_id,
+            )
+
+            # 7b. Create context (direct ORM — ContextService.create_context commits internally)
             context = Context(
                 workspace_id=workspace_id,
                 name=name,
@@ -872,6 +914,8 @@ async def handle_setup_resource(
             manager = ResourceTokenManager(db)
             plaintext_token, token_record = await manager.create_token(
                 resource_id=resource_id,
+                resource_pk=resource_pk,
+                workspace_id=workspace_id,
                 description=args.get("description"),
                 quota_events_per_hour=quota_events_per_hour,
                 created_by=user_id,

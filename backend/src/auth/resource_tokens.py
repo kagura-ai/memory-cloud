@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+from uuid import UUID
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,6 +64,9 @@ class ResourceTokenManager:
     async def create_token(
         self,
         resource_id: str,
+        *,
+        resource_pk: UUID,
+        workspace_id: UUID,
         description: str | None = None,
         quota_events_per_hour: int = 1000,
         created_by: str | None = None,
@@ -71,6 +75,14 @@ class ResourceTokenManager:
 
         Args:
             resource_id: Resource identifier this token is scoped to
+            resource_pk: Authoritative ``resources.id`` UUID (Issue #390
+                Phase 2). Keyword-only so every caller is forced to resolve
+                it — the ``before_insert`` event listener on ResourceToken
+                rejects inserts with resource_id but no resource_pk, so a
+                forgotten value surfaces as a hard error at test time.
+            workspace_id: Owning workspace UUID (Issue #390 Phase 2).
+                Keyword-only for the same reason; populates the Phase 1
+                shadow column that Phase C (#325) will tighten to NOT NULL.
             description: Human-readable description
             quota_events_per_hour: Event ingestion quota (default: 1000/hour)
             created_by: User ID who created this token
@@ -89,9 +101,13 @@ class ResourceTokenManager:
         token = self._generate_token()
         token_hash = self._hash_token(token)
 
-        # Create database record
+        # Create database record. ``resource_pk`` + ``workspace_id`` are
+        # populated from the caller's resolved values so the event listener
+        # invariant (models/resource.py) passes.
         new_token = ResourceToken(
+            resource_pk=resource_pk,
             resource_id=resource_id,
+            workspace_id=workspace_id,
             token_hash=token_hash,
             description=description,
             quota_events_per_hour=quota_events_per_hour,
@@ -104,6 +120,8 @@ class ResourceTokenManager:
         logger.info(
             "resource_token_created",
             resource_id=resource_id,
+            resource_pk=str(resource_pk),
+            workspace_id=str(workspace_id),
             quota=quota_events_per_hour,
             created_by=created_by,
         )

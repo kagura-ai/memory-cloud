@@ -79,9 +79,15 @@ class TestResourceTokenManager:
     @pytest.mark.asyncio
     async def test_create_token_success(self, manager, mock_db):
         """Test successful token creation."""
-        # Execute
+        import uuid
+
+        # Issue #390 Phase 2: create_token now requires keyword-only
+        # resource_pk + workspace_id so the before_insert event listener
+        # invariant on ResourceToken passes.
         token, token_obj = await manager.create_token(
             resource_id="ec_products",
+            resource_pk=uuid.uuid4(),
+            workspace_id=uuid.uuid4(),
             description="Test EC integration",
             quota_events_per_hour=500,
             created_by="admin_user",
