@@ -103,14 +103,17 @@ async def get_graph_stats(
         - Shared context (``is_private = false``): any workspace member sees
           the full graph for the context.
         - Private context (``is_private = true``): only the private-context
-          creator can access the graph for that context. Non-creators are
-          denied at the context level by ``resolve_context_for_workspace_read``
-          and surface as 404 (same uniform disclosure as cross-workspace
-          probes), matching ``can_access_memory`` / ``check_context_access``
-          semantics across the rest of the API.
+          creator can access the graph for that context. The creator-only
+          rule matches ``can_access_memory`` (returns ``False`` for
+          non-creators) and ``check_context_access`` (raises 403 for
+          non-creators). This endpoint deliberately **remaps that denial
+          to 404**, unifying with the cross-workspace-probe shape so
+          neither path leaks existence — an intentional divergence from
+          ``check_context_access``'s 403 status code, not from its
+          authorization semantics.
         - Cross-workspace probes and private-context access by non-creators
           both surface as 404 (CWE-639 / OWASP A01 uniform disclosure)
-          rather than 403 to avoid existence leakage.
+          to avoid existence leakage.
 
     Args:
         context_id: Optional context ID. When absent, returns an empty graph
@@ -347,12 +350,22 @@ async def get_graph_data(
                     )
                 )
 
-        # total_nodes/total_edges are derived from ``all_edges`` already loaded
-        # above — a second ``stats()`` call would re-run 3 queries for data we
-        # already have. filtered_* reflect the post-limit/post-memory_types cut.
+        # Base totals on the post-Memory-scope set so they stay consistent
+        # with what the UI can actually render. A stale edge whose src/dst
+        # Memory has been soft-deleted or has drifted out of the resolved
+        # (workspace_id, context_id) scope is counted in ``all_edges`` but
+        # cannot be rendered — including it in ``total_edges`` would produce
+        # a "10 edges, 0 rendered" mismatch that confuses the viewer.
+        visible_node_ids = set(memories_map.keys())
+        visible_edges = [
+            edge
+            for edge in all_edges
+            if str(edge.src_id) in visible_node_ids and str(edge.dst_id) in visible_node_ids
+        ]
+        # total_* = post-Memory-scope; filtered_* = post-limit/post-memory_types cut.
         stats = {
-            "total_nodes": len(all_node_ids),
-            "total_edges": len(all_edges),
+            "total_nodes": len(visible_node_ids),
+            "total_edges": len(visible_edges),
             "filtered_nodes": len(nodes),
             "filtered_edges": len(edges),
         }
