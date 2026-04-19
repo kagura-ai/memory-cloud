@@ -362,9 +362,10 @@ async def handle_list_resource_tokens(
                 if boundary_err:
                     return boundary_err
 
-            from sqlalchemy import and_, func
+            from sqlalchemy import and_, exists, func
             from sqlalchemy import select as sa_select
 
+            from models.auth import Context
             from models.resource import Resource, ResourceToken
 
             include_revoked = args.get("include_revoked", True)
@@ -382,7 +383,20 @@ async def handle_list_resource_tokens(
             # Legacy resource_pk IS NULL rows are excluded from the list view;
             # they are draining in production within the observation window
             # before Phase C tightens the column to NOT NULL.
-            conditions = [Resource.workspace_id == workspace_id]
+            #
+            # Preserve the pre-#390 behavior of hiding tokens whose backing
+            # Context was soft-deleted — the existence filter runs as an
+            # EXISTS subquery against ``contexts`` so the CWE-639 fix
+            # (resource_pk-scoped reads) is not compromised.
+            active_context_exists = exists().where(
+                Context.workspace_id == Resource.workspace_id,
+                Context.resource_id == Resource.resource_id,
+                Context.deleted_at.is_(None),
+            )
+            conditions = [
+                Resource.workspace_id == workspace_id,
+                active_context_exists,
+            ]
             if resource_id:
                 conditions.append(Resource.resource_id == resource_id)
             if not include_revoked:
