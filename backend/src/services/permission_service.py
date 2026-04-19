@@ -247,7 +247,12 @@ class PermissionService:
             HTTPException(404): context does not exist, or the caller is not
                 a member of its owning workspace with the required role.
         """
-        context_result = await self.db.execute(select(Context).where(Context.id == context_id))
+        context_result = await self.db.execute(
+            select(Context).where(
+                Context.id == context_id,
+                Context.deleted_at.is_(None),
+            )
+        )
         context = context_result.scalar_one_or_none()
         if context is None:
             raise HTTPException(status_code=404, detail=f"Context {context_id} not found")

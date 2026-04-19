@@ -406,3 +406,33 @@ async def test_graph_data_cross_workspace_returns_404(visibility_scenario):
         )
 
     assert response.status_code == 404, response.text
+
+
+@pytest.mark.asyncio
+async def test_soft_deleted_context_returns_404(visibility_scenario, db_session):
+    """Soft-deleted context surfaces as 404 even for a legitimate workspace member.
+
+    ``resolve_context_for_workspace_read`` mirrors ``resolve_resource_by_slug``'s
+    ``Context.deleted_at.is_(None)`` filter — stale graph data from a deleted
+    context must not be reachable.
+    """
+    from models.auth import Context
+    from utils.datetime import utcnow
+
+    ctx_id = visibility_scenario["ctx_shared_id"]
+    await db_session.execute(
+        Context.__table__.update()
+        .where(Context.id == ctx_id)
+        .values(deleted_at=utcnow().replace(tzinfo=None))
+    )
+    await db_session.commit()
+
+    _as(visibility_scenario["owner_a_id"], visibility_scenario["ws_a_id"])
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get(
+            "/api/v1/graph/stats",
+            params={"context_id": str(ctx_id)},
+        )
+
+    assert response.status_code == 404, response.text
