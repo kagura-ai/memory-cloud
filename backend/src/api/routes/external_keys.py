@@ -294,12 +294,18 @@ async def create_external_key(
         # would have caught) doesn't escape with a 500 from the DB IntegrityError.
         if request.enabled:
             # Existence check only; .limit(1) makes scalar_one_or_none() resilient
-            # to legacy/dirty data that has multiple matching rows.
+            # to legacy/dirty data that has multiple matching rows. Scope the
+            # check to context_id IS NULL to match the partial unique index's
+            # (workspace_id, context_id, provider) key — create_external_key
+            # always stores context_id=None, so a context-scoped enabled key
+            # for the same provider legitimately coexists at the DB level and
+            # should not block creation of the workspace-scoped fallback.
             dup_result = await db.execute(
                 select(ExternalAPIKey)
                 .where(
                     and_(
                         ExternalAPIKey.workspace_id == current_workspace_id,
+                        ExternalAPIKey.context_id.is_(None),
                         ExternalAPIKey.provider == request.provider,
                         ExternalAPIKey.enabled.is_(True),
                     )
@@ -310,8 +316,9 @@ async def create_external_key(
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
-                        f"An enabled {request.provider} API key already exists in this "
-                        "workspace. Disable it first or update its value instead."
+                        f"An enabled workspace-scoped {request.provider} API key "
+                        "already exists in this workspace. Disable it first or "
+                        "update its value instead."
                     ),
                 )
 
@@ -494,17 +501,23 @@ async def toggle_external_key(
         # same provider exists doesn't surface as a 500 from the DB IntegrityError.
         if request.enabled and not bool(key.enabled):
             # Existence check only — same rationale as create_external_key.
+            # Scope to the same context_id as the row being toggled so the
+            # pre-check matches the (workspace_id, context_id, provider)
+            # partial unique index. key.context_id may be NULL (workspace-
+            # scoped) or a context UUID; the comparison handles both via
+            # the same IS-NULL-vs-equal split SQLAlchemy applies normally.
+            dup_conditions = [
+                ExternalAPIKey.workspace_id == current_workspace_id,
+                ExternalAPIKey.provider == key.provider,
+                ExternalAPIKey.enabled.is_(True),
+                ExternalAPIKey.id != key.id,
+            ]
+            if key.context_id is None:
+                dup_conditions.append(ExternalAPIKey.context_id.is_(None))
+            else:
+                dup_conditions.append(ExternalAPIKey.context_id == key.context_id)
             dup_result = await db.execute(
-                select(ExternalAPIKey)
-                .where(
-                    and_(
-                        ExternalAPIKey.workspace_id == current_workspace_id,
-                        ExternalAPIKey.provider == key.provider,
-                        ExternalAPIKey.enabled.is_(True),
-                        ExternalAPIKey.id != key.id,
-                    )
-                )
-                .limit(1)
+                select(ExternalAPIKey).where(and_(*dup_conditions)).limit(1)
             )
             if dup_result.scalar_one_or_none():
                 raise HTTPException(
