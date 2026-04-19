@@ -155,29 +155,11 @@ async def get_indexer_status(
     contract is maintained so existing integrations continue to work without
     modification after the v0.12.0 UUID FK migration.
 
-    Authorization (Issue #389):
-        - ``WorkspaceOwner``: non-owner roles (admin / member / viewer) are
-          rejected with 403 before the handler runs. ``resource_token``
-          credentials are write-scoped and are rejected by the same
-          dependency (pinned by isolation tests).
-        - Workspace boundary: resolved via
-          ``PermissionService.resolve_resource_by_slug``, which returns 404
-          (not 403) when the slug exists only in another workspace. 404 keeps
-          cross-workspace existence from leaking (CWE-639 / OWASP A01).
-
-    Args:
-        resource_id: Resource slug from the URL path.
-        owner: Workspace owner tuple ``(user_id, workspace_id)`` from the
-            ``WorkspaceOwner`` dependency.
-        db: Async DB session.
-
-    Returns:
-        IndexerStatusResponse with state + last 5 events.
-
-    Raises:
-        HTTPException(401): no valid authentication.
-        HTTPException(403): non-owner role.
-        HTTPException(404): resource not found OR not accessible by the caller.
+    Owner-only (#389): ``WorkspaceOwner`` rejects non-owners with 403
+    (``resource_token`` write-scoped credentials are rejected by the same
+    dependency — pinned by isolation tests); ``resolve_resource_by_slug``
+    returns 404 (CWE-639 / OWASP A01) on cross-workspace probes so
+    existence does not leak.
     """
     user_id, _ = owner
     permissions = PermissionService(db)

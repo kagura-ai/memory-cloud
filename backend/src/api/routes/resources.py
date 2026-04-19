@@ -81,44 +81,12 @@ async def list_resources(
     non-null ``resource_id``, with aggregated counts joined from the
     resource_tokens, memories, resource_schemas, and resource_events tables.
 
-    Issue #389: workspace-owner-only. Non-owners (admin / member / viewer)
-    are rejected with 403 at the ``WorkspaceOwner`` dependency before the
-    handler runs. The legacy ``get_accessible_contexts`` filter below is
-    retained for defense-in-depth — for owners it is a no-op (they see every
-    context in the workspace), but it keeps the read path safe if the role
-    gate ever regresses.
-
-    Args:
-        owner: Workspace owner tuple ``(user_id, workspace_id)`` from the
-            ``WorkspaceOwner`` dependency.
-        db: Database session.
-
-    Returns:
-        ResourceListResponse with resources[] and total count.
-
-    Raises:
-        HTTPException(403): Non-owner role (enforced by ``WorkspaceOwner``).
+    Owner-only (#389): ``WorkspaceOwner`` rejects non-owners with 403.
+    ``get_accessible_contexts`` below is a no-op for owners and retained
+    as defense-in-depth against a role-gate regression.
 
     Example:
         GET /api/v1/resources
-
-        Response:
-        {
-            "resources": [
-                {
-                    "resource_id": "ec_products",
-                    "context_id": "550e8400-...",
-                    "context_name": "ec-products",
-                    "context_display_name": "EC Products",
-                    "token_count": 2,
-                    "memory_count": 1234,
-                    "current_schema_version": 3,
-                    "created_at": "2026-03-01T12:00:00Z",
-                    "updated_at": "2026-04-14T09:15:30Z"
-                }
-            ],
-            "total": 1
-        }
     """
     user_id, current_workspace_id = owner
     logger.info("list_resources_request", user_id=user_id)

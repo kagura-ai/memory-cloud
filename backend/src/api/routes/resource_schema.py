@@ -104,33 +104,8 @@ async def get_schema(
 ):
     """Get resource schema (latest or specific version).
 
-    Authorization (Issue #389):
-        - ``WorkspaceOwner``: non-owner roles (admin / member / viewer) are
-          rejected with 403 before the handler runs.
-        - ``PermissionService.resolve_resource_by_slug``: resolves the slug
-          to a workspace-scoped ``Context`` and returns 404 (uniform
-          disclosure, CWE-639) if the slug exists only in another workspace.
-
-    The downstream ``ResourceSchema`` query still filters by the slug alone
-    during the v0.12.2 hotfix — the narrower residual CWE-639 / slug-reuse
-    leak is tracked in #390 for v0.13.0 together with the Phase 2 writer
-    migration that populates ``resource_pk``.
-
-    Args:
-        resource_id: Resource slug (URL path).
-        owner: Workspace owner tuple ``(user_id, workspace_id)`` from the
-            ``WorkspaceOwner`` dependency.
-        schema_version: Optional schema version (default: latest).
-        db: Database session.
-
-    Returns:
-        Schema with field definitions.
-
-    Raises:
-        HTTPException(403): Non-owner role (enforced by ``WorkspaceOwner``).
-        HTTPException(404): Slug not found OR lives in another workspace
-            (enforced by ``resolve_resource_by_slug``).
-        NotFoundException: No schema rows for the resolved resource.
+    Owner-only (#389): ``WorkspaceOwner`` rejects non-owners with 403;
+    ``resolve_resource_by_slug`` returns 404 on cross-workspace probes.
 
     Example:
         GET /api/v1/resources/ec_products/schema
@@ -288,43 +263,14 @@ async def get_resource_impact(
 ):
     """Get resource change impact information.
 
-    Issue #266: Shows the impact of creating/modifying a schema for this resource.
-
-    Authorization (Issue #389):
-        - ``WorkspaceOwner``: non-owner roles (admin / member / viewer) are
-          rejected with 403 before the handler runs.
-        - ``PermissionService.resolve_resource_by_slug``: workspace boundary
-          + 404 uniform disclosure (CWE-639) for cross-workspace probes —
-          supersedes the prior manual ``User.current_workspace_id`` /
-          ``Context`` lookup.
-
-    The downstream impact aggregates still filter by the slug alone during
-    the v0.12.2 hotfix. Narrower residual CWE-639 leak (slug reuse after
-    soft-delete) is tracked in #390.
-
-    Args:
-        resource_id: Resource slug (URL path).
-        owner: Workspace owner tuple ``(user_id, workspace_id)`` from the
-            ``WorkspaceOwner`` dependency.
-        db: Database session.
-
-    Returns:
-        Impact information including token count, memory count, and current schema version.
-
-    Raises:
-        HTTPException(403): Non-owner role.
-        HTTPException(404): Slug not found OR lives in another workspace.
+    Issue #266: Shows the impact of creating/modifying a schema.
+    Owner-only (#389): same two-layer gate as ``get_schema`` —
+    ``WorkspaceOwner`` → 403 for non-owners, ``resolve_resource_by_slug`` →
+    404 on cross-workspace probes. The prior manual workspace-boundary
+    SELECT block was superseded by the helper.
 
     Example:
         GET /api/v1/resources/ec_products/impact
-
-        Response:
-        {
-            "resource_id": "ec_products",
-            "token_count": 3,
-            "memory_count": 1234,
-            "current_schema_version": 2
-        }
     """
     user_id, _ = owner
     logger.info("get_resource_impact_request", resource_id=resource_id, user_id=user_id)

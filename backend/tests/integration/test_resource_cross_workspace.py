@@ -63,15 +63,6 @@ async def cross_workspace_scenario(db_session):
         daily_api_limit=50000,
         weekly_api_limit=250000,
     )
-    db_session.add_all([ws_a, ws_b])
-    db_session.add_all(
-        [
-            WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role="owner"),
-            WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role="owner"),
-        ]
-    )
-    await db_session.commit()
-
     ctx_b = Context(
         id=uuid4(),
         workspace_id=ws_b.id,
@@ -79,7 +70,15 @@ async def cross_workspace_scenario(db_session):
         resource_id=SLUG_IN_WORKSPACE_B,
         created_by=owner_b_id,
     )
-    db_session.add(ctx_b)
+    db_session.add_all(
+        [
+            ws_a,
+            ws_b,
+            WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role="owner"),
+            WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role="owner"),
+            ctx_b,
+        ]
+    )
     await db_session.commit()
 
     async def override_get_db():
