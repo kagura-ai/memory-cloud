@@ -56,40 +56,50 @@ branch_labels = None
 depends_on = None
 
 
-# Tables that need orphan backfill. ``has_context_id`` controls whether the
-# backfill JOIN can use ``context_id`` for workspace disambiguation.
-_SATELLITE_TABLES = [
-    ("resource_events", False),
-    ("resource_schemas", False),
-    ("indexer_state", True),
-    ("resource_tokens", False),
-]
+# Tables that need orphan backfill, classified by which column (if any) gives
+# them a workspace-safe disambiguation path. The audit only runs on
+# slug-only tables (the leftmost category). Tables with a usable
+# disambiguation column skip the audit and use a workspace-scoped JOIN.
+#
+# - ``slug_only``: no workspace-scoped FK. Backfill via direct ``resources``
+#   JOIN with ambiguity audit prerequisite. Used for ``resource_events``
+#   and ``resource_schemas``.
+# - ``has_context_id``: FK to ``contexts`` gives workspace via
+#   ``contexts.workspace_id``. Backfill JOIN through contexts. Used for
+#   ``indexer_state``.
+# - ``has_workspace_id``: nullable shadow ``workspace_id`` FK (a97 Phase 1
+#   backfilled existing rows; new writers populate it). When populated,
+#   backfill via (workspace_id, resource_id) is safe even under slug reuse.
+#   Rows with ``workspace_id IS NULL`` fall back to the slug-only path
+#   with its ambiguity audit. Used for ``resource_tokens``.
+_SATELLITE_TABLES_SLUG_ONLY = ("resource_events", "resource_schemas")
+_SATELLITE_TABLES_HAS_WORKSPACE_ID = ("resource_tokens",)
+# ``indexer_state`` (has_context_id) is handled inline by ``_backfill_indexer_state``;
+# no constant tuple needed since it's a single-table special case.
 
 
 def _audit_cross_workspace_ambiguity(conn: sa.Connection) -> None:
-    """Abort the migration if any satellite slug maps to >1 live workspace.
+    """Abort the migration if any slug-only orphan maps to >1 live workspace.
 
     This is the canonical "0635c675 pattern" applied to Phase 2 orphan
     backfill. See the module docstring for the exploit shape being
-    prevented.
+    prevented. The audit runs ONLY on tables that have no workspace-safe
+    disambiguation path — ``has_context_id`` and ``has_workspace_id``
+    tables are workspace-safe by JOIN construction and auditing them
+    would falsely abort whenever two workspaces legitimately share a slug
+    (common case — slugs are per-workspace unique, not globally unique).
+    ``resource_tokens`` additionally scopes the audit to
+    ``workspace_id IS NULL`` rows, since rows with a populated
+    ``workspace_id`` are workspace-safe via that column.
     """
     ambiguities: list[str] = []
-    # Only audit tables that CANNOT disambiguate via ``context_id`` —
-    # those whose backfill JOIN key is slug-only. ``indexer_state`` has a
-    # ``context_id`` FK that pins the workspace via ``contexts.workspace_id``,
-    # so ``_backfill_indexer_state`` already resolves the correct Resource
-    # row per (workspace_id, resource_id) tuple even when the slug maps to
-    # >1 live Resource globally. Auditing indexer_state would falsely abort
-    # whenever two workspaces legitimately share a slug (a common case —
-    # slugs are per-workspace unique, not globally unique). Skip those tables
-    # here and let the workspace-aware JOIN handle them safely in step 2.
-    for table_name, has_context_id in _SATELLITE_TABLES:
-        if has_context_id:
-            continue
-        # Table name is a module-constant from ``_SATELLITE_TABLES``; slug
-        # values never appear in the f-string (only the whole-table scan
-        # does). Matches the a97 precedent (``# noqa: S608 -- table names
-        # are module-constant``) for the same shape.
+
+    # Straight slug-only tables: resource_events, resource_schemas.
+    # Any orphan row whose slug maps to >1 live Resource is ambiguous.
+    for table_name in _SATELLITE_TABLES_SLUG_ONLY:
+        # Table name is a module-constant; slug values never appear in the
+        # f-string (only the whole-table scan does). Matches the a97
+        # precedent (``# noqa: S608 -- table names are module-constant``).
         result = conn.execute(
             sa.text(
                 f"""
@@ -107,6 +117,29 @@ def _audit_cross_workspace_ambiguity(conn: sa.Connection) -> None:
         if result:
             slugs = ", ".join(repr(row[0]) for row in result)
             ambiguities.append(f"{table_name}: {slugs}")
+
+    # resource_tokens special case: only audit rows that lack workspace_id.
+    # Rows with workspace_id populated can backfill via
+    # (workspace_id, resource_id) JOIN without ambiguity risk.
+    for table_name in _SATELLITE_TABLES_HAS_WORKSPACE_ID:
+        result = conn.execute(
+            sa.text(
+                f"""
+                SELECT DISTINCT s.resource_id
+                FROM {table_name} s
+                WHERE s.resource_pk IS NULL
+                  AND s.workspace_id IS NULL
+                  AND (
+                    SELECT COUNT(*)
+                    FROM resources r
+                    WHERE r.resource_id = s.resource_id
+                  ) > 1
+                """  # noqa: S608 -- table names are module-constant
+            )
+        ).fetchall()
+        if result:
+            slugs = ", ".join(repr(row[0]) for row in result)
+            ambiguities.append(f"{table_name} (workspace_id IS NULL): {slugs}")
 
     if ambiguities:
         lines = "\n  ".join(ambiguities)
@@ -151,8 +184,9 @@ def _backfill_slug_only_table(conn: sa.Connection, table_name: str) -> None:
 
     Precondition: the cross-workspace ambiguity audit has confirmed every
     orphan slug maps to at most one ``resources`` row, so the JOIN is
-    deterministic. ``resource_events``, ``resource_schemas``, and
-    ``resource_tokens`` all take this path.
+    deterministic. Used for ``resource_events`` and ``resource_schemas``;
+    ``resource_tokens`` has its own workspace-scoped path via
+    ``_backfill_resource_tokens``.
     """
     conn.execute(
         sa.text(
@@ -163,6 +197,49 @@ def _backfill_slug_only_table(conn: sa.Connection, table_name: str) -> None:
             WHERE s.resource_pk IS NULL
               AND r.resource_id = s.resource_id
             """  # noqa: S608 -- table_name is module-constant
+        )
+    )
+
+
+def _backfill_resource_tokens(conn: sa.Connection) -> None:
+    """Backfill ``resource_tokens.resource_pk`` in two passes.
+
+    Pass 1 (workspace-safe): rows where ``workspace_id`` is populated
+    JOIN on ``(workspace_id, resource_id)`` — this pins the correct
+    Resource row even when the slug is globally reused across workspaces,
+    so no audit prerequisite.
+
+    Pass 2 (slug-only fallback): rows where ``workspace_id IS NULL``
+    (pre-a97 legacy writes that predate the shadow column) can only JOIN
+    on slug. These depend on the cross-workspace ambiguity audit having
+    already passed.
+    """
+    # Pass 1: workspace-scoped JOIN — safe under slug reuse.
+    conn.execute(
+        sa.text(
+            """
+            UPDATE resource_tokens t
+            SET resource_pk = r.id
+            FROM resources r
+            WHERE t.resource_pk IS NULL
+              AND t.workspace_id IS NOT NULL
+              AND r.workspace_id = t.workspace_id
+              AND r.resource_id = t.resource_id
+            """
+        )
+    )
+    # Pass 2: slug-only for legacy rows; audit has already ruled out
+    # ambiguity for workspace_id IS NULL + resource_pk IS NULL shape.
+    conn.execute(
+        sa.text(
+            """
+            UPDATE resource_tokens t
+            SET resource_pk = r.id
+            FROM resources r
+            WHERE t.resource_pk IS NULL
+              AND t.workspace_id IS NULL
+              AND r.resource_id = t.resource_id
+            """
         )
     )
 
@@ -194,19 +271,20 @@ def _backfill_resource_tokens_workspace_id(conn: sa.Connection) -> None:
 def upgrade() -> None:
     conn = op.get_bind()
 
-    # Step 1: abort if any orphan slug is ambiguous across workspaces.
+    # Step 1: abort if any slug-only orphan is ambiguous across workspaces.
     _audit_cross_workspace_ambiguity(conn)
 
-    # Step 2: backfill the context-scoped table first (safest JOIN shape).
+    # Step 2: backfill the context-scoped table (safest JOIN shape).
     _backfill_indexer_state(conn)
 
-    # Step 3: backfill the three slug-only satellite tables.
-    for table_name, has_context_id in _SATELLITE_TABLES:
-        if has_context_id:
-            continue  # indexer_state handled above
+    # Step 3: backfill resource_tokens (workspace-safe pass + slug-only fallback).
+    _backfill_resource_tokens(conn)
+
+    # Step 4: backfill the pure slug-only satellite tables (events, schemas).
+    for table_name in _SATELLITE_TABLES_SLUG_ONLY:
         _backfill_slug_only_table(conn, table_name)
 
-    # Step 4: finish a97 Phase 1's ``workspace_id`` backfill for any
+    # Step 5: finish a97 Phase 1's ``workspace_id`` backfill for any
     # newly-populated ``resource_pk`` values on resource_tokens.
     _backfill_resource_tokens_workspace_id(conn)
 
