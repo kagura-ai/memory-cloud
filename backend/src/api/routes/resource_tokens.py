@@ -345,14 +345,22 @@ async def create_resource_token(
         # ``workspace_id`` so the ResourceToken insert satisfies the
         # before_insert event listener invariant (models/resource.py).
         # The context-existence check above already confirmed the Resource
-        # is bound to this workspace, so resolve_resource_pk should always
-        # return a non-None UUID; guard defensively for the race where the
-        # resource is deleted between the two queries.
+        # is bound to this workspace; if resolve_resource_pk still returns
+        # None it indicates either a delete race between the two queries or
+        # a data-integrity gap (Context exists without a backing Resource
+        # row), NOT an authorization failure. Surface 409 CONFLICT with an
+        # actionable hint so operators can distinguish "not authorized" from
+        # "resource binding is inconsistent" in logs and error reports.
         resource_pk = await resolve_resource_pk(db, workspace_id, data.resource_id)
         if resource_pk is None:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Resource ID '{data.resource_id}' not found in your workspace or you don't have access to it.",
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Resource ID '{data.resource_id}' exists as a Context but has no "
+                    "backing Resource entity row. This is either a delete race or a "
+                    "data-integrity gap. Retry in a moment, or run setup_resource() "
+                    "to rebind."
+                ),
             )
 
         # Create token (returns plaintext + token object)

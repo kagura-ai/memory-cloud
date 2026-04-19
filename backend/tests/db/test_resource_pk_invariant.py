@@ -27,6 +27,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
 
 from models.resource import (
@@ -123,3 +124,27 @@ class TestResourcePkInvariantAcceptsValidInsert:
             quota_events_per_hour=1000,
         )
         _enforce_resource_pk_invariant(None, None, token)
+
+
+class TestResourcePkInvariantEventListenerRegistration:
+    """Pin the event wiring itself, not just the listener function body.
+
+    Copilot catch on PR #392 loop 2: calling ``_enforce_resource_pk_invariant``
+    directly verifies the function's behavior but would still pass if the
+    ``event.listen(...)`` wiring at the bottom of ``models/resource.py`` were
+    accidentally removed — producing the silent orphan-row regression this
+    module is supposed to prevent. Asserting ``event.contains(...)`` locks the
+    wiring at test time.
+    """
+
+    @pytest.mark.parametrize(
+        "model",
+        [ResourceEvent, ResourceSchema, IndexerState, ResourceToken],
+    )
+    def test_before_insert_listener_is_registered(self, model):
+        """Every satellite model must carry the _enforce_resource_pk_invariant hook."""
+        assert event.contains(model, "before_insert", _enforce_resource_pk_invariant), (
+            f"{model.__name__} is missing the 'before_insert' invariant listener. "
+            "The event.listen(...) loop at the bottom of models/resource.py must "
+            "register _enforce_resource_pk_invariant on every satellite model."
+        )

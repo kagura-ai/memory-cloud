@@ -19,11 +19,11 @@ Phase 2 (Issue #390, v0.12.3): all application writers now populate
 ``resource_pk`` on insert, and the ``before_insert`` event listener at
 the bottom of this module enforces the invariant at the ORM layer —
 inserts with ``resource_id`` set but ``resource_pk`` NULL raise
-``IntegrityError``. Orphan backfill migration
-``b01_resource_pk_writer_phase2`` closes any rows written between a97
-and the writer migration, and includes a cross-workspace slug
-ambiguity audit that aborts on the rare soft-delete-plus-reuse shape
-the CWE-639 fix is meant to close.
+``IntegrityError``. Orphan backfill migration ``b01_resource_pk_ph2``
+(file: ``b01_resource_pk_writer_phase2.py``) closes any rows written
+between a97 and the writer migration, and includes a cross-workspace
+slug ambiguity audit that aborts on the rare soft-delete-plus-reuse
+shape the CWE-639 fix is meant to close.
 
 Phase C (Issue #325, v0.13.0 follow-up): after a prod observation
 window confirms no new NULL rows, ``resource_pk`` (and
