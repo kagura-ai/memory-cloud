@@ -2,13 +2,9 @@
 
 Release notes are published on [GitHub Releases](https://github.com/kagura-ai/memory-cloud/releases).
 
-## v0.12.1 — Unreleased
+## [v0.12.3](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.12.3) — 2026-04-19
 
-### Added (preview, disabled by default)
-- **BM25 IDF drift observability** (#343, infrastructure only): new `bm25_idf_drift_log` table, daily cron computing per-context Population Stability Index (PSI) of memory-only vs collection-global BM25 IDF distributions, and admin API at `/api/v1/admin/bm25-drift/`. Cron is gated by `BM25_DRIFT_CRON_ENABLED=false` and remains off in production until v0.14.0 (blocked on #359 Privacy Policy and #360 right-to-erasure). The OpenAPI tag is `bm25-drift (preview)` and only the manual trigger (`POST /admin/bm25-drift/run`) is intended for use in v0.12.1, scoped to dev/staging verification. PSI is computed per Stats PhD spec (rare-term filter via Cochran's rule, 10 quantile bins on `IDF_memory`, ε-smoothing) with `M >= 100` and `|T| >= 50` min-N gates that emit `psi_status="insufficient_data"` rather than a misleading scalar. Stored term entries are mmh3 hashes (no plaintext token storage).
-
-### Database
-- Added migration `a98_bm25_idf_drift_log`: `bm25_idf_drift_log` table with `psi NUMERIC(10,6)`, JSONB `top_divergent_terms`, `psi_status` CHECK enum, an integrity CHECK that pins `psi IS NULL ⇔ psi_status='insufficient_data'`, and three indexes including a partial alerted-status index. CASCADE deletes on context removal so right-to-erasure (#360) sweeps drift rows without an extra hop.
+Consolidated release rolling up the planned v0.12.1, v0.12.2, and v0.12.3 content into a single tag. Full notes on the [GitHub Release page](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.12.3).
 
 ## [v0.12.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.12.0) — 2026-04-16
 
