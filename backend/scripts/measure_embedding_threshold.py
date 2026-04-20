@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from sqlalchemy import func, select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
+from sqlalchemy.orm import load_only  # noqa: E402
 
 from db.base import _get_session_factory  # noqa: E402
 from db.qdrant import (  # noqa: E402
@@ -126,9 +127,19 @@ async def count_memories(db: AsyncSession, context_id: UUID) -> int:
 
 
 async def sample_memories(db: AsyncSession, context_id: UUID, n: int) -> list[Memory]:
-    """Random-sample n searchable memories from a context."""
+    """Random-sample n searchable memories from a context.
+
+    Uses ``load_only`` to fetch the four columns this script actually reads
+    (``id``, ``user_id``, ``workspace_id``, ``context_id``) instead of pulling
+    heavy ``content``/``summary``/``details`` fields that would otherwise
+    dominate the round-trip payload for large contexts. ``ORDER BY random()``
+    is retained for statistical correctness — offset-based sampling on a
+    canonical order would bias the sample toward clustered regions of the
+    context (e.g. a single user's memories).
+    """
     stmt = (
         select(Memory)
+        .options(load_only(Memory.id, Memory.user_id, Memory.workspace_id, Memory.context_id))
         .where(
             Memory.context_id == context_id,
             Memory.deleted_at.is_(None),
