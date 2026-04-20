@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import get_current_user
+from auth.dependencies import require_workspace_admin
 from db.base import get_db
 from services import stripe_service
 from utils.logger import get_logger
@@ -41,16 +41,14 @@ class PortalResponse(BaseModel):
 @router.post("/checkout", response_model=CheckoutResponse)
 async def create_checkout(
     request: CheckoutRequest,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_workspace_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """Create a Stripe Checkout Session for plan upgrade.
 
-    Owner-only. Redirects user to Stripe-hosted payment page.
+    Admin/owner-only (Issue #398). Redirects user to Stripe-hosted payment page.
     """
-    workspace_id = user.get("current_workspace_id")
-    if not workspace_id:
-        raise HTTPException(status_code=400, detail="No workspace selected")
+    workspace_id = user["current_workspace_id"]
 
     if request.plan_name not in ("basic", "pro"):
         raise HTTPException(status_code=400, detail="Invalid plan. Must be 'basic' or 'pro'")
@@ -99,16 +97,14 @@ async def handle_webhook(
 @router.get("/portal", response_model=PortalResponse)
 async def get_portal(
     return_url: str,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_workspace_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """Get Stripe Customer Portal URL.
 
-    Owner-only. Allows managing payment methods and subscriptions.
+    Admin/owner-only (Issue #398). Allows managing payment methods and subscriptions.
     """
-    workspace_id = user.get("current_workspace_id")
-    if not workspace_id:
-        raise HTTPException(status_code=400, detail="No workspace selected")
+    workspace_id = user["current_workspace_id"]
 
     try:
         portal_url = await stripe_service.create_portal_session(
