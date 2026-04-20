@@ -9,7 +9,9 @@
  */
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { hasWorkspaceRole } from "@/lib/auth/rbac";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
@@ -68,6 +70,7 @@ import { useToast } from "@/hooks/use-toast";
 export default function WorkspaceMembersPage() {
   const t = useTranslations("workspace");
   const tCommon = useTranslations("common");
+  const router = useRouter();
   const {
     currentWorkspaceId,
     currentWorkspace,
@@ -75,6 +78,19 @@ export default function WorkspaceMembersPage() {
   } = useWorkspace();
   const { user } = useAuth();
   const { toast } = useToast();
+
+  // Issue #398: admin/owner only — redirect member/viewer to dashboard.
+  // Mirrors settings/general/page.tsx:83-90 pattern. The workspaceLoading
+  // guard prevents a flash-redirect while WorkspaceContext hydrates.
+  useEffect(() => {
+    if (workspaceLoading) return;
+    if (
+      currentWorkspace &&
+      !hasWorkspaceRole(currentWorkspace.current_user_role, "admin")
+    ) {
+      router.push("/workspace/dashboard");
+    }
+  }, [currentWorkspace, workspaceLoading, router]);
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [invitations, setInvitations] = useState<WorkspaceInvitation[]>([]);
   const [loading, setLoading] = useState(true);

@@ -105,6 +105,7 @@ const navigationGroups: NavGroup[] = [
         href: "/workspace/members",
         icon: Users,
         showMemberCount: true,
+        requiredWorkspaceRole: "admin", // Issue #398: hide from member/viewer
       },
     ],
   },
