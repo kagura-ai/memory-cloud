@@ -286,12 +286,15 @@ class NeuralMemoryEdge(Base):
     src_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     dst_id = Column(UUID(as_uuid=True), nullable=False, index=True)
 
-    # Migration 062: 3-level isolation (workspace, context, user)
-    workspace_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+    # Migration 062 added these as nullable; b03_396 backfilled NULL rows
+    # from endpoint memories and enforced NOT NULL via CHECK constraint +
+    # SET NOT NULL so the context_id FK's ON DELETE CASCADE cannot be
+    # bypassed (prior NULL rows were a GDPR right-to-erasure death zone).
+    workspace_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     context_id = Column(
         UUID(as_uuid=True),
         ForeignKey("contexts.id", ondelete="CASCADE"),
-        nullable=True,
+        nullable=False,
         index=True,
     )
 
