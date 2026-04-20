@@ -209,10 +209,10 @@ describe("ContextDetailPage deep-link tab guard (#398)", () => {
     },
   );
 
-  // PR #399 review (Copilot): on a hard reload `currentWorkspace` is null
-  // while WorkspaceContext hydrates. Without the workspace-loaded guard,
-  // canSeeAdminTabs collapses to false and the snap effect would clobber
-  // an admin's deep-link target before their role resolves.
+  // On a hard reload `currentWorkspace` is null while WorkspaceContext
+  // hydrates. Without the workspace-loaded guard, canSeeAdminTabs collapses
+  // to false and the snap effect would clobber an admin's deep-link target
+  // before their role resolves.
   it("does NOT snap URL while WorkspaceContext is still loading (currentWorkspace=null)", async () => {
     mockUseParams.mockReturnValue({ id: "ctx-1" });
     mockUseSearchParams.mockReturnValue(new URLSearchParams("tab=settings"));
@@ -222,12 +222,15 @@ describe("ContextDetailPage deep-link tab guard (#398)", () => {
     mockGetContext.mockResolvedValue(makeContext());
 
     render(<ContextDetailPage />);
-    // Give effects time to flush.
-    await new Promise((r) => setTimeout(r, 50));
-    const overviewSnaps = mockReplace.mock.calls.filter(
-      (c) =>
-        typeof c[0] === "string" && (c[0] as string).includes("tab=overview"),
-    );
-    expect(overviewSnaps.length).toBe(0);
+    // Tie the assertion to React's effect processing rather than a fixed
+    // wall-clock delay (which is CI-flaky). The snap effect must NOT push
+    // a tab=overview replace while currentWorkspace is null.
+    await waitFor(() => {
+      const overviewSnaps = mockReplace.mock.calls.filter(
+        (c) =>
+          typeof c[0] === "string" && (c[0] as string).includes("tab=overview"),
+      );
+      expect(overviewSnaps.length).toBe(0);
+    });
   });
 });

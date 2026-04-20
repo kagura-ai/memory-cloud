@@ -104,18 +104,17 @@ export default function ContextDetailPage() {
     fetchContext();
   }, [fetchContext]);
 
-  // Issue #398: snap the URL to ?tab=overview when a member/viewer arrives
-  // on an admin-only tab via deep-link. useTabParam's allowedValues already
-  // clamps the *rendered* value to overview, but useTabParam only auto-promotes
-  // the URL when the param is absent (not when it is present-but-invalid),
-  // so we compare the raw URL value here — checking `tab` would always see
-  // "overview" for non-admins and the snap would never fire.
+  // Snap the URL to ?tab=overview when a member/viewer arrives on an
+  // admin-only tab via deep-link. useTabParam's allowedValues already clamps
+  // the *rendered* value to overview, but only auto-promotes the URL when the
+  // param is absent — not when it's present-but-invalid. Compare the raw URL
+  // value here; reading `tab` would always see "overview" for non-admins so
+  // the snap would never fire.
   //
-  // PR #399 review (Copilot): the `currentWorkspace` guard is load-bearing.
-  // During WorkspaceContext hydration `currentWorkspace` is null, which makes
-  // `canSeeAdminTabs` false — without this guard, an admin hard-reloading
-  // ?tab=settings would have their URL snapped back to overview before the
-  // role resolved, losing the deep-link target.
+  // The `!currentWorkspace` guard is load-bearing: during WorkspaceContext
+  // hydration `currentWorkspace` is null, which collapses canSeeAdminTabs to
+  // false. Without the guard, an admin hard-reloading ?tab=settings would
+  // have their URL snapped back to overview before the role resolved.
   const searchParams = useSearchParams();
   const rawTab = searchParams.get("tab");
   useEffect(() => {

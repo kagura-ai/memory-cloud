@@ -327,11 +327,11 @@ export function OverviewTabPanel({
               </Table>
             ) : (
               <div className="text-center py-8 text-gray-500">
-                {/* PR #399 review (Copilot): the card is now gated to admin/
-                    owner via canSeeUserActivity above. Reaching the null
-                    branch means a real fetch failure (network/5xx), not an
-                    authorization denial — drop the misleading "requires
-                    admin role" sub-copy. */}
+                {/* The card is gated to admin/owner via canSeeUserActivity
+                    above, so reaching the null branch means a real fetch
+                    failure (network/5xx) rather than an authorization
+                    denial. The pre-gating "requires admin role" sub-copy
+                    would be misleading here. */}
                 {userActivity === null ? (
                   <p>{t("userActivityNotAvailable")}</p>
                 ) : (

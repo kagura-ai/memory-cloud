@@ -431,13 +431,67 @@ async def require_workspace_owner(
     return user_id, workspace_id
 
 
+async def require_workspace_admin_session(
+    user: dict = Depends(require_session_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Verify user is workspace admin or owner — session auth only.
+
+    Issue #398: billing checkout/portal use this variant so a leaked API key
+    cannot initiate Stripe checkout sessions on behalf of an admin/owner.
+    Mirrors require_workspace_admin but rejects API-key auth at the door
+    (require_session_auth raises 403 for any Bearer token).
+
+    Args:
+        user: Current authenticated user (session only)
+        db: Database session
+
+    Returns:
+        User info dict (full dict, like require_workspace_member)
+
+    Raises:
+        HTTPException: 400 if no workspace selected
+        HTTPException: 403 if API key was provided OR if viewer/member
+    """
+    user_id = user.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    workspace_id = user.get("current_workspace_id")
+    if not workspace_id:
+        raise HTTPException(
+            status_code=400, detail="No workspace selected. Please select a workspace first."
+        )
+
+    from services.permission_service import PermissionService
+
+    perm_service = PermissionService(db)
+    try:
+        await perm_service.check_workspace_admin(user_id, workspace_id)
+    except HTTPException as exc:
+        logger.warning(
+            "workspace_admin_session_denied",
+            user_id=user_id,
+            workspace_id=str(workspace_id),
+            status_code=exc.status_code,
+            detail=exc.detail if isinstance(exc.detail, str) else None,
+        )
+        raise
+
+    logger.info("workspace_admin_session_verified", user_id=user_id, workspace_id=str(workspace_id))
+
+    return user
+
+
 async def require_workspace_admin(
     user: dict = Depends(get_user_from_api_key_or_session),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Verify user is workspace admin or owner.
 
-    Issue #398: billing checkout/portal and similar admin-level operations.
+    Issue #398: admin-level operations that can be invoked via session OR API
+    key. For UI-only actions where API-key auth would be inappropriate (e.g.
+    billing checkout), use require_workspace_admin_session instead.
     Mirrors require_workspace_owner but also accepts the 'admin' role.
     Accepts both session auth and API key auth.
 
@@ -535,4 +589,5 @@ APIKeyOrSessionUser = Annotated[dict, Depends(get_user_from_api_key_or_session)]
 SessionUser = Annotated[dict, Depends(require_session_auth)]  # Issue #252
 WorkspaceOwner = Annotated[tuple[str, UUID], Depends(require_workspace_owner)]  # Issue #276
 WorkspaceAdmin = Annotated[dict, Depends(require_workspace_admin)]  # Issue #398
+WorkspaceAdminSession = Annotated[dict, Depends(require_workspace_admin_session)]  # Issue #398
 WorkspaceMember = Annotated[dict, Depends(require_workspace_member)]  # Issue #59

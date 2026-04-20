@@ -145,9 +145,9 @@ describe("WorkspaceMembersPage redirect guard (#398)", () => {
     mockGetContexts.mockResolvedValue({ contexts: [] });
 
     render(<WorkspaceMembersPage />);
-    // Give React a chance to flush effects. No redirect should fire because
+    // Tie the assertion to React's effect processing rather than a fixed
+    // wall-clock delay (which is CI-flaky). No redirect should fire because
     // workspaceLoading is true.
-    await new Promise((r) => setTimeout(r, 50));
-    expect(mockPush).not.toHaveBeenCalled();
+    await waitFor(() => expect(mockPush).not.toHaveBeenCalled());
   });
 });

@@ -1,17 +1,20 @@
 """RBAC tests for billing routes (Issue #398).
 
-Workspace admin/owner-only access on the two self-service Stripe endpoints:
+Workspace admin/owner-only, session-only access on the two self-service
+Stripe endpoints:
 
 - ``POST /api/v1/billing/checkout``
 - ``GET  /api/v1/billing/portal``
 
-The ``POST /api/v1/billing/webhook`` route remains open (Stripe signature
+Session-only enforcement (require_workspace_admin_session) prevents a leaked
+long-lived API key from initiating a Stripe checkout. The
+``POST /api/v1/billing/webhook`` route remains open (Stripe signature
 verification) and is intentionally not covered here.
 
 The billing router is registered in ``api.main`` only when ``BILLING_ENABLED=true``.
 This test mounts the router directly on a fresh FastAPI app so the suite runs
 without environment toggles. The role gate is exercised in isolation by
-overriding ``require_workspace_admin``.
+overriding ``require_workspace_admin_session``.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -21,7 +24,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from auth.dependencies import require_workspace_admin
+from auth.dependencies import require_workspace_admin_session
 from db.base import get_db
 from plugins.billing.routes import router as billing_router
 
@@ -61,7 +64,7 @@ def non_admin_client():
     async def mock_db():
         yield MagicMock()
 
-    app.dependency_overrides[require_workspace_admin] = mock_reject_admin
+    app.dependency_overrides[require_workspace_admin_session] = mock_reject_admin
     app.dependency_overrides[get_db] = mock_db
     with TestClient(app, raise_server_exceptions=False) as client:
         yield client
@@ -79,7 +82,7 @@ def admin_client():
     async def mock_db():
         yield MagicMock()
 
-    app.dependency_overrides[require_workspace_admin] = mock_admin
+    app.dependency_overrides[require_workspace_admin_session] = mock_admin
     app.dependency_overrides[get_db] = mock_db
     with TestClient(app, raise_server_exceptions=False) as client:
         yield client

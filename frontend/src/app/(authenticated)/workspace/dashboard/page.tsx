@@ -94,17 +94,16 @@ export default function WorkspaceStatsPage() {
   };
 
   useEffect(() => {
-    // Issue #398: skip the protected fetches for viewer — the redirect
-    // useEffect above is sending them to /workspace/contexts, and the
-    // backend (workspace stats + contexts/stats) returns 403 for viewer.
-    // Without this guard a viewer flashes a "Requires 'member' role or
-    // higher" error toast in the gap between login and the redirect.
+    // Skip the protected fetches for viewer — the redirect useEffect above
+    // is sending them to /workspace/contexts, and the backend (workspace
+    // stats + contexts/stats) returns 403 for viewer. Without this guard a
+    // viewer flashes a "Requires 'member' role or higher" error toast in
+    // the gap between login and the redirect.
     //
-    // PR #399 review (Copilot): also wait for WorkspaceContext to finish
-    // loading. During hydration `currentWorkspace` is null while
-    // `currentWorkspaceId` may already be cached — without the loading
-    // guard the viewer-skip is bypassed and fetchStats fires once with
-    // unknown role, recreating the very flash this code is preventing.
+    // The workspaceLoading guard is load-bearing: during hydration
+    // currentWorkspace is null while currentWorkspaceId may already be
+    // cached. Without it the viewer-skip is bypassed and fetchStats fires
+    // once with unknown role, recreating the flash this code prevents.
     if (workspaceLoading) return;
     if (
       currentWorkspace &&

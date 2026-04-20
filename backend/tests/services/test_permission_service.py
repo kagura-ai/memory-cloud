@@ -347,11 +347,10 @@ class TestGetAccessibleContextsForViewer:
 
 
 class TestResolveContextWhitelistEnforcement:
-    """PR #399 regression: ``resolve_context_for_workspace_read`` must apply
-    the same ``allowed_context_ids`` whitelist that ``check_context_access``
-    enforces. Without this, a restricted member/viewer could read
-    UUID-addressed read endpoints (``/graph/*``) for shared contexts outside
-    their whitelist.
+    """``resolve_context_for_workspace_read`` must apply the same
+    ``allowed_context_ids`` whitelist that ``check_context_access`` enforces.
+    Without this, a restricted member/viewer could read UUID-addressed
+    endpoints (``/graph/*``) for contexts outside their whitelist.
     """
 
     def _service_with_member(self, member, context):
