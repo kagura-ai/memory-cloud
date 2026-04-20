@@ -14,13 +14,20 @@ stays under a generous threshold. Local Postgres is typically < 3 ms/op;
 the threshold is set high enough to survive slow CI runners while still
 catching an order-of-magnitude regression.
 
-Per-run wall time is also printed to stdout for observability — operators
-running ``make test-integration`` can eyeball the number across branches
-to spot small-but-real regressions that don't trip the assertion.
+Per-run wall time is emitted through ``logging`` rather than ``print`` so
+pytest's default output capture does not swallow it on passing runs. To
+surface the number in normal pytest output:
+
+    pytest tests/integration/test_edge_invariant_perf.py --log-cli-level=INFO
+
+Or set ``log_cli = true`` + ``log_cli_level = INFO`` in ``pytest.ini`` /
+``pyproject.toml`` for repo-wide default visibility. On failure the number
+appears in the captured log regardless.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from uuid import uuid4
 
@@ -31,6 +38,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.auth import Context, Workspace
 from models.memory import Memory
 from repositories.neural_edge import NeuralEdgeRepository
+
+perf_logger = logging.getLogger(__name__)
 
 # Generous threshold — local Postgres measures ~1 ms/op end-to-end (two
 # round-trips: invariant SELECT + upsert). CI runners with slow I/O may
@@ -153,11 +162,15 @@ async def test_invariant_check_throughput_stays_under_threshold(
     total_ms = elapsed_s * 1000
     avg_ms = total_ms / PERF_N_EDGES
 
-    # Print is the observability channel — appears in pytest output for operators
-    # to eyeball across branches. Not a structured metric by design.
-    print(
-        f"\n[perf] {PERF_N_EDGES} edge inserts through invariant check: "
-        f"{total_ms:.1f}ms total, {avg_ms:.2f}ms avg"
+    # Log (not print) so pytest's default capture does not swallow the number
+    # on passing runs. Operators see it with --log-cli-level=INFO. On failure
+    # the assertion message below carries the same figures, so the signal is
+    # never lost even when logs are silenced.
+    perf_logger.info(
+        "[perf] %d edge inserts through invariant check: %.1fms total, %.2fms avg",
+        PERF_N_EDGES,
+        total_ms,
+        avg_ms,
     )
 
     assert avg_ms < PERF_AVG_MS_THRESHOLD, (

@@ -45,7 +45,7 @@ from typing import Any
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from sqlalchemy import and_, delete, or_, select  # noqa: E402
+from sqlalchemy import and_, delete, func, or_, select  # noqa: E402
 from sqlalchemy.orm import aliased  # noqa: E402
 
 from db.base import _get_session_factory  # noqa: E402
@@ -86,9 +86,60 @@ async def audit_invariant(sample_limit: int = 5, fix: bool = False) -> dict[str,
         src_mem = aliased(Memory, name="src_mem")
         dst_mem = aliased(Memory, name="dst_mem")
 
-        # Fetch only non-NULL edges — NULL-edge rows are handled by the migration,
-        # not by this audit, to keep the two paths composable and reviewable.
-        stmt = (
+        # Violation predicate — shared between count/stream/delete so the three
+        # paths cannot drift. ``IS DISTINCT FROM`` is PG's NULL-safe inequality:
+        # plain ``!=`` evaluates to UNKNOWN when either side is NULL, so an
+        # endpoint memory with NULL workspace_id/context_id (pre-063 data) would
+        # slip past a ``src_mem.workspace_id != edge.workspace_id`` predicate
+        # and never register as a violation. Copilot loop 2 catch.
+        violation_predicate = and_(
+            NeuralMemoryEdge.workspace_id.is_not(None),
+            NeuralMemoryEdge.context_id.is_not(None),
+            or_(
+                src_mem.id.is_(None),
+                dst_mem.id.is_(None),
+                src_mem.workspace_id.is_distinct_from(NeuralMemoryEdge.workspace_id),
+                src_mem.context_id.is_distinct_from(NeuralMemoryEdge.context_id),
+                dst_mem.workspace_id.is_distinct_from(NeuralMemoryEdge.workspace_id),
+                dst_mem.context_id.is_distinct_from(NeuralMemoryEdge.context_id),
+            ),
+        )
+
+        # Totals via COUNT(*) — avoids materializing the full table in Python
+        # just to call len(). On a multi-million-row neural_memory_edges this
+        # is the difference between a multi-GB working set and a single scan.
+        total_edges = (
+            await session.execute(select(func.count()).select_from(NeuralMemoryEdge))
+        ).scalar_one()
+
+        null_skipped = (
+            await session.execute(
+                select(func.count())
+                .select_from(NeuralMemoryEdge)
+                .where(
+                    or_(
+                        NeuralMemoryEdge.workspace_id.is_(None),
+                        NeuralMemoryEdge.context_id.is_(None),
+                    )
+                )
+            )
+        ).scalar_one()
+
+        violations_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(NeuralMemoryEdge)
+                .outerjoin(src_mem, src_mem.id == NeuralMemoryEdge.src_id)
+                .outerjoin(dst_mem, dst_mem.id == NeuralMemoryEdge.dst_id)
+                .where(violation_predicate)
+            )
+        ).scalar_one()
+
+        # Stream a bounded sample per category rather than materializing every
+        # violation. We still need to classify each streamed row to bucket it,
+        # so sample_limit * 3 (three categories) rows is the worst case we
+        # buffer in Python at any time.
+        sample_stmt = (
             select(
                 NeuralMemoryEdge.id.label("edge_id"),
                 NeuralMemoryEdge.user_id.label("edge_user_id"),
@@ -106,35 +157,9 @@ async def audit_invariant(sample_limit: int = 5, fix: bool = False) -> dict[str,
             .select_from(NeuralMemoryEdge)
             .outerjoin(src_mem, src_mem.id == NeuralMemoryEdge.src_id)
             .outerjoin(dst_mem, dst_mem.id == NeuralMemoryEdge.dst_id)
-            .where(
-                and_(
-                    NeuralMemoryEdge.workspace_id.is_not(None),
-                    NeuralMemoryEdge.context_id.is_not(None),
-                    or_(
-                        src_mem.id.is_(None),
-                        dst_mem.id.is_(None),
-                        src_mem.workspace_id != NeuralMemoryEdge.workspace_id,
-                        src_mem.context_id != NeuralMemoryEdge.context_id,
-                        dst_mem.workspace_id != NeuralMemoryEdge.workspace_id,
-                        dst_mem.context_id != NeuralMemoryEdge.context_id,
-                    ),
-                )
-            )
+            .where(violation_predicate)
+            .execution_options(yield_per=max(1, sample_limit) * 3)
         )
-        result = await session.execute(stmt)
-        violating_rows = result.all()
-
-        # Count NULL rows separately (informational)
-        null_stmt = select(NeuralMemoryEdge.id).where(
-            or_(
-                NeuralMemoryEdge.workspace_id.is_(None),
-                NeuralMemoryEdge.context_id.is_(None),
-            )
-        )
-        null_rows = (await session.execute(null_stmt)).all()
-
-        total_stmt = select(NeuralMemoryEdge.id)
-        total_rows = (await session.execute(total_stmt)).all()
 
         counts_by_category: dict[str, int] = {
             "missing_endpoint": 0,
@@ -143,25 +168,45 @@ async def audit_invariant(sample_limit: int = 5, fix: bool = False) -> dict[str,
         }
         samples_by_category: dict[str, list] = {k: [] for k in counts_by_category}
 
-        for row in violating_rows:
+        sample_result = await session.stream(sample_stmt)
+        async for row in sample_result:
             category = _classify_row(row)
             counts_by_category[category] += 1
             if len(samples_by_category[category]) < sample_limit:
                 samples_by_category[category].append(row)
+            # Stop streaming once every category has its quota AND the running
+            # per-category counts have saturated the COUNT(*) number. Since the
+            # COUNT(*) already gave us the authoritative total, we only need
+            # the stream for sample rows and category bucket populations.
+            if all(len(samples_by_category[c]) >= sample_limit for c in counts_by_category):
+                if sum(counts_by_category.values()) >= violations_count:
+                    break
 
-        results = {
-            "total_edges": len(total_rows),
-            "scanned": len(total_rows) - len(null_rows),
-            "violations": len(violating_rows),
-            "null_skipped": len(null_rows),
+        results: dict[str, Any] = {
+            "total_edges": total_edges,
+            "scanned": total_edges - null_skipped,
+            "violations": violations_count,
+            "null_skipped": null_skipped,
             "by_category": counts_by_category,
             "samples": samples_by_category,
             "deleted": 0,
         }
 
-        if fix and violating_rows:
-            violating_ids = [row.edge_id for row in violating_rows]
-            del_stmt = delete(NeuralMemoryEdge).where(NeuralMemoryEdge.id.in_(violating_ids))
+        if fix and violations_count > 0:
+            # Single-statement DELETE ... USING ... WHERE <violation_predicate>
+            # — no Python-side ID list, no IN-clause parameter pressure. The
+            # predicate is the same one the SELECT used, so whatever COUNT(*)
+            # saw is exactly what gets deleted (no TOCTOU narrowing).
+            del_stmt = delete(NeuralMemoryEdge).where(
+                NeuralMemoryEdge.id.in_(
+                    select(NeuralMemoryEdge.id)
+                    .select_from(NeuralMemoryEdge)
+                    .outerjoin(src_mem, src_mem.id == NeuralMemoryEdge.src_id)
+                    .outerjoin(dst_mem, dst_mem.id == NeuralMemoryEdge.dst_id)
+                    .where(violation_predicate)
+                    .scalar_subquery()
+                )
+            )
             del_result = await session.execute(del_stmt)
             await session.commit()
             results["deleted"] = del_result.rowcount or 0
