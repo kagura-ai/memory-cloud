@@ -160,7 +160,21 @@ async def visibility_scenario(async_engine, db_session):
     db_session.add_all(
         [
             WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role="owner"),
-            WorkspaceMember(workspace_id=ws_a.id, user_id=member_a_id, role="member"),
+            # member_a needs an explicit allowed_context_ids whitelist — post-#398
+            # (commit bd5b7a4) a member with ``allowed_context_ids=NULL`` is
+            # treated as suspended and uniformly 404s on every UUID-addressed
+            # read. The whitelist must include ctx_shared so the shared-context
+            # visibility matrix can be exercised. ctx_private is intentionally
+            # omitted: the private-creator-only rule blocks non-creators before
+            # the whitelist check runs anyway, so both "in whitelist" and "out
+            # of whitelist" yield the same 404 for a private non-creator — the
+            # minimal whitelist keeps the fixture intent obvious.
+            WorkspaceMember(
+                workspace_id=ws_a.id,
+                user_id=member_a_id,
+                role="member",
+                allowed_context_ids=[ctx_shared.id],
+            ),
             WorkspaceMember(workspace_id=ws_b.id, user_id=outsider_b_id, role="owner"),
         ]
     )
@@ -435,3 +449,274 @@ async def test_soft_deleted_context_returns_404(visibility_scenario, db_session)
         )
 
     assert response.status_code == 404, response.text
+
+
+# ============================================================================
+# MCP parity — Issue #395
+# ----------------------------------------------------------------------------
+# These tests directly invoke the MCP tool handlers (``handle_list_edges`` and
+# ``handle_get_context_info``) and assert that the same 6-way visibility
+# matrix enforced for the HTTP ``/graph/*`` endpoints above also holds on the
+# MCP surface. The handlers are plain ``async def`` functions that take
+# ``(args, user_id, workspace_id)``; they internally call ``db.base.get_db()``
+# which reads the module-level ``async_session_factory`` global. The
+# ``_mcp_db_factory`` fixture below rebinds that global to a factory built
+# from ``async_engine`` so MCP handlers read from the same test database the
+# ``visibility_scenario`` fixture seeds into.
+# ============================================================================
+
+
+import json  # noqa: E402  — lazy import kept local to the MCP parity block
+
+
+def _json_of(result):
+    """Parse the JSON payload from an MCP TextContent response."""
+    return json.loads(result[0].text)
+
+
+@pytest_asyncio.fixture
+async def _mcp_db_factory(async_engine, monkeypatch):
+    """Rebind ``db.base.async_session_factory`` to the test engine's factory.
+
+    MCP handlers use ``async for db in get_db()`` rather than FastAPI's
+    dependency injection, so the TestClient-oriented
+    ``app.dependency_overrides[get_db]`` override used by the HTTP tests
+    above does not reach them. This fixture monkeypatches the module-level
+    session factory that ``_get_session_factory`` returns so the handlers
+    operate against the same engine the ``visibility_scenario`` fixture
+    seeds, without requiring ``DATABASE_URL == TEST_DATABASE_URL``.
+    """
+    import db.base as _db_base
+
+    test_factory = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(_db_base, "async_session_factory", test_factory)
+    yield
+
+
+@pytest.mark.asyncio
+async def test_mcp_list_edges_shared_context_member_sees_other_creator_edges(
+    visibility_scenario, _mcp_db_factory
+):
+    """Pre-#395 regression target — member must see owner-authored edges via MCP.
+
+    ``edge_owner_shared`` is authored by ``owner_a_id`` and connects
+    ``mem_owner_shared_src`` → ``mem_owner_shared_dst``. Before #395 the MCP
+    ``list_edges`` handler hardcoded the ``user_id`` filter to the MCP
+    caller, so ``member_a`` querying edges on ``mem_owner_shared_dst`` saw
+    0 edges. Post-fix they see ``edge_owner_shared`` because the shared
+    context's visibility model delegates to ``PermissionService`` rather
+    than a per-caller creator filter.
+    """
+    from mcp_server.tools.edge import handle_list_edges
+
+    result = await handle_list_edges(
+        {
+            "memory_id": str(visibility_scenario["memory_ids"][1]),  # mem_owner_shared_dst
+            "context_id": str(visibility_scenario["ctx_shared_id"]),
+        },
+        visibility_scenario["member_a_id"],
+        visibility_scenario["ws_a_id"],
+    )
+    data = _json_of(result)
+    assert data["status"] == "success", data
+    assert data["count"] >= 1, (
+        "Member must see owner-authored edges in a shared context via MCP "
+        "(#395: MCP parity with HTTP /graph/* visibility fix from #383)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_list_edges_shared_context_owner_sees_other_creator_edges(
+    visibility_scenario, _mcp_db_factory
+):
+    """Mirror of the above — owner must see member-authored edges via MCP."""
+    from mcp_server.tools.edge import handle_list_edges
+
+    result = await handle_list_edges(
+        {
+            "memory_id": str(visibility_scenario["memory_ids"][3]),  # mem_member_shared_dst
+            "context_id": str(visibility_scenario["ctx_shared_id"]),
+        },
+        visibility_scenario["owner_a_id"],
+        visibility_scenario["ws_a_id"],
+    )
+    data = _json_of(result)
+    assert data["status"] == "success", data
+    assert data["count"] >= 1, "Owner must see member-authored edges in a shared context via MCP"
+
+
+@pytest.mark.asyncio
+async def test_mcp_list_edges_shared_context_cross_workspace_returns_not_found(
+    visibility_scenario, _mcp_db_factory
+):
+    """Cross-workspace probe via MCP surfaces as uniform ``context_not_found``.
+
+    CWE-639 / OWASP A01 uniform-disclosure contract — MCP caller from a
+    different workspace must not distinguish "context exists but forbidden"
+    from "context does not exist at all".
+    """
+    from mcp_server.tools.edge import handle_list_edges
+
+    result = await handle_list_edges(
+        {
+            "memory_id": str(visibility_scenario["memory_ids"][0]),
+            "context_id": str(visibility_scenario["ctx_shared_id"]),
+        },
+        visibility_scenario["outsider_b_id"],
+        visibility_scenario["ws_b_id"],
+    )
+    data = _json_of(result)
+    assert data["status"] == "error"
+    assert data["error"] == "context_not_found", data
+
+
+@pytest.mark.asyncio
+async def test_mcp_list_edges_private_context_creator_sees_own_edges(
+    visibility_scenario, _mcp_db_factory
+):
+    """Creator of a private context retains full visibility of own edges via MCP."""
+    from mcp_server.tools.edge import handle_list_edges
+
+    result = await handle_list_edges(
+        {
+            "memory_id": str(visibility_scenario["memory_ids"][4]),  # mem_owner_private_src
+            "context_id": str(visibility_scenario["ctx_private_id"]),
+        },
+        visibility_scenario["owner_a_id"],
+        visibility_scenario["ws_a_id"],
+    )
+    data = _json_of(result)
+    assert data["status"] == "success", data
+    assert data["count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_list_edges_private_context_non_creator_returns_not_found(
+    visibility_scenario, _mcp_db_factory
+):
+    """Workspace member who is NOT the private-context creator gets uniform denial.
+
+    Matches ``can_access_memory`` ("private → only creator can access") and
+    the HTTP contract established in #383 — avoids leaking "a private
+    context with this UUID exists in this workspace, and you aren't its
+    creator".
+    """
+    from mcp_server.tools.edge import handle_list_edges
+
+    result = await handle_list_edges(
+        {
+            "memory_id": str(visibility_scenario["memory_ids"][4]),
+            "context_id": str(visibility_scenario["ctx_private_id"]),
+        },
+        visibility_scenario["member_a_id"],
+        visibility_scenario["ws_a_id"],
+    )
+    data = _json_of(result)
+    assert data["status"] == "error"
+    assert data["error"] == "context_not_found", data
+
+
+@pytest.mark.asyncio
+async def test_mcp_get_context_info_shared_context_member_sees_full_stats(
+    visibility_scenario, _mcp_db_factory
+):
+    """Shared-context stats via MCP aggregate across all workspace members.
+
+    Pre-#395 the MCP ``get_context_info`` computed
+    ``is_shared = is_workspace_owner or not is_private`` — a member
+    (non-owner) hitting a shared context saw only their own memories. The
+    fix aligns with HTTP ``/memory/stats`` so workspace members see the
+    same per-context totals regardless of transport.
+    """
+    from mcp_server.tools.context import handle_get_context_info
+
+    result = await handle_get_context_info(
+        {"context_id": str(visibility_scenario["ctx_shared_id"])},
+        visibility_scenario["member_a_id"],
+        visibility_scenario["ws_a_id"],
+    )
+    data = _json_of(result)
+    assert data["status"] == "success", data
+    # The shared context has 4 memories (2 by owner_a, 2 by member_a). Both
+    # creators must be counted regardless of which of them is the caller.
+    assert data["stats"]["total_memories"] >= 4, (
+        "Shared-context stats must aggregate across all workspace members' "
+        "memories (not just the caller's)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_get_context_info_private_context_non_creator_returns_not_found(
+    visibility_scenario, _mcp_db_factory
+):
+    """Private-context non-creator (even a workspace admin) gets uniform denial.
+
+    The pre-#395 ``is_workspace_owner`` fast path let workspace owners peek
+    at another member's private context stats. Post-fix that fast path is
+    removed — the contract now matches ``resolve_context_for_workspace_read``
+    (private → creator-only, regardless of workspace role).
+    """
+    from mcp_server.tools.context import handle_get_context_info
+
+    result = await handle_get_context_info(
+        {"context_id": str(visibility_scenario["ctx_private_id"])},
+        visibility_scenario["member_a_id"],
+        visibility_scenario["ws_a_id"],
+    )
+    data = _json_of(result)
+    assert data["status"] == "error"
+    assert data["error"] == "context_not_found", data
+
+
+@pytest.mark.asyncio
+async def test_mcp_get_context_info_cross_workspace_returns_not_found(
+    visibility_scenario, _mcp_db_factory
+):
+    """Cross-workspace probe of MCP ``get_context_info`` surfaces as uniform denial."""
+    from mcp_server.tools.context import handle_get_context_info
+
+    result = await handle_get_context_info(
+        {"context_id": str(visibility_scenario["ctx_shared_id"])},
+        visibility_scenario["outsider_b_id"],
+        visibility_scenario["ws_b_id"],
+    )
+    data = _json_of(result)
+    assert data["status"] == "error"
+    assert data["error"] == "context_not_found", data
+
+
+@pytest.mark.asyncio
+async def test_mcp_list_edges_soft_deleted_context_returns_not_found(
+    visibility_scenario, _mcp_db_factory, db_session
+):
+    """Soft-deleted context — MCP honors ``Context.deleted_at IS NULL`` via the resolver."""
+    from mcp_server.tools.edge import handle_list_edges
+    from models.auth import Context
+    from utils.datetime import utcnow
+
+    ctx_id = visibility_scenario["ctx_shared_id"]
+    await db_session.execute(
+        Context.__table__.update()
+        .where(Context.id == ctx_id)
+        .values(deleted_at=utcnow().replace(tzinfo=None))
+    )
+    await db_session.commit()
+
+    try:
+        result = await handle_list_edges(
+            {
+                "memory_id": str(visibility_scenario["memory_ids"][0]),
+                "context_id": str(ctx_id),
+            },
+            visibility_scenario["owner_a_id"],
+            visibility_scenario["ws_a_id"],
+        )
+        data = _json_of(result)
+        assert data["status"] == "error"
+        assert data["error"] == "context_not_found", data
+    finally:
+        # Restore so ``visibility_scenario`` teardown sees a live row.
+        await db_session.execute(
+            Context.__table__.update().where(Context.id == ctx_id).values(deleted_at=None)
+        )
+        await db_session.commit()
