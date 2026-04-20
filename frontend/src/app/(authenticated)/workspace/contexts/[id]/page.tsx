@@ -108,8 +108,8 @@ export default function ContextDetailPage() {
   // on an admin-only tab via deep-link. useTabParam's allowedValues already
   // clamps the *rendered* value to overview, but useTabParam only auto-promotes
   // the URL when the param is absent (not when it is present-but-invalid),
-  // so we have to compare the raw URL value here — `tab` is already clamped
-  // and would always equal "overview" for non-admins, making this a no-op.
+  // so we compare the raw URL value here — checking `tab` would always see
+  // "overview" for non-admins and the snap would never fire.
   const searchParams = useSearchParams();
   const rawTab = searchParams.get("tab");
   useEffect(() => {

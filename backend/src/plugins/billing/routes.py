@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import require_workspace_admin
+from auth.dependencies import WorkspaceAdmin
 from db.base import get_db
 from services import stripe_service
 from utils.logger import get_logger
@@ -41,7 +41,7 @@ class PortalResponse(BaseModel):
 @router.post("/checkout", response_model=CheckoutResponse)
 async def create_checkout(
     request: CheckoutRequest,
-    user: dict = Depends(require_workspace_admin),
+    user: WorkspaceAdmin,
     db: AsyncSession = Depends(get_db),
 ):
     """Create a Stripe Checkout Session for plan upgrade.
@@ -97,7 +97,7 @@ async def handle_webhook(
 @router.get("/portal", response_model=PortalResponse)
 async def get_portal(
     return_url: str,
-    user: dict = Depends(require_workspace_admin),
+    user: WorkspaceAdmin,
     db: AsyncSession = Depends(get_db),
 ):
     """Get Stripe Customer Portal URL.

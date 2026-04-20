@@ -150,13 +150,20 @@ export default function WorkspaceMembersPage() {
   const isProPlan = currentWorkspace?.plan_name === "pro";
 
   useEffect(() => {
+    // Issue #398: skip the four protected fetches for member/viewer — the
+    // redirect useEffect above is sending them to /dashboard, and the backend
+    // would 403 each call. Without this guard a non-admin briefly hits four
+    // protected endpoints in parallel with the redirect, surfacing spurious
+    // error toasts before the route change lands.
+    if (workspaceLoading) return;
+    if (!hasWorkspaceRole(currentWorkspace?.current_user_role, "admin")) return;
     if (currentWorkspaceId) {
       loadMembers();
       loadInvitations();
       loadMemberQuota(); // Issue #229
       loadContexts(); // Issue #234
     }
-  }, [currentWorkspaceId]);
+  }, [currentWorkspaceId, currentWorkspace, workspaceLoading]);
 
   const loadMembers = async () => {
     if (!currentWorkspaceId) return;

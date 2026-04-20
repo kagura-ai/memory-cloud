@@ -134,10 +134,13 @@ describe("WorkspaceMembersPage redirect guard (#398)", () => {
     mockListMembers.mockResolvedValue([]);
     mockListInvitations.mockResolvedValue([]);
     mockGetMemberQuota.mockResolvedValue({
-      plan_name: "pro",
-      members_used: 0,
-      members_limit: 100,
-      upgrade_required: false,
+      current_members: 0,
+      pending_invitations: 0,
+      total_used: 0,
+      limit: 100,
+      available: 100,
+      percentage: 0,
+      can_invite: true,
     });
     mockGetContexts.mockResolvedValue({ contexts: [] });
 
