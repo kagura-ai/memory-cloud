@@ -193,10 +193,17 @@ async def audit_invariant(sample_limit: int = 5, fix: bool = False) -> dict[str,
         }
 
         if fix and violations_count > 0:
-            # Single-statement DELETE ... USING ... WHERE <violation_predicate>
+            # Single-statement DELETE ... WHERE id IN (SELECT ... WHERE <pred>)
             # — no Python-side ID list, no IN-clause parameter pressure. The
             # predicate is the same one the SELECT used, so whatever COUNT(*)
             # saw is exactly what gets deleted (no TOCTOU narrowing).
+            #
+            # ``in_(<select>)`` is passed the Select directly, NOT
+            # ``.scalar_subquery()`` — scalar_subquery is for expressions
+            # expecting a single row and raises when the subquery returns
+            # multiple rows (which is exactly what we want here). Plain
+            # ``in_(<select>)`` treats the Select as a row-set, which is the
+            # correct IN-subquery shape.
             del_stmt = delete(NeuralMemoryEdge).where(
                 NeuralMemoryEdge.id.in_(
                     select(NeuralMemoryEdge.id)
@@ -204,7 +211,6 @@ async def audit_invariant(sample_limit: int = 5, fix: bool = False) -> dict[str,
                     .outerjoin(src_mem, src_mem.id == NeuralMemoryEdge.src_id)
                     .outerjoin(dst_mem, dst_mem.id == NeuralMemoryEdge.dst_id)
                     .where(violation_predicate)
-                    .scalar_subquery()
                 )
             )
             del_result = await session.execute(del_stmt)

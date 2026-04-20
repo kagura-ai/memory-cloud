@@ -6,6 +6,7 @@ Requires a real PostgreSQL database (TEST_DATABASE_URL).
 
 import os
 import uuid
+from contextlib import contextmanager
 
 from alembic.config import Config
 from sqlalchemy import create_engine, text
@@ -14,9 +15,19 @@ from alembic import command
 
 ALEMBIC_INI = "alembic.ini"
 
+_DEFAULT_TEST_URL = "postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test"
+
 
 def _get_alembic_config() -> Config:
-    """Create Alembic config pointing to test database."""
+    """Create Alembic config pointing to test database.
+
+    Note: ``backend/alembic/env.py`` reads ``get_database_url()`` at import
+    time and overwrites ``sqlalchemy.url`` on the Config, so this
+    ``set_main_option`` is always clobbered before migrations actually run.
+    It is kept for cases where env.py might not be imported (e.g. direct
+    Config introspection). To actually steer the migrations at the test DB,
+    wrap the ``command.*`` call in ``_alembic_at_test_db()`` below.
+    """
     config = Config(ALEMBIC_INI)
     # Override with test database URL if available
     test_url = os.getenv("TEST_DATABASE_URL")
@@ -29,12 +40,39 @@ def _get_alembic_config() -> Config:
 
 def _sync_engine():
     """Sync SQLAlchemy engine pointing to the test database."""
-    test_url = os.getenv(
-        "TEST_DATABASE_URL",
-        "postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test",
-    )
+    test_url = os.getenv("TEST_DATABASE_URL", _DEFAULT_TEST_URL)
     sync_url = test_url.replace("+asyncpg", "")
     return create_engine(sync_url)
+
+
+@contextmanager
+def _alembic_at_test_db():
+    """Temporarily point ``get_database_url()`` at ``TEST_DATABASE_URL``.
+
+    ``backend/alembic/env.py`` reads ``get_database_url()`` on import and
+    overwrites the Config's ``sqlalchemy.url``, so
+    ``_get_alembic_config().set_main_option("sqlalchemy.url", ...)`` is
+    always clobbered. The only reliable way to steer ``command.upgrade`` /
+    ``command.downgrade`` / ``command.ensure_version`` at the test DB is
+    to set ``DATABASE_URL`` in the environment for the duration of the
+    call. Anything outside this context sees the prior value restored.
+
+    This is the shared mechanism used by both ``TestAlembicMigrations``
+    (mechanical forward/rollback) and ``TestB03NeuralEdgesBackfillMigration``
+    (seeded data-path tests) — without it, a ``_reset_alembic_state()``
+    drops the test schema but the migration then runs against the dev DB,
+    silently stamping the dev alembic_version and producing bogus "passes".
+    """
+    test_url = os.getenv("TEST_DATABASE_URL", _DEFAULT_TEST_URL)
+    prev = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = test_url
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = prev
 
 
 def _reset_alembic_state():
@@ -65,35 +103,44 @@ def _reset_alembic_state():
 
 
 class TestAlembicMigrations:
-    """Test that all Alembic migrations apply and rollback cleanly."""
+    """Test that all Alembic migrations apply and rollback cleanly.
+
+    Every ``command.*`` call is wrapped in ``_alembic_at_test_db()`` so the
+    migration runs against the test DB, not the dev DB — see that helper's
+    docstring for the env.py override issue it works around.
+    """
 
     def test_upgrade_to_head(self):
         """All migrations apply without error."""
         _reset_alembic_state()
         config = _get_alembic_config()
-        command.upgrade(config, "head")
+        with _alembic_at_test_db():
+            command.upgrade(config, "head")
 
     def test_current_is_head(self):
         """After upgrade, current revision matches head."""
         config = _get_alembic_config()
         # This will raise if not at head
-        command.ensure_version(config)
+        with _alembic_at_test_db():
+            command.ensure_version(config)
 
     def test_downgrade_one_step(self):
         """Most recent migration can be rolled back."""
         config = _get_alembic_config()
-        command.upgrade(config, "head")
-        command.downgrade(config, "-1")
-        # Re-apply to leave DB in clean state
-        command.upgrade(config, "head")
+        with _alembic_at_test_db():
+            command.upgrade(config, "head")
+            command.downgrade(config, "-1")
+            # Re-apply to leave DB in clean state
+            command.upgrade(config, "head")
 
     def test_downgrade_to_base_and_upgrade(self):
         """Full rollback to baseline and re-apply works."""
         config = _get_alembic_config()
-        # Downgrade to baseline (first revision: 157247e0df86)
-        command.downgrade(config, "157247e0df86")
-        # Re-upgrade to head
-        command.upgrade(config, "head")
+        with _alembic_at_test_db():
+            # Downgrade to baseline (first revision: 157247e0df86)
+            command.downgrade(config, "157247e0df86")
+            # Re-upgrade to head
+            command.upgrade(config, "head")
 
 
 # Revision one step before b03_396 — the state where workspace_id / context_id
@@ -126,21 +173,13 @@ class TestB03NeuralEdgesBackfillMigration:
     def _reset_and_upgrade_to_b02():
         """Drop schema, upgrade to b02 (one step before b03), ready for seeding.
 
-        Note on DATABASE_URL: backend/alembic/env.py unconditionally reads
-        ``get_database_url()`` on import and calls ``config.set_main_option``
-        on the alembic Config — so ``_get_alembic_config()``'s
-        ``set_main_option("sqlalchemy.url", ...)`` is always clobbered by
-        env.py. The only way to steer ``command.upgrade`` at the test DB is
-        to set DATABASE_URL to the TEST_DATABASE_URL value for the duration
-        of the call. We restore the original env afterwards so unrelated
-        code outside the test is not affected.
+        Steers migrations at the test DB via ``_alembic_at_test_db()`` —
+        without it, env.py's ``get_database_url()`` override would silently
+        redirect the upgrade to the dev DB.
         """
         # Safety guard — mirrors _reset_alembic_state's non-test-DB check so
         # a misconfigured TEST_DATABASE_URL cannot drop a dev/prod database.
-        test_url = os.getenv(
-            "TEST_DATABASE_URL",
-            "postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test",
-        )
+        test_url = os.getenv("TEST_DATABASE_URL", _DEFAULT_TEST_URL)
         db_name = test_url.rsplit("/", 1)[-1].split("?")[0]
         if not db_name.endswith("_test"):
             raise RuntimeError(f"Refusing to reset non-test database: {db_name}")
@@ -151,32 +190,14 @@ class TestB03NeuralEdgesBackfillMigration:
             conn.execute(text("CREATE SCHEMA public"))
         engine.dispose()
 
-        prev_db_url = os.environ.get("DATABASE_URL")
-        os.environ["DATABASE_URL"] = test_url
-        try:
+        with _alembic_at_test_db():
             command.upgrade(_get_alembic_config(), B02_REV)
-        finally:
-            if prev_db_url is None:
-                os.environ.pop("DATABASE_URL", None)
-            else:
-                os.environ["DATABASE_URL"] = prev_db_url
 
     @staticmethod
     def _upgrade_head_with_test_db():
-        """Run ``alembic upgrade head`` aimed at the test DB — see note above."""
-        test_url = os.getenv(
-            "TEST_DATABASE_URL",
-            "postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test",
-        )
-        prev_db_url = os.environ.get("DATABASE_URL")
-        os.environ["DATABASE_URL"] = test_url
-        try:
+        """Run ``alembic upgrade head`` aimed at the test DB."""
+        with _alembic_at_test_db():
             command.upgrade(_get_alembic_config(), "head")
-        finally:
-            if prev_db_url is None:
-                os.environ.pop("DATABASE_URL", None)
-            else:
-                os.environ["DATABASE_URL"] = prev_db_url
 
     @staticmethod
     def _seed_workspace_and_context(conn, owner_id: str) -> tuple[str, str]:
