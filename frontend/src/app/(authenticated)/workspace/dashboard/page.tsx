@@ -90,11 +90,29 @@ export default function WorkspaceStatsPage() {
   };
 
   useEffect(() => {
+    // Issue #398: skip the protected fetches for viewer — the redirect
+    // useEffect above is sending them to /workspace/contexts, and the
+    // backend (workspace stats + contexts/stats) returns 403 for viewer.
+    // Without this guard a viewer flashes a "Requires 'member' role or
+    // higher" error toast in the gap between login and the redirect.
+    if (
+      currentWorkspace &&
+      !hasWorkspaceRole(currentWorkspace.current_user_role, "member")
+    ) {
+      return;
+    }
     fetchStats();
-  }, [currentWorkspaceId]);
+  }, [currentWorkspaceId, currentWorkspace?.current_user_role]);
 
   useEffect(() => {
     if (!currentWorkspaceId) return;
+    // Same viewer-skip as above — memory-timeline is a member+ surface.
+    if (
+      currentWorkspace &&
+      !hasWorkspaceRole(currentWorkspace.current_user_role, "member")
+    ) {
+      return;
+    }
 
     const controller = new AbortController();
     getWorkspaceMemoryTimeline(
@@ -113,7 +131,12 @@ export default function WorkspaceStatsPage() {
       });
 
     return () => controller.abort();
-  }, [timelineDays, currentWorkspaceId, selectedContextId]);
+  }, [
+    timelineDays,
+    currentWorkspaceId,
+    selectedContextId,
+    currentWorkspace?.current_user_role,
+  ]);
 
   return (
     <PageContainer>
