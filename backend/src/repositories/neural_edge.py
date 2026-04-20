@@ -18,7 +18,7 @@ from sqlalchemy import and_, delete, desc, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.memory import NeuralMemoryEdge
+from models.memory import Memory, NeuralMemoryEdge
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -61,6 +61,54 @@ class NeuralEdgeRepository:
             raise ValueError(
                 ERROR_MSG_2_LEVEL_ISOLATION.format(workspace_id=workspace_id, context_id=context_id)
             )
+
+    async def _validate_edge_context_invariant(
+        self,
+        src_id: UUID,
+        dst_id: UUID,
+        workspace_id_uuid: UUID,
+        context_id_uuid: UUID,
+    ) -> None:
+        """Assert both endpoint memories live in the edge's (workspace, context).
+
+        The invariant — ``edge.workspace_id == src.workspace_id == dst.workspace_id``
+        AND ``edge.context_id == src.context_id == dst.context_id`` — was trusted
+        across the write surface prior to this check but never enforced. PR #394
+        added a read-path Memory-scope filter as defense in depth; this write-path
+        assertion prevents violating rows from entering the table in the first
+        place so the invariant can be relied on by downstream graph queries and
+        by the GDPR CASCADE on context deletion.
+
+        Fails closed: a missing endpoint (src or dst deleted, never existed, or
+        soft-deleted on the caller's session view) is treated as a violation
+        rather than a silent no-op — a cross-context write that cannot be
+        validated is not a write we want to persist.
+
+        Raises:
+            ValueError: If either endpoint memory is missing or its
+                ``(workspace_id, context_id)`` pair does not match the edge's.
+        """
+        stmt = select(Memory.id, Memory.workspace_id, Memory.context_id).where(
+            Memory.id.in_([src_id, dst_id])
+        )
+        result = await self.db.execute(stmt)
+        rows = {row.id: (row.workspace_id, row.context_id) for row in result.all()}
+
+        for endpoint_name, endpoint_id in (("src", src_id), ("dst", dst_id)):
+            row = rows.get(endpoint_id)
+            if row is None:
+                raise ValueError(
+                    f"edge context invariant violated: {endpoint_name}_id={endpoint_id} "
+                    f"memory not found (missing, deleted, or inaccessible in this session)"
+                )
+            mem_ws, mem_ctx = row
+            if mem_ws != workspace_id_uuid or mem_ctx != context_id_uuid:
+                raise ValueError(
+                    f"edge context invariant violated: {endpoint_name}_id={endpoint_id} "
+                    f"belongs to (workspace={mem_ws}, context={mem_ctx}), "
+                    f"but edge is being created in "
+                    f"(workspace={workspace_id_uuid}, context={context_id_uuid})"
+                )
 
     # ========================================================================
     # Create / Update Operations
@@ -106,6 +154,10 @@ class NeuralEdgeRepository:
                 f"Got workspace_id={workspace_id}, context_id={context_id}"
             )
 
+        ws_uuid = UUID(workspace_id)
+        ctx_uuid = UUID(context_id)
+        await self._validate_edge_context_invariant(src_id, dst_id, ws_uuid, ctx_uuid)
+
         stmt = insert(NeuralMemoryEdge).values(
             user_id=user_id,
             src_id=src_id,
@@ -114,8 +166,8 @@ class NeuralEdgeRepository:
             weight=weight,
             confidence=confidence,
             edge_metadata=edge_metadata,
-            workspace_id=UUID(workspace_id),  # Required for 3-level isolation
-            context_id=UUID(context_id),  # Required for 3-level isolation
+            workspace_id=ws_uuid,  # Required for 3-level isolation
+            context_id=ctx_uuid,  # Required for 3-level isolation
             created_at=utcnow(),
             last_updated=utcnow(),
         )
@@ -176,6 +228,10 @@ class NeuralEdgeRepository:
                 f"3-level isolation. Got workspace_id={workspace_id}, context_id={context_id}"
             )
 
+        ws_uuid = UUID(workspace_id)
+        ctx_uuid = UUID(context_id)
+        await self._validate_edge_context_invariant(src_id, dst_id, ws_uuid, ctx_uuid)
+
         stmt = (
             insert(NeuralMemoryEdge)
             .values(
@@ -185,8 +241,8 @@ class NeuralEdgeRepository:
                 edge_type=edge_type,
                 weight=weight,
                 confidence=confidence,
-                workspace_id=UUID(workspace_id),
-                context_id=UUID(context_id),
+                workspace_id=ws_uuid,
+                context_id=ctx_uuid,
                 created_at=utcnow(),
                 last_updated=utcnow(),
             )
