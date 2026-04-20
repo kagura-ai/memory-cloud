@@ -282,3 +282,171 @@ class TestCountContextOwners:
         db.execute = AsyncMock(return_value=mock_result)
         service = PermissionService(db)
         assert await service.count_context_owners(uuid4()) == 0
+
+
+class TestGetAccessibleContextsForViewer:
+    """Issue #398 regression: get_accessible_contexts must reach the viewer
+    branch.
+
+    Previously gated at ``required_role="member"``, which raised 403 for
+    viewer (weight=1 < member weight=2) — making the explicit viewer branch
+    at lines ~588-613 unreachable. UX symptom: viewer's contexts list was
+    empty even when shared contexts existed in the workspace.
+    """
+
+    @pytest.fixture
+    def viewer_member(self):
+        member = MagicMock()
+        member.role = "viewer"
+        member.allowed_context_ids = None  # No restriction → all shared contexts
+        return member
+
+    @pytest.fixture
+    def service_with_viewer(self, viewer_member):
+        db = MagicMock()
+        # Workspace lookup (not deleted)
+        ws_lookup_result = MagicMock()
+        ws_lookup_result.scalar_one_or_none.return_value = MagicMock(id=uuid4(), deleted_at=None)
+        # Context list query result
+        ctx_list_result = MagicMock()
+        ctx_list_result.scalars.return_value.all.return_value = ["ctx-a", "ctx-b"]
+        db.execute = AsyncMock(side_effect=[ws_lookup_result, ctx_list_result])
+        service = PermissionService(db)
+        service.workspace_service.get_member = AsyncMock(return_value=viewer_member)
+        return service
+
+    @pytest.mark.asyncio
+    async def test_viewer_reaches_viewer_branch(self, service_with_viewer):
+        """Viewer must NOT be 403'd by the membership gate before the
+        per-role branches run."""
+        result = await service_with_viewer.get_accessible_contexts("viewer-user", uuid4())
+        assert result == ["ctx-a", "ctx-b"], (
+            "viewer should reach the per-role branch and receive shared "
+            "contexts; receiving an empty list (or HTTPException) means "
+            "the membership gate rejected viewer before the branch ran"
+        )
+
+    @pytest.mark.asyncio
+    async def test_viewer_with_empty_whitelist_returns_empty(self):
+        """Viewer with allowed_context_ids=[] → no access (explicit empty)."""
+        viewer = MagicMock()
+        viewer.role = "viewer"
+        viewer.allowed_context_ids = []
+
+        db = MagicMock()
+        ws_lookup_result = MagicMock()
+        ws_lookup_result.scalar_one_or_none.return_value = MagicMock(id=uuid4(), deleted_at=None)
+        ctx_list_result = MagicMock()
+        ctx_list_result.scalars.return_value.all.return_value = []
+        db.execute = AsyncMock(side_effect=[ws_lookup_result, ctx_list_result])
+        service = PermissionService(db)
+        service.workspace_service.get_member = AsyncMock(return_value=viewer)
+
+        result = await service.get_accessible_contexts("viewer-user", uuid4())
+        assert result == []
+
+
+class TestResolveContextWhitelistEnforcement:
+    """``resolve_context_for_workspace_read`` must apply the same
+    ``allowed_context_ids`` whitelist that ``check_context_access`` enforces.
+    Without this, a restricted member/viewer could read UUID-addressed
+    endpoints (``/graph/*``) for contexts outside their whitelist.
+    """
+
+    def _service_with_member(self, member, context):
+        db = MagicMock()
+        # First db.execute → context lookup
+        ctx_result = MagicMock()
+        ctx_result.scalar_one_or_none.return_value = context
+        # Second db.execute (inside check_workspace_access) → workspace lookup
+        ws_result = MagicMock()
+        ws_result.scalar_one_or_none.return_value = MagicMock(
+            id=context.workspace_id, deleted_at=None
+        )
+        db.execute = AsyncMock(side_effect=[ctx_result, ws_result])
+        service = PermissionService(db)
+        service.workspace_service.get_member = AsyncMock(return_value=member)
+        return service
+
+    @pytest.mark.asyncio
+    async def test_member_outside_whitelist_gets_404(self):
+        ctx_id = uuid4()
+        ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
+        member = MagicMock()
+        member.role = "member"
+        member.allowed_context_ids = [uuid4()]  # whitelist excludes ctx_id
+        service = self._service_with_member(member, ctx)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.resolve_context_for_workspace_read("user1", ctx_id)
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_viewer_outside_whitelist_gets_404(self):
+        ctx_id = uuid4()
+        ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
+        viewer = MagicMock()
+        viewer.role = "viewer"
+        viewer.allowed_context_ids = []  # explicit empty whitelist
+        service = self._service_with_member(viewer, ctx)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.resolve_context_for_workspace_read("user1", ctx_id)
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_member_inside_whitelist_succeeds(self):
+        ctx_id = uuid4()
+        ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
+        member = MagicMock()
+        member.role = "member"
+        member.allowed_context_ids = [ctx_id]  # whitelist includes ctx_id
+        service = self._service_with_member(member, ctx)
+
+        result = await service.resolve_context_for_workspace_read("user1", ctx_id)
+        assert result is ctx
+
+    @pytest.mark.asyncio
+    async def test_admin_bypasses_whitelist(self):
+        """Workspace admin/owner should never be filtered by allowed_context_ids
+        (matches check_context_access bypass semantics)."""
+        ctx_id = uuid4()
+        ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
+        admin = MagicMock()
+        admin.role = "admin"
+        admin.allowed_context_ids = [uuid4()]  # would exclude ctx_id if checked
+        service = self._service_with_member(admin, ctx)
+
+        result = await service.resolve_context_for_workspace_read("user1", ctx_id)
+        assert result is ctx
+
+    @pytest.mark.asyncio
+    async def test_suspended_member_with_null_whitelist_gets_404(self):
+        """Migration 042: a member with allowed_context_ids=NULL is in the
+        suspended state and must not reach any UUID-addressed read endpoint.
+        get_accessible_contexts returns [] for the same shape; this helper
+        must align so /graph/* doesn't become a back door."""
+        ctx_id = uuid4()
+        ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
+        suspended_member = MagicMock()
+        suspended_member.role = "member"
+        suspended_member.allowed_context_ids = None  # suspended
+        service = self._service_with_member(suspended_member, ctx)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.resolve_context_for_workspace_read("user1", ctx_id)
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_viewer_with_null_whitelist_succeeds(self):
+        """Viewer NULL whitelist means "no restriction" per Migration 042 —
+        unlike the member NULL case (suspended). Viewer should pass."""
+        ctx_id = uuid4()
+        ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
+        viewer = MagicMock()
+        viewer.role = "viewer"
+        viewer.allowed_context_ids = None  # no restriction (all contexts)
+        service = self._service_with_member(viewer, ctx)
+
+        result = await service.resolve_context_for_workspace_read("user1", ctx_id)
+        assert result is ctx

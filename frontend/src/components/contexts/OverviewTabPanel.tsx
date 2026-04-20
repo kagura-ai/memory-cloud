@@ -54,6 +54,7 @@ import { PublicAPIStats } from "@/components/dashboard/PublicAPIStats";
 import { formatRelativeTime, formatDate } from "@/lib/utils/datetime";
 import type { Context } from "@/lib/types/context";
 import { useAuth } from "@/contexts/AuthContext";
+import { hasWorkspaceRole } from "@/lib/auth/rbac";
 
 interface OverviewTabPanelProps {
   contextId: string;
@@ -78,7 +79,14 @@ export function OverviewTabPanel({
   const [publicAPIStats, setPublicAPIStats] =
     useState<PublicAPIStatsResponse | null>(null);
   const [timelineDays, setTimelineDays] = useState<7 | 30>(7);
-  const { currentWorkspaceId } = useWorkspace();
+  const { currentWorkspace, currentWorkspaceId } = useWorkspace();
+  // Issue #398: User Activity is admin/owner only. Backend 403's the
+  // /user-activity endpoint for non-admins; gating here both hides the
+  // card and skips the doomed API call.
+  const canSeeUserActivity = hasWorkspaceRole(
+    currentWorkspace?.current_user_role,
+    "admin",
+  );
 
   const fetchUsageStats = useCallback(async () => {
     if (!contextId || !currentWorkspaceId) return;
@@ -91,15 +99,17 @@ export function OverviewTabPanel({
       );
       setTimeline(timelineData);
 
-      try {
-        const activityData = await getContextUserActivity(
-          currentWorkspaceId,
-          contextId,
-          timelineDays,
-        );
-        setUserActivity(activityData);
-      } catch {
-        setUserActivity(null);
+      if (canSeeUserActivity) {
+        try {
+          const activityData = await getContextUserActivity(
+            currentWorkspaceId,
+            contextId,
+            timelineDays,
+          );
+          setUserActivity(activityData);
+        } catch {
+          setUserActivity(null);
+        }
       }
 
       if (context?.is_public) {
@@ -117,7 +127,13 @@ export function OverviewTabPanel({
     } catch {
       // Timeline fetch failed — graceful degradation
     }
-  }, [contextId, currentWorkspaceId, timelineDays, context]);
+  }, [
+    contextId,
+    currentWorkspaceId,
+    timelineDays,
+    context,
+    canSeeUserActivity,
+  ]);
 
   useEffect(() => {
     if (context && currentWorkspaceId) {
@@ -248,78 +264,84 @@ export function OverviewTabPanel({
       {/* Memory Health & Neural Activity */}
       <RichMemoryOverview ref={overviewRef} contextId={contextId} />
 
-      {/* User Activity Table */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <UserCircle className="h-5 w-5" />
-            {t("userActivity")}
-          </CardTitle>
-          <CardDescription>
-            {timelineDays === 7
-              ? t("topUsersLast7Days")
-              : t("topUsersLast30Days")}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {userActivity && userActivity.users.length > 0 ? (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>{t("user")}</TableHead>
-                  <TableHead className="text-right">{t("apiCalls")}</TableHead>
-                  <TableHead className="text-right">
-                    {t("lastActivity")}
-                  </TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {userActivity.users.map((user) => (
-                  <TableRow key={user.user_id}>
-                    <TableCell>
-                      <div>
-                        <div className="font-medium">
-                          {user.user_name || user.user_email}
-                        </div>
-                        {user.user_name && user.user_email && (
-                          <div className="text-sm text-gray-500">
-                            {user.user_email}
-                          </div>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <span className="font-semibold text-green-600">
-                        {user.api_calls.toLocaleString()}
-                      </span>
-                    </TableCell>
-                    <TableCell className="text-right text-sm text-gray-500">
-                      {user.last_activity
-                        ? formatRelativeTime(
-                            user.last_activity,
-                            authUser?.timezone,
-                            locale,
-                          )
-                        : "Never"}
-                    </TableCell>
+      {/* User Activity Table — Issue #398: admin/owner only. */}
+      {canSeeUserActivity && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <UserCircle className="h-5 w-5" />
+              {t("userActivity")}
+            </CardTitle>
+            <CardDescription>
+              {timelineDays === 7
+                ? t("topUsersLast7Days")
+                : t("topUsersLast30Days")}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {userActivity && userActivity.users.length > 0 ? (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>{t("user")}</TableHead>
+                    <TableHead className="text-right">
+                      {t("apiCalls")}
+                    </TableHead>
+                    <TableHead className="text-right">
+                      {t("lastActivity")}
+                    </TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          ) : (
-            <div className="text-center py-8 text-gray-500">
-              {userActivity === null ? (
-                <div>
+                </TableHeader>
+                <TableBody>
+                  {userActivity.users.map((user) => (
+                    <TableRow key={user.user_id}>
+                      <TableCell>
+                        <div>
+                          <div className="font-medium">
+                            {user.user_name || user.user_email}
+                          </div>
+                          {user.user_name && user.user_email && (
+                            <div className="text-sm text-gray-500">
+                              {user.user_email}
+                            </div>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <span className="font-semibold text-green-600">
+                          {user.api_calls.toLocaleString()}
+                        </span>
+                      </TableCell>
+                      <TableCell className="text-right text-sm text-gray-500">
+                        {user.last_activity
+                          ? formatRelativeTime(
+                              user.last_activity,
+                              authUser?.timezone,
+                              locale,
+                            )
+                          : t("never")}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            ) : (
+              <div className="text-center py-8 text-gray-500">
+                {/* The card is gated to admin/owner via canSeeUserActivity
+                    above, so reaching the null branch means a real fetch
+                    failure (network/5xx) rather than an authorization
+                    denial. The pre-gating "requires admin role" sub-copy
+                    would be misleading here. */}
+                {userActivity === null ? (
                   <p>{t("userActivityNotAvailable")}</p>
-                  <p className="text-sm mt-2">{t("requiresAdminRole")}</p>
-                </div>
-              ) : (
-                <p>{t("noActivityData")}</p>
-              )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+                ) : (
+                  <p>{t("noActivityData")}</p>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

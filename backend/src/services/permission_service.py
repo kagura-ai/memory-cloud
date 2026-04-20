@@ -221,7 +221,7 @@ class PermissionService:
         user_id: str,
         context_id: UUID,
         *,
-        required_role: str = "member",
+        required_role: str = "viewer",
     ) -> Context:
         """Resolve a ``context_id`` to a Context the caller can read, with uniform 404.
 
@@ -232,12 +232,20 @@ class PermissionService:
         (CWE-639 / OWASP A01 uniform disclosure — same principle as
         ``resolve_resource_by_slug`` for slug-addressed paths).
 
+        Issue #398: default lowered from ``member`` to ``viewer`` — this is
+        a *read* helper and viewers must be able to read shared-context
+        graphs/stats. Previously a viewer hitting ``/graph/stats`` for a
+        shared context they could otherwise see surfaced as
+        ``404 Context not found`` because the membership gate rejected
+        viewer before any per-role logic ran.
+
         Args:
             user_id: Authenticated principal.
             context_id: UUID of the context to resolve.
             required_role: Minimum workspace role to accept. Defaults to
-                ``member`` — suitable for read endpoints like ``/graph/*``.
-                Writers should pass ``admin`` or ``owner``.
+                ``viewer`` — suitable for read endpoints like ``/graph/*``
+                and ``/memory/stats``. Writers should pass ``admin`` or
+                ``owner``.
 
         Returns:
             The ``Context`` row for ``context_id`` if the caller has the
@@ -279,7 +287,7 @@ class PermissionService:
             raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
 
         try:
-            await self.check_workspace_access(
+            workspace_member = await self.check_workspace_access(
                 user_id=user_id,
                 workspace_id=context.workspace_id,
                 required_role=required_role,
@@ -306,6 +314,41 @@ class PermissionService:
                 user_id=user_id,
             )
             raise HTTPException(status_code=404, detail=f"Context {context_id} not found") from None
+
+        # Apply the same allowed_context_ids semantics that get_accessible_contexts
+        # and check_context_access enforce for the lower-privilege roles. Without
+        # this, a restricted member/viewer could read /graph/stats and other
+        # UUID-addressed endpoints for contexts they cannot list. Workspace
+        # owner/admin bypass these restrictions by design (line 427-429).
+        #
+        # Per Migration 042 the NULL/[] semantics differ by role:
+        #   - member, allowed_context_ids IS NULL → suspended (no access)
+        #   - viewer, allowed_context_ids IS NULL → no restriction (all)
+        #   - either, allowed_context_ids = [<ids>] → whitelist enforced
+        #   - either, allowed_context_ids = []     → explicit no access
+        if workspace_member.role == "member" and workspace_member.allowed_context_ids is None:
+            logger.warning(
+                "context_read_denied",
+                reason="member_suspended",
+                context_id=str(context_id),
+                context_workspace_id=str(context.workspace_id),
+                user_id=user_id,
+            )
+            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+
+        if (
+            workspace_member.role in ("member", "viewer")
+            and workspace_member.allowed_context_ids is not None
+            and context_id not in workspace_member.allowed_context_ids
+        ):
+            logger.warning(
+                "context_read_denied",
+                reason="not_in_whitelist",
+                context_id=str(context_id),
+                context_workspace_id=str(context.workspace_id),
+                user_id=user_id,
+            )
+            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
 
         return context
 
@@ -556,6 +599,10 @@ class PermissionService:
         """Get all contexts user can access in workspace.
 
         Issue #234: Respects allowed_context_ids whitelist for member/viewer.
+        Issue #398: viewer must reach the viewer branch below — gating at
+        ``required_role="member"`` made that branch unreachable and silently
+        hid every shared context from viewers (UX-visible: contexts list
+        was empty for viewer even when shared contexts existed).
 
         Args:
             user_id: User ID
@@ -566,18 +613,30 @@ class PermissionService:
         """
         from sqlalchemy import select
 
-        # Check workspace membership
+        # Check workspace membership (viewer is the floor — the per-role
+        # branches below decide what each role can actually see).
         workspace_member = await self.check_workspace_access(
-            user_id, workspace_id, required_role="member"
+            user_id, workspace_id, required_role="viewer"
         )
 
-        # Workspace owner/admin → all contexts (ignore allowed_context_ids)
+        # Private contexts are creator-only across every workspace role
+        # (matches check_context_access:401-410 — even an owner/admin gets 403
+        # when trying to open another user's private context). Filter the
+        # listing to non-private contexts plus the caller's own private ones
+        # so the list shape matches the per-context access check; otherwise
+        # the listing leaks the existence of private contexts that 403 on
+        # click-through.
+        privacy_filter = (Context.is_private.is_(False)) | (Context.created_by == user_id)
+
+        # Workspace owner/admin → all accessible contexts (ignore
+        # allowed_context_ids; privacy still applies).
         if workspace_member.role in ("owner", "admin"):
             stmt = (
                 select(Context)
                 .where(
                     Context.workspace_id == workspace_id,
                     Context.deleted_at.is_(None),
+                    privacy_filter,
                 )
                 .order_by(Context.created_at.desc())
             )
@@ -596,16 +655,18 @@ class PermissionService:
                         Context.workspace_id == workspace_id,
                         Context.deleted_at.is_(None),
                         Context.id.in_(workspace_member.allowed_context_ids),
+                        privacy_filter,
                     )
                     .order_by(Context.created_at.desc())
                 )
             else:
-                # No restriction → all contexts
+                # No restriction → all shared contexts (+ caller's own private)
                 stmt = (
                     select(Context)
                     .where(
                         Context.workspace_id == workspace_id,
                         Context.deleted_at.is_(None),
+                        privacy_filter,
                     )
                     .order_by(Context.created_at.desc())
                 )
@@ -623,13 +684,14 @@ class PermissionService:
         if not workspace_member.allowed_context_ids:
             return []
 
-        # Show only whitelisted contexts
+        # Show only whitelisted contexts (filtered to non-private + own private)
         stmt = (
             select(Context)
             .where(
                 Context.workspace_id == workspace_id,
                 Context.deleted_at.is_(None),
                 Context.id.in_(workspace_member.allowed_context_ids),
+                privacy_filter,
             )
             .order_by(Context.created_at.desc())
         )

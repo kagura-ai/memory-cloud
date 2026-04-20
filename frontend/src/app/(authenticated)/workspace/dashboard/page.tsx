@@ -8,7 +8,9 @@
  */
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { hasWorkspaceRole } from "@/lib/auth/rbac";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Button } from "@/components/ui/button";
 import {
@@ -40,7 +42,24 @@ import {
 export default function WorkspaceStatsPage() {
   const t = useTranslations("workspace");
   const tCommon = useTranslations("common");
-  const { currentWorkspace, currentWorkspaceId } = useWorkspace();
+  const router = useRouter();
+  const {
+    currentWorkspace,
+    currentWorkspaceId,
+    loading: workspaceLoading,
+  } = useWorkspace();
+
+  // Issue #398: viewer cannot read workspace stats (backend 403's on
+  // /workspaces/{id}/contexts/stats with required_role="member"). Send
+  // viewers to the contexts list — their only data-bearing surface.
+  useEffect(() => {
+    if (
+      currentWorkspace &&
+      !hasWorkspaceRole(currentWorkspace.current_user_role, "member")
+    ) {
+      router.push("/workspace/contexts");
+    }
+  }, [currentWorkspace, router]);
   const [stats, setStats] = useState<WorkspaceStats | null>(null);
   const [contextStats, setContextStats] = useState<ContextStatsResponse | null>(
     null,
@@ -75,11 +94,40 @@ export default function WorkspaceStatsPage() {
   };
 
   useEffect(() => {
+    // Skip the protected fetches for viewer — the redirect useEffect above
+    // is sending them to /workspace/contexts, and the backend (workspace
+    // stats + contexts/stats) returns 403 for viewer. Without this guard a
+    // viewer flashes a "Requires 'member' role or higher" error toast in
+    // the gap between login and the redirect.
+    //
+    // The workspaceLoading guard is load-bearing: during hydration
+    // currentWorkspace is null while currentWorkspaceId may already be
+    // cached. Without it the viewer-skip is bypassed and fetchStats fires
+    // once with unknown role, recreating the flash this code prevents.
+    if (workspaceLoading) return;
+    if (
+      currentWorkspace &&
+      !hasWorkspaceRole(currentWorkspace.current_user_role, "member")
+    ) {
+      return;
+    }
     fetchStats();
-  }, [currentWorkspaceId]);
+  }, [
+    currentWorkspaceId,
+    currentWorkspace?.current_user_role,
+    workspaceLoading,
+  ]);
 
   useEffect(() => {
     if (!currentWorkspaceId) return;
+    if (workspaceLoading) return;
+    // Same viewer-skip as above — memory-timeline is a member+ surface.
+    if (
+      currentWorkspace &&
+      !hasWorkspaceRole(currentWorkspace.current_user_role, "member")
+    ) {
+      return;
+    }
 
     const controller = new AbortController();
     getWorkspaceMemoryTimeline(
@@ -98,7 +146,13 @@ export default function WorkspaceStatsPage() {
       });
 
     return () => controller.abort();
-  }, [timelineDays, currentWorkspaceId, selectedContextId]);
+  }, [
+    timelineDays,
+    currentWorkspaceId,
+    selectedContextId,
+    currentWorkspace?.current_user_role,
+    workspaceLoading,
+  ]);
 
   return (
     <PageContainer>
