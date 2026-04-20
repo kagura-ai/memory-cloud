@@ -163,7 +163,14 @@ export default function WorkspaceMembersPage() {
       loadMemberQuota(); // Issue #229
       loadContexts(); // Issue #234
     }
-  }, [currentWorkspaceId, currentWorkspace, workspaceLoading]);
+    // Depend on the role string (a primitive) rather than the whole
+    // currentWorkspace object — a context provider re-render with the same
+    // workspace would otherwise re-trigger four protected fetches.
+  }, [
+    currentWorkspaceId,
+    currentWorkspace?.current_user_role,
+    workspaceLoading,
+  ]);
 
   const loadMembers = async () => {
     if (!currentWorkspaceId) return;
