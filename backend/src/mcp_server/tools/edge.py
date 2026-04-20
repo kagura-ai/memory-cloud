@@ -8,6 +8,7 @@ from itertools import chain
 from typing import Any
 from uuid import UUID
 
+from fastapi import HTTPException
 from mcp.types import TextContent
 
 from mcp_server.tools._helpers import (
@@ -95,13 +96,26 @@ def _parse_float(
 async def handle_list_edges(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
-    """List edges connected to a specific memory."""
+    """List edges connected to a specific memory.
+
+    Issue #395: Visibility honors ``Context.is_private`` via
+    ``PermissionService.resolve_context_for_workspace_read`` (same contract
+    as the HTTP ``/graph/*`` endpoints fixed in #383/#394). Shared-context
+    workspace members see edges authored by ALL creators; private-context
+    non-creators (including workspace admins) see a uniform
+    ``context_not_found`` denial indistinguishable from "context does not
+    exist at all" (CWE-639 / OWASP A01). The ``context.workspace_id``
+    returned by the resolver is authoritative — the pre-#395 fallback to
+    the MCP-session ``workspace_id`` could diverge from the context's
+    actual workspace and is intentionally removed.
+    """
     memory_uuid, error = _validate_memory_id(args, "list_edges")
     if error or memory_uuid is None:
         return error or _error_response("invalid_memory_id_format", "Invalid memory_id")
 
     from db.base import get_db
     from repositories.neural_edge import NeuralEdgeRepository
+    from services.permission_service import PermissionService
 
     min_weight, error = _parse_float(args.get("min_weight"), "min_weight", 0.0, 3.0, 0.0)
     if error:
@@ -114,17 +128,33 @@ async def handle_list_edges(
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
-            context = await _resolve_context(db, user_id, current_context_id)
 
-            # Use context's workspace_id for isolation (fallback from MCP session)
-            ws_id = str(workspace_id) if workspace_id else str(context.workspace_id)
-            ctx_id = str(current_context_id)
+            try:
+                context = await PermissionService(db).resolve_context_for_workspace_read(
+                    user_id=user_id, context_id=current_context_id
+                )
+            except HTTPException as exc:
+                # Uniform denial — same shape whether the context does not
+                # exist, is private and the caller is not its creator, or
+                # the caller is not a workspace member. Mirrors HTTP 404
+                # uniform disclosure (CWE-639 / OWASP A01) by routing
+                # through the existing _ContextNotFoundError path.
+                if exc.status_code == 404:
+                    raise _ContextNotFoundError(
+                        current_context_id,
+                        "Context not found or you don't have access to it.",
+                    ) from exc
+                raise
+
+            ws_id = str(context.workspace_id)
+            ctx_id = str(context.id)
+            owner_filter = user_id if context.is_private else None
 
             repo = NeuralEdgeRepository(db)
 
             outgoing = await execute_with_timeout(
                 repo.get_outgoing_edges(
-                    user_id=user_id,
+                    user_id=owner_filter,
                     src_id=memory_uuid,
                     min_weight=min_weight,
                     edge_types=edge_types,
@@ -136,7 +166,7 @@ async def handle_list_edges(
             )
             incoming = await execute_with_timeout(
                 repo.get_incoming_edges(
-                    user_id=user_id,
+                    user_id=owner_filter,
                     dst_id=memory_uuid,
                     min_weight=min_weight,
                     edge_types=edge_types,
