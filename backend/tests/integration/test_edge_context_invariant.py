@@ -70,7 +70,18 @@ async def invariant_scenario(db_session: AsyncSession):
     mem_dst_a = _mk_memory(ctx_a)
     mem_stray_b = _mk_memory(ctx_b)
 
-    db_session.add_all([ws, ctx_a, ctx_b, mem_src_a, mem_dst_a, mem_stray_b])
+    # Flush in dependency order — SQLAlchemy's UoW heuristic doesn't reliably
+    # topo-sort inserts when the ORM lacks back-populating relationship() on
+    # Context → Workspace and Memory → Context (they only have raw FK columns),
+    # so a single add_all + flush can see contexts inserted before their
+    # workspace row exists. test_graph_visibility.py has the same pattern.
+    db_session.add(ws)
+    await db_session.flush()
+
+    db_session.add_all([ctx_a, ctx_b])
+    await db_session.flush()
+
+    db_session.add_all([mem_src_a, mem_dst_a, mem_stray_b])
     await db_session.flush()
 
     yield {
