@@ -162,6 +162,14 @@ export default function ContextsPage() {
   >({});
   const [loadingStats, setLoadingStats] = useState<Record<string, boolean>>({});
 
+  // Issue #398: admin/owner-only controls (create button, per-row kebab,
+  // settings/connections/graph navigation). hasWorkspaceRole returns false
+  // while currentWorkspace hydrates — controls stay hidden until role is known.
+  const canManageContexts = hasWorkspaceRole(
+    currentWorkspace?.current_user_role,
+    "admin",
+  );
+
   const fetchContexts = useCallback(async () => {
     try {
       setLoading(true);
@@ -431,61 +439,59 @@ export default function ContextsPage() {
         actions={
           <div className="flex items-center gap-2">
             {/* Issue #169: Dropdown for Quick Create vs Advanced Create */}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  size="sm"
-                  className={colors.button.primary}
-                  disabled={
-                    hasOpenAIKey === false ||
-                    currentWorkspace?.current_user_role === "member" ||
-                    currentWorkspace?.current_user_role === "viewer" ||
-                    isQuotaReached
-                  }
-                >
-                  <Plus className="h-4 w-4 mr-2" />
-                  {t("newContext")}
-                  <ChevronDown className="h-4 w-4 ml-1" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56">
-                <DropdownMenuItem
-                  onClick={() => {
-                    if (isQuotaReached) {
-                      setQuotaDialogOpen(true);
-                    } else {
-                      setQuickCreateDialogOpen(true);
-                    }
-                  }}
-                >
-                  <Zap className="h-4 w-4 mr-2 text-amber-500" />
-                  <div>
-                    <div className="font-medium">{t("quickCreate")}</div>
-                    <div className="text-xs text-muted-foreground">
-                      {t("quickCreateDesc")}
+            {/* Issue #398: admin/owner-only — hidden for member/viewer. */}
+            {canManageContexts && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="sm"
+                    className={colors.button.primary}
+                    disabled={hasOpenAIKey === false || isQuotaReached}
+                  >
+                    <Plus className="h-4 w-4 mr-2" />
+                    {t("newContext")}
+                    <ChevronDown className="h-4 w-4 ml-1" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-56">
+                  <DropdownMenuItem
+                    onClick={() => {
+                      if (isQuotaReached) {
+                        setQuotaDialogOpen(true);
+                      } else {
+                        setQuickCreateDialogOpen(true);
+                      }
+                    }}
+                  >
+                    <Zap className="h-4 w-4 mr-2 text-amber-500" />
+                    <div>
+                      <div className="font-medium">{t("quickCreate")}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {t("quickCreateDesc")}
+                      </div>
                     </div>
-                  </div>
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  onClick={() => {
-                    if (isQuotaReached) {
-                      setQuotaDialogOpen(true);
-                    } else {
-                      setCreateDialogOpen(true);
-                    }
-                  }}
-                >
-                  <Settings2 className="h-4 w-4 mr-2 text-blue-500" />
-                  <div>
-                    <div className="font-medium">{t("advancedCreate")}</div>
-                    <div className="text-xs text-muted-foreground">
-                      {t("advancedCreateDesc")}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={() => {
+                      if (isQuotaReached) {
+                        setQuotaDialogOpen(true);
+                      } else {
+                        setCreateDialogOpen(true);
+                      }
+                    }}
+                  >
+                    <Settings2 className="h-4 w-4 mr-2 text-blue-500" />
+                    <div>
+                      <div className="font-medium">{t("advancedCreate")}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {t("advancedCreateDesc")}
+                      </div>
                     </div>
-                  </div>
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
           </div>
         }
       />
@@ -1012,49 +1018,54 @@ export default function ContextsPage() {
                       >
                         <BarChart className="h-3.5 w-3.5" />
                       </Button>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 w-7 p-0"
-                          >
-                            <MoreVertical className="h-3.5 w-3.5" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem
-                            onClick={() =>
-                              router.push(
-                                `/workspace/contexts/${context.id}?tab=connections`,
-                              )
-                            }
-                          >
-                            <Settings2 className="h-4 w-4 mr-2" />
-                            {t("connections")}
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={() =>
-                              router.push(
-                                `/workspace/contexts/${context.id}?tab=graph`,
-                              )
-                            }
-                          >
-                            <Settings2 className="h-4 w-4 mr-2" />
-                            {t("graph")}
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={() =>
-                              router.push(
-                                `/workspace/contexts/${context.id}?tab=settings`,
-                              )
-                            }
-                          >
-                            <Settings2 className="h-4 w-4 mr-2" />
-                            {tCommon("settings")}
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                      {/* Issue #398: kebab navigates to admin-only tabs;
+                          hide entirely for member/viewer (overview reachable
+                          via the BarChart button above). */}
+                      {canManageContexts && (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 w-7 p-0"
+                            >
+                              <MoreVertical className="h-3.5 w-3.5" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem
+                              onClick={() =>
+                                router.push(
+                                  `/workspace/contexts/${context.id}?tab=connections`,
+                                )
+                              }
+                            >
+                              <Settings2 className="h-4 w-4 mr-2" />
+                              {t("connections")}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={() =>
+                                router.push(
+                                  `/workspace/contexts/${context.id}?tab=graph`,
+                                )
+                              }
+                            >
+                              <Settings2 className="h-4 w-4 mr-2" />
+                              {t("graph")}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={() =>
+                                router.push(
+                                  `/workspace/contexts/${context.id}?tab=settings`,
+                                )
+                              }
+                            >
+                              <Settings2 className="h-4 w-4 mr-2" />
+                              {tCommon("settings")}
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      )}
                     </div>
                   </td>
                 </tr>
