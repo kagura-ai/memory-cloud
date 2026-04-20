@@ -65,26 +65,35 @@ logger = logging.getLogger("alembic.runtime.migration")
 def upgrade() -> None:
     conn = op.get_bind()
 
-    # Step 1: backfill NULL workspace_id/context_id from endpoint memories.
+    # Step 1: backfill NULL workspace_id/context_id from endpoint memories —
+    # but ONLY when src and dst memories agree on (workspace_id, context_id).
     #
-    # COALESCE order: prefer the edge's existing value (if any), then src, then
-    # dst. ms/md are INNER JOINed so edges whose src OR dst has been deleted
-    # won't match and remain untouched here — Step 2 catches them as orphans.
-    # The UPDATE skips rows that are already non-NULL on both columns.
+    # A COALESCE(e.ws, ms.ws, md.ws) naive backfill would "fix" rows whose
+    # src and dst memories live in different contexts by arbitrarily picking
+    # src's values, silently introducing the exact invariant violation the
+    # sibling write-path check (_validate_edge_context_invariant) exists to
+    # prevent. Those rows were already broken before 062 and have no legal
+    # resolution — we would need to know which side is authoritative, and
+    # there is no signal. Leave them NULL so Step 2 drops them as orphans.
+    #
+    # The narrower WHERE also implicitly filters out cases where either
+    # endpoint memory still has NULL ws/ctx (pre-063 data migration 063
+    # did not reach) — the equality-on-NULL is false, so those edges
+    # fall through to the orphan delete as well.
     backfill_result = conn.execute(
         sa.text(
             """
             UPDATE neural_memory_edges AS e
-            SET workspace_id = COALESCE(e.workspace_id, ms.workspace_id, md.workspace_id),
-                context_id   = COALESCE(e.context_id,   ms.context_id,   md.context_id)
+            SET workspace_id = COALESCE(e.workspace_id, ms.workspace_id),
+                context_id   = COALESCE(e.context_id,   ms.context_id)
             FROM memories AS ms, memories AS md
             WHERE ms.id = e.src_id
               AND md.id = e.dst_id
               AND (e.workspace_id IS NULL OR e.context_id IS NULL)
-              AND (
-                    COALESCE(ms.workspace_id, md.workspace_id) IS NOT NULL
-                 OR COALESCE(ms.context_id,   md.context_id)   IS NOT NULL
-              )
+              AND ms.workspace_id IS NOT NULL
+              AND ms.context_id   IS NOT NULL
+              AND ms.workspace_id = md.workspace_id
+              AND ms.context_id   = md.context_id
             """
         )
     )
