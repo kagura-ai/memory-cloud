@@ -19,6 +19,7 @@ from mcp_server.tools._helpers import (
     _error_response,
     _get_workspace_member_role,
     _log_tool_usage,
+    _resolve_context_for_read,
     _resolve_context_id,
     execute_with_timeout,
 )
@@ -29,7 +30,13 @@ logger = logging.getLogger(__name__)
 async def handle_get_context_info(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
-    """Retrieve context information and memory statistics."""
+    """Retrieve context information and memory statistics.
+
+    Visibility: shared context → stats aggregate across all workspace members;
+    private context → creator-only. Non-creators get uniform ``context_not_found``.
+    The workspace returned by the resolver is authoritative; the MCP-session
+    ``workspace_id`` is informational only.
+    """
     include_details = args.get("include_details", True)
 
     from db.base import get_db
@@ -37,63 +44,38 @@ async def handle_get_context_info(
     start_time = time.time()
     async for db in get_db():
         try:
-            from services.context_service import ContextService
             from services.memory_service import MemoryService
 
             current_context_id = _resolve_context_id(args["context_id"])
 
-            # Get context details (with fallback for stats if access check fails)
-            context_service = ContextService(db)
             current_context = None
-            context_for_stats = None
+            is_shared = False
+            effective_workspace_id = workspace_id
 
             if current_context_id:
-                try:
-                    current_context = await context_service.get_context(user_id, current_context_id)
-                    context_for_stats = current_context
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to fetch context with access check {current_context_id}: {e}"
-                    )
-                    from sqlalchemy import select
+                current_context = await _resolve_context_for_read(db, user_id, current_context_id)
+                # Past this gate the caller is either the private-context creator
+                # or an authorized shared-context reader, so is_private alone
+                # picks the correct scope for MemoryService.get_stats.
+                is_shared = not current_context.is_private
+                effective_workspace_id = current_context.workspace_id
 
-                    from models.auth import Context
-
-                    result = await db.execute(
-                        select(Context).where(
-                            Context.id == current_context_id,
-                            Context.deleted_at.is_(None),
-                        )
-                    )
-                    context_for_stats = result.scalar_one_or_none()
-
-            # Issue #204: Check if context is shared or if user is workspace owner
-            is_shared = False
             workspace = None
-            logger.info(
-                f"MCP get_context_info: workspace_id={workspace_id}, current_context={current_context is not None}, context_for_stats={context_for_stats is not None}"
-            )
-
-            if context_for_stats and workspace_id:
+            if effective_workspace_id:
                 from sqlalchemy import select
 
                 from models.auth import Workspace
 
                 workspace_result = await db.execute(
-                    select(Workspace).where(Workspace.id == workspace_id)
+                    select(Workspace).where(Workspace.id == effective_workspace_id)
                 )
                 workspace = workspace_result.scalar_one_or_none()
-                logger.info(
-                    f"MCP workspace lookup: workspace_id={workspace_id}, workspace_found={workspace is not None}"
-                )
-                is_workspace_owner = workspace and workspace.owner_user_id == user_id
-                is_shared = is_workspace_owner or not context_for_stats.is_private
 
             service = MemoryService(db)
             result = await execute_with_timeout(
                 service.get_stats(
                     user_id=user_id,
-                    workspace_id=str(workspace_id) if workspace_id else None,
+                    workspace_id=str(effective_workspace_id) if effective_workspace_id else None,
                     context_id=str(current_context_id) if current_context_id else None,
                     include_details=include_details,
                     time_window_hours=168,
@@ -196,6 +178,18 @@ async def handle_get_context_info(
                     ),
                 )
             ]
+        except _ContextNotFoundError as e:
+            await db.rollback()
+            await _log_tool_usage(
+                db,
+                user_id,
+                "get_context_info",
+                start_time,
+                404,
+                args.get("context_id"),
+                workspace_id,
+            )
+            return e.to_response()
         except Exception as e:
             await db.rollback()
             await _log_tool_usage(

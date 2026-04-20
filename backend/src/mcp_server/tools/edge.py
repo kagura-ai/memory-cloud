@@ -16,6 +16,7 @@ from mcp_server.tools._helpers import (
     _error_response,
     _log_tool_usage,
     _resolve_context,
+    _resolve_context_for_read,
     _resolve_context_id,
     _success_response,
     _validate_memory_id,
@@ -95,7 +96,13 @@ def _parse_float(
 async def handle_list_edges(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
-    """List edges connected to a specific memory."""
+    """List edges connected to a specific memory.
+
+    Visibility: shared context → workspace members see all creators' edges;
+    private context → only the creator sees edges, non-creators get a uniform
+    ``context_not_found`` denial. ``context.workspace_id`` (from the resolver)
+    is authoritative — the MCP-session ``workspace_id`` is informational only.
+    """
     memory_uuid, error = _validate_memory_id(args, "list_edges")
     if error or memory_uuid is None:
         return error or _error_response("invalid_memory_id_format", "Invalid memory_id")
@@ -114,17 +121,17 @@ async def handle_list_edges(
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
-            context = await _resolve_context(db, user_id, current_context_id)
+            context = await _resolve_context_for_read(db, user_id, current_context_id)
 
-            # Use context's workspace_id for isolation (fallback from MCP session)
-            ws_id = str(workspace_id) if workspace_id else str(context.workspace_id)
-            ctx_id = str(current_context_id)
+            ws_id = str(context.workspace_id)
+            ctx_id = str(context.id)
+            owner_filter = user_id if context.is_private else None
 
             repo = NeuralEdgeRepository(db)
 
             outgoing = await execute_with_timeout(
                 repo.get_outgoing_edges(
-                    user_id=user_id,
+                    user_id=owner_filter,
                     src_id=memory_uuid,
                     min_weight=min_weight,
                     edge_types=edge_types,
@@ -136,7 +143,7 @@ async def handle_list_edges(
             )
             incoming = await execute_with_timeout(
                 repo.get_incoming_edges(
-                    user_id=user_id,
+                    user_id=owner_filter,
                     dst_id=memory_uuid,
                     min_weight=min_weight,
                     edge_types=edge_types,
@@ -166,6 +173,9 @@ async def handle_list_edges(
             )
         except _ContextNotFoundError as e:
             await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "list_edges", start_time, 404, args.get("context_id"), workspace_id
+            )
             return e.to_response()
         except Exception:
             await db.rollback()
