@@ -328,12 +328,13 @@ class NeuralEdgeRepository:
         """Get outgoing edges from a node with 3-level isolation.
 
         Single Collection Migration: Added workspace_id and context_id filtering.
-        Issue #395: ``user_id`` is now optional — mirrors ``get_all_edges`` /
-        ``get_stats`` / ``get_top_connected_nodes`` (extended for #383).
-        ``None`` returns all creators' outgoing edges from ``src_id`` in the
-        workspace+context (shared-context reads where authorization is
-        enforced upstream by ``PermissionService``); a concrete value keeps
-        the prior private-context / owner-scoped behavior.
+
+        ``user_id`` is optional and mirrors the signature of ``get_all_edges`` /
+        ``get_stats`` / ``get_top_connected_nodes``: ``None`` returns all
+        creators' outgoing edges within the resolved (workspace_id, context_id)
+        scope (shared-context reads where authorization is enforced upstream
+        by ``PermissionService``); a concrete value keeps the prior
+        creator-scoped behavior (private-context or owner-only reads).
 
         Args:
             user_id: Optional creator filter. ``None`` returns all creators'
@@ -395,12 +396,13 @@ class NeuralEdgeRepository:
         """Get incoming edges to a node with 3-level isolation.
 
         Single Collection Migration: Added workspace_id and context_id filtering.
-        Issue #395: ``user_id`` is now optional — mirrors ``get_all_edges`` /
-        ``get_stats`` / ``get_top_connected_nodes`` (extended for #383).
-        ``None`` returns all creators' incoming edges to ``dst_id`` in the
-        workspace+context (shared-context reads where authorization is
-        enforced upstream by ``PermissionService``); a concrete value keeps
-        the prior private-context / owner-scoped behavior.
+
+        ``user_id`` is optional and mirrors the signature of ``get_all_edges`` /
+        ``get_stats`` / ``get_top_connected_nodes``: ``None`` returns all
+        creators' incoming edges within the resolved (workspace_id, context_id)
+        scope (shared-context reads where authorization is enforced upstream
+        by ``PermissionService``); a concrete value keeps the prior
+        creator-scoped behavior (private-context or owner-only reads).
 
         Args:
             user_id: Optional creator filter. ``None`` returns all creators'

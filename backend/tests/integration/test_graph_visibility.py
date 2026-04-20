@@ -17,6 +17,7 @@ class) rather than a parametric sweep so a failure clearly identifies
 which visibility contract regressed.
 """
 
+import json
 from uuid import uuid4
 
 import pytest
@@ -464,9 +465,6 @@ async def test_soft_deleted_context_returns_404(visibility_scenario, db_session)
 # from ``async_engine`` so MCP handlers read from the same test database the
 # ``visibility_scenario`` fixture seeds into.
 # ============================================================================
-
-
-import json  # noqa: E402  — lazy import kept local to the MCP parity block
 
 
 def _json_of(result):

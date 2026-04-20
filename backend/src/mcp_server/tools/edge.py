@@ -8,7 +8,6 @@ from itertools import chain
 from typing import Any
 from uuid import UUID
 
-from fastapi import HTTPException
 from mcp.types import TextContent
 
 from mcp_server.tools._helpers import (
@@ -17,6 +16,7 @@ from mcp_server.tools._helpers import (
     _error_response,
     _log_tool_usage,
     _resolve_context,
+    _resolve_context_for_read,
     _resolve_context_id,
     _success_response,
     _validate_memory_id,
@@ -98,16 +98,10 @@ async def handle_list_edges(
 ) -> list[TextContent]:
     """List edges connected to a specific memory.
 
-    Issue #395: Visibility honors ``Context.is_private`` via
-    ``PermissionService.resolve_context_for_workspace_read`` (same contract
-    as the HTTP ``/graph/*`` endpoints fixed in #383/#394). Shared-context
-    workspace members see edges authored by ALL creators; private-context
-    non-creators (including workspace admins) see a uniform
-    ``context_not_found`` denial indistinguishable from "context does not
-    exist at all" (CWE-639 / OWASP A01). The ``context.workspace_id``
-    returned by the resolver is authoritative — the pre-#395 fallback to
-    the MCP-session ``workspace_id`` could diverge from the context's
-    actual workspace and is intentionally removed.
+    Visibility: shared context → workspace members see all creators' edges;
+    private context → only the creator sees edges, non-creators get a uniform
+    ``context_not_found`` denial. ``context.workspace_id`` (from the resolver)
+    is authoritative — the MCP-session ``workspace_id`` is informational only.
     """
     memory_uuid, error = _validate_memory_id(args, "list_edges")
     if error or memory_uuid is None:
@@ -115,7 +109,6 @@ async def handle_list_edges(
 
     from db.base import get_db
     from repositories.neural_edge import NeuralEdgeRepository
-    from services.permission_service import PermissionService
 
     min_weight, error = _parse_float(args.get("min_weight"), "min_weight", 0.0, 3.0, 0.0)
     if error:
@@ -128,23 +121,7 @@ async def handle_list_edges(
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
-
-            try:
-                context = await PermissionService(db).resolve_context_for_workspace_read(
-                    user_id=user_id, context_id=current_context_id
-                )
-            except HTTPException as exc:
-                # Uniform denial — same shape whether the context does not
-                # exist, is private and the caller is not its creator, or
-                # the caller is not a workspace member. Mirrors HTTP 404
-                # uniform disclosure (CWE-639 / OWASP A01) by routing
-                # through the existing _ContextNotFoundError path.
-                if exc.status_code == 404:
-                    raise _ContextNotFoundError(
-                        current_context_id,
-                        "Context not found or you don't have access to it.",
-                    ) from exc
-                raise
+            context = await _resolve_context_for_read(db, user_id, current_context_id)
 
             ws_id = str(context.workspace_id)
             ctx_id = str(context.id)
@@ -196,6 +173,9 @@ async def handle_list_edges(
             )
         except _ContextNotFoundError as e:
             await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "list_edges", start_time, 404, args.get("context_id"), workspace_id
+            )
             return e.to_response()
         except Exception:
             await db.rollback()

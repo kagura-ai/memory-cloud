@@ -10,7 +10,6 @@ import time
 from typing import Any
 from uuid import UUID
 
-from fastapi import HTTPException
 from mcp.types import TextContent
 
 from mcp_server.tools._constants import KAGURA_MEMORY_INSTRUCTIONS
@@ -20,6 +19,7 @@ from mcp_server.tools._helpers import (
     _error_response,
     _get_workspace_member_role,
     _log_tool_usage,
+    _resolve_context_for_read,
     _resolve_context_id,
     execute_with_timeout,
 )
@@ -32,16 +32,10 @@ async def handle_get_context_info(
 ) -> list[TextContent]:
     """Retrieve context information and memory statistics.
 
-    Issue #395: Context resolution honors
-    ``PermissionService.resolve_context_for_workspace_read`` (same contract
-    as the HTTP ``/graph/*`` endpoints fixed in #383/#394). Shared-context
-    stats aggregate across all workspace members; private-context stats
-    are creator-scoped; private non-creators (including workspace admins)
-    get a uniform ``context_not_found`` denial. The pre-#395 stale
-    fallback that re-read the context without any access check is removed
-    — it silently authorized cross-workspace and private-non-creator
-    reads. The workspace returned by the resolver is authoritative; the
-    MCP-session ``workspace_id`` is informational-only when they diverge.
+    Visibility: shared context → stats aggregate across all workspace members;
+    private context → creator-only. Non-creators get uniform ``context_not_found``.
+    The workspace returned by the resolver is authoritative; the MCP-session
+    ``workspace_id`` is informational only.
     """
     include_details = args.get("include_details", True)
 
@@ -51,7 +45,6 @@ async def handle_get_context_info(
     async for db in get_db():
         try:
             from services.memory_service import MemoryService
-            from services.permission_service import PermissionService
 
             current_context_id = _resolve_context_id(args["context_id"])
 
@@ -60,28 +53,10 @@ async def handle_get_context_info(
             effective_workspace_id = workspace_id
 
             if current_context_id:
-                try:
-                    current_context = await PermissionService(
-                        db
-                    ).resolve_context_for_workspace_read(
-                        user_id=user_id, context_id=current_context_id
-                    )
-                except HTTPException as exc:
-                    if exc.status_code == 404:
-                        raise _ContextNotFoundError(
-                            current_context_id,
-                            "Context not found or you don't have access to it.",
-                        ) from exc
-                    raise
-
-                # Private context + creator: creator-only stats (user_id filter).
-                # Shared context + any workspace member: aggregate across all
-                # creators (no user_id filter). Past this gate the caller is
-                # always either the private-context creator or an authorized
-                # shared-context reader, so the is_private flag alone picks
-                # the correct scope — the pre-#395 ``is_workspace_owner``
-                # special case was a pre-workspace-era workaround and is
-                # removed to align with ``can_access_memory`` / #383.
+                current_context = await _resolve_context_for_read(db, user_id, current_context_id)
+                # Past this gate the caller is either the private-context creator
+                # or an authorized shared-context reader, so is_private alone
+                # picks the correct scope for MemoryService.get_stats.
                 is_shared = not current_context.is_private
                 effective_workspace_id = current_context.workspace_id
 
