@@ -671,9 +671,7 @@ class NeuralEdgeRepository:
         ``user_id`` axis is the only optional one. "All edges authored by this
         user across all contexts" is NOT a supported use case for this method —
         that access pattern would bypass the 3-level isolation and is rejected
-        by the validator. The pre-existing ``neural/decay.py:get_decay_statistics``
-        caller is currently on a latent error path and is uncalled (dead code);
-        see Issue #383 PR body for the tracked follow-up.
+        by the validator.
 
         Args:
             user_id: Optional creator filter. ``None`` aggregates over all
