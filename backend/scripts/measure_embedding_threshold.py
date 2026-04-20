@@ -136,6 +136,12 @@ async def sample_memories(db: AsyncSession, context_id: UUID, n: int) -> list[Me
     is retained for statistical correctness — offset-based sampling on a
     canonical order would bias the sample toward clustered regions of the
     context (e.g. a single user's memories).
+
+    Operational note: ``ORDER BY random()`` forces a full scan + sort on the
+    filtered row set. On a very large production context (order 10^5+
+    memories) this can be a measurable load spike. Run during off-peak hours
+    or against a read replica if available; for a single diagnostic run on
+    the default ``--memories 200`` sample size, this has been acceptable.
     """
     stmt = (
         select(Memory)
@@ -188,8 +194,8 @@ async def measure_top_k(
     vectors: dict[str, list[float]],
     collection: str,
     top_k: int,
-) -> list[float]:
-    """Collect up to ``top_k`` neighbor scores for each sampled memory.
+) -> tuple[list[float], int]:
+    """Collect top-k neighbor scores and count memories that contributed.
 
     Matches runtime ``_create_knn_seed_edges`` isolation: each memory queries
     with its own (user_id, workspace_id, context_id). The self-hit
@@ -198,6 +204,12 @@ async def measure_top_k(
 
     Searches run concurrently with a semaphore cap (TOP_K_SEARCH_CONCURRENCY)
     so a 200-memory run is bound by one round-trip rather than N serial ones.
+
+    Returns ``(scores, effective_memories)`` where ``effective_memories`` is
+    the count of sampled memories that produced at least one neighbor score.
+    Memories without a Qdrant vector, or whose search errored, do not
+    contribute — so ``effective_memories`` may be less than ``len(memories)``
+    and is the authoritative D3 bootstrap-gate signal.
     """
     sem = asyncio.Semaphore(TOP_K_SEARCH_CONCURRENCY)
 
@@ -227,7 +239,9 @@ async def measure_top_k(
         return non_self[:top_k]
 
     per_memory = await asyncio.gather(*(_one(m) for m in memories))
-    return [s for sublist in per_memory for s in sublist]
+    scores = [s for sublist in per_memory for s in sublist]
+    effective = sum(1 for sublist in per_memory if sublist)
+    return scores, effective
 
 
 def measure_random_pair(
@@ -264,12 +278,21 @@ def build_report(
     dimensions: int,
     collection: str,
     sampled_memories: int,
+    effective_memories: int,
     top_k_requested: int,
     random_pairs_requested: int,
     top_k_scores: list[float],
     random_pair_scores: list[float],
 ) -> dict[str, Any]:
-    """Compose the final JSON-serializable report."""
+    """Compose the final JSON-serializable report.
+
+    ``sampled_memories`` is the count of rows returned by the DB sample;
+    ``effective_memories`` is the count that contributed at least one top-k
+    score (i.e. had a Qdrant vector and a successful search). The D3
+    bootstrap gate reads ``effective_memories`` so undersized runs that
+    merely sampled enough rows but lost most of them to missing vectors /
+    search failures cannot silently pass the gate.
+    """
     top_k_pcts = compute_percentiles(top_k_scores)
     pair_pcts = compute_percentiles(random_pair_scores)
 
@@ -282,6 +305,7 @@ def build_report(
         "model": {"name": model_name, "dimensions": dimensions, "collection": collection},
         "sample": {
             "memories": sampled_memories,
+            "effective_memories": effective_memories,
             "top_k": top_k_requested,
             "random_pairs": random_pairs_requested,
             "observations_total": len(top_k_scores),
@@ -296,29 +320,33 @@ def build_report(
 def check_bootstrap_gate(report: dict[str, Any]) -> list[str]:
     """Return warnings for D3 bootstrap under-sizing.
 
-    D3 gate passes when ``memories >= BOOTSTRAP_MIN_MEMORIES`` OR
+    D3 gate passes when ``effective_memories >= BOOTSTRAP_MIN_MEMORIES`` OR
     ``observations_total >= BOOTSTRAP_MIN_OBSERVATIONS`` — either condition
     alone is enough for a stable percentile estimate. Warnings fire only when
-    BOTH are below their thresholds. Emits a structlog event alongside the
-    returned strings so operators can grep the log for the same signal.
-    Warnings are informational: the function never mutates the report or
-    exits.
+    BOTH are below their thresholds. ``effective_memories`` (not the raw DB
+    sample count) is the authoritative signal, so a run that sampled 200
+    memories but only got 50 into the measurement (missing vectors, search
+    errors) correctly fails the memories half of the OR.
+
+    Emits a structlog event alongside the returned strings so operators can
+    grep the log for the same signal. Warnings are informational: the
+    function never mutates the report or exits.
     """
-    memories = report["sample"]["memories"]
+    effective = report["sample"]["effective_memories"]
     observations = report["sample"]["observations_total"]
-    if memories >= BOOTSTRAP_MIN_MEMORIES or observations >= BOOTSTRAP_MIN_OBSERVATIONS:
+    if effective >= BOOTSTRAP_MIN_MEMORIES or observations >= BOOTSTRAP_MIN_OBSERVATIONS:
         return []
 
     logger.warning(
         "bootstrap_gate_below_threshold",
-        memories=memories,
+        effective_memories=effective,
         observations=observations,
         min_memories=BOOTSTRAP_MIN_MEMORIES,
         min_observations=BOOTSTRAP_MIN_OBSERVATIONS,
     )
     return [
         (
-            f"sample_size_below_bootstrap_gate: {memories} memories "
+            f"effective_memories_below_bootstrap_gate: {effective} memories contributed "
             f"(< {BOOTSTRAP_MIN_MEMORIES}); percentile estimate may be unstable"
         ),
         (
@@ -350,10 +378,11 @@ def print_report(report: dict[str, Any], warnings: list[str]) -> None:
     print(f"Timestamp:   {report['timestamp']}")
     print()
     print("Sample")
-    print(f"  Memories sampled:   {report['sample']['memories']:,}")
-    print(f"  Top-k per memory:   {report['sample']['top_k']:,}")
+    print(f"  Memories sampled:    {report['sample']['memories']:,}")
+    print(f"  Memories measured:   {report['sample']['effective_memories']:,}")
+    print(f"  Top-k per memory:    {report['sample']['top_k']:,}")
     print(f"  Observations (top-k): {report['sample']['observations_total']:,}")
-    print(f"  Random pairs:       {report['sample']['random_pair_observations']:,}")
+    print(f"  Random pairs:        {report['sample']['random_pair_observations']:,}")
     print()
 
     _print_distribution("Top-k neighbor distribution", report["top_k_distribution"])
@@ -406,7 +435,7 @@ async def measure(
 
     qdrant = get_qdrant_client()
     vectors = await fetch_vectors(qdrant, collection, [m.id for m in sampled])
-    top_k_scores = await measure_top_k(sampled, vectors, collection, top_k)
+    top_k_scores, effective = await measure_top_k(sampled, vectors, collection, top_k)
     pair_scores = measure_random_pair(list(vectors.values()), random_pairs, seed=seed)
 
     return build_report(
@@ -415,6 +444,7 @@ async def measure(
         dimensions=dimensions,
         collection=collection,
         sampled_memories=len(sampled),
+        effective_memories=effective,
         top_k_requested=top_k,
         random_pairs_requested=random_pairs,
         top_k_scores=top_k_scores,

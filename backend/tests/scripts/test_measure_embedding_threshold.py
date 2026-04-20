@@ -31,7 +31,7 @@ import measure_embedding_threshold as met  # noqa: E402
 
 class TestComputePercentiles:
     def test_returns_all_expected_keys(self):
-        values = [0.1 * i for i in range(1, 101)]  # 0.01..1.00
+        values = [0.1 * i for i in range(1, 101)]  # 0.1..10.0
         result = met.compute_percentiles(values)
         assert set(result.keys()) == {"p25", "p50", "p75", "p90", "p95", "p99"}
 
@@ -137,34 +137,45 @@ class TestMeasureRandomPair:
 # ---------------------------------------------------------------------------
 
 
-def _report(memories: int, observations: int) -> dict:
+def _report(effective_memories: int, observations: int) -> dict:
     return {
-        "sample": {"memories": memories, "observations_total": observations},
+        "sample": {
+            "effective_memories": effective_memories,
+            "observations_total": observations,
+        },
     }
 
 
 class TestCheckBootstrapGate:
     def test_both_above_threshold_no_warnings(self):
-        r = _report(memories=200, observations=10_000)
+        r = _report(effective_memories=200, observations=10_000)
         assert met.check_bootstrap_gate(r) == []
 
-    def test_memories_above_alone_satisfies_or_gate(self):
-        # D3: OR-gate — memories ≥ 200 alone is enough even if observations
-        # is tiny. Operators with a small top_k setting should NOT be warned.
-        r = _report(memories=200, observations=1_000)
+    def test_effective_memories_above_alone_satisfies_or_gate(self):
+        # D3: OR-gate — effective_memories ≥ 200 alone is enough even if
+        # observations is tiny.
+        r = _report(effective_memories=200, observations=1_000)
         assert met.check_bootstrap_gate(r) == []
 
     def test_observations_above_alone_satisfies_or_gate(self):
-        # D3: OR-gate — ≥ 10k observations alone is enough even if memories
-        # is below. A small-context run with high top_k should NOT be warned.
-        r = _report(memories=50, observations=10_000)
+        # D3: OR-gate — ≥ 10k observations alone is enough even if
+        # effective_memories is below.
+        r = _report(effective_memories=50, observations=10_000)
         assert met.check_bootstrap_gate(r) == []
 
     def test_both_below_triggers_warnings(self):
-        r = _report(memories=50, observations=1_000)
+        r = _report(effective_memories=50, observations=1_000)
         warnings = met.check_bootstrap_gate(r)
-        assert any("sample_size_below_bootstrap_gate" in w for w in warnings)
+        assert any("effective_memories_below_bootstrap_gate" in w for w in warnings)
         assert any("observations_below_bootstrap_gate" in w for w in warnings)
+
+    def test_raw_sample_count_does_not_mask_dropout(self):
+        # Regression for Copilot loop 3 finding: if 200 memories were sampled
+        # but only 50 contributed (vector missing, search failed), the gate
+        # must fire. Raw sample count is not a fallback.
+        r = _report(effective_memories=50, observations=1_000)
+        warnings = met.check_bootstrap_gate(r)
+        assert warnings, "effective_memories=50 must trigger the D3 warning"
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +192,7 @@ class TestBuildReport:
             dimensions=128,
             collection="kagura_memories_test_128",
             sampled_memories=10,
+            effective_memories=10,
             top_k_requested=5,
             random_pairs_requested=20,
             top_k_scores=[0.4 + 0.001 * i for i in range(50)],
@@ -194,6 +206,7 @@ class TestBuildReport:
             "collection": "kagura_memories_test_128",
         }
         assert report["sample"]["memories"] == 10
+        assert report["sample"]["effective_memories"] == 10
         assert report["sample"]["observations_total"] == 50
         assert report["sample"]["random_pair_observations"] == 20
 
@@ -205,6 +218,25 @@ class TestBuildReport:
             report["top_k_distribution"]["p90"]
         )
 
+    def test_effective_memories_can_differ_from_sampled(self):
+        # Regression for Copilot loop 3 finding: sampled=200 but only 50
+        # had vectors and contributed to observations.
+        ctx = uuid4()
+        report = met.build_report(
+            context_id=ctx,
+            model_name="m",
+            dimensions=1,
+            collection="c",
+            sampled_memories=200,
+            effective_memories=50,
+            top_k_requested=5,
+            random_pairs_requested=0,
+            top_k_scores=[0.5] * 250,
+            random_pair_scores=[],
+        )
+        assert report["sample"]["memories"] == 200
+        assert report["sample"]["effective_memories"] == 50
+
     def test_floor_wins_when_p90_low(self):
         ctx = uuid4()
         report = met.build_report(
@@ -213,6 +245,7 @@ class TestBuildReport:
             dimensions=1,
             collection="c",
             sampled_memories=5,
+            effective_memories=5,
             top_k_requested=1,
             random_pairs_requested=0,
             top_k_scores=[0.05, 0.10, 0.15, 0.20, 0.25],
@@ -228,6 +261,7 @@ class TestBuildReport:
             dimensions=1,
             collection="c",
             sampled_memories=0,
+            effective_memories=0,
             top_k_requested=0,
             random_pairs_requested=0,
             top_k_scores=[],
@@ -269,8 +303,9 @@ class TestMeasureTopK:
         monkeypatch.setattr(met, "search_memories_qdrant", fake_search)
 
         vectors = {self_id_str: [0.1, 0.2, 0.3]}
-        scores = await met.measure_top_k([mem], vectors, "test_collection", top_k=3)
+        scores, effective = await met.measure_top_k([mem], vectors, "test_collection", top_k=3)
         assert scores == [0.8, 0.6, 0.4]
+        assert effective == 1
 
     @pytest.mark.asyncio
     async def test_respects_top_k_cap(self, monkeypatch):
@@ -285,9 +320,10 @@ class TestMeasureTopK:
 
         monkeypatch.setattr(met, "search_memories_qdrant", fake_search)
         vectors = {self_id_str: [0.1]}
-        scores = await met.measure_top_k([mem], vectors, "c", top_k=5)
+        scores, effective = await met.measure_top_k([mem], vectors, "c", top_k=5)
         assert len(scores) == 5
         assert scores[0] == pytest.approx(0.9)
+        assert effective == 1
 
     @pytest.mark.asyncio
     async def test_uses_per_memory_isolation_params(self, monkeypatch):
@@ -323,8 +359,9 @@ class TestMeasureTopK:
 
         monkeypatch.setattr(met, "search_memories_qdrant", fake_search)
         # No vector for this memory in the dict
-        scores = await met.measure_top_k([mem], {}, "c", top_k=5)
+        scores, effective = await met.measure_top_k([mem], {}, "c", top_k=5)
         assert scores == []
+        assert effective == 0
         assert calls == []  # never called
 
     @pytest.mark.asyncio
@@ -340,8 +377,10 @@ class TestMeasureTopK:
 
         monkeypatch.setattr(met, "search_memories_qdrant", fake_search)
         vectors = {str(mem_a.id): [0.1], str(mem_b.id): [0.1]}
-        scores = await met.measure_top_k([mem_a, mem_b], vectors, "c", top_k=1)
+        scores, effective = await met.measure_top_k([mem_a, mem_b], vectors, "c", top_k=1)
         assert scores == [0.7]  # mem_b's neighbor only
+        # mem_a failed search → not effective; mem_b returned 1 score → effective
+        assert effective == 1
 
 
 # ---------------------------------------------------------------------------
