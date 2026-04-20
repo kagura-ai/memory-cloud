@@ -222,15 +222,17 @@ describe("ContextDetailPage deep-link tab guard (#398)", () => {
     mockGetContext.mockResolvedValue(makeContext());
 
     render(<ContextDetailPage />);
-    // Tie the assertion to React's effect processing rather than a fixed
-    // wall-clock delay (which is CI-flaky). The snap effect must NOT push
-    // a tab=overview replace while currentWorkspace is null.
+    // Anchor on a positive signal (initial getContext fetch) so we know the
+    // page's first effect cycle has run. The negative assertion that follows
+    // would be vacuously true right after render() — without an anchor a
+    // regression that fires the snap on the next tick could still pass.
     await waitFor(() => {
-      const overviewSnaps = mockReplace.mock.calls.filter(
-        (c) =>
-          typeof c[0] === "string" && (c[0] as string).includes("tab=overview"),
-      );
-      expect(overviewSnaps.length).toBe(0);
+      expect(mockGetContext).toHaveBeenCalled();
     });
+    const overviewSnaps = mockReplace.mock.calls.filter(
+      (c) =>
+        typeof c[0] === "string" && (c[0] as string).includes("tab=overview"),
+    );
+    expect(overviewSnaps.length).toBe(0);
   });
 });

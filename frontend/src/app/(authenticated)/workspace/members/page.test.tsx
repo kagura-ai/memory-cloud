@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { render, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, waitFor, cleanup } from "@testing-library/react";
 
 import WorkspaceMembersPage from "./page";
 
@@ -145,9 +145,15 @@ describe("WorkspaceMembersPage redirect guard (#398)", () => {
     mockGetContexts.mockResolvedValue({ contexts: [] });
 
     render(<WorkspaceMembersPage />);
-    // Tie the assertion to React's effect processing rather than a fixed
-    // wall-clock delay (which is CI-flaky). No redirect should fire because
-    // workspaceLoading is true.
-    await waitFor(() => expect(mockPush).not.toHaveBeenCalled());
+    // Anchor on a positive signal (PageHeader renders) so the page's first
+    // effect cycle is known to have run. The negative assertion that
+    // follows would be vacuously true right after render() — without an
+    // anchor a regression that fires the redirect on the next tick could
+    // still pass. Both API fetches are also gated on workspaceLoading so
+    // there's no API call to anchor on during the loading state.
+    await waitFor(() => {
+      expect(screen.getByText("membersTitle")).toBeInTheDocument();
+    });
+    expect(mockPush).not.toHaveBeenCalled();
   });
 });
