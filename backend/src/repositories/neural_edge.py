@@ -317,7 +317,7 @@ class NeuralEdgeRepository:
 
     async def get_outgoing_edges(
         self,
-        user_id: str,
+        user_id: str | None,
         src_id: UUID,
         min_weight: float = 0.0,
         edge_types: list[str] | None = None,
@@ -328,9 +328,16 @@ class NeuralEdgeRepository:
         """Get outgoing edges from a node with 3-level isolation.
 
         Single Collection Migration: Added workspace_id and context_id filtering.
+        Issue #395: ``user_id`` is now optional — mirrors ``get_all_edges`` /
+        ``get_stats`` / ``get_top_connected_nodes`` (extended for #383).
+        ``None`` returns all creators' outgoing edges from ``src_id`` in the
+        workspace+context (shared-context reads where authorization is
+        enforced upstream by ``PermissionService``); a concrete value keeps
+        the prior private-context / owner-scoped behavior.
 
         Args:
-            user_id: User identifier
+            user_id: Optional creator filter. ``None`` returns all creators'
+                edges in the workspace+context.
             src_id: Source node ID
             min_weight: Minimum edge weight threshold
             edge_types: Filter by edge types
@@ -348,10 +355,11 @@ class NeuralEdgeRepository:
         self._validate_isolation_params(workspace_id, context_id)
 
         conditions = [
-            NeuralMemoryEdge.user_id == user_id,
             NeuralMemoryEdge.src_id == src_id,
             NeuralMemoryEdge.weight >= min_weight,
         ]
+        if user_id is not None:
+            conditions.append(NeuralMemoryEdge.user_id == user_id)
 
         # Single Collection Migration: Add workspace and context filters
         if workspace_id:
@@ -376,7 +384,7 @@ class NeuralEdgeRepository:
 
     async def get_incoming_edges(
         self,
-        user_id: str,
+        user_id: str | None,
         dst_id: UUID,
         min_weight: float = 0.0,
         edge_types: list[str] | None = None,
@@ -387,9 +395,16 @@ class NeuralEdgeRepository:
         """Get incoming edges to a node with 3-level isolation.
 
         Single Collection Migration: Added workspace_id and context_id filtering.
+        Issue #395: ``user_id`` is now optional — mirrors ``get_all_edges`` /
+        ``get_stats`` / ``get_top_connected_nodes`` (extended for #383).
+        ``None`` returns all creators' incoming edges to ``dst_id`` in the
+        workspace+context (shared-context reads where authorization is
+        enforced upstream by ``PermissionService``); a concrete value keeps
+        the prior private-context / owner-scoped behavior.
 
         Args:
-            user_id: User identifier
+            user_id: Optional creator filter. ``None`` returns all creators'
+                edges in the workspace+context.
             dst_id: Destination node ID
             min_weight: Minimum edge weight threshold
             edge_types: Filter by edge types
@@ -407,10 +422,11 @@ class NeuralEdgeRepository:
         self._validate_isolation_params(workspace_id, context_id)
 
         conditions = [
-            NeuralMemoryEdge.user_id == user_id,
             NeuralMemoryEdge.dst_id == dst_id,
             NeuralMemoryEdge.weight >= min_weight,
         ]
+        if user_id is not None:
+            conditions.append(NeuralMemoryEdge.user_id == user_id)
 
         # Single Collection Migration: Add workspace and context filters
         if workspace_id:
