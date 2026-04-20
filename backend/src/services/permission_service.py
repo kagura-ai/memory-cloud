@@ -287,7 +287,7 @@ class PermissionService:
             raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
 
         try:
-            await self.check_workspace_access(
+            workspace_member = await self.check_workspace_access(
                 user_id=user_id,
                 workspace_id=context.workspace_id,
                 required_role=required_role,
@@ -314,6 +314,25 @@ class PermissionService:
                 user_id=user_id,
             )
             raise HTTPException(status_code=404, detail=f"Context {context_id} not found") from None
+
+        # PR #399 review (Copilot): apply the same allowed_context_ids whitelist
+        # that check_context_access enforces for member/viewer (line 432-437).
+        # Without this, a restricted member/viewer could read /graph/stats for
+        # contexts outside their whitelist via this UUID-addressed read path.
+        # Workspace owner/admin bypass the whitelist by design (line 427-429).
+        if (
+            workspace_member.role in ("member", "viewer")
+            and workspace_member.allowed_context_ids is not None
+            and context_id not in workspace_member.allowed_context_ids
+        ):
+            logger.warning(
+                "context_read_denied",
+                reason="not_in_whitelist",
+                context_id=str(context_id),
+                context_workspace_id=str(context.workspace_id),
+                user_id=user_id,
+            )
+            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
 
         return context
 
@@ -597,6 +616,15 @@ class PermissionService:
             result = await self.db.execute(stmt)
             return list(result.scalars().all())
 
+        # PR #399 review (Copilot): viewer/member must NOT receive other users'
+        # private contexts in the listing — those are creator-only per
+        # check_context_access:401-410. Without this filter, the listing leaks
+        # the existence of private contexts that the caller cannot then open
+        # (resulting in 403 when clicking through, plus existence disclosure).
+        # Owner/admin branch above intentionally returns everything; this
+        # filter is for the lower-privilege roles only.
+        privacy_filter = (Context.is_private.is_(False)) | (Context.created_by == user_id)
+
         # Issue #234: Workspace viewer with allowed_context_ids restriction
         if workspace_member.role == "viewer":
             if workspace_member.allowed_context_ids is not None:
@@ -609,16 +637,18 @@ class PermissionService:
                         Context.workspace_id == workspace_id,
                         Context.deleted_at.is_(None),
                         Context.id.in_(workspace_member.allowed_context_ids),
+                        privacy_filter,
                     )
                     .order_by(Context.created_at.desc())
                 )
             else:
-                # No restriction → all contexts
+                # No restriction → all shared contexts (+ caller's own private)
                 stmt = (
                     select(Context)
                     .where(
                         Context.workspace_id == workspace_id,
                         Context.deleted_at.is_(None),
+                        privacy_filter,
                     )
                     .order_by(Context.created_at.desc())
                 )
@@ -636,13 +666,14 @@ class PermissionService:
         if not workspace_member.allowed_context_ids:
             return []
 
-        # Show only whitelisted contexts
+        # Show only whitelisted contexts (filtered to non-private + own private)
         stmt = (
             select(Context)
             .where(
                 Context.workspace_id == workspace_id,
                 Context.deleted_at.is_(None),
                 Context.id.in_(workspace_member.allowed_context_ids),
+                privacy_filter,
             )
             .order_by(Context.created_at.desc())
         )

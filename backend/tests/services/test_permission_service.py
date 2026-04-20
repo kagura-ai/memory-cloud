@@ -344,3 +344,79 @@ class TestGetAccessibleContextsForViewer:
 
         result = await service.get_accessible_contexts("viewer-user", uuid4())
         assert result == []
+
+
+class TestResolveContextWhitelistEnforcement:
+    """PR #399 regression: ``resolve_context_for_workspace_read`` must apply
+    the same ``allowed_context_ids`` whitelist that ``check_context_access``
+    enforces. Without this, a restricted member/viewer could read
+    UUID-addressed read endpoints (``/graph/*``) for shared contexts outside
+    their whitelist.
+    """
+
+    def _service_with_member(self, member, context):
+        db = MagicMock()
+        # First db.execute → context lookup
+        ctx_result = MagicMock()
+        ctx_result.scalar_one_or_none.return_value = context
+        # Second db.execute (inside check_workspace_access) → workspace lookup
+        ws_result = MagicMock()
+        ws_result.scalar_one_or_none.return_value = MagicMock(
+            id=context.workspace_id, deleted_at=None
+        )
+        db.execute = AsyncMock(side_effect=[ctx_result, ws_result])
+        service = PermissionService(db)
+        service.workspace_service.get_member = AsyncMock(return_value=member)
+        return service
+
+    @pytest.mark.asyncio
+    async def test_member_outside_whitelist_gets_404(self):
+        ctx_id = uuid4()
+        ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
+        member = MagicMock()
+        member.role = "member"
+        member.allowed_context_ids = [uuid4()]  # whitelist excludes ctx_id
+        service = self._service_with_member(member, ctx)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.resolve_context_for_workspace_read("user1", ctx_id)
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_viewer_outside_whitelist_gets_404(self):
+        ctx_id = uuid4()
+        ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
+        viewer = MagicMock()
+        viewer.role = "viewer"
+        viewer.allowed_context_ids = []  # explicit empty whitelist
+        service = self._service_with_member(viewer, ctx)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.resolve_context_for_workspace_read("user1", ctx_id)
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_member_inside_whitelist_succeeds(self):
+        ctx_id = uuid4()
+        ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
+        member = MagicMock()
+        member.role = "member"
+        member.allowed_context_ids = [ctx_id]  # whitelist includes ctx_id
+        service = self._service_with_member(member, ctx)
+
+        result = await service.resolve_context_for_workspace_read("user1", ctx_id)
+        assert result is ctx
+
+    @pytest.mark.asyncio
+    async def test_admin_bypasses_whitelist(self):
+        """Workspace admin/owner should never be filtered by allowed_context_ids
+        (matches check_context_access bypass semantics)."""
+        ctx_id = uuid4()
+        ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
+        admin = MagicMock()
+        admin.role = "admin"
+        admin.allowed_context_ids = [uuid4()]  # would exclude ctx_id if checked
+        service = self._service_with_member(admin, ctx)
+
+        result = await service.resolve_context_for_workspace_read("user1", ctx_id)
+        assert result is ctx

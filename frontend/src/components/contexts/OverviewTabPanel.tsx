@@ -327,11 +327,13 @@ export function OverviewTabPanel({
               </Table>
             ) : (
               <div className="text-center py-8 text-gray-500">
+                {/* PR #399 review (Copilot): the card is now gated to admin/
+                    owner via canSeeUserActivity above. Reaching the null
+                    branch means a real fetch failure (network/5xx), not an
+                    authorization denial — drop the misleading "requires
+                    admin role" sub-copy. */}
                 {userActivity === null ? (
-                  <div>
-                    <p>{t("userActivityNotAvailable")}</p>
-                    <p className="text-sm mt-2">{t("requiresAdminRole")}</p>
-                  </div>
+                  <p>{t("userActivityNotAvailable")}</p>
                 ) : (
                   <p>{t("noActivityData")}</p>
                 )}

@@ -43,7 +43,11 @@ export default function WorkspaceStatsPage() {
   const t = useTranslations("workspace");
   const tCommon = useTranslations("common");
   const router = useRouter();
-  const { currentWorkspace, currentWorkspaceId } = useWorkspace();
+  const {
+    currentWorkspace,
+    currentWorkspaceId,
+    loading: workspaceLoading,
+  } = useWorkspace();
 
   // Issue #398: viewer cannot read workspace stats (backend 403's on
   // /workspaces/{id}/contexts/stats with required_role="member"). Send
@@ -95,6 +99,13 @@ export default function WorkspaceStatsPage() {
     // backend (workspace stats + contexts/stats) returns 403 for viewer.
     // Without this guard a viewer flashes a "Requires 'member' role or
     // higher" error toast in the gap between login and the redirect.
+    //
+    // PR #399 review (Copilot): also wait for WorkspaceContext to finish
+    // loading. During hydration `currentWorkspace` is null while
+    // `currentWorkspaceId` may already be cached — without the loading
+    // guard the viewer-skip is bypassed and fetchStats fires once with
+    // unknown role, recreating the very flash this code is preventing.
+    if (workspaceLoading) return;
     if (
       currentWorkspace &&
       !hasWorkspaceRole(currentWorkspace.current_user_role, "member")
@@ -102,10 +113,15 @@ export default function WorkspaceStatsPage() {
       return;
     }
     fetchStats();
-  }, [currentWorkspaceId, currentWorkspace?.current_user_role]);
+  }, [
+    currentWorkspaceId,
+    currentWorkspace?.current_user_role,
+    workspaceLoading,
+  ]);
 
   useEffect(() => {
     if (!currentWorkspaceId) return;
+    if (workspaceLoading) return;
     // Same viewer-skip as above — memory-timeline is a member+ surface.
     if (
       currentWorkspace &&
@@ -136,6 +152,7 @@ export default function WorkspaceStatsPage() {
     currentWorkspaceId,
     selectedContextId,
     currentWorkspace?.current_user_role,
+    workspaceLoading,
   ]);
 
   return (
