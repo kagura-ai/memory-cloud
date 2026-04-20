@@ -221,7 +221,7 @@ class PermissionService:
         user_id: str,
         context_id: UUID,
         *,
-        required_role: str = "member",
+        required_role: str = "viewer",
     ) -> Context:
         """Resolve a ``context_id`` to a Context the caller can read, with uniform 404.
 
@@ -232,12 +232,20 @@ class PermissionService:
         (CWE-639 / OWASP A01 uniform disclosure — same principle as
         ``resolve_resource_by_slug`` for slug-addressed paths).
 
+        Issue #398: default lowered from ``member`` to ``viewer`` — this is
+        a *read* helper and viewers must be able to read shared-context
+        graphs/stats. Previously a viewer hitting ``/graph/stats`` for a
+        shared context they could otherwise see surfaced as
+        ``404 Context not found`` because the membership gate rejected
+        viewer before any per-role logic ran.
+
         Args:
             user_id: Authenticated principal.
             context_id: UUID of the context to resolve.
             required_role: Minimum workspace role to accept. Defaults to
-                ``member`` — suitable for read endpoints like ``/graph/*``.
-                Writers should pass ``admin`` or ``owner``.
+                ``viewer`` — suitable for read endpoints like ``/graph/*``
+                and ``/memory/stats``. Writers should pass ``admin`` or
+                ``owner``.
 
         Returns:
             The ``Context`` row for ``context_id`` if the caller has the
@@ -556,6 +564,10 @@ class PermissionService:
         """Get all contexts user can access in workspace.
 
         Issue #234: Respects allowed_context_ids whitelist for member/viewer.
+        Issue #398: viewer must reach the viewer branch below — gating at
+        ``required_role="member"`` made that branch unreachable and silently
+        hid every shared context from viewers (UX-visible: contexts list
+        was empty for viewer even when shared contexts existed).
 
         Args:
             user_id: User ID
@@ -566,9 +578,10 @@ class PermissionService:
         """
         from sqlalchemy import select
 
-        # Check workspace membership
+        # Check workspace membership (viewer is the floor — the per-role
+        # branches below decide what each role can actually see).
         workspace_member = await self.check_workspace_access(
-            user_id, workspace_id, required_role="member"
+            user_id, workspace_id, required_role="viewer"
         )
 
         # Workspace owner/admin → all contexts (ignore allowed_context_ids)

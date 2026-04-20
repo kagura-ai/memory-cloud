@@ -87,6 +87,7 @@ const navigationGroups: NavGroup[] = [
         nameKey: "dashboard",
         href: "/workspace/dashboard",
         icon: BarChart,
+        requiredWorkspaceRole: "member", // Issue #398: hide from viewer (read-only role)
       },
       {
         nameKey: "contexts",

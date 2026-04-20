@@ -8,7 +8,9 @@
  */
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { hasWorkspaceRole } from "@/lib/auth/rbac";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Button } from "@/components/ui/button";
 import {
@@ -40,7 +42,20 @@ import {
 export default function WorkspaceStatsPage() {
   const t = useTranslations("workspace");
   const tCommon = useTranslations("common");
+  const router = useRouter();
   const { currentWorkspace, currentWorkspaceId } = useWorkspace();
+
+  // Issue #398: viewer cannot read workspace stats (backend 403's on
+  // /workspaces/{id}/contexts/stats with required_role="member"). Send
+  // viewers to the contexts list — their only data-bearing surface.
+  useEffect(() => {
+    if (
+      currentWorkspace &&
+      !hasWorkspaceRole(currentWorkspace.current_user_role, "member")
+    ) {
+      router.push("/workspace/contexts");
+    }
+  }, [currentWorkspace, router]);
   const [stats, setStats] = useState<WorkspaceStats | null>(null);
   const [contextStats, setContextStats] = useState<ContextStatsResponse | null>(
     null,

@@ -282,3 +282,65 @@ class TestCountContextOwners:
         db.execute = AsyncMock(return_value=mock_result)
         service = PermissionService(db)
         assert await service.count_context_owners(uuid4()) == 0
+
+
+class TestGetAccessibleContextsForViewer:
+    """Issue #398 regression: get_accessible_contexts must reach the viewer
+    branch.
+
+    Previously gated at ``required_role="member"``, which raised 403 for
+    viewer (weight=1 < member weight=2) — making the explicit viewer branch
+    at lines ~588-613 unreachable. UX symptom: viewer's contexts list was
+    empty even when shared contexts existed in the workspace.
+    """
+
+    @pytest.fixture
+    def viewer_member(self):
+        member = MagicMock()
+        member.role = "viewer"
+        member.allowed_context_ids = None  # No restriction → all shared contexts
+        return member
+
+    @pytest.fixture
+    def service_with_viewer(self, viewer_member):
+        db = MagicMock()
+        # Workspace lookup (not deleted)
+        ws_lookup_result = MagicMock()
+        ws_lookup_result.scalar_one_or_none.return_value = MagicMock(id=uuid4(), deleted_at=None)
+        # Context list query result
+        ctx_list_result = MagicMock()
+        ctx_list_result.scalars.return_value.all.return_value = ["ctx-a", "ctx-b"]
+        db.execute = AsyncMock(side_effect=[ws_lookup_result, ctx_list_result])
+        service = PermissionService(db)
+        service.workspace_service.get_member = AsyncMock(return_value=viewer_member)
+        return service
+
+    @pytest.mark.asyncio
+    async def test_viewer_reaches_viewer_branch(self, service_with_viewer):
+        """Viewer must NOT be 403'd by the membership gate before the
+        per-role branches run."""
+        result = await service_with_viewer.get_accessible_contexts("viewer-user", uuid4())
+        assert result == ["ctx-a", "ctx-b"], (
+            "viewer should reach the per-role branch and receive shared "
+            "contexts; receiving an empty list (or HTTPException) means "
+            "the membership gate rejected viewer before the branch ran"
+        )
+
+    @pytest.mark.asyncio
+    async def test_viewer_with_empty_whitelist_returns_empty(self):
+        """Viewer with allowed_context_ids=[] → no access (explicit empty)."""
+        viewer = MagicMock()
+        viewer.role = "viewer"
+        viewer.allowed_context_ids = []
+
+        db = MagicMock()
+        ws_lookup_result = MagicMock()
+        ws_lookup_result.scalar_one_or_none.return_value = MagicMock(id=uuid4(), deleted_at=None)
+        ctx_list_result = MagicMock()
+        ctx_list_result.scalars.return_value.all.return_value = []
+        db.execute = AsyncMock(side_effect=[ws_lookup_result, ctx_list_result])
+        service = PermissionService(db)
+        service.workspace_service.get_member = AsyncMock(return_value=viewer)
+
+        result = await service.get_accessible_contexts("viewer-user", uuid4())
+        assert result == []
