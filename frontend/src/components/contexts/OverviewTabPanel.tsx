@@ -319,7 +319,7 @@ export function OverviewTabPanel({
                               authUser?.timezone,
                               locale,
                             )
-                          : "Never"}
+                          : t("never")}
                       </TableCell>
                     </TableRow>
                   ))}

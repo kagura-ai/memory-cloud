@@ -1742,6 +1742,7 @@
     "userActivityNotAvailable": "ユーザーアクティビティデータを取得できません",
     "requiresAdminRole": "この機能にはAdmin権限が必要です",
     "noActivityData": "アクティビティデータがありません",
+    "never": "なし",
     "publicAPIUsage": "公開API使用状況",
     "publicAPI": {
       "resourceIngestAPI": "リソース取り込みAPI",

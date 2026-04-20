@@ -110,13 +110,20 @@ export default function ContextDetailPage() {
   // the URL when the param is absent (not when it is present-but-invalid),
   // so we compare the raw URL value here — checking `tab` would always see
   // "overview" for non-admins and the snap would never fire.
+  //
+  // PR #399 review (Copilot): the `currentWorkspace` guard is load-bearing.
+  // During WorkspaceContext hydration `currentWorkspace` is null, which makes
+  // `canSeeAdminTabs` false — without this guard, an admin hard-reloading
+  // ?tab=settings would have their URL snapped back to overview before the
+  // role resolved, losing the deep-link target.
   const searchParams = useSearchParams();
   const rawTab = searchParams.get("tab");
   useEffect(() => {
+    if (!currentWorkspace) return;
     if (!canSeeAdminTabs && rawTab && rawTab !== "overview") {
       setTab("overview");
     }
-  }, [canSeeAdminTabs, rawTab, setTab]);
+  }, [currentWorkspace, canSeeAdminTabs, rawTab, setTab]);
 
   useEffect(() => {
     const title = context?.display_name || context?.name || t("title");

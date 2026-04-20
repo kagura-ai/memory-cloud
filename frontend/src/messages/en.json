@@ -1742,6 +1742,7 @@
     "userActivityNotAvailable": "User activity data not available",
     "requiresAdminRole": "This feature requires Admin role",
     "noActivityData": "No activity data available",
+    "never": "Never",
     "publicAPIUsage": "Public API Usage",
     "publicAPI": {
       "resourceIngestAPI": "Resource Ingest API",

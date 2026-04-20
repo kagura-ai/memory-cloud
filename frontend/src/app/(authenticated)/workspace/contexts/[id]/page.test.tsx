@@ -208,4 +208,26 @@ describe("ContextDetailPage deep-link tab guard (#398)", () => {
       expect(overviewSnaps.length).toBe(0);
     },
   );
+
+  // PR #399 review (Copilot): on a hard reload `currentWorkspace` is null
+  // while WorkspaceContext hydrates. Without the workspace-loaded guard,
+  // canSeeAdminTabs collapses to false and the snap effect would clobber
+  // an admin's deep-link target before their role resolves.
+  it("does NOT snap URL while WorkspaceContext is still loading (currentWorkspace=null)", async () => {
+    mockUseParams.mockReturnValue({ id: "ctx-1" });
+    mockUseSearchParams.mockReturnValue(new URLSearchParams("tab=settings"));
+    mockUseAuth.mockReturnValue({ user: { id: "user-1" } });
+    mockUseWorkspace.mockReturnValue({ currentWorkspace: null });
+    mockUseMemoryContext.mockReturnValue({ currentContext: null });
+    mockGetContext.mockResolvedValue(makeContext());
+
+    render(<ContextDetailPage />);
+    // Give effects time to flush.
+    await new Promise((r) => setTimeout(r, 50));
+    const overviewSnaps = mockReplace.mock.calls.filter(
+      (c) =>
+        typeof c[0] === "string" && (c[0] as string).includes("tab=overview"),
+    );
+    expect(overviewSnaps.length).toBe(0);
+  });
 });
