@@ -297,24 +297,13 @@ class HebbianLearner:
                     confidence=1.0,
                 )
             else:
-                # ====================================================================
-                # BUG FIX #83-8: Edge type consistency
-                # ====================================================================
-                # Problem: Hebbian learner created edges with type="learned_from",
-                #          but DecayManager.get_decay_statistics() counted edges with
-                #          type="neural_association", causing stats to always show 0.
-                #
-                # Solution: Use consistent edge type "neural_association" for all
-                #           Hebbian-created edges.
-                #
-                # Impact: Neural Memory statistics now correctly reflect edge counts.
-                # ====================================================================
-
-                # Create new edge with correct type
+                # Hebbian-created edges use rel_type="neural_association" so that
+                # any edge-stats query filtering by that type counts them. Prior
+                # mismatches against "learned_from" caused silently-zero stats.
                 await self.graph.add_edge(
                     src_id=src_id,
                     dst_id=dst_id,
-                    rel_type="neural_association",  # ✅ Fixed: use consistent type
+                    rel_type="neural_association",
                     weight=new_weight,
                     edge_metadata={
                         "created_by": "hebbian_learning",
