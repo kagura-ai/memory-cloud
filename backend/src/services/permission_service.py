@@ -315,11 +315,27 @@ class PermissionService:
             )
             raise HTTPException(status_code=404, detail=f"Context {context_id} not found") from None
 
-        # Apply the same allowed_context_ids whitelist that check_context_access
-        # enforces for member/viewer (line 432-437). Without this check, a
-        # restricted member/viewer could read /graph/stats and other UUID-
-        # addressed endpoints for contexts outside their whitelist. Workspace
-        # owner/admin bypass the whitelist by design (line 427-429).
+        # Apply the same allowed_context_ids semantics that get_accessible_contexts
+        # and check_context_access enforce for the lower-privilege roles. Without
+        # this, a restricted member/viewer could read /graph/stats and other
+        # UUID-addressed endpoints for contexts they cannot list. Workspace
+        # owner/admin bypass these restrictions by design (line 427-429).
+        #
+        # Per Migration 042 the NULL/[] semantics differ by role:
+        #   - member, allowed_context_ids IS NULL → suspended (no access)
+        #   - viewer, allowed_context_ids IS NULL → no restriction (all)
+        #   - either, allowed_context_ids = [<ids>] → whitelist enforced
+        #   - either, allowed_context_ids = []     → explicit no access
+        if workspace_member.role == "member" and workspace_member.allowed_context_ids is None:
+            logger.warning(
+                "context_read_denied",
+                reason="member_suspended",
+                context_id=str(context_id),
+                context_workspace_id=str(context.workspace_id),
+                user_id=user_id,
+            )
+            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+
         if (
             workspace_member.role in ("member", "viewer")
             and workspace_member.allowed_context_ids is not None

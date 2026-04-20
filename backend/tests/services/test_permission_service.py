@@ -419,3 +419,34 @@ class TestResolveContextWhitelistEnforcement:
 
         result = await service.resolve_context_for_workspace_read("user1", ctx_id)
         assert result is ctx
+
+    @pytest.mark.asyncio
+    async def test_suspended_member_with_null_whitelist_gets_404(self):
+        """Migration 042: a member with allowed_context_ids=NULL is in the
+        suspended state and must not reach any UUID-addressed read endpoint.
+        get_accessible_contexts returns [] for the same shape; this helper
+        must align so /graph/* doesn't become a back door."""
+        ctx_id = uuid4()
+        ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
+        suspended_member = MagicMock()
+        suspended_member.role = "member"
+        suspended_member.allowed_context_ids = None  # suspended
+        service = self._service_with_member(suspended_member, ctx)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.resolve_context_for_workspace_read("user1", ctx_id)
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_viewer_with_null_whitelist_succeeds(self):
+        """Viewer NULL whitelist means "no restriction" per Migration 042 —
+        unlike the member NULL case (suspended). Viewer should pass."""
+        ctx_id = uuid4()
+        ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
+        viewer = MagicMock()
+        viewer.role = "viewer"
+        viewer.allowed_context_ids = None  # no restriction (all contexts)
+        service = self._service_with_member(viewer, ctx)
+
+        result = await service.resolve_context_for_workspace_read("user1", ctx_id)
+        assert result is ctx
