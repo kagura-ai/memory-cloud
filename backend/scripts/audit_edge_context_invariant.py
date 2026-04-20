@@ -40,6 +40,7 @@ import argparse
 import asyncio
 import sys
 from pathlib import Path
+from typing import Any
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -66,7 +67,7 @@ def _classify_row(row) -> str:
     return "context_mismatch"
 
 
-async def audit_invariant(sample_limit: int = 5, fix: bool = False) -> dict[str, int]:
+async def audit_invariant(sample_limit: int = 5, fix: bool = False) -> dict[str, Any]:
     """Scan neural_memory_edges for invariant violations.
 
     Args:
@@ -74,8 +75,11 @@ async def audit_invariant(sample_limit: int = 5, fix: bool = False) -> dict[str,
         fix: If True, delete violating edges. If False, report only.
 
     Returns:
-        Counts dict with keys: total_edges, scanned, violations, by_category,
-        null_skipped, deleted.
+        Counts dict with keys:
+          * ``total_edges`` (int), ``scanned`` (int), ``violations`` (int),
+            ``null_skipped`` (int), ``deleted`` (int) — scalar metrics.
+          * ``by_category`` (dict[str, int]) — per-category violation counts.
+          * ``samples`` (dict[str, list[Row]]) — per-category sample rows.
     """
     session_factory = _get_session_factory()
     async with session_factory() as session:

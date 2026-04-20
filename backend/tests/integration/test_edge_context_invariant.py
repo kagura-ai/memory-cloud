@@ -14,6 +14,7 @@ legitimate same-context writes also trips the suite.
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import uuid4
 
 import pytest
@@ -171,6 +172,37 @@ async def test_create_or_update_edge_accepts_same_context(
     assert edge.dst_id == s["mem_dst_a"].id
     assert edge.workspace_id == s["ws_id"]
     assert edge.context_id == s["ctx_a_id"]
+
+
+@pytest.mark.asyncio
+async def test_create_or_update_edge_rejects_soft_deleted_endpoint(
+    db_session: AsyncSession, invariant_scenario
+):
+    """Soft-deleted endpoint memory must raise — fails closed even though the row exists.
+
+    Copilot loop 1 catch: the original SELECT filtered only on ``Memory.id``,
+    so a soft-deleted endpoint would be treated as valid. Writing new edges
+    to soft-deleted memories would defeat the application-layer soft-delete
+    semantics (undo, GDPR replay) and could resurrect state that the deleter
+    intended to retire.
+    """
+    repo = NeuralEdgeRepository(db_session)
+    s = invariant_scenario
+
+    # Soft-delete dst. Memory.deleted_at is TIMESTAMP WITHOUT TIME ZONE in
+    # this schema (see models/memory.py), so use a tz-naive datetime.
+    s["mem_dst_a"].deleted_at = datetime.utcnow()
+    s["mem_dst_a"].deleted_by = s["owner_id"]
+    await db_session.flush()
+
+    with pytest.raises(ValueError, match="memory not found"):
+        await repo.create_or_update_edge(
+            user_id=s["owner_id"],
+            src_id=s["mem_src_a"].id,
+            dst_id=s["mem_dst_a"].id,
+            workspace_id=str(s["ws_id"]),
+            context_id=str(s["ctx_a_id"]),
+        )
 
 
 @pytest.mark.asyncio

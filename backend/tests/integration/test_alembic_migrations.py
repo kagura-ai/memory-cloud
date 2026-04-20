@@ -377,3 +377,57 @@ class TestB03NeuralEdgesBackfillMigration:
             assert str(rows[0].workspace_id) == ws_id
             assert str(rows[0].context_id) == ctx_id
         engine.dispose()
+
+    def test_partial_null_edge_with_mismatched_non_null_value_is_orphan_deleted(self):
+        """Edge with e.ws non-NULL but != endpoint's ws, e.ctx NULL → orphan-deleted.
+
+        Copilot loop 1 catch: without the ``e.ws = ms.ws`` guard in Step 1's
+        WHERE, COALESCE would fill e.ctx from the endpoints while preserving
+        the incorrect e.ws, producing a fully-non-NULL row that escapes the
+        Step 2 orphan delete AND still violates the edge↔memory invariant.
+        The narrowed WHERE leaves the partial-NULL row untouched so the
+        orphan delete catches it.
+        """
+        self._reset_and_upgrade_to_b02()
+        owner = "owner-partial-null-mismatch"
+        mem_src = str(uuid.uuid4())
+        mem_dst = str(uuid.uuid4())
+        wrong_ws = str(uuid.uuid4())  # UUID that doesn't exist in workspaces
+
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            ws_id, ctx_id = self._seed_workspace_and_context(conn, owner)
+            self._seed_memory(conn, mem_src, owner, ws_id, ctx_id)
+            self._seed_memory(conn, mem_dst, owner, ws_id, ctx_id)
+            # Insert edge with a *foreign* workspace_id (non-NULL but wrong)
+            # and context_id=NULL. Bypass the FK on workspace_id temporarily
+            # by dropping the constraint for this row — at b02 the edge's
+            # workspace_id column has no FK to workspaces, only a plain UUID
+            # column, so we can write any UUID. (If the schema ever adds an
+            # FK on neural_memory_edges.workspace_id, this test will need to
+            # be adjusted to seed the wrong_ws into workspaces first.)
+            conn.execute(
+                text(
+                    "INSERT INTO neural_memory_edges "
+                    "(user_id, src_id, dst_id, edge_type, weight, confidence, "
+                    " workspace_id, context_id) "
+                    "VALUES (:u, :s, :d, 'neural_association', 1.0, 1.0, "
+                    " :ws, NULL)"
+                ),
+                {"u": owner, "s": mem_src, "d": mem_dst, "ws": wrong_ws},
+            )
+        engine.dispose()
+
+        self._upgrade_head_with_test_db()
+
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            count = conn.execute(
+                text("SELECT COUNT(*) FROM neural_memory_edges WHERE user_id = :u"),
+                {"u": owner},
+            ).scalar()
+            assert count == 0, (
+                "partial-NULL edge with wrong pre-existing ws must be orphan-deleted, "
+                "not COALESCE-repaired into a fully-populated invariant violation"
+            )
+        engine.dispose()

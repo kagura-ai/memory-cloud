@@ -79,17 +79,21 @@ class NeuralEdgeRepository:
         place so the invariant can be relied on by downstream graph queries and
         by the GDPR CASCADE on context deletion.
 
-        Fails closed: a missing endpoint (src or dst deleted, never existed, or
-        soft-deleted on the caller's session view) is treated as a violation
-        rather than a silent no-op — a cross-context write that cannot be
-        validated is not a write we want to persist.
+        Fails closed: a missing endpoint — hard-deleted, never existed, OR
+        soft-deleted (``Memory.deleted_at IS NOT NULL``) — is treated as a
+        violation rather than a silent no-op. A cross-context write that
+        cannot be validated is not a write we want to persist, and writing
+        new edges to soft-deleted memories would defeat the soft-delete
+        semantics the application relies on for undo and GDPR replay.
 
         Raises:
-            ValueError: If either endpoint memory is missing or its
-                ``(workspace_id, context_id)`` pair does not match the edge's.
+            ValueError: If either endpoint memory is missing, soft-deleted,
+                or its ``(workspace_id, context_id)`` pair does not match
+                the edge's.
         """
         stmt = select(Memory.id, Memory.workspace_id, Memory.context_id).where(
-            Memory.id.in_([src_id, dst_id])
+            Memory.id.in_([src_id, dst_id]),
+            Memory.deleted_at.is_(None),
         )
         result = await self.db.execute(stmt)
         rows = {row.id: (row.workspace_id, row.context_id) for row in result.all()}
