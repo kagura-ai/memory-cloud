@@ -8,7 +8,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import Link from "next/link";
 import dynamic from "next/dynamic";
@@ -106,13 +106,17 @@ export default function ContextDetailPage() {
 
   // Issue #398: snap the URL to ?tab=overview when a member/viewer arrives
   // on an admin-only tab via deep-link. useTabParam's allowedValues already
-  // clamps the rendered value, but the raw URL is not auto-corrected — this
-  // keeps the address bar honest.
+  // clamps the *rendered* value to overview, but useTabParam only auto-promotes
+  // the URL when the param is absent (not when it is present-but-invalid),
+  // so we have to compare the raw URL value here — `tab` is already clamped
+  // and would always equal "overview" for non-admins, making this a no-op.
+  const searchParams = useSearchParams();
+  const rawTab = searchParams.get("tab");
   useEffect(() => {
-    if (!canSeeAdminTabs && tab !== "overview") {
+    if (!canSeeAdminTabs && rawTab && rawTab !== "overview") {
       setTab("overview");
     }
-  }, [canSeeAdminTabs, tab, setTab]);
+  }, [canSeeAdminTabs, rawTab, setTab]);
 
   useEffect(() => {
     const title = context?.display_name || context?.name || t("title");
