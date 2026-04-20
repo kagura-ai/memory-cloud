@@ -14,15 +14,17 @@ stays under a generous threshold. Local Postgres is typically < 3 ms/op;
 the threshold is set high enough to survive slow CI runners while still
 catching an order-of-magnitude regression.
 
-Per-run wall time is emitted through ``logging`` rather than ``print`` so
-pytest's default output capture does not swallow it on passing runs. To
-surface the number in normal pytest output:
+Per-run wall time is emitted through ``logging`` rather than ``print``.
+pytest captures both stdout and logs by default, so the number is NOT
+visible on passing runs without live-log configuration. To surface it
+during development or perf investigation, enable live-log:
 
     pytest tests/integration/test_edge_invariant_perf.py --log-cli-level=INFO
 
 Or set ``log_cli = true`` + ``log_cli_level = INFO`` in ``pytest.ini`` /
-``pyproject.toml`` for repo-wide default visibility. On failure the number
-appears in the captured log regardless.
+``pyproject.toml``. On failure (threshold exceeded under
+``RUN_PERF_TESTS=1``) the wall time is embedded in the assertion message
+so the signal is never lost regardless of live-log configuration.
 """
 
 from __future__ import annotations
