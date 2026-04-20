@@ -339,7 +339,7 @@ def print_report(report: dict[str, Any], warnings: list[str]) -> None:
     print(f"Timestamp:   {report['timestamp']}")
     print()
     print("Sample")
-    print(f"  Memories requested: {report['sample']['memories']:,}")
+    print(f"  Memories sampled:   {report['sample']['memories']:,}")
     print(f"  Top-k per memory:   {report['sample']['top_k']:,}")
     print(f"  Observations (top-k): {report['sample']['observations_total']:,}")
     print(f"  Random pairs:       {report['sample']['random_pair_observations']:,}")

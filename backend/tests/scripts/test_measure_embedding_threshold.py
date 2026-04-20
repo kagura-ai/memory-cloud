@@ -98,11 +98,20 @@ class TestMeasureRandomPair:
             assert s == pytest.approx(1.0)
 
     def test_orthogonal_vectors_give_cosine_0(self):
-        a, b = [1.0, 0.0], [0.0, 1.0]
-        sims = met.measure_random_pair([a, b, a, b], n_pairs=2, seed=0)
+        # All 4 vectors are mutually orthogonal unit vectors, so every pair
+        # produced by any permutation has cosine == 0. This lets the test
+        # assert strict 0.0 instead of the loose "0 or 1" form that earlier
+        # allowed duplicate-pair permutations to pass silently.
+        vectors = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+        sims = met.measure_random_pair(vectors, n_pairs=2, seed=0)
+        assert len(sims) == 2
         for s in sims:
-            # With seed=0 we may get any permutation; all pairs here are (a,b) or (b,a)
-            assert s == pytest.approx(0.0) or s == pytest.approx(1.0)
+            assert s == pytest.approx(0.0)
 
     def test_empty_returns_empty(self):
         assert met.measure_random_pair([], n_pairs=5) == []
