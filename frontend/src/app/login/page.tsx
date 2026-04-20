@@ -515,12 +515,12 @@ function LoginContent() {
         </Card>
 
         <div className="mt-6 flex items-center justify-between">
-          <button
-            onClick={() => router.push("/")}
+          <a
+            href="https://www.kagura-ai.com"
             className="text-sm font-medium text-gray-500 transition-colors hover:text-brand-green-600"
           >
             {t("backToHome")}
-          </button>
+          </a>
           {authConfig &&
             (() => {
               const hasOAuth =
