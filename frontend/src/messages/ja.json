@@ -2389,7 +2389,17 @@
       "tableState": "状態",
       "tableActions": "操作",
       "allowlistEmpty": "許可リストは空です。",
-      "allowlistEmptyHint": "上のフォームから GitHub ユーザー名を追加するとサインアップ制御を開始します。"
+      "allowlistEmptyHint": "上のフォームから GitHub ユーザー名を追加するとサインアップ制御を開始します。",
+      "removeAllowlistEntry": "{username} を許可リストから削除",
+      "source": {
+        "manual": "手動",
+        "github_sponsors": "GitHub Sponsors"
+      },
+      "state": {
+        "active": "有効",
+        "grace": "猶予期間",
+        "revoked": "無効"
+      }
     }
   },
   "resourceTokens": {

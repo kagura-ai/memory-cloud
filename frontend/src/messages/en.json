@@ -2389,7 +2389,17 @@
       "tableState": "State",
       "tableActions": "Actions",
       "allowlistEmpty": "No allowlist entries yet.",
-      "allowlistEmptyHint": "Add a GitHub username above to start gating signup."
+      "allowlistEmptyHint": "Add a GitHub username above to start gating signup.",
+      "removeAllowlistEntry": "Remove {username} from allowlist",
+      "source": {
+        "manual": "Manual",
+        "github_sponsors": "GitHub Sponsors"
+      },
+      "state": {
+        "active": "Active",
+        "grace": "Grace period",
+        "revoked": "Revoked"
+      }
     }
   },
   "resourceTokens": {

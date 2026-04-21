@@ -66,10 +66,14 @@ class AllowlistEntryResponse(BaseModel):
 
 
 class AllowlistAddRequest(BaseModel):
-    # GitHub usernames are 1–39 chars, alphanumeric with hyphens (never at
-    # start/end). Enforce length here so empty / 10KB payloads don't make it
-    # to the GitHub API call.
-    github_username: str = Field(min_length=1, max_length=39)
+    # GitHub usernames are 1–39 chars, alphanumeric with hyphens, never at
+    # start/end. Enforce length + shape here so malformed payloads don't spend
+    # a GitHub API request (rate-limited to 60/hr unauthenticated).
+    github_username: str = Field(
+        min_length=1,
+        max_length=39,
+        pattern=r"^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$",
+    )
 
 
 # ============================================================================

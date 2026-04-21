@@ -208,7 +208,7 @@ describe("AdminSignupGatePage", () => {
       await screen.findByText(/octocat/);
 
       const deleteButton = screen.getByRole("button", {
-        name: /admin\.signupGate\.tableActions/,
+        name: /admin\.signupGate\.removeAllowlistEntry/,
       });
       fireEvent.click(deleteButton);
 

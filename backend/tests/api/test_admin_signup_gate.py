@@ -193,6 +193,25 @@ class TestAddToAllowlist:
         )
         assert resp.status_code == 422
 
+    @pytest.mark.parametrize(
+        "bad_username",
+        [
+            "-leading-hyphen",
+            "trailing-hyphen-",
+            "has space",
+            "has_underscore",
+            "dot.name",
+            "has!bang",
+        ],
+    )
+    def test_422_on_malformed_username(self, client, bad_username):
+        """GitHub usernames reject hyphen-endpoints + non-alphanumeric chars."""
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={"github_username": bad_username},
+        )
+        assert resp.status_code == 422
+
 
 class TestRemoveFromAllowlist:
     def test_204_on_success(self, client, monkeypatch):

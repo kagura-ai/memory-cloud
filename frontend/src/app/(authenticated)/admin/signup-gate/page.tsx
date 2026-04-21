@@ -253,14 +253,16 @@ export default function AdminSignupGatePage() {
                           (id: {entry.github_user_id})
                         </span>
                       </TableCell>
-                      <TableCell>{entry.source}</TableCell>
-                      <TableCell>{entry.state}</TableCell>
+                      <TableCell>{t(`source.${entry.source}`)}</TableCell>
+                      <TableCell>{t(`state.${entry.state}`)}</TableCell>
                       <TableCell className="text-right">
                         <Button
                           variant="ghost"
                           size="icon"
                           onClick={() => void handleRemove(entry)}
-                          aria-label={t("tableActions")}
+                          aria-label={t("removeAllowlistEntry", {
+                            username: entry.github_username,
+                          })}
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>

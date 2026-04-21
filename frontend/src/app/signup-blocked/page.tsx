@@ -44,11 +44,9 @@ export default function SignupBlockedPage() {
           <p className="text-sm text-muted-foreground">{t("contact")}</p>
 
           <div className="pt-2">
-            <Link href="/login" className="w-full">
-              <Button variant="outline" className="w-full">
-                {t("backToLogin")}
-              </Button>
-            </Link>
+            <Button asChild variant="outline" className="w-full">
+              <Link href="/login">{t("backToLogin")}</Link>
+            </Button>
           </div>
         </CardContent>
       </Card>
