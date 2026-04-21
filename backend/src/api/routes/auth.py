@@ -304,10 +304,25 @@ async def google_callback(
         # 3. Get user info from Google
         user_info = _oauth2_manager.get_user_info_web(credentials)
 
-        # 3.5. Issue #349: Registration gate
-        blocked = await _check_registration_allowed(user_info["email"])
-        if blocked:
-            return blocked
+        # 3.5. Registration gate. Google's own OAuth + workspace configuration
+        # decides who can sign up via Google, so the backend gate passes
+        # through for provider="google" when admin-configurable mode is on;
+        # when off, delegates to _check_registration_allowed (Issue #349) just
+        # like the GitHub path. This keeps a single gate abstraction without
+        # layering a redundant backend allowlist on top of Google's own.
+        async for db in get_db():
+            from services.signup_gate_service import SignupGateService
+
+            gate = SignupGateService(db)
+            blocked = await gate.check_access(
+                provider="google",
+                oauth_sub=user_info["sub"],
+                email=user_info["email"],
+                username=None,
+            )
+            if blocked:
+                return blocked
+            break
 
         # 4. Ensure user exists in database & assign role
         role_manager = get_role_manager()
@@ -646,6 +661,7 @@ async def _github_get_user_info(access_token: str) -> dict[str, Any]:
         "email": email,
         "name": user_data.get("name") or user_data.get("login"),
         "picture": user_data.get("avatar_url"),
+        "login": user_data.get("login"),  # GitHub username for audit logging (Issue #358)
     }
 
 
@@ -675,10 +691,21 @@ async def github_callback(
         # 3. Get user info
         user_info = await _github_get_user_info(access_token)
 
-        # 3.5. Issue #349: Registration gate
-        blocked = await _check_registration_allowed(user_info["email"])
-        if blocked:
-            return blocked
+        # 3.5. Registration gate: admin-configurable (Issue #358) with legacy
+        # _check_registration_allowed delegation when disabled (Issue #349).
+        async for db in get_db():
+            from services.signup_gate_service import SignupGateService
+
+            gate = SignupGateService(db)
+            blocked = await gate.check_access(
+                provider="github",
+                oauth_sub=user_info["sub"],
+                email=user_info["email"],
+                username=user_info.get("login"),
+            )
+            if blocked:
+                return blocked
+            break
 
         # 4. Ensure user exists & assign role
         # Use GitHub's user ID for new users, but for existing users (e.g., logged in
