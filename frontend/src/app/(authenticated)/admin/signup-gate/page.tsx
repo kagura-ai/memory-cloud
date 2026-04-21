@@ -98,6 +98,11 @@ export default function AdminSignupGatePage() {
 
   async function saveConfig(next: SignupGateConfig): Promise<void> {
     if (savingConfig) return;
+    const previous = config;
+    // Optimistic: reflect the user's toggle/select immediately so the
+    // control doesn't appear to "snap back" during the PUT round-trip.
+    // Roll back to `previous` on error.
+    setConfig(next);
     setSavingConfig(true);
     try {
       const updated = await updateSignupGateConfig({
@@ -107,6 +112,7 @@ export default function AdminSignupGatePage() {
       setConfig(updated);
       toast({ title: tCommon("success"), description: t("configSaved") });
     } catch (err) {
+      setConfig(previous);
       const detail =
         err instanceof ApiError ? err.message : t("configSaveError");
       toast({
