@@ -86,20 +86,21 @@ class TestUpdateConfig:
         assert response.status_code == 200
         assert response.json()["enabled"] is True
 
-    def test_rejects_sponsors_mode_with_400(self, client):
+    def test_rejects_sponsors_mode_with_422(self, client):
+        # Phase 2 modes are narrowed out of the update schema, so Pydantic
+        # rejects them at parse time with 422 Unprocessable Entity.
         response = client.put(
             "/api/v1/admin/signup-gate/config",
             json={"enabled": True, "mode": "github_sponsors"},
         )
-        assert response.status_code == 400
-        assert "Phase 2" in response.json()["detail"]
+        assert response.status_code == 422
 
-    def test_rejects_both_mode_with_400(self, client):
+    def test_rejects_both_mode_with_422(self, client):
         response = client.put(
             "/api/v1/admin/signup-gate/config",
             json={"enabled": True, "mode": "both"},
         )
-        assert response.status_code == 400
+        assert response.status_code == 422
 
 
 class TestListAllowlist:

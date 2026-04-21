@@ -50,7 +50,11 @@ class SignupGateConfigResponse(BaseModel):
 
 class SignupGateConfigUpdate(BaseModel):
     enabled: bool
-    mode: Literal["manual", "github_sponsors", "both"]
+    # Phase 1 only accepts 'manual' on write. The response model keeps the
+    # broader union so reads can still surface whatever the DB currently holds
+    # (e.g. a Phase 2-deployment value), without advertising those values as
+    # valid update inputs in the OpenAPI spec.
+    mode: Literal["manual"]
 
 
 class AllowlistEntryResponse(BaseModel):
@@ -97,18 +101,9 @@ async def update_config(
     user: AdminUser,
     db: AsyncSession = Depends(get_db),
 ) -> SignupGateConfigResponse:
-    # Phase 1 refuses to persist Sponsors modes — the service would raise
-    # NotImplementedError on check_access anyway, so reject early with a 400
-    # that explains why.
-    if payload.mode in ("github_sponsors", "both"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"Mode '{payload.mode}' is reserved for Phase 2 "
-                "(GitHub Sponsors integration — Issue #358 follow-up). "
-                "Only 'manual' is accepted in Phase 1."
-            ),
-        )
+    # Phase 2 modes are rejected by Pydantic at parse time (422) via the
+    # narrowed Literal on SignupGateConfigUpdate.mode. No runtime guard
+    # needed here.
     svc = SignupGateService(db)
     config = await svc.update_config(enabled=payload.enabled, mode=payload.mode)
     return SignupGateConfigResponse.model_validate(config)
