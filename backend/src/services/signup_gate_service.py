@@ -105,7 +105,7 @@ class SignupGateService:
             return None
 
         if config.mode == "manual":
-            if await self._is_allowlisted(oauth_sub):
+            if await self._is_allowlisted(oauth_sub, config.mode):
                 return None
             logger.info(
                 "signup_blocked",
@@ -246,19 +246,25 @@ class SignupGateService:
         result = await self.db.execute(select(func.count()).select_from(User))
         return (result.scalar() or 0) == 0
 
-    async def _is_allowlisted(self, github_user_id: str) -> bool:
-        # A GitHub user can have multiple rows (one per source — e.g. manual +
-        # github_sponsors once Phase 2 ships), so scalar_one_or_none would raise
-        # MultipleResultsFound. first() returns whichever active row hits first,
-        # which is all this check needs.
-        result = await self.db.execute(
-            select(SignupAllowlistEntry.id)
-            .where(
-                SignupAllowlistEntry.github_user_id == github_user_id,
-                SignupAllowlistEntry.state == "active",
-            )
-            .limit(1)
-        )
+    async def _is_allowlisted(self, github_user_id: str, mode: SignupGateMode) -> bool:
+        # Filter by source so mode='manual' doesn't silently accept a
+        # sponsor-only row in Phase 2, and mode='github_sponsors' doesn't
+        # silently accept a manually-added row — i.e. keep 'manual' and 'both'
+        # semantically distinct. mode='both' omits the source filter by design.
+        filters = [
+            SignupAllowlistEntry.github_user_id == github_user_id,
+            SignupAllowlistEntry.state == "active",
+        ]
+        if mode == "manual":
+            filters.append(SignupAllowlistEntry.source == "manual")
+        elif mode == "github_sponsors":
+            filters.append(SignupAllowlistEntry.source == "github_sponsors")
+        # mode == "both" → no source filter
+
+        # A GitHub user can have multiple rows (one per source), so
+        # scalar_one_or_none would raise MultipleResultsFound when mode='both'
+        # matches two rows. first() returns whichever active row hits first.
+        result = await self.db.execute(select(SignupAllowlistEntry.id).where(*filters).limit(1))
         return result.first() is not None
 
     async def _legacy_check(self, email: str) -> RedirectResponse | None:

@@ -324,3 +324,42 @@ class TestLoadConfigSelfHeal:
         svc.db.rollback.assert_awaited_once()
         # execute called twice: initial SELECT, then re-SELECT after rollback
         assert svc.db.execute.await_count == 2
+
+
+class TestIsAllowlistedSourceFiltering:
+    """Verify mode→source filter mapping so manual/sponsors/both stay distinct."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("mode", "expected_filter_count"),
+        [
+            # manual/github_sponsors add 1 source filter on top of the 2 base
+            # filters (github_user_id, state); 'both' omits the source filter.
+            ("manual", 3),
+            ("github_sponsors", 3),
+            ("both", 2),
+        ],
+    )
+    async def test_mode_controls_source_filter(self, mode, expected_filter_count):
+        """mode='both' MUST omit the source filter so either row type allows signup."""
+        svc = _svc()
+        captured = {}
+
+        async def fake_execute(stmt):
+            # Introspect the compiled WHERE clause to count filters.
+            captured["sql"] = str(stmt.compile())
+            result = MagicMock()
+            result.first = MagicMock(return_value=None)
+            return result
+
+        svc.db.execute = fake_execute
+
+        allowed = await svc._is_allowlisted("1234", mode)
+        assert allowed is False  # no matching row → not allowlisted
+
+        # SQL contains "source = " clause iff mode != 'both'
+        has_source_filter = "signup_allowlist.source =" in captured["sql"]
+        if mode == "both":
+            assert not has_source_filter, f"mode=both must not filter by source: {captured['sql']}"
+        else:
+            assert has_source_filter, f"mode={mode} must filter by source: {captured['sql']}"
