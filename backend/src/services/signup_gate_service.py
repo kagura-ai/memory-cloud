@@ -8,7 +8,6 @@ implements ``manual`` only; ``github_sponsors`` / ``both`` raise
 NotImplementedError and are covered by the Phase 2 follow-up issue.
 """
 
-import logging
 import os
 from typing import Literal
 from uuid import UUID
@@ -22,8 +21,9 @@ from db.base import get_db
 from models.auth import User
 from models.signup_gate import SignupAllowlistEntry, SignupGateConfig
 from utils.github_user import resolve_github_user_id
+from utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 SignupGateMode = Literal["manual", "github_sponsors", "both"]
 
