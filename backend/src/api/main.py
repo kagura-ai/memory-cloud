@@ -323,6 +323,7 @@ for _exc_cls in (
 from api.routes import (  # noqa: E402
     admin,
     admin_plans,
+    admin_signup_gate,  # Issue #358: admin-configurable signup gate
     admin_sleep,  # Issue #247: Manual Sleep Maintenance trigger
     api_keys,
     attachments,  # Issue #330: File attachment support
@@ -400,6 +401,9 @@ app.include_router(sleep_reports.router, prefix="/api/v1")
 
 # Admin Sleep trigger (Issue #247 - Manual Sleep Maintenance trigger)
 app.include_router(admin_sleep.router, prefix="/api/v1")
+
+# Admin signup gate (Issue #358: admin-configurable signup gate)
+app.include_router(admin_signup_gate.router, prefix="/api/v1")
 
 # BM25 IDF Drift admin (Issue #343 - cron disabled by default until v0.14.0)
 app.include_router(bm25_drift.router, prefix="/api/v1")
