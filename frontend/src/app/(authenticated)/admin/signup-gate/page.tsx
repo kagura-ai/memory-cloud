@@ -69,6 +69,11 @@ export default function AdminSignupGatePage() {
 
   const [username, setUsername] = useState("");
   const [adding, setAdding] = useState(false);
+  // Guards against rapid toggle/select interleaving: without it, response
+  // order is not response order and the UI can end up stale relative to the
+  // last user action. Disabling the controls while a save is in flight
+  // serializes the user's intent into one-at-a-time semantics.
+  const [savingConfig, setSavingConfig] = useState(false);
 
   useEffect(() => {
     void loadAll();
@@ -92,6 +97,8 @@ export default function AdminSignupGatePage() {
   }
 
   async function saveConfig(next: SignupGateConfig): Promise<void> {
+    if (savingConfig) return;
+    setSavingConfig(true);
     try {
       const updated = await updateSignupGateConfig({
         enabled: next.enabled,
@@ -107,6 +114,8 @@ export default function AdminSignupGatePage() {
         description: detail,
         variant: "destructive",
       });
+    } finally {
+      setSavingConfig(false);
     }
   }
 
@@ -180,6 +189,7 @@ export default function AdminSignupGatePage() {
               <Switch
                 id="signup-gate-enabled"
                 checked={config.enabled}
+                disabled={savingConfig}
                 onCheckedChange={(checked) =>
                   void saveConfig({ ...config, enabled: checked })
                 }
@@ -192,6 +202,7 @@ export default function AdminSignupGatePage() {
               </Label>
               <Select
                 value={config.mode}
+                disabled={savingConfig}
                 onValueChange={(mode) =>
                   void saveConfig({ ...config, mode: mode as SignupGateMode })
                 }
