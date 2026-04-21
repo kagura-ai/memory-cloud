@@ -10,7 +10,6 @@ defaults (enabled=false, mode=manual).
 from sqlalchemy import inspect, text
 
 from alembic import command
-
 from tests.integration.test_alembic_migrations import (
     _alembic_at_test_db,
     _get_alembic_config,

@@ -11,13 +11,12 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import AdminUser
 from db.base import get_db
-from fastapi import Depends
 from services.signup_gate_service import SignupGateService
 from utils.github_user import GitHubUserNotFound
 from utils.logger import get_logger
@@ -136,13 +135,13 @@ async def add_to_allowlist(
             github_username=payload.github_username,
             added_by_user_id=user["user_id"],
         )
-    except GitHubUserNotFound:
+    except GitHubUserNotFound as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"GitHub user '{payload.github_username}' not found",
-        )
+        ) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return AllowlistEntryResponse.model_validate(entry)
 
 
@@ -159,7 +158,7 @@ async def remove_from_allowlist(
     svc = SignupGateService(db)
     try:
         await svc.remove_from_allowlist(entry_id)
-    except ValueError:
+    except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Allowlist entry not found"
-        )
+        ) from exc
