@@ -8,7 +8,7 @@ All constants are grouped by category with clear documentation.
 # Application Version (single source of truth for runtime)
 # ============================================================================
 
-APP_VERSION = "0.12.3"
+APP_VERSION = "0.13.0"
 
 # ============================================================================
 # Memory Content Limits
