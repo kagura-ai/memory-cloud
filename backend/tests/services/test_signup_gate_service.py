@@ -330,17 +330,8 @@ class TestIsAllowlistedSourceFiltering:
     """Verify mode→source filter mapping so manual/sponsors/both stay distinct."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("mode", "expected_filter_count"),
-        [
-            # manual/github_sponsors add 1 source filter on top of the 2 base
-            # filters (github_user_id, state); 'both' omits the source filter.
-            ("manual", 3),
-            ("github_sponsors", 3),
-            ("both", 2),
-        ],
-    )
-    async def test_mode_controls_source_filter(self, mode, expected_filter_count):
+    @pytest.mark.parametrize("mode", ["manual", "github_sponsors", "both"])
+    async def test_mode_controls_source_filter(self, mode):
         """mode='both' MUST omit the source filter so either row type allows signup."""
         svc = _svc()
         captured = {}

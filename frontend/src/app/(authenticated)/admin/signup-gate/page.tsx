@@ -250,7 +250,7 @@ export default function AdminSignupGatePage() {
                       <TableCell className="font-medium">
                         {entry.github_username}
                         <span className="ml-2 text-xs text-muted-foreground">
-                          (id: {entry.github_user_id})
+                          {t("githubUserId", { id: entry.github_user_id })}
                         </span>
                       </TableCell>
                       <TableCell>{t(`source.${entry.source}`)}</TableCell>

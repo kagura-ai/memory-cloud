@@ -2399,7 +2399,8 @@
         "active": "Active",
         "grace": "Grace period",
         "revoked": "Revoked"
-      }
+      },
+      "githubUserId": "(id: {id})"
     }
   },
   "resourceTokens": {

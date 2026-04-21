@@ -2399,7 +2399,8 @@
         "active": "有効",
         "grace": "猶予期間",
         "revoked": "無効"
-      }
+      },
+      "githubUserId": "(ID: {id})"
     }
   },
   "resourceTokens": {
