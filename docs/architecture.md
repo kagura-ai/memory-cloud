@@ -17,10 +17,11 @@ Kagura Memory Cloud is built with a modern, scalable architecture designed for p
                               ↓
 ┌──────────────────────┬──────────────────────────────────────┐
 │   MCP Server (SSE)   │          REST API (FastAPI)          │
-│  - 21 MCP Tools      │  - Memory CRUD                       │
+│  - 26 MCP Tools      │  - Memory CRUD                       │
 │    (memory / ctx /   │  - OAuth2 endpoints                  │
 │     edge / search /  │  - API Key management                │
-│     usage / sleep)   │  - Admin: sleep-reports, neural cfg  │
+│     usage / sleep /  │  - Resource Ingest API               │
+│     resource)        │  - Admin: sleep-reports, neural cfg  │
 │  - Session Mgmt      │                                      │
 │  - JSON-RPC          │                                      │
 └──────────────────────┴──────────────────────────────────────┘
@@ -28,20 +29,23 @@ Kagura Memory Cloud is built with a modern, scalable architecture designed for p
 ┌─────────────────────────────────────────────────────────────┐
 │                      Service Layer                           │
 │  MemoryService │ SearchService │ EmbeddingService           │
-│  GraphService │ NeuralMemoryEngine │ AuthService            │
-│  SleepService │ LLMService                                  │
+│  GraphService │ NeuralMemoryEngine │ WorkspaceService       │
+│  PermissionService │ SleepService │ LLMService              │
+│  ResourceIndexer │ ContextService │ QuotaService            │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
-│                    Repository Layer                          │
-│  MemoryRepository │ GraphRepository │ UserRepository        │
+│                     Data Access Layer                        │
+│  SQLAlchemy async models (backend/src/models/)              │
+│  + service-owned queries (no dedicated repository layer)    │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌──────────────┬──────────────┬──────────────┬───────────────┐
 │  PostgreSQL  │   Qdrant     │    Redis     │  External API │
 │  - Memories  │  - Vectors   │  - Sessions  │  - OpenAI     │
-│  - Users     │  - Full-text │  - Cache     │  - Cohere     │
-│  - Graph     │  (1u=1coll)  │  - Rate Lmt  │               │
+│  - Workspace │  - BM25      │  - Cache     │  - Cohere     │
+│  - Resources │  (single     │  - Rate Lmt  │  - Stripe     │
+│  - Graph     │   collection)│              │               │
 └──────────────┴──────────────┴──────────────┴───────────────┘
 ```
 
@@ -155,28 +159,66 @@ score = (
 
 ### PostgreSQL Tables
 
-1. **users** - User accounts
-2. **api_keys** - API key management (SHA256 hashed)
-3. **external_api_keys** - OpenAI/Cohere keys (Fernet encrypted)
-4. **memories** - 3-layer memory storage
-5. **graph_memory** - Neural memory relationships (NetworkX JSON)
-6. **oauth_clients** - OAuth2 client applications
-7. **oauth_authorization_codes** - OAuth2 auth codes
-8. **oauth_tokens** - OAuth2 access/refresh tokens
+Tables are grouped by domain. The authoritative list lives in `backend/src/models/`.
+
+**Identity & access**
+- **users** — User accounts
+- **api_keys** — API key management (SHA256 hashed)
+- **external_api_keys** — OpenAI/Cohere keys (Fernet encrypted)
+- **oauth_clients** / **oauth_authorization_codes** / **oauth_tokens** — OAuth2 server
+- **audit_logs** — Security-relevant audit trail
+
+**Workspaces & contexts** (top-level tenancy)
+- **workspaces** — Top-level organizational unit (team / project owner)
+- **workspace_members** — Role assignments (Owner / Admin / Member / Viewer)
+- **workspace_invitations** — Pending invitations
+- **workspace_addons** — Per-workspace addon entitlements
+- **contexts** — Memory namespaces scoped to a workspace
+- **context_members** — Per-context access (private / shared)
+- **context_search_configs** — Per-context hybrid search weights and reranker tuning
+
+**Memories & graph**
+- **memories** — 3-layer memory storage
+- **attachments** — File attachments linked to memories
+- **neural_memory_edges** — Primary Hebbian edge storage (workspace + context scoped)
+- **graph_memory** — Legacy NetworkX JSON (read paths still reference it; new writes go to `neural_memory_edges`)
+
+**Resource ingest** (v0.12.0 Resource Foundation)
+- **resources** — Normalized Resource entity (UUID PK); satellite tables FK via `resource_pk`
+- **resource_events** — Append-only event log (upsert / delete events)
+- **resource_schemas** — Versioned schemas declared per Resource
+- **indexer_state** — Per-(resource, context) indexer cursor + error metrics
+- **resource_tokens** — Per-Resource ingest tokens (workspace-scoped)
+
+**Plans, quotas & sleep**
+- **user_plans** / **plan_changes** — Plan state and history
+- **usage_stats** — Rate-limit and quota counters
+- **sleep_reports** — Per-run Sleep Maintenance summaries
+- **sleep_actions** — Reversible action audit log (used by `rollback_sleep_run`)
+
+**Configuration**
+- **neural_config** — Neural engine per-workspace config
+- **config_overrides** — System-level config overrides
+- **mcp_tool_descriptions** — Admin-editable MCP tool description overrides
 
 ### Qdrant Collections
 
-**Design**: 1 user = 1 collection
+**Design**: single shared collection per embedding model, scoped via payload filters.
 
-- Collection name: `kagura_user_{user_id}`
-- Vector size: 512 (OpenAI text-embedding-3-small)
+- Default collection: `kagura_memories` (OpenAI `text-embedding-3-small`, 512 dims)
+- Non-default models: `kagura_memories_{model_slug}_{dim}` (e.g. `kagura_memories_qwen3_embedding_8b_4096`)
+- Name resolution: `get_collection_name(model, dimensions)` in `backend/src/db/qdrant.py`
+- Isolation: every point carries `workspace_id` + `context_id` in its payload; searches add these as Qdrant filters
+- Named vectors: `dense` (VectorParams) + `bm25` (SparseVectorParams) — anonymous vectors are rejected
 - Distance metric: Cosine
 - Tokenizer: Multilingual (auto Japanese support)
 
 **Features**:
 - Semantic vector search
-- Full-text BM25 search (MatchText)
-- Metadata filtering
+- Full-text BM25 search (MatchText + sparse vector)
+- Metadata filtering (workspace / context / tags / importance)
+
+Prior "1 user = 1 collection" design (`kagura_user_{user_id}`) was replaced by the single-collection migration; no per-user collections remain in new deployments.
 
 ### Redis Storage
 
@@ -196,11 +238,25 @@ User → OAuth2 Login → Session Cookie → Access Token
                         External API Access
 ```
 
-### Authorization Levels
+### Authorization Model
 
-1. **Admin**: Full access (user management, system config)
-2. **User**: Standard access (own memories, API keys)
-3. **Read-only**: View-only access
+Authorization is **workspace-scoped RBAC**. Every authenticated request is resolved to a `(user, workspace, context)` triple before any data access.
+
+**System roles** (flag on `users`):
+- **System admin**: Operator-level access (user management, system config, admin API endpoints)
+- **Standard user**: Default — scoped by workspace membership
+
+**Workspace roles** (per `workspace_members` row):
+- **Owner**: Billing, members, contexts, memories, settings
+- **Admin**: Manage members and shared contexts, read/write memories
+- **Member**: Read/write memories in assigned contexts
+- **Viewer**: Read-only access to assigned contexts
+
+**Context-level privacy**:
+- **Private** (`is_private=true`): Only the creator can access
+- **Shared** (`is_private=false`): All workspace members with the appropriate role
+
+All checks funnel through `PermissionService` in `backend/src/services/permission_service.py`; clients never supply a raw `workspace_id` without server-side verification.
 
 ### Encryption
 

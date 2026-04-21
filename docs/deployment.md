@@ -40,7 +40,7 @@ your-domain.example.com {
     reverse_proxy /health kagura-api:8080
 
     # Frontend (catch-all)
-    reverse_proxy kagura-frontend:3000
+    reverse_proxy kagura-web-dev:3000
 }
 ```
 
@@ -69,7 +69,7 @@ services:
       - caddy_config:/config
     depends_on:
       - kagura-api
-      - kagura-frontend
+      - kagura-web-dev
 
 volumes:
   caddy_data:

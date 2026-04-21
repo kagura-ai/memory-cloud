@@ -1,12 +1,12 @@
 """Qdrant vector database client.
 
-Issue #1 specification:
-- 1ユーザー1コレクション設計 (kagura_user_{user_id})
-- Multilingual tokenizer (Qdrant 1.15+ built-in, 日本語自動対応)
-- Full-text index (summary + context_summary)
-- Keyword index (scope, type, context.context_id)
-
-Based on: kagura-ai/src/kagura/core/memory/backends/qdrant_rag.py
+Collection design (post Single Collection Migration, Issue #334):
+- Default model (text-embedding-3-small, 512 dims) → `kagura_memories`
+- Non-default models → `kagura_memories_{model_slug}_{dim}` via `get_collection_name()`
+- Isolation is payload-based: every point carries `workspace_id` + `context_id`
+- Named vectors: `dense` (VectorParams) + `bm25` (SparseVectorParams)
+- Multilingual tokenizer (Qdrant 1.15+ built-in; Japanese auto-supported)
+- Full-text index on summary + context_summary; keyword index on scope, type, context_id
 """
 
 from typing import Any

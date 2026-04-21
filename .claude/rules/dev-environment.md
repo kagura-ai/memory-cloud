@@ -12,7 +12,7 @@ paths:
 
 - **Only `docker-compose.yml` exists** — there is no `docker-compose.dev.yml` or `docker-compose.override.yml`
 - All environments (dev, test, prod) use the same compose file with environment variables for differentiation
-- Container names: `kagura-api`, `kagura-web`, `kagura-db`, `kagura-redis`
+- Container names: `kagura-api`, `kagura-web-dev`, `kagura-postgres`, `kagura-qdrant`, `kagura-redis`
 
 ## Test Execution
 
