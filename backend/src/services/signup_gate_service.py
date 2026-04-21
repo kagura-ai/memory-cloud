@@ -223,8 +223,19 @@ class SignupGateService:
         if config is None:
             config = SignupGateConfig(id=1, enabled=False, mode="manual")
             self.db.add(config)
-            await self.db.commit()
-            await self.db.refresh(config)
+            try:
+                await self.db.commit()
+            except IntegrityError:
+                # Race: a concurrent caller inserted the singleton row between
+                # our SELECT above and this COMMIT. Roll back our duplicate
+                # insert and re-SELECT the row that now exists.
+                await self.db.rollback()
+                result = await self.db.execute(
+                    select(SignupGateConfig).where(SignupGateConfig.id == 1)
+                )
+                config = result.scalar_one()
+            else:
+                await self.db.refresh(config)
         return config
 
     async def _is_existing_user(self, email: str) -> bool:

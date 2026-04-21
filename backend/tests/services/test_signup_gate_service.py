@@ -290,3 +290,37 @@ class TestUpdateConfig:
         assert result.enabled is True
         assert result.mode == "manual"
         svc.db.commit.assert_awaited_once()
+
+
+class TestLoadConfigSelfHeal:
+    @pytest.mark.asyncio
+    async def test_concurrent_self_heal_race_resolves(self):
+        """Two callers both see config is None; one INSERT wins, the other
+        catches IntegrityError, rolls back, and re-SELECTs the winning row.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        winning_row = SimpleNamespace(id=1, enabled=False, mode="manual")
+
+        # First execute: SELECT finds no row (concurrent caller hasn't committed yet).
+        first_select = MagicMock()
+        first_select.scalar_one_or_none = MagicMock(return_value=None)
+        # Second execute (after IntegrityError): SELECT finds the row the
+        # winning caller just committed.
+        second_select = MagicMock()
+        second_select.scalar_one = MagicMock(return_value=winning_row)
+
+        svc = _svc()
+        svc.db.execute = AsyncMock(side_effect=[first_select, second_select])
+        svc.db.add = MagicMock()
+        svc.db.commit = AsyncMock(
+            side_effect=IntegrityError("uq violation", params=None, orig=Exception())
+        )
+        svc.db.rollback = AsyncMock()
+
+        config = await svc._load_config()
+
+        assert config is winning_row
+        svc.db.rollback.assert_awaited_once()
+        # execute called twice: initial SELECT, then re-SELECT after rollback
+        assert svc.db.execute.await_count == 2
