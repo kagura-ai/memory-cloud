@@ -158,7 +158,8 @@ async def add_to_allowlist(
         # actionable message rather than leaking the raw httpx exception.
         logger.warning(
             "github_api_unavailable",
-            extra={"github_username": payload.github_username, "error": str(exc)},
+            github_username=payload.github_username,
+            error=str(exc),
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

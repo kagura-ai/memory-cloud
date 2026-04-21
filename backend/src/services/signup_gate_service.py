@@ -109,7 +109,9 @@ class SignupGateService:
                 return None
             logger.info(
                 "signup_blocked",
-                extra={"provider": provider, "github_user_id": oauth_sub, "username": username},
+                provider=provider,
+                github_user_id=oauth_sub,
+                username=username,
             )
             return self._blocked_response()
 
@@ -190,11 +192,9 @@ class SignupGateService:
         await self.db.refresh(entry)
         logger.info(
             "signup_allowlist_added",
-            extra={
-                "github_username": canonical_login,
-                "github_user_id": user_id,
-                "added_by": added_by_user_id,
-            },
+            github_username=canonical_login,
+            github_user_id=user_id,
+            added_by=added_by_user_id,
         )
         return entry
 
@@ -205,7 +205,7 @@ class SignupGateService:
         username = entry.github_username
         await self.db.delete(entry)
         await self.db.commit()
-        logger.info("signup_allowlist_removed", extra={"github_username": username})
+        logger.info("signup_allowlist_removed", github_username=username)
 
     # ------------------------------------------------------------------
     # Internals
