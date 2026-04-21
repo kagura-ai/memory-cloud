@@ -68,7 +68,8 @@
     "ownerOnly": "Owner",
     "profileSettings": "Profile Settings",
     "logOut": "Log out",
-    "toggleMenu": "Toggle menu"
+    "toggleMenu": "Toggle menu",
+    "signupGate": "Signup Gate"
   },
   "auth": {
     "signIn": "Sign In",
@@ -2362,6 +2363,33 @@
       "title": "Workspaces Management",
       "description": "Manage all workspaces in the system",
       "featureDescription": "Create and manage workspaces, view workspace statistics, configure workspace-level settings, and manage cross-workspace policies."
+    },
+    "signupGate": {
+      "title": "Signup Gate",
+      "description": "Control who can register on this instance. Default off preserves OSS behavior.",
+      "tabSettings": "Settings",
+      "tabAllowlist": "Manual Allowlist",
+      "enabledToggle": "Enable signup gate",
+      "enabledHelp": "When off, the legacy ALLOW_REGISTRATION env flag controls signup (OSS default).",
+      "modeLabel": "Mode",
+      "modeManual": "Manual Allowlist",
+      "modeGithubSponsorsPhase2": "GitHub Sponsors (Phase 2 — coming later)",
+      "modeBothPhase2": "Manual + Sponsors (Phase 2 — coming later)",
+      "addUsername": "GitHub username",
+      "addButton": "Add",
+      "addSuccess": "Added to allowlist.",
+      "addError": "Failed to add. Check the username and try again.",
+      "removeConfirm": "Remove {username} from the allowlist?",
+      "removeSuccess": "Removed from allowlist.",
+      "removeError": "Failed to remove entry.",
+      "configSaved": "Settings saved.",
+      "configSaveError": "Failed to save settings.",
+      "tableUser": "GitHub User",
+      "tableSource": "Source",
+      "tableState": "State",
+      "tableActions": "Actions",
+      "allowlistEmpty": "No allowlist entries yet.",
+      "allowlistEmptyHint": "Add a GitHub username above to start gating signup."
     }
   },
   "resourceTokens": {
@@ -2819,5 +2847,12 @@
       "description": "Resource setup and ingestion are available on Pro and higher plans. Upgrade to unlock Web UI visibility, MCP resource tools, and ingestion quotas.",
       "action": "Upgrade to Pro"
     }
+  },
+  "signupBlocked": {
+    "title": "Signup Not Available",
+    "description": "This instance restricts new signups.",
+    "message": "Your account is not on the allowlist. Contact the administrator to request access.",
+    "contact": "If you believe you should have access, please reach out to the administrator.",
+    "backToLogin": "Back to Login"
   }
 }

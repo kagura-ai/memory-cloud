@@ -68,7 +68,8 @@
     "ownerOnly": "オーナー",
     "profileSettings": "プロフィール設定",
     "logOut": "ログアウト",
-    "toggleMenu": "メニュー切替"
+    "toggleMenu": "メニュー切替",
+    "signupGate": "サインアップゲート"
   },
   "auth": {
     "signIn": "サインイン",
@@ -2362,6 +2363,33 @@
       "title": "ワークスペース管理",
       "description": "システム内のすべてのワークスペースを管理します",
       "featureDescription": "ワークスペースの作成と管理、ワークスペース統計の表示、ワークスペースレベルの設定、ワークスペース間ポリシーの管理を行います。"
+    },
+    "signupGate": {
+      "title": "サインアップゲート",
+      "description": "このインスタンスに登録できるユーザーを制御します。デフォルトは off で OSS の既存挙動を維持します。",
+      "tabSettings": "設定",
+      "tabAllowlist": "手動許可リスト",
+      "enabledToggle": "サインアップゲートを有効化",
+      "enabledHelp": "off の場合、従来の ALLOW_REGISTRATION 環境変数がサインアップを制御します (OSS デフォルト)。",
+      "modeLabel": "モード",
+      "modeManual": "手動許可リスト",
+      "modeGithubSponsorsPhase2": "GitHub Sponsors (Phase 2 — 今後対応)",
+      "modeBothPhase2": "手動 + Sponsors (Phase 2 — 今後対応)",
+      "addUsername": "GitHub ユーザー名",
+      "addButton": "追加",
+      "addSuccess": "許可リストに追加しました。",
+      "addError": "追加に失敗しました。ユーザー名を確認して再試行してください。",
+      "removeConfirm": "{username} を許可リストから削除しますか?",
+      "removeSuccess": "許可リストから削除しました。",
+      "removeError": "削除に失敗しました。",
+      "configSaved": "設定を保存しました。",
+      "configSaveError": "設定の保存に失敗しました。",
+      "tableUser": "GitHub ユーザー",
+      "tableSource": "ソース",
+      "tableState": "状態",
+      "tableActions": "操作",
+      "allowlistEmpty": "許可リストは空です。",
+      "allowlistEmptyHint": "上のフォームから GitHub ユーザー名を追加するとサインアップ制御を開始します。"
     }
   },
   "resourceTokens": {
@@ -2819,5 +2847,12 @@
       "description": "リソースのセットアップと ingest は Pro 以上のプランで利用可能です。アップグレードして Web UI 可視化、MCP リソースツール、ingest クォータを解放しましょう。",
       "action": "Pro にアップグレード"
     }
+  },
+  "signupBlocked": {
+    "title": "サインアップはご利用いただけません",
+    "description": "このインスタンスは新規サインアップを制限しています。",
+    "message": "このアカウントは許可リストに登録されていません。アクセスをご希望の場合は管理者にお問い合わせください。",
+    "contact": "アクセス権限が必要な場合は、管理者までご連絡ください。",
+    "backToLogin": "ログインに戻る"
   }
 }
