@@ -17,6 +17,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from db.base import get_db
 from models.auth import User
 from models.signup_gate import SignupAllowlistEntry, SignupGateConfig
 from utils.github_user import resolve_github_user_id
@@ -24,6 +25,33 @@ from utils.github_user import resolve_github_user_id
 logger = logging.getLogger(__name__)
 
 SignupGateMode = Literal["manual", "github_sponsors", "both"]
+
+
+async def check_signup_access(
+    *,
+    provider: Literal["github", "google"],
+    oauth_sub: str,
+    email: str,
+    username: str | None = None,
+) -> RedirectResponse | None:
+    """Run the signup gate for an OAuth callback.
+
+    Convenience wrapper that opens a DB session, instantiates the service,
+    and delegates to ``check_access``. Keeps OAuth callback handlers free of
+    the ``async for db in get_db()`` boilerplate and the inline service
+    import (which exists to break a circular dependency with auth.py).
+
+    Returns None when signup is allowed, a RedirectResponse when blocked.
+    """
+    async for db in get_db():
+        gate = SignupGateService(db)
+        return await gate.check_access(
+            provider=provider,
+            oauth_sub=oauth_sub,
+            email=email,
+            username=username,
+        )
+    return None
 
 
 class SignupGateService:
@@ -208,12 +236,14 @@ class SignupGateService:
     async def _legacy_check(self, email: str) -> RedirectResponse | None:
         """Delegate to the pre-existing env-based gate.
 
-        Lazy import to avoid circular dependency — ``api.routes.auth`` imports
-        service modules for other flows.
+        Lazy import to avoid a circular dependency (``api.routes.auth``
+        imports service modules for other flows). Shares ``self.db`` with
+        ``_check_registration_allowed`` so the OAuth callback opens only one
+        DB pool connection per attempt instead of two.
         """
         from api.routes.auth import _check_registration_allowed
 
-        return await _check_registration_allowed(email)
+        return await _check_registration_allowed(email, self.db)
 
     def _blocked_response(self) -> RedirectResponse:
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")

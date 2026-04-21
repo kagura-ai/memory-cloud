@@ -11,24 +11,33 @@ Phase 2's bulk Sponsors sync will authenticate with the admin-configured
 token and get a 5000 req/hr budget.
 """
 
+from typing import NamedTuple
+
 import httpx
 
 _GITHUB_API = "https://api.github.com"
 _TIMEOUT_SECONDS = 10.0
 
 
+class GitHubUser(NamedTuple):
+    """Canonical GitHub user identity returned by the resolver."""
+
+    user_id: str
+    login: str
+
+
 class GitHubUserNotFound(Exception):
     """Raised when the GitHub username does not resolve to an existing user."""
 
 
-async def resolve_github_user_id(username: str) -> tuple[str, str]:
-    """Resolve ``username`` to ``(numeric_user_id, canonical_login)``.
+async def resolve_github_user_id(username: str) -> GitHubUser:
+    """Resolve ``username`` to its immutable numeric ID and canonical login.
 
     Args:
         username: GitHub handle (case-insensitive per GitHub).
 
     Returns:
-        Tuple of (GitHub numeric user ID as string, canonical login string).
+        ``GitHubUser(user_id, login)`` — numeric ID as string, canonical login.
 
     Raises:
         GitHubUserNotFound: The username does not exist (HTTP 404).
@@ -43,4 +52,4 @@ async def resolve_github_user_id(username: str) -> tuple[str, str]:
         raise GitHubUserNotFound(username)
     response.raise_for_status()
     data = response.json()
-    return str(data["id"]), data["login"]
+    return GitHubUser(user_id=str(data["id"]), login=data["login"])

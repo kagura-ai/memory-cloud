@@ -38,6 +38,7 @@ from auth.session import SessionManager
 from auth.totp import verify_totp
 from db.base import get_db
 from models.auth import User
+from services.signup_gate_service import check_signup_access
 from services.workspace_service import WorkspaceService
 from utils.datetime import utcnow
 from utils.encryption import get_encryptor
@@ -89,7 +90,9 @@ class CallbackResponse(BaseModel):
 # ============================================================================
 
 
-async def _check_registration_allowed(email: str) -> RedirectResponse | None:
+async def _check_registration_allowed(
+    email: str, db: AsyncSession | None = None
+) -> RedirectResponse | None:
     """Check if a new user is allowed to register.
 
     Returns None if allowed, RedirectResponse if blocked.
@@ -99,6 +102,12 @@ async def _check_registration_allowed(email: str) -> RedirectResponse | None:
     - ALLOW_REGISTRATION=true: always allowed
     - Pending invitation for this email: always allowed
     - Otherwise: blocked → redirect to login with error
+
+    Args:
+        email: Candidate signup email.
+        db: Optional existing session. When provided, the check runs on the
+            caller's session (avoids opening a second pool connection when
+            dispatched from SignupGateService's fallback path).
     """
     from sqlalchemy import func, select
 
@@ -108,14 +117,14 @@ async def _check_registration_allowed(email: str) -> RedirectResponse | None:
 
     settings = get_settings()
 
-    async for db in get_db():
+    async def _run(session: AsyncSession) -> RedirectResponse | None:
         # Existing users can always login
-        result = await db.execute(select(User).filter_by(email=email))
+        result = await session.execute(select(User).filter_by(email=email))
         if result.scalar_one_or_none():
             return None
 
         # First user always allowed
-        user_count_result = await db.execute(select(func.count()).select_from(User))
+        user_count_result = await session.execute(select(func.count()).select_from(User))
         if user_count_result.scalar() == 0:
             return None
 
@@ -124,7 +133,7 @@ async def _check_registration_allowed(email: str) -> RedirectResponse | None:
             return None
 
         # Invited users bypass gate
-        invitation_service = InvitationService(db)
+        invitation_service = InvitationService(session)
         pending_invites = await invitation_service.get_pending_invitations_for_email(email=email)
         if pending_invites:
             return None
@@ -136,6 +145,12 @@ async def _check_registration_allowed(email: str) -> RedirectResponse | None:
             f"{frontend_url}/login?error=registration_disabled",
             status_code=303,
         )
+
+    if db is not None:
+        return await _run(db)
+    async for session in get_db():
+        return await _run(session)
+    return None
 
 
 # ============================================================================
@@ -310,19 +325,13 @@ async def google_callback(
         # when off, delegates to _check_registration_allowed (Issue #349) just
         # like the GitHub path. This keeps a single gate abstraction without
         # layering a redundant backend allowlist on top of Google's own.
-        async for db in get_db():
-            from services.signup_gate_service import SignupGateService
-
-            gate = SignupGateService(db)
-            blocked = await gate.check_access(
-                provider="google",
-                oauth_sub=user_info["sub"],
-                email=user_info["email"],
-                username=None,
-            )
-            if blocked:
-                return blocked
-            break
+        blocked = await check_signup_access(
+            provider="google",
+            oauth_sub=user_info["sub"],
+            email=user_info["email"],
+        )
+        if blocked:
+            return blocked
 
         # 4. Ensure user exists in database & assign role
         role_manager = get_role_manager()
@@ -693,19 +702,14 @@ async def github_callback(
 
         # 3.5. Registration gate: admin-configurable (Issue #358) with legacy
         # _check_registration_allowed delegation when disabled (Issue #349).
-        async for db in get_db():
-            from services.signup_gate_service import SignupGateService
-
-            gate = SignupGateService(db)
-            blocked = await gate.check_access(
-                provider="github",
-                oauth_sub=user_info["sub"],
-                email=user_info["email"],
-                username=user_info.get("login"),
-            )
-            if blocked:
-                return blocked
-            break
+        blocked = await check_signup_access(
+            provider="github",
+            oauth_sub=user_info["sub"],
+            email=user_info["email"],
+            username=user_info.get("login"),
+        )
+        if blocked:
+            return blocked
 
         # 4. Ensure user exists & assign role
         # Use GitHub's user ID for new users, but for existing users (e.g., logged in
