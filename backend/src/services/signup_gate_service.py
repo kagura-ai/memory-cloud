@@ -15,6 +15,7 @@ from uuid import UUID
 
 from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.base import get_db
@@ -175,7 +176,17 @@ class SignupGateService:
             added_by_user_id=added_by_user_id,
         )
         self.db.add(entry)
-        await self.db.commit()
+        try:
+            await self.db.commit()
+        except IntegrityError as exc:
+            # Race: a concurrent add between our SELECT duplicate-check above
+            # and this COMMIT passed the unique index check first. Convert to
+            # the same ValueError the pre-check raises so callers see one
+            # consistent "duplicate" signal instead of a 500.
+            await self.db.rollback()
+            raise ValueError(
+                f"User '{canonical_login}' is already on the manual allowlist"
+            ) from exc
         await self.db.refresh(entry)
         logger.info(
             "signup_allowlist_added",
@@ -225,13 +236,19 @@ class SignupGateService:
         return (result.scalar() or 0) == 0
 
     async def _is_allowlisted(self, github_user_id: str) -> bool:
+        # A GitHub user can have multiple rows (one per source — e.g. manual +
+        # github_sponsors once Phase 2 ships), so scalar_one_or_none would raise
+        # MultipleResultsFound. first() returns whichever active row hits first,
+        # which is all this check needs.
         result = await self.db.execute(
-            select(SignupAllowlistEntry).where(
+            select(SignupAllowlistEntry.id)
+            .where(
                 SignupAllowlistEntry.github_user_id == github_user_id,
                 SignupAllowlistEntry.state == "active",
             )
+            .limit(1)
         )
-        return result.scalar_one_or_none() is not None
+        return result.first() is not None
 
     async def _legacy_check(self, email: str) -> RedirectResponse | None:
         """Delegate to the pre-existing env-based gate.

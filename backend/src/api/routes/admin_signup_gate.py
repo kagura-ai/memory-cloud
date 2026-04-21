@@ -8,11 +8,13 @@ boundary so a DB edit is the only way to reach them.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import AdminUser
@@ -58,12 +60,16 @@ class AllowlistEntryResponse(BaseModel):
     source: str
     state: str
     added_by_user_id: str | None
+    created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class AllowlistAddRequest(BaseModel):
-    github_username: str
+    # GitHub usernames are 1–39 chars, alphanumeric with hyphens (never at
+    # start/end). Enforce length here so empty / 10KB payloads don't make it
+    # to the GitHub API call.
+    github_username: str = Field(min_length=1, max_length=39)
 
 
 # ============================================================================
@@ -142,6 +148,21 @@ async def add_to_allowlist(
         ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+        # GitHub API unreachable / rate-limited. 60 req/hr unauth means a busy
+        # admin session can exhaust the quota; surface that as 502 with an
+        # actionable message rather than leaking the raw httpx exception.
+        logger.warning(
+            "github_api_unavailable",
+            extra={"github_username": payload.github_username, "error": str(exc)},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "Could not reach GitHub to resolve the username. "
+                "The API may be rate-limited or temporarily unreachable; try again shortly."
+            ),
+        ) from exc
     return AllowlistEntryResponse.model_validate(entry)
 
 

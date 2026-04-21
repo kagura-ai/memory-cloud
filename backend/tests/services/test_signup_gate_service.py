@@ -221,6 +221,37 @@ class TestAddToAllowlist:
             with pytest.raises(GitHubUserNotFound):
                 await svc.add_to_allowlist(github_username="ghost", added_by_user_id="admin1")
 
+    @pytest.mark.asyncio
+    async def test_integrity_error_on_commit_becomes_value_error(self):
+        """Concurrent add: SELECT check passes, COMMIT hits the unique index.
+
+        The pre-check SELECT can return 'no existing row' while a parallel
+        request is still mid-flight; when our COMMIT then violates the
+        uq_allowlist_user_source index, surface the same ValueError the
+        pre-check raises so the API returns a consistent 409 instead of
+        leaking a 500.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        svc = _svc()
+        scalar_result = MagicMock()
+        scalar_result.scalar_one_or_none = MagicMock(return_value=None)
+        svc.db.execute = AsyncMock(return_value=scalar_result)
+        svc.db.add = MagicMock()
+        svc.db.commit = AsyncMock(
+            side_effect=IntegrityError("uq violation", params=None, orig=Exception())
+        )
+        svc.db.rollback = AsyncMock()
+
+        with patch(
+            "services.signup_gate_service.resolve_github_user_id",
+            new=AsyncMock(return_value=("583231", "octocat")),
+        ):
+            with pytest.raises(ValueError, match="already on the manual allowlist"):
+                await svc.add_to_allowlist(github_username="octocat", added_by_user_id="admin1")
+
+        svc.db.rollback.assert_awaited_once()
+
 
 class TestRemoveFromAllowlist:
     @pytest.mark.asyncio

@@ -6,10 +6,12 @@ checks — the service behavior is covered by
 dependency_overrides.
 """
 
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -53,6 +55,7 @@ def _mock_entry(username: str = "octocat", user_id: str = "583231") -> Any:
         source="manual",
         state="active",
         added_by_user_id="admin_user_1",
+        created_at=datetime(2026, 4, 21, 12, 0, 0, tzinfo=UTC),
     )
 
 
@@ -156,6 +159,39 @@ class TestAddToAllowlist:
             json={"github_username": "octocat"},
         )
         assert response.status_code == 409
+
+    def test_502_on_github_api_error(self, client, monkeypatch):
+        """GitHub API rate limit / network error surfaces as 502."""
+        request = httpx.Request("GET", "https://api.github.com/users/octocat")
+        response = httpx.Response(403, request=request)
+        monkeypatch.setattr(
+            "services.signup_gate_service.SignupGateService.add_to_allowlist",
+            AsyncMock(
+                side_effect=httpx.HTTPStatusError("rate limit", request=request, response=response)
+            ),
+        )
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={"github_username": "octocat"},
+        )
+        assert resp.status_code == 502
+        assert "GitHub" in resp.json()["detail"]
+
+    def test_422_on_empty_username(self, client):
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={"github_username": ""},
+        )
+        assert resp.status_code == 422
+
+    def test_422_on_overlong_username(self, client):
+        # GitHub caps usernames at 39 chars — anything longer is rejected
+        # before we spend a network call on it.
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={"github_username": "a" * 40},
+        )
+        assert resp.status_code == 422
 
 
 class TestRemoveFromAllowlist:
