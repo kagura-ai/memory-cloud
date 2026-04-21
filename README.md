@@ -1,5 +1,11 @@
 <p align="center">
-  <img src="docs/assets/kagura-logo.svg" alt="Kagura Memory Cloud" width="400">
+  <a href="https://www.kagura-ai.com">
+    <img src="docs/assets/kagura-logo.svg" alt="Kagura Memory Cloud" width="400">
+  </a>
+</p>
+
+<p align="center">
+  English · <a href="README.ja.md">日本語</a>
 </p>
 
 <p align="center">
@@ -509,6 +515,7 @@ This project is designed to be developed **with** Claude Code and Kagura Memory 
 - [Contributing](CONTRIBUTING.md) — Development setup, code style, PR workflow
 - [Security](SECURITY.md) — Vulnerability reporting, security design
 - [Python SDK](https://github.com/kagura-ai/kagura-memory-python-sdk) — `KaguraClient` and `KaguraAgent` for Python
+- **Project site**: [www.kagura-ai.com](https://www.kagura-ai.com) — overview, use cases, getting started paths
 
 ## 🇯🇵 日本語ガイド / Japanese Guide
 
