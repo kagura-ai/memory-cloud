@@ -53,6 +53,7 @@ import {
   ChevronDown,
   AlertTriangle,
   Moon,
+  ShieldCheck,
 } from "lucide-react";
 // Issue #246: ContextSelector removed - use /contexts link instead
 import { WorkspaceSwitcher } from "@/components/workspaces/WorkspaceSwitcher";
@@ -175,6 +176,13 @@ const navigationGroups: NavGroup[] = [
         nameKey: "environment",
         href: "/admin/environment",
         icon: Settings,
+        requiredRole: Role.ADMIN,
+      },
+      {
+        // Issue #358: admin-configurable signup gate
+        nameKey: "signupGate",
+        href: "/admin/signup-gate",
+        icon: ShieldCheck,
         requiredRole: Role.ADMIN,
       },
     ],

@@ -2,6 +2,15 @@
 
 Release notes are published on [GitHub Releases](https://github.com/kagura-ai/memory-cloud/releases).
 
+## [Unreleased]
+
+### Added
+- **Admin-configurable signup gate (Phase 1)** (#358): New `/admin/signup-gate` admin page controls who can register on self-hosted and public instances. Default off preserves existing OSS behavior (`ALLOW_REGISTRATION` env flag continues to control signup). When enabled with mode=`manual`, only GitHub users on the admin-managed allowlist may register; attempts from non-allowlisted accounts redirect to `/signup-blocked`. Matching is on the immutable numeric `github_user_id` (renames don't break the match). Added `signup_gate_config` (singleton) + `signup_allowlist` tables via migration `b04`.
+
+### Notes
+- **Phase 2 follow-up**: GitHub Sponsors sync (`sponsorshipsAsMaintainer` GraphQL cron + `POST /webhooks/github/sponsors` HMAC receiver) and the 6 sponsorship-action state machine are deliberately not yet implemented. Mode selector exposes `github_sponsors` / `both` as disabled options; the PUT update schema is narrowed to `Literal["manual"]` so the backend returns `422` for direct-API calls that set those modes. Table schema already reserves all Sponsors columns so Phase 2 lands without a follow-up migration.
+- **Privacy Policy dependency**: before enabling this gate on any hosted deployment, Privacy Policy must document allowlist retention + revocation flow. Tracked under #359 (`docs(legal): Privacy Policy / ToS / Cookie Policy draft`) — ship together per the v0.14.0 Access + Legal bundle rule.
+
 ## [v0.12.3](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.12.3) — 2026-04-19
 
 Consolidated release rolling up the planned v0.12.1, v0.12.2, and v0.12.3 content into a single tag. Full notes on the [GitHub Release page](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.12.3).
