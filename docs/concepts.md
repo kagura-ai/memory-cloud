@@ -142,7 +142,7 @@ See [Sleep Maintenance](sleep-maintenance.md) for the complete reference.
 
 ## MCP Tools
 
-Kagura Memory Cloud exposes 21 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/):
+Kagura Memory Cloud exposes 26 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/):
 
 | Tool | Description | Read-only |
 |------|------------|-----------|
@@ -167,6 +167,11 @@ Kagura Memory Cloud exposes 21 tools via the [Model Context Protocol (MCP)](http
 | `get_sleep_history` | List recent Sleep Maintenance runs for a context | Yes |
 | `get_sleep_report` | Fetch a Sleep run's full report and action audit log | Yes |
 | `rollback_sleep_run` | Reverse every recorded action of a Sleep run | No |
+| `setup_resource` | Register or update a Resource (schema + indexer config) | No |
+| `ingest_events` | Append versioned events to a Resource | No |
+| `get_resource_schema` | Fetch the schema for a Resource | Yes |
+| `get_resource_impact` | Preview how a Resource re-index would affect memories | Yes |
+| `list_resource_tokens` | List Resource Tokens scoped to the caller | Yes |
 
 **Typical workflow:**
 
