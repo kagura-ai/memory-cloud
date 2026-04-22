@@ -105,14 +105,14 @@ an opt-in operator action.
 
 ### Deploy order
 
-1. **Deploy code.** New `remember()` calls now invoke
-   `_create_tag_cooccurrence_seed_edges` after the existing knn seeding step.
-   With migration not yet applied, the function detects that `hub_tag_cache`
-   does not exist (via `SELECT to_regclass('hub_tag_cache')`) and returns
-   silently with a `tag_cooccurrence_skip_pre_migration` debug log — no
-   user-visible impact, no warning spam, no per-memory error rollback. The
-   `valid_edge_type` CHECK constraint extension is therefore never reached
-   in this window.
+1. **Deploy code.** The background embedding task (`process_pending_embedding`)
+   now invokes `_create_tag_cooccurrence_seed_edges` after the existing knn
+   seeding step (which runs after the Qdrant upsert succeeds). With migration
+   not yet applied, the function detects that `hub_tag_cache` does not exist
+   (via `SELECT to_regclass('hub_tag_cache')`) and returns silently with a
+   `tag_cooccurrence_skip_pre_migration` debug log — no user-visible impact,
+   no warning spam, no per-memory error rollback. The `valid_edge_type` CHECK
+   constraint extension is therefore never reached in this window.
 
 2. **Apply migration.** `make migrate` (or `alembic upgrade head`) runs
    `b05_223`, which:
