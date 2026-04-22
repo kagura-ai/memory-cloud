@@ -163,3 +163,75 @@ class TestSleepMaintenanceConfig:
         assert config.sleep_llm_model == "llama3:8b"
         assert config.sleep_max_memories_per_run == 1000
         assert config.sleep_dedup_similarity_threshold == 0.95
+
+
+class TestTagCooccurrenceConfig:
+    """Test tag co-occurrence seeding configuration fields (Issue #223)."""
+
+    def test_defaults(self):
+        config = NeuralMemoryConfig()
+        assert config.tag_cooccurrence_enabled is True
+        assert config.tag_cooccurrence_min_shared == 2
+        assert config.tag_cooccurrence_max_per_remember == 10
+        assert config.tag_cooccurrence_hub_threshold == 0.30
+        assert config.tag_cooccurrence_max_degree_per_node == 50
+
+    def test_custom_values(self):
+        config = NeuralMemoryConfig(
+            tag_cooccurrence_enabled=False,
+            tag_cooccurrence_min_shared=3,
+            tag_cooccurrence_max_per_remember=20,
+            tag_cooccurrence_hub_threshold=0.25,
+            tag_cooccurrence_max_degree_per_node=100,
+        )
+        assert config.tag_cooccurrence_enabled is False
+        assert config.tag_cooccurrence_min_shared == 3
+        assert config.tag_cooccurrence_max_per_remember == 20
+        assert config.tag_cooccurrence_hub_threshold == 0.25
+        assert config.tag_cooccurrence_max_degree_per_node == 100
+
+    def test_min_shared_validation(self):
+        with pytest.raises(ValueError, match="tag_cooccurrence_min_shared"):
+            NeuralMemoryConfig(tag_cooccurrence_min_shared=0)
+        with pytest.raises(ValueError, match="tag_cooccurrence_min_shared"):
+            NeuralMemoryConfig(tag_cooccurrence_min_shared=11)
+
+    def test_max_per_remember_validation(self):
+        with pytest.raises(ValueError, match="tag_cooccurrence_max_per_remember"):
+            NeuralMemoryConfig(tag_cooccurrence_max_per_remember=0)
+        with pytest.raises(ValueError, match="tag_cooccurrence_max_per_remember"):
+            NeuralMemoryConfig(tag_cooccurrence_max_per_remember=101)
+
+    def test_hub_threshold_validation(self):
+        with pytest.raises(ValueError, match="tag_cooccurrence_hub_threshold"):
+            NeuralMemoryConfig(tag_cooccurrence_hub_threshold=-0.1)
+        with pytest.raises(ValueError, match="tag_cooccurrence_hub_threshold"):
+            NeuralMemoryConfig(tag_cooccurrence_hub_threshold=1.5)
+
+    def test_max_degree_validation(self):
+        with pytest.raises(ValueError, match="tag_cooccurrence_max_degree_per_node"):
+            NeuralMemoryConfig(tag_cooccurrence_max_degree_per_node=0)
+        with pytest.raises(ValueError, match="tag_cooccurrence_max_degree_per_node"):
+            NeuralMemoryConfig(tag_cooccurrence_max_degree_per_node=1001)
+
+    def test_from_env_defaults(self):
+        config = NeuralMemoryConfig.from_env()
+        assert config.tag_cooccurrence_enabled is True
+        assert config.tag_cooccurrence_min_shared == 2
+        assert config.tag_cooccurrence_max_per_remember == 10
+        assert config.tag_cooccurrence_hub_threshold == 0.30
+        assert config.tag_cooccurrence_max_degree_per_node == 50
+
+    def test_from_env_overrides(self, monkeypatch):
+        monkeypatch.setenv("TAG_COOCCURRENCE_ENABLED", "false")
+        monkeypatch.setenv("TAG_COOCCURRENCE_MIN_SHARED", "3")
+        monkeypatch.setenv("TAG_COOCCURRENCE_MAX_PER_REMEMBER", "25")
+        monkeypatch.setenv("TAG_COOCCURRENCE_HUB_THRESHOLD", "0.40")
+        monkeypatch.setenv("TAG_COOCCURRENCE_MAX_DEGREE_PER_NODE", "75")
+
+        config = NeuralMemoryConfig.from_env()
+        assert config.tag_cooccurrence_enabled is False
+        assert config.tag_cooccurrence_min_shared == 3
+        assert config.tag_cooccurrence_max_per_remember == 25
+        assert config.tag_cooccurrence_hub_threshold == 0.40
+        assert config.tag_cooccurrence_max_degree_per_node == 75

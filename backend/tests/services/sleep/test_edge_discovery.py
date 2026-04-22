@@ -335,6 +335,29 @@ class TestIsSyntheticSeedEdge:
         edge = _make_edge("learned_from", 0.1)
         assert _is_synthetic_seed_edge(edge) is False
 
+    # ---- Issue #223: tag_cooccurrence is synthetic at any weight ----
+
+    def test_tag_cooccurrence_low_weight_is_synthetic(self):
+        """Default tag_cooccurrence weight (2 shared = 0.25) is synthetic."""
+        edge = _make_edge("tag_cooccurrence", 0.25)
+        assert _is_synthetic_seed_edge(edge) is True
+
+    def test_tag_cooccurrence_capped_weight_is_synthetic(self):
+        """4+ shared tags caps weight at 0.40 — still synthetic."""
+        edge = _make_edge("tag_cooccurrence", 0.40)
+        assert _is_synthetic_seed_edge(edge) is True
+
+    def test_tag_cooccurrence_above_threshold_is_still_synthetic(self):
+        """Unlike semantic_similarity, tag_cooccurrence has NO weight
+        threshold — even an artificially high-weight tag_cooccurrence edge
+        (which the seeding code never produces, but a backfill bug or a
+        future operator override could) is treated as synthetic. This is the
+        documented design: tag_cooccurrence is purely seeding by definition,
+        and Sleep Discovery should be free to overwrite it with a confirmed
+        ``related_to``."""
+        edge = _make_edge("tag_cooccurrence", 0.9)
+        assert _is_synthetic_seed_edge(edge) is True
+
 
 class TestFilterExistingEdges:
     """_filter_existing_edges is now edge_type-aware (Issue #248).

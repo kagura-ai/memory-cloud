@@ -318,7 +318,8 @@ class NeuralMemoryEdge(Base):
         CheckConstraint("confidence >= 0.0 AND confidence <= 1.0", name="valid_confidence"),
         CheckConstraint(
             "edge_type IN ('neural_association', 'related_to', 'depends_on', "
-            "'learned_from', 'semantic_similarity', 'declared_link')",
+            "'learned_from', 'semantic_similarity', 'declared_link', "
+            "'tag_cooccurrence')",
             name="valid_edge_type",
         ),
         # Mirrors the CHECK the b03_396 migration installs so Base.metadata.

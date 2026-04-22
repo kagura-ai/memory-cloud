@@ -327,6 +327,292 @@ class TestDeclaredLinks:
         service.db.execute.assert_not_called()
 
 
+class TestTagCooccurrenceSeeding:
+    """Unit tests for _create_tag_cooccurrence_seed_edges (Issue #223).
+
+    Mock-based: the function lives at module scope in memory_service.py. We
+    pass a fake AsyncSession + Memory and assert which paths short-circuit vs
+    invoke create_edge_if_absent.
+    """
+
+    @pytest.fixture
+    def base_memory(self):
+        """A memory with two tags, in a fully-isolated (ws, ctx) scope."""
+        from models.memory import Memory
+
+        m = Memory(
+            id=uuid4(),
+            user_id="user-1",
+            workspace_id=uuid4(),
+            context_id=uuid4(),
+            summary="seed summary",
+            content="seed content",
+            type="note",
+            tags=["python", "backend", "memory-cloud"],
+            scope="working",
+            client="test",
+        )
+        return m
+
+    @pytest.fixture
+    def cfg(self):
+        from neural.config import NeuralMemoryConfig
+
+        return NeuralMemoryConfig()  # defaults: enabled=True, min_shared=2, etc.
+
+    def _async_session_with(self, *, hub_tags: list[str] | None, candidates: list):
+        """Build a MagicMock AsyncSession that returns the given hub-tags row
+        on the first execute() and the given candidates list on the second."""
+        session = MagicMock()
+        # hub-tag row: scalar_one_or_none() returns the hub_tags list (or None).
+        hub_result = MagicMock()
+        hub_result.scalar_one_or_none = MagicMock(return_value=hub_tags)
+        # candidate query: .all() returns the rows
+        cand_result = MagicMock()
+        cand_result.all = MagicMock(return_value=candidates)
+        # First execute = hub-tag SELECT, second = candidate SELECT
+        session.execute = AsyncMock(side_effect=[hub_result, cand_result])
+        session.commit = AsyncMock()
+        session.rollback = AsyncMock()
+        # SAVEPOINT context manager
+        savepoint = MagicMock()
+        savepoint.__aenter__ = AsyncMock(return_value=None)
+        savepoint.__aexit__ = AsyncMock(return_value=None)
+        session.begin_nested = MagicMock(return_value=savepoint)
+        return session
+
+    @pytest.mark.asyncio
+    async def test_disabled_config_is_noop(self, base_memory, cfg):
+        from services import memory_service as ms
+
+        cfg.tag_cooccurrence_enabled = False
+        session = MagicMock()
+        session.execute = AsyncMock()
+        with patch(
+            "neural.config.NeuralMemoryConfig.from_db",
+            new=AsyncMock(return_value=cfg),
+        ):
+            await ms._create_tag_cooccurrence_seed_edges(session, base_memory)
+        session.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_tags_is_noop(self, base_memory, cfg):
+        from services import memory_service as ms
+
+        base_memory.tags = []
+        session = MagicMock()
+        session.execute = AsyncMock()
+        with patch(
+            "neural.config.NeuralMemoryConfig.from_db",
+            new=AsyncMock(return_value=cfg),
+        ):
+            await ms._create_tag_cooccurrence_seed_edges(session, base_memory)
+        session.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_workspace_is_noop(self, base_memory, cfg):
+        from services import memory_service as ms
+
+        base_memory.workspace_id = None
+        session = MagicMock()
+        session.execute = AsyncMock()
+        with patch(
+            "neural.config.NeuralMemoryConfig.from_db",
+            new=AsyncMock(return_value=cfg),
+        ):
+            await ms._create_tag_cooccurrence_seed_edges(session, base_memory)
+        session.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_idempotency_guard_skips_when_seeded(self, base_memory, cfg):
+        """If tag_cooccurrence edges already exist for this memory, skip the
+        SQL candidate query entirely. Edge-type-scoped — knn semantic_similarity
+        edges on the same memory must NOT trigger this skip."""
+        from services import memory_service as ms
+
+        edge_repo_cls = MagicMock()
+        repo_inst = MagicMock()
+        repo_inst.get_outgoing_edges = AsyncMock(return_value=[MagicMock()])  # already seeded
+        edge_repo_cls.return_value = repo_inst
+
+        session = MagicMock()
+        session.execute = AsyncMock()
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=cfg),
+            ),
+            patch("repositories.neural_edge.NeuralEdgeRepository", new=edge_repo_cls),
+        ):
+            await ms._create_tag_cooccurrence_seed_edges(session, base_memory)
+
+        # idempotency check happened, but no SQL queries (hub-tag, candidates)
+        repo_inst.get_outgoing_edges.assert_awaited_once()
+        # filter passed only the tag_cooccurrence edge_type
+        call_kwargs = repo_inst.get_outgoing_edges.call_args.kwargs
+        assert call_kwargs["edge_types"] == ["tag_cooccurrence"]
+        session.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_all_tags_are_hub_skips_query(self, base_memory, cfg):
+        """When every tag on the new memory is in the hub-set for this
+        (workspace, context), there are no non-hub tags left to correlate on
+        and we short-circuit before issuing the candidate query."""
+        from services import memory_service as ms
+
+        edge_repo_cls = MagicMock()
+        repo_inst = MagicMock()
+        repo_inst.get_outgoing_edges = AsyncMock(return_value=[])
+        edge_repo_cls.return_value = repo_inst
+
+        # Every tag on the memory is in the hub set
+        session = self._async_session_with(hub_tags=list(base_memory.tags), candidates=[])
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=cfg),
+            ),
+            patch("repositories.neural_edge.NeuralEdgeRepository", new=edge_repo_cls),
+        ):
+            await ms._create_tag_cooccurrence_seed_edges(session, base_memory)
+
+        # Only one execute: the hub-tag SELECT. Candidate query never fired.
+        assert session.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_creates_edges_with_correct_weight_and_confidence(self, base_memory, cfg):
+        """Two candidates with shared=2 and shared=3 produce edges with the
+        spec'd weight (0.25, 0.35) and confidence (0.50, 0.75)."""
+        from services import memory_service as ms
+
+        cand_a_id = uuid4()
+        cand_b_id = uuid4()
+        candidates = [
+            MagicMock(id=cand_b_id, shared_count=3),  # higher shared first (ORDER BY DESC)
+            MagicMock(id=cand_a_id, shared_count=2),
+        ]
+        session = self._async_session_with(hub_tags=None, candidates=candidates)
+
+        repo_inst = MagicMock()
+        repo_inst.get_outgoing_edges = AsyncMock(return_value=[])
+        repo_inst.create_edge_if_absent = AsyncMock(side_effect=[MagicMock(), MagicMock()])
+
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=cfg),
+            ),
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                new=MagicMock(return_value=repo_inst),
+            ),
+        ):
+            await ms._create_tag_cooccurrence_seed_edges(session, base_memory)
+
+        assert repo_inst.create_edge_if_absent.await_count == 2
+        # First call: shared=3 → weight=0.35, confidence=0.75
+        first = repo_inst.create_edge_if_absent.call_args_list[0].kwargs
+        assert first["edge_type"] == "tag_cooccurrence"
+        assert first["dst_id"] == cand_b_id
+        assert first["weight"] == pytest.approx(0.35)
+        assert first["confidence"] == pytest.approx(0.75)
+        # Second call: shared=2 → weight=0.25, confidence=0.50
+        second = repo_inst.create_edge_if_absent.call_args_list[1].kwargs
+        assert second["dst_id"] == cand_a_id
+        assert second["weight"] == pytest.approx(0.25)
+        assert second["confidence"] == pytest.approx(0.50)
+        session.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_weight_capped_at_max(self, base_memory, cfg):
+        """4+ shared tags caps weight at 0.40, confidence at 1.00."""
+        from services import memory_service as ms
+
+        candidates = [MagicMock(id=uuid4(), shared_count=7)]
+        session = self._async_session_with(hub_tags=None, candidates=candidates)
+        repo_inst = MagicMock()
+        repo_inst.get_outgoing_edges = AsyncMock(return_value=[])
+        repo_inst.create_edge_if_absent = AsyncMock(return_value=MagicMock())
+
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=cfg),
+            ),
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                new=MagicMock(return_value=repo_inst),
+            ),
+        ):
+            await ms._create_tag_cooccurrence_seed_edges(session, base_memory)
+
+        kw = repo_inst.create_edge_if_absent.call_args.kwargs
+        assert kw["weight"] == pytest.approx(0.40)
+        assert kw["confidence"] == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_degree_cap_truncates_writes(self, base_memory, cfg):
+        """At ``tag_cooccurrence_max_degree_per_node`` writes, stop creating."""
+        from services import memory_service as ms
+
+        cfg.tag_cooccurrence_max_degree_per_node = 2  # tiny cap for the test
+        candidates = [
+            MagicMock(id=uuid4(), shared_count=3),
+            MagicMock(id=uuid4(), shared_count=3),
+            MagicMock(id=uuid4(), shared_count=3),  # would exceed cap
+        ]
+        session = self._async_session_with(hub_tags=None, candidates=candidates)
+        repo_inst = MagicMock()
+        repo_inst.get_outgoing_edges = AsyncMock(return_value=[])
+        repo_inst.create_edge_if_absent = AsyncMock(return_value=MagicMock())
+
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=cfg),
+            ),
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                new=MagicMock(return_value=repo_inst),
+            ),
+        ):
+            await ms._create_tag_cooccurrence_seed_edges(session, base_memory)
+
+        # Only 2 writes despite 3 candidates
+        assert repo_inst.create_edge_if_absent.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_per_edge_failure_does_not_abort_remaining(self, base_memory, cfg):
+        """SAVEPOINT-per-edge: one failure logs a warning but the next edge
+        still attempts."""
+        from services import memory_service as ms
+
+        candidates = [
+            MagicMock(id=uuid4(), shared_count=2),
+            MagicMock(id=uuid4(), shared_count=3),
+        ]
+        session = self._async_session_with(hub_tags=None, candidates=candidates)
+        repo_inst = MagicMock()
+        repo_inst.get_outgoing_edges = AsyncMock(return_value=[])
+        # First call raises, second succeeds
+        repo_inst.create_edge_if_absent = AsyncMock(side_effect=[RuntimeError("boom"), MagicMock()])
+
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=cfg),
+            ),
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                new=MagicMock(return_value=repo_inst),
+            ),
+        ):
+            # Must not raise — best-effort error swallowing.
+            await ms._create_tag_cooccurrence_seed_edges(session, base_memory)
+
+        assert repo_inst.create_edge_if_absent.await_count == 2
+
+
 class TestForget:
     """Test forget (delete) operations."""
 

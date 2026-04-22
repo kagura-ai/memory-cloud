@@ -1784,6 +1784,248 @@ async def _create_knn_seed_edges(
         )
 
 
+async def _create_tag_cooccurrence_seed_edges(
+    db: AsyncSession,
+    memory: Memory,
+) -> None:
+    """Create tag-cooccurrence seed edges for a newly-persisted memory.
+
+    Issue #223 (Tier 2 cold-start seeding): after a memory persists, find
+    existing memories within the same (user, workspace, context) that share
+    ``tag_cooccurrence_min_shared`` or more tags and create weak
+    ``tag_cooccurrence`` edges. Complementary to k-NN semantic seeding —
+    catches structural similarity that embedding similarity misses.
+
+    Best-effort: any failure is logged and swallowed (must not affect memory
+    creation). Mirrors the structure of ``_create_knn_seed_edges`` with three
+    deliberate divergences:
+
+    1. **SQL candidates, not Qdrant**: uses ``tags && ARRAY[?]`` (GIN-indexed
+       overlap) with a ``cardinality(... INTERSECT ...)`` filter pushed down
+       to SQL so the "shared >= N" threshold is enforced by Postgres, not
+       materialized in Python. Requires the ``idx_memories_tags_gin`` index
+       added by migration b05_223.
+    2. **Edge-type-scoped idempotency guard**: skips only when
+       ``tag_cooccurrence`` edges already exist for this memory (knn uses an
+       any-type guard). If we used the any-type guard, the knn seed pass that
+       ran just before would prevent us from ever seeding, even though the
+       two seed types are independent.
+    3. **One direction only**: mirrors knn (src=memory, dst=neighbor). Tag
+       co-occurrence is logically symmetric, but the graph BFS treats edges
+       as undirected, and the ``unique_edge`` constraint is ``(user, src,
+       dst)`` — creating both directions doubles edge count without adding
+       information. Kept asymmetric for consistency with the knn path.
+
+    Args:
+        db: AsyncSession bound to the caller's transaction context
+        memory: The freshly-created Memory entity (must have non-empty tags)
+    """
+    from sqlalchemy import select, text
+
+    from neural.config import NeuralMemoryConfig
+    from repositories.neural_edge import NeuralEdgeRepository
+
+    try:
+        config = await NeuralMemoryConfig.from_db(db)
+
+        if not config.tag_cooccurrence_enabled:
+            return
+
+        if not memory.workspace_id or not memory.context_id:
+            # Defensive: 3-level isolation requires both
+            return
+
+        if not memory.tags:
+            # No tags → no candidates by definition
+            return
+
+        workspace_id_str = str(memory.workspace_id)
+        context_id_str = str(memory.context_id)
+        memory_id_str = str(memory.id)
+
+        # Edge-type-scoped idempotency guard. Unlike knn (any-type guard), we
+        # only skip when tag_cooccurrence edges already exist for this memory
+        # — otherwise the knn seeding pass that just ran would prevent us from
+        # ever writing tag_cooccurrence edges. Re-embed on update_memory()
+        # would re-enter this function with the guard protecting us from
+        # duplicate writes (create_edge_if_absent also protects via ON
+        # CONFLICT, but skipping the SQL work is cheaper).
+        edge_repo = NeuralEdgeRepository(db)
+        existing_edges = await edge_repo.get_outgoing_edges(
+            user_id=memory.user_id,
+            src_id=memory.id,
+            edge_types=["tag_cooccurrence"],
+            workspace_id=workspace_id_str,
+            context_id=context_id_str,
+            limit=1,
+        )
+        if existing_edges:
+            logger.debug(
+                "tag_cooccurrence_skip_already_seeded",
+                memory_id=memory_id_str,
+            )
+            return
+
+        # Read hub-tag set for this (workspace, context). Missing row = never
+        # computed = "no exclusion" (first-night fallback). Sleep Maintenance
+        # populates the cache on its nightly run.
+        from models.hub_tag import HubTagCache
+
+        hub_row = await db.execute(
+            select(HubTagCache.hub_tags).where(
+                HubTagCache.workspace_id == memory.workspace_id,
+                HubTagCache.context_id == memory.context_id,
+            )
+        )
+        hub_tags_raw = hub_row.scalar_one_or_none()
+        hub_tags_set: set[str] = set(hub_tags_raw) if hub_tags_raw else set()
+
+        # Exclude hub tags from the incoming memory's tag set when forming the
+        # candidate query. If every tag is hub-like, there's nothing left to
+        # correlate on.
+        query_tags = [t for t in memory.tags if t not in hub_tags_set]
+        if len(query_tags) < config.tag_cooccurrence_min_shared:
+            logger.debug(
+                "tag_cooccurrence_skip_no_nonhub_tags",
+                memory_id=memory_id_str,
+                total_tags=len(memory.tags),
+                nonhub_tags=len(query_tags),
+                min_shared=config.tag_cooccurrence_min_shared,
+            )
+            return
+
+        # Push the "share >= min_shared non-hub tags" predicate into SQL.
+        # The `&&` operator uses the GIN index (idx_memories_tags_gin) as a
+        # coarse filter; cardinality(... INTERSECT ...) enforces the exact
+        # threshold. Ordering by INTERSECT cardinality descending lets us
+        # pick the top-N "strongest" candidates without client-side sort.
+        sql = text(
+            """
+            SELECT id, tags,
+                   cardinality(ARRAY(
+                       SELECT unnest(tags)
+                       INTERSECT
+                       SELECT unnest(CAST(:query_tags AS text[]))
+                   )) AS shared_count
+            FROM memories
+            WHERE user_id = :user_id
+              AND workspace_id = CAST(:workspace_id AS uuid)
+              AND context_id = CAST(:context_id AS uuid)
+              AND deleted_at IS NULL
+              AND id != CAST(:self_id AS uuid)
+              AND tags && CAST(:query_tags AS text[])
+              AND cardinality(ARRAY(
+                  SELECT unnest(tags)
+                  INTERSECT
+                  SELECT unnest(CAST(:query_tags AS text[]))
+              )) >= :min_shared
+            ORDER BY shared_count DESC, id
+            LIMIT :max_matches
+            """
+        )
+        result = await db.execute(
+            sql,
+            {
+                "user_id": memory.user_id,
+                "workspace_id": workspace_id_str,
+                "context_id": context_id_str,
+                "self_id": memory_id_str,
+                "query_tags": query_tags,
+                "min_shared": config.tag_cooccurrence_min_shared,
+                "max_matches": config.tag_cooccurrence_max_per_remember,
+            },
+        )
+        rows = result.all()
+
+        if not rows:
+            logger.debug(
+                "tag_cooccurrence_no_candidates",
+                memory_id=memory_id_str,
+                nonhub_tag_count=len(query_tags),
+            )
+            return
+
+        # Degree cap: if this memory already has N tag_cooccurrence edges
+        # (from a prior incomplete run that created some but not all — should
+        # only happen if the process crashed mid-seed; the idempotency guard
+        # above would normally fire), truncate further writes.
+        degree_cap = config.tag_cooccurrence_max_degree_per_node
+        edges_created = 0
+
+        for row in rows:
+            if edges_created >= degree_cap:
+                break
+
+            try:
+                neighbor_id = UUID(str(row.id))
+                shared_count = int(row.shared_count)
+            except (ValueError, TypeError, AttributeError):
+                continue
+
+            # Weight: 2 shared → 0.25, 3 → 0.35, 4+ → 0.40 (capped).
+            weight = min(0.4, 0.15 + 0.10 * (shared_count - 1))
+            # Confidence: 2 → 0.50, 3 → 0.75, 4+ → 1.00.
+            confidence = min(1.0, shared_count / 4.0)
+
+            # SAVEPOINT per edge so a single IntegrityError / validation
+            # failure cannot poison the session for the remaining inserts.
+            try:
+                async with db.begin_nested():
+                    edge = await edge_repo.create_edge_if_absent(
+                        user_id=memory.user_id,
+                        src_id=memory.id,
+                        dst_id=neighbor_id,
+                        edge_type="tag_cooccurrence",
+                        weight=weight,
+                        confidence=confidence,
+                        workspace_id=workspace_id_str,
+                        context_id=context_id_str,
+                    )
+                # edge is None when ON CONFLICT DO NOTHING fired — e.g. a
+                # semantic_similarity edge from knn seeding already exists
+                # for this pair. unique_edge is (user, src, dst) so only one
+                # edge per ordered pair regardless of edge_type.
+                if edge is not None:
+                    edges_created += 1
+            except Exception as edge_err:
+                logger.warning(
+                    "tag_cooccurrence_edge_failed",
+                    memory_id=memory_id_str,
+                    neighbor_id=str(row.id),
+                    error=str(edge_err),
+                )
+
+        if edges_created > 0:
+            await db.commit()
+            logger.info(
+                "tag_cooccurrence_edges_created",
+                memory_id=memory_id_str,
+                edges_created=edges_created,
+                candidates=len(rows),
+                nonhub_tags=len(query_tags),
+                hub_tags_excluded=len(memory.tags) - len(query_tags),
+            )
+
+    except Exception as e:
+        # Best-effort: never let tag-cooccurrence seeding failures affect
+        # memory creation. Rollback may itself fail if the session is in a
+        # bad state; log at debug so the original error (logged below) isn't
+        # masked.
+        try:
+            await db.rollback()
+        except Exception as rollback_err:
+            logger.debug(
+                "tag_cooccurrence_rollback_failed",
+                memory_id=str(memory.id),
+                error=str(rollback_err),
+            )
+        logger.warning(
+            "tag_cooccurrence_seeding_failed",
+            memory_id=str(memory.id),
+            error=str(e),
+        )
+
+
 async def process_pending_embedding(memory_id: UUID) -> None:
     """Process embedding generation + Qdrant upsert for a pending memory.
 
@@ -1929,6 +2171,19 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 memory=memory,
                 vector=vector,
                 collection_name=collection,
+            )
+
+            # ================================================================
+            # Issue #223: tag co-occurrence cold-start seeding (Tier 2)
+            # ================================================================
+            # Independent of knn (different signal source: shared tags vs
+            # vector similarity). Both can run; unique_edge constraint and
+            # ON CONFLICT DO NOTHING ensure no double-write per pair. The
+            # idempotency guard inside the function is edge-type-scoped so
+            # this does NOT skip just because knn already wrote edges.
+            await _create_tag_cooccurrence_seed_edges(
+                db=db,
+                memory=memory,
             )
 
         except Exception as e:

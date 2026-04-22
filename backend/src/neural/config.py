@@ -89,6 +89,14 @@ class NeuralMemoryConfig:
         sleep_edge_discovery_enabled: Enable edge discovery phase
         sleep_edge_discovery_sample_size: Memories sampled for edge discovery
         sleep_importance_reeval_enabled: Enable importance re-evaluation phase
+
+        # Tag Co-Occurrence Cold-Start Seeding (Issue #223, Tier 2)
+        tag_cooccurrence_enabled: Master switch for tag-cooccurrence seeding
+        tag_cooccurrence_min_shared: Minimum shared tags to create an edge (1-10)
+        tag_cooccurrence_max_per_remember: Top-N matches per remember() (1-100)
+        tag_cooccurrence_hub_threshold: Frequency above which a tag is "hub"
+            and excluded from co-occurrence (0.0-1.0)
+        tag_cooccurrence_max_degree_per_node: Per-source-node degree cap (1-1000)
     """
 
     # Class-level cache for from_db() (not serialized as instance fields)
@@ -163,6 +171,21 @@ class NeuralMemoryConfig:
     knn_seed_weight: float = (
         0.3  # Intentionally low — synthetic signal, Sleep Maintenance prunes if unused
     )
+
+    # Tag Co-Occurrence Cold-Start Seeding (Issue #223, Tier 2)
+    # On remember(), find existing memories sharing 2+ tags within the same
+    # (user, workspace, context) and create weak ``tag_cooccurrence`` edges.
+    # Complementary to k-NN: deterministic, free (no embedding cost), and
+    # surfaces structure that semantic similarity alone misses (e.g., two
+    # memories about different topics that share the same project tags).
+    tag_cooccurrence_enabled: bool = True
+    tag_cooccurrence_min_shared: int = 2  # Minimum shared tags to create edge (1-10)
+    tag_cooccurrence_max_per_remember: int = 10  # Top-N matches per remember() (1-100)
+    # Hub-tag exclusion: tags appearing on > threshold * memory_count in a
+    # (workspace, context) are excluded from co-occurrence. Computed nightly by
+    # Sleep Maintenance and cached in ``hub_tag_cache``.
+    tag_cooccurrence_hub_threshold: float = 0.30  # 0.0-1.0
+    tag_cooccurrence_max_degree_per_node: int = 50  # Per-node degree cap (1-1000)
 
     # Sleep Maintenance (Issue #101)
     sleep_enabled: bool = False  # Feature flag (env-only)
@@ -267,6 +290,28 @@ class NeuralMemoryConfig:
             )
         if not (0.0 <= self.knn_seed_weight <= 1.0):
             raise ValueError(f"knn_seed_weight must be in [0, 1], got {self.knn_seed_weight}")
+
+        # Tag Co-Occurrence Cold-Start Seeding validation (Issue #223)
+        if not (1 <= self.tag_cooccurrence_min_shared <= 10):
+            raise ValueError(
+                f"tag_cooccurrence_min_shared must be in [1, 10], "
+                f"got {self.tag_cooccurrence_min_shared}"
+            )
+        if not (1 <= self.tag_cooccurrence_max_per_remember <= 100):
+            raise ValueError(
+                f"tag_cooccurrence_max_per_remember must be in [1, 100], "
+                f"got {self.tag_cooccurrence_max_per_remember}"
+            )
+        if not (0.0 <= self.tag_cooccurrence_hub_threshold <= 1.0):
+            raise ValueError(
+                f"tag_cooccurrence_hub_threshold must be in [0, 1], "
+                f"got {self.tag_cooccurrence_hub_threshold}"
+            )
+        if not (1 <= self.tag_cooccurrence_max_degree_per_node <= 1000):
+            raise ValueError(
+                f"tag_cooccurrence_max_degree_per_node must be in [1, 1000], "
+                f"got {self.tag_cooccurrence_max_degree_per_node}"
+            )
 
         # Sleep Maintenance validation
         if not (0 <= self.sleep_cron_hour <= 23):
@@ -377,6 +422,14 @@ class NeuralMemoryConfig:
             knn_seed_k=get_int("KNN_SEED_K", 5),
             knn_seed_min_similarity=get_float("KNN_SEED_MIN_SIMILARITY", 0.4),
             knn_seed_weight=get_float("KNN_SEED_WEIGHT", 0.3),
+            # Tag Co-Occurrence Cold-Start Seeding (Issue #223)
+            tag_cooccurrence_enabled=get_bool("TAG_COOCCURRENCE_ENABLED", True),
+            tag_cooccurrence_min_shared=get_int("TAG_COOCCURRENCE_MIN_SHARED", 2),
+            tag_cooccurrence_max_per_remember=get_int("TAG_COOCCURRENCE_MAX_PER_REMEMBER", 10),
+            tag_cooccurrence_hub_threshold=get_float("TAG_COOCCURRENCE_HUB_THRESHOLD", 0.30),
+            tag_cooccurrence_max_degree_per_node=get_int(
+                "TAG_COOCCURRENCE_MAX_DEGREE_PER_NODE", 50
+            ),
             # Sleep Maintenance (env-only flags + DB-configurable params)
             sleep_enabled=get_bool("SLEEP_ENABLED", False),
             sleep_cron_hour=get_int("SLEEP_CRON_HOUR", 2),
@@ -490,6 +543,25 @@ class NeuralMemoryConfig:
                 "knn_seed_min_similarity", base_config.knn_seed_min_similarity
             ),
             knn_seed_weight=configs.get("knn_seed_weight", base_config.knn_seed_weight),
+            # Tag Co-Occurrence Cold-Start Seeding (Issue #223) — DB-overridable
+            tag_cooccurrence_enabled=configs.get(
+                "tag_cooccurrence_enabled", base_config.tag_cooccurrence_enabled
+            ),
+            tag_cooccurrence_min_shared=configs.get(
+                "tag_cooccurrence_min_shared", base_config.tag_cooccurrence_min_shared
+            ),
+            tag_cooccurrence_max_per_remember=configs.get(
+                "tag_cooccurrence_max_per_remember",
+                base_config.tag_cooccurrence_max_per_remember,
+            ),
+            tag_cooccurrence_hub_threshold=configs.get(
+                "tag_cooccurrence_hub_threshold",
+                base_config.tag_cooccurrence_hub_threshold,
+            ),
+            tag_cooccurrence_max_degree_per_node=configs.get(
+                "tag_cooccurrence_max_degree_per_node",
+                base_config.tag_cooccurrence_max_degree_per_node,
+            ),
             # Sleep Maintenance (env-only flags use base_config, DB params use configs)
             sleep_enabled=base_config.sleep_enabled,  # Feature flag (env-only)
             sleep_cron_hour=base_config.sleep_cron_hour,  # Schedule (env-only)

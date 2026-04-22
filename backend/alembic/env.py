@@ -21,6 +21,7 @@ import models.memory  # noqa: F401
 import models.config  # noqa: F401
 import models.resource  # noqa: F401
 import models.neural  # noqa: F401
+import models.hub_tag  # noqa: F401
 
 # Alembic Config object
 config = context.config
