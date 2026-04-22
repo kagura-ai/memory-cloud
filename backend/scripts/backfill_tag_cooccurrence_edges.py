@@ -47,8 +47,19 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-# Add src to path for imports (mirrors audit_edge_context_invariant.py).
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+# Make BOTH ``backend/`` and ``backend/src/`` importable. The codebase has
+# mixed import styles — most modules use ``from neural.X import ...`` (which
+# resolves from ``backend/src/``), but ``backend/src/neural/activation.py``
+# uses ``from src.services.graph_service import ...`` (which resolves from
+# ``backend/`` because ``src/`` is treated as a package). The backfill chain
+# (this script → ``neural.config`` → ``neural.__init__`` →
+# ``neural.activation``) hits both styles, so both paths must be importable.
+# Without the ``backend/`` insert, this script raises ``ModuleNotFoundError:
+# No module named 'src'`` inside the production container — see #415 for the
+# full root-cause writeup.
+_HERE = Path(__file__).parent
+sys.path.insert(0, str(_HERE.parent))  # backend/  → enables `from src.X`
+sys.path.insert(0, str(_HERE.parent / "src"))  # backend/src/ → enables `from X`
 
 from sqlalchemy import select, text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
