@@ -65,13 +65,22 @@ async def _refresh_hub_tag_cache(
             SELECT COUNT(*)::float AS n FROM scope
         ),
         tag_counts AS (
+            -- Count DISTINCT memories per tag, not raw unnest occurrences
+            -- (Copilot loop 2): if a memory's tags array contains duplicate
+            -- entries (e.g. ["python", "python", "backend"]), counting raw
+            -- unnest rows would over-count "python" as 2 even though it
+            -- appears in only 1 memory. Wrapping in SELECT DISTINCT id, tag
+            -- collapses duplicates per memory before the GROUP BY.
+            --
             -- Cast unnest(tags) to text so ARRAY_AGG produces text[] and the
             -- COALESCE fallback ``ARRAY[]::text[]`` is element-type-compatible
-            -- (Copilot loop 1: ``Column(ARRAY(String))`` → varchar[] in PG;
-            -- without the cast COALESCE would mix varchar[] / text[]).
-            SELECT unnest(tags)::text AS tag, COUNT(*) AS cnt
-            FROM scope
-            GROUP BY 1
+            -- (Copilot loop 1: ``Column(ARRAY(String))`` → varchar[] in PG).
+            SELECT tag, COUNT(*) AS cnt
+            FROM (
+                SELECT DISTINCT id, unnest(tags)::text AS tag
+                FROM scope
+            ) sub
+            GROUP BY tag
         )
         SELECT
             (SELECT n FROM total)::int AS memory_count,
@@ -93,9 +102,20 @@ async def _refresh_hub_tag_cache(
             "threshold": threshold,
         },
     )
-    row = result.one()
-    memory_count = int(row.memory_count)
-    hub_tags: list[str] = list(row.hub_tags or [])
+    # Defensive: aggregate-without-GROUP-BY *should* return exactly 1 row
+    # even on empty input, but use one_or_none() so a future SQL refactor
+    # that accidentally turns it into a "0 rows on empty scope" query does
+    # not raise NoResultFound for every context with zero tagged memories
+    # (which would log the whole nightly hub-tag refresh as failed for that
+    # context). Treat None as "empty scope, write empty hub set" — the same
+    # outcome the cache should reflect anyway. (Copilot loop 2.)
+    row = result.one_or_none()
+    if row is None:
+        memory_count = 0
+        hub_tags: list[str] = []
+    else:
+        memory_count = int(row.memory_count)
+        hub_tags = list(row.hub_tags or [])
 
     # Upsert on (workspace_id, context_id). Bypass ORM for the upsert so we
     # can use the DB-side conflict resolution rather than SELECT-then-INSERT.
