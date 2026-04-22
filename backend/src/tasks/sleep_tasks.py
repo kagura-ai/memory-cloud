@@ -50,8 +50,11 @@ async def _refresh_hub_tag_cache(
     from models.hub_tag import HubTagCache
 
     # Single SQL: count distinct memory occurrences per tag, normalize by
-    # total memory count in scope, and return tags above threshold. Uses
-    # the GIN index (idx_memories_tags_gin) implicitly via unnest+group.
+    # total memory count in (workspace, context), and return tags above
+    # threshold. Note: this query does NOT exercise the GIN index on
+    # ``memories.tags`` (no array-overlap / contains operators) — it walks
+    # all in-scope rows. The GIN index is used by the seeding query in
+    # ``memory_service._create_tag_cooccurrence_seed_edges``, not here.
     sql = text(
         """
         WITH scope AS (

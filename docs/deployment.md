@@ -96,8 +96,12 @@ NEXT_PUBLIC_APP_URL=https://your-domain.com
 ## Tag Co-Occurrence Cold-Start Seeding (Issue #223)
 
 Migration `b05_223_tag_cooccurrence` adds the schema; seeding fires
-automatically on every new `remember()` after deploy. Backfilling pre-existing
-memories is an opt-in operator action.
+automatically inside the **background embedding task** (`process_pending_embedding`)
+after each new memory's embedding completes — so it lags `remember()`'s synchronous
+return by however long the embedding pipeline takes, and is skipped when an
+embedding ultimately fails (the memory exists but no `tag_cooccurrence` edges are
+created until a future re-embed succeeds). Backfilling pre-existing memories is
+an opt-in operator action.
 
 ### Deploy order
 
