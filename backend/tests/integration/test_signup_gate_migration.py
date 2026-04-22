@@ -49,7 +49,13 @@ class TestSignupGateMigration:
         _reset_alembic_state()
         with _alembic_at_test_db():
             command.upgrade(_get_alembic_config(), "head")
-            command.downgrade(_get_alembic_config(), "-1")
+            # Downgrade to the revision immediately BEFORE b04 (signup_gate)
+            # — pinning the target instead of using ``"-1"`` keeps this test
+            # correct as further migrations land on top of b04 (e.g. b05_223
+            # tag_cooccurrence). With ``"-1"`` from a later head, only the
+            # newest migration is rolled back and signup_gate tables would
+            # still exist, falsifying the assertion below.
+            command.downgrade(_get_alembic_config(), "b03_396_edges_ws_ctx_not_null")
 
         engine = _sync_engine()
         try:
