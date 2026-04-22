@@ -135,20 +135,77 @@ an opt-in operator action.
 4. **(Optional) Backfill existing memories.** Memories created before the
    deploy do not get tag_cooccurrence edges automatically. To populate them:
 
+   The script lives at `/app/scripts/backfill_tag_cooccurrence_edges.py`
+   inside the API container and is self-contained (no `PYTHONPATH=` override
+   needed since #415 — the script's own `sys.path` setup covers both
+   `/app` and `/app/src` for the codebase's mixed import style). For
+   pre-#415 builds, prepend `-e PYTHONPATH=/app` to the docker exec.
+
+   Use `docker compose exec` (against the active API color) rather than
+   `docker exec -it kagura-api` because the API container is suffixed with
+   the active blue/green color (`kagura-api-blue` or `kagura-api-green`):
+
    ```bash
+   # On the VM, in /opt/kagura-memory/src/terraform/single-server:
+   ACTIVE=$(cat /opt/kagura-memory/active-color)   # blue|green
+
    # Dry-run for a specific user (preview counts):
-   docker exec -it kagura-api \
-     python scripts/backfill_tag_cooccurrence_edges.py --user-id <uuid>
+   sudo docker compose -f docker-compose.prod.yml --env-file .env.prod \
+     exec -T api-${ACTIVE} \
+     python /app/scripts/backfill_tag_cooccurrence_edges.py --user-id <uuid>
 
    # Execute (writes edges):
-   docker exec -it kagura-api \
-     python scripts/backfill_tag_cooccurrence_edges.py \
+   sudo docker compose -f docker-compose.prod.yml --env-file .env.prod \
+     exec -T api-${ACTIVE} \
+     python /app/scripts/backfill_tag_cooccurrence_edges.py \
        --user-id <uuid> --execute --batch-size 200
 
    # Whole-instance backfill (long-running; consider running per-user):
-   docker exec -it kagura-api \
-     python scripts/backfill_tag_cooccurrence_edges.py --all-users --execute
+   sudo docker compose -f docker-compose.prod.yml --env-file .env.prod \
+     exec -T api-${ACTIVE} \
+     python /app/scripts/backfill_tag_cooccurrence_edges.py --all-users --execute
    ```
+
+   **Pre-backfill: ensure `hub_tag_cache` is populated.** The first nightly
+   Sleep Maintenance run populates it automatically (cron 02:00 UTC). If
+   you want to backfill BEFORE that — to get the benefit of hub-tag
+   exclusion — manually populate via a one-off Python invocation:
+
+   ```bash
+   sudo docker compose -f docker-compose.prod.yml --env-file .env.prod \
+     exec -T -e PYTHONPATH=/app:/app/src api-${ACTIVE} python -c "
+   import sys; sys.path.insert(0, '/app/src')
+   import asyncio
+   from db.base import get_db
+   from neural.config import NeuralMemoryConfig
+   from tasks.sleep_tasks import _refresh_hub_tag_cache
+   from sqlalchemy import select
+   from models.memory import Memory
+
+   async def main():
+       async for db in get_db():
+           cfg = await NeuralMemoryConfig.from_db(db)
+           rows = (await db.execute(
+               select(Memory.workspace_id, Memory.context_id).distinct().where(
+                   Memory.deleted_at.is_(None),
+                   Memory.workspace_id.isnot(None),
+                   Memory.context_id.isnot(None),
+               )
+           )).all()
+           for ws, ctx in rows:
+               n = await _refresh_hub_tag_cache(db, workspace_id=str(ws),
+                                                context_id=str(ctx),
+                                                threshold=cfg.tag_cooccurrence_hub_threshold)
+               await db.commit()
+               print(f'  ctx={ctx} → {n} hub tags')
+   asyncio.run(main())
+   "
+   ```
+
+   Without this pre-step, backfill runs treat every context as "no hub tags"
+   and over-edge popular tags (still bounded by the per-node degree cap, but
+   noisier). The PYTHONPATH=/app:/app/src is required for the inline `python -c`
+   form because it bypasses the script's own sys.path setup.
 
    The script is **idempotent** (safe to re-run after a crash or partial
    failure) and **resumable** via stable `id` ordering. `create_edge_if_absent`
