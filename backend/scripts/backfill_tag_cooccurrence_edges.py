@@ -126,14 +126,17 @@ async def _backfill_one_memory(
     if len(query_tags) < config.tag_cooccurrence_min_shared:
         return 0, "no_candidates"
 
-    # Cast `tags` (varchar[]) to text[] to match :query_tags element type —
-    # see memory_service.py companion SQL for the same fix (Copilot loop 1).
+    # Cast :query_tags to varchar[] (matching ``Column(ARRAY(String))`` →
+    # varchar[]) and leave ``tags`` uncast so ``idx_memories_tags_gin`` is
+    # eligible. See memory_service.py companion SQL for the rationale
+    # (Copilot loop 3: prior text[] cast on the column bypassed the index
+    # and turned backfill into a seq scan on large contexts).
     sql = text(
         """
         SELECT id, cardinality(ARRAY(
-            SELECT unnest(tags::text[])
+            SELECT unnest(tags)
             INTERSECT
-            SELECT unnest(CAST(:query_tags AS text[]))
+            SELECT unnest(CAST(:query_tags AS varchar[]))
         )) AS shared_count
         FROM memories
         WHERE user_id = :user_id
@@ -141,11 +144,11 @@ async def _backfill_one_memory(
           AND context_id = CAST(:context_id AS uuid)
           AND deleted_at IS NULL
           AND id != CAST(:self_id AS uuid)
-          AND tags::text[] && CAST(:query_tags AS text[])
+          AND tags && CAST(:query_tags AS varchar[])
           AND cardinality(ARRAY(
-              SELECT unnest(tags::text[])
+              SELECT unnest(tags)
               INTERSECT
-              SELECT unnest(CAST(:query_tags AS text[]))
+              SELECT unnest(CAST(:query_tags AS varchar[]))
           )) >= :min_shared
         ORDER BY shared_count DESC, id
         LIMIT :max_matches

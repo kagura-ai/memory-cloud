@@ -42,6 +42,8 @@ async def _refresh_hub_tag_cache(
         upserted explicitly so readers can distinguish "computed: nothing"
         from "never computed").
     """
+    from uuid import UUID
+
     from sqlalchemy import text
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -119,9 +121,13 @@ async def _refresh_hub_tag_cache(
 
     # Upsert on (workspace_id, context_id). Bypass ORM for the upsert so we
     # can use the DB-side conflict resolution rather than SELECT-then-INSERT.
+    # Coerce str → UUID explicitly: the columns are ``UUID(as_uuid=True)`` and
+    # the postgresql dialect ``insert()`` does not invoke the column type
+    # processor for raw kwargs the same way ORM ``add()`` would, so a plain
+    # str can fail bind on asyncpg (Copilot loop 3).
     stmt = pg_insert(HubTagCache).values(
-        workspace_id=workspace_id,
-        context_id=context_id,
+        workspace_id=UUID(workspace_id),
+        context_id=UUID(context_id),
         hub_tags=hub_tags,
         memory_count=memory_count,
         threshold_used=threshold,

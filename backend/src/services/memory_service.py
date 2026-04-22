@@ -1914,18 +1914,22 @@ async def _create_tag_cooccurrence_seed_edges(
         # coarse filter; cardinality(... INTERSECT ...) enforces the exact
         # threshold. Ordering by INTERSECT cardinality descending lets us
         # pick the top-N "strongest" candidates without client-side sort.
-        # Cast `tags` (Postgres ``varchar[]`` from ``Column(ARRAY(String))``)
-        # to ``text[]`` everywhere it interacts with ``:query_tags``. Without
-        # the cast Postgres rejects the operator with "operator does not
-        # exist: character varying[] && text[]" because && requires
-        # exactly-matching element types (Copilot loop 1 catch).
+        # Cast :query_tags to ``varchar[]`` (matching the column type
+        # ``Column(ARRAY(String))`` → varchar[] in PG) instead of casting
+        # the column. The previous text[] approach (Copilot loop 1)
+        # technically worked but bypassed ``idx_memories_tags_gin`` because
+        # the index expression is ``tags`` (varchar[]), and Postgres only
+        # uses an index whose indexed expression matches the WHERE clause
+        # expression — ``tags::text[] && ...`` is a different expression.
+        # On large contexts this turned the seeding query back into a seq
+        # scan (Copilot loop 3 catch).
         sql = text(
             """
             SELECT id, tags,
                    cardinality(ARRAY(
-                       SELECT unnest(tags::text[])
+                       SELECT unnest(tags)
                        INTERSECT
-                       SELECT unnest(CAST(:query_tags AS text[]))
+                       SELECT unnest(CAST(:query_tags AS varchar[]))
                    )) AS shared_count
             FROM memories
             WHERE user_id = :user_id
@@ -1933,11 +1937,11 @@ async def _create_tag_cooccurrence_seed_edges(
               AND context_id = CAST(:context_id AS uuid)
               AND deleted_at IS NULL
               AND id != CAST(:self_id AS uuid)
-              AND tags::text[] && CAST(:query_tags AS text[])
+              AND tags && CAST(:query_tags AS varchar[])
               AND cardinality(ARRAY(
-                  SELECT unnest(tags::text[])
+                  SELECT unnest(tags)
                   INTERSECT
-                  SELECT unnest(CAST(:query_tags AS text[]))
+                  SELECT unnest(CAST(:query_tags AS varchar[]))
               )) >= :min_shared
             ORDER BY shared_count DESC, id
             LIMIT :max_matches
