@@ -8,8 +8,13 @@ together because the runtime code that uses them is added in the same PR.
    CHECK constraint in-place; drop + recreate is the canonical pattern.
 
 2. Create ``idx_memories_tags_gin`` — a GIN index on ``memories.tags`` so the
-   ``tags && ARRAY[?]::text[]`` overlap query at remember() time can be pushed
-   down to the index instead of degrading to a sequential scan.
+   ``tags && CAST(:query_tags AS varchar[])`` overlap query at remember() time
+   can be pushed down to the index instead of degrading to a sequential scan.
+   The runtime code casts the *parameter* to ``varchar[]`` (matching the
+   column type ``Column(ARRAY(String))`` → ``varchar[]`` in Postgres) so the
+   WHERE-clause expression literally is ``tags && X`` and PG can use this
+   index. Casting the column instead would form a different expression
+   (``tags::text[] && X``) that the GIN index does not match.
 
    NOTE on CONCURRENTLY: this repo's ``alembic/env.py`` wraps every migration
    in ``context.begin_transaction()``, and Postgres rejects

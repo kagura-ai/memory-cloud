@@ -64,7 +64,19 @@ async def _refresh_hub_tag_cache(
               AND cardinality(tags) > 0
         ),
         total AS (
-            SELECT COUNT(*)::float AS n FROM scope
+            -- Denominator is ALL non-deleted memories in the (workspace,
+            -- context), NOT just the tagged subset. The hub-threshold
+            -- semantic per #223 section 5 is "tags appearing on > X% of
+            -- memories within the (workspace, context) scope" — measured
+            -- against every memory the user has, not only those that
+            -- happen to carry tags. Using ``scope`` here would inflate
+            -- frequencies in contexts with many untagged memories
+            -- (Copilot loop 5 catch).
+            SELECT COUNT(*)::float AS n
+            FROM memories
+            WHERE workspace_id = CAST(:workspace_id AS uuid)
+              AND context_id = CAST(:context_id AS uuid)
+              AND deleted_at IS NULL
         ),
         tag_counts AS (
             -- Count DISTINCT memories per tag, not raw unnest occurrences
