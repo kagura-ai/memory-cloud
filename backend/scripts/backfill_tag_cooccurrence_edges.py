@@ -126,10 +126,12 @@ async def _backfill_one_memory(
     if len(query_tags) < config.tag_cooccurrence_min_shared:
         return 0, "no_candidates"
 
+    # Cast `tags` (varchar[]) to text[] to match :query_tags element type —
+    # see memory_service.py companion SQL for the same fix (Copilot loop 1).
     sql = text(
         """
         SELECT id, cardinality(ARRAY(
-            SELECT unnest(tags)
+            SELECT unnest(tags::text[])
             INTERSECT
             SELECT unnest(CAST(:query_tags AS text[]))
         )) AS shared_count
@@ -139,9 +141,9 @@ async def _backfill_one_memory(
           AND context_id = CAST(:context_id AS uuid)
           AND deleted_at IS NULL
           AND id != CAST(:self_id AS uuid)
-          AND tags && CAST(:query_tags AS text[])
+          AND tags::text[] && CAST(:query_tags AS text[])
           AND cardinality(ARRAY(
-              SELECT unnest(tags)
+              SELECT unnest(tags::text[])
               INTERSECT
               SELECT unnest(CAST(:query_tags AS text[]))
           )) >= :min_shared

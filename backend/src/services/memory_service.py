@@ -1839,6 +1839,21 @@ async def _create_tag_cooccurrence_seed_edges(
             # No tags → no candidates by definition
             return
 
+        # Pre-migration guard (Copilot loop 1): the documented deploy order
+        # ships code before migration b05_223. In that window
+        # ``hub_tag_cache`` does not exist yet, so the first SELECT against
+        # it would raise UndefinedTable for every new memory until migration
+        # runs. Use ``to_regclass`` (returns NULL on missing) to silently
+        # no-op instead of relying on the outer try/except to swallow noisy
+        # warnings. Cheap (no I/O — Postgres catalog lookup, plan cached).
+        table_check = await db.execute(text("SELECT to_regclass('hub_tag_cache')"))
+        if table_check.scalar() is None:
+            logger.debug(
+                "tag_cooccurrence_skip_pre_migration",
+                memory_id=str(memory.id),
+            )
+            return
+
         workspace_id_str = str(memory.workspace_id)
         context_id_str = str(memory.context_id)
         memory_id_str = str(memory.id)
@@ -1899,11 +1914,16 @@ async def _create_tag_cooccurrence_seed_edges(
         # coarse filter; cardinality(... INTERSECT ...) enforces the exact
         # threshold. Ordering by INTERSECT cardinality descending lets us
         # pick the top-N "strongest" candidates without client-side sort.
+        # Cast `tags` (Postgres ``varchar[]`` from ``Column(ARRAY(String))``)
+        # to ``text[]`` everywhere it interacts with ``:query_tags``. Without
+        # the cast Postgres rejects the operator with "operator does not
+        # exist: character varying[] && text[]" because && requires
+        # exactly-matching element types (Copilot loop 1 catch).
         sql = text(
             """
             SELECT id, tags,
                    cardinality(ARRAY(
-                       SELECT unnest(tags)
+                       SELECT unnest(tags::text[])
                        INTERSECT
                        SELECT unnest(CAST(:query_tags AS text[]))
                    )) AS shared_count
@@ -1913,9 +1933,9 @@ async def _create_tag_cooccurrence_seed_edges(
               AND context_id = CAST(:context_id AS uuid)
               AND deleted_at IS NULL
               AND id != CAST(:self_id AS uuid)
-              AND tags && CAST(:query_tags AS text[])
+              AND tags::text[] && CAST(:query_tags AS text[])
               AND cardinality(ARRAY(
-                  SELECT unnest(tags)
+                  SELECT unnest(tags::text[])
                   INTERSECT
                   SELECT unnest(CAST(:query_tags AS text[]))
               )) >= :min_shared

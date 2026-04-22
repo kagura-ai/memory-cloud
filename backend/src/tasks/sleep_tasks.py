@@ -65,7 +65,11 @@ async def _refresh_hub_tag_cache(
             SELECT COUNT(*)::float AS n FROM scope
         ),
         tag_counts AS (
-            SELECT unnest(tags) AS tag, COUNT(*) AS cnt
+            -- Cast unnest(tags) to text so ARRAY_AGG produces text[] and the
+            -- COALESCE fallback ``ARRAY[]::text[]`` is element-type-compatible
+            -- (Copilot loop 1: ``Column(ARRAY(String))`` → varchar[] in PG;
+            -- without the cast COALESCE would mix varchar[] / text[]).
+            SELECT unnest(tags)::text AS tag, COUNT(*) AS cnt
             FROM scope
             GROUP BY 1
         )

@@ -103,9 +103,12 @@ memories is an opt-in operator action.
 
 1. **Deploy code.** New `remember()` calls now invoke
    `_create_tag_cooccurrence_seed_edges` after the existing knn seeding step.
-   With migration not yet applied, the call short-circuits because the
-   `valid_edge_type` CHECK constraint rejects `tag_cooccurrence` edges and
-   the per-edge SAVEPOINT swallows the error — no user-visible impact.
+   With migration not yet applied, the function detects that `hub_tag_cache`
+   does not exist (via `SELECT to_regclass('hub_tag_cache')`) and returns
+   silently with a `tag_cooccurrence_skip_pre_migration` debug log — no
+   user-visible impact, no warning spam, no per-memory error rollback. The
+   `valid_edge_type` CHECK constraint extension is therefore never reached
+   in this window.
 
 2. **Apply migration.** `make migrate` (or `alembic upgrade head`) runs
    `b05_223`, which:
