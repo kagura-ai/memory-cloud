@@ -33,6 +33,9 @@ VALID_EDGE_TYPES = frozenset(
         "semantic_similarity",
         # Issue #215: Explicit links from clients (Obsidian wikilinks, code imports, etc.)
         "declared_link",
+        # Issue #223 (Tier 2 cold-start seeding): synthetic edges from
+        # tag co-occurrence at remember() time
+        "tag_cooccurrence",
     }
 )
 

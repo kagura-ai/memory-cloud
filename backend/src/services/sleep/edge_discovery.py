@@ -74,16 +74,28 @@ SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD = 0.5
 
 
 def _is_synthetic_seed_edge(edge: NeuralMemoryEdge) -> bool:
-    """Return True if ``edge`` is a low-weight k-NN cold-start seed (#248).
+    """Return True if ``edge`` is a synthetic cold-start seed (#248, #223).
 
-    Cold-start seeds from #224/#238 must NOT block Sleep Edge Discovery from
-    re-judging a pair. All other edge types — and high-weight
-    ``semantic_similarity`` edges — represent real connections.
+    Cold-start seeds must NOT block Sleep Edge Discovery from re-judging a
+    pair. Two seed types qualify:
+
+    - **k-NN ``semantic_similarity`` (#221/#224/#238)**: synthetic only when
+      ``weight < SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD`` (0.5).
+      Operators who set ``knn_seed_weight`` >= 0.5 are implicitly opting
+      those edges back into "real connection" semantics.
+    - **``tag_cooccurrence`` (#223)**: synthetic at *any* weight — the type
+      is purely seeding, weight 0.25–0.40 by spec, and there is no operator
+      knob to "promote" tag-cooccurrence to a real connection. If a pair
+      becomes truly related, Sleep Discovery should overwrite the
+      tag_cooccurrence edge with a confirmed ``related_to`` (or similar).
+
+    All other edge types are treated as real connections regardless of weight.
     """
-    return (
-        edge.edge_type == "semantic_similarity"
-        and edge.weight < SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD
-    )
+    if edge.edge_type == "semantic_similarity":
+        return edge.weight < SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD
+    if edge.edge_type == "tag_cooccurrence":
+        return True
+    return False
 
 
 # Issue #306: Confidence histogram bucket boundaries.
