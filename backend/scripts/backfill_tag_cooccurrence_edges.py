@@ -128,28 +128,27 @@ async def _backfill_one_memory(
 
     # Cast :query_tags to varchar[] (matching ``Column(ARRAY(String))`` →
     # varchar[]) and leave ``tags`` uncast so ``idx_memories_tags_gin`` is
-    # eligible. See memory_service.py companion SQL for the rationale
-    # (Copilot loop 3: prior text[] cast on the column bypassed the index
-    # and turned backfill into a seq scan on large contexts).
+    # eligible. See memory_service.py companion SQL for full rationale
+    # (Copilot loops 1+3+4 history). Subquery shape computes the
+    # cardinality(... INTERSECT ...) exactly once per row.
     sql = text(
         """
-        SELECT id, cardinality(ARRAY(
-            SELECT unnest(tags)
-            INTERSECT
-            SELECT unnest(CAST(:query_tags AS varchar[]))
-        )) AS shared_count
-        FROM memories
-        WHERE user_id = :user_id
-          AND workspace_id = CAST(:workspace_id AS uuid)
-          AND context_id = CAST(:context_id AS uuid)
-          AND deleted_at IS NULL
-          AND id != CAST(:self_id AS uuid)
-          AND tags && CAST(:query_tags AS varchar[])
-          AND cardinality(ARRAY(
-              SELECT unnest(tags)
-              INTERSECT
-              SELECT unnest(CAST(:query_tags AS varchar[]))
-          )) >= :min_shared
+        SELECT id, shared_count
+        FROM (
+            SELECT id, cardinality(ARRAY(
+                SELECT unnest(tags)
+                INTERSECT
+                SELECT unnest(CAST(:query_tags AS varchar[]))
+            )) AS shared_count
+            FROM memories
+            WHERE user_id = :user_id
+              AND workspace_id = CAST(:workspace_id AS uuid)
+              AND context_id = CAST(:context_id AS uuid)
+              AND deleted_at IS NULL
+              AND id != CAST(:self_id AS uuid)
+              AND tags && CAST(:query_tags AS varchar[])
+        ) m
+        WHERE shared_count >= :min_shared
         ORDER BY shared_count DESC, id
         LIMIT :max_matches
         """

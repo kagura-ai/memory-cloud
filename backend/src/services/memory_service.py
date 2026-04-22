@@ -1916,33 +1916,37 @@ async def _create_tag_cooccurrence_seed_edges(
         # pick the top-N "strongest" candidates without client-side sort.
         # Cast :query_tags to ``varchar[]`` (matching the column type
         # ``Column(ARRAY(String))`` → varchar[] in PG) instead of casting
-        # the column. The previous text[] approach (Copilot loop 1)
-        # technically worked but bypassed ``idx_memories_tags_gin`` because
-        # the index expression is ``tags`` (varchar[]), and Postgres only
-        # uses an index whose indexed expression matches the WHERE clause
-        # expression — ``tags::text[] && ...`` is a different expression.
-        # On large contexts this turned the seeding query back into a seq
-        # scan (Copilot loop 3 catch).
+        # the column. Casting the column would form expression
+        # ``tags::text[] && X`` which no longer matches
+        # ``idx_memories_tags_gin`` (indexed on bare ``tags``), turning the
+        # seeding query into a seq scan on large contexts (Copilot loops
+        # 1+3 history).
+        #
+        # Compute the expensive ``cardinality(... INTERSECT ...)`` exactly
+        # once per row by wrapping the inner query and filtering on the
+        # alias from the outer query. The previous shape repeated the
+        # INTERSECT in both SELECT and WHERE; Postgres cannot always
+        # CSE-collapse identical scalar subqueries, so on large candidate
+        # sets the duplicate work was visible (Copilot loop 4 catch).
         sql = text(
             """
-            SELECT id, tags,
-                   cardinality(ARRAY(
-                       SELECT unnest(tags)
-                       INTERSECT
-                       SELECT unnest(CAST(:query_tags AS varchar[]))
-                   )) AS shared_count
-            FROM memories
-            WHERE user_id = :user_id
-              AND workspace_id = CAST(:workspace_id AS uuid)
-              AND context_id = CAST(:context_id AS uuid)
-              AND deleted_at IS NULL
-              AND id != CAST(:self_id AS uuid)
-              AND tags && CAST(:query_tags AS varchar[])
-              AND cardinality(ARRAY(
-                  SELECT unnest(tags)
-                  INTERSECT
-                  SELECT unnest(CAST(:query_tags AS varchar[]))
-              )) >= :min_shared
+            SELECT id, tags, shared_count
+            FROM (
+                SELECT id, tags,
+                       cardinality(ARRAY(
+                           SELECT unnest(tags)
+                           INTERSECT
+                           SELECT unnest(CAST(:query_tags AS varchar[]))
+                       )) AS shared_count
+                FROM memories
+                WHERE user_id = :user_id
+                  AND workspace_id = CAST(:workspace_id AS uuid)
+                  AND context_id = CAST(:context_id AS uuid)
+                  AND deleted_at IS NULL
+                  AND id != CAST(:self_id AS uuid)
+                  AND tags && CAST(:query_tags AS varchar[])
+            ) m
+            WHERE shared_count >= :min_shared
             ORDER BY shared_count DESC, id
             LIMIT :max_matches
             """
