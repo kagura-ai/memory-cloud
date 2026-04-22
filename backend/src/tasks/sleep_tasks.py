@@ -96,16 +96,25 @@ async def _refresh_hub_tag_cache(
             ) sub
             GROUP BY tag
         )
+        -- Outer SELECT has NO `FROM tag_counts` — that would return 0 rows
+        -- when tag_counts is empty (context has memories but none are
+        -- tagged), making `memory_count` incorrectly absent for that
+        -- context. Instead, build both fields as scalar subqueries from
+        -- the FROM-less SELECT, which always returns exactly 1 row.
+        -- ARRAY_AGG inside the scalar subquery handles the empty-tag case
+        -- naturally (returns NULL → COALESCE → []) (Copilot loop 6 catch).
         SELECT
             (SELECT n FROM total)::int AS memory_count,
             COALESCE(
-                ARRAY_AGG(tag) FILTER (
-                    WHERE (SELECT n FROM total) > 0
-                      AND cnt::float / (SELECT n FROM total) > :threshold
+                (
+                    SELECT ARRAY_AGG(tag) FILTER (
+                        WHERE (SELECT n FROM total) > 0
+                          AND cnt::float / (SELECT n FROM total) > :threshold
+                    )
+                    FROM tag_counts
                 ),
                 ARRAY[]::text[]
             ) AS hub_tags
-        FROM tag_counts
         """
     )
     result = await db.execute(
