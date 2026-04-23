@@ -831,12 +831,6 @@ class EdgeDiscoveryPhase:
             ):
                 continue
 
-            # #372: retain rejected-side confidence with the same NaN/Inf
-            # guard + clamp as the accept path. `confidence_imputed_rejected`
-            # is a separate counter so operators can tell whether malformed
-            # confidence values cluster on accept, reject, or both — the
-            # per-side skew is a prompt/model signal independent of the
-            # bimodality observable from the histograms themselves.
             if not edge.get("related", False):
                 raw_conf = edge.get("confidence", 0.5)
                 if not isinstance(raw_conf, (int, float)) or not math.isfinite(raw_conf):
