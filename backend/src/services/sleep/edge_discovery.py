@@ -24,7 +24,7 @@ import random
 import statistics
 import string
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, get_args
 from uuid import UUID
 
 if TYPE_CHECKING:
@@ -116,6 +116,33 @@ CONFIDENCE_HISTOGRAM_KEYS: tuple[str, ...] = ("0.0-0.5", "0.5-0.7", "0.7-0.85", 
 # in the wrong direction (PR #371 PhD-pl review finding). Module-level so
 # tests can import the same source of truth.
 DIRECTED_EDGE_TYPES: frozenset[str] = frozenset({"depends_on", "learned_from"})
+
+# Issue #374: `EdgeType` is the type-level source of truth for valid
+# `NeuralMemoryEdge.edge_type` values. `VALID_EDGE_TYPES` is derived via
+# `get_args` so the runtime membership check and the type annotation cannot
+# drift. Adding a new edge_type only requires editing the Literal.
+EdgeType = Literal["related_to", "depends_on", "learned_from"]
+VALID_EDGE_TYPES: frozenset[EdgeType] = frozenset(get_args(EdgeType))
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmedEdge:
+    """A single edge accepted by `_llm_judge_batch` (#374).
+
+    Replaces the prior positional 4-tuple `(src_id, dst_id, edge_type,
+    confidence)`. `frozen=True` prevents post-construction mutation;
+    `slots=True` shaves per-edge memory on the batch hot path. Named access
+    eliminates src/dst swap bugs and is robust to future field additions.
+
+    `confidence` is constrained to `[0.0, 1.0]` by the parser's clamp (and by
+    the auto-accept path's literal `0.5`); Python's type system cannot express
+    the range, so the invariant lives in the runtime clamp and this docstring.
+    """
+
+    src_id: UUID
+    dst_id: UUID
+    edge_type: EdgeType
+    confidence: float
 
 
 @dataclass
@@ -389,18 +416,21 @@ class EdgeDiscoveryPhase:
                 # Without LLM, accept all candidates with default confidence.
                 # Tracked separately as `auto_accepted` so it does NOT pollute
                 # avg_confidence / confidence_histogram / edge_type_dist (#306).
-                confirmed = [(src, dst, "related_to", 0.5) for src, dst, _score in batch]
+                confirmed = [
+                    ConfirmedEdge(src_id=src, dst_id=dst, edge_type="related_to", confidence=0.5)
+                    for src, dst, _score in batch
+                ]
                 auto_accepted += len(confirmed)
 
-            for src_id, dst_id, edge_type, confidence in confirmed:
+            for edge in confirmed:
                 try:
                     await self.edge_repo.create_or_update_edge(
                         user_id=user_id,
-                        src_id=src_id,
-                        dst_id=dst_id,
-                        edge_type=edge_type,
+                        src_id=edge.src_id,
+                        dst_id=edge.dst_id,
+                        edge_type=edge.edge_type,
                         weight=DISCOVERY_EDGE_WEIGHT,
-                        confidence=confidence,
+                        confidence=edge.confidence,
                         workspace_id=workspace_id,
                         context_id=context_id,
                         edge_metadata={"source": "sleep_edge_discovery"},
@@ -411,19 +441,19 @@ class EdgeDiscoveryPhase:
                             report_id=report_id,
                             phase="edge_discovery",
                             action_type="create_edge",
-                            memory_id=src_id,
-                            target_id=dst_id,
+                            memory_id=edge.src_id,
+                            target_id=edge.dst_id,
                             details={
-                                "edge_type": edge_type,
-                                "confidence": confidence,
+                                "edge_type": edge.edge_type,
+                                "confidence": edge.confidence,
                                 "weight": DISCOVERY_EDGE_WEIGHT,
                             },
                         )
                 except Exception as e:
                     logger.warning(
                         "edge_creation_failed",
-                        src=str(src_id),
-                        dst=str(dst_id),
+                        src=str(edge.src_id),
+                        dst=str(edge.dst_id),
                         error=str(e),
                     )
 
@@ -586,13 +616,12 @@ class EdgeDiscoveryPhase:
         workspace_id: str | None,
         budget: SleepBudget,
         config: NeuralMemoryConfig,
-    ) -> tuple[list[tuple[UUID, UUID, str, float]], BatchStats]:
+    ) -> tuple[list[ConfirmedEdge], BatchStats]:
         """Use LLM to judge edge candidates.
 
         Returns:
             Tuple of (confirmed_edges, stats):
-              - confirmed_edges: list of (src_id, dst_id, edge_type, confidence)
-                for accepted edges.
+              - confirmed_edges: list of `ConfirmedEdge` for accepted edges.
               - stats: BatchStats with per-batch counts. `failures` is 0 or 1
                 (one LLM call per batch).
         """
@@ -704,8 +733,7 @@ class EdgeDiscoveryPhase:
             return [], stats
 
         # Parse response with label validation
-        confirmed: list[tuple[UUID, UUID, str, float]] = []
-        valid_edge_types = {"related_to", "depends_on", "learned_from"}
+        confirmed: list[ConfirmedEdge] = []
         for edge in response.get("edges", []):
             pair = edge.get("pair", [])
             if len(pair) != 2 or pair[0] not in label_to_id or pair[1] not in label_to_id:
@@ -732,9 +760,9 @@ class EdgeDiscoveryPhase:
             # Treat non-strings as invalid and coerce to `related_to`,
             # matching the existing fallback for unknown string values.
             raw_type = edge.get("edge_type", "related_to")
-            edge_type = (
+            edge_type: EdgeType = (
                 raw_type
-                if isinstance(raw_type, str) and raw_type in valid_edge_types
+                if isinstance(raw_type, str) and raw_type in VALID_EDGE_TYPES
                 else "related_to"
             )
 
@@ -774,11 +802,11 @@ class EdgeDiscoveryPhase:
             stats.confidences.append(confidence)
 
             confirmed.append(
-                (
-                    label_to_id[pair[0]],
-                    label_to_id[pair[1]],
-                    edge_type,
-                    confidence,
+                ConfirmedEdge(
+                    src_id=label_to_id[pair[0]],
+                    dst_id=label_to_id[pair[1]],
+                    edge_type=edge_type,
+                    confidence=confidence,
                 )
             )
 

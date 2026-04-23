@@ -17,6 +17,7 @@ from services.sleep.edge_discovery import (
     SIMILARITY_MAX,
     SIMILARITY_MIN,
     BatchStats,
+    ConfirmedEdge,
     EdgeDiscoveryPhase,
     _build_confidence_histogram,
     _is_synthetic_seed_edge,
@@ -580,7 +581,7 @@ class TestLLMJudgeBatch:
         )
 
         assert len(confirmed) == 1
-        assert confirmed[0][2] == "related_to"
+        assert confirmed[0].edge_type == "related_to"
         assert stats.edge_type_counts == {"related_to": 1}
         # "garbage_type" must NOT appear in dist
         assert "garbage_type" not in stats.edge_type_counts
@@ -633,8 +634,8 @@ class TestLLMJudgeBatch:
 
         assert stats.accepted == 2
         assert stats.confidences == [1.0, 0.0]
-        assert confirmed[0][3] == 1.0
-        assert confirmed[1][3] == 0.0
+        assert confirmed[0].confidence == 1.0
+        assert confirmed[1].confidence == 0.0
 
     @pytest.mark.asyncio
     async def test_complete_json_raises_increments_failures(self, llm_judge_phase):
@@ -813,9 +814,9 @@ class TestDirectedEdgeOrientation:
         assert stats.edge_type_counts == {directed_edge_type: 1}
         # src/dst preserved in the order the LLM returned (which equals the
         # input order, by construction of this test).
-        assert confirmed[0][0] == batch[0][0]
-        assert confirmed[0][1] == batch[0][1]
-        assert confirmed[0][2] == directed_edge_type
+        assert confirmed[0].src_id == batch[0][0]
+        assert confirmed[0].dst_id == batch[0][1]
+        assert confirmed[0].edge_type == directed_edge_type
 
     @pytest.mark.asyncio
     async def test_undirected_pair_flipped_still_accepted(self, llm_judge_phase):
@@ -844,8 +845,8 @@ class TestDirectedEdgeOrientation:
         # The parser uses the LLM's pair order verbatim for undirected edges,
         # so src/dst here reflect the flipped order. Semantically equivalent
         # to (src=A, dst=B) for the consumer because `related_to` is symmetric.
-        assert confirmed[0][0] == batch[0][1]
-        assert confirmed[0][1] == batch[0][0]
+        assert confirmed[0].src_id == batch[0][1]
+        assert confirmed[0].dst_id == batch[0][0]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -926,7 +927,7 @@ class TestDirectedEdgeOrientation:
         )
 
         assert len(confirmed) == 1
-        assert confirmed[0][2] == "related_to"
+        assert confirmed[0].edge_type == "related_to"
         assert stats.edge_type_counts == {"related_to": 1}
 
 
@@ -960,9 +961,24 @@ class TestExecuteAggregation:
                     confidences=[0.9, 0.7, 0.55],
                 )
                 confirmed = [
-                    (batch[0][0], batch[0][1], "related_to", 0.9),
-                    (batch[1][0], batch[1][1], "related_to", 0.7),
-                    (batch[2][0], batch[2][1], "depends_on", 0.55),
+                    ConfirmedEdge(
+                        src_id=batch[0][0],
+                        dst_id=batch[0][1],
+                        edge_type="related_to",
+                        confidence=0.9,
+                    ),
+                    ConfirmedEdge(
+                        src_id=batch[1][0],
+                        dst_id=batch[1][1],
+                        edge_type="related_to",
+                        confidence=0.7,
+                    ),
+                    ConfirmedEdge(
+                        src_id=batch[2][0],
+                        dst_id=batch[2][1],
+                        edge_type="depends_on",
+                        confidence=0.55,
+                    ),
                 ]
                 return confirmed, stats
             # Second batch: 1 accepted, 0 rejected
@@ -972,7 +988,14 @@ class TestExecuteAggregation:
                 edge_type_counts={"learned_from": 1},
                 confidences=[0.95],
             )
-            confirmed = [(batch[0][0], batch[0][1], "learned_from", 0.95)]
+            confirmed = [
+                ConfirmedEdge(
+                    src_id=batch[0][0],
+                    dst_id=batch[0][1],
+                    edge_type="learned_from",
+                    confidence=0.95,
+                )
+            ]
             return confirmed, stats
 
         llm_judge_phase._llm_judge_batch = fake_judge
