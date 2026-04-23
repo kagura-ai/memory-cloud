@@ -400,6 +400,14 @@ async def maybe_trigger_bootstrap(
         .where(
             Memory.deleted_at.is_(None),
             Memory.embedding_status == "success",
+            # Exclude NULL-context memories so the count matches the set
+            # ``_pick_largest_context_for_model`` samples from. Without this
+            # filter a large NULL-context backfill (legacy pre-context
+            # migrations or admin-inserted system rows) could prematurely
+            # trip BOOTSTRAP_MIN_MEMORIES without any real context crossing
+            # the D3 gate — the calibration job would then abort at
+            # ``_pick_largest_context_for_model`` with no_context_for_model.
+            Memory.context_id.is_not(None),
             _model_dims_where(model_name, dimensions),
         )
     )

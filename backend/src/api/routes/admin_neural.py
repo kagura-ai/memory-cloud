@@ -11,8 +11,9 @@ hasn't fired yet and the operator wants a fresh threshold immediately.
 
 The actual compute runs in an ``asyncio.create_task`` spawned by
 :func:`~tasks.neural_calibration.enqueue_recalibration_dedup`; this
-handler returns 202 as soon as the job is enqueued (or 200 with
-``accepted=false`` when the dedup lock rejects a duplicate).
+handler always returns 202, with ``accepted=true`` when a new job was
+enqueued and ``accepted=false`` when the dedup lock rejects a duplicate
+(idempotent — callers can safely retry without hammering the compute).
 """
 
 from __future__ import annotations
