@@ -167,11 +167,12 @@ class LLMService:
         - GPT-4o / GPT-3.5 / non-OpenAI: pass `temperature` as given.
         - GPT-5 / o-series reasoning models: omit `temperature` (only default
           accepted) AND pass `reasoning_effort="minimal"` (#426). Without the
-          latter, reasoning consumes the entire `max_completion_tokens` budget
-          and the visible JSON output is empty, breaking the JSON-mode pipeline
-          silently (LLM call succeeds, but `response.edges` is missing).
-          `minimal` matches OpenAI's recommended setting for deterministic
-          extraction/classification tasks.
+          latter, reasoning tokens consume the entire `max_completion_tokens`
+          budget and `response.choices[0].message.content` comes back empty
+          (or `"{}"`). The downstream JSON-mode pipeline then parses an empty
+          dict, the parser sees no `edges` key, and edge_discovery silently
+          classifies nothing. `minimal` matches OpenAI's recommended setting
+          for deterministic extraction/classification tasks.
         """
         kwargs: dict = {
             "model": model,
