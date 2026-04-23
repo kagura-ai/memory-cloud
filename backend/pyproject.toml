@@ -31,7 +31,7 @@ dependencies = [
     "numpy>=1.24.0",           # Cosine similarity in neural memory (neural/utils.py)
 
     # LLM APIs (DB管理されたKeysを使用)
-    "openai>=1.54.0",       # Embedding
+    "openai>=1.99.2",       # Embedding + Sleep LLM (reasoning_effort kwarg requires 1.99.2+, #426)
     "cohere>=5.11.0",       # Reranking (optional)
     "voyageai>=0.3.0",      # Reranking (Issue #105: Voyage AI alternative)
 
