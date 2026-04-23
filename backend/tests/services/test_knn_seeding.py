@@ -99,6 +99,7 @@ class TestKnnSeeding:
                 memory=memory,
                 vector=[0.1] * 1536,
                 collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
             )
 
         mock_search.assert_not_called()
@@ -130,6 +131,7 @@ class TestKnnSeeding:
                 memory=memory,
                 vector=[0.1] * 1536,
                 collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
             )
 
         mock_repo.create_edge_if_absent.assert_not_called()
@@ -168,6 +170,7 @@ class TestKnnSeeding:
                 memory=memory,
                 vector=[0.1] * 1536,
                 collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
             )
 
         # 2 edges created (self excluded)
@@ -209,6 +212,7 @@ class TestKnnSeeding:
                 memory=memory,
                 vector=[0.1] * 1536,
                 collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
             )
 
         # Only 2 edges (0.9 and 0.7 pass the 0.6 threshold)
@@ -246,6 +250,7 @@ class TestKnnSeeding:
                 memory=memory,
                 vector=[0.1] * 1536,
                 collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
             )
 
         # Capped at k=3
@@ -282,6 +287,7 @@ class TestKnnSeeding:
                 memory=memory,
                 vector=[0.1] * 1536,
                 collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
             )
 
         mock_repo.create_edge_if_absent.assert_called_once()
@@ -321,6 +327,7 @@ class TestKnnSeeding:
                 memory=memory,
                 vector=[0.1] * 1536,
                 collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
             )
 
         mock_search.assert_called_once()
@@ -357,6 +364,7 @@ class TestKnnSeeding:
                 memory=memory,
                 vector=[0.1] * 1536,
                 collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
             )
 
         # Rollback called as part of best-effort cleanup
@@ -399,6 +407,7 @@ class TestKnnSeeding:
                 memory=memory,
                 vector=[0.1] * 1536,
                 collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
             )
 
         # All 3 attempts made
@@ -425,6 +434,7 @@ class TestKnnSeeding:
                 memory=memory,
                 vector=[0.1] * 1536,
                 collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
             )
 
         mock_search.assert_not_called()
@@ -464,6 +474,7 @@ class TestKnnSeeding:
                 memory=memory,
                 vector=[0.1] * 1536,
                 collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
             )
 
         # All 2 attempted, but none counted as "created" since DO NOTHING fired
@@ -504,6 +515,7 @@ class TestKnnSeeding:
                 memory=memory,
                 vector=[0.1] * 1536,
                 collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
             )
 
         # begin_nested() called once per edge attempt (3 candidates)
@@ -543,6 +555,7 @@ class TestKnnSeeding:
                 memory=memory,
                 vector=[0.1] * 1536,
                 collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
             )
 
         # Idempotency guard: get_outgoing_edges was called, returned existing edges,

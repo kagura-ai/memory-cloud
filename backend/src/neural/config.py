@@ -154,20 +154,33 @@ class NeuralMemoryConfig:
     async_update_delay_ms: int = 2000  # 2 seconds
     max_candidates_k: int = 64
 
-    # k-NN Cold-Start Seeding (Issue #221)
+    # k-NN Cold-Start Seeding (Issue #221, #406 Phase B)
     # On remember(), search for k nearest neighbors and create weak
     # `semantic_similarity` edges so new memories are not born as isolated nodes.
     knn_seed_enabled: bool = True
     knn_seed_k: int = 5  # Neighbors per new memory (1-20)
-    # Cosine threshold. Validated for OpenAI text-embedding-3-small via dogfood
-    # on 2026-04-07 (memory.kagura-ai.com): strongly related memories typically
-    # cluster around 0.40-0.50 cosine, so 0.4 is the right floor for that model.
-    # Other embedding models (Ollama qwen3, etc.) have different distributions
-    # and may need a different threshold — see #236 for per-model defaults.
-    # Sleep Edge Discovery uses 0.6 because it has LLM judgment downstream as a
-    # quality filter; kNN seeding has no such filter, so use a lower threshold
-    # and let Sleep Maintenance prune low-quality edges later.
-    knn_seed_min_similarity: float = 0.4
+    # Cosine threshold override. None (default) → use `embedding_calibrations`
+    # percentile path; non-None → raw operator override (D6). Prior to #406,
+    # this was hardcoded 0.4, which is over-permissive for text-embedding-3-
+    # small (production p90 = 0.6322 per Phase A acceptance) and wrong-
+    # dimension for other models (qwen3-8b top-k p90 = 0.5816 per #407 Task 1).
+    # See #240 D1 for why the calibration path uses top-k neighbor distribution
+    # rather than random-pair baseline.
+    knn_seed_min_similarity: float | None = None
+    # Percentile of the top-k neighbor distribution that serves as the default
+    # runtime threshold when `knn_seed_min_similarity` is None (#240 D2, D4).
+    # 90.0 = top decile = reject bottom 90% as "not a high-quality seeding
+    # candidate". Validated across text-embedding-3-small (512d) and qwen3-
+    # embedding:8b (4096d) in Phase A and #407 Task 1 respectively.
+    knn_seed_min_percentile: float = 90.0
+    # Hard lower bound for the calibration-derived threshold (#240 D2). Protects
+    # sparse/anomalous corpora where p90 < 0.3 would mean "accept everything".
+    # Applied as `max(percentile(p90), floor)` in `resolve_knn_threshold`.
+    knn_seed_min_similarity_floor: float = 0.3
+    # TTL for embedding_calibrations rows (#240 D7, gate1 review). Kept in code
+    # config rather than hardcoded in migration so #407 Task 2's drift signal
+    # can tune it via env var without a schema change.
+    calibration_ttl_days: int = 30
     knn_seed_weight: float = (
         0.3  # Intentionally low — synthetic signal, Sleep Maintenance prunes if unused
     )
@@ -281,12 +294,28 @@ class NeuralMemoryConfig:
         if not self.max_candidates_k > 0:
             raise ValueError(f"max_candidates_k must be positive, got {self.max_candidates_k}")
 
-        # k-NN Cold-Start Seeding validation (Issue #221)
+        # k-NN Cold-Start Seeding validation (Issue #221, #406)
         if not (1 <= self.knn_seed_k <= 20):
             raise ValueError(f"knn_seed_k must be in [1, 20], got {self.knn_seed_k}")
-        if not (0.0 <= self.knn_seed_min_similarity <= 1.0):
+        if self.knn_seed_min_similarity is not None and not (
+            0.0 <= self.knn_seed_min_similarity <= 1.0
+        ):
             raise ValueError(
-                f"knn_seed_min_similarity must be in [0, 1], got {self.knn_seed_min_similarity}"
+                f"knn_seed_min_similarity must be in [0, 1] or None, "
+                f"got {self.knn_seed_min_similarity}"
+            )
+        if not (0.0 < self.knn_seed_min_percentile < 100.0):
+            raise ValueError(
+                f"knn_seed_min_percentile must be in (0, 100), got {self.knn_seed_min_percentile}"
+            )
+        if not (0.0 <= self.knn_seed_min_similarity_floor <= 1.0):
+            raise ValueError(
+                f"knn_seed_min_similarity_floor must be in [0, 1], "
+                f"got {self.knn_seed_min_similarity_floor}"
+            )
+        if not self.calibration_ttl_days > 0:
+            raise ValueError(
+                f"calibration_ttl_days must be positive, got {self.calibration_ttl_days}"
             )
         if not (0.0 <= self.knn_seed_weight <= 1.0):
             raise ValueError(f"knn_seed_weight must be in [0, 1], got {self.knn_seed_weight}")
@@ -368,6 +397,22 @@ class NeuralMemoryConfig:
         def get_float(key: str, default: float) -> float:
             return float(os.getenv(key, str(default)))
 
+        def get_float_or_none(key: str) -> float | None:
+            """Parse a float-or-None env var.
+
+            Unset env var → ``None`` (use default which may itself be None).
+            Empty / "none" / "null" / "auto" (case-insensitive) → ``None``
+            explicitly. Any other string parses as float. Used for config
+            fields where ``None`` means "delegate to calibration path".
+            """
+            raw = os.getenv(key)
+            if raw is None:
+                return None
+            stripped = raw.strip().lower()
+            if stripped in ("", "none", "null", "auto"):
+                return None
+            return float(raw)
+
         def get_int(key: str, default: int) -> int:
             return int(os.getenv(key, str(default)))
 
@@ -417,10 +462,13 @@ class NeuralMemoryConfig:
             batch_update_size=get_int("BATCH_UPDATE_SIZE", 100),
             async_update_delay_ms=get_int("ASYNC_UPDATE_DELAY_MS", 2000),
             max_candidates_k=get_int("MAX_CANDIDATES_K", 64),
-            # k-NN Cold-Start Seeding (Issue #221)
+            # k-NN Cold-Start Seeding (Issue #221, #406)
             knn_seed_enabled=get_bool("KNN_SEED_ENABLED", True),
             knn_seed_k=get_int("KNN_SEED_K", 5),
-            knn_seed_min_similarity=get_float("KNN_SEED_MIN_SIMILARITY", 0.4),
+            knn_seed_min_similarity=get_float_or_none("KNN_SEED_MIN_SIMILARITY"),
+            knn_seed_min_percentile=get_float("KNN_SEED_MIN_PERCENTILE", 90.0),
+            knn_seed_min_similarity_floor=get_float("KNN_SEED_MIN_SIMILARITY_FLOOR", 0.3),
+            calibration_ttl_days=get_int("CALIBRATION_TTL_DAYS", 30),
             knn_seed_weight=get_float("KNN_SEED_WEIGHT", 0.3),
             # Tag Co-Occurrence Cold-Start Seeding (Issue #223)
             tag_cooccurrence_enabled=get_bool("TAG_COOCCURRENCE_ENABLED", True),
@@ -536,11 +584,24 @@ class NeuralMemoryConfig:
                 "async_update_delay_ms", base_config.async_update_delay_ms
             ),
             max_candidates_k=configs.get("max_candidates_k", base_config.max_candidates_k),
-            # k-NN Cold-Start Seeding (Issue #221) — DB-overridable
+            # k-NN Cold-Start Seeding (Issue #221, #406) — DB-overridable
             knn_seed_enabled=configs.get("knn_seed_enabled", base_config.knn_seed_enabled),
             knn_seed_k=configs.get("knn_seed_k", base_config.knn_seed_k),
+            # A DB row for knn_seed_min_similarity is an operator override that
+            # wins over calibration (D6). Post-#406 migration deletes rows with
+            # value=0.4, so only genuinely-tuned values survive here; absent
+            # row → base_config default (None) → calibration path.
             knn_seed_min_similarity=configs.get(
                 "knn_seed_min_similarity", base_config.knn_seed_min_similarity
+            ),
+            knn_seed_min_percentile=configs.get(
+                "knn_seed_min_percentile", base_config.knn_seed_min_percentile
+            ),
+            knn_seed_min_similarity_floor=configs.get(
+                "knn_seed_min_similarity_floor", base_config.knn_seed_min_similarity_floor
+            ),
+            calibration_ttl_days=configs.get(
+                "calibration_ttl_days", base_config.calibration_ttl_days
             ),
             knn_seed_weight=configs.get("knn_seed_weight", base_config.knn_seed_weight),
             # Tag Co-Occurrence Cold-Start Seeding (Issue #223) — DB-overridable
