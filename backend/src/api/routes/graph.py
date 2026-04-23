@@ -62,12 +62,21 @@ class GraphNode(BaseModel):
 
 
 class GraphEdge(BaseModel):
-    """Graph edge for visualization."""
+    """Graph edge for visualization.
+
+    `created_at` and `confidence` are surfaced for downstream UI consumers
+    (#430 — graph edge metadata overlay, future #435). They were already
+    on the underlying `NeuralMemoryEdge` row but previously stripped at
+    this response model. Both stay optional so existing API clients that
+    don't read the new fields continue to deserialize unchanged.
+    """
 
     source: str
     target: str
     weight: float
     type: str
+    created_at: str | None = None
+    confidence: float | None = None
 
 
 class GraphDataResponse(BaseModel):
@@ -356,6 +365,8 @@ async def get_graph_data(
                         target=target_str,
                         weight=edge.weight,
                         type=edge.edge_type,
+                        created_at=edge.created_at.isoformat() if edge.created_at else None,
+                        confidence=edge.confidence,
                     )
                 )
 
