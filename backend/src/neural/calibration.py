@@ -121,9 +121,13 @@ async def _enqueue_lazy_recalibration(
     the next scheduled recalibration will catch up.
     """
     try:
-        # Imported lazily (a) to avoid a circular dependency between
-        # ``neural`` and ``tasks`` packages and (b) so ``resolve_knn_threshold``
-        # remains unit-testable without the full tasks/Redis machinery.
+        # Deferred import so ``resolve_knn_threshold`` remains unit-testable
+        # without the full tasks / Redis machinery pulled in transitively
+        # (e.g. ``tests/neural/test_calibration.py`` can exercise this
+        # module against a stubbed AsyncSession). The dependency graph is
+        # acyclic — ``tasks.neural_calibration`` imports from
+        # ``neural.config`` but not from this module — so the lazy import
+        # is about test ergonomics, not breaking a cycle.
         from tasks.neural_calibration import enqueue_recalibration_dedup  # noqa: PLC0415
     except ImportError:
         logger.debug(
