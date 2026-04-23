@@ -1687,6 +1687,29 @@ async def _create_knn_seed_edges(
                 model=model_name,
                 dimensions=len(vector),
             )
+            # Bootstrap trigger (#406 C2 trigger 1): if this (model, dims)
+            # has crossed D3, enqueue a deduped calibration job so
+            # subsequent remember() calls find a populated row and exit
+            # step 3. Dedup (Redis SET NX, 1h TTL) ensures at most one
+            # enqueue per hour regardless of concurrent ingestion.
+            try:
+                from tasks.neural_calibration import maybe_trigger_bootstrap
+
+                await maybe_trigger_bootstrap(
+                    db=db,
+                    model_name=model_name,
+                    dimensions=len(vector),
+                )
+            except Exception as exc:
+                # Bootstrap is best-effort. A failure here must not block
+                # memory creation — log and move on; the next remember()
+                # will retry the trigger.
+                logger.warning(
+                    "knn_seed_bootstrap_trigger_failed",
+                    memory_id=str(memory.id),
+                    model=model_name,
+                    error=str(exc),
+                )
             return
 
         workspace_id_str = str(memory.workspace_id)

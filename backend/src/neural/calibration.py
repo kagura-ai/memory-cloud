@@ -123,11 +123,8 @@ async def _enqueue_lazy_recalibration(
     try:
         # Imported lazily (a) to avoid a circular dependency between
         # ``neural`` and ``tasks`` packages and (b) so ``resolve_knn_threshold``
-        # remains unit-testable without the full tasks/Redis machinery. The
-        # type: ignore guards against pyright warning while chunk B's
-        # ``tasks/neural_calibration.py`` is not yet on disk — remove once
-        # that file lands.
-        from tasks.neural_calibration import enqueue_recalibration_dedup  # type: ignore[import-not-found] # noqa: PLC0415
+        # remains unit-testable without the full tasks/Redis machinery.
+        from tasks.neural_calibration import enqueue_recalibration_dedup  # noqa: PLC0415
     except ImportError:
         logger.debug(
             "knn_seed_lazy_ttl_enqueue_unavailable",
