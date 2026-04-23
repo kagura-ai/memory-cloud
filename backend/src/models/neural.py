@@ -263,8 +263,15 @@ class EmbeddingCalibration(Base):
         """
         current = now if now is not None else datetime.now(UTC)
         valid_until = self.valid_until
-        # SQLAlchemy returns naive datetimes for some adapters; coerce to UTC
-        # to make comparison deterministic.
+        # Treat naive datetimes as UTC on both sides. SQLAlchemy returns
+        # naive datetimes for some adapters, and callers in this repo
+        # frequently go through ``utils.datetime.utcnow()`` which is naive
+        # by project convention. Comparing a naive datetime to a timezone-
+        # aware one raises TypeError; normalize both so this helper is
+        # robust regardless of which side is naive.
+        # (Copilot review PR #420 loop 8.)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=UTC)
         if valid_until.tzinfo is None:
             valid_until = valid_until.replace(tzinfo=UTC)
         return current >= valid_until

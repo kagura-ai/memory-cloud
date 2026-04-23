@@ -511,9 +511,14 @@ async def maybe_trigger_bootstrap(
 
     Called from ``_create_knn_seed_edges`` when
     ``resolve_knn_threshold`` returns ``None`` (step 3 of D4 — no
-    calibration row yet). Counts memories across contexts that use this
-    ``(model, dimensions)``; if the count is at or above
-    :data:`BOOTSTRAP_MIN_MEMORIES`, kicks off a deduped job.
+    calibration row yet). Uses the **largest single context** for this
+    ``(model, dimensions)`` pair (via ``_pick_largest_context_for_model``)
+    and enqueues only when that context's memory count is at or above
+    :data:`BOOTSTRAP_MIN_MEMORIES`. The same helper is used by
+    ``compute_calibration`` to pick the sampling source, so the pre-check
+    here and the actual D3 check there operate on the same count — no
+    hourly wasted work when the global cross-context total reaches 200
+    but no single context does (Copilot review PR #420 loop 7).
 
     This is the only path that runs per remember() call, so two layers
     limit redundant work under heavy concurrent ingestion:

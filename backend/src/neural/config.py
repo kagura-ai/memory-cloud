@@ -397,17 +397,23 @@ class NeuralMemoryConfig:
         def get_float(key: str, default: float) -> float:
             return float(os.getenv(key, str(default)))
 
-        def get_float_or_none(key: str) -> float | None:
+        def get_float_or_none(key: str, default: float | None = None) -> float | None:
             """Parse a float-or-None env var.
 
-            Unset env var → ``None`` (use default which may itself be None).
-            Empty / "none" / "null" / "auto" (case-insensitive) → ``None``
-            explicitly. Any other string parses as float. Used for config
-            fields where ``None`` means "delegate to calibration path".
+            - Unset env var → ``default`` (``None`` unless caller overrides).
+            - Empty / ``"none"`` / ``"null"`` / ``"auto"`` (case-insensitive)
+              → ``None`` explicitly.
+            - Any other string → parsed as float.
+
+            Used for config fields where ``None`` means "delegate to calibration
+            path" (Issue #406). The ``default`` parameter lets callers pick
+            their own "unset" sentinel — the knn_seed_min_similarity call site
+            passes ``None`` so that unset means "use calibration", but future
+            optional-float fields can override. (Copilot review PR #420 loop 8.)
             """
             raw = os.getenv(key)
             if raw is None:
-                return None
+                return default
             stripped = raw.strip().lower()
             if stripped in ("", "none", "null", "auto"):
                 return None
