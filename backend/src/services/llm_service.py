@@ -92,11 +92,7 @@ class LLMService:
         client = await self._get_client(user_id, resolved_provider, context_id, workspace_id)
         try:
             response = await client.chat.completions.create(
-                model=resolved_model,
-                messages=messages,
-                temperature=temperature,
-                max_completion_tokens=max_tokens,
-                response_format={"type": "json_object"},
+                **self._build_create_kwargs(resolved_model, messages, temperature, max_tokens),
             )
             content = response.choices[0].message.content or "{}"
             tokens_used = response.usage.total_tokens if response.usage else 0
@@ -122,14 +118,10 @@ class LLMService:
                 f"LLM API call failed ({resolved_provider}/{resolved_model}): {e}"
             ) from e
 
-        # Retry with higher temperature
+        # Retry with higher temperature (no-op on reasoning models that only accept default)
         try:
             response = await client.chat.completions.create(
-                model=resolved_model,
-                messages=messages,
-                temperature=0.3,
-                max_completion_tokens=max_tokens,
-                response_format={"type": "json_object"},
+                **self._build_create_kwargs(resolved_model, messages, 0.3, max_tokens),
             )
             content = response.choices[0].message.content or "{}"
             retry_tokens = response.usage.total_tokens if response.usage else 0
@@ -150,6 +142,39 @@ class LLMService:
             raise LLMServiceError(
                 f"LLM API call failed on retry ({resolved_provider}/{resolved_model}): {e}"
             ) from e
+
+    @staticmethod
+    def _supports_custom_temperature(model: str) -> bool:
+        """OpenAI gpt-5 / o-series reasoning models reject any temperature value other than 1.
+
+        Returns False for those models so the caller omits the kwarg and lets the
+        SDK use the model's fixed default. Returns True for GPT-4o / GPT-3.5 / etc.
+        """
+        model_lower = model.lower()
+        return not any(p in model_lower for p in ("gpt-5", "o1", "o3", "o4"))
+
+    @classmethod
+    def _build_create_kwargs(
+        cls,
+        model: str,
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int,
+    ) -> dict:
+        """Build kwargs for AsyncOpenAI.chat.completions.create.
+
+        Branches on the model name to omit `temperature` for reasoning models
+        (gpt-5 / o-series) which only accept the default value.
+        """
+        kwargs: dict = {
+            "model": model,
+            "messages": messages,
+            "max_completion_tokens": max_tokens,
+            "response_format": {"type": "json_object"},
+        }
+        if cls._supports_custom_temperature(model):
+            kwargs["temperature"] = temperature
+        return kwargs
 
     async def _get_client(
         self,
