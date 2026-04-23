@@ -54,6 +54,13 @@ logger = get_logger(__name__)
 # lives long enough to absorb retry storms while the compute is in-flight.
 _DEDUP_LOCK_TTL_SEC = 3600
 
+# Strong references to in-flight calibration tasks. ``asyncio.create_task``
+# returns a task that the event loop only holds a weak reference to, so
+# without keeping a strong ref the task can be garbage-collected mid-flight
+# and the compute silently vanishes (see Python asyncio docs). We drop the
+# reference via ``add_done_callback`` once the task finishes.
+_IN_FLIGHT_TASKS: set[asyncio.Task] = set()
+
 # D3 gate thresholds — also defined in the Phase A script but duplicated
 # here so the task module doesn't import from the ``scripts/`` tree at
 # runtime (only ``scripts/measure_embedding_threshold.py`` imports are
@@ -116,7 +123,9 @@ async def enqueue_recalibration_dedup(
         logger.debug("calibration_dedup_skipped", key=key)
         return False
 
-    asyncio.create_task(_run_calibration(model_name, dimensions, context_id, dedup_key=key))
+    task = asyncio.create_task(_run_calibration(model_name, dimensions, context_id, dedup_key=key))
+    _IN_FLIGHT_TASKS.add(task)
+    task.add_done_callback(_IN_FLIGHT_TASKS.discard)
     return True
 
 
