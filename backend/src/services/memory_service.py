@@ -1627,6 +1627,7 @@ async def _create_knn_seed_edges(
     memory: Memory,
     vector: list[float],
     collection_name: str,
+    model_name: str,
 ) -> None:
     """Create k-NN cold-start seed edges for a newly embedded memory.
 
@@ -1635,6 +1636,14 @@ async def _create_knn_seed_edges(
     `semantic_similarity` edges. This prevents new memories from being born as
     isolated nodes (graph cold-start UX failure).
 
+    Issue #406 (Phase B): the similarity threshold is resolved via
+    ``neural.calibration.resolve_knn_threshold`` which implements the D4
+    fallback chain (operator override → model-global calibration percentile →
+    disabled). When ``resolve_knn_threshold`` returns ``None`` (no
+    calibration row yet), seeding is skipped for this call — the bootstrap
+    trigger in the remember() path will populate the row once the context
+    crosses D3, and subsequent calls will use the calibrated threshold.
+
     Best-effort: any failure is logged and swallowed — must not affect memory
     creation. Edge creation uses an isolated commit so partial failures do not
     roll back unrelated work.
@@ -1642,10 +1651,14 @@ async def _create_knn_seed_edges(
     Args:
         db: AsyncSession (already bound to memory's transaction context)
         memory: The freshly created Memory entity
-        vector: The dense embedding vector that was upserted to Qdrant
+        vector: The dense embedding vector that was upserted to Qdrant.
+            Its length is the embedding dimensionality passed to calibration.
         collection_name: Qdrant collection name (varies by embedding model)
+        model_name: Embedding model name (e.g. ``text-embedding-3-small``).
+            Combined with ``len(vector)`` to key the calibration lookup.
     """
     from db.qdrant import search_memories_qdrant
+    from neural.calibration import resolve_knn_threshold
     from neural.config import NeuralMemoryConfig
     from repositories.neural_edge import NeuralEdgeRepository
 
@@ -1657,6 +1670,46 @@ async def _create_knn_seed_edges(
 
         if not memory.workspace_id or not memory.context_id:
             # Defensive: 3-level isolation requires both
+            return
+
+        # Resolve the threshold via the D4 fallback chain (#406). None means
+        # "disable seeding for this call" — bootstrap will catch up later.
+        threshold = await resolve_knn_threshold(
+            db=db,
+            config=config,
+            model_name=model_name,
+            dimensions=len(vector),
+        )
+        if threshold is None:
+            logger.debug(
+                "knn_seed_skip_no_threshold",
+                memory_id=str(memory.id),
+                model=model_name,
+                dimensions=len(vector),
+            )
+            # Bootstrap trigger (#406 C2 trigger 1): if this (model, dims)
+            # has crossed D3, enqueue a deduped calibration job so
+            # subsequent remember() calls find a populated row and exit
+            # step 3. Dedup (Redis SET NX, 1h TTL) ensures at most one
+            # enqueue per hour regardless of concurrent ingestion.
+            try:
+                from tasks.neural_calibration import maybe_trigger_bootstrap
+
+                await maybe_trigger_bootstrap(
+                    db=db,
+                    model_name=model_name,
+                    dimensions=len(vector),
+                )
+            except Exception as exc:
+                # Bootstrap is best-effort. A failure here must not block
+                # memory creation — log and move on; the next remember()
+                # will retry the trigger.
+                logger.warning(
+                    "knn_seed_bootstrap_trigger_failed",
+                    memory_id=str(memory.id),
+                    model=model_name,
+                    error=str(exc),
+                )
             return
 
         workspace_id_str = str(memory.workspace_id)
@@ -1696,11 +1749,9 @@ async def _create_knn_seed_edges(
             collection_name=collection_name,
         )
 
-        # Filter: exclude self, apply similarity threshold, cap at k
+        # Filter: exclude self, apply resolved (calibrated) similarity threshold, cap at k
         seed_neighbors = [
-            c
-            for c in candidates
-            if str(c["id"]) != memory_id_str and c["score"] >= config.knn_seed_min_similarity
+            c for c in candidates if str(c["id"]) != memory_id_str and c["score"] >= threshold
         ][: config.knn_seed_k]
 
         if not seed_neighbors:
@@ -1708,7 +1759,7 @@ async def _create_knn_seed_edges(
                 "knn_seed_no_neighbors",
                 memory_id=memory_id_str,
                 candidates=len(candidates),
-                threshold=config.knn_seed_min_similarity,
+                threshold=threshold,
             )
             return
 
@@ -2199,6 +2250,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 memory=memory,
                 vector=vector,
                 collection_name=collection,
+                model_name=embed_svc.model,
             )
 
             # ================================================================
