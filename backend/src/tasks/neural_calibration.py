@@ -320,21 +320,33 @@ async def compute_calibration(
 
     sample_context_id = context_id
     if sample_context_id is None:
-        sample_context_id = await _pick_largest_context_for_model(db, model_name, dimensions)
-    if sample_context_id is None:
-        logger.warning(
-            "calibration_no_context_for_model",
-            model=model_name,
-            dimensions=dimensions,
-            hint="No context has any memories with this (model, dimensions) yet.",
-        )
-        return None
+        picked = await _pick_largest_context_for_model(db, model_name, dimensions)
+        if picked is None:
+            logger.warning(
+                "calibration_no_context_for_model",
+                model=model_name,
+                dimensions=dimensions,
+                hint="No context has any memories with this (model, dimensions) yet.",
+            )
+            return None
+        sample_context_id, _ = picked
 
     # Resolve the correct collection for Qdrant lookups.
     from db.qdrant import get_collection_name  # noqa: PLC0415
 
     collection = get_collection_name(model_name, dimensions)
 
+    # NOTE: ``sample_memories`` uses ``ORDER BY random()`` which forces a
+    # full scan + sort on the filtered row set. That's acceptable for the
+    # script's CLI use case (manual, off-peak) but a background path
+    # running hourly / on bootstrap against large contexts (10^5+ memories)
+    # can create a measurable DB spike. A TABLESAMPLE BERNOULLI(p) +
+    # LIMIT N strategy (or tsm_system_rows extension for exact N) would
+    # be cheaper. Deferred as v0.14.0+ follow-up because kagura-dev
+    # production is ~500 memories where ORDER BY random() is negligible
+    # and the D3 gate elsewhere keeps this off small contexts anyway.
+    # Copilot review PR #420 loop 7.
+    # TODO(v0.14.0+): switch to TABLESAMPLE-based sampler for large contexts.
     sampled = await sample_memories(db, sample_context_id, SAMPLE_MEMORIES)
     if not sampled:
         logger.warning(
@@ -426,7 +438,7 @@ async def _pick_largest_context_for_model(
     db: AsyncSession,
     model_name: str,
     dimensions: int,
-) -> UUID | None:
+) -> tuple[UUID, int] | None:
     """Find the context with the most memories for a ``(model, dimensions)``.
 
     Model-global calibration samples from one representative context
@@ -434,10 +446,13 @@ async def _pick_largest_context_for_model(
     for a given embedding model. We pick the largest existing context so
     the sample has the best chance of clearing the D3 gate.
 
-    Returns the chosen ``context_id``, or ``None`` if no context uses
-    this ``(model, dimensions)`` pair yet (no row in
-    ``ContextSearchConfig`` or the default-routed legacy path's context
-    has zero successful memories).
+    Returns ``(context_id, memory_count)`` for the largest context, or
+    ``None`` if no context uses this ``(model, dimensions)`` pair yet.
+    The count is returned alongside the id so callers like
+    ``maybe_trigger_bootstrap`` can pre-check the single-context D3 gate
+    rather than a cross-context global count (the compute path samples
+    from ONE context, so the global is the wrong pre-check — see
+    Copilot review PR #420 loop 7).
     """
     stmt = (
         select(Memory.context_id, func.count(Memory.id).label("n"))
@@ -459,7 +474,7 @@ async def _pick_largest_context_for_model(
     row = (await db.execute(stmt)).first()
     if row is None:
         return None
-    return row[0]
+    return (row[0], int(row[1]))
 
 
 def _model_dims_where(model_name: str, dimensions: int):
@@ -520,20 +535,20 @@ async def maybe_trigger_bootstrap(
     the gate did not fire, the in-process throttle suppressed the count,
     or a Redis dedup skip occurred.
     """
-    # In-process throttle on the COUNT query itself. Responsibility split:
+    # In-process throttle on the pre-check query itself. Responsibility split:
     #
-    #   - **this throttle** (in-process dict) collapses redundant COUNT
-    #     queries from the same worker process into one DB round-trip
-    #     per 5 minutes.
+    #   - **this throttle** (in-process dict) collapses redundant pre-check
+    #     queries from the same worker process into one DB round-trip per
+    #     5 minutes.
     #   - **Redis SETNX dedup** (inside ``enqueue_recalibration_dedup``
     #     one layer deeper) collapses redundant calibration compute jobs
     #     across workers and restarts into one running task per hour.
     #
     # Both layers are needed: the in-process throttle doesn't help a
     # second API worker (separate dict), and the Redis dedup lives below
-    # this call site so it can't avoid the COUNT. 5 min window is short
-    # enough that a near-D3 context still bootstraps within a single
-    # Redis dedup lifetime (1h). (Copilot review PR #420 loop 3-4.)
+    # this call site so it can't avoid the pre-check. 5 min window is
+    # short enough that a near-D3 context still bootstraps within a
+    # single Redis dedup lifetime (1h). (Copilot review PR #420 loop 3-4.)
     throttle_key = (model_name, dimensions)
     now = datetime.now(UTC)
     last = _BOOTSTRAP_LAST_ATTEMPT.get(throttle_key)
@@ -541,29 +556,19 @@ async def maybe_trigger_bootstrap(
         return False
     _BOOTSTRAP_LAST_ATTEMPT[throttle_key] = now
 
-    count_stmt = (
-        select(func.count(Memory.id))
-        .join(
-            ContextSearchConfig,
-            ContextSearchConfig.context_id == Memory.context_id,
-            isouter=True,
-        )
-        .where(
-            Memory.deleted_at.is_(None),
-            Memory.embedding_status == "success",
-            # Exclude NULL-context memories so the count matches the set
-            # ``_pick_largest_context_for_model`` samples from. Without this
-            # filter a large NULL-context backfill (legacy pre-context
-            # migrations or admin-inserted system rows) could prematurely
-            # trip BOOTSTRAP_MIN_MEMORIES without any real context crossing
-            # the D3 gate — the calibration job would then abort at
-            # ``_pick_largest_context_for_model`` with no_context_for_model.
-            Memory.context_id.is_not(None),
-            _model_dims_where(model_name, dimensions),
-        )
-    )
-    count = int((await db.execute(count_stmt)).scalar_one() or 0)
-    if count < BOOTSTRAP_MIN_MEMORIES:
+    # Gate on the LARGEST single context's count, not a cross-context global
+    # sum. ``compute_calibration`` samples from exactly one context (the
+    # largest one), so its D3 gate is a per-context check. If we enqueued
+    # on a global-sum pre-check, a (model, dims) pair spread across many
+    # small contexts (each < 200 memories) would pass the pre-check but
+    # fail D3 inside the task — wasting a Qdrant + DB round-trip per hour.
+    # Using the same helper ``compute_calibration`` uses keeps the pre-
+    # check and the actual D3 gate aligned. (Copilot review PR #420 loop 7.)
+    picked = await _pick_largest_context_for_model(db, model_name, dimensions)
+    if picked is None:
+        return False
+    _, largest_context_count = picked
+    if largest_context_count < BOOTSTRAP_MIN_MEMORIES:
         return False
 
     return await enqueue_recalibration_dedup(model_name, dimensions, context_id=None)
