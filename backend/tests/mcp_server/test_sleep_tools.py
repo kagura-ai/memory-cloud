@@ -231,15 +231,14 @@ class TestGetSleepReport:
 
     @pytest.mark.asyncio
     async def test_get_sleep_report_includes_edge_discovery_metrics(self, user_id, workspace_id):
-        """Issue #306: edge_discovery_result JSON column passes new metric keys
-        through `_report_to_detail` to the MCP response untouched.
+        """Issues #306 / #372: edge_discovery_result JSON column passes new
+        metric keys through `_report_to_detail` to the MCP response untouched.
 
         Verifies that the JSON column contract — sleep_reports.details written
         by `execute()` → SQLAlchemy JSON serialize → `_report_to_detail` read —
-        round-trips the new keys (`llm_accepted`, `llm_rejected`,
-        `llm_call_failures`, `auto_accepted`, `edge_type_dist`,
-        `avg_confidence`, `confidence_histogram`, `llm_model`,
-        `prompt_revision`) without filtering or reshaping.
+        round-trips every documented metric key without filtering or reshaping.
+        Covers the accept-side (#306) keys and the parallel reject-side
+        (#372) `_rejected` suffix keys.
         """
         report_id = uuid4()
         report = self._mock_report(report_id, user_id)
@@ -273,6 +272,19 @@ class TestGetSleepReport:
                     "0.5-0.7": 1,
                     "0.7-0.85": 1,
                     "0.85-1.0": 1,
+                },
+                # #372: reject-side parallel metrics must round-trip identically.
+                "avg_confidence_rejected": 0.42,
+                "median_confidence_rejected": 0.40,
+                "p25_confidence_rejected": 0.35,
+                "p75_confidence_rejected": 0.50,
+                "confidence_n_rejected": 2,
+                "confidence_imputed_rejected": 0,
+                "confidence_histogram_rejected": {
+                    "0.0-0.5": 1,
+                    "0.5-0.7": 1,
+                    "0.7-0.85": 0,
+                    "0.85-1.0": 0,
                 },
                 "llm_model": "gpt-5-nano",
                 "prompt_revision": EDGE_DISCOVERY_PROMPT_REVISION,
@@ -325,6 +337,21 @@ class TestGetSleepReport:
         assert ed["p75_confidence"] == 0.92
         assert ed["confidence_n"] == 3
         assert ed["confidence_imputed"] == 0
+        # #372 reject-side parallel keys — dropping any of these from
+        # `_report_to_detail` would silently hide half of the decision-
+        # boundary signal that #372 was specifically filed to restore.
+        assert ed["avg_confidence_rejected"] == 0.42
+        assert ed["median_confidence_rejected"] == 0.40
+        assert ed["p25_confidence_rejected"] == 0.35
+        assert ed["p75_confidence_rejected"] == 0.50
+        assert ed["confidence_n_rejected"] == 2
+        assert ed["confidence_imputed_rejected"] == 0
+        assert ed["confidence_histogram_rejected"] == {
+            "0.0-0.5": 1,
+            "0.5-0.7": 1,
+            "0.7-0.85": 0,
+            "0.85-1.0": 0,
+        }
 
 
 class TestRollbackSleepRun:

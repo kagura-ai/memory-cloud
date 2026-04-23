@@ -184,6 +184,16 @@ class TestEdgeDiscoveryPhase:
         assert result.details["p75_confidence"] == 0.0
         assert result.details["confidence_n"] == 0
         assert result.details["confidence_imputed"] == 0
+        # #372: rejected-side metric keys also zero-init on early return.
+        assert result.details["avg_confidence_rejected"] == 0.0
+        assert result.details["median_confidence_rejected"] == 0.0
+        assert result.details["p25_confidence_rejected"] == 0.0
+        assert result.details["p75_confidence_rejected"] == 0.0
+        assert result.details["confidence_n_rejected"] == 0
+        assert result.details["confidence_imputed_rejected"] == 0
+        assert result.details["confidence_histogram_rejected"] == dict.fromkeys(
+            CONFIDENCE_HISTOGRAM_KEYS, 0
+        )
 
     @pytest.mark.asyncio
     async def test_no_candidates(self, edge_phase):
@@ -534,6 +544,9 @@ class TestLLMJudgeBatch:
         assert stats.failures == 0
         assert stats.edge_type_counts == {}
         assert stats.confidences == []
+        # #372: rejected-side confidence is retained for decision-boundary analysis.
+        assert stats.rejected_confidences == [0.2, 0.3]
+        assert stats.confidence_imputed_rejected == 0
 
     @pytest.mark.asyncio
     async def test_mixed_accept_reject(self, llm_judge_phase):
@@ -558,6 +571,8 @@ class TestLLMJudgeBatch:
         assert stats.rejected == 1
         assert stats.edge_type_counts == {"learned_from": 1}
         assert stats.confidences == [0.75]
+        # #372: rejected-side confidence captured in parallel.
+        assert stats.rejected_confidences == [0.4]
 
     @pytest.mark.asyncio
     async def test_invalid_edge_type_coerced_to_related_to(self, llm_judge_phase):
@@ -1052,6 +1067,159 @@ class TestConfidenceImputed:
         assert stats.confidences == [0.5, 0.5]
 
 
+class TestRejectedSideConfidence:
+    """Rejected-side confidence retention (#372).
+
+    PR #371 retained accepted-edge confidence only, which produced a
+    structurally censored `P(confidence | accept)` distribution. #372 mirrors
+    the parser logic for rejected edges so both sides of the decision boundary
+    are observable. The counter `confidence_imputed_rejected` is separate from
+    accept-side `confidence_imputed` so operators can detect per-side skew
+    (prompt/model signal independent of bimodality itself).
+    """
+
+    @pytest.mark.asyncio
+    async def test_rejected_confidence_clamped_and_retained(self, llm_judge_phase):
+        """Rejected-edge confidence is clamped to [0.0, 1.0] and retained.
+
+        The parallel accept-side guarantees (clamp + NaN imputation) apply
+        symmetrically; `_make_llm_response` populates `confidence` for every
+        edge per the `EDGE_DISCOVERY_USER` prompt contract (prompts.py:116-118).
+        """
+        config = _make_config()
+        budget = SleepBudget()
+        _, batch, memory_map = _make_batch_pair(n=3)
+        labels = _labels_for(memory_map)
+
+        llm_judge_phase.llm_service.complete_json.return_value = _make_llm_response(
+            [
+                (labels[batch[0][0]], labels[batch[0][1]], False, "related_to", 1.7),  # over
+                (labels[batch[1][0]], labels[batch[1][1]], False, "related_to", -0.2),  # under
+            ]
+        )
+
+        _, stats = await llm_judge_phase._llm_judge_batch(
+            batch, memory_map, "user-1", "ctx-1", "ws-1", budget, config
+        )
+
+        assert stats.rejected == 2
+        assert stats.rejected_confidences == [1.0, 0.0]
+        # No imputation path — both inputs were finite, just out-of-range.
+        assert stats.confidence_imputed_rejected == 0
+        assert stats.confidence_imputed == 0
+
+    @pytest.mark.asyncio
+    async def test_rejected_nan_imputed_to_separate_counter(self, llm_judge_phase):
+        """NaN/Inf in rejected-edge confidence imputes to 0.5 and increments
+        the reject-side counter only — accept-side `confidence_imputed` stays 0.
+
+        This is the per-side observability signal: a non-zero
+        `confidence_imputed_rejected` with zero `confidence_imputed` tells the
+        operator the LLM returns malformed confidence specifically when
+        rejecting, which is distinct information from overall imputation rate.
+        """
+        config = _make_config()
+        budget = SleepBudget()
+        _, batch, memory_map = _make_batch_pair(n=3)
+        labels = _labels_for(memory_map)
+
+        llm_judge_phase.llm_service.complete_json.return_value = _make_llm_response(
+            [
+                (labels[batch[0][0]], labels[batch[0][1]], True, "related_to", 0.9),
+                (labels[batch[1][0]], labels[batch[1][1]], False, "related_to", float("nan")),
+            ]
+        )
+
+        _, stats = await llm_judge_phase._llm_judge_batch(
+            batch, memory_map, "user-1", "ctx-1", "ws-1", budget, config
+        )
+
+        assert stats.accepted == 1
+        assert stats.rejected == 1
+        assert stats.confidences == [0.9]
+        # NaN on the reject side → imputed to 0.5 on reject counter, not accept.
+        assert stats.rejected_confidences == [0.5]
+        assert stats.confidence_imputed_rejected == 1
+        assert stats.confidence_imputed == 0
+
+    @pytest.mark.asyncio
+    async def test_rejected_confidence_skip_filter_regression(self, llm_judge_phase):
+        """#369 regression guard: rejected-side parser must not reach unguarded
+        label indexing. Labels outside `label_to_id` are skipped BEFORE the
+        `related` branch, so they cannot populate `rejected_confidences`.
+
+        Without this ordering, an LLM returning a reject for a hallucinated
+        pair would trip the KeyError that closed #369 on the accept side.
+        """
+        config = _make_config()
+        budget = SleepBudget()
+        _, batch, memory_map = _make_batch_pair(n=2)
+        labels = _labels_for(memory_map)
+
+        llm_judge_phase.llm_service.complete_json.return_value = _make_llm_response(
+            [
+                (labels[batch[0][0]], labels[batch[0][1]], False, "related_to", 0.3),
+                # Out-of-range labels — skipped before the reject branch runs.
+                ("X", "Y", False, "related_to", 0.1),
+            ]
+        )
+
+        _, stats = await llm_judge_phase._llm_judge_batch(
+            batch, memory_map, "user-1", "ctx-1", "ws-1", budget, config
+        )
+
+        assert stats.rejected == 1
+        # The malformed (X, Y) pair was skipped — only the valid reject is retained.
+        assert stats.rejected_confidences == [0.3]
+
+    @pytest.mark.asyncio
+    async def test_execute_aggregates_rejected_histogram_and_summary(self, llm_judge_phase):
+        """End-to-end: full `execute()` path emits rejected-side histogram,
+        summary quartiles, and per-side imputation counter in `result.details`.
+        """
+        config = _make_config(sample_size=4)
+        budget = SleepBudget()
+
+        mems = [_make_memory() for _ in range(4)]
+        edges = [(mems[i].id, mems[i + 1].id, 0.75) for i in range(3)]
+
+        llm_judge_phase._sample_memories = AsyncMock(return_value=mems)
+        llm_judge_phase._find_candidates = AsyncMock(return_value=edges)
+        llm_judge_phase._filter_existing_edges = AsyncMock(return_value=edges)
+        llm_judge_phase.edge_repo.create_or_update_edge = AsyncMock()
+
+        memory_map = {m.id: m for m in mems}
+        labels = _labels_for(memory_map)
+
+        llm_judge_phase.llm_service.complete_json.return_value = _make_llm_response(
+            [
+                (labels[edges[0][0]], labels[edges[0][1]], True, "related_to", 0.9),
+                (labels[edges[1][0]], labels[edges[1][1]], False, "related_to", 0.3),
+                (labels[edges[2][0]], labels[edges[2][1]], False, "related_to", 0.6),
+            ]
+        )
+
+        result = await llm_judge_phase.execute(config, "user-1", "ws-1", "ctx-1", budget)
+
+        # Accept side unchanged
+        assert result.details["llm_accepted"] == 1
+        assert result.details["llm_rejected"] == 2
+        assert result.details["confidence_histogram"]["0.85-1.0"] == 1
+
+        # Reject side — 0.3 → [0.0, 0.5) bucket, 0.6 → [0.5, 0.7) bucket.
+        rejected_hist = result.details["confidence_histogram_rejected"]
+        assert rejected_hist["0.0-0.5"] == 1
+        assert rejected_hist["0.5-0.7"] == 1
+        assert rejected_hist["0.7-0.85"] == 0
+        assert rejected_hist["0.85-1.0"] == 0
+
+        # Reject side summary: n=2 with [0.3, 0.6], avg 0.45, median 0.45.
+        assert result.details["confidence_n_rejected"] == 2
+        assert result.details["avg_confidence_rejected"] == pytest.approx(0.45)
+        assert result.details["median_confidence_rejected"] == pytest.approx(0.45)
+        assert result.details["confidence_imputed_rejected"] == 0
+
+
 class TestMetricsAliasing:
     """Defensive copy in _metrics_from_agg prevents result.details from
     aliasing the live BatchStats / histogram (#306 PhD-review fix).
@@ -1098,8 +1266,8 @@ class TestMetricsAliasing:
         assert s1.p75 == 0.7
 
     def test_metrics_from_agg_returns_independent_dicts(self):
-        """Direct test: _metrics_from_agg copies edge_type_counts and the
-        histogram so callers can mutate freely."""
+        """Direct test: _metrics_from_agg copies edge_type_counts and both
+        confidence histograms (accept + rejected) so callers can mutate freely."""
         from services.sleep.edge_discovery import (
             _build_confidence_histogram,
             _metrics_from_agg,
@@ -1108,22 +1276,28 @@ class TestMetricsAliasing:
 
         agg = BatchStats(
             accepted=2,
+            rejected=1,
             edge_type_counts={"related_to": 1, "depends_on": 1},
             confidences=[0.6, 0.9],
+            rejected_confidences=[0.3],
         )
         hist = _build_confidence_histogram(agg.confidences)
         summary = _summarize_confidences(agg.confidences)
+        rejected_hist = _build_confidence_histogram(agg.rejected_confidences)
+        rejected_summary = _summarize_confidences(agg.rejected_confidences)
         config = _make_config()
 
-        emitted = _metrics_from_agg(agg, 0, summary, hist, config)
+        emitted = _metrics_from_agg(agg, 0, summary, hist, rejected_summary, rejected_hist, config)
 
-        # Mutate the emitted dict's mutable fields.
+        # Mutate the emitted dict's mutable fields (all three).
         emitted["edge_type_dist"]["NEW_KEY"] = 42
         emitted["confidence_histogram"]["0.0-0.5"] = 999
+        emitted["confidence_histogram_rejected"]["0.0-0.5"] = 888
 
-        # Source data MUST be unchanged (defensive copy worked).
+        # Source data MUST be unchanged (defensive copy worked on all three).
         assert "NEW_KEY" not in agg.edge_type_counts
         assert hist["0.0-0.5"] == 0
+        assert rejected_hist["0.0-0.5"] == 1  # 0.3 sits in first bucket, untouched
 
 
 class TestConfidenceHistogram:
