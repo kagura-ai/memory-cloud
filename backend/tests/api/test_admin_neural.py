@@ -39,8 +39,15 @@ def admin_client():
 
 @pytest.fixture
 def unauth_client():
-    """TestClient without any auth overrides — exercises the 401 path."""
-    # Do not override require_admin; the dependency's real 401 behavior fires.
+    """TestClient without any auth overrides — exercises the 401 path.
+
+    Explicitly clears ``app.dependency_overrides`` before yielding so a
+    prior test's leaked override (e.g., a prior admin fixture that
+    errored before its teardown ran) cannot suppress the real auth
+    dependency and mask a 401/403 regression. Copilot review PR #420
+    loop 4 flagged the order-dependency.
+    """
+    app.dependency_overrides.clear()
     yield TestClient(app, raise_server_exceptions=False)
     app.dependency_overrides.clear()
 

@@ -14,8 +14,9 @@ All three paths funnel through :func:`enqueue_recalibration_dedup` so
 concurrent requests produce at most one running task per ``(model_name,
 dimensions, context_id)`` combination. The dedup key is a Redis
 ``SETNX`` with a 1-hour TTL — the compute itself typically completes in
-seconds (200 memories × 50 top-k = 10k Qdrant queries), and the 1-hour
-window just absorbs retry storms while a task is in-flight.
+seconds (200 Qdrant top-k searches, each returning up to 50 neighbors;
+total observations ≤ 10k), and the 1-hour window just absorbs retry
+storms while a task is in-flight.
 
 The actual compute reuses the helpers from
 ``scripts/measure_embedding_threshold.py``. For model-global
@@ -39,6 +40,7 @@ from types import ModuleType
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.base import get_db
@@ -61,14 +63,20 @@ _DEDUP_LOCK_TTL_SEC = 3600
 def _load_measure_script() -> ModuleType:
     """Load ``scripts/measure_embedding_threshold.py`` as a module.
 
-    Uses ``importlib.util.spec_from_file_location`` with an explicit path so
-    ``sys.path`` stays unmodified — avoids the module-shadowing + import-
-    order hazards of ``sys.path.insert`` in a long-running API worker.
+    Uses ``importlib.util.spec_from_file_location`` with an explicit path
+    rather than a ``sys.path`` insert. The script itself also calls
+    ``sys.path.insert(0, "src")`` at import time (it's written as a
+    standalone CLI), so we snapshot/restore ``sys.path`` around
+    ``exec_module`` to ensure the long-running API worker's import path
+    ends exactly as it started.
+
     ``functools.cache`` memoizes the no-argument call so subsequent
     ``compute_calibration`` invocations reuse the already-loaded module
     without re-executing its top-level imports (numpy, sqlalchemy,
     qdrant-client etc.).
     """
+    import sys  # noqa: PLC0415 — local to the snapshot/restore window
+
     backend_root = Path(__file__).resolve().parent.parent.parent
     script_file = backend_root / "scripts" / "measure_embedding_threshold.py"
     spec = importlib.util.spec_from_file_location(
@@ -79,7 +87,14 @@ def _load_measure_script() -> ModuleType:
             f"unable to build import spec for {script_file} — calibration cannot run"
         )
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    original_sys_path = list(sys.path)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        # Restore even if the script mutated sys.path during import. Copy
+        # the list so later mutations by anyone else don't affect the
+        # snapshot we saved.
+        sys.path[:] = original_sys_path
     return module
 
 
@@ -185,6 +200,22 @@ async def _run_calibration(
         async for db in get_db():
             await compute_calibration(db, model_name, dimensions, context_id)
             break
+    except IntegrityError as exc:
+        # Partial-unique-index collision. The Redis fail-open path and a
+        # brief Redis outage can allow two workers to run ``compute_
+        # calibration`` concurrently — both DELETE + INSERT race, and one
+        # loses on the partial unique index. The other worker's row is
+        # already correct, so log at info level and move on rather than
+        # as a scary "calibration_task_failed" error. (Copilot review
+        # PR #420 loop 4.)
+        logger.info(
+            "calibration_concurrent_upsert_race",
+            model=model_name,
+            dimensions=dimensions,
+            context_id=str(context_id) if context_id else None,
+            error=str(exc),
+            hint="another worker won the upsert; the row is already correct",
+        )
     except Exception as exc:
         logger.error(
             "calibration_task_failed",
@@ -432,15 +463,20 @@ async def maybe_trigger_bootstrap(
     the gate did not fire, the in-process throttle suppressed the count,
     or a Redis dedup skip occurred.
     """
-    # In-process throttle: skip the COUNT entirely when the same
-    # (model, dimensions) was attempted within the throttle window. On a
-    # freshly-migrated deployment every ``remember()`` hits step 3 → this
-    # function is called unconditionally; without the throttle we would
-    # run a full-table COUNT on every call even though the Redis dedup
-    # lock already prevents duplicate compute jobs. 5 min window is short
+    # In-process throttle on the COUNT query itself. Responsibility split:
+    #
+    #   - **this throttle** (in-process dict) collapses redundant COUNT
+    #     queries from the same worker process into one DB round-trip
+    #     per 5 minutes.
+    #   - **Redis SETNX dedup** (inside ``enqueue_recalibration_dedup``
+    #     one layer deeper) collapses redundant calibration compute jobs
+    #     across workers and restarts into one running task per hour.
+    #
+    # Both layers are needed: the in-process throttle doesn't help a
+    # second API worker (separate dict), and the Redis dedup lives below
+    # this call site so it can't avoid the COUNT. 5 min window is short
     # enough that a near-D3 context still bootstraps within a single
-    # dedup lock lifetime (1h) but collapses bursts into one count.
-    # (Copilot review PR #420 loop 3.)
+    # Redis dedup lifetime (1h). (Copilot review PR #420 loop 3-4.)
     throttle_key = (model_name, dimensions)
     now = datetime.now(UTC)
     last = _BOOTSTRAP_LAST_ATTEMPT.get(throttle_key)
