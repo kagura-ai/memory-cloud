@@ -163,8 +163,16 @@ class LLMService:
     ) -> dict:
         """Build kwargs for AsyncOpenAI.chat.completions.create.
 
-        Branches on the model name to omit `temperature` for reasoning models
-        (gpt-5 / o-series) which only accept the default value.
+        Branches on the model name:
+        - GPT-4o / GPT-3.5 / non-OpenAI: pass `temperature` as given.
+        - GPT-5 / o-series reasoning models: omit `temperature` (only default
+          accepted) AND pass `reasoning_effort="minimal"` (#426). Without the
+          latter, reasoning tokens consume the entire `max_completion_tokens`
+          budget and `response.choices[0].message.content` comes back empty
+          (or `"{}"`). The downstream JSON-mode pipeline then parses an empty
+          dict, the parser sees no `edges` key, and edge_discovery silently
+          classifies nothing. `minimal` matches OpenAI's recommended setting
+          for deterministic extraction/classification tasks.
         """
         kwargs: dict = {
             "model": model,
@@ -174,6 +182,8 @@ class LLMService:
         }
         if cls._supports_custom_temperature(model):
             kwargs["temperature"] = temperature
+        else:
+            kwargs["reasoning_effort"] = "minimal"
         return kwargs
 
     async def _get_client(
