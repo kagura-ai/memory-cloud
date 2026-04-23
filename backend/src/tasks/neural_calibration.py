@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 from datetime import UTC, datetime, timedelta
+from functools import cache
 from pathlib import Path
 from types import ModuleType
 from uuid import UUID
@@ -55,25 +56,19 @@ logger = get_logger(__name__)
 # lives long enough to absorb retry storms while the compute is in-flight.
 _DEDUP_LOCK_TTL_SEC = 3600
 
-# Cache the imported script module so the importlib-load path runs once.
-# After first call the real importlib ``exec_module`` runs; subsequent calls
-# return this cached reference without touching the filesystem.
-_MEASURE_SCRIPT_MODULE: ModuleType | None = None
 
-
+@cache
 def _load_measure_script() -> ModuleType:
     """Load ``scripts/measure_embedding_threshold.py`` as a module.
 
     Uses ``importlib.util.spec_from_file_location`` with an explicit path so
     ``sys.path`` stays unmodified — avoids the module-shadowing + import-
     order hazards of ``sys.path.insert`` in a long-running API worker.
-    Cached after first call so subsequent ``compute_calibration`` invocations
-    don't re-execute the module's top-level imports (numpy, sqlalchemy,
+    ``functools.cache`` memoizes the no-argument call so subsequent
+    ``compute_calibration`` invocations reuse the already-loaded module
+    without re-executing its top-level imports (numpy, sqlalchemy,
     qdrant-client etc.).
     """
-    global _MEASURE_SCRIPT_MODULE  # noqa: PLW0603 — intentional lazy-init cache
-    if _MEASURE_SCRIPT_MODULE is not None:
-        return _MEASURE_SCRIPT_MODULE
     backend_root = Path(__file__).resolve().parent.parent.parent
     script_file = backend_root / "scripts" / "measure_embedding_threshold.py"
     spec = importlib.util.spec_from_file_location(
@@ -85,7 +80,6 @@ def _load_measure_script() -> ModuleType:
         )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    _MEASURE_SCRIPT_MODULE = module
     return module
 
 
@@ -109,6 +103,17 @@ BOOTSTRAP_MIN_OBSERVATIONS = 10_000
 # script produced.
 SAMPLE_MEMORIES = 200
 SAMPLE_TOP_K = 50
+
+# In-process bootstrap-count throttle. ``maybe_trigger_bootstrap`` fires on
+# every ``remember()`` that hits D4 step 3 (pre-calibration phase), and each
+# call runs a full-table ``COUNT(*)``. The Redis dedup lock prevents
+# duplicate compute jobs but not duplicate counts. Cache the last attempt
+# timestamp per (model, dimensions) and skip the count when seen recently.
+# 5 minutes is long enough to absorb a burst of ingestion at a new
+# context's cold start, short enough that a near-D3 context crosses the
+# threshold within one dedup lock lifetime (1h).
+_BOOTSTRAP_COUNT_THROTTLE_SEC = 300
+_BOOTSTRAP_LAST_ATTEMPT: dict[tuple[str, int], datetime] = {}
 
 
 def _dedup_key(model_name: str, dimensions: int, context_id: UUID | None) -> str:
@@ -424,8 +429,25 @@ async def maybe_trigger_bootstrap(
     concurrent ingestion.
 
     Returns ``True`` if a job was enqueued by this call, ``False`` if
-    the gate did not fire or a dedup skip occurred.
+    the gate did not fire, the in-process throttle suppressed the count,
+    or a Redis dedup skip occurred.
     """
+    # In-process throttle: skip the COUNT entirely when the same
+    # (model, dimensions) was attempted within the throttle window. On a
+    # freshly-migrated deployment every ``remember()`` hits step 3 → this
+    # function is called unconditionally; without the throttle we would
+    # run a full-table COUNT on every call even though the Redis dedup
+    # lock already prevents duplicate compute jobs. 5 min window is short
+    # enough that a near-D3 context still bootstraps within a single
+    # dedup lock lifetime (1h) but collapses bursts into one count.
+    # (Copilot review PR #420 loop 3.)
+    throttle_key = (model_name, dimensions)
+    now = datetime.now(UTC)
+    last = _BOOTSTRAP_LAST_ATTEMPT.get(throttle_key)
+    if last is not None and (now - last).total_seconds() < _BOOTSTRAP_COUNT_THROTTLE_SEC:
+        return False
+    _BOOTSTRAP_LAST_ATTEMPT[throttle_key] = now
+
     count_stmt = (
         select(func.count(Memory.id))
         .join(

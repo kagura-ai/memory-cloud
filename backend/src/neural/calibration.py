@@ -25,6 +25,7 @@ every remember() call while we wait for Qdrant to re-measure 10k points.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -87,8 +88,25 @@ async def resolve_knn_threshold(
     if calibration is not None:
         if calibration.is_expired():
             # Lazy TTL trigger — see tasks/neural_calibration.py for dedup.
-            # Serve the stale value while the refresh runs in the background.
-            await _enqueue_lazy_recalibration(model_name, dimensions, context_id=None)
+            # Fire-and-forget so ``remember()`` does NOT wait on the Redis
+            # round-trip (or its timeout) while we serve the stale value.
+            # The background task path ``tasks.neural_calibration`` owns
+            # its own error handling and strong-ref retention; here we
+            # only need to spawn it. (Copilot review PR #420 loop 3.)
+            try:
+                asyncio.create_task(
+                    _enqueue_lazy_recalibration(model_name, dimensions, context_id=None)
+                )
+            except RuntimeError:
+                # ``asyncio.create_task`` raises if no event loop is running
+                # (e.g. the caller is driving via ``asyncio.run`` in a test
+                # teardown). In that narrow case the expired value is still
+                # served; the next scheduled recalibration will catch up.
+                logger.debug(
+                    "knn_seed_lazy_ttl_enqueue_no_loop",
+                    model=model_name,
+                    dimensions=dimensions,
+                )
         percentile_value = calibration.percentile(config.knn_seed_min_percentile)
         return max(percentile_value, config.knn_seed_min_similarity_floor)
 

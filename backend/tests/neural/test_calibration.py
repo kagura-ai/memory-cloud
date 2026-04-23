@@ -146,7 +146,12 @@ class TestResolveKnnThresholdCalibrationPath:
         db = _mock_db(calibration_result=_make_calibration(p90=0.55, expired=True))
         result = await resolve_knn_threshold(db, cfg, "text-embedding-3-small", 512)
         assert result == pytest.approx(0.55)
-        enqueue_stub.assert_awaited_once()
+        # The lazy-TTL enqueue is fire-and-forget via ``asyncio.create_task``
+        # (loop 3 fix so ``remember()`` doesn't block on the Redis round-
+        # trip). The coroutine is CREATED (mock called) but may not have
+        # been AWAITED by the time the test returns — scheduling a task
+        # doesn't yield to the event loop. Assert the call, not the await.
+        enqueue_stub.assert_called_once()
 
 
 class TestResolveKnnThresholdDisabled:
