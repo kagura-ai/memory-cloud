@@ -121,10 +121,15 @@ async def cross_workspace_scenario(async_engine, db_session):
         schema_version=1,
         field_definitions=[{"name": "canary_field", "type": "text"}],
     )
+    # Two-phase insert: Context.workspace_id is a raw UUID FK without an ORM
+    # relationship, so SQLAlchemy's Unit of Work cannot reliably order child
+    # rows after their workspace parent within a single add_all batch. Flush
+    # parents first so PostgreSQL's IMMEDIATE FK check sees the workspace
+    # row when the child INSERT runs (#414).
+    db_session.add_all([ws_a, ws_b])
+    await db_session.flush()
     db_session.add_all(
         [
-            ws_a,
-            ws_b,
             WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role="owner"),
             WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role="owner"),
             resource_b,
@@ -282,10 +287,13 @@ async def cross_workspace_multi_member_scenario(async_engine, db_session):
         field_definitions=[{"name": "canary_field", "type": "text"}],
     )
     # user_a is owner of A AND member of B — the subtle case.
+    # Two-phase insert: flush workspaces before children so the
+    # contexts.workspace_id FK check sees the parent row (see base fixture
+    # comment + #414).
+    db_session.add_all([ws_a, ws_b])
+    await db_session.flush()
     db_session.add_all(
         [
-            ws_a,
-            ws_b,
             WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role="owner"),
             WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role="owner"),
             WorkspaceMember(workspace_id=ws_b.id, user_id=owner_a_id, role="member"),
@@ -488,10 +496,13 @@ async def cross_workspace_list_scenario(async_engine, db_session):
         created_by=owner_b_id,
     )
 
+    # Two-phase insert: flush workspaces before children so the
+    # contexts.workspace_id FK check sees the parent row (see base fixture
+    # comment + #414).
+    db_session.add_all([ws_a, ws_b])
+    await db_session.flush()
     db_session.add_all(
         [
-            ws_a,
-            ws_b,
             WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role="owner"),
             WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role="owner"),
             resource_a,
@@ -662,7 +673,13 @@ async def test_slug_reuse_after_soft_delete_isolates_orphans(async_engine, db_se
         resource_pk=resource_a.id,
         resource_id=shared_slug,
         schema_version=1,
-        field_definitions=[{"name": "ws_a_orphan_canary", "type": "text"}],
+        field_definitions=[
+            {
+                "name": "ws_a_orphan_canary",
+                "type": "text",
+                "description": "ws-a orphan canary (must not surface in B's response)",
+            }
+        ],
     )
 
     # Workspace B: new resource with same slug + its own schema.
@@ -684,13 +701,22 @@ async def test_slug_reuse_after_soft_delete_isolates_orphans(async_engine, db_se
         resource_pk=resource_b.id,
         resource_id=shared_slug,
         schema_version=1,
-        field_definitions=[{"name": "ws_b_correct_field", "type": "text"}],
+        field_definitions=[
+            {
+                "name": "ws_b_correct_field",
+                "type": "text",
+                "description": "ws-b own schema field (expected in B's response)",
+            }
+        ],
     )
 
+    # Two-phase insert: flush workspaces before children so the
+    # contexts.workspace_id FK check sees the parent row (see base fixture
+    # comment + #414).
+    db_session.add_all([ws_a, ws_b])
+    await db_session.flush()
     db_session.add_all(
         [
-            ws_a,
-            ws_b,
             WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role="owner"),
             WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role="owner"),
             resource_a,
