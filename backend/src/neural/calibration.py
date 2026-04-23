@@ -41,6 +41,14 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# Strong references to the lazy-TTL enqueue coroutines so Python does not GC
+# them mid-flight. ``asyncio.create_task`` returns a Task that the event
+# loop holds only a weak reference to — without an explicit strong ref the
+# enqueue coroutine can vanish before it reaches Redis. Mirrors the pattern
+# in ``tasks.neural_calibration._IN_FLIGHT_TASKS``. (Copilot review PR #420
+# loop 5, mirror of loop 1's fix for the task-side set.)
+_LAZY_TTL_TASKS: set[asyncio.Task] = set()
+
 
 async def resolve_knn_threshold(
     db: AsyncSession,
@@ -94,9 +102,11 @@ async def resolve_knn_threshold(
             # its own error handling and strong-ref retention; here we
             # only need to spawn it. (Copilot review PR #420 loop 3.)
             try:
-                asyncio.create_task(
+                task = asyncio.create_task(
                     _enqueue_lazy_recalibration(model_name, dimensions, context_id=None)
                 )
+                _LAZY_TTL_TASKS.add(task)
+                task.add_done_callback(_LAZY_TTL_TASKS.discard)
             except RuntimeError:
                 # ``asyncio.create_task`` raises if no event loop is running
                 # (e.g. the caller is driving via ``asyncio.run`` in a test

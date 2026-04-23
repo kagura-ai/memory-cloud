@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import secrets
 from datetime import UTC, datetime, timedelta
 from functools import cache
 from pathlib import Path
@@ -160,25 +161,37 @@ async def enqueue_recalibration_dedup(
             the call sites always pass ``None`` (model-global).
     """
     key = _dedup_key(model_name, dimensions, context_id)
+    # Write a unique token (not a dummy "1") so release can check we still
+    # own the lock via compare-and-delete. Without this, the finally branch
+    # could blindly DELETE a key that another worker re-acquired after our
+    # TTL expired mid-compute, defeating dedup under load.
+    # (Copilot review PR #420 loop 5.)
+    token = secrets.token_hex(16)
     try:
         client = get_redis_client()
-        acquired = await client.set(key, "1", nx=True, ex=_DEDUP_LOCK_TTL_SEC)
+        acquired = await client.set(key, token, nx=True, ex=_DEDUP_LOCK_TTL_SEC)
     except Exception as exc:
         # Redis unavailable → fail-open (run anyway). A duplicate compute
         # is wasteful but not incorrect, whereas skipping compute on a
         # Redis hiccup would stall the calibration path indefinitely.
+        # Signal "we never owned a lock" by clearing the token so the
+        # release branch skips the DEL entirely — it had nothing to
+        # release and could only corrupt another worker's lock.
         logger.warning(
             "calibration_dedup_redis_error",
             key=key,
             error=str(exc),
         )
         acquired = True
+        token = ""
 
     if not acquired:
         logger.debug("calibration_dedup_skipped", key=key)
         return False
 
-    task = asyncio.create_task(_run_calibration(model_name, dimensions, context_id, dedup_key=key))
+    task = asyncio.create_task(
+        _run_calibration(model_name, dimensions, context_id, dedup_key=key, token=token)
+    )
     _IN_FLIGHT_TASKS.add(task)
     task.add_done_callback(_IN_FLIGHT_TASKS.discard)
     return True
@@ -189,12 +202,20 @@ async def _run_calibration(
     dimensions: int,
     context_id: UUID | None,
     dedup_key: str,
+    token: str,
 ) -> None:
     """Execute the calibration compute + upsert, then release the dedup lock.
 
     Wraps :func:`compute_calibration` so the lock is always released even
     on exception paths. Any logging/observability happens inside
     ``compute_calibration``; this wrapper only handles the try/finally.
+
+    ``token`` is the value written when :func:`enqueue_recalibration_dedup`
+    acquired the lock. Release uses a compare-and-delete Lua script so we
+    only remove keys we still own (TTL expiration + re-acquisition by
+    another worker is the hazard this guards against). An empty token
+    signals the fail-open path — we never acquired a lock, so we must not
+    DELETE. (Copilot review PR #420 loop 5.)
     """
     try:
         async for db in get_db():
@@ -226,17 +247,42 @@ async def _run_calibration(
             exc_info=True,
         )
     finally:
-        try:
-            client = get_redis_client()
-            await client.delete(dedup_key)
-        except Exception as exc:
-            # Leaving the lock to TTL out is acceptable — next recalibration
-            # fires in at most _DEDUP_LOCK_TTL_SEC.
-            logger.warning(
-                "calibration_dedup_release_failed",
-                key=dedup_key,
-                error=str(exc),
-            )
+        await _release_dedup_lock(dedup_key, token)
+
+
+# Compare-and-delete so a worker whose lock TTL expired (and was re-acquired
+# by another worker) does NOT blow away that other worker's lock. Standard
+# Redis SETNX lock release idiom. Returns 1 when we deleted our key, 0 when
+# the key was missing, held by someone else, or already released.
+_DEDUP_RELEASE_SCRIPT = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] "
+    "then return redis.call('del', KEYS[1]) "
+    "else return 0 end"
+)
+
+
+async def _release_dedup_lock(key: str, token: str) -> None:
+    """Compare-and-delete the Redis dedup lock.
+
+    Skips the release entirely when ``token`` is empty (the fail-open
+    path never acquired a lock and DEL would corrupt another worker's
+    lock if one exists). Any Redis error during release is logged and
+    swallowed — the TTL guarantees eventual release.
+    """
+    if not token:
+        return
+    try:
+        client = get_redis_client()
+        release_script = client.register_script(_DEDUP_RELEASE_SCRIPT)
+        await release_script(keys=[key], args=[token])
+    except Exception as exc:
+        # Leaving the lock to TTL out is acceptable — next recalibration
+        # fires in at most _DEDUP_LOCK_TTL_SEC.
+        logger.warning(
+            "calibration_dedup_release_failed",
+            key=key,
+            error=str(exc),
+        )
 
 
 async def compute_calibration(
