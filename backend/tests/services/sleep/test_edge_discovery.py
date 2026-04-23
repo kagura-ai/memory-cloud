@@ -952,6 +952,14 @@ class TestExecuteAggregation:
 
         # Stub _llm_judge_batch directly so we control batch_stats per call.
         async def fake_judge(batch, *args, **kwargs):
+            def edge(i, edge_type, confidence):
+                return ConfirmedEdge(
+                    src_id=batch[i][0],
+                    dst_id=batch[i][1],
+                    edge_type=edge_type,
+                    confidence=confidence,
+                )
+
             if len(batch) == 5:
                 # First batch: 3 accepted, 2 rejected
                 stats = BatchStats(
@@ -961,24 +969,9 @@ class TestExecuteAggregation:
                     confidences=[0.9, 0.7, 0.55],
                 )
                 confirmed = [
-                    ConfirmedEdge(
-                        src_id=batch[0][0],
-                        dst_id=batch[0][1],
-                        edge_type="related_to",
-                        confidence=0.9,
-                    ),
-                    ConfirmedEdge(
-                        src_id=batch[1][0],
-                        dst_id=batch[1][1],
-                        edge_type="related_to",
-                        confidence=0.7,
-                    ),
-                    ConfirmedEdge(
-                        src_id=batch[2][0],
-                        dst_id=batch[2][1],
-                        edge_type="depends_on",
-                        confidence=0.55,
-                    ),
+                    edge(0, "related_to", 0.9),
+                    edge(1, "related_to", 0.7),
+                    edge(2, "depends_on", 0.55),
                 ]
                 return confirmed, stats
             # Second batch: 1 accepted, 0 rejected
@@ -988,14 +981,7 @@ class TestExecuteAggregation:
                 edge_type_counts={"learned_from": 1},
                 confidences=[0.95],
             )
-            confirmed = [
-                ConfirmedEdge(
-                    src_id=batch[0][0],
-                    dst_id=batch[0][1],
-                    edge_type="learned_from",
-                    confidence=0.95,
-                )
-            ]
+            confirmed = [edge(0, "learned_from", 0.95)]
             return confirmed, stats
 
         llm_judge_phase._llm_judge_batch = fake_judge

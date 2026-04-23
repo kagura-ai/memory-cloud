@@ -24,7 +24,7 @@ import random
 import statistics
 import string
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, get_args
+from typing import TYPE_CHECKING, Literal, cast, get_args
 from uuid import UUID
 
 if TYPE_CHECKING:
@@ -108,21 +108,25 @@ def _is_synthetic_seed_edge(edge: NeuralMemoryEdge) -> bool:
 # `dict.fromkeys(KEYS, 0)` widens to `dict[str, int]` for downstream consumers.
 CONFIDENCE_HISTOGRAM_KEYS: tuple[str, ...] = ("0.0-0.5", "0.5-0.7", "0.7-0.85", "0.85-1.0")
 
+# Issue #374: `EdgeType` is the type-level source of truth for valid
+# `NeuralMemoryEdge.edge_type` values emitted by the LLM judge (a deliberate
+# subset of the DB CHECK constraint in `models/memory.py` — the DB accepts
+# additional non-LLM types like `tag_cooccurrence`). `VALID_EDGE_TYPES` is
+# derived via `get_args` so the runtime membership check and the type
+# annotation cannot drift. Adding a new LLM-emittable edge type only requires
+# editing the Literal.
+EdgeType = Literal["related_to", "depends_on", "learned_from"]
+VALID_EDGE_TYPES: frozenset[EdgeType] = frozenset(get_args(EdgeType))
+
 # Issue #373: edge_type directionality semantics.
 # `related_to` is undirected (A related_to B ⇔ B related_to A); the parser
 # accepts the LLM's pair order as-is. `depends_on` and `learned_from` are
 # directed (A depends_on B ≠ B depends_on A); the parser MUST reject pairs
 # where the LLM flipped the input order, otherwise edges are silently stored
 # in the wrong direction (PR #371 PhD-pl review finding). Module-level so
-# tests can import the same source of truth.
-DIRECTED_EDGE_TYPES: frozenset[str] = frozenset({"depends_on", "learned_from"})
-
-# Issue #374: `EdgeType` is the type-level source of truth for valid
-# `NeuralMemoryEdge.edge_type` values. `VALID_EDGE_TYPES` is derived via
-# `get_args` so the runtime membership check and the type annotation cannot
-# drift. Adding a new edge_type only requires editing the Literal.
-EdgeType = Literal["related_to", "depends_on", "learned_from"]
-VALID_EDGE_TYPES: frozenset[EdgeType] = frozenset(get_args(EdgeType))
+# tests can import the same source of truth. Typed as `frozenset[EdgeType]`
+# so adding a typo'd member is caught by pyright (#374).
+DIRECTED_EDGE_TYPES: frozenset[EdgeType] = frozenset({"depends_on", "learned_from"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -760,8 +764,12 @@ class EdgeDiscoveryPhase:
             # Treat non-strings as invalid and coerce to `related_to`,
             # matching the existing fallback for unknown string values.
             raw_type = edge.get("edge_type", "related_to")
+            # `frozenset.__contains__` does not narrow `raw_type` to `EdgeType`
+            # for type checkers, so the membership check is promoted to a
+            # `cast` — the `in VALID_EDGE_TYPES` predicate is the runtime
+            # guarantee that the cast is sound.
             edge_type: EdgeType = (
-                raw_type
+                cast(EdgeType, raw_type)
                 if isinstance(raw_type, str) and raw_type in VALID_EDGE_TYPES
                 else "related_to"
             )
