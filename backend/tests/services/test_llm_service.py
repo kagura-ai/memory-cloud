@@ -126,8 +126,36 @@ class TestCompleteJson:
         assert call_kwargs["model"] == "gpt-5-nano"
 
     @pytest.mark.asyncio
+    async def test_gpt5_includes_reasoning_effort_minimal(self, llm_service):
+        """Regression guard (#426): gpt-5 / o-series must receive reasoning_effort=minimal.
+
+        Without it, reasoning tokens exhaust max_completion_tokens and the
+        visible JSON output is empty. `minimal` is OpenAI's recommended
+        setting for deterministic JSON-mode tasks like edge_discovery.
+        """
+        mock_response = _make_completion_response('{"ok": true}')
+
+        with patch.object(llm_service, "_get_client") as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create.return_value = mock_response
+            mock_get_client.return_value = mock_client
+
+            await llm_service.complete_json(
+                user_id="user-1",
+                prompt="Test",
+                model="gpt-5-nano",
+            )
+
+        call_kwargs = mock_client.chat.completions.create.call_args[1]
+        assert call_kwargs["reasoning_effort"] == "minimal"
+
+    @pytest.mark.asyncio
     async def test_gpt4_includes_temperature_kwarg(self, llm_service):
-        """Regression guard (#424): GPT-4 family must still receive the temperature kwarg."""
+        """Regression guard (#424): GPT-4 family must still receive the temperature kwarg.
+
+        Also (#426): GPT-4 family must NOT receive reasoning_effort
+        (parameter is unknown to non-reasoning models and would 400).
+        """
         mock_response = _make_completion_response('{"ok": true}')
 
         with patch.object(llm_service, "_get_client") as mock_get_client:
@@ -144,6 +172,7 @@ class TestCompleteJson:
 
         call_kwargs = mock_client.chat.completions.create.call_args[1]
         assert call_kwargs["temperature"] == 0.1
+        assert "reasoning_effort" not in call_kwargs
 
     def test_supports_custom_temperature_helper(self):
         """Unit test for the model-prefix detection helper (#424)."""
