@@ -1054,12 +1054,25 @@ class NeuralEdgeRepository:
                 await self.db.delete(edge)
                 continue
 
-            # Check for conflicting edge (unique_edge constraint)
+            # Check for conflicting edge (unique_edge constraint).
+            #
+            # The DB `unique_edge` UNIQUE constraint covers
+            # `(user_id, src_id, dst_id)` only — NOT `edge_type`
+            # (see `models/memory.py` UniqueConstraint definition and
+            # alembic migration `d18bcb6512e2_add_unique_edge_constraint_*`).
+            # Including `edge_type` here previously caused #428: a transfer
+            # that produced (C, B, related_to) when (C, B, depends_on) already
+            # existed was reported as "no conflict" by this 4-col check, then
+            # rejected by the DB 3-col constraint as IntegrityError, aborting
+            # the entire sleep run on contexts where any such pair existed.
+            #
+            # If the existing edge has a different `edge_type`, the
+            # weight-based winner-keeping logic below still applies (one
+            # edge per (src, dst) pair, matching DB semantics).
             conflict_conditions = [
                 NeuralMemoryEdge.user_id == user_id,
                 NeuralMemoryEdge.src_id == new_src,
                 NeuralMemoryEdge.dst_id == new_dst,
-                NeuralMemoryEdge.edge_type == edge.edge_type,
             ]
             if workspace_id:
                 conflict_conditions.append(NeuralMemoryEdge.workspace_id == UUID(workspace_id))
