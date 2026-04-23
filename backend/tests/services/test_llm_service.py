@@ -72,6 +72,33 @@ class TestCompleteJson:
         assert call_kwargs["messages"][1]["role"] == "user"
         assert call_kwargs["response_format"] == {"type": "json_object"}
 
+        # Regression guard (#421): OpenAI gpt-5/o-series reject `max_tokens` with
+        # HTTP 400 and require `max_completion_tokens`. Pin the kwarg name here
+        # so a future rename back to `max_tokens` fails loudly in tests instead
+        # of silently in production.
+        assert call_kwargs["max_completion_tokens"] == 1024
+        assert "max_tokens" not in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_max_completion_tokens_mapped_from_max_tokens_arg(self, llm_service):
+        """Regression guard (#421): caller-facing `max_tokens` must map to `max_completion_tokens` on the OpenAI call."""
+        mock_response = _make_completion_response('{"ok": true}', total_tokens=20)
+
+        with patch.object(llm_service, "_get_client") as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create.return_value = mock_response
+            mock_get_client.return_value = mock_client
+
+            await llm_service.complete_json(
+                user_id="user-1",
+                prompt="Test",
+                max_tokens=512,
+            )
+
+        call_kwargs = mock_client.chat.completions.create.call_args[1]
+        assert call_kwargs["max_completion_tokens"] == 512
+        assert "max_tokens" not in call_kwargs
+
     @pytest.mark.asyncio
     async def test_no_system_prompt(self, llm_service):
         """Test completion without system prompt."""

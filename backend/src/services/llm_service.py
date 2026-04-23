@@ -95,7 +95,7 @@ class LLMService:
                 model=resolved_model,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_completion_tokens=max_tokens,
                 response_format={"type": "json_object"},
             )
             content = response.choices[0].message.content or "{}"
@@ -128,7 +128,7 @@ class LLMService:
                 model=resolved_model,
                 messages=messages,
                 temperature=0.3,
-                max_tokens=max_tokens,
+                max_completion_tokens=max_tokens,
                 response_format={"type": "json_object"},
             )
             content = response.choices[0].message.content or "{}"
