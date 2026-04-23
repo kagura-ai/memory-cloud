@@ -31,9 +31,10 @@ does not (D5 v2 follow-up).
 from __future__ import annotations
 
 import asyncio
-import sys
+import importlib.util
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import ModuleType
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
@@ -53,6 +54,40 @@ logger = get_logger(__name__)
 # Dedup lock TTL. A calibration compute is short (seconds), but the lock
 # lives long enough to absorb retry storms while the compute is in-flight.
 _DEDUP_LOCK_TTL_SEC = 3600
+
+# Cache the imported script module so the importlib-load path runs once.
+# After first call the real importlib ``exec_module`` runs; subsequent calls
+# return this cached reference without touching the filesystem.
+_MEASURE_SCRIPT_MODULE: ModuleType | None = None
+
+
+def _load_measure_script() -> ModuleType:
+    """Load ``scripts/measure_embedding_threshold.py`` as a module.
+
+    Uses ``importlib.util.spec_from_file_location`` with an explicit path so
+    ``sys.path`` stays unmodified — avoids the module-shadowing + import-
+    order hazards of ``sys.path.insert`` in a long-running API worker.
+    Cached after first call so subsequent ``compute_calibration`` invocations
+    don't re-execute the module's top-level imports (numpy, sqlalchemy,
+    qdrant-client etc.).
+    """
+    global _MEASURE_SCRIPT_MODULE  # noqa: PLW0603 — intentional lazy-init cache
+    if _MEASURE_SCRIPT_MODULE is not None:
+        return _MEASURE_SCRIPT_MODULE
+    backend_root = Path(__file__).resolve().parent.parent.parent
+    script_file = backend_root / "scripts" / "measure_embedding_threshold.py"
+    spec = importlib.util.spec_from_file_location(
+        "_kagura_measure_embedding_threshold", script_file
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(
+            f"unable to build import spec for {script_file} — calibration cannot run"
+        )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _MEASURE_SCRIPT_MODULE = module
+    return module
+
 
 # Strong references to in-flight calibration tasks. ``asyncio.create_task``
 # returns a task that the event loop only holds a weak reference to, so
@@ -188,17 +223,18 @@ async def compute_calibration(
     """
     # Defer the script import so test environments don't need numpy etc.
     # if they never exercise this path. The script lives under ``scripts/``
-    # which is not on the default ``sys.path``; add it temporarily.
-    backend_root = Path(__file__).resolve().parent.parent.parent
-    scripts_path = str(backend_root / "scripts")
-    if scripts_path not in sys.path:
-        sys.path.insert(0, scripts_path)
-    from measure_embedding_threshold import (  # type: ignore[import-not-found] # noqa: PLC0415
-        compute_percentiles,
-        fetch_vectors,
-        measure_top_k,
-        sample_memories,
-    )
+    # which is not on the default ``sys.path``. Load it via importlib with an
+    # explicit file-path spec so we don't mutate global ``sys.path`` — a
+    # long-running API worker would otherwise accumulate a path entry that
+    # can cause hard-to-debug module shadowing and makes imports depend on
+    # call order (Copilot review PR #420 loop 2). After the first call the
+    # module is cached in ``sys.modules`` under its own name, so subsequent
+    # calls reuse the cached module for free.
+    _script_module = _load_measure_script()
+    compute_percentiles = _script_module.compute_percentiles
+    fetch_vectors = _script_module.fetch_vectors
+    measure_top_k = _script_module.measure_top_k
+    sample_memories = _script_module.sample_memories
 
     sample_context_id = context_id
     if sample_context_id is None:

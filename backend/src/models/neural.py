@@ -6,7 +6,18 @@ Issue #406: Add EmbeddingCalibration for knn_seed percentile calibration
 
 from datetime import UTC, datetime
 
-from sqlalchemy import CheckConstraint, Column, DateTime, Float, Index, Integer, String, Text, func
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import expression
 
@@ -143,7 +154,14 @@ class EmbeddingCalibration(Base):
     )
     model_name = Column(String(100), nullable=False)
     dimensions = Column(Integer, nullable=False)
-    context_id = Column(UUID(as_uuid=True), nullable=True)
+    # FK to contexts.id with ON DELETE CASCADE so per-context calibration
+    # rows (v2) get cleaned up automatically when a context is deleted.
+    # Nullable because model-global rows use NULL here (v1 runtime path).
+    context_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("contexts.id", ondelete="CASCADE"),
+        nullable=True,
+    )
 
     p25 = Column(Float, nullable=False)
     p50 = Column(Float, nullable=False)

@@ -128,14 +128,25 @@ class TestResolveKnnThresholdCalibrationPath:
         assert result == pytest.approx(0.50)
 
     @pytest.mark.asyncio
-    async def test_expired_row_still_serves_value(self):
-        """Lazy-TTL: expired row is served (fail-open) while refresh enqueues."""
+    async def test_expired_row_still_serves_value(self, monkeypatch):
+        """Lazy-TTL: expired row is served (fail-open) while refresh enqueues.
+
+        Monkeypatches ``_enqueue_lazy_recalibration`` so the test doesn't
+        trigger the real Redis + asyncio task path (Copilot review PR #420
+        loop 2 finding). We only assert the returned threshold.
+        """
+        from unittest.mock import AsyncMock as _AsyncMock
+
+        import neural.calibration as calibration_module
+
+        enqueue_stub = _AsyncMock(return_value=None)
+        monkeypatch.setattr(calibration_module, "_enqueue_lazy_recalibration", enqueue_stub)
+
         cfg = _make_config(min_similarity=None)
         db = _mock_db(calibration_result=_make_calibration(p90=0.55, expired=True))
         result = await resolve_knn_threshold(db, cfg, "text-embedding-3-small", 512)
-        # Expired rows are still returned; enqueue happens as a side effect
-        # (swallowed by ImportError guard when tasks module is absent).
         assert result == pytest.approx(0.55)
+        enqueue_stub.assert_awaited_once()
 
 
 class TestResolveKnnThresholdDisabled:

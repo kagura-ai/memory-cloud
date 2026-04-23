@@ -1,6 +1,6 @@
 """Admin endpoint for manually triggering kNN-seed calibration (#406 Phase B).
 
-POST /api/admin/neural/recalibrate?model=<name>&dimensions=<N>
+POST /api/v1/admin/neural/recalibrate?model=<name>&dimensions=<N>
 
 Enqueues a model-global calibration job for the given ``(model_name,
 dimensions)`` pair. This is the third of three calibration triggers

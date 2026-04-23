@@ -94,16 +94,17 @@ async def resolve_knn_threshold(
 
     # Step 3: no calibration yet → disable seeding. Bootstrap trigger in the
     # remember() path will populate the row once the context crosses D3.
-    logger.warning(
+    # Logged at debug level so new contexts (or freshly migrated deployments)
+    # don't emit a WARNING on every ``remember()`` call until the bootstrap
+    # gate is reached — that would create alert fatigue at no operational
+    # benefit (bootstrap emits its own one-shot log when it enqueues).
+    # Operators can still observe the disabled state via the bootstrap
+    # trigger logs and the absence of an ``embedding_calibrations`` row.
+    # (Copilot review PR #420 loop 2.)
+    logger.debug(
         "knn_seed_disabled_no_calibration",
         model=model_name,
         dimensions=dimensions,
-        hint=(
-            "Calibration row missing for this (model, dimensions). "
-            "Bootstrap fires when the context has >=200 memories or "
-            ">=10k top-k observations. Admin-manual recalibrate is "
-            "available via /api/admin/neural/recalibrate."
-        ),
     )
     return None
 

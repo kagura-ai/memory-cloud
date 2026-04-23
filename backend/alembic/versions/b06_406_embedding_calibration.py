@@ -80,7 +80,16 @@ def upgrade() -> None:
         ),
         sa.Column("model_name", sa.String(100), nullable=False),
         sa.Column("dimensions", sa.Integer, nullable=False),
-        sa.Column("context_id", UUID(as_uuid=True), nullable=True),
+        # FK to contexts.id with ON DELETE CASCADE so per-context calibration
+        # rows (v2) are auto-cleaned when a context is deleted. Nullable
+        # because model-global rows use NULL here (the v1 runtime lookup path).
+        # Copilot review PR #420 loop 2 finding.
+        sa.Column(
+            "context_id",
+            UUID(as_uuid=True),
+            sa.ForeignKey("contexts.id", ondelete="CASCADE"),
+            nullable=True,
+        ),
         sa.Column("p25", sa.Float, nullable=False),
         sa.Column("p50", sa.Float, nullable=False),
         sa.Column("p75", sa.Float, nullable=False),
