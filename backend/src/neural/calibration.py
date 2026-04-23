@@ -125,10 +125,10 @@ async def resolve_knn_threshold(
     # Logged at debug level so new contexts (or freshly migrated deployments)
     # don't emit a WARNING on every ``remember()`` call until the bootstrap
     # gate is reached — that would create alert fatigue at no operational
-    # benefit (bootstrap emits its own one-shot log when it enqueues).
-    # Operators can still observe the disabled state via the bootstrap
-    # trigger logs and the absence of an ``embedding_calibrations`` row.
-    # (Copilot review PR #420 loop 2.)
+    # benefit. Operators can observe the disabled state via this debug
+    # event and the absence of an ``embedding_calibrations`` row for the
+    # (model, dimensions) pair.
+    # (Copilot review PR #420 loop 2 & 6.)
     logger.debug(
         "knn_seed_disabled_no_calibration",
         model=model_name,

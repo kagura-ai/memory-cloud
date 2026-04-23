@@ -500,10 +500,21 @@ async def maybe_trigger_bootstrap(
     ``(model, dimensions)``; if the count is at or above
     :data:`BOOTSTRAP_MIN_MEMORIES`, kicks off a deduped job.
 
-    This is the only path that runs per remember() call, so the cost of
-    the count is kept small via the dedup lock: at most one bootstrap
-    attempt per ``_DEDUP_LOCK_TTL_SEC`` (1 hour), even under heavy
-    concurrent ingestion.
+    This is the only path that runs per remember() call, so two layers
+    limit redundant work under heavy concurrent ingestion:
+
+    - **in-process throttle** (``_BOOTSTRAP_LAST_ATTEMPT`` +
+      ``_BOOTSTRAP_COUNT_THROTTLE_SEC``) suppresses repeated COUNT
+      queries from the same worker to at most one per throttle window
+      (5 minutes by default). This is the layer that keeps DB cost
+      small per worker.
+    - **Redis SETNX dedup** (inside ``enqueue_recalibration_dedup``)
+      suppresses duplicate calibration jobs across workers / restarts
+      for ``_DEDUP_LOCK_TTL_SEC`` (1 hour).
+
+    The dedup lock does NOT prevent repeated COUNT queries on its own
+    — the COUNT runs above the enqueue — which is why both layers are
+    needed. (Copilot review PR #420 loop 6.)
 
     Returns ``True`` if a job was enqueued by this call, ``False`` if
     the gate did not fire, the in-process throttle suppressed the count,

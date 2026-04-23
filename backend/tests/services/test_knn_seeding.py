@@ -97,7 +97,7 @@ class TestKnnSeeding:
             await _create_knn_seed_edges(
                 db=db,
                 memory=memory,
-                vector=[0.1] * 1536,
+                vector=[0.1] * 512,
                 collection_name="kagura_memories",
                 model_name="text-embedding-3-small",
             )
@@ -129,7 +129,7 @@ class TestKnnSeeding:
             await _create_knn_seed_edges(
                 db=db,
                 memory=memory,
-                vector=[0.1] * 1536,
+                vector=[0.1] * 512,
                 collection_name="kagura_memories",
                 model_name="text-embedding-3-small",
             )
@@ -168,7 +168,7 @@ class TestKnnSeeding:
             await _create_knn_seed_edges(
                 db=db,
                 memory=memory,
-                vector=[0.1] * 1536,
+                vector=[0.1] * 512,
                 collection_name="kagura_memories",
                 model_name="text-embedding-3-small",
             )
@@ -210,7 +210,7 @@ class TestKnnSeeding:
             await _create_knn_seed_edges(
                 db=db,
                 memory=memory,
-                vector=[0.1] * 1536,
+                vector=[0.1] * 512,
                 collection_name="kagura_memories",
                 model_name="text-embedding-3-small",
             )
@@ -248,7 +248,7 @@ class TestKnnSeeding:
             await _create_knn_seed_edges(
                 db=db,
                 memory=memory,
-                vector=[0.1] * 1536,
+                vector=[0.1] * 512,
                 collection_name="kagura_memories",
                 model_name="text-embedding-3-small",
             )
@@ -285,7 +285,7 @@ class TestKnnSeeding:
             await _create_knn_seed_edges(
                 db=db,
                 memory=memory,
-                vector=[0.1] * 1536,
+                vector=[0.1] * 512,
                 collection_name="kagura_memories",
                 model_name="text-embedding-3-small",
             )
@@ -325,7 +325,7 @@ class TestKnnSeeding:
             await _create_knn_seed_edges(
                 db=db,
                 memory=memory,
-                vector=[0.1] * 1536,
+                vector=[0.1] * 512,
                 collection_name="kagura_memories",
                 model_name="text-embedding-3-small",
             )
@@ -362,7 +362,7 @@ class TestKnnSeeding:
             await _create_knn_seed_edges(
                 db=db,
                 memory=memory,
-                vector=[0.1] * 1536,
+                vector=[0.1] * 512,
                 collection_name="kagura_memories",
                 model_name="text-embedding-3-small",
             )
@@ -405,7 +405,7 @@ class TestKnnSeeding:
             await _create_knn_seed_edges(
                 db=db,
                 memory=memory,
-                vector=[0.1] * 1536,
+                vector=[0.1] * 512,
                 collection_name="kagura_memories",
                 model_name="text-embedding-3-small",
             )
@@ -432,7 +432,7 @@ class TestKnnSeeding:
             await _create_knn_seed_edges(
                 db=db,
                 memory=memory,
-                vector=[0.1] * 1536,
+                vector=[0.1] * 512,
                 collection_name="kagura_memories",
                 model_name="text-embedding-3-small",
             )
@@ -472,7 +472,7 @@ class TestKnnSeeding:
             await _create_knn_seed_edges(
                 db=db,
                 memory=memory,
-                vector=[0.1] * 1536,
+                vector=[0.1] * 512,
                 collection_name="kagura_memories",
                 model_name="text-embedding-3-small",
             )
@@ -513,7 +513,7 @@ class TestKnnSeeding:
             await _create_knn_seed_edges(
                 db=db,
                 memory=memory,
-                vector=[0.1] * 1536,
+                vector=[0.1] * 512,
                 collection_name="kagura_memories",
                 model_name="text-embedding-3-small",
             )
@@ -553,7 +553,7 @@ class TestKnnSeeding:
             await _create_knn_seed_edges(
                 db=db,
                 memory=memory,
-                vector=[0.1] * 1536,
+                vector=[0.1] * 512,
                 collection_name="kagura_memories",
                 model_name="text-embedding-3-small",
             )
@@ -564,3 +564,61 @@ class TestKnnSeeding:
         mock_search.assert_not_called()
         mock_repo.create_edge_if_absent.assert_not_called()
         db.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_none_threshold_skips_search_and_triggers_bootstrap(self):
+        """D4 step 3: ``resolve_knn_threshold`` → None disables seeding
+        for this call and invokes ``maybe_trigger_bootstrap`` (best-effort).
+
+        Guards the Phase B fallback-chain wiring in ``_create_knn_seed_edges``
+        so a regression that silently skips the bootstrap trigger (or keeps
+        issuing Qdrant searches with a broken threshold) is caught early.
+        (Copilot review PR #420 loop 6.)
+        """
+        memory = _make_memory()
+        db = _make_db()
+        mock_repo = _make_edge_repo()
+
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=_make_config()),
+            ),
+            patch(
+                "neural.calibration.resolve_knn_threshold",
+                new=AsyncMock(return_value=None),
+            ) as mock_resolve,
+            patch(
+                "db.qdrant.search_memories_qdrant",
+                new=AsyncMock(),
+            ) as mock_search,
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "tasks.neural_calibration.maybe_trigger_bootstrap",
+                new=AsyncMock(return_value=True),
+            ) as mock_bootstrap,
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        # Threshold resolver was consulted with the right dimensions.
+        mock_resolve.assert_awaited_once()
+        # No Qdrant search: step 3 disables seeding for this call.
+        mock_search.assert_not_called()
+        # No edges created.
+        mock_repo.create_edge_if_absent.assert_not_called()
+        # Bootstrap trigger WAS invoked — subsequent remember() calls can
+        # find a populated calibration row once D3 is crossed.
+        mock_bootstrap.assert_awaited_once()
+        # dimensions argument plumbed correctly (len(vector) = 512)
+        call_kwargs = mock_bootstrap.await_args.kwargs
+        assert call_kwargs["model_name"] == "text-embedding-3-small"
+        assert call_kwargs["dimensions"] == 512
