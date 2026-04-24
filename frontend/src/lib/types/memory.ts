@@ -88,13 +88,14 @@ export interface MemoryListItem {
   updated_at: string;
 }
 
-// Response type is still typed as `Memory[]` (the superset) for backward
-// compatibility with the pre-#432 getMemories() signature — see the `Memory`
-// interface comment for the unsoundness this carries. The #433 consumer is
-// expected to switch `memories` to `MemoryListItem[]` and let callers convert
-// at the boundary when they need the full `Memory` shape.
-export interface MemoryListResponse {
-  memories: Memory[];
+// Generic over the row shape: default is `MemoryListItem` (the structurally
+// correct type for `GET /memory/list`). Callers that still want the legacy
+// superset shape (e.g., dead-code paths pre-dating the split) can specialize
+// as `MemoryListResponse<Memory>`. Once the consumer (#433) lands, those
+// legacy paths should convert at the boundary rather than carrying the
+// superset through.
+export interface MemoryListResponse<TItem = MemoryListItem> {
+  memories: TItem[];
   total: number;
   has_more: boolean;
 }

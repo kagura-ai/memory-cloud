@@ -34,8 +34,9 @@ interface MemoriesTableProps {
   total: number;
   onPageChange: (page: number) => void;
   // Bulk delete props (Issue #666). ``selectedIds`` holds ``Memory.id`` UUIDs
-  // — endpoint-agnostic, so rows from either the legacy composite-key API or
-  // the new ``/memory/list`` can be selected uniformly.
+  // for rows already normalized into the ``Memory`` shape this table renders
+  // (which expects ``key`` / ``agent_name`` columns — so a consumer fed from
+  // raw ``/memory/list`` rows must convert at the boundary first).
   //
   // Bulk-delete wiring is the parent's responsibility. The legacy
   // ``bulkDeleteMemories`` API addresses rows by (key, scope, agent_name),
@@ -67,10 +68,13 @@ export function MemoriesTable({
   const allVisibleSelected =
     memories.length > 0 && memories.every((m) => selectedIds.includes(m.id));
 
-  const handleSelectAll = (checked: boolean) => {
+  // Radix Checkbox `onCheckedChange` emits `boolean | "indeterminate"`.
+  // Coerce explicitly so the "indeterminate" branch is treated as unchecked,
+  // not as a silent truthy "select all".
+  const handleSelectAll = (checked: boolean | "indeterminate") => {
     if (!onSelectionChange) return;
 
-    if (checked) {
+    if (checked === true) {
       const visibleIds = memories.map((m) => m.id);
       onSelectionChange([...new Set([...selectedIds, ...visibleIds])]);
     } else {
@@ -79,10 +83,13 @@ export function MemoriesTable({
     }
   };
 
-  const handleRowToggle = (memory: Memory, checked: boolean) => {
+  const handleRowToggle = (
+    memory: Memory,
+    checked: boolean | "indeterminate",
+  ) => {
     if (!onSelectionChange) return;
 
-    if (checked) {
+    if (checked === true) {
       onSelectionChange([...selectedIds, memory.id]);
     } else {
       onSelectionChange(selectedIds.filter((id) => id !== memory.id));
@@ -159,7 +166,7 @@ export function MemoriesTable({
                       <Checkbox
                         checked={isSelected}
                         onCheckedChange={(checked) =>
-                          handleRowToggle(memory, checked as boolean)
+                          handleRowToggle(memory, checked)
                         }
                         aria-label={`Select ${memory.key}`}
                       />
