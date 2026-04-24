@@ -19,7 +19,7 @@ export type KnownMemoryType = "normal" | "coding";
 //
 // `id` is the new canonical row identity going forward. The legacy composite
 // fields (key/value/agent_name/user_id) remain REQUIRED here even though the
-// new `/memory/list` response does not populate them — making them optional
+// new `/api/v1/memory/list` response does not populate them — making them optional
 // would force null-guards into dialogs that are still dead code today
 // (MemoryDetailDialog, EditMemoryDialog, DeleteMemoryDialog). That trade-off
 // is intentional and type-unsound in one direction: a response from the new

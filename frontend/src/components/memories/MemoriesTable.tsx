@@ -36,13 +36,13 @@ interface MemoriesTableProps {
   // Bulk delete props (Issue #666). ``selectedIds`` holds ``Memory.id`` UUIDs
   // for rows already normalized into the ``Memory`` shape this table renders
   // (which expects ``key`` / ``agent_name`` columns — so a consumer fed from
-  // raw ``/memory/list`` rows must convert at the boundary first).
+  // raw ``GET /api/v1/memory/list`` rows must convert at the boundary first).
   //
   // Bulk-delete wiring is the parent's responsibility. The legacy
   // ``bulkDeleteMemories`` API addresses rows by (key, scope, agent_name),
-  // which ``/memory/list`` does not return; a consumer fed from that endpoint
-  // needs either a bulk-delete-by-id backend endpoint or pre-loaded composite
-  // fields. #433 will decide which path to take.
+  // which ``/api/v1/memory/list`` does not return; a consumer fed from that
+  // endpoint needs either a bulk-delete-by-id backend endpoint or pre-loaded
+  // composite fields. #433 will decide which path to take.
   selectedIds?: string[];
   onSelectionChange?: (ids: string[]) => void;
 }
