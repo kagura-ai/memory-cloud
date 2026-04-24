@@ -33,9 +33,18 @@ interface MemoriesTableProps {
   pageSize: number;
   total: number;
   onPageChange: (page: number) => void;
-  // Bulk delete props (Issue #666)
-  selectedKeys?: string[];
-  onSelectionChange?: (keys: string[]) => void;
+  // Bulk delete props (Issue #666). ``selectedIds`` holds ``Memory.id`` UUIDs
+  // for rows already normalized into the ``Memory`` shape this table renders
+  // (which expects ``key`` / ``agent_name`` columns — so a consumer fed from
+  // raw ``GET /api/v1/memory/list`` rows must convert at the boundary first).
+  //
+  // Bulk-delete wiring is the parent's responsibility. The legacy
+  // ``bulkDeleteMemories`` API addresses rows by (key, scope, agent_name),
+  // which ``/api/v1/memory/list`` does not return; a consumer fed from that
+  // endpoint needs either a bulk-delete-by-id backend endpoint or pre-loaded
+  // composite fields. #433 will decide which path to take.
+  selectedIds?: string[];
+  onSelectionChange?: (ids: string[]) => void;
 }
 
 export function MemoriesTable({
@@ -48,7 +57,7 @@ export function MemoriesTable({
   pageSize,
   total,
   onPageChange,
-  selectedKeys = [],
+  selectedIds = [],
   onSelectionChange,
 }: MemoriesTableProps) {
   const { user } = useAuth();
@@ -56,41 +65,37 @@ export function MemoriesTable({
   const totalPages = Math.ceil(total / pageSize);
   const bulkDeleteEnabled = !!onSelectionChange;
 
-  // Helper to generate unique key for memory
-  const getMemoryUniqueKey = (memory: Memory) =>
-    `${memory.key}:${memory.scope}:${memory.agent_name}`;
-
-  // Check if all visible memories are selected
   const allVisibleSelected =
-    memories.length > 0 &&
-    memories.every((m) => selectedKeys.includes(getMemoryUniqueKey(m)));
+    memories.length > 0 && memories.every((m) => selectedIds.includes(m.id));
 
-  // Handle select all toggle
-  const handleSelectAll = (checked: boolean) => {
+  // Radix Checkbox `onCheckedChange` emits `boolean | "indeterminate"`.
+  // Coerce explicitly so the "indeterminate" branch is treated as unchecked,
+  // not as a silent truthy "select all".
+  const handleSelectAll = (checked: boolean | "indeterminate") => {
     if (!onSelectionChange) return;
 
-    if (checked) {
-      // Add all visible memories to selection
-      const allKeys = memories.map(getMemoryUniqueKey);
-      const newSelection = [...new Set([...selectedKeys, ...allKeys])];
-      onSelectionChange(newSelection);
+    if (checked === true) {
+      const visibleIds = memories.map((m) => m.id);
+      onSelectionChange([...new Set([...selectedIds, ...visibleIds])]);
     } else {
-      // Remove all visible memories from selection
-      const visibleKeys = new Set(memories.map(getMemoryUniqueKey));
-      const newSelection = selectedKeys.filter((k) => !visibleKeys.has(k));
-      onSelectionChange(newSelection);
+      const visibleIds = new Set(memories.map((m) => m.id));
+      onSelectionChange(selectedIds.filter((id) => !visibleIds.has(id)));
     }
   };
 
-  // Handle single row toggle
-  const handleRowToggle = (memory: Memory, checked: boolean) => {
+  const handleRowToggle = (
+    memory: Memory,
+    checked: boolean | "indeterminate",
+  ) => {
     if (!onSelectionChange) return;
 
-    const key = getMemoryUniqueKey(memory);
-    if (checked) {
-      onSelectionChange([...selectedKeys, key]);
+    if (checked === true) {
+      // Dedup via Set — Radix Checkbox can re-fire `onCheckedChange(true)`
+      // on repeated clicks / re-renders, which would otherwise pile up
+      // duplicate entries in `selectedIds`.
+      onSelectionChange([...new Set([...selectedIds, memory.id])]);
     } else {
-      onSelectionChange(selectedKeys.filter((k) => k !== key));
+      onSelectionChange(selectedIds.filter((id) => id !== memory.id));
     }
   };
 
@@ -156,16 +161,15 @@ export function MemoriesTable({
           </TableHeader>
           <TableBody>
             {memories.map((memory) => {
-              const uniqueKey = getMemoryUniqueKey(memory);
-              const isSelected = selectedKeys.includes(uniqueKey);
+              const isSelected = selectedIds.includes(memory.id);
               return (
-                <TableRow key={uniqueKey}>
+                <TableRow key={memory.id}>
                   {bulkDeleteEnabled && (
                     <TableCell>
                       <Checkbox
                         checked={isSelected}
                         onCheckedChange={(checked) =>
-                          handleRowToggle(memory, checked as boolean)
+                          handleRowToggle(memory, checked)
                         }
                         aria-label={`Select ${memory.key}`}
                       />
