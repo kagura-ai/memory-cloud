@@ -5,7 +5,12 @@
  */
 
 export type MemoryScope = "working" | "persistent";
-export type MemoryType = "normal" | "coding";
+
+// Backend `Memory.type` is `Column(String(50))` (arbitrary string), so the
+// wire type is `string`. `KnownMemoryType` enumerates values the UI recognizes
+// for styling / badges — use it in lookups, not in type annotations.
+export type MemoryType = string;
+export type KnownMemoryType = "normal" | "coding";
 
 // Issue #431/#432: Backend `MemoryListItem` (routes/memory.py:324) is UUID-keyed
 // and returns {id, summary, type, scope, importance, created_at, updated_at}.
@@ -69,6 +74,25 @@ export interface MemorySearchParams {
   offset?: number;
 }
 
+// Exact mirror of backend `MemoryListItem` (routes/memory.py:324) — the row
+// shape returned by the new UUID-addressed `GET /memory/list` endpoint. Does
+// NOT include legacy composite-key fields (key/value/agent_name/user_id).
+// `type` is `string` (not `KnownMemoryType`) to match the backend column.
+export interface MemoryListItem {
+  id: string;
+  summary: string;
+  type: string;
+  scope: MemoryScope;
+  importance: number;
+  created_at: string;
+  updated_at: string;
+}
+
+// Response type is still typed as `Memory[]` (the superset) for backward
+// compatibility with the pre-#432 getMemories() signature — see the `Memory`
+// interface comment for the unsoundness this carries. The #433 consumer is
+// expected to switch `memories` to `MemoryListItem[]` and let callers convert
+// at the boundary when they need the full `Memory` shape.
 export interface MemoryListResponse {
   memories: Memory[];
   total: number;

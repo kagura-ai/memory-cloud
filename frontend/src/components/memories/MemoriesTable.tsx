@@ -34,9 +34,14 @@ interface MemoriesTableProps {
   total: number;
   onPageChange: (page: number) => void;
   // Bulk delete props (Issue #666). ``selectedIds`` holds ``Memory.id`` UUIDs
-  // so the contract stays stable across rows from any endpoint shape. The
-  // eventual parent (see #433) must translate these IDs back to the legacy
-  // composite tuple at the ``bulkDeleteMemories`` call site.
+  // — endpoint-agnostic, so rows from either the legacy composite-key API or
+  // the new ``/memory/list`` can be selected uniformly.
+  //
+  // Bulk-delete wiring is the parent's responsibility. The legacy
+  // ``bulkDeleteMemories`` API addresses rows by (key, scope, agent_name),
+  // which ``/memory/list`` does not return; a consumer fed from that endpoint
+  // needs either a bulk-delete-by-id backend endpoint or pre-loaded composite
+  // fields. #433 will decide which path to take.
   selectedIds?: string[];
   onSelectionChange?: (ids: string[]) => void;
 }
