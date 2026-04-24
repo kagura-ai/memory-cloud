@@ -90,7 +90,10 @@ export function MemoriesTable({
     if (!onSelectionChange) return;
 
     if (checked === true) {
-      onSelectionChange([...selectedIds, memory.id]);
+      // Dedup via Set — Radix Checkbox can re-fire `onCheckedChange(true)`
+      // on repeated clicks / re-renders, which would otherwise pile up
+      // duplicate entries in `selectedIds`.
+      onSelectionChange([...new Set([...selectedIds, memory.id])]);
     } else {
       onSelectionChange(selectedIds.filter((id) => id !== memory.id));
     }
