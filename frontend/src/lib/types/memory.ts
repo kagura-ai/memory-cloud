@@ -75,7 +75,7 @@ export interface MemorySearchParams {
 }
 
 // Exact mirror of backend `MemoryListItem` (routes/memory.py:324) — the row
-// shape returned by the new UUID-addressed `GET /memory/list` endpoint. Does
+// shape returned by the new UUID-addressed `GET /api/v1/memory/list` endpoint. Does
 // NOT include legacy composite-key fields (key/value/agent_name/user_id).
 // `type` is `string` (not `KnownMemoryType`) to match the backend column.
 export interface MemoryListItem {
@@ -89,7 +89,7 @@ export interface MemoryListItem {
 }
 
 // Generic over the row shape: default is `MemoryListItem` (the structurally
-// correct type for `GET /memory/list`). Callers that still want the legacy
+// correct type for `GET /api/v1/memory/list`). Callers that still want the legacy
 // superset shape (e.g., dead-code paths pre-dating the split) can specialize
 // as `MemoryListResponse<Memory>`. Once the consumer (#433) lands, those
 // legacy paths should convert at the boundary rather than carrying the
