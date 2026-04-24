@@ -33,9 +33,12 @@ interface MemoriesTableProps {
   pageSize: number;
   total: number;
   onPageChange: (page: number) => void;
-  // Bulk delete props (Issue #666)
-  selectedKeys?: string[];
-  onSelectionChange?: (keys: string[]) => void;
+  // Bulk delete props (Issue #666). ``selectedIds`` holds ``Memory.id`` UUIDs
+  // so the contract stays stable across rows from any endpoint shape. The
+  // eventual parent (see #433) must translate these IDs back to the legacy
+  // composite tuple at the ``bulkDeleteMemories`` call site.
+  selectedIds?: string[];
+  onSelectionChange?: (ids: string[]) => void;
 }
 
 export function MemoriesTable({
@@ -48,7 +51,7 @@ export function MemoriesTable({
   pageSize,
   total,
   onPageChange,
-  selectedKeys = [],
+  selectedIds = [],
   onSelectionChange,
 }: MemoriesTableProps) {
   const { user } = useAuth();
@@ -56,43 +59,28 @@ export function MemoriesTable({
   const totalPages = Math.ceil(total / pageSize);
   const bulkDeleteEnabled = !!onSelectionChange;
 
-  // Composite key for the legacy bulk-delete API — the backend still
-  // addresses rows by (key, scope, agent_name), so selectedKeys must use
-  // this tuple. Row identity for React uses `memory.id` (UUID) instead.
-  const getMemoryUniqueKey = (memory: Memory) =>
-    `${memory.key}:${memory.scope}:${memory.agent_name}`;
-
-  // Check if all visible memories are selected
   const allVisibleSelected =
-    memories.length > 0 &&
-    memories.every((m) => selectedKeys.includes(getMemoryUniqueKey(m)));
+    memories.length > 0 && memories.every((m) => selectedIds.includes(m.id));
 
-  // Handle select all toggle
   const handleSelectAll = (checked: boolean) => {
     if (!onSelectionChange) return;
 
     if (checked) {
-      // Add all visible memories to selection
-      const allKeys = memories.map(getMemoryUniqueKey);
-      const newSelection = [...new Set([...selectedKeys, ...allKeys])];
-      onSelectionChange(newSelection);
+      const visibleIds = memories.map((m) => m.id);
+      onSelectionChange([...new Set([...selectedIds, ...visibleIds])]);
     } else {
-      // Remove all visible memories from selection
-      const visibleKeys = new Set(memories.map(getMemoryUniqueKey));
-      const newSelection = selectedKeys.filter((k) => !visibleKeys.has(k));
-      onSelectionChange(newSelection);
+      const visibleIds = new Set(memories.map((m) => m.id));
+      onSelectionChange(selectedIds.filter((id) => !visibleIds.has(id)));
     }
   };
 
-  // Handle single row toggle
   const handleRowToggle = (memory: Memory, checked: boolean) => {
     if (!onSelectionChange) return;
 
-    const key = getMemoryUniqueKey(memory);
     if (checked) {
-      onSelectionChange([...selectedKeys, key]);
+      onSelectionChange([...selectedIds, memory.id]);
     } else {
-      onSelectionChange(selectedKeys.filter((k) => k !== key));
+      onSelectionChange(selectedIds.filter((id) => id !== memory.id));
     }
   };
 
@@ -158,9 +146,7 @@ export function MemoriesTable({
           </TableHeader>
           <TableBody>
             {memories.map((memory) => {
-              const isSelected = selectedKeys.includes(
-                getMemoryUniqueKey(memory),
-              );
+              const isSelected = selectedIds.includes(memory.id);
               return (
                 <TableRow key={memory.id}>
                   {bulkDeleteEnabled && (

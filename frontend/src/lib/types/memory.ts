@@ -9,10 +9,18 @@ export type MemoryType = "normal" | "coding";
 
 // Issue #431/#432: Backend `MemoryListItem` (routes/memory.py:324) is UUID-keyed
 // and returns {id, summary, type, scope, importance, created_at, updated_at}.
-// Existing (legacy) endpoints still use the composite (key, scope, agent_name)
-// addressing with {key, value, agent_name, user_id, ...} shape. This interface
-// is the superset so a single consumer (MemoriesTable and dialogs) can accept
-// rows from either origin — fields that don't cross the bridge are optional.
+// Existing (legacy) endpoints still use composite (key, scope, agent_name)
+// addressing with {key, value, agent_name, user_id, ...} shape.
+//
+// `id` is the new canonical row identity going forward. The legacy composite
+// fields (key/value/agent_name/user_id) remain REQUIRED here even though the
+// new `/memory/list` response does not populate them — making them optional
+// would force null-guards into dialogs that are still dead code today
+// (MemoryDetailDialog, EditMemoryDialog, DeleteMemoryDialog). That trade-off
+// is intentional and type-unsound in one direction: a response from the new
+// endpoint does not literally satisfy `Memory` without an `as` cast. The
+// consumer issue (#433 Memories tab) will decide whether to weaken those
+// fields to optional or to keep them required behind a conversion boundary.
 export interface Memory {
   id: string;
   summary?: string;
