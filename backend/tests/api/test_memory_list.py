@@ -47,6 +47,18 @@ def _db_with_rows(total: int, rows: list):
     return mock_db
 
 
+def _where_sql(mock_db, call_index: int) -> str:
+    """Return the compiled WHERE clause for the Select passed to mock_db.execute(...).
+
+    We target just the WHERE subtree (not the full SELECT) because the column
+    list of ``select(Memory)`` always expands to include ``memories.context_id``
+    as a projected column — a whole-statement string match would be useless.
+    """
+    stmt = mock_db.execute.call_args_list[call_index].args[0]
+    whereclause = stmt.whereclause
+    return str(whereclause.compile(compile_kwargs={"literal_binds": False}))
+
+
 class TestListMemoriesContextFilter:
     """Issue #431: context_id filter on GET /memory/list."""
 
@@ -70,6 +82,14 @@ class TestListMemoriesContextFilter:
         mock_perm_cls.assert_not_called()
         assert response.total == 1
         assert len(response.memories) == 1
+
+        # Regression guard: when context_id is omitted, the predicate must
+        # NOT be present in either the count query or the data query.
+        for call_index in (0, 1):
+            sql = _where_sql(mock_db, call_index)
+            assert "context_id" not in sql, (
+                f"context_id unexpectedly appears in SQL when param omitted: {sql}"
+            )
 
     @pytest.mark.asyncio
     async def test_context_id_enforces_permission_and_filters(self):
@@ -99,6 +119,15 @@ class TestListMemoriesContextFilter:
             user_id="test_user_123", context_id=context_id
         )
         assert response.total == 1
+
+        # Regression guard: the context_id predicate must land in BOTH the
+        # count query and the data query — asymmetric filtering would surface
+        # as `total=N, memories=[]` or broken pagination.
+        for call_index in (0, 1):
+            sql = _where_sql(mock_db, call_index)
+            assert "context_id" in sql, (
+                f"context_id predicate missing from SQL (call_index={call_index}): {sql}"
+            )
 
     @pytest.mark.asyncio
     async def test_context_id_denied_propagates_404(self):
