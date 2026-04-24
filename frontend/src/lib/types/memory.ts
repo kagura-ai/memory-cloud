@@ -4,10 +4,18 @@
  * TypeScript interfaces for Kagura Memory Cloud API
  */
 
-export type MemoryScope = 'working' | 'persistent';
-export type MemoryType = 'normal' | 'coding';
+export type MemoryScope = "working" | "persistent";
+export type MemoryType = "normal" | "coding";
 
+// Issue #431/#432: Backend `MemoryListItem` (routes/memory.py:324) is UUID-keyed
+// and returns {id, summary, type, scope, importance, created_at, updated_at}.
+// Existing (legacy) endpoints still use the composite (key, scope, agent_name)
+// addressing with {key, value, agent_name, user_id, ...} shape. This interface
+// is the superset so a single consumer (MemoriesTable and dialogs) can accept
+// rows from either origin — fields that don't cross the bridge are optional.
 export interface Memory {
+  id: string;
+  summary?: string;
   key: string;
   value: string;
   scope: MemoryScope;
@@ -56,8 +64,7 @@ export interface MemorySearchParams {
 export interface MemoryListResponse {
   memories: Memory[];
   total: number;
-  limit: number;
-  offset: number;
+  has_more: boolean;
 }
 
 export interface MemoryStatsResponse {
@@ -70,14 +77,13 @@ export interface MemoryStatsResponse {
   tags: string[];
 }
 
-
 // ============================================================================
 // Issue #720: Search result types
 // ============================================================================
 
 export interface SearchResultMemory extends Memory {
-  score: number;  // Relevance score (RAG similarity or BM25 score)
-  search_mode?: 'semantic' | 'keyword' | 'timeline';
+  score: number; // Relevance score (RAG similarity or BM25 score)
+  search_mode?: "semantic" | "keyword" | "timeline";
 }
 
-export type SearchMode = 'simple' | 'semantic' | 'keyword' | 'timeline';
+export type SearchMode = "simple" | "semantic" | "keyword" | "timeline";

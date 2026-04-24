@@ -56,7 +56,9 @@ export function MemoriesTable({
   const totalPages = Math.ceil(total / pageSize);
   const bulkDeleteEnabled = !!onSelectionChange;
 
-  // Helper to generate unique key for memory
+  // Composite key for the legacy bulk-delete API — the backend still
+  // addresses rows by (key, scope, agent_name), so selectedKeys must use
+  // this tuple. Row identity for React uses `memory.id` (UUID) instead.
   const getMemoryUniqueKey = (memory: Memory) =>
     `${memory.key}:${memory.scope}:${memory.agent_name}`;
 
@@ -156,10 +158,11 @@ export function MemoriesTable({
           </TableHeader>
           <TableBody>
             {memories.map((memory) => {
-              const uniqueKey = getMemoryUniqueKey(memory);
-              const isSelected = selectedKeys.includes(uniqueKey);
+              const isSelected = selectedKeys.includes(
+                getMemoryUniqueKey(memory),
+              );
               return (
-                <TableRow key={uniqueKey}>
+                <TableRow key={memory.id}>
                   {bulkDeleteEnabled && (
                     <TableCell>
                       <Checkbox
