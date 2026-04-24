@@ -30,6 +30,7 @@ from models.schemas import (
 )
 from services.context_service import ContextService
 from services.memory_service import MemoryService
+from services.permission_service import PermissionService
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -467,6 +468,9 @@ async def list_memories(
     db: AsyncSession = Depends(get_db),
     scope: str | None = Query(None, pattern="^(working|persistent)$"),
     type: str | None = Query(None),
+    context_id: UUID | None = Query(
+        None, description="Optional context ID to scope results to a single context"
+    ),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
@@ -477,6 +481,11 @@ async def list_memories(
         db: Database session
         scope: Filter by scope (working or persistent)
         type: Filter by memory type
+        context_id: Optional context ID. When present, results are restricted
+            to that context and the caller must have workspace-read access to
+            it (uniform 404 via ``PermissionService`` on denial / non-existence).
+            The ``user_id`` filter is applied unchanged — ``context_id`` is
+            additive, not a bypass.
         limit: Maximum number of memories to return
         offset: Pagination offset
 
@@ -495,6 +504,13 @@ async def list_memories(
         if not user_id:
             raise ValueError("user_id or sub not found in user object")
 
+        if context_id is not None:
+            # Raises 404 on non-existent context, non-member, or private-context
+            # non-creator (CWE-639 uniform disclosure). Matches the graph routes.
+            await PermissionService(db).resolve_context_for_workspace_read(
+                user_id=user_id, context_id=context_id
+            )
+
         # Build query
         query = select(Memory).where(Memory.user_id == user_id)
 
@@ -504,12 +520,17 @@ async def list_memories(
         if type:
             query = query.where(Memory.type == type)
 
+        if context_id is not None:
+            query = query.where(Memory.context_id == context_id)
+
         # Get total count (with same filters as data query)
         count_query = select(func.count(Memory.id)).where(Memory.user_id == user_id)
         if scope:
             count_query = count_query.where(Memory.scope == scope)
         if type:
             count_query = count_query.where(Memory.type == type)
+        if context_id is not None:
+            count_query = count_query.where(Memory.context_id == context_id)
         count_result = await db.execute(count_query)
         total = count_result.scalar() or 0
 
@@ -539,6 +560,8 @@ async def list_memories(
 
         return MemoryListResponse(memories=memory_items, total=total, has_more=has_more)
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("list_memories_failed", error=str(e))
         raise HTTPException(
