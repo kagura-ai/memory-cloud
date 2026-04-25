@@ -212,12 +212,16 @@ export function EditMemoryDialog({
       }
     }
     setDetailsParseError(null);
-    // Canonical (no pretty-print) JSON for the dirty check so round-tripped
-    // objects with different key spacing don't fire false positives. The
-    // human-readable pretty-print is only for the textarea display.
-    const currentDetailsCanonical = JSON.stringify(memory.details ?? null);
-    const newDetailsCanonical = JSON.stringify(parsedDetails ?? null);
-    if (newDetailsCanonical !== currentDetailsCanonical) {
+    // Minified JSON (no pretty-print whitespace) for the dirty check so
+    // round-tripped objects with different INDENTATION don't fire false
+    // positives. NOT canonicalized across key order — `JSON.stringify`
+    // preserves insertion order, so a backend that re-orders keys could
+    // still trigger a spurious "dirty" diff. Acceptable for now since
+    // PostgreSQL JSONB preserves key order on round-trip and the form
+    // assembles JSON from a single textarea (no key-order ambiguity).
+    const currentDetailsMinified = JSON.stringify(memory.details ?? null);
+    const newDetailsMinified = JSON.stringify(parsedDetails ?? null);
+    if (newDetailsMinified !== currentDetailsMinified) {
       patch.details = parsedDetails ?? null;
     }
 

@@ -248,6 +248,8 @@ async def patch_memory(
              is gone. Distinguishing 410 from 404 lets clients stop retrying.
         422: Request body validation failed (empty patch, importance out of
              range, summary < 10 chars, etc.).
+        429: The patched memory's post-patch size exceeds ``MAX_CONTENT_SIZE``
+             (1MB) — same envelope as ``remember`` / ``update_memory``.
 
     Permission: same envelope as ``forget`` — ``PermissionService.
     can_access_memory`` (workspace member for shared, creator for private).

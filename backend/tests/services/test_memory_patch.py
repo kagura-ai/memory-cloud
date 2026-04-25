@@ -265,7 +265,7 @@ class TestPatchMemoryMetadataOnly:
 
             assert memory.embedding_status == "success"  # unchanged
             mock_payload_update.assert_awaited_once()
-            mock_db.commit.assert_called()
+            mock_db.commit.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_quota_check_uses_post_patch_size_for_clear(self, service):
