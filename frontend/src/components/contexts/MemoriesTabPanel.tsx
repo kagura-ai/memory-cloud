@@ -23,6 +23,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { useToast } from "@/hooks/use-toast";
 import { getMemories, referenceMemory } from "@/lib/api/memory";
 import type {
+  LinkedMemoryRef,
   Memory,
   MemoryListItem,
   MemoryReference,
@@ -81,6 +82,20 @@ function referenceAsMemory(ref: MemoryReference, item: MemoryListItem): Memory {
 
 type DialogTarget = "detail" | "delete";
 
+interface LinkedRefsState {
+  outgoing: LinkedMemoryRef[];
+  outgoingHasMore: boolean;
+  incoming: LinkedMemoryRef[];
+  incomingHasMore: boolean;
+}
+
+const EMPTY_LINKED_REFS: LinkedRefsState = {
+  outgoing: [],
+  outgoingHasMore: false,
+  incoming: [],
+  incomingHasMore: false,
+};
+
 export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   const t = useTranslations("contextDetail.memoriesPanel");
   const { toast } = useToast();
@@ -92,6 +107,8 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   const [error, setError] = useState<string | null>(null);
 
   const [hydrated, setHydrated] = useState<Memory | null>(null);
+  const [linkedRefs, setLinkedRefs] =
+    useState<LinkedRefsState>(EMPTY_LINKED_REFS);
   const [detailOpen, setDetailOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
@@ -135,6 +152,12 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         const ref = await referenceMemory(id);
         if (pendingHydrationRef.current !== id) return;
         setHydrated(referenceAsMemory(ref, item));
+        setLinkedRefs({
+          outgoing: ref.outgoing_links ?? [],
+          outgoingHasMore: !!ref.outgoing_has_more,
+          incoming: ref.incoming_links ?? [],
+          incomingHasMore: !!ref.incoming_has_more,
+        });
         if (target === "detail") setDetailOpen(true);
         else setDeleteOpen(true);
       } catch (err) {
@@ -159,6 +182,11 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     [openWith],
   );
 
+  const handleOpenLinkedMemory = useCallback(
+    (id: string) => void openWith(id, "detail"),
+    [openWith],
+  );
+
   const handleDetailDelete = useCallback(() => {
     setDetailOpen(false);
     setDeleteOpen(true);
@@ -168,6 +196,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     setDeleteOpen(false);
     setDetailOpen(false);
     setHydrated(null);
+    setLinkedRefs(EMPTY_LINKED_REFS);
     toast({ title: t("deleteSuccess") });
 
     // Avoid stranding the user on an empty page when the deleted row was the
@@ -215,6 +244,11 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
             open={detailOpen}
             onOpenChange={setDetailOpen}
             onDelete={handleDetailDelete}
+            outgoingLinks={linkedRefs.outgoing}
+            outgoingHasMore={linkedRefs.outgoingHasMore}
+            incomingLinks={linkedRefs.incoming}
+            incomingHasMore={linkedRefs.incomingHasMore}
+            onOpenLinkedMemory={handleOpenLinkedMemory}
           />
           <DeleteMemoryDialog
             memory={hydrated}

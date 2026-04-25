@@ -1,7 +1,9 @@
 /**
  * Memory Detail Dialog
  *
- * Displays detailed information about a memory
+ * Displays detailed information about a memory plus optional declared_link
+ * backlinks (Issue #440) when the panel passes ``outgoingLinks`` /
+ * ``incomingLinks``.
  */
 
 import {
@@ -15,8 +17,15 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { Pencil, Trash2, Copy, Check } from "lucide-react";
-import type { Memory } from "@/lib/types/memory";
+import {
+  ArrowDownLeft,
+  ArrowUpRight,
+  Check,
+  Copy,
+  Pencil,
+  Trash2,
+} from "lucide-react";
+import type { LinkedMemoryRef, Memory } from "@/lib/types/memory";
 import { formatDateTime } from "@/lib/utils/datetime";
 import { useState } from "react";
 import { useAuth } from "@/contexts/AuthContext";
@@ -31,6 +40,13 @@ interface MemoryDetailDialogProps {
   // honest (no ghost button).
   onEdit?: () => void;
   onDelete: () => void;
+  // Issue #440: outgoing/incoming declared_link references. Optional —
+  // omitting both (or passing empty arrays) hides the References section.
+  outgoingLinks?: LinkedMemoryRef[];
+  outgoingHasMore?: boolean;
+  incomingLinks?: LinkedMemoryRef[];
+  incomingHasMore?: boolean;
+  onOpenLinkedMemory?: (memoryId: string) => void;
 }
 
 export function MemoryDetailDialog({
@@ -39,6 +55,11 @@ export function MemoryDetailDialog({
   onOpenChange,
   onEdit,
   onDelete,
+  outgoingLinks,
+  outgoingHasMore = false,
+  incomingLinks,
+  incomingHasMore = false,
+  onOpenLinkedMemory,
 }: MemoryDetailDialogProps) {
   const { user } = useAuth();
   const locale = useLocale();
@@ -65,6 +86,10 @@ export function MemoryDetailDialog({
       console.error("Failed to copy:", error);
     }
   };
+
+  const hasOutgoing = (outgoingLinks?.length ?? 0) > 0;
+  const hasIncoming = (incomingLinks?.length ?? 0) > 0;
+  const showReferences = hasOutgoing || hasIncoming;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -216,6 +241,45 @@ export function MemoryDetailDialog({
             </>
           )}
 
+          {/* References — declared_link backlinks (Issue #440). Hidden when
+              both lists are empty. The buttons compose with #434's deep-link:
+              the panel-side handler updates ``?memoryId=`` so the URL stays
+              canonical when the user navigates between linked memories. */}
+          {showReferences && (
+            <>
+              <Separator />
+              <div>
+                <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
+                  {t("references.title")}
+                </label>
+                <div className="mt-2 space-y-3">
+                  {hasOutgoing && (
+                    <ReferenceList
+                      heading={t("references.outgoing")}
+                      icon={<ArrowUpRight className="h-3.5 w-3.5" />}
+                      links={outgoingLinks!}
+                      hasMore={outgoingHasMore}
+                      truncatedLabel={t("references.truncated")}
+                      unknownLabel={t("references.unknown")}
+                      onOpen={onOpenLinkedMemory}
+                    />
+                  )}
+                  {hasIncoming && (
+                    <ReferenceList
+                      heading={t("references.incoming")}
+                      icon={<ArrowDownLeft className="h-3.5 w-3.5" />}
+                      links={incomingLinks!}
+                      hasMore={incomingHasMore}
+                      truncatedLabel={t("references.truncated")}
+                      unknownLabel={t("references.unknown")}
+                      onOpen={onOpenLinkedMemory}
+                    />
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+
           {/* Tags */}
           {memory.tags && memory.tags.length > 0 && (
             <>
@@ -268,5 +332,61 @@ export function MemoryDetailDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+interface ReferenceListProps {
+  heading: string;
+  icon: React.ReactNode;
+  links: LinkedMemoryRef[];
+  hasMore: boolean;
+  truncatedLabel: string;
+  unknownLabel: string;
+  onOpen?: (memoryId: string) => void;
+}
+
+function ReferenceList({
+  heading,
+  icon,
+  links,
+  hasMore,
+  truncatedLabel,
+  unknownLabel,
+  onOpen,
+}: ReferenceListProps) {
+  return (
+    <div>
+      <div className="flex items-center gap-1.5 mb-1.5 text-xs font-medium text-slate-600 dark:text-slate-300">
+        {icon}
+        <span>{heading}</span>
+        <span className="text-slate-400">({links.length})</span>
+      </div>
+      <ul className="space-y-1">
+        {links.map((link) => (
+          <li key={link.memory_id}>
+            <button
+              type="button"
+              onClick={() => onOpen?.(link.memory_id)}
+              disabled={!onOpen}
+              className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-left text-sm hover:bg-slate-100 dark:hover:bg-slate-800 disabled:cursor-default disabled:hover:bg-transparent transition"
+            >
+              <span className="flex-1 truncate">
+                {link.summary || unknownLabel}
+              </span>
+              {link.type && (
+                <code className="text-xs bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded shrink-0">
+                  {link.type}
+                </code>
+              )}
+            </button>
+          </li>
+        ))}
+      </ul>
+      {hasMore && (
+        <p className="mt-1.5 text-xs text-slate-400 dark:text-slate-500 italic">
+          {truncatedLabel}
+        </p>
+      )}
+    </div>
   );
 }
