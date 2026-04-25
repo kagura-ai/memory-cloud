@@ -174,7 +174,7 @@ export function MemoriesTable({
                         onCheckedChange={(checked) =>
                           handleRowToggle(memory, checked)
                         }
-                        aria-label={`Select ${memory.summary || memory.key}`}
+                        aria-label={`Select ${memory.summary || memory.key || memory.id}`}
                       />
                     </TableCell>
                   )}
