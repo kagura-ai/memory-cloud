@@ -211,8 +211,11 @@ describe("MemoryDetailDialog — notFound mode (Issue #434)", () => {
       />,
     );
 
-    expect(screen.getByText("notFoundTitle")).toBeInTheDocument();
-    expect(screen.getByText("notFoundDesc")).toBeInTheDocument();
+    // notFoundTitle / notFoundDesc legitimately appear twice — once inside
+    // the sr-only DialogTitle/Description (Radix accessibility) and once
+    // inside the visible EmptyState. Match both with getAllByText.
+    expect(screen.getAllByText("notFoundTitle").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("notFoundDesc").length).toBeGreaterThan(0);
     // Critical: we did NOT render the regular field labels — the dialog
     // is fully replaced by the EmptyState body.
     expect(screen.queryByText("memoryDetails")).not.toBeInTheDocument();

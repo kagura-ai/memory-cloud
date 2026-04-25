@@ -24,6 +24,7 @@ const { mockReplace, mockSearchParams } = vi.hoisted(() => ({
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: mockReplace }),
+  usePathname: () => "/workspace/contexts/ctx-1",
   useSearchParams: () => ({
     get: (k: string) => mockSearchParams.current.get(k),
     toString: () => mockSearchParams.current.toString(),
@@ -132,7 +133,9 @@ describe("MemoriesTabPanel — deep-link hydration (Issue #434)", () => {
 
     // The notFound title should appear; toast must NOT have been fired
     // (deep-link path renders EmptyState inside the dialog instead).
-    await screen.findByText("notFoundTitle");
+    // Title appears twice (sr-only DialogTitle + visible EmptyState h3),
+    // so wait for any occurrence and assert ≥ 1.
+    await screen.findAllByText("notFoundTitle");
     expect(mockToast).not.toHaveBeenCalled();
   });
 

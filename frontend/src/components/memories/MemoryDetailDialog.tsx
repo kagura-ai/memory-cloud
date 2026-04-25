@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Separator } from "@/components/ui/separator";
 import {
   ArrowDownLeft,
@@ -100,19 +101,26 @@ export function MemoryDetailDialog({
   };
 
   // NotFound state: memory is unreachable (deleted, cross-context, or the
-  // user lacks permission). Render a self-contained EmptyState body — no
-  // toast, no hard 404 — so the dialog still acts as a recovery surface.
+  // user lacks permission). Render the shared <EmptyState> primitive inside
+  // the dialog body so the empty/error UI matches every other surface in
+  // the app (frontend rule: "MUST use EmptyState primitive"). Title +
+  // description live in <DialogHeader className="sr-only"> to satisfy
+  // Radix's accessibility requirement without visually duplicating the
+  // EmptyState content.
   if (notFound || !memory) {
     return (
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="max-w-md">
-          <DialogHeader>
+          <DialogHeader className="sr-only">
             <DialogTitle>{t("notFoundTitle")}</DialogTitle>
             <DialogDescription>{t("notFoundDesc")}</DialogDescription>
           </DialogHeader>
-          <div className="flex flex-col items-center py-8 text-slate-500 dark:text-slate-400">
-            <FileQuestion className="h-12 w-12 mb-3 opacity-60" />
-          </div>
+          <EmptyState
+            icon={FileQuestion}
+            title={t("notFoundTitle")}
+            description={t("notFoundDesc")}
+            compact
+          />
           <DialogFooter>
             <Button variant="outline" onClick={() => onOpenChange(false)}>
               {t("close")}

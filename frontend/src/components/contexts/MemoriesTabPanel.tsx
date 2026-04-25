@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { FileText } from "lucide-react";
 import { MemoriesTable } from "@/components/memories/MemoriesTable";
 import { MemoryDetailDialog } from "@/components/memories/MemoryDetailDialog";
@@ -102,6 +102,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   const t = useTranslations("contextDetail.memoriesPanel");
   const { toast } = useToast();
   const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
   const memoryIdParam = searchParams.get(MEMORY_ID_PARAM);
 
@@ -128,6 +129,9 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   // Replace the URL while preserving every other search param (e.g. ?tab=).
   // ``router.replace`` (not push) keeps history clean — opening/closing the
   // dialog does not stack new history entries the user has to back through.
+  // Anchoring on ``pathname`` matches the canonical pattern in
+  // ``hooks/useTabParam.ts`` and avoids leaving a bare trailing ``?`` when
+  // every search param has been removed.
   const setMemoryIdParam = useCallback(
     (id: string | null) => {
       const params = new URLSearchParams(searchParams.toString());
@@ -137,9 +141,9 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         params.delete(MEMORY_ID_PARAM);
       }
       const qs = params.toString();
-      router.replace(qs ? `?${qs}` : "?");
+      router.replace(`${pathname}${qs ? `?${qs}` : ""}`);
     },
-    [router, searchParams],
+    [pathname, router, searchParams],
   );
 
   const fetchMemories = useCallback(async () => {
