@@ -546,11 +546,21 @@ class MemoryService:
         if {"summary", "content", "details"} & provided.keys():
             from config.constants import MAX_CONTENT_SIZE
 
+            # Compute the post-patch size from the would-be values (using
+            # `in provided` instead of `or`-falsy fallback). The truthy-fallback
+            # form silently kept the OLD value when the caller explicitly sent
+            # `None` or `{}` to CLEAR a field — making patches that shrink or
+            # clear `details`/`content`/`summary` get rejected against the
+            # pre-patch size instead of the (smaller) post-patch size.
+            next_summary = normalized_summary if "summary" in provided else memory.summary
+            next_content = request.content if "content" in provided else memory.content
+            next_details = request.details if "details" in provided else memory.details
+
             content_size = (
-                len(request.summary or memory.summary or "")
+                len(next_summary or "")
                 + len(memory.context_summary or "")
-                + len(request.content or memory.content or "")
-                + len(str(request.details or memory.details or ""))
+                + len(next_content or "")
+                + len(str(next_details or ""))
             )
             if content_size > MAX_CONTENT_SIZE:
                 raise QuotaExceededError(

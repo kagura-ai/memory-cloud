@@ -268,6 +268,49 @@ class TestPatchMemoryMetadataOnly:
             mock_db.commit.assert_called()
 
     @pytest.mark.asyncio
+    async def test_quota_check_uses_post_patch_size_for_clear(self, service):
+        """Copilot loop 2: clearing details on a near-quota memory must not 422.
+
+        The pre-fix `len(str(request.details or memory.details or ""))` form
+        kept the OLD value when `request.details` was `None` or `{}`, so a
+        patch that intended to SHRINK the row was rejected against the
+        pre-shrink size.
+        """
+        from config.constants import MAX_CONTENT_SIZE
+
+        # Memory with details near the quota — clearing them should pass.
+        big_details = {"k": "x" * (MAX_CONTENT_SIZE - 100)}
+        memory = _make_memory(details=big_details, summary="ok summary baseline")
+        service.memory_repo.get = AsyncMock(return_value=memory)
+
+        with (
+            patch("services.permission_service.PermissionService") as mock_perm_cls,
+            patch(
+                "services.memory_service.update_memory_payload_in_qdrant",
+                new=AsyncMock(),
+            ),
+            patch(
+                "services.memory_service.resolve_collection_name",
+                new=AsyncMock(return_value="kagura_memories"),
+            ),
+            patch.object(
+                service,
+                "_fetch_declared_link_refs",
+                new=AsyncMock(return_value=([], False, [], False)),
+            ),
+        ):
+            mock_perm = mock_perm_cls.return_value
+            mock_perm.can_access_memory = AsyncMock(return_value=True)
+
+            # Send `details: null` to clear — must NOT raise QuotaExceededError.
+            await service.patch_memory(
+                memory_id=memory.id,
+                request=PatchMemoryRequest(details=None),
+                user_id="test_user",
+            )
+            assert memory.details is None
+
+    @pytest.mark.asyncio
     async def test_qdrant_payload_failure_does_not_raise(self, service):
         """Drift visibility: qdrant fail after PG commit logs error, no rollback."""
         memory = _make_memory()

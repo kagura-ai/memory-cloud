@@ -151,16 +151,28 @@ export function EditMemoryDialog({
       patch.type = type;
     }
 
-    const importanceNum = Number(importance);
-    if (
-      Number.isFinite(importanceNum) &&
-      Math.abs(importanceNum - memory.importance) > 1e-9
-    ) {
+    // `Number("") === 0` in JS — without this guard, clearing the importance
+    // input then submitting would silently set the column to 0 (and treat it
+    // as a real change vs the prior 0.5 default). Treat empty / non-finite
+    // as a validation error so the user has to type a number to commit.
+    const importanceTrimmed = importance.trim();
+    if (importanceTrimmed !== String(memory.importance)) {
+      if (importanceTrimmed.length === 0) {
+        setError(t("importanceOutOfRange"));
+        return;
+      }
+      const importanceNum = Number(importanceTrimmed);
+      if (!Number.isFinite(importanceNum)) {
+        setError(t("importanceOutOfRange"));
+        return;
+      }
       if (importanceNum < 0 || importanceNum > 1) {
         setError(t("importanceOutOfRange"));
         return;
       }
-      patch.importance = importanceNum;
+      if (Math.abs(importanceNum - memory.importance) > 1e-9) {
+        patch.importance = importanceNum;
+      }
     }
 
     // Order-insensitive tag comparison: backend may normalize tag order on

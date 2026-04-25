@@ -261,6 +261,32 @@ describe("EditMemoryDialog — details JSON validation", () => {
     expect(patch).not.toHaveProperty("details");
   });
 
+  it("rejects empty importance input as validation error (Copilot loop 2)", async () => {
+    // Number("") === 0 in JS — without an explicit empty-string guard,
+    // clearing the field then submitting would silently send importance=0.
+    render(
+      <EditMemoryDialog
+        memory={makeRef()}
+        open={true}
+        onOpenChange={vi.fn()}
+        onSuccess={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText(/importanceLabel/), {
+      target: { value: "" },
+    });
+    const confirmBtn = screen.getByRole("button", { name: "confirm" });
+    const form = confirmBtn.closest("form");
+    expect(form).not.toBeNull();
+    fireEvent.submit(form!);
+
+    await waitFor(() => {
+      expect(screen.getByText("importanceOutOfRange")).toBeInTheDocument();
+    });
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
   it("rejects details that parse to a non-object value", async () => {
     render(
       <EditMemoryDialog
