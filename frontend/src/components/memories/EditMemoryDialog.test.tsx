@@ -231,6 +231,36 @@ describe("EditMemoryDialog — details JSON validation", () => {
     expect(mockUpdate).not.toHaveBeenCalled();
   });
 
+  it("does not falsely dirty an existing empty-object details when user does nothing", async () => {
+    // Copilot loop 1: detailsToText({}) used to collapse to "" which the
+    // submit logic interpreted as `null`, accidentally clearing the column.
+    mockUpdate.mockResolvedValue(makeRef());
+    render(
+      <EditMemoryDialog
+        memory={makeRef({ details: {} })}
+        open={true}
+        onOpenChange={vi.fn()}
+        onSuccess={vi.fn()}
+      />,
+    );
+
+    // Touch some unrelated field to make submit go through.
+    fireEvent.change(screen.getByLabelText(/importanceLabel/), {
+      target: { value: "0.95" },
+    });
+    const confirmBtn = screen.getByRole("button", { name: "confirm" });
+    const form = confirmBtn.closest("form");
+    expect(form).not.toBeNull();
+    fireEvent.submit(form!);
+
+    await waitFor(() => {
+      expect(mockUpdate).toHaveBeenCalled();
+    });
+    // The patch should NOT include `details` — the existing `{}` was untouched.
+    const [, patch] = mockUpdate.mock.calls[0];
+    expect(patch).not.toHaveProperty("details");
+  });
+
   it("rejects details that parse to a non-object value", async () => {
     render(
       <EditMemoryDialog

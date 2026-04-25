@@ -148,7 +148,8 @@ class TestPatchMemoryEmbeddingRegen:
     """summary / content changes trigger re-embed + neural edge invalidation."""
 
     @pytest.mark.asyncio
-    async def test_summary_change_invalidates_neural_edges(self, service, mock_db):
+    async def test_summary_change_invalidates_neural_edges_and_commits(self, service, mock_db):
+        """Copilot loop 1: edge DELETE must be committed (repo doesn't commit internally)."""
         memory = _make_memory()
         service.memory_repo.get = AsyncMock(return_value=memory)
 
@@ -183,7 +184,10 @@ class TestPatchMemoryEmbeddingRegen:
             )
 
             edge_repo_instance.delete_node_edges.assert_awaited_once()
-            mock_db.commit.assert_called()
+            # Two commits expected: (1) memory update, (2) edge invalidation.
+            assert mock_db.commit.await_count >= 2, (
+                "edge invalidation must commit; otherwise the DELETE is discarded"
+            )
             assert memory.embedding_status == "pending"
 
     @pytest.mark.asyncio
@@ -401,3 +405,14 @@ class TestPatchMemoryRequestValidation:
     def test_tags_array_at_max_length_accepted(self):
         req = PatchMemoryRequest(tags=["x"] * 100)
         assert len(req.tags) == 100
+
+    def test_explicit_null_rejected_for_non_clearable_fields(self):
+        """Copilot loop 1: sending `{field: null}` for NOT NULL columns must 422, not 500."""
+        for field in ("summary", "content", "type", "importance", "tags"):
+            with pytest.raises(ValueError):
+                PatchMemoryRequest(**{field: None})
+
+    def test_explicit_null_accepted_only_for_details(self):
+        req = PatchMemoryRequest(details=None)
+        assert "details" in req.model_fields_set
+        assert req.details is None

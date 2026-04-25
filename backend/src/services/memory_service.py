@@ -591,6 +591,15 @@ class MemoryService:
             # vector. NULL workspace/context skips invalidation but emits a
             # warning so operators can spot pre-Migration-063 rows that drift
             # silently.
+            #
+            # `NeuralEdgeRepository.delete_node_edges` issues a SQL DELETE via
+            # `self.db.execute(...)` but does NOT commit internally — without
+            # an explicit commit here the DELETE would never persist (the
+            # memory commit above closed the prior transaction; the DELETE
+            # lands in a fresh implicit transaction that is discarded on
+            # session close). Best-effort: commit on success, rollback on
+            # failure so the (incomplete) DELETE doesn't leak into the next
+            # statement on this session.
             if memory_workspace_id and memory_context_id:
                 from repositories.neural_edge import NeuralEdgeRepository
 
@@ -602,6 +611,7 @@ class MemoryService:
                         workspace_id=memory_workspace_id,
                         context_id=memory_context_id,
                     )
+                    await self.db.commit()
                     if edges_deleted > 0:
                         logger.info(
                             "memory_patch_edges_invalidated",
@@ -610,6 +620,7 @@ class MemoryService:
                             user_id=user_id,
                         )
                 except Exception as exc:  # noqa: BLE001
+                    await self.db.rollback()
                     logger.error(
                         "memory_patch_edge_invalidation_failed",
                         memory_id=str(memory.id),

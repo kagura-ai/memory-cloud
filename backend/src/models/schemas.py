@@ -395,6 +395,20 @@ class PatchMemoryRequest(BaseModel):
     def _at_least_one_field(self) -> "PatchMemoryRequest":
         if not self.model_dump(exclude_unset=True):
             raise ValueError("PATCH request must include at least one field to update")
+        # Reject explicit `null` for fields that either map to NOT NULL DB
+        # columns (`summary`/`content`/`type`/`importance`) — would 500 with a
+        # PG integrity error — or would otherwise duplicate semantics with
+        # field omission (`tags`: omit = preserve, `[]` = clear, `null` is
+        # ambiguous). `details: null` is the only legitimate explicit-null
+        # value (clears the JSONB column).
+        non_nullable = ("summary", "content", "type", "importance", "tags")
+        invalid_null = [
+            f for f in non_nullable if f in self.model_fields_set and getattr(self, f) is None
+        ]
+        if invalid_null:
+            raise ValueError(
+                "PATCH request fields must not be null when provided: " + ", ".join(invalid_null)
+            )
         return self
 
 

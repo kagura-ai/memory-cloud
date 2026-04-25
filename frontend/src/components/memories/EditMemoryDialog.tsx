@@ -33,7 +33,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { updateMemoryById } from "@/lib/api/memory";
+import { updateMemoryById, type UpdateMemoryByIdPatch } from "@/lib/api/memory";
 import type { KnownMemoryType, MemoryReference } from "@/lib/types/memory";
 
 interface EditMemoryDialogProps {
@@ -65,7 +65,10 @@ function csvToTags(csv: string): string[] {
 function detailsToText(
   details: Record<string, unknown> | null | undefined,
 ): string {
-  if (!details || Object.keys(details).length === 0) return "";
+  // Distinguish `null`/undefined (no details — empty textarea) from `{}`
+  // (explicit empty object — show as "{}" so the dirty check doesn't false-
+  // positive convert `{}` to `null` on submit).
+  if (details == null) return "";
   return JSON.stringify(details, null, 2);
 }
 
@@ -89,12 +92,14 @@ export function EditMemoryDialog({
     null,
   );
 
-  // Reset form when the dialog is reopened on a different memory. Depend on
-  // `memory.memory_id` only — depending on the whole `memory` object would
-  // reset user edits on every parent re-render that produces a referentially
-  // new object. (`memory` itself is not referentially stable across the
-  // panel's hydration cycle.)
+  // Reset form on (a) memory id changing or (b) the dialog opening. The
+  // component stays mounted across open/close cycles; without the `open`
+  // dependency, closing mid-edit then reopening on the same memory would
+  // resurrect the prior in-progress edits + error state — Cancel is
+  // expected to discard, mirroring DeleteMemoryDialog and the rest of the
+  // dialog set. The `if (!open) return` guard skips the closing transition.
   useEffect(() => {
+    if (!open) return;
     setSummary(memory.summary);
     setContent(memory.content);
     setType(memory.type);
@@ -104,7 +109,7 @@ export function EditMemoryDialog({
     setDetailsParseError(null);
     setError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [memory.memory_id]);
+  }, [memory.memory_id, open]);
 
   const typeIsKnown = useMemo<boolean>(
     () => KNOWN_TYPES.some((t) => t === memory.type),
@@ -121,7 +126,9 @@ export function EditMemoryDialog({
     if (loading) return;
 
     // Compute dirty fields. Only changed values are included in the patch.
-    const patch: Record<string, unknown> = {};
+    // Type as `UpdateMemoryByIdPatch` (not `Record<string, unknown>`) so the
+    // request body matches the helper's contract and tsc catches typos.
+    const patch: UpdateMemoryByIdPatch = {};
 
     const summaryTrimmed = summary.trim();
     if (summaryTrimmed !== memory.summary) {
