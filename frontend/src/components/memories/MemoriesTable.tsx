@@ -206,6 +206,7 @@ export function MemoriesTable({
                         size="icon"
                         onClick={() => onView(memory)}
                         title="View details"
+                        aria-label="View details"
                       >
                         <Eye className="h-4 w-4" />
                       </Button>
@@ -215,6 +216,7 @@ export function MemoriesTable({
                           size="icon"
                           onClick={() => onEdit(memory)}
                           title="Edit memory"
+                          aria-label="Edit memory"
                         >
                           <Pencil className="h-4 w-4" />
                         </Button>
@@ -224,6 +226,7 @@ export function MemoriesTable({
                         size="icon"
                         onClick={() => onDelete(memory)}
                         title="Delete memory"
+                        aria-label="Delete memory"
                         className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20"
                       >
                         <Trash2 className="h-4 w-4" />
