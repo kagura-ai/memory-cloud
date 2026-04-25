@@ -219,6 +219,29 @@ class ReferenceRequest(BaseModel):
     memory_id: UUID
 
 
+class LinkedMemoryRef(BaseModel):
+    """A single declared_link reference surfaced in ReferenceResponse.
+
+    Issue #440: outgoing_links / incoming_links items. Edge invariant
+    (`_validate_edge_context_invariant`) guarantees both endpoints share
+    the same (workspace_id, context_id) as the source memory, so a
+    workspace-scoped permission check on the source covers these too.
+    The bulk re-scope in MemoryService.reference() is defense-in-depth
+    against soft-deleted or invariant-violating rows.
+    """
+
+    memory_id: UUID
+    summary: str
+    type: str | None = None
+    importance: float
+    weight: float
+    created_at: datetime
+
+    @field_serializer("created_at")
+    def _serialize_created_at(self, dt: datetime) -> str:
+        return dt.isoformat() + ("Z" if dt.tzinfo is None else "")
+
+
 class ReferenceResponse(BaseModel):
     """Response schema for reference() API (full details)."""
 
@@ -228,10 +251,15 @@ class ReferenceResponse(BaseModel):
     content: str
     details: dict | None
     type: str
+    # Issue #434: scope and updated_at let the dialog render correctly when
+    # the caller has only a memory_id (deep-link path), without round-tripping
+    # through `GET /memory/list` to discover them.
+    scope: Literal["working", "persistent"]
     importance: float
     tags: list[str]
     context: dict | None
     created_at: datetime
+    updated_at: datetime
     client: str
     # Optional origin metadata (Issue #215). Surfaced so the detail UI can
     # show where a memory came from (vault://, file://, https://, etc.).
@@ -239,12 +267,20 @@ class ReferenceResponse(BaseModel):
     # contract stays consistent and unexpected values can't leak to the UI.
     source_uri: str | None = None
     source_type: Literal["file", "url", "vault", "api", "manual"] | None = None
+    # Issue #440: declared_link references for the dialog "References" section.
+    # Naming: outgoing_has_more / incoming_has_more matches MemoryListResponse.has_more
+    # (codebase precedent for capped collections); the issue body's `*_truncated`
+    # suggestion is intentionally overridden for consistency.
+    outgoing_links: list[LinkedMemoryRef] = Field(default_factory=list)
+    outgoing_has_more: bool = False
+    incoming_links: list[LinkedMemoryRef] = Field(default_factory=list)
+    incoming_has_more: bool = False
 
-    @field_serializer("created_at")
-    def _serialize_created_at(self, dt: datetime) -> str:
-        # Memory.created_at is stored as naive UTC. Tag with "Z" so JS
-        # clients parse it as UTC (without it, naive ISO is interpreted
-        # as local time, which JST shifts by +9 hours).
+    @field_serializer("created_at", "updated_at")
+    def _serialize_dt(self, dt: datetime) -> str:
+        # Memory.created_at/updated_at are stored as naive UTC. Tag with "Z"
+        # so JS clients parse them as UTC (without it, naive ISO is
+        # interpreted as local time, which JST shifts by +9 hours).
         return dt.isoformat() + ("Z" if dt.tzinfo is None else "")
 
 
