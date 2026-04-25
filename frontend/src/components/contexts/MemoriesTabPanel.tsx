@@ -233,6 +233,14 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     if (!memoryIdParam) {
       setDetailOpen(false);
       setDetailNotFound(false);
+      // URL-driven dismiss (back/forward, manual edit) bypasses
+      // ``handleDetailOpenChange``, so the in-flight cleanup needs to fire
+      // here too: reset hydrated state and clear ``pendingHydrationRef`` so
+      // a late URL-driven referenceMemory response can't re-open the dialog
+      // after the param has been removed.
+      setHydrated(null);
+      setLinkedRefs(EMPTY_LINKED_REFS);
+      pendingHydrationRef.current = null;
       return;
     }
     if (skipNextDeepLinkEffectRef.current === memoryIdParam) {
