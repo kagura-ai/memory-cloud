@@ -2662,9 +2662,34 @@
     "sharedContext": "Shared context",
     "tabs": {
       "overview": "Overview",
+      "memories": "Memories",
       "connections": "Connections",
       "graph": "Graph",
       "settings": "Settings"
+    },
+    "memoriesPanel": {
+      "emptyTitle": "No memories yet",
+      "emptyDesc": "Use the MCP remember tool to store memories in this context.",
+      "loadFailed": "Failed to load memories",
+      "hydrateFailed": "Failed to load memory details",
+      "deleteSuccess": "Memory deleted"
+    },
+    "detailDialog": {
+      "memoryId": "Memory ID",
+      "copyMemoryId": "Copy memory ID",
+      "source": "Source"
+    },
+    "deleteDialog": {
+      "title": "Delete Memory",
+      "description": "Are you sure you want to delete this memory? This action cannot be undone.",
+      "summaryLabel": "Summary:",
+      "idLabel": "Memory ID:",
+      "scopeLabel": "Scope:",
+      "previewLabel": "Value (preview):",
+      "cancel": "Cancel",
+      "confirm": "Delete Memory",
+      "deleting": "Deleting...",
+      "failed": "Failed to delete memory"
     }
   },
   "contextSettings": {

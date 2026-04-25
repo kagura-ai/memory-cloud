@@ -107,6 +107,7 @@ const CONTEXT_NAME_PATTERN = /^[a-z0-9_-]+$/;
 export default function ContextsPage() {
   const t = useTranslations("contexts");
   const tCommon = useTranslations("common");
+  const tDetail = useTranslations("contextDetail");
   const router = useRouter();
   const searchParams = useSearchParams();
   const { user, refetchUser } = useAuth();
@@ -1033,6 +1034,16 @@ export default function ContextsPage() {
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
+                            <DropdownMenuItem
+                              onClick={() =>
+                                router.push(
+                                  `/workspace/contexts/${context.id}?tab=memories`,
+                                )
+                              }
+                            >
+                              <Settings2 className="h-4 w-4 mr-2" />
+                              {tDetail("tabs.memories")}
+                            </DropdownMenuItem>
                             <DropdownMenuItem
                               onClick={() =>
                                 router.push(

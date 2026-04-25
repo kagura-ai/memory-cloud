@@ -42,6 +42,10 @@ export interface Memory {
   updated_at: string;
   access_count?: number;
   last_accessed?: string;
+  // Origin metadata (Issue #215). Optional — only populated for memories
+  // imported from a vault, file, URL, or other tracked source.
+  source_uri?: string | null;
+  source_type?: string | null;
 }
 
 export interface CreateMemoryRequest {
@@ -86,6 +90,28 @@ export interface MemoryListItem {
   importance: number;
   created_at: string;
   updated_at: string;
+}
+
+// Exact mirror of backend `ReferenceResponse` (schemas.py:222) — returned by
+// `POST /api/v1/memory/reference`. This is NOT structurally equal to `Memory`:
+// `key`, `value`, `agent_name`, `user_id`, `updated_at`, `access_count` are
+// absent. Callers that feed a `MemoryDetailDialog` (which reads those fields)
+// must adapt at the boundary — see ``referenceAsMemory`` in
+// ``components/contexts/MemoriesTabPanel.tsx`` for the canonical adapter.
+export interface MemoryReference {
+  memory_id: string;
+  summary: string;
+  context_summary: string | null;
+  content: string;
+  details: Record<string, unknown> | null;
+  type: string;
+  importance: number;
+  tags: string[];
+  context: Record<string, unknown> | null;
+  created_at: string;
+  client: string;
+  source_uri?: string | null;
+  source_type?: string | null;
 }
 
 // Generic over the row shape: default is `MemoryListItem` (the structurally

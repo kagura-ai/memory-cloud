@@ -130,6 +130,52 @@ class TestListMemoriesContextFilter:
             )
 
     @pytest.mark.asyncio
+    async def test_null_updated_at_falls_back_to_created_at(self):
+        """Memory.updated_at is nullable (set onupdate). Fresh-insert rows have
+        updated_at=NULL; serializer must not crash and should fall back to
+        created_at to keep the response shape stable."""
+        mem = _mock_memory_row()
+        mem.updated_at = None  # simulates a never-updated row
+        mock_db = _db_with_rows(total=1, rows=[mem])
+
+        with patch("api.routes.memory.PermissionService"):
+            response = await list_memories(
+                user=MOCK_USER,
+                db=mock_db,
+                scope=None,
+                type=None,
+                context_id=None,
+                limit=50,
+                offset=0,
+            )
+
+        assert response.total == 1
+        assert response.memories[0].updated_at == response.memories[0].created_at
+
+    @pytest.mark.asyncio
+    async def test_soft_deleted_memories_excluded(self):
+        """``deleted_at IS NULL`` is in WHERE on every code path (regression #433):
+        forget() is a soft-delete, so the list must hide tombstones."""
+        mock_db = _db_with_rows(total=0, rows=[])
+
+        with patch("api.routes.memory.PermissionService"):
+            await list_memories(
+                user=MOCK_USER,
+                db=mock_db,
+                scope=None,
+                type=None,
+                context_id=None,
+                limit=50,
+                offset=0,
+            )
+
+        for call_index in (0, 1):
+            sql = _where_sql(mock_db, call_index)
+            assert "deleted_at IS NULL" in sql, (
+                f"deleted_at filter missing (call_index={call_index}): {sql}"
+            )
+
+    @pytest.mark.asyncio
     async def test_context_id_denied_propagates_404(self):
         """PermissionService 404 on forbidden/missing context propagates as HTTPException."""
         mock_db = AsyncMock()  # must not reach .execute()

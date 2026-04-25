@@ -27,7 +27,10 @@ interface MemoriesTableProps {
   memories: Memory[];
   loading: boolean;
   onView: (memory: Memory) => void;
-  onEdit: (memory: Memory) => void;
+  // Optional: omit to hide the Edit icon. Same convention as MemoryDetailDialog
+  // — until a UUID-addressed update endpoint lands (#439), consumers without
+  // an edit path should pass nothing rather than a no-op callback.
+  onEdit?: (memory: Memory) => void;
   onDelete: (memory: Memory) => void;
   page: number;
   pageSize: number;
@@ -151,9 +154,9 @@ export function MemoriesTable({
                   />
                 </TableHead>
               )}
-              <TableHead>Key</TableHead>
+              <TableHead>Summary</TableHead>
+              <TableHead>Type</TableHead>
               <TableHead>Scope</TableHead>
-              <TableHead>Agent</TableHead>
               <TableHead>Importance</TableHead>
               <TableHead>Updated</TableHead>
               <TableHead className="text-right">Actions</TableHead>
@@ -171,19 +174,23 @@ export function MemoriesTable({
                         onCheckedChange={(checked) =>
                           handleRowToggle(memory, checked)
                         }
-                        aria-label={`Select ${memory.key}`}
+                        aria-label={`Select ${memory.summary || memory.key || memory.id}`}
                       />
                     </TableCell>
                   )}
                   <TableCell className="font-medium max-w-xs truncate">
-                    {memory.key}
+                    {memory.summary || memory.key}
+                  </TableCell>
+                  <TableCell>
+                    {memory.type ? (
+                      <code className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">
+                        {memory.type}
+                      </code>
+                    ) : (
+                      <span className="text-xs text-slate-400">—</span>
+                    )}
                   </TableCell>
                   <TableCell>{getScopeBadge(memory.scope)}</TableCell>
-                  <TableCell>
-                    <code className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">
-                      {memory.agent_name}
-                    </code>
-                  </TableCell>
                   <TableCell>{getImportanceBadge(memory.importance)}</TableCell>
                   <TableCell className="text-sm text-slate-500">
                     {formatRelativeTime(
@@ -199,22 +206,27 @@ export function MemoriesTable({
                         size="icon"
                         onClick={() => onView(memory)}
                         title="View details"
+                        aria-label="View details"
                       >
                         <Eye className="h-4 w-4" />
                       </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => onEdit(memory)}
-                        title="Edit memory"
-                      >
-                        <Pencil className="h-4 w-4" />
-                      </Button>
+                      {onEdit && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => onEdit(memory)}
+                          title="Edit memory"
+                          aria-label="Edit memory"
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                      )}
                       <Button
                         variant="ghost"
                         size="icon"
                         onClick={() => onDelete(memory)}
                         title="Delete memory"
+                        aria-label="Delete memory"
                         className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20"
                       >
                         <Trash2 className="h-4 w-4" />

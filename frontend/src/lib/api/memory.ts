@@ -7,41 +7,99 @@
 import { apiClient } from "./base";
 import type {
   Memory,
+  MemoryScope,
   CreateMemoryRequest,
   UpdateMemoryRequest,
-  MemorySearchParams,
   MemoryListResponse,
+  MemoryListItem,
+  MemoryReference,
   MemoryStatsResponse,
 } from "../types/memory";
 
-/**
- * Get list of memories with optional filters
- */
-export async function getMemories(
-  params: MemorySearchParams = {},
-): Promise<MemoryListResponse<Memory>> {
-  const searchParams = new URLSearchParams();
-
-  if (params.query) searchParams.append("query", params.query);
-  if (params.scope) searchParams.append("scope", params.scope);
-  if (params.agent_name) searchParams.append("agent_name", params.agent_name);
-  if (params.tags)
-    params.tags.forEach((tag) => searchParams.append("tags", tag));
-  if (params.min_importance !== undefined)
-    searchParams.append("min_importance", params.min_importance.toString());
-  if (params.max_importance !== undefined)
-    searchParams.append("max_importance", params.max_importance.toString());
-  if (params.limit) searchParams.append("limit", params.limit.toString());
-  if (params.offset) searchParams.append("offset", params.offset.toString());
-
-  const queryString = searchParams.toString();
-  const endpoint = `/memory${queryString ? `?${queryString}` : ""}`;
-
-  return apiClient.get<MemoryListResponse<Memory>>(endpoint);
+// Issue #431/#433: Backend `GET /api/v1/memory/list` accepts only
+// {context_id, scope, type, limit, offset} — the old getMemories params
+// (query, agent_name, tags, min_importance, max_importance) don't exist
+// on this endpoint. Named params object, not the legacy `MemorySearchParams`.
+export interface ListMemoriesParams {
+  context_id?: string;
+  scope?: MemoryScope;
+  type?: string;
+  limit?: number;
+  offset?: number;
 }
 
 /**
- * Get a single memory by key
+ * List memories, optionally scoped to a single context.
+ *
+ * Hits `GET /api/v1/memory/list` and returns the canonical
+ * `MemoryListItem` row shape (no legacy composite-key fields).
+ */
+export async function getMemories(
+  params: ListMemoriesParams = {},
+): Promise<MemoryListResponse<MemoryListItem>> {
+  const searchParams = new URLSearchParams();
+
+  if (params.context_id) searchParams.set("context_id", params.context_id);
+  if (params.scope) searchParams.set("scope", params.scope);
+  if (params.type) searchParams.set("type", params.type);
+  searchParams.set("limit", String(params.limit ?? 50));
+  searchParams.set("offset", String(params.offset ?? 0));
+
+  return apiClient.get<MemoryListResponse<MemoryListItem>>(
+    `/api/v1/memory/list?${searchParams.toString()}`,
+  );
+}
+
+/**
+ * Fetch full memory detail by UUID.
+ *
+ * Returns the backend's `ReferenceResponse` shape verbatim. Consumers that
+ * need the legacy `Memory` shape must adapt — the backend does not return
+ * `key` / `value` / `agent_name` / `user_id` / `updated_at` / `access_count`.
+ */
+export async function referenceMemory(
+  memoryId: string,
+): Promise<MemoryReference> {
+  return apiClient.post<MemoryReference>("/api/v1/memory/reference", {
+    memory_id: memoryId,
+  });
+}
+
+/**
+ * Delete a memory by UUID (UUID-addressed forget, not the composite-key
+ * DELETE which doesn't exist as a REST endpoint).
+ */
+export async function forgetMemory(memoryId: string): Promise<void> {
+  await apiClient.post<unknown>("/api/v1/memory/forget", {
+    memory_id: memoryId,
+  });
+}
+
+// =============================================================================
+// LEGACY DEAD CODE — composite-key helpers below this banner.
+//
+// These functions target backend paths that DO NOT EXIST on the current API
+// surface (the memory router only exposes `/api/v1/memory/list`,
+// `/remember`, `/reference`, `/forget`, `/recall`, `/explore`, `/stats`,
+// `/access-patterns`). Calling any of them today returns 404.
+//
+// They remain in the file because the dialog components still import them
+// (CreateMemoryDialog → createMemory, EditMemoryDialog → updateMemory,
+// MemoriesTable → bulkDeleteMemories). Those dialogs are not yet wired to
+// any consumer. Removal is tracked alongside the dialog refactors:
+//   - createMemory / CreateMemoryDialog → needs /remember rewire
+//   - updateMemory / EditMemoryDialog   → see #439 (UUID PUT endpoint)
+//   - deleteMemory                       → superseded by forgetMemory above
+//   - bulkDeleteMemories                 → blocked on a UUID bulk-forget
+//   - searchMemoriesSemantic / Keyword / Timeline / getMemory / getMemoryStats
+//                                         → broken legacy search/stats
+//
+// Do NOT add new callers. The single-source canonical list/read/delete is
+// `getMemories` / `referenceMemory` / `forgetMemory` above.
+// =============================================================================
+
+/**
+ * @deprecated Backend path /memory/{key} does not exist. Use referenceMemory(id).
  */
 export async function getMemory(
   key: string,
@@ -59,7 +117,7 @@ export async function getMemory(
 }
 
 /**
- * Create a new memory
+ * @deprecated Backend path POST /memory does not exist. Use POST /api/v1/memory/remember.
  */
 export async function createMemory(
   userId: string,
@@ -72,7 +130,7 @@ export async function createMemory(
 }
 
 /**
- * Update an existing memory
+ * @deprecated Backend path PUT /memory/{key} does not exist. See #439.
  */
 export async function updateMemory(
   key: string,
@@ -90,7 +148,7 @@ export async function updateMemory(
 }
 
 /**
- * Delete a memory
+ * @deprecated Backend path DELETE /memory/{key} does not exist. Use forgetMemory(id).
  */
 export async function deleteMemory(
   key: string,
@@ -110,7 +168,7 @@ export async function deleteMemory(
 }
 
 /**
- * Get memory statistics
+ * @deprecated Backend path is GET /api/v1/memory/stats and derives user from auth, not query.
  */
 export async function getMemoryStats(
   userId: string,
@@ -119,21 +177,7 @@ export async function getMemoryStats(
 }
 
 /**
- * Search memories semantically
- */
-export async function searchMemories(
-  userId: string,
-  query: string,
-  params: Omit<MemorySearchParams, "query"> = {},
-): Promise<MemoryListResponse<Memory>> {
-  return getMemories({
-    ...params,
-    query,
-  });
-}
-
-/**
- * Bulk delete memories (Issue #666)
+ * @deprecated Backend path POST /memory/bulk-delete does not exist. Needs UUID bulk-forget.
  */
 export async function bulkDeleteMemories(
   keys: string[],

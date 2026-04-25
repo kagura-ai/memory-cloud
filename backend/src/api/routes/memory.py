@@ -511,8 +511,13 @@ async def list_memories(
                 user_id=user_id, context_id=context_id
             )
 
-        # Build query
-        query = select(Memory).where(Memory.user_id == user_id)
+        # Build query. Exclude soft-deleted rows — POST /forget sets
+        # ``deleted_at`` rather than removing the row, and the list view
+        # must not surface tombstones.
+        query = select(Memory).where(
+            Memory.user_id == user_id,
+            Memory.deleted_at.is_(None),
+        )
 
         if scope:
             query = query.where(Memory.scope == scope)
@@ -524,7 +529,10 @@ async def list_memories(
             query = query.where(Memory.context_id == context_id)
 
         # Get total count (with same filters as data query)
-        count_query = select(func.count(Memory.id)).where(Memory.user_id == user_id)
+        count_query = select(func.count(Memory.id)).where(
+            Memory.user_id == user_id,
+            Memory.deleted_at.is_(None),
+        )
         if scope:
             count_query = count_query.where(Memory.scope == scope)
         if type:
@@ -540,7 +548,17 @@ async def list_memories(
         )
         memories = list(result.scalars().all())
 
-        # Convert to response
+        # Convert to response. Memory.created_at / updated_at are stored as
+        # naive UTC datetimes (DateTime without timezone=True). Tag the
+        # serialized form with "Z" so JS clients (which parse naive ISO as
+        # local time) don't render JST-shifted relative timestamps.
+        # ``updated_at`` is nullable (only set onupdate), so fall back to
+        # ``created_at`` for fresh rows that haven't been touched since
+        # insert. The frontend renders both as the row "updated" timestamp,
+        # so created_at is the correct fallback rather than null/empty.
+        def _utc_iso(dt: Any) -> str:
+            return dt.isoformat() + ("Z" if dt.tzinfo is None else "")
+
         memory_items = [
             MemoryListItem(
                 id=str(m.id),
@@ -548,8 +566,8 @@ async def list_memories(
                 type=m.type,
                 scope=m.scope,
                 importance=m.importance,
-                created_at=m.created_at.isoformat(),
-                updated_at=m.updated_at.isoformat(),
+                created_at=_utc_iso(m.created_at),
+                updated_at=_utc_iso(m.updated_at or m.created_at),
             )
             for m in memories
         ]
