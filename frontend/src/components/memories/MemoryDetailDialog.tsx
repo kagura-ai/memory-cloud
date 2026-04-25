@@ -144,7 +144,9 @@ export function MemoryDetailDialog({
             <Badge
               variant={memory.scope === "persistent" ? "default" : "outline"}
             >
-              {memory.scope}
+              {memory.scope === "persistent"
+                ? t("scopePersistent")
+                : t("scopeWorking")}
             </Badge>
           </DialogTitle>
           <DialogDescription>{t("memoryDetails")}</DialogDescription>

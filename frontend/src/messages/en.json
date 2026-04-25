@@ -2703,6 +2703,8 @@
       "memoryId": "Memory ID",
       "copyMemoryId": "Copy memory ID",
       "source": "Source",
+      "scopePersistent": "Persistent",
+      "scopeWorking": "Working",
       "memoryDetails": "Memory details and metadata",
       "value": "Value",
       "copy": "Copy",

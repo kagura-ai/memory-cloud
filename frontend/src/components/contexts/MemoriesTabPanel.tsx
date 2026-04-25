@@ -123,8 +123,19 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   // resolved, the B-click sets `pendingHydrationRef.current = B.id`; when A
   // finally resolves we compare and discard the stale result. Without this
   // the last-resolving call wins, so A's data can land in a dialog opened
-  // for B.
+  // for B. Cleared on dialog close so a stale in-flight reference can't
+  // re-open the dialog after the user dismissed it.
   const pendingHydrationRef = useRef<string | null>(null);
+
+  // Bypass token for the deep-link useEffect: when handleView /
+  // handleOpenLinkedMemory mutate the URL, they also call openWith()
+  // directly with viaUrl=false (so a failure surfaces as a toast — the
+  // user clicked, they expect a notification, not a silent EmptyState).
+  // Without this token the URL change would re-fire the effect, issue a
+  // duplicate referenceMemory call, AND swap the toast path for the
+  // viaUrl=true notFound path. Setting the ref to the id about to be
+  // pushed lets the effect skip exactly one cycle.
+  const skipNextDeepLinkEffectRef = useRef<string | null>(null);
 
   // Replace the URL while preserving every other search param (e.g. ?tab=).
   // ``router.replace`` (not push) keeps history clean — opening/closing the
@@ -213,11 +224,19 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   // hydration runs straight from the API so a URL referencing a memory on a
   // different page (or even a different context the user has access to)
   // works on first paint. The dependency on ``memoryIdParam`` only — not
-  // ``openWith`` — avoids re-firing when ``items`` re-renders.
+  // ``openWith`` — avoids re-firing when ``items`` re-renders. Click-driven
+  // URL mutations (handleView / handleOpenLinkedMemory) set
+  // ``skipNextDeepLinkEffectRef`` so this effect does NOT issue a duplicate
+  // referenceMemory and does NOT swap the click's toast path for the
+  // URL-paste notFound path.
   useEffect(() => {
     if (!memoryIdParam) {
       setDetailOpen(false);
       setDetailNotFound(false);
+      return;
+    }
+    if (skipNextDeepLinkEffectRef.current === memoryIdParam) {
+      skipNextDeepLinkEffectRef.current = null;
       return;
     }
     if (hydrated?.id === memoryIdParam && detailOpen) return;
@@ -236,6 +255,11 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         // and won't re-open.
         if (memoryIdParam) setMemoryIdParam(null);
         setDetailNotFound(false);
+        // Cancel any in-flight referenceMemory: setting the ref to null
+        // makes the openWith resolution path's identity check fail, so a
+        // late-arriving response can't re-open the dialog the user just
+        // closed.
+        pendingHydrationRef.current = null;
       }
     },
     [memoryIdParam, setMemoryIdParam],
@@ -244,6 +268,10 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   const handleView = useCallback(
     (memory: Memory) => {
       // Sync URL first so refresh / share works; openWith fires alongside.
+      // The deep-link effect would otherwise see this URL change and issue
+      // a duplicate request, swapping our toast-on-failure for silent
+      // notFound — set the bypass token to skip one effect cycle.
+      skipNextDeepLinkEffectRef.current = memory.id;
       setMemoryIdParam(memory.id);
       void openWith(memory.id, "detail");
     },
@@ -259,7 +287,9 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     (id: string) => {
       // Backlink click in the References section — Issue #440 + #434
       // composition: the URL becomes the canonical pointer to the new
-      // memory, the dialog rehydrates onto it.
+      // memory, the dialog rehydrates onto it. Same deep-link-effect
+      // bypass as handleView — see the comment there.
+      skipNextDeepLinkEffectRef.current = id;
       setMemoryIdParam(id);
       void openWith(id, "detail");
     },

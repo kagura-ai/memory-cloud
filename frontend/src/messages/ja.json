@@ -2703,6 +2703,8 @@
       "memoryId": "メモリID",
       "copyMemoryId": "メモリIDをコピー",
       "source": "ソース",
+      "scopePersistent": "永続",
+      "scopeWorking": "作業",
       "memoryDetails": "メモリ詳細とメタデータ",
       "value": "値",
       "copy": "コピー",
