@@ -408,7 +408,12 @@ class PatchMemoryRequest(BaseModel):
 
     @model_validator(mode="after")
     def _at_least_one_field(self) -> "PatchMemoryRequest":
-        if not self.model_dump(exclude_unset=True):
+        # `model_fields_set` is a name-only set; cheap. The previous
+        # `model_dump(exclude_unset=True)` form deep-serialized the full
+        # request (including `details` JSON) just to check emptiness — the
+        # service layer already prefers `model_fields_set` for the same
+        # reason, so the validator is now consistent with it.
+        if not self.model_fields_set:
             raise ValueError("PATCH request must include at least one field to update")
         # Reject explicit `null` for fields that either map to NOT NULL DB
         # columns (`summary`/`content`/`type`/`importance`) — would 500 with a
