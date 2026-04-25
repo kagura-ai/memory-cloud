@@ -2682,9 +2682,9 @@
     "deleteDialog": {
       "title": "メモリを削除",
       "description": "このメモリを削除してもよろしいですか? この操作は取り消せません。",
-      "keyLabel": "キー:",
+      "summaryLabel": "サマリ:",
+      "idLabel": "メモリID:",
       "scopeLabel": "スコープ:",
-      "agentLabel": "エージェント:",
       "previewLabel": "値(プレビュー):",
       "cancel": "キャンセル",
       "confirm": "メモリを削除",

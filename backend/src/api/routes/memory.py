@@ -552,6 +552,10 @@ async def list_memories(
         # naive UTC datetimes (DateTime without timezone=True). Tag the
         # serialized form with "Z" so JS clients (which parse naive ISO as
         # local time) don't render JST-shifted relative timestamps.
+        # ``updated_at`` is nullable (only set onupdate), so fall back to
+        # ``created_at`` for fresh rows that haven't been touched since
+        # insert. The frontend renders both as the row "updated" timestamp,
+        # so created_at is the correct fallback rather than null/empty.
         def _utc_iso(dt: Any) -> str:
             return dt.isoformat() + ("Z" if dt.tzinfo is None else "")
 
@@ -563,7 +567,7 @@ async def list_memories(
                 scope=m.scope,
                 importance=m.importance,
                 created_at=_utc_iso(m.created_at),
-                updated_at=_utc_iso(m.updated_at),
+                updated_at=_utc_iso(m.updated_at or m.created_at),
             )
             for m in memories
         ]
