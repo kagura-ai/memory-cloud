@@ -215,10 +215,15 @@ export function EditMemoryDialog({
     // Minified JSON (no pretty-print whitespace) for the dirty check so
     // round-tripped objects with different INDENTATION don't fire false
     // positives. NOT canonicalized across key order — `JSON.stringify`
-    // preserves insertion order, so a backend that re-orders keys could
-    // still trigger a spurious "dirty" diff. Acceptable for now since
-    // PostgreSQL JSONB preserves key order on round-trip and the form
-    // assembles JSON from a single textarea (no key-order ambiguity).
+    // preserves the in-memory key order, but PostgreSQL JSONB does NOT
+    // preserve key order on round-trip (jsonb stores a decomposed binary
+    // representation and may emit keys in a normalized order). A spurious
+    // "dirty" diff can therefore fire if the user re-edits a memory whose
+    // details were saved with different key insertion order than the
+    // backend returned. Acceptable for v0.14.0 — the false-positive sends
+    // a valid (semantically-identical) PATCH; not a correctness bug, just
+    // an extra round-trip. Stable-sort stringify is the proper fix and
+    // is tracked alongside the v0.14.1 dialog refactor (#446).
     const currentDetailsMinified = JSON.stringify(memory.details ?? null);
     const newDetailsMinified = JSON.stringify(parsedDetails ?? null);
     if (newDetailsMinified !== currentDetailsMinified) {

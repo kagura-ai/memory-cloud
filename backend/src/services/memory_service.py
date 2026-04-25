@@ -482,11 +482,17 @@ class MemoryService:
           re-embed path keeps the existing async-task pattern, so qdrant
           errors there continue to be surfaced via `_log_embedding_task_result`.
 
-        Field-presence semantics: ``model_dump(exclude_unset=True)`` is used to
-        distinguish "field omitted" from "field explicitly null". This matters
-        for ``details`` — sending ``{"details": null}`` clears the existing JSON,
-        while omitting ``details`` preserves it. ``tags`` follows the same
-        contract (None/missing = preserve, [] = clear, [...] = replace).
+        Field-presence semantics: ``request.model_fields_set`` (the set of
+        fields the client EXPLICITLY sent, including those set to ``None``)
+        distinguishes "field omitted" from "field explicitly null". This
+        matters for ``details`` — sending ``{"details": null}`` clears the
+        existing JSON, while omitting ``details`` preserves it. ``tags``
+        follows the same omit/clear contract (None/missing = preserve,
+        [] = clear, [...] = replace), enforced by the schema's null-reject
+        validator. ``model_fields_set`` is preferred over
+        ``model_dump(exclude_unset=True)`` because the latter deep-serializes
+        the full request body (including ``details`` JSON) just to extract
+        a key set — wasteful for our use case.
 
         Returns the updated memory as ``ReferenceResponse`` (full detail). The
         response is constructed inline from the in-scope ORM object to avoid

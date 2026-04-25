@@ -245,14 +245,19 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     if (!memoryIdParam) {
       setDetailOpen(false);
       setDetailNotFound(false);
-      // URL-driven dismiss (back/forward, manual edit) bypasses
-      // ``handleDetailOpenChange``, so the in-flight cleanup needs to fire
-      // here too: reset hydrated state and clear ``pendingHydrationRef`` so
-      // a late URL-driven referenceMemory response can't re-open the dialog
-      // after the param has been removed.
+      // URL-driven dismiss (back/forward, manual edit) bypasses every
+      // dialog's onOpenChange, so the cleanup must reset the same flags
+      // those handlers do. ``editOpen`` belongs here: leaving it `true`
+      // while ``hydratedRaw`` is null causes EditMemoryDialog to mount
+      // already-open the next time hydration completes for any memory
+      // (Copilot post-loop finding). Same risk applies to ``deleteOpen``
+      // for symmetry, even though DeleteMemoryDialog is guarded by
+      // ``hydrated`` and the URL flow currently goes detail-first.
       setHydrated(null);
       setHydratedRaw(null);
       setLinkedRefs(EMPTY_LINKED_REFS);
+      setEditOpen(false);
+      setDeleteOpen(false);
       pendingHydrationRef.current = null;
       return;
     }
