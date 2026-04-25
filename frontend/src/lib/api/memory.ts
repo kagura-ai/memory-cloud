@@ -75,6 +75,42 @@ export async function forgetMemory(memoryId: string): Promise<void> {
   });
 }
 
+/**
+ * Partial update of a memory by UUID (Issue #439).
+ *
+ * Issue #439: Replaces the legacy `updateMemory()` composite-key path
+ * (deprecated, calls a 404 endpoint). Backend route is
+ * `PATCH /api/v1/memory/{memory_id}` and accepts any subset of the
+ * patchable fields. Omitted fields preserve their current value;
+ * `tags` follows replace-all semantics (an empty array clears tags).
+ *
+ * Status code surfacing:
+ *   - 200: returns the full `MemoryReference`
+ *   - 404: memory does not exist OR caller lacks access (existence not leaked)
+ *   - 410: memory was soft-deleted (distinct from 404 so retries can stop)
+ *   - 422: validation error (empty patch, importance > 1, etc.)
+ *
+ * Caller propagates errors as `ApiError` (see `lib/api/base.ts`).
+ */
+export interface UpdateMemoryByIdPatch {
+  summary?: string;
+  content?: string;
+  type?: string;
+  importance?: number;
+  tags?: string[];
+  details?: Record<string, unknown> | null;
+}
+
+export async function updateMemoryById(
+  memoryId: string,
+  patch: UpdateMemoryByIdPatch,
+): Promise<MemoryReference> {
+  return apiClient.patch<MemoryReference>(
+    `/api/v1/memory/${encodeURIComponent(memoryId)}`,
+    patch,
+  );
+}
+
 // =============================================================================
 // LEGACY DEAD CODE — composite-key helpers below this banner.
 //

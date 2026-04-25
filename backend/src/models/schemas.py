@@ -366,6 +366,34 @@ class UpdateMemoryResponse(BaseModel):
     scope: str
 
 
+class PatchMemoryRequest(BaseModel):
+    """Request schema for ``PATCH /api/v1/memory/{memory_id}`` (Issue #439).
+
+    UUID-addressed partial update. ``memory_id`` is the URL path param, not a
+    body field — there is intentionally no ``external_id`` upsert mode here
+    (use the existing ``update_memory`` MCP tool for that).
+
+    All fields are optional. Only fields explicitly provided are updated;
+    omitted fields preserve their current value. ``tags`` follows replace-all
+    semantics (an empty list clears tags; a non-empty list replaces the
+    whole list). ``scope`` and ``context_id`` are intentionally excluded —
+    they have orthogonal lifecycles handled by separate operations.
+    """
+
+    summary: str | None = Field(None, min_length=10, max_length=500)
+    content: str | None = Field(None, min_length=1)
+    type: str | None = Field(None, min_length=1, max_length=50)
+    importance: float | None = Field(None, ge=0.0, le=1.0)
+    tags: list[str] | None = None
+    details: dict | None = None
+
+    @model_validator(mode="after")
+    def _at_least_one_field(self) -> "PatchMemoryRequest":
+        if not self.model_dump(exclude_unset=True):
+            raise ValueError("PATCH request must include at least one field to update")
+        return self
+
+
 class ExploreRequest(BaseModel):
     """Request schema for explore() API.
 

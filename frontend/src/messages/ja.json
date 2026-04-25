@@ -2672,7 +2672,8 @@
       "emptyDesc": "MCP の remember ツールでこのコンテキストにメモリを保存してください。",
       "loadFailed": "メモリの読み込みに失敗しました",
       "hydrateFailed": "メモリ詳細の取得に失敗しました",
-      "deleteSuccess": "メモリを削除しました"
+      "deleteSuccess": "メモリを削除しました",
+      "editSuccess": "メモリを更新しました"
     },
     "memoriesTable": {
       "loading": "メモリを読み込み中...",
@@ -2739,6 +2740,31 @@
       "confirm": "メモリを削除",
       "deleting": "削除中...",
       "failed": "メモリの削除に失敗しました"
+    },
+    "editDialog": {
+      "title": "メモリを編集",
+      "description": "メモリのフィールドを更新します。メモリID: {id}",
+      "summaryLabel": "サマリ",
+      "contentLabel": "コンテンツ",
+      "typeLabel": "種別",
+      "typeNormal": "ノーマル",
+      "typeCoding": "コーディング",
+      "typeUnknownReadonly": "UI が認識しない種別は読み取り専用です。",
+      "importanceLabel": "重要度 (0.0–1.0)",
+      "tagsLabel": "タグ(カンマ区切り)",
+      "tagsPlaceholder": "tag1, tag2, tag3",
+      "detailsLabel": "詳細 (JSON オブジェクト)",
+      "detailsPlaceholder": "'{'\"key\": \"value\"'}'",
+      "detailsParseError": "詳細は有効な JSON で入力してください",
+      "detailsMustBeObject": "詳細は JSON オブジェクトで入力してください(配列やプリミティブは不可)",
+      "summaryTooShort": "サマリは 10 文字以上必要です",
+      "contentRequired": "コンテンツは必須です",
+      "importanceOutOfRange": "重要度は 0.0 〜 1.0 の範囲で入力してください",
+      "noChanges": "変更がありません",
+      "cancel": "キャンセル",
+      "confirm": "変更を保存",
+      "saving": "保存中...",
+      "failed": "メモリの更新に失敗しました"
     }
   },
   "contextSettings": {

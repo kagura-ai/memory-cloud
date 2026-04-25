@@ -2672,7 +2672,8 @@
       "emptyDesc": "Use the MCP remember tool to store memories in this context.",
       "loadFailed": "Failed to load memories",
       "hydrateFailed": "Failed to load memory details",
-      "deleteSuccess": "Memory deleted"
+      "deleteSuccess": "Memory deleted",
+      "editSuccess": "Memory updated"
     },
     "memoriesTable": {
       "loading": "Loading memories...",
@@ -2739,6 +2740,31 @@
       "confirm": "Delete Memory",
       "deleting": "Deleting...",
       "failed": "Failed to delete memory"
+    },
+    "editDialog": {
+      "title": "Edit Memory",
+      "description": "Update memory fields. Memory ID: {id}",
+      "summaryLabel": "Summary",
+      "contentLabel": "Content",
+      "typeLabel": "Type",
+      "typeNormal": "Normal",
+      "typeCoding": "Coding",
+      "typeUnknownReadonly": "Type editing is read-only for values the UI doesn't recognize.",
+      "importanceLabel": "Importance (0.0–1.0)",
+      "tagsLabel": "Tags (comma-separated)",
+      "tagsPlaceholder": "tag1, tag2, tag3",
+      "detailsLabel": "Details (JSON object)",
+      "detailsPlaceholder": "'{'\"key\": \"value\"'}'",
+      "detailsParseError": "Details must be valid JSON",
+      "detailsMustBeObject": "Details must be a JSON object (not array or primitive)",
+      "summaryTooShort": "Summary must be at least 10 characters",
+      "contentRequired": "Content is required",
+      "importanceOutOfRange": "Importance must be between 0.0 and 1.0",
+      "noChanges": "No changes to save",
+      "cancel": "Cancel",
+      "confirm": "Save Changes",
+      "saving": "Saving...",
+      "failed": "Failed to update memory"
     }
   },
   "contextSettings": {

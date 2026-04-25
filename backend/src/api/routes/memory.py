@@ -21,6 +21,7 @@ from models.schemas import (
     ForgetRequest,
     ForgetResponse,
     MemoryStatsResponse,
+    PatchMemoryRequest,
     RecallRequest,
     RecallResponse,
     ReferenceRequest,
@@ -224,6 +225,58 @@ async def recall(
     )
 
     return result
+
+
+@router.patch("/{memory_id}", response_model=ReferenceResponse)
+async def patch_memory(
+    memory_id: UUID,
+    request: PatchMemoryRequest,
+    user: APIKeyOrSessionUser,
+    memory_service: MemoryServiceDep,
+):
+    """Partial update of a memory by UUID (Issue #439).
+
+    Accepts any subset of ``summary``/``content``/``type``/``importance``/
+    ``tags``/``details``. Omitted fields preserve their current value;
+    ``tags`` follows replace-all semantics.
+
+    Status codes:
+        200: Updated successfully. Body is the full ``ReferenceResponse``.
+        404: Memory does not exist OR the caller lacks access (existence
+             is intentionally not leaked).
+        410: Memory was soft-deleted; the tombstone exists but the resource
+             is gone. Distinguishing 410 from 404 lets clients stop retrying.
+        422: Request body validation failed (empty patch, importance out of
+             range, summary < 10 chars, etc.).
+
+    Permission: same envelope as ``forget`` — ``PermissionService.
+    can_access_memory`` (workspace member for shared, creator for private).
+
+    Embedding regeneration: triggered only when ``summary`` or ``content``
+    changes. Runs on the same async-task pipeline as the ``remember`` path
+    (``process_pending_embedding``); this PATCH does not block on embedding
+    completion. Neural edges anchored on this memory are invalidated when
+    re-embed fires.
+
+    Example:
+        PATCH /api/v1/memory/550e8400-e29b-41d4-a716-446655440000
+        Authorization: Bearer <session_token>
+        Content-Type: application/json
+
+        {"importance": 0.9, "tags": ["python", "auth"]}
+    """
+    logger.info(
+        "patch_memory_request",
+        user_id=user["user_id"],
+        memory_id=str(memory_id),
+        fields=list(request.model_dump(exclude_unset=True).keys()),
+    )
+
+    return await memory_service.patch_memory(
+        memory_id=memory_id,
+        request=request,
+        user_id=user["user_id"],
+    )
 
 
 @router.post("/forget", response_model=ForgetResponse)

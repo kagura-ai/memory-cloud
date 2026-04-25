@@ -119,6 +119,21 @@ class NotFoundException(MemoryCloudException):
         super().__init__(message, status_code=404, error_code="RES-001")
 
 
+class MemoryGoneError(MemoryCloudException):
+    """Resource existed but was soft-deleted (410 Gone).
+
+    Distinct from NotFoundException so clients can stop retrying instead of
+    interpreting 404 as "maybe transient". Used by Issue #439's PATCH path
+    when the target memory has ``deleted_at IS NOT NULL``.
+    """
+
+    def __init__(self, resource: str, resource_id: str | None = None):
+        message = f"{resource} has been deleted"
+        if resource_id:
+            message += f": {resource_id}"
+        super().__init__(message, status_code=410, error_code="RES-003")
+
+
 class ConflictError(MemoryCloudException):
     """Resource conflict (409)."""
 
