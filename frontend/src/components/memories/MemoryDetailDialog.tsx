@@ -78,14 +78,14 @@ export function MemoryDetailDialog({
               {memory.scope}
             </Badge>
           </DialogTitle>
-          <DialogDescription>Memory details and metadata</DialogDescription>
+          <DialogDescription>{t("memoryDetails")}</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
           {/* Value */}
           <div>
             <div className="flex items-center justify-between mb-2">
-              <label className="text-sm font-medium">Value</label>
+              <label className="text-sm font-medium">{t("value")}</label>
               <Button
                 variant="ghost"
                 size="sm"
@@ -95,12 +95,12 @@ export function MemoryDetailDialog({
                 {copied ? (
                   <>
                     <Check className="h-4 w-4 mr-1" />
-                    Copied
+                    {t("copied")}
                   </>
                 ) : (
                   <>
                     <Copy className="h-4 w-4 mr-1" />
-                    Copy
+                    {t("copy")}
                   </>
                 )}
               </Button>
@@ -145,7 +145,7 @@ export function MemoryDetailDialog({
             {memory.type && (
               <div>
                 <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
-                  Type
+                  {t("type")}
                 </label>
                 <div className="mt-1">
                   <code className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">
@@ -157,7 +157,7 @@ export function MemoryDetailDialog({
 
             <div>
               <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
-                Importance
+                {t("importance")}
               </label>
               <div className="mt-1">
                 <Badge
@@ -176,7 +176,7 @@ export function MemoryDetailDialog({
 
             <div>
               <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
-                Created At
+                {t("createdAt")}
               </label>
               <div className="mt-1 text-sm">
                 {formatDateTime(memory.created_at, user?.timezone, locale)}
@@ -185,7 +185,7 @@ export function MemoryDetailDialog({
 
             <div>
               <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
-                Updated At
+                {t("updatedAt")}
               </label>
               <div className="mt-1 text-sm">
                 {formatDateTime(memory.updated_at, user?.timezone, locale)}
@@ -222,7 +222,7 @@ export function MemoryDetailDialog({
               <Separator />
               <div>
                 <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
-                  Tags
+                  {t("tags")}
                 </label>
                 <div className="flex flex-wrap gap-2 mt-2">
                   {memory.tags.map((tag) => (
@@ -241,7 +241,7 @@ export function MemoryDetailDialog({
               <Separator />
               <div>
                 <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
-                  Metadata
+                  {t("metadata")}
                 </label>
                 <div className="mt-2 p-3 bg-slate-50 dark:bg-slate-900 rounded-lg text-sm font-mono">
                   <pre>{JSON.stringify(memory.metadata, null, 2)}</pre>
@@ -253,17 +253,17 @@ export function MemoryDetailDialog({
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Close
+            {t("close")}
           </Button>
           {onEdit && (
             <Button variant="outline" onClick={onEdit}>
               <Pencil className="h-4 w-4 mr-2" />
-              Edit
+              {t("edit")}
             </Button>
           )}
           <Button variant="destructive" onClick={onDelete}>
             <Trash2 className="h-4 w-4 mr-2" />
-            Delete
+            {t("delete")}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -21,7 +21,7 @@ import type { Memory } from "@/lib/types/memory";
 import { formatRelativeTime } from "@/lib/utils/datetime";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { useAuth } from "@/contexts/AuthContext";
-import { useLocale } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 
 interface MemoriesTableProps {
   memories: Memory[];
@@ -65,6 +65,7 @@ export function MemoriesTable({
 }: MemoriesTableProps) {
   const { user } = useAuth();
   const locale = useLocale();
+  const t = useTranslations("contextDetail.memoriesTable");
   const totalPages = Math.ceil(total / pageSize);
   const bulkDeleteEnabled = !!onSelectionChange;
 
@@ -103,23 +104,25 @@ export function MemoriesTable({
   };
 
   const getImportanceBadge = (importance: number) => {
-    if (importance >= 0.8) return <Badge variant="destructive">High</Badge>;
-    if (importance >= 0.5) return <Badge variant="default">Medium</Badge>;
-    return <Badge variant="secondary">Low</Badge>;
+    if (importance >= 0.8)
+      return <Badge variant="destructive">{t("importanceHigh")}</Badge>;
+    if (importance >= 0.5)
+      return <Badge variant="default">{t("importanceMedium")}</Badge>;
+    return <Badge variant="secondary">{t("importanceLow")}</Badge>;
   };
 
   const getScopeBadge = (scope: string) => {
     return scope === "persistent" ? (
-      <Badge variant="default">Persistent</Badge>
+      <Badge variant="default">{t("scopePersistent")}</Badge>
     ) : (
-      <Badge variant="outline">Working</Badge>
+      <Badge variant="outline">{t("scopeWorking")}</Badge>
     );
   };
 
   if (loading && memories.length === 0) {
     return (
       <div className="flex items-center justify-center h-64">
-        <SpinnerLoading size="md" message="Loading memories..." />
+        <SpinnerLoading size="md" message={t("loading")} />
       </div>
     );
   }
@@ -129,10 +132,10 @@ export function MemoriesTable({
       <div className="flex items-center justify-center h-64 border border-dashed rounded-lg">
         <div className="text-center">
           <p className="text-lg font-medium text-slate-900 dark:text-white">
-            No memories found
+            {t("emptyTitle")}
           </p>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-            Try adjusting your search or filters
+            {t("emptyDesc")}
           </p>
         </div>
       </div>
@@ -150,16 +153,16 @@ export function MemoriesTable({
                   <Checkbox
                     checked={allVisibleSelected}
                     onCheckedChange={handleSelectAll}
-                    aria-label="Select all"
+                    aria-label={t("selectAll")}
                   />
                 </TableHead>
               )}
-              <TableHead>Summary</TableHead>
-              <TableHead>Type</TableHead>
-              <TableHead>Scope</TableHead>
-              <TableHead>Importance</TableHead>
-              <TableHead>Updated</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
+              <TableHead>{t("columnSummary")}</TableHead>
+              <TableHead>{t("columnType")}</TableHead>
+              <TableHead>{t("columnScope")}</TableHead>
+              <TableHead>{t("columnImportance")}</TableHead>
+              <TableHead>{t("columnUpdated")}</TableHead>
+              <TableHead className="text-right">{t("columnActions")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -174,7 +177,9 @@ export function MemoriesTable({
                         onCheckedChange={(checked) =>
                           handleRowToggle(memory, checked)
                         }
-                        aria-label={`Select ${memory.summary || memory.key || memory.id}`}
+                        aria-label={t("selectRow", {
+                          summary: memory.summary || memory.key || memory.id,
+                        })}
                       />
                     </TableCell>
                   )}
@@ -205,8 +210,8 @@ export function MemoriesTable({
                         variant="ghost"
                         size="icon"
                         onClick={() => onView(memory)}
-                        title="View details"
-                        aria-label="View details"
+                        title={t("actionView")}
+                        aria-label={t("actionView")}
                       >
                         <Eye className="h-4 w-4" />
                       </Button>
@@ -215,8 +220,8 @@ export function MemoriesTable({
                           variant="ghost"
                           size="icon"
                           onClick={() => onEdit(memory)}
-                          title="Edit memory"
-                          aria-label="Edit memory"
+                          title={t("actionEdit")}
+                          aria-label={t("actionEdit")}
                         >
                           <Pencil className="h-4 w-4" />
                         </Button>
@@ -225,8 +230,8 @@ export function MemoriesTable({
                         variant="ghost"
                         size="icon"
                         onClick={() => onDelete(memory)}
-                        title="Delete memory"
-                        aria-label="Delete memory"
+                        title={t("actionDelete")}
+                        aria-label={t("actionDelete")}
                         className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20"
                       >
                         <Trash2 className="h-4 w-4" />
@@ -244,8 +249,11 @@ export function MemoriesTable({
       {totalPages > 1 && (
         <div className="flex items-center justify-between">
           <p className="text-sm text-slate-500">
-            Showing {(page - 1) * pageSize + 1} to{" "}
-            {Math.min(page * pageSize, total)} of {total} memories
+            {t("paginationShowing", {
+              start: (page - 1) * pageSize + 1,
+              end: Math.min(page * pageSize, total),
+              total,
+            })}
           </p>
           <div className="flex items-center gap-2">
             <Button
@@ -254,10 +262,10 @@ export function MemoriesTable({
               onClick={() => onPageChange(page - 1)}
               disabled={page === 1 || loading}
             >
-              Previous
+              {t("paginationPrevious")}
             </Button>
             <span className="text-sm text-slate-700 dark:text-slate-300">
-              Page {page} of {totalPages}
+              {t("paginationPage", { page, totalPages })}
             </span>
             <Button
               variant="outline"
@@ -265,7 +273,7 @@ export function MemoriesTable({
               onClick={() => onPageChange(page + 1)}
               disabled={page === totalPages || loading}
             >
-              Next
+              {t("paginationNext")}
             </Button>
           </div>
         </div>
