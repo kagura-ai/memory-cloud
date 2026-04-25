@@ -2703,6 +2703,7 @@
     "detailDialog": {
       "memoryId": "メモリID",
       "copyMemoryId": "メモリIDをコピー",
+      "copyFailed": "クリップボードへのコピーに失敗しました",
       "source": "ソース",
       "scopePersistent": "永続",
       "scopeWorking": "作業",

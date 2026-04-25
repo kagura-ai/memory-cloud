@@ -21,10 +21,10 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { AlertTriangle } from "lucide-react";
 import { forgetMemory } from "@/lib/api/memory";
-import type { Memory } from "@/lib/types/memory";
+import type { MemoryReference } from "@/lib/types/memory";
 
 interface DeleteMemoryDialogProps {
-  memory: Memory;
+  memory: MemoryReference;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSuccess: () => void;
@@ -44,7 +44,7 @@ export function DeleteMemoryDialog({
     try {
       setLoading(true);
       setError(null);
-      await forgetMemory(memory.id);
+      await forgetMemory(memory.memory_id);
       onSuccess();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("failed"));
@@ -78,22 +78,19 @@ export function DeleteMemoryDialog({
             </Alert>
           )}
 
-          {/* Preview block: identify the memory by summary + UUID. The legacy
-              composite-key fields (key/agent_name) are not populated by the
-              UUID-addressed list flow, so they are intentionally not shown.
-              Value preview is conditional — empty for list-only rows. */}
+          {/* Preview block: identify the memory by summary + UUID. */}
           <div className="p-4 bg-slate-50 dark:bg-slate-900 rounded-lg space-y-2">
             <div>
               <span className="text-xs text-slate-500 dark:text-slate-400">
                 {t("summaryLabel")}
               </span>
-              <p className="font-medium">{memory.summary || memory.key}</p>
+              <p className="font-medium">{memory.summary}</p>
             </div>
             <div>
               <span className="text-xs text-slate-500 dark:text-slate-400">
                 {t("idLabel")}
               </span>
-              <p className="text-xs font-mono break-all">{memory.id}</p>
+              <p className="text-xs font-mono break-all">{memory.memory_id}</p>
             </div>
             <div>
               <span className="text-xs text-slate-500 dark:text-slate-400">
@@ -101,14 +98,14 @@ export function DeleteMemoryDialog({
               </span>
               <p className="text-sm">{memory.scope}</p>
             </div>
-            {memory.value && (
+            {memory.content && (
               <div>
                 <span className="text-xs text-slate-500 dark:text-slate-400">
                   {t("previewLabel")}
                 </span>
                 <p className="text-sm text-slate-600 dark:text-slate-300 truncate">
-                  {memory.value.substring(0, 100)}
-                  {memory.value.length > 100 && "..."}
+                  {memory.content.substring(0, 100)}
+                  {memory.content.length > 100 && "..."}
                 </p>
               </div>
             )}
