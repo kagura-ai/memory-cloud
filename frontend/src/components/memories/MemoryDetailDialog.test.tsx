@@ -14,7 +14,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MemoryDetailDialog } from "./MemoryDetailDialog";
-import type { LinkedMemoryRef, Memory } from "@/lib/types/memory";
+import type { LinkedMemoryRef, MemoryReference } from "@/lib/types/memory";
 
 // ---------- Mocks ------------------------------------------------------------
 
@@ -43,20 +43,23 @@ beforeEach(() => {
 
 // ---------- Fixtures ---------------------------------------------------------
 
-function makeMemory(overrides: Partial<Memory> = {}): Memory {
+function makeRef(overrides: Partial<MemoryReference> = {}): MemoryReference {
   return {
-    id: "11111111-1111-1111-1111-111111111111",
+    memory_id: "11111111-1111-1111-1111-111111111111",
     summary: "Sample summary",
-    key: "Sample summary",
-    value: "Sample body",
-    scope: "working",
+    context_summary: null,
+    content: "Sample body",
+    details: null,
     type: "note",
-    agent_name: "",
-    user_id: "user-a",
+    scope: "working",
     importance: 0.5,
     tags: [],
+    context: null,
     created_at: "2026-04-25T00:00:00Z",
     updated_at: "2026-04-25T00:00:00Z",
+    client: "mcp",
+    source_uri: null,
+    source_type: null,
     ...overrides,
   };
 }
@@ -79,7 +82,7 @@ describe("MemoryDetailDialog — i18n", () => {
   it("uses translation keys for static labels and footer buttons", () => {
     render(
       <MemoryDetailDialog
-        memory={makeMemory()}
+        memory={makeRef()}
         open={true}
         onOpenChange={vi.fn()}
         onDelete={vi.fn()}
@@ -104,7 +107,7 @@ describe("MemoryDetailDialog — i18n", () => {
   it("does not render Edit when onEdit is not provided", () => {
     render(
       <MemoryDetailDialog
-        memory={makeMemory()}
+        memory={makeRef()}
         open={true}
         onOpenChange={vi.fn()}
         onDelete={vi.fn()}
@@ -121,7 +124,7 @@ describe("MemoryDetailDialog — References (Issue #440)", () => {
     const onOpen = vi.fn();
     render(
       <MemoryDetailDialog
-        memory={makeMemory()}
+        memory={makeRef()}
         open={true}
         onOpenChange={vi.fn()}
         onDelete={vi.fn()}
@@ -150,7 +153,7 @@ describe("MemoryDetailDialog — References (Issue #440)", () => {
     const onOpen = vi.fn();
     render(
       <MemoryDetailDialog
-        memory={makeMemory()}
+        memory={makeRef()}
         open={true}
         onOpenChange={vi.fn()}
         onDelete={vi.fn()}
@@ -171,7 +174,7 @@ describe("MemoryDetailDialog — References (Issue #440)", () => {
   it("shows the truncated hint when outgoingHasMore is true", () => {
     render(
       <MemoryDetailDialog
-        memory={makeMemory()}
+        memory={makeRef()}
         open={true}
         onOpenChange={vi.fn()}
         onDelete={vi.fn()}
@@ -186,7 +189,7 @@ describe("MemoryDetailDialog — References (Issue #440)", () => {
   it("hides the References section when both lists are empty", () => {
     render(
       <MemoryDetailDialog
-        memory={makeMemory()}
+        memory={makeRef()}
         open={true}
         onOpenChange={vi.fn()}
         onDelete={vi.fn()}

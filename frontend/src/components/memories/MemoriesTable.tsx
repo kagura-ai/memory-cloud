@@ -16,36 +16,28 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Eye, Pencil, Trash2 } from "lucide-react";
-import type { Memory } from "@/lib/types/memory";
+import { Eye, FileText, Pencil, Trash2 } from "lucide-react";
+import type { MemoryListItem } from "@/lib/types/memory";
 import { formatRelativeTime } from "@/lib/utils/datetime";
 import { SpinnerLoading } from "@/components/common/LoadingState";
+import { EmptyState } from "@/components/ui/empty-state";
 import { useAuth } from "@/contexts/AuthContext";
 import { useLocale, useTranslations } from "next-intl";
 
 interface MemoriesTableProps {
-  memories: Memory[];
+  memories: MemoryListItem[];
   loading: boolean;
-  onView: (memory: Memory) => void;
+  onView: (memory: MemoryListItem) => void;
   // Optional: omit to hide the Edit icon. Same convention as MemoryDetailDialog
-  // — until a UUID-addressed update endpoint lands (#439), consumers without
-  // an edit path should pass nothing rather than a no-op callback.
-  onEdit?: (memory: Memory) => void;
-  onDelete: (memory: Memory) => void;
+  // — passing nothing keeps the dialog honest (no ghost button).
+  onEdit?: (memory: MemoryListItem) => void;
+  onDelete: (memory: MemoryListItem) => void;
   page: number;
   pageSize: number;
   total: number;
   onPageChange: (page: number) => void;
-  // Bulk delete props (Issue #666). ``selectedIds`` holds ``Memory.id`` UUIDs
-  // for rows already normalized into the ``Memory`` shape this table renders
-  // (which expects ``key`` / ``agent_name`` columns — so a consumer fed from
-  // raw ``GET /api/v1/memory/list`` rows must convert at the boundary first).
-  //
-  // Bulk-delete wiring is the parent's responsibility. The legacy
-  // ``bulkDeleteMemories`` API addresses rows by (key, scope, agent_name),
-  // which ``/api/v1/memory/list`` does not return; a consumer fed from that
-  // endpoint needs either a bulk-delete-by-id backend endpoint or pre-loaded
-  // composite fields. #433 will decide which path to take.
+  // Bulk delete (Issue #666): wiring is the parent's responsibility.
+  // Currently blocked on a UUID bulk-forget endpoint backend-side.
   selectedIds?: string[];
   onSelectionChange?: (ids: string[]) => void;
 }
@@ -88,7 +80,7 @@ export function MemoriesTable({
   };
 
   const handleRowToggle = (
-    memory: Memory,
+    memory: MemoryListItem,
     checked: boolean | "indeterminate",
   ) => {
     if (!onSelectionChange) return;
@@ -129,16 +121,11 @@ export function MemoriesTable({
 
   if (!loading && memories.length === 0) {
     return (
-      <div className="flex items-center justify-center h-64 border border-dashed rounded-lg">
-        <div className="text-center">
-          <p className="text-lg font-medium text-slate-900 dark:text-white">
-            {t("emptyTitle")}
-          </p>
-          <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-            {t("emptyDesc")}
-          </p>
-        </div>
-      </div>
+      <EmptyState
+        icon={FileText}
+        title={t("emptyTitle")}
+        description={t("emptyDesc")}
+      />
     );
   }
 
@@ -178,13 +165,13 @@ export function MemoriesTable({
                           handleRowToggle(memory, checked)
                         }
                         aria-label={t("selectRow", {
-                          summary: memory.summary || memory.key || memory.id,
+                          summary: memory.summary,
                         })}
                       />
                     </TableCell>
                   )}
                   <TableCell className="font-medium max-w-xs truncate">
-                    {memory.summary || memory.key}
+                    {memory.summary}
                   </TableCell>
                   <TableCell>
                     {memory.type ? (

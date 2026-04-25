@@ -28,22 +28,21 @@ import {
   Pencil,
   Trash2,
 } from "lucide-react";
-import type { LinkedMemoryRef, Memory } from "@/lib/types/memory";
+import type { LinkedMemoryRef, MemoryReference } from "@/lib/types/memory";
 import { formatDateTime } from "@/lib/utils/datetime";
-import { useState } from "react";
 import { useAuth } from "@/contexts/AuthContext";
+import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useLocale, useTranslations } from "next-intl";
 
 interface MemoryDetailDialogProps {
   // ``memory`` may be null in the deep-link "not found" path so the dialog
   // can still render an EmptyState (matches the contract in #434 — invalid
   // ``?memoryId=`` shows EmptyState inside the dialog, not a hard 404 page).
-  memory: Memory | null;
+  memory: MemoryReference | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  // Optional: omit to hide the Edit button entirely. #433 defers edit until a
-  // UUID-addressed update endpoint lands; passing `undefined` keeps the dialog
-  // honest (no ghost button).
+  // Optional: omit to hide the Edit button entirely. Passing `undefined`
+  // keeps the dialog honest — no ghost button when edit is unavailable.
   onEdit?: () => void;
   onDelete: () => void;
   // Issue #434: when ``referenceMemory`` rejects on a deep-link path, the
@@ -75,28 +74,14 @@ export function MemoryDetailDialog({
   const { user } = useAuth();
   const locale = useLocale();
   const t = useTranslations("contextDetail.detailDialog");
-  const [copied, setCopied] = useState(false);
-  const [idCopied, setIdCopied] = useState(false);
+  const { isCopied, copyToTarget } = useCopyFeedback();
 
-  const copyValue = async () => {
-    if (!memory) return;
+  const copy = async (text: string, key: string) => {
     try {
-      await navigator.clipboard.writeText(memory.value);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch (error) {
-      console.error("Failed to copy:", error);
-    }
-  };
-
-  const copyId = async () => {
-    if (!memory) return;
-    try {
-      await navigator.clipboard.writeText(memory.id);
-      setIdCopied(true);
-      setTimeout(() => setIdCopied(false), 2000);
-    } catch (error) {
-      console.error("Failed to copy:", error);
+      await copyToTarget(text, key);
+    } catch {
+      // Clipboard rejected (permissions, ephemeral env). Silent — the
+      // unflipped copy icon is the user-visible signal.
     }
   };
 
@@ -140,7 +125,7 @@ export function MemoryDetailDialog({
       <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            {memory.key}
+            {memory.summary}
             <Badge
               variant={memory.scope === "persistent" ? "default" : "outline"}
             >
@@ -160,10 +145,10 @@ export function MemoryDetailDialog({
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={copyValue}
+                onClick={() => void copy(memory.content, "content")}
                 className="h-8"
               >
-                {copied ? (
+                {isCopied("content") ? (
                   <>
                     <Check className="h-4 w-4 mr-1" />
                     {t("copied")}
@@ -177,7 +162,7 @@ export function MemoryDetailDialog({
               </Button>
             </div>
             <div className="p-3 bg-slate-50 dark:bg-slate-900 rounded-lg text-sm font-mono whitespace-pre-wrap break-words">
-              {memory.value}
+              {memory.content}
             </div>
           </div>
 
@@ -190,17 +175,17 @@ export function MemoryDetailDialog({
             </label>
             <div className="mt-1 flex items-center gap-2">
               <code className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded font-mono break-all">
-                {memory.id}
+                {memory.memory_id}
               </code>
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={copyId}
+                onClick={() => void copy(memory.memory_id, "id")}
                 className="h-7 shrink-0"
                 title={t("copyMemoryId")}
                 aria-label={t("copyMemoryId")}
               >
-                {idCopied ? (
+                {isCopied("id") ? (
                   <Check className="h-3.5 w-3.5" />
                 ) : (
                   <Copy className="h-3.5 w-3.5" />
@@ -346,7 +331,7 @@ export function MemoryDetailDialog({
           )}
 
           {/* Metadata */}
-          {memory.metadata && Object.keys(memory.metadata).length > 0 && (
+          {memory.details && Object.keys(memory.details).length > 0 && (
             <>
               <Separator />
               <div>
@@ -354,7 +339,7 @@ export function MemoryDetailDialog({
                   {t("metadata")}
                 </label>
                 <div className="mt-2 p-3 bg-slate-50 dark:bg-slate-900 rounded-lg text-sm font-mono">
-                  <pre>{JSON.stringify(memory.metadata, null, 2)}</pre>
+                  <pre>{JSON.stringify(memory.details, null, 2)}</pre>
                 </div>
               </div>
             </>
