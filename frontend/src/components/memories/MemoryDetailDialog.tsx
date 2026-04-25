@@ -1,9 +1,10 @@
 /**
  * Memory Detail Dialog
  *
- * Displays detailed information about a memory plus optional declared_link
- * backlinks (Issue #440) when the panel passes ``outgoingLinks`` /
- * ``incomingLinks``.
+ * Displays detailed information about a memory. Receives ``memory`` plus
+ * optional declared_link backlinks (Issue #440) and a ``notFound`` flag
+ * (Issue #434) that lets the deep-link path render an EmptyState inside
+ * the dialog when the URL pointed at an unreachable memory.
  */
 
 import {
@@ -22,6 +23,7 @@ import {
   ArrowUpRight,
   Check,
   Copy,
+  FileQuestion,
   Pencil,
   Trash2,
 } from "lucide-react";
@@ -32,7 +34,10 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useLocale, useTranslations } from "next-intl";
 
 interface MemoryDetailDialogProps {
-  memory: Memory;
+  // ``memory`` may be null in the deep-link "not found" path so the dialog
+  // can still render an EmptyState (matches the contract in #434 — invalid
+  // ``?memoryId=`` shows EmptyState inside the dialog, not a hard 404 page).
+  memory: Memory | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   // Optional: omit to hide the Edit button entirely. #433 defers edit until a
@@ -40,6 +45,10 @@ interface MemoryDetailDialogProps {
   // honest (no ghost button).
   onEdit?: () => void;
   onDelete: () => void;
+  // Issue #434: when ``referenceMemory`` rejects on a deep-link path, the
+  // panel sets ``notFound=true`` so we render an EmptyState body instead of
+  // closing or toasting. ``memory`` is null in this state.
+  notFound?: boolean;
   // Issue #440: outgoing/incoming declared_link references. Optional —
   // omitting both (or passing empty arrays) hides the References section.
   outgoingLinks?: LinkedMemoryRef[];
@@ -55,6 +64,7 @@ export function MemoryDetailDialog({
   onOpenChange,
   onEdit,
   onDelete,
+  notFound = false,
   outgoingLinks,
   outgoingHasMore = false,
   incomingLinks,
@@ -68,6 +78,7 @@ export function MemoryDetailDialog({
   const [idCopied, setIdCopied] = useState(false);
 
   const copyValue = async () => {
+    if (!memory) return;
     try {
       await navigator.clipboard.writeText(memory.value);
       setCopied(true);
@@ -78,6 +89,7 @@ export function MemoryDetailDialog({
   };
 
   const copyId = async () => {
+    if (!memory) return;
     try {
       await navigator.clipboard.writeText(memory.id);
       setIdCopied(true);
@@ -86,6 +98,30 @@ export function MemoryDetailDialog({
       console.error("Failed to copy:", error);
     }
   };
+
+  // NotFound state: memory is unreachable (deleted, cross-context, or the
+  // user lacks permission). Render a self-contained EmptyState body — no
+  // toast, no hard 404 — so the dialog still acts as a recovery surface.
+  if (notFound || !memory) {
+    return (
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("notFoundTitle")}</DialogTitle>
+            <DialogDescription>{t("notFoundDesc")}</DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col items-center py-8 text-slate-500 dark:text-slate-400">
+            <FileQuestion className="h-12 w-12 mb-3 opacity-60" />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => onOpenChange(false)}>
+              {t("close")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
 
   const hasOutgoing = (outgoingLinks?.length ?? 0) > 0;
   const hasIncoming = (incomingLinks?.length ?? 0) > 0;

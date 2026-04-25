@@ -1,11 +1,12 @@
 /**
- * Tests for MemoryDetailDialog (Issues #443 / #440).
+ * Tests for MemoryDetailDialog (Issues #443 / #440 / #434).
  *
  * Covers:
  *   - i18n: every user-visible string resolves through useTranslations (#443)
  *   - References section renders outgoing/incoming declared_link refs (#440)
- *   - References click invokes onOpenLinkedMemory (#440)
+ *   - References click invokes onOpenLinkedMemory (#440 + #434 composition)
  *   - References truncated hint renders when *HasMore is true (#440)
+ *   - notFound mode renders an EmptyState body, not a hard 404 (#434)
  *   - References section is hidden when both lists are empty
  */
 
@@ -195,5 +196,42 @@ describe("MemoryDetailDialog — References (Issue #440)", () => {
     );
 
     expect(screen.queryByText("references.title")).not.toBeInTheDocument();
+  });
+});
+
+describe("MemoryDetailDialog — notFound mode (Issue #434)", () => {
+  it("renders the EmptyState body when notFound=true", () => {
+    render(
+      <MemoryDetailDialog
+        memory={null}
+        open={true}
+        onOpenChange={vi.fn()}
+        onDelete={vi.fn()}
+        notFound={true}
+      />,
+    );
+
+    expect(screen.getByText("notFoundTitle")).toBeInTheDocument();
+    expect(screen.getByText("notFoundDesc")).toBeInTheDocument();
+    // Critical: we did NOT render the regular field labels — the dialog
+    // is fully replaced by the EmptyState body.
+    expect(screen.queryByText("memoryDetails")).not.toBeInTheDocument();
+    expect(screen.queryByText("value")).not.toBeInTheDocument();
+  });
+
+  it("calls onOpenChange(false) when Close is clicked in notFound mode", () => {
+    const onOpenChange = vi.fn();
+    render(
+      <MemoryDetailDialog
+        memory={null}
+        open={true}
+        onOpenChange={onOpenChange}
+        onDelete={vi.fn()}
+        notFound={true}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "close" }));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 });

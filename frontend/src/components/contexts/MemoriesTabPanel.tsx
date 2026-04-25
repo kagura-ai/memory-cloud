@@ -12,8 +12,9 @@
 
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
+import { useRouter, useSearchParams } from "next/navigation";
 import { FileText } from "lucide-react";
 import { MemoriesTable } from "@/components/memories/MemoriesTable";
 import { MemoryDetailDialog } from "@/components/memories/MemoryDetailDialog";
@@ -34,6 +35,7 @@ interface MemoriesTabPanelProps {
 }
 
 const PAGE_SIZE = 50;
+const MEMORY_ID_PARAM = "memoryId";
 
 // ``MemoryListItem`` (id-only) becomes something table-renderable here for
 // rows not yet hydrated. The table expects legacy composite-key columns
@@ -55,18 +57,18 @@ function listItemAsMemory(item: MemoryListItem): Memory {
   };
 }
 
-// ``POST /api/v1/memory/reference`` does NOT return {key, value, agent_name,
-// user_id, updated_at, access_count, metadata}. Merge the response with the
-// list item (which carries scope + updated_at) and fill the truly-absent
-// legacy fields with empty strings so the detail dialog renders without
-// crashing. This is the boundary where structural unsoundness is resolved.
-function referenceAsMemory(ref: MemoryReference, item: MemoryListItem): Memory {
+// Adapt the reference response to the legacy ``Memory`` shape the dialog
+// expects. With Issue #434 the response now carries scope + updated_at, so
+// this conversion is page-independent — a deep-link to a memory not on the
+// current page (or in a different context) hydrates correctly without
+// needing the list item.
+function referenceAsMemory(ref: MemoryReference): Memory {
   return {
     id: ref.memory_id,
     summary: ref.summary,
     key: ref.summary,
     value: ref.content,
-    scope: item.scope,
+    scope: ref.scope,
     type: ref.type,
     agent_name: "",
     user_id: "",
@@ -74,7 +76,7 @@ function referenceAsMemory(ref: MemoryReference, item: MemoryListItem): Memory {
     tags: ref.tags,
     metadata: ref.details ?? undefined,
     created_at: ref.created_at,
-    updated_at: item.updated_at,
+    updated_at: ref.updated_at,
     source_uri: ref.source_uri,
     source_type: ref.source_type,
   };
@@ -99,6 +101,9 @@ const EMPTY_LINKED_REFS: LinkedRefsState = {
 export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   const t = useTranslations("contextDetail.memoriesPanel");
   const { toast } = useToast();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const memoryIdParam = searchParams.get(MEMORY_ID_PARAM);
 
   const [items, setItems] = useState<MemoryListItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -110,6 +115,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   const [linkedRefs, setLinkedRefs] =
     useState<LinkedRefsState>(EMPTY_LINKED_REFS);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [detailNotFound, setDetailNotFound] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
   // Race guard: when the user clicks row A then B before A's reference() has
@@ -118,6 +124,23 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   // the last-resolving call wins, so A's data can land in a dialog opened
   // for B.
   const pendingHydrationRef = useRef<string | null>(null);
+
+  // Replace the URL while preserving every other search param (e.g. ?tab=).
+  // ``router.replace`` (not push) keeps history clean — opening/closing the
+  // dialog does not stack new history entries the user has to back through.
+  const setMemoryIdParam = useCallback(
+    (id: string | null) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (id) {
+        params.set(MEMORY_ID_PARAM, id);
+      } else {
+        params.delete(MEMORY_ID_PARAM);
+      }
+      const qs = params.toString();
+      router.replace(qs ? `?${qs}` : "?");
+    },
+    [router, searchParams],
+  );
 
   const fetchMemories = useCallback(async () => {
     setLoading(true);
@@ -142,26 +165,35 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     fetchMemories();
   }, [fetchMemories]);
 
+  // Open the detail dialog for ``id``. ``viaUrl=true`` paths come from the
+  // deep-link effect and render an EmptyState in the dialog on failure
+  // (rather than a toast) because the user navigated by URL — there is no
+  // implicit row context to redirect them to.
   const openWith = useCallback(
-    async (id: string, target: DialogTarget) => {
-      const item = items.find((m) => m.id === id);
-      if (!item) return;
-
+    async (id: string, target: DialogTarget, viaUrl = false) => {
       pendingHydrationRef.current = id;
       try {
         const ref = await referenceMemory(id);
         if (pendingHydrationRef.current !== id) return;
-        setHydrated(referenceAsMemory(ref, item));
+        setHydrated(referenceAsMemory(ref));
         setLinkedRefs({
           outgoing: ref.outgoing_links ?? [],
           outgoingHasMore: !!ref.outgoing_has_more,
           incoming: ref.incoming_links ?? [],
           incomingHasMore: !!ref.incoming_has_more,
         });
+        setDetailNotFound(false);
         if (target === "detail") setDetailOpen(true);
         else setDeleteOpen(true);
       } catch (err) {
         if (pendingHydrationRef.current !== id) return;
+        if (viaUrl && target === "detail") {
+          setHydrated(null);
+          setLinkedRefs(EMPTY_LINKED_REFS);
+          setDetailNotFound(true);
+          setDetailOpen(true);
+          return;
+        }
         toast({
           variant: "destructive",
           title: t("hydrateFailed"),
@@ -169,12 +201,49 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         });
       }
     },
-    [items, toast, t],
+    [toast, t],
+  );
+
+  // Deep-link sync (Issue #434): when ?memoryId= appears in the URL, open
+  // the dialog for that memory. We do not depend on `items.find(id)` —
+  // hydration runs straight from the API so a URL referencing a memory on a
+  // different page (or even a different context the user has access to)
+  // works on first paint. The dependency on ``memoryIdParam`` only — not
+  // ``openWith`` — avoids re-firing when ``items`` re-renders.
+  useEffect(() => {
+    if (!memoryIdParam) {
+      setDetailOpen(false);
+      setDetailNotFound(false);
+      return;
+    }
+    if (hydrated?.id === memoryIdParam && detailOpen) return;
+    void openWith(memoryIdParam, "detail", true);
+    // openWith is stable enough; we want the trigger to be the URL value
+    // changing, not other panel state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [memoryIdParam]);
+
+  const handleDetailOpenChange = useCallback(
+    (next: boolean) => {
+      setDetailOpen(next);
+      if (!next) {
+        // Drop the deep-link param so the URL matches dialog state. The
+        // useEffect above will see memoryIdParam=null on the next render
+        // and won't re-open.
+        if (memoryIdParam) setMemoryIdParam(null);
+        setDetailNotFound(false);
+      }
+    },
+    [memoryIdParam, setMemoryIdParam],
   );
 
   const handleView = useCallback(
-    (memory: Memory) => void openWith(memory.id, "detail"),
-    [openWith],
+    (memory: Memory) => {
+      // Sync URL first so refresh / share works; openWith fires alongside.
+      setMemoryIdParam(memory.id);
+      void openWith(memory.id, "detail");
+    },
+    [openWith, setMemoryIdParam],
   );
 
   const handleDelete = useCallback(
@@ -183,8 +252,14 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   );
 
   const handleOpenLinkedMemory = useCallback(
-    (id: string) => void openWith(id, "detail"),
-    [openWith],
+    (id: string) => {
+      // Backlink click in the References section — Issue #440 + #434
+      // composition: the URL becomes the canonical pointer to the new
+      // memory, the dialog rehydrates onto it.
+      setMemoryIdParam(id);
+      void openWith(id, "detail");
+    },
+    [openWith, setMemoryIdParam],
   );
 
   const handleDetailDelete = useCallback(() => {
@@ -197,6 +272,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     setDetailOpen(false);
     setHydrated(null);
     setLinkedRefs(EMPTY_LINKED_REFS);
+    if (memoryIdParam) setMemoryIdParam(null);
     toast({ title: t("deleteSuccess") });
 
     // Avoid stranding the user on an empty page when the deleted row was the
@@ -207,13 +283,23 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     } else {
       void fetchMemories();
     }
-  }, [fetchMemories, toast, t, items.length, page]);
+  }, [
+    fetchMemories,
+    toast,
+    t,
+    items.length,
+    page,
+    memoryIdParam,
+    setMemoryIdParam,
+  ]);
+
+  const displayRows = useMemo(() => items.map(listItemAsMemory), [items]);
 
   if (error) {
     return <ErrorBanner error={error} />;
   }
 
-  if (!loading && items.length === 0) {
+  if (!loading && items.length === 0 && !memoryIdParam) {
     return (
       <EmptyState
         icon={FileText}
@@ -222,8 +308,6 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
       />
     );
   }
-
-  const displayRows = items.map(listItemAsMemory);
 
   return (
     <>
@@ -237,26 +321,25 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         total={total}
         onPageChange={setPage}
       />
+      <MemoryDetailDialog
+        memory={hydrated}
+        open={detailOpen}
+        onOpenChange={handleDetailOpenChange}
+        onDelete={handleDetailDelete}
+        notFound={detailNotFound}
+        outgoingLinks={linkedRefs.outgoing}
+        outgoingHasMore={linkedRefs.outgoingHasMore}
+        incomingLinks={linkedRefs.incoming}
+        incomingHasMore={linkedRefs.incomingHasMore}
+        onOpenLinkedMemory={handleOpenLinkedMemory}
+      />
       {hydrated && (
-        <>
-          <MemoryDetailDialog
-            memory={hydrated}
-            open={detailOpen}
-            onOpenChange={setDetailOpen}
-            onDelete={handleDetailDelete}
-            outgoingLinks={linkedRefs.outgoing}
-            outgoingHasMore={linkedRefs.outgoingHasMore}
-            incomingLinks={linkedRefs.incoming}
-            incomingHasMore={linkedRefs.incomingHasMore}
-            onOpenLinkedMemory={handleOpenLinkedMemory}
-          />
-          <DeleteMemoryDialog
-            memory={hydrated}
-            open={deleteOpen}
-            onOpenChange={setDeleteOpen}
-            onSuccess={handleDeleteSuccess}
-          />
-        </>
+        <DeleteMemoryDialog
+          memory={hydrated}
+          open={deleteOpen}
+          onOpenChange={setDeleteOpen}
+          onSuccess={handleDeleteSuccess}
+        />
       )}
     </>
   );
