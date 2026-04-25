@@ -269,7 +269,7 @@ async def patch_memory(
         "patch_memory_request",
         user_id=user["user_id"],
         memory_id=str(memory_id),
-        fields=list(request.model_dump(exclude_unset=True).keys()),
+        fields=sorted(request.model_fields_set),
     )
 
     return await memory_service.patch_memory(

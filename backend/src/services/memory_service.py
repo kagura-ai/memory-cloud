@@ -525,42 +525,42 @@ class MemoryService:
         if memory.deleted_at is not None:
             raise MemoryGoneError("Memory", str(memory_id))
 
-        # `exclude_unset=True` keeps None values that the client EXPLICITLY
-        # sent, so `{"details": null}` lands in `provided` and clears the
-        # column, while a body that simply omits `details` does not.
-        provided = request.model_dump(exclude_unset=True)
+        # `model_fields_set` is the set of field names the client EXPLICITLY
+        # sent (including those set to None), so `{"details": null}` puts
+        # "details" in the set and a body that simply omits `details` does
+        # not. Cheaper than `model_dump(exclude_unset=True)` for large
+        # `details` payloads — no deep serialization, just a name set.
+        provided_fields = request.model_fields_set
 
         normalized_summary = (
-            normalize_for_search(request.summary) if "summary" in provided else None
+            normalize_for_search(request.summary) if "summary" in provided_fields else None
         )
 
         needs_reembed = False
         if normalized_summary is not None and normalized_summary != memory.summary:
             needs_reembed = True
-        if "content" in provided and request.content != memory.content:
+        if "content" in provided_fields and request.content != memory.content:
             needs_reembed = True
 
         # Skip the size guard on metadata-only patches: `tags`/`importance`/`type`
         # cannot move the row across the byte limit, so the four `len()` calls
         # are pure waste on the most common PATCH shape.
-        if {"summary", "content", "details"} & provided.keys():
+        if {"summary", "content", "details"} & provided_fields:
             from config.constants import MAX_CONTENT_SIZE
 
-            # Compute the post-patch size from the would-be values (using
-            # `in provided` instead of `or`-falsy fallback). The truthy-fallback
-            # form silently kept the OLD value when the caller explicitly sent
-            # `None` or `{}` to CLEAR a field — making patches that shrink or
-            # clear `details`/`content`/`summary` get rejected against the
-            # pre-patch size instead of the (smaller) post-patch size.
-            next_summary = normalized_summary if "summary" in provided else memory.summary
-            next_content = request.content if "content" in provided else memory.content
-            next_details = request.details if "details" in provided else memory.details
+            # Compute the post-patch size from the would-be values. Use
+            # explicit `is None` rather than truthy fallback so empty-but-
+            # provided values like `details = {}` count as themselves
+            # (`len("{}") = 2`) instead of being collapsed to 0.
+            next_summary = normalized_summary if "summary" in provided_fields else memory.summary
+            next_content = request.content if "content" in provided_fields else memory.content
+            next_details = request.details if "details" in provided_fields else memory.details
 
             content_size = (
-                len(next_summary or "")
-                + len(memory.context_summary or "")
-                + len(next_content or "")
-                + len(str(next_details or ""))
+                len(next_summary if next_summary is not None else "")
+                + len(memory.context_summary if memory.context_summary is not None else "")
+                + len(next_content if next_content is not None else "")
+                + len(str(next_details) if next_details is not None else "")
             )
             if content_size > MAX_CONTENT_SIZE:
                 raise QuotaExceededError(
@@ -570,15 +570,15 @@ class MemoryService:
 
         if normalized_summary is not None:
             memory.summary = normalized_summary
-        if "content" in provided:
+        if "content" in provided_fields:
             memory.content = request.content
-        if "type" in provided:
+        if "type" in provided_fields:
             memory.type = request.type
-        if "importance" in provided:
+        if "importance" in provided_fields:
             memory.importance = request.importance
-        if "tags" in provided:
+        if "tags" in provided_fields:
             memory.tags = request.tags
-        if "details" in provided:
+        if "details" in provided_fields:
             # Explicit null clears the column; non-null replaces it.
             memory.details = request.details
 
@@ -654,11 +654,11 @@ class MemoryService:
             await self.db.commit()
 
             payload_updates: dict[str, object] = {}
-            if "tags" in provided:
+            if "tags" in provided_fields:
                 payload_updates["tags"] = request.tags
-            if "importance" in provided:
+            if "importance" in provided_fields:
                 payload_updates["importance"] = request.importance
-            if "type" in provided:
+            if "type" in provided_fields:
                 payload_updates["type"] = request.type
 
             if payload_updates:
