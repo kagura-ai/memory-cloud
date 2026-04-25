@@ -546,6 +546,16 @@ class MemoryService:
         if not can_access:
             raise NotFoundException("Memory", str(memory_id))
 
+        # Snapshot ``updated_at`` before bumping access stats. The Memory
+        # ORM column declares ``onupdate=func.now()``; a subsequent UPDATE
+        # (issued by ``update_access_stats``) makes SQLAlchemy expire the
+        # in-memory attribute so the next access triggers a sync lazy-load
+        # → ``MissingGreenlet`` outside the original IO context. Reading
+        # the value here is also semantically right: an access bump is
+        # not a meaningful edit, so the dialog's "Updated At" should
+        # reflect the last real change, not "now".
+        snapshot_updated_at = memory.updated_at or memory.created_at
+
         # Update access stats
         await self.memory_repo.update_access_stats(memory_id, client="api")
         await self.db.commit()
@@ -583,7 +593,7 @@ class MemoryService:
             tags=memory.tags or [],
             context=memory.context,
             created_at=memory.created_at,
-            updated_at=memory.updated_at or memory.created_at,
+            updated_at=snapshot_updated_at,
             client=memory.client,
             source_uri=memory.source_uri,
             source_type=memory.source_type,
