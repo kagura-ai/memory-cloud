@@ -7,6 +7,8 @@ Issue #82: Context-based multi-collection support.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, select
@@ -29,6 +31,7 @@ from models.schemas import (
     LinkedMemoryRef,
     MemoryResponse,
     MemoryStatsResponse,
+    PatchMemoryRequest,
     RecallRequest,
     RecallResponse,
     ReferenceResponse,
@@ -45,10 +48,35 @@ from services.context_service import ContextService
 from services.embedding_service import EmbeddingService
 from services.search_service import SearchService
 from utils.datetime import utcnow
-from utils.exceptions import NotFoundException
+from utils.exceptions import MemoryGoneError, NotFoundException, QuotaExceededError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _log_embedding_task_result(task: asyncio.Task, memory_id: str) -> None:
+    """Done-callback for `process_pending_embedding` tasks (memory write paths).
+
+    Promotes asyncio task failures into structured `error` log events so they
+    surface in observability instead of being lost as unhandled task exceptions.
+    Cancellation is logged at warn level — typically a shutdown signal.
+
+    Used by every memory write path that fires `process_pending_embedding` as a
+    fire-and-forget task: `remember`, `_update_in_place`, and `patch_memory`.
+    Bind via `functools.partial(_log_embedding_task_result, memory_id=...)` so
+    the callback receives a stable id even after the surrounding scope unwinds.
+    """
+    if task.cancelled():
+        logger.warning("embedding_task_cancelled", memory_id=memory_id)
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "embedding_task_exception",
+            memory_id=memory_id,
+            error=str(exc),
+            exc_info=exc,
+        )
 
 
 class MemoryService:
@@ -246,27 +274,10 @@ class MemoryService:
                 context_id=context_id_str,
             )
 
-            import asyncio
-
-            def _log_embedding_task_result(t: asyncio.Task) -> None:
-                if t.cancelled():
-                    logger.warning(
-                        "embedding_task_cancelled",
-                        memory_id=str(memory_id),
-                    )
-                    return
-
-                exc = t.exception()
-                if exc is not None:
-                    logger.error(
-                        "embedding_task_exception",
-                        memory_id=str(memory_id),
-                        error=str(exc),
-                        exc_info=exc,
-                    )
-
             task = asyncio.create_task(process_pending_embedding(memory_id))
-            task.add_done_callback(_log_embedding_task_result)
+            task.add_done_callback(
+                functools.partial(_log_embedding_task_result, memory_id=str(memory_id))
+            )
 
             return RememberResponse(memory_id=memory_id, scope="working")
 
@@ -404,23 +415,10 @@ class MemoryService:
             await self.db.flush()
             await self.db.commit()
 
-            import asyncio
-
-            def _log_embedding_task_result(t: asyncio.Task) -> None:
-                if t.cancelled():
-                    logger.warning("embedding_task_cancelled", memory_id=str(memory.id))
-                    return
-                exc = t.exception()
-                if exc is not None:
-                    logger.error(
-                        "embedding_task_exception",
-                        memory_id=str(memory.id),
-                        error=str(exc),
-                        exc_info=exc,
-                    )
-
             task = asyncio.create_task(process_pending_embedding(memory.id))
-            task.add_done_callback(_log_embedding_task_result)
+            task.add_done_callback(
+                functools.partial(_log_embedding_task_result, memory_id=str(memory.id))
+            )
         else:
             # Metadata-only update: patch Qdrant payload without re-embedding
             payload_updates: dict = {}
@@ -457,6 +455,288 @@ class MemoryService:
             operation="updated",
             re_embedded=needs_reembed,
             scope=memory.scope,
+        )
+
+    async def patch_memory(
+        self,
+        memory_id: UUID,
+        request: PatchMemoryRequest,
+        user_id: str,
+    ) -> ReferenceResponse:
+        """Partial update of a memory by UUID (Issue #439).
+
+        Mirrors `_update_in_place` but with four #439-specific behaviors:
+
+        - Soft-deleted memories raise ``MemoryGoneError`` so the route can
+          return 410 (vs `_update_in_place`'s 404 NotFound, which hides the
+          tombstone). Distinguishing 410 from 404 lets clients detect a
+          known-but-deleted memory and stop retrying.
+        - Permission denial returns 404 (not silent 200, unlike forget) so
+          UUID existence is not leaked.
+        - When ``summary`` or ``content`` changes, neural edges anchored on
+          this memory are invalidated (forget's pattern). Edge weights were
+          computed against the previous embedding; the next sleep run rebuilds
+          them against the new vector.
+        - Qdrant payload-only updates run AFTER the PG commit and only emit a
+          structured error log on failure (drift visibility, no rollback). The
+          re-embed path keeps the existing async-task pattern, so qdrant
+          errors there continue to be surfaced via `_log_embedding_task_result`.
+
+        Field-presence semantics: ``request.model_fields_set`` (the set of
+        fields the client EXPLICITLY sent, including those set to ``None``)
+        distinguishes "field omitted" from "field explicitly null". This
+        matters for ``details`` — sending ``{"details": null}`` clears the
+        existing JSON, while omitting ``details`` preserves it. ``tags``
+        follows the same omit/clear contract (None/missing = preserve,
+        [] = clear, [...] = replace), enforced by the schema's null-reject
+        validator. ``model_fields_set`` is preferred over
+        ``model_dump(exclude_unset=True)`` because the latter deep-serializes
+        the full request body (including ``details`` JSON) just to extract
+        a key set — wasteful for our use case.
+
+        Returns the updated memory as ``ReferenceResponse`` (full detail). The
+        response is constructed inline from the in-scope ORM object to avoid
+        a second permission check + extra commit round-trip that delegating
+        to ``self.reference()`` would incur (and PATCH should not bump
+        access-stats — that semantic only fits read paths).
+        """
+        from services.permission_service import (
+            CallerId,
+            MemoryAuthorId,
+            PermissionService,
+        )
+        from utils.text import normalize_for_search
+
+        memory = await self.memory_repo.get(memory_id)
+        if not memory:
+            raise NotFoundException("Memory", str(memory_id))
+
+        # Permission check BEFORE soft-delete check: a non-member must not be
+        # able to distinguish a soft-deleted memory (would-be 410) from a
+        # never-existed UUID (404). Returning 410 first would let an attacker
+        # who guesses (or harvests) a UUID confirm "this memory was once
+        # real" — meaningful for GDPR-style "we used to have a record about
+        # you" leaks. 410 is reserved for authorized callers who need to
+        # distinguish tombstones from never-existed.
+        perm_service = PermissionService(self.db)
+        can_access = await perm_service.can_access_memory(
+            user_id=CallerId(user_id),
+            memory_user_id=MemoryAuthorId(memory.user_id),
+            workspace_id=memory.workspace_id,
+            context_id=memory.context_id,
+        )
+        if not can_access:
+            raise NotFoundException("Memory", str(memory_id))
+
+        if memory.deleted_at is not None:
+            raise MemoryGoneError("Memory", str(memory_id))
+
+        # `model_fields_set` is the set of field names the client EXPLICITLY
+        # sent (including those set to None), so `{"details": null}` puts
+        # "details" in the set and a body that simply omits `details` does
+        # not. Cheaper than `model_dump(exclude_unset=True)` for large
+        # `details` payloads — no deep serialization, just a name set.
+        provided_fields = request.model_fields_set
+
+        normalized_summary = (
+            normalize_for_search(request.summary) if "summary" in provided_fields else None
+        )
+
+        needs_reembed = False
+        if normalized_summary is not None and normalized_summary != memory.summary:
+            needs_reembed = True
+        if "content" in provided_fields and request.content != memory.content:
+            needs_reembed = True
+
+        # Skip the size guard on metadata-only patches: `tags`/`importance`/`type`
+        # cannot move the row across the byte limit, so the four `len()` calls
+        # are pure waste on the most common PATCH shape.
+        if {"summary", "content", "details"} & provided_fields:
+            from config.constants import MAX_CONTENT_SIZE
+
+            # Compute the post-patch size from the would-be values. Use
+            # explicit `is None` rather than truthy fallback so empty-but-
+            # provided values like `details = {}` count as themselves
+            # (`len("{}") = 2`) instead of being collapsed to 0.
+            next_summary = normalized_summary if "summary" in provided_fields else memory.summary
+            next_content = request.content if "content" in provided_fields else memory.content
+            next_details = request.details if "details" in provided_fields else memory.details
+
+            content_size = (
+                len(next_summary if next_summary is not None else "")
+                + len(memory.context_summary if memory.context_summary is not None else "")
+                + len(next_content if next_content is not None else "")
+                + len(str(next_details) if next_details is not None else "")
+            )
+            if content_size > MAX_CONTENT_SIZE:
+                raise QuotaExceededError(
+                    f"Memory size {content_size:,} bytes exceeds limit "
+                    f"{MAX_CONTENT_SIZE:,} bytes (1MB)."
+                )
+
+        if normalized_summary is not None:
+            memory.summary = normalized_summary
+        if "content" in provided_fields:
+            memory.content = request.content
+        if "type" in provided_fields:
+            memory.type = request.type
+        if "importance" in provided_fields:
+            memory.importance = request.importance
+        if "tags" in provided_fields:
+            memory.tags = request.tags
+        if "details" in provided_fields:
+            # Explicit null clears the column; non-null replaces it.
+            memory.details = request.details
+
+        memory.updated_at = utcnow()
+
+        memory_workspace_id = str(memory.workspace_id) if memory.workspace_id else None
+        memory_context_id = str(memory.context_id) if memory.context_id else None
+
+        if needs_reembed:
+            memory.embedding_status = "pending"
+            await self.db.flush()
+            await self.db.commit()
+
+            task = asyncio.create_task(process_pending_embedding(memory.id))
+            task.add_done_callback(
+                functools.partial(_log_embedding_task_result, memory_id=str(memory.id))
+            )
+
+            # Invalidate neural edges. Sleep run rebuilds against the new
+            # vector. NULL workspace/context skips invalidation but emits a
+            # warning so operators can spot pre-Migration-063 rows that drift
+            # silently.
+            #
+            # `NeuralEdgeRepository.delete_node_edges` issues a SQL DELETE via
+            # `self.db.execute(...)` but does NOT commit internally — without
+            # an explicit commit here the DELETE would never persist (the
+            # memory commit above closed the prior transaction; the DELETE
+            # lands in a fresh implicit transaction that is discarded on
+            # session close). Best-effort: commit on success, rollback on
+            # failure so the (incomplete) DELETE doesn't leak into the next
+            # statement on this session.
+            if memory_workspace_id and memory_context_id:
+                from repositories.neural_edge import NeuralEdgeRepository
+
+                edge_repo = NeuralEdgeRepository(self.db)
+                try:
+                    edges_deleted = await edge_repo.delete_node_edges(
+                        user_id=user_id,
+                        node_id=memory.id,
+                        workspace_id=memory_workspace_id,
+                        context_id=memory_context_id,
+                    )
+                    await self.db.commit()
+                    if edges_deleted > 0:
+                        logger.info(
+                            "memory_patch_edges_invalidated",
+                            memory_id=str(memory.id),
+                            edges_deleted=edges_deleted,
+                            user_id=user_id,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    await self.db.rollback()
+                    logger.error(
+                        "memory_patch_edge_invalidation_failed",
+                        memory_id=str(memory.id),
+                        user_id=user_id,
+                        error=str(exc),
+                        exc_info=exc,
+                    )
+            else:
+                logger.warning(
+                    "memory_patch_edges_invalidation_skipped",
+                    memory_id=str(memory.id),
+                    user_id=user_id,
+                    reason="missing_workspace_or_context_id",
+                )
+        else:
+            # Metadata-only path: PG commit first, qdrant after. Qdrant
+            # failure is logged (not raised) for drift visibility — the PG
+            # write stays durable. Forget uses single-commit-at-end; this
+            # deviation is by Issue #439's design.
+            await self.db.flush()
+            await self.db.commit()
+
+            payload_updates: dict[str, object] = {}
+            if "tags" in provided_fields:
+                payload_updates["tags"] = request.tags
+            if "importance" in provided_fields:
+                payload_updates["importance"] = request.importance
+            if "type" in provided_fields:
+                payload_updates["type"] = request.type
+
+            if payload_updates:
+                payload_updates["updated_at"] = utcnow().isoformat() + "Z"
+                try:
+                    collection = await resolve_collection_name(self.db, memory.context_id)
+                    await update_memory_payload_in_qdrant(
+                        memory_id=memory.id,
+                        payload_updates=payload_updates,
+                        collection_name=collection,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "memory_patch_qdrant_payload_failed",
+                        memory_id=str(memory.id),
+                        user_id=user_id,
+                        error=str(exc),
+                        exc_info=exc,
+                    )
+
+        logger.info(
+            "memory_patched",
+            memory_id=str(memory.id),
+            user_id=user_id,
+            re_embedded=needs_reembed,
+        )
+
+        # Build the response inline from the in-scope ORM row. Delegating to
+        # ``self.reference(...)`` here would re-fetch the row, re-run the
+        # permission check, bump access-stats (a write — wrong for PATCH),
+        # and issue a second commit. We still want the declared_link refs,
+        # which `_fetch_declared_link_refs` provides without those side
+        # effects. NULL workspace_id/context_id rows skip the link fetch and
+        # return empty link arrays (the helper's signature requires non-null
+        # FKs).
+        if memory.workspace_id and memory.context_id:
+            (
+                outgoing_links,
+                outgoing_has_more,
+                incoming_links,
+                incoming_has_more,
+            ) = await self._fetch_declared_link_refs(
+                memory_id=memory.id,
+                workspace_id=memory.workspace_id,
+                context_id=memory.context_id,
+            )
+        else:
+            outgoing_links = []
+            outgoing_has_more = False
+            incoming_links = []
+            incoming_has_more = False
+
+        return ReferenceResponse(
+            memory_id=memory.id,
+            summary=memory.summary,
+            context_summary=memory.context_summary,
+            content=memory.content,
+            details=memory.details,
+            type=memory.type,
+            scope=memory.scope,
+            importance=memory.importance,
+            tags=memory.tags or [],
+            context=memory.context,
+            created_at=memory.created_at,
+            updated_at=memory.updated_at or memory.created_at,
+            client=memory.client,
+            source_uri=memory.source_uri,
+            source_type=memory.source_type,
+            outgoing_links=outgoing_links,
+            outgoing_has_more=outgoing_has_more,
+            incoming_links=incoming_links,
+            incoming_has_more=incoming_has_more,
         )
 
     async def _upsert_by_external_id(

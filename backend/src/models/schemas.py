@@ -366,6 +366,72 @@ class UpdateMemoryResponse(BaseModel):
     scope: str
 
 
+class PatchMemoryRequest(BaseModel):
+    """Request schema for ``PATCH /api/v1/memory/{memory_id}`` (Issue #439).
+
+    UUID-addressed partial update. ``memory_id`` is the URL path param, not a
+    body field — there is intentionally no ``external_id`` upsert mode here
+    (use the existing ``update_memory`` MCP tool for that).
+
+    All fields are optional. Only fields explicitly provided are updated;
+    omitted fields preserve their current value. ``tags`` follows replace-all
+    semantics (an empty list clears tags; a non-empty list replaces the
+    whole list). ``scope`` and ``context_id`` are intentionally excluded —
+    they have orthogonal lifecycles handled by separate operations.
+    """
+
+    summary: str | None = Field(None, min_length=10, max_length=500)
+    content: str | None = Field(None, min_length=1)
+    type: str | None = Field(None, min_length=1, max_length=50)
+    importance: float | None = Field(None, ge=0.0, le=1.0)
+    # `max_length=100` caps the tag array length; per-tag string length is
+    # capped via `_validate_tag_strings` below. Tags-only patches skip the
+    # MAX_CONTENT_SIZE guard (simplify deferred it to summary/content/details
+    # paths only), so without these caps an authenticated workspace member
+    # could either send 1M tags OR 100 tags of 1MB each to bloat the row's
+    # PG ARRAY column. Both surfaces are now closed.
+    tags: list[str] | None = Field(None, max_length=100)
+    details: dict | None = None
+
+    @field_validator("tags")
+    @classmethod
+    def _validate_tag_strings(cls, v: list[str] | None) -> list[str] | None:
+        """Cap per-tag string length at 64 chars (Copilot loop 3 finding)."""
+        if v is None:
+            return v
+        for idx, tag in enumerate(v):
+            if len(tag) > 64:
+                raise ValueError(
+                    f"tag at index {idx} exceeds 64 chars (got {len(tag)}): '{tag[:32]}…'"
+                )
+        return v
+
+    @model_validator(mode="after")
+    def _at_least_one_field(self) -> "PatchMemoryRequest":
+        # `model_fields_set` is a name-only set; cheap. The previous
+        # `model_dump(exclude_unset=True)` form deep-serialized the full
+        # request (including `details` JSON) just to check emptiness — the
+        # service layer already prefers `model_fields_set` for the same
+        # reason, so the validator is now consistent with it.
+        if not self.model_fields_set:
+            raise ValueError("PATCH request must include at least one field to update")
+        # Reject explicit `null` for fields that either map to NOT NULL DB
+        # columns (`summary`/`content`/`type`/`importance`) — would 500 with a
+        # PG integrity error — or would otherwise duplicate semantics with
+        # field omission (`tags`: omit = preserve, `[]` = clear, `null` is
+        # ambiguous). `details: null` is the only legitimate explicit-null
+        # value (clears the JSONB column).
+        non_nullable = ("summary", "content", "type", "importance", "tags")
+        invalid_null = [
+            f for f in non_nullable if f in self.model_fields_set and getattr(self, f) is None
+        ]
+        if invalid_null:
+            raise ValueError(
+                "PATCH request fields must not be null when provided: " + ", ".join(invalid_null)
+            )
+        return self
+
+
 class ExploreRequest(BaseModel):
     """Request schema for explore() API.
 

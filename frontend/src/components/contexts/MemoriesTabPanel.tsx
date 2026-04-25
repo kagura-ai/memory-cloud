@@ -3,11 +3,11 @@
  *
  * Context-scoped memory list for the Memories tab on contexts/[id]
  * (Issue #433). Lists rows via `GET /api/v1/memory/list?context_id=...`,
- * hydrates each row to full `Memory` via `POST /reference` on view/delete,
- * and deletes via `POST /forget`.
+ * hydrates each row to full `Memory` via `POST /reference` on view/edit/delete,
+ * deletes via `POST /forget`, and edits via `PATCH /api/v1/memory/{id}`
+ * (Issue #439).
  *
- * Edit and Create are deferred — no UUID-addressed PUT endpoint exists yet
- * (backend follow-up) and Create needs an MCP-shape form rewrite.
+ * Create is still deferred — needs an MCP-shape form rewrite.
  */
 
 "use client";
@@ -19,6 +19,7 @@ import { FileText } from "lucide-react";
 import { MemoriesTable } from "@/components/memories/MemoriesTable";
 import { MemoryDetailDialog } from "@/components/memories/MemoryDetailDialog";
 import { DeleteMemoryDialog } from "@/components/memories/DeleteMemoryDialog";
+import { EditMemoryDialog } from "@/components/memories/EditMemoryDialog";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useToast } from "@/hooks/use-toast";
@@ -82,7 +83,7 @@ function referenceAsMemory(ref: MemoryReference): Memory {
   };
 }
 
-type DialogTarget = "detail" | "delete";
+type DialogTarget = "detail" | "delete" | "edit";
 
 interface LinkedRefsState {
   outgoing: LinkedMemoryRef[];
@@ -113,11 +114,19 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   const [error, setError] = useState<string | null>(null);
 
   const [hydrated, setHydrated] = useState<Memory | null>(null);
+  // Issue #439: keep the raw `MemoryReference` alongside the adapted
+  // `Memory`. The Edit dialog needs the canonical 6-field shape (summary /
+  // content / type / importance / tags / details), which `referenceAsMemory`
+  // discards (`details` lands in `metadata?`, `content` lands in `value`).
+  // Storing both avoids a round-trip refetch when opening Edit and makes
+  // patch responses cheap to swap in via a single `setHydratedRaw` call.
+  const [hydratedRaw, setHydratedRaw] = useState<MemoryReference | null>(null);
   const [linkedRefs, setLinkedRefs] =
     useState<LinkedRefsState>(EMPTY_LINKED_REFS);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailNotFound, setDetailNotFound] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
 
   // Race guard: when the user clicks row A then B before A's reference() has
   // resolved, the B-click sets `pendingHydrationRef.current = B.id`; when A
@@ -191,6 +200,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         const ref = await referenceMemory(id);
         if (pendingHydrationRef.current !== id) return;
         setHydrated(referenceAsMemory(ref));
+        setHydratedRaw(ref);
         setLinkedRefs({
           outgoing: ref.outgoing_links ?? [],
           outgoingHasMore: !!ref.outgoing_has_more,
@@ -199,11 +209,13 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         });
         setDetailNotFound(false);
         if (target === "detail") setDetailOpen(true);
+        else if (target === "edit") setEditOpen(true);
         else setDeleteOpen(true);
       } catch (err) {
         if (pendingHydrationRef.current !== id) return;
         if (viaUrl && target === "detail") {
           setHydrated(null);
+          setHydratedRaw(null);
           setLinkedRefs(EMPTY_LINKED_REFS);
           setDetailNotFound(true);
           setDetailOpen(true);
@@ -233,13 +245,19 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     if (!memoryIdParam) {
       setDetailOpen(false);
       setDetailNotFound(false);
-      // URL-driven dismiss (back/forward, manual edit) bypasses
-      // ``handleDetailOpenChange``, so the in-flight cleanup needs to fire
-      // here too: reset hydrated state and clear ``pendingHydrationRef`` so
-      // a late URL-driven referenceMemory response can't re-open the dialog
-      // after the param has been removed.
+      // URL-driven dismiss (back/forward, manual edit) bypasses every
+      // dialog's onOpenChange, so the cleanup must reset the same flags
+      // those handlers do. ``editOpen`` belongs here: leaving it `true`
+      // while ``hydratedRaw`` is null causes EditMemoryDialog to mount
+      // already-open the next time hydration completes for any memory
+      // (Copilot post-loop finding). Same risk applies to ``deleteOpen``
+      // for symmetry, even though DeleteMemoryDialog is guarded by
+      // ``hydrated`` and the URL flow currently goes detail-first.
       setHydrated(null);
+      setHydratedRaw(null);
       setLinkedRefs(EMPTY_LINKED_REFS);
+      setEditOpen(false);
+      setDeleteOpen(false);
       pendingHydrationRef.current = null;
       return;
     }
@@ -309,6 +327,35 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     setDeleteOpen(true);
   }, []);
 
+  // Issue #439: Edit affordance. The detail dialog already has a hydrated
+  // memory in `hydratedRaw`, so opening Edit is a synchronous state flip
+  // (no extra fetch). The detail dialog stays open underneath so the user
+  // can return to it with a single Cancel.
+  const handleDetailEdit = useCallback(() => {
+    if (!hydratedRaw) return;
+    setEditOpen(true);
+  }, [hydratedRaw]);
+
+  const handleEditOpenChange = useCallback((next: boolean) => {
+    setEditOpen(next);
+  }, []);
+
+  const handleEditSuccess = useCallback(
+    (updated: MemoryReference) => {
+      // Swap in the patched ref: dialog closes, detail dialog re-renders
+      // against the fresh data. `fetchMemories()` refreshes the table row
+      // so summary/type/importance changes show without manual refresh.
+      // Toast surfaces the success — frontend rule: button-driven mutation
+      // success → toast (not banner).
+      setHydratedRaw(updated);
+      setHydrated(referenceAsMemory(updated));
+      setEditOpen(false);
+      toast({ title: t("editSuccess") });
+      void fetchMemories();
+    },
+    [fetchMemories, toast, t],
+  );
+
   const handleDeleteOpenChange = useCallback(
     (next: boolean) => {
       setDeleteOpen(next);
@@ -329,6 +376,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     setDeleteOpen(false);
     setDetailOpen(false);
     setHydrated(null);
+    setHydratedRaw(null);
     setLinkedRefs(EMPTY_LINKED_REFS);
     if (memoryIdParam) setMemoryIdParam(null);
     toast({ title: t("deleteSuccess") });
@@ -383,6 +431,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         memory={hydrated}
         open={detailOpen}
         onOpenChange={handleDetailOpenChange}
+        onEdit={hydratedRaw ? handleDetailEdit : undefined}
         onDelete={handleDetailDelete}
         notFound={detailNotFound}
         outgoingLinks={linkedRefs.outgoing}
@@ -397,6 +446,19 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
           open={deleteOpen}
           onOpenChange={handleDeleteOpenChange}
           onSuccess={handleDeleteSuccess}
+        />
+      )}
+      {/* Both hydrated state slices are mutated together (see `openWith`,
+          `handleEditSuccess`, `handleDeleteSuccess`); guarding on both
+          keeps the EditMemoryDialog mount aligned with the DeleteMemoryDialog
+          mount above and prevents a render with stale `hydratedRaw` if a
+          future code path forgets to clear one of the slices. */}
+      {hydrated && hydratedRaw && (
+        <EditMemoryDialog
+          memory={hydratedRaw}
+          open={editOpen}
+          onOpenChange={handleEditOpenChange}
+          onSuccess={handleEditSuccess}
         />
       )}
     </>
