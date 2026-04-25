@@ -193,6 +193,8 @@ class TestReference:
             workspace_id=uuid4(),
             context_id=uuid4(),
             deleted_at=None,
+            source_uri=None,
+            source_type=None,
         )
         service.memory_repo.get = AsyncMock(return_value=mock_memory)
         service.memory_repo.update_access_stats = AsyncMock()
