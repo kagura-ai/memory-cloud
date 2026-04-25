@@ -2754,7 +2754,7 @@
       "tagsLabel": "タグ(カンマ区切り)",
       "tagsPlaceholder": "tag1, tag2, tag3",
       "detailsLabel": "詳細 (JSON オブジェクト)",
-      "detailsPlaceholder": "'{'\"key\": \"value\"'}'",
+      "detailsPlaceholder": "JSON オブジェクト — 例: \"key\": \"value\"",
       "detailsParseError": "詳細は有効な JSON で入力してください",
       "detailsMustBeObject": "詳細は JSON オブジェクトで入力してください(配列やプリミティブは不可)",
       "summaryTooShort": "サマリは 10 文字以上必要です",

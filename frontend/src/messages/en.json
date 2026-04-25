@@ -2754,7 +2754,7 @@
       "tagsLabel": "Tags (comma-separated)",
       "tagsPlaceholder": "tag1, tag2, tag3",
       "detailsLabel": "Details (JSON object)",
-      "detailsPlaceholder": "'{'\"key\": \"value\"'}'",
+      "detailsPlaceholder": "JSON object — e.g. \"key\": \"value\"",
       "detailsParseError": "Details must be valid JSON",
       "detailsMustBeObject": "Details must be a JSON object (not array or primitive)",
       "summaryTooShort": "Summary must be at least 10 characters",

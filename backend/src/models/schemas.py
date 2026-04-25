@@ -384,12 +384,27 @@ class PatchMemoryRequest(BaseModel):
     content: str | None = Field(None, min_length=1)
     type: str | None = Field(None, min_length=1, max_length=50)
     importance: float | None = Field(None, ge=0.0, le=1.0)
-    # `max_length=100` caps the tag array. Tags-only patches skip the
+    # `max_length=100` caps the tag array length; per-tag string length is
+    # capped via `_validate_tag_strings` below. Tags-only patches skip the
     # MAX_CONTENT_SIZE guard (simplify deferred it to summary/content/details
-    # paths only), so without this cap an authenticated workspace member could
-    # send `tags=["x"]*1_000_000` and bloat the row's PG ARRAY column.
+    # paths only), so without these caps an authenticated workspace member
+    # could either send 1M tags OR 100 tags of 1MB each to bloat the row's
+    # PG ARRAY column. Both surfaces are now closed.
     tags: list[str] | None = Field(None, max_length=100)
     details: dict | None = None
+
+    @field_validator("tags")
+    @classmethod
+    def _validate_tag_strings(cls, v: list[str] | None) -> list[str] | None:
+        """Cap per-tag string length at 64 chars (Copilot loop 3 finding)."""
+        if v is None:
+            return v
+        for idx, tag in enumerate(v):
+            if len(tag) > 64:
+                raise ValueError(
+                    f"tag at index {idx} exceeds 64 chars (got {len(tag)}): '{tag[:32]}…'"
+                )
+        return v
 
     @model_validator(mode="after")
     def _at_least_one_field(self) -> "PatchMemoryRequest":

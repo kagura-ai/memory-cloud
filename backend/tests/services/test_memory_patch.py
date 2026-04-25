@@ -459,3 +459,13 @@ class TestPatchMemoryRequestValidation:
         req = PatchMemoryRequest(details=None)
         assert "details" in req.model_fields_set
         assert req.details is None
+
+    def test_per_tag_length_cap_enforced(self):
+        """Copilot loop 3: per-tag length cap (64 chars) — not just array length."""
+        with pytest.raises(ValueError, match="exceeds 64 chars"):
+            PatchMemoryRequest(tags=["x" * 65])
+
+    def test_per_tag_length_at_cap_accepted(self):
+        req = PatchMemoryRequest(tags=["x" * 64, "y" * 64])
+        assert len(req.tags) == 2
+        assert all(len(t) == 64 for t in req.tags)
