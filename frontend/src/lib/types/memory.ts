@@ -96,8 +96,8 @@ export interface MemoryListItem {
 // `POST /api/v1/memory/reference`. This is NOT structurally equal to `Memory`:
 // `key`, `value`, `agent_name`, `user_id`, `updated_at`, `access_count` are
 // absent. Callers that feed a `MemoryDetailDialog` (which reads those fields)
-// must adapt at the boundary — see ``referenceResponseToMemory`` helpers in
-// consumers.
+// must adapt at the boundary — see ``referenceAsMemory`` in
+// ``components/contexts/MemoriesTabPanel.tsx`` for the canonical adapter.
 export interface MemoryReference {
   memory_id: string;
   summary: string;
