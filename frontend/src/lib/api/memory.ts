@@ -75,8 +75,31 @@ export async function forgetMemory(memoryId: string): Promise<void> {
   });
 }
 
+// =============================================================================
+// LEGACY DEAD CODE — composite-key helpers below this banner.
+//
+// These functions target backend paths that DO NOT EXIST on the current API
+// surface (the memory router only exposes `/api/v1/memory/list`,
+// `/remember`, `/reference`, `/forget`, `/recall`, `/explore`, `/stats`,
+// `/access-patterns`). Calling any of them today returns 404.
+//
+// They remain in the file because the dialog components still import them
+// (CreateMemoryDialog → createMemory, EditMemoryDialog → updateMemory,
+// MemoriesTable → bulkDeleteMemories). Those dialogs are not yet wired to
+// any consumer. Removal is tracked alongside the dialog refactors:
+//   - createMemory / CreateMemoryDialog → needs /remember rewire
+//   - updateMemory / EditMemoryDialog   → see #439 (UUID PUT endpoint)
+//   - deleteMemory                       → superseded by forgetMemory above
+//   - bulkDeleteMemories                 → blocked on a UUID bulk-forget
+//   - searchMemoriesSemantic / Keyword / Timeline / getMemory / getMemoryStats
+//                                         → broken legacy search/stats
+//
+// Do NOT add new callers. The single-source canonical list/read/delete is
+// `getMemories` / `referenceMemory` / `forgetMemory` above.
+// =============================================================================
+
 /**
- * Get a single memory by key
+ * @deprecated Backend path /memory/{key} does not exist. Use referenceMemory(id).
  */
 export async function getMemory(
   key: string,
@@ -94,7 +117,7 @@ export async function getMemory(
 }
 
 /**
- * Create a new memory
+ * @deprecated Backend path POST /memory does not exist. Use POST /api/v1/memory/remember.
  */
 export async function createMemory(
   userId: string,
@@ -107,7 +130,7 @@ export async function createMemory(
 }
 
 /**
- * Update an existing memory
+ * @deprecated Backend path PUT /memory/{key} does not exist. See #439.
  */
 export async function updateMemory(
   key: string,
@@ -125,7 +148,7 @@ export async function updateMemory(
 }
 
 /**
- * Delete a memory
+ * @deprecated Backend path DELETE /memory/{key} does not exist. Use forgetMemory(id).
  */
 export async function deleteMemory(
   key: string,
@@ -145,7 +168,7 @@ export async function deleteMemory(
 }
 
 /**
- * Get memory statistics
+ * @deprecated Backend path is GET /api/v1/memory/stats and derives user from auth, not query.
  */
 export async function getMemoryStats(
   userId: string,
@@ -154,7 +177,7 @@ export async function getMemoryStats(
 }
 
 /**
- * Bulk delete memories (Issue #666)
+ * @deprecated Backend path POST /memory/bulk-delete does not exist. Needs UUID bulk-forget.
  */
 export async function bulkDeleteMemories(
   keys: string[],

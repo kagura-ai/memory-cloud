@@ -235,8 +235,10 @@ class ReferenceResponse(BaseModel):
     client: str
     # Optional origin metadata (Issue #215). Surfaced so the detail UI can
     # show where a memory came from (vault://, file://, https://, etc.).
+    # Use the same Literal as MemoryResponse / RememberRequest so the OpenAPI
+    # contract stays consistent and unexpected values can't leak to the UI.
     source_uri: str | None = None
-    source_type: str | None = None
+    source_type: Literal["file", "url", "vault", "api", "manual"] | None = None
 
     @field_serializer("created_at")
     def _serialize_created_at(self, dt: datetime) -> str:
