@@ -151,9 +151,9 @@ export function MemoriesTable({
                   />
                 </TableHead>
               )}
-              <TableHead>Key</TableHead>
+              <TableHead>Summary</TableHead>
+              <TableHead>Type</TableHead>
               <TableHead>Scope</TableHead>
-              <TableHead>Agent</TableHead>
               <TableHead>Importance</TableHead>
               <TableHead>Updated</TableHead>
               <TableHead className="text-right">Actions</TableHead>
@@ -171,19 +171,23 @@ export function MemoriesTable({
                         onCheckedChange={(checked) =>
                           handleRowToggle(memory, checked)
                         }
-                        aria-label={`Select ${memory.key}`}
+                        aria-label={`Select ${memory.summary || memory.key}`}
                       />
                     </TableCell>
                   )}
                   <TableCell className="font-medium max-w-xs truncate">
-                    {memory.key}
+                    {memory.summary || memory.key}
+                  </TableCell>
+                  <TableCell>
+                    {memory.type ? (
+                      <code className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">
+                        {memory.type}
+                      </code>
+                    ) : (
+                      <span className="text-xs text-slate-400">—</span>
+                    )}
                   </TableCell>
                   <TableCell>{getScopeBadge(memory.scope)}</TableCell>
-                  <TableCell>
-                    <code className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">
-                      {memory.agent_name}
-                    </code>
-                  </TableCell>
                   <TableCell>{getImportanceBadge(memory.importance)}</TableCell>
                   <TableCell className="text-sm text-slate-500">
                     {formatRelativeTime(

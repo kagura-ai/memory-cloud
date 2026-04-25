@@ -26,7 +26,10 @@ interface MemoryDetailDialogProps {
   memory: Memory;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onEdit: () => void;
+  // Optional: omit to hide the Edit button entirely. #433 defers edit until a
+  // UUID-addressed update endpoint lands; passing `undefined` keeps the dialog
+  // honest (no ghost button).
+  onEdit?: () => void;
   onDelete: () => void;
 }
 
@@ -40,12 +43,23 @@ export function MemoryDetailDialog({
   const { user } = useAuth();
   const locale = useLocale();
   const [copied, setCopied] = useState(false);
+  const [idCopied, setIdCopied] = useState(false);
 
   const copyValue = async () => {
     try {
       await navigator.clipboard.writeText(memory.value);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+    } catch (error) {
+      console.error("Failed to copy:", error);
+    }
+  };
+
+  const copyId = async () => {
+    try {
+      await navigator.clipboard.writeText(memory.id);
+      setIdCopied(true);
+      setTimeout(() => setIdCopied(false), 2000);
     } catch (error) {
       console.error("Failed to copy:", error);
     }
@@ -97,31 +111,53 @@ export function MemoryDetailDialog({
 
           <Separator />
 
-          {/* Metadata Grid */}
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
-                Agent Name
-              </label>
-              <p className="mt-1">
-                <code className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">
-                  {memory.agent_name}
-                </code>
-              </p>
+          {/* Memory ID — full row with copy button */}
+          <div>
+            <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
+              Memory ID
+            </label>
+            <div className="mt-1 flex items-center gap-2">
+              <code className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded font-mono break-all">
+                {memory.id}
+              </code>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={copyId}
+                className="h-7 shrink-0"
+                title="Copy memory ID"
+              >
+                {idCopied ? (
+                  <Check className="h-3.5 w-3.5" />
+                ) : (
+                  <Copy className="h-3.5 w-3.5" />
+                )}
+              </Button>
             </div>
+          </div>
 
-            <div>
-              <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
-                User ID
-              </label>
-              <p className="mt-1 text-sm truncate">{memory.user_id}</p>
-            </div>
+          {/* Metadata Grid — wrapper elements use <div> not <p> so the Badge
+              children (which render as <div>) don't trigger the
+              `<p> cannot contain <div>` HTML hydration warning. */}
+          <div className="grid grid-cols-2 gap-4">
+            {memory.type && (
+              <div>
+                <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
+                  Type
+                </label>
+                <div className="mt-1">
+                  <code className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">
+                    {memory.type}
+                  </code>
+                </div>
+              </div>
+            )}
 
             <div>
               <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
                 Importance
               </label>
-              <p className="mt-1">
+              <div className="mt-1">
                 <Badge
                   variant={
                     memory.importance >= 0.8
@@ -133,34 +169,50 @@ export function MemoryDetailDialog({
                 >
                   {memory.importance.toFixed(2)}
                 </Badge>
-              </p>
-            </div>
-
-            <div>
-              <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
-                Access Count
-              </label>
-              <p className="mt-1 text-sm">{memory.access_count || 0}</p>
+              </div>
             </div>
 
             <div>
               <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
                 Created At
               </label>
-              <p className="mt-1 text-sm">
+              <div className="mt-1 text-sm">
                 {formatDateTime(memory.created_at, user?.timezone, locale)}
-              </p>
+              </div>
             </div>
 
             <div>
               <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
                 Updated At
               </label>
-              <p className="mt-1 text-sm">
+              <div className="mt-1 text-sm">
                 {formatDateTime(memory.updated_at, user?.timezone, locale)}
-              </p>
+              </div>
             </div>
           </div>
+
+          {/* Source — origin URI + type for memories imported from a vault,
+              file, URL, etc. (Issue #215). Hidden if memory has no origin. */}
+          {memory.source_uri && (
+            <>
+              <Separator />
+              <div>
+                <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
+                  Source
+                </label>
+                <div className="mt-1 flex items-center gap-2">
+                  {memory.source_type && (
+                    <Badge variant="outline" className="shrink-0">
+                      {memory.source_type}
+                    </Badge>
+                  )}
+                  <code className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded break-all">
+                    {memory.source_uri}
+                  </code>
+                </div>
+              </div>
+            </>
+          )}
 
           {/* Tags */}
           {memory.tags && memory.tags.length > 0 && (
@@ -201,10 +253,12 @@ export function MemoryDetailDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Close
           </Button>
-          <Button variant="outline" onClick={onEdit}>
-            <Pencil className="h-4 w-4 mr-2" />
-            Edit
-          </Button>
+          {onEdit && (
+            <Button variant="outline" onClick={onEdit}>
+              <Pencil className="h-4 w-4 mr-2" />
+              Edit
+            </Button>
+          )}
           <Button variant="destructive" onClick={onDelete}>
             <Trash2 className="h-4 w-4 mr-2" />
             Delete

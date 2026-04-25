@@ -36,6 +36,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { OverviewTabPanel } from "@/components/contexts/OverviewTabPanel";
+import { MemoriesTabPanel } from "@/components/contexts/MemoriesTabPanel";
 import { ConnectionsTabPanel } from "@/components/contexts/ConnectionsTabPanel";
 import { SettingsTabPanel } from "@/components/contexts/SettingsTabPanel";
 import { SearchSettingsSection } from "@/components/contexts/SearchSettingsSection";
@@ -52,6 +53,7 @@ const GraphTabPanel = dynamic(
 
 const ADMIN_CONTEXT_TABS = [
   "overview",
+  "memories",
   "connections",
   "graph",
   "settings",
@@ -229,6 +231,7 @@ export default function ContextDetailPage() {
           {/* Issue #398: connections/graph/settings tabs are admin-only. */}
           {canSeeAdminTabs && (
             <>
+              <TabsTrigger value="memories">{t("tabs.memories")}</TabsTrigger>
               <TabsTrigger value="connections">
                 {t("tabs.connections")}
               </TabsTrigger>
@@ -248,6 +251,10 @@ export default function ContextDetailPage() {
             keeps GraphTabPanel's d3 bundle out of non-admin sessions). */}
         {canSeeAdminTabs && (
           <>
+            <TabsContent value="memories">
+              <MemoriesTabPanel contextId={contextId} />
+            </TabsContent>
+
             <TabsContent value="connections">
               <ConnectionsTabPanel contextId={contextId} />
             </TabsContent>

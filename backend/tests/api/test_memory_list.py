@@ -130,6 +130,29 @@ class TestListMemoriesContextFilter:
             )
 
     @pytest.mark.asyncio
+    async def test_soft_deleted_memories_excluded(self):
+        """``deleted_at IS NULL`` is in WHERE on every code path (regression #433):
+        forget() is a soft-delete, so the list must hide tombstones."""
+        mock_db = _db_with_rows(total=0, rows=[])
+
+        with patch("api.routes.memory.PermissionService"):
+            await list_memories(
+                user=MOCK_USER,
+                db=mock_db,
+                scope=None,
+                type=None,
+                context_id=None,
+                limit=50,
+                offset=0,
+            )
+
+        for call_index in (0, 1):
+            sql = _where_sql(mock_db, call_index)
+            assert "deleted_at IS NULL" in sql, (
+                f"deleted_at filter missing (call_index={call_index}): {sql}"
+            )
+
+    @pytest.mark.asyncio
     async def test_context_id_denied_propagates_404(self):
         """PermissionService 404 on forbidden/missing context propagates as HTTPException."""
         mock_db = AsyncMock()  # must not reach .execute()

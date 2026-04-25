@@ -563,6 +563,8 @@ class MemoryService:
             context=memory.context,
             created_at=memory.created_at,
             client=memory.client,
+            source_uri=memory.source_uri,
+            source_type=memory.source_type,
         )
 
     async def _create_declared_links(

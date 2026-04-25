@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +233,17 @@ class ReferenceResponse(BaseModel):
     context: dict | None
     created_at: datetime
     client: str
+    # Optional origin metadata (Issue #215). Surfaced so the detail UI can
+    # show where a memory came from (vault://, file://, https://, etc.).
+    source_uri: str | None = None
+    source_type: str | None = None
+
+    @field_serializer("created_at")
+    def _serialize_created_at(self, dt: datetime) -> str:
+        # Memory.created_at is stored as naive UTC. Tag with "Z" so JS
+        # clients parse it as UTC (without it, naive ISO is interpreted
+        # as local time, which JST shifts by +9 hours).
+        return dt.isoformat() + ("Z" if dt.tzinfo is None else "")
 
 
 class ForgetRequest(BaseModel):

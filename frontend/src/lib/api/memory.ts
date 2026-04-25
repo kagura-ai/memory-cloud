@@ -7,37 +7,72 @@
 import { apiClient } from "./base";
 import type {
   Memory,
+  MemoryScope,
   CreateMemoryRequest,
   UpdateMemoryRequest,
-  MemorySearchParams,
   MemoryListResponse,
+  MemoryListItem,
+  MemoryReference,
   MemoryStatsResponse,
 } from "../types/memory";
 
+// Issue #431/#433: Backend `GET /api/v1/memory/list` accepts only
+// {context_id, scope, type, limit, offset} — the old getMemories params
+// (query, agent_name, tags, min_importance, max_importance) don't exist
+// on this endpoint. Named params object, not the legacy `MemorySearchParams`.
+export interface ListMemoriesParams {
+  context_id?: string;
+  scope?: MemoryScope;
+  type?: string;
+  limit?: number;
+  offset?: number;
+}
+
 /**
- * Get list of memories with optional filters
+ * List memories, optionally scoped to a single context.
+ *
+ * Hits `GET /api/v1/memory/list` and returns the canonical
+ * `MemoryListItem` row shape (no legacy composite-key fields).
  */
 export async function getMemories(
-  params: MemorySearchParams = {},
-): Promise<MemoryListResponse<Memory>> {
+  params: ListMemoriesParams = {},
+): Promise<MemoryListResponse<MemoryListItem>> {
   const searchParams = new URLSearchParams();
 
-  if (params.query) searchParams.append("query", params.query);
-  if (params.scope) searchParams.append("scope", params.scope);
-  if (params.agent_name) searchParams.append("agent_name", params.agent_name);
-  if (params.tags)
-    params.tags.forEach((tag) => searchParams.append("tags", tag));
-  if (params.min_importance !== undefined)
-    searchParams.append("min_importance", params.min_importance.toString());
-  if (params.max_importance !== undefined)
-    searchParams.append("max_importance", params.max_importance.toString());
-  if (params.limit) searchParams.append("limit", params.limit.toString());
-  if (params.offset) searchParams.append("offset", params.offset.toString());
+  if (params.context_id) searchParams.set("context_id", params.context_id);
+  if (params.scope) searchParams.set("scope", params.scope);
+  if (params.type) searchParams.set("type", params.type);
+  searchParams.set("limit", String(params.limit ?? 50));
+  searchParams.set("offset", String(params.offset ?? 0));
 
-  const queryString = searchParams.toString();
-  const endpoint = `/memory${queryString ? `?${queryString}` : ""}`;
+  return apiClient.get<MemoryListResponse<MemoryListItem>>(
+    `/api/v1/memory/list?${searchParams.toString()}`,
+  );
+}
 
-  return apiClient.get<MemoryListResponse<Memory>>(endpoint);
+/**
+ * Fetch full memory detail by UUID.
+ *
+ * Returns the backend's `ReferenceResponse` shape verbatim. Consumers that
+ * need the legacy `Memory` shape must adapt — the backend does not return
+ * `key` / `value` / `agent_name` / `user_id` / `updated_at` / `access_count`.
+ */
+export async function referenceMemory(
+  memoryId: string,
+): Promise<MemoryReference> {
+  return apiClient.post<MemoryReference>("/api/v1/memory/reference", {
+    memory_id: memoryId,
+  });
+}
+
+/**
+ * Delete a memory by UUID (UUID-addressed forget, not the composite-key
+ * DELETE which doesn't exist as a REST endpoint).
+ */
+export async function forgetMemory(memoryId: string): Promise<void> {
+  await apiClient.post<unknown>("/api/v1/memory/forget", {
+    memory_id: memoryId,
+  });
 }
 
 /**
@@ -116,20 +151,6 @@ export async function getMemoryStats(
   userId: string,
 ): Promise<MemoryStatsResponse> {
   return apiClient.get<MemoryStatsResponse>(`/memory/stats?user_id=${userId}`);
-}
-
-/**
- * Search memories semantically
- */
-export async function searchMemories(
-  userId: string,
-  query: string,
-  params: Omit<MemorySearchParams, "query"> = {},
-): Promise<MemoryListResponse<Memory>> {
-  return getMemories({
-    ...params,
-    query,
-  });
 }
 
 /**
