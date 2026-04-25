@@ -101,22 +101,47 @@ class TestPatchMemoryNotFound:
 
 
 class TestPatchMemorySoftDeleted:
-    """Soft-deleted memories must surface as 410 Gone, not 404."""
+    """Soft-deleted memories must surface as 410 Gone — but only to authorized callers.
+
+    Permission denial fires BEFORE the soft-delete check (CSO security review):
+    a non-member must not distinguish "soft-deleted" (would-be 410) from
+    "never existed" (404), or they could confirm a memory was once real
+    just by guessing a UUID.
+    """
 
     @pytest.mark.asyncio
-    async def test_soft_deleted_raises_memory_gone(self, service):
-        from datetime import datetime
-
+    async def test_soft_deleted_raises_memory_gone_when_authorized(self, service):
         memory = _make_memory(deleted_at=datetime(2026, 4, 20))
         service.memory_repo.get = AsyncMock(return_value=memory)
 
-        with pytest.raises(MemoryGoneError) as excinfo:
-            await service.patch_memory(
-                memory_id=memory.id,
-                request=PatchMemoryRequest(importance=0.9),
-                user_id="test_user",
-            )
-        assert excinfo.value.status_code == 410
+        with patch("services.permission_service.PermissionService") as mock_perm_cls:
+            mock_perm = mock_perm_cls.return_value
+            mock_perm.can_access_memory = AsyncMock(return_value=True)
+
+            with pytest.raises(MemoryGoneError) as excinfo:
+                await service.patch_memory(
+                    memory_id=memory.id,
+                    request=PatchMemoryRequest(importance=0.9),
+                    user_id="test_user",
+                )
+            assert excinfo.value.status_code == 410
+
+    @pytest.mark.asyncio
+    async def test_soft_deleted_to_unauthorized_returns_not_found(self, service):
+        """Existence-leak guard: 404 (not 410) for non-members on a deleted memory."""
+        memory = _make_memory(deleted_at=datetime(2026, 4, 20))
+        service.memory_repo.get = AsyncMock(return_value=memory)
+
+        with patch("services.permission_service.PermissionService") as mock_perm_cls:
+            mock_perm = mock_perm_cls.return_value
+            mock_perm.can_access_memory = AsyncMock(return_value=False)
+
+            with pytest.raises(NotFoundException):
+                await service.patch_memory(
+                    memory_id=memory.id,
+                    request=PatchMemoryRequest(importance=0.9),
+                    user_id="other_user",
+                )
 
 
 class TestPatchMemoryEmbeddingRegen:
@@ -367,3 +392,12 @@ class TestPatchMemoryRequestValidation:
         req = PatchMemoryRequest(importance=0.7)
         assert req.importance == 0.7
         assert req.summary is None
+
+    def test_tags_array_max_length_enforced(self):
+        """CSO #2: prevent unbounded PG ARRAY bloat from authenticated members."""
+        with pytest.raises(ValueError):
+            PatchMemoryRequest(tags=["x"] * 101)
+
+    def test_tags_array_at_max_length_accepted(self):
+        req = PatchMemoryRequest(tags=["x"] * 100)
+        assert len(req.tags) == 100

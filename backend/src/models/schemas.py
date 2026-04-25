@@ -384,7 +384,11 @@ class PatchMemoryRequest(BaseModel):
     content: str | None = Field(None, min_length=1)
     type: str | None = Field(None, min_length=1, max_length=50)
     importance: float | None = Field(None, ge=0.0, le=1.0)
-    tags: list[str] | None = None
+    # `max_length=100` caps the tag array. Tags-only patches skip the
+    # MAX_CONTENT_SIZE guard (simplify deferred it to summary/content/details
+    # paths only), so without this cap an authenticated workspace member could
+    # send `tags=["x"]*1_000_000` and bloat the row's PG ARRAY column.
+    tags: list[str] | None = Field(None, max_length=100)
     details: dict | None = None
 
     @model_validator(mode="after")

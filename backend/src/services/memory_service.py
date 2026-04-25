@@ -505,9 +505,13 @@ class MemoryService:
         if not memory:
             raise NotFoundException("Memory", str(memory_id))
 
-        if memory.deleted_at is not None:
-            raise MemoryGoneError("Memory", str(memory_id))
-
+        # Permission check BEFORE soft-delete check: a non-member must not be
+        # able to distinguish a soft-deleted memory (would-be 410) from a
+        # never-existed UUID (404). Returning 410 first would let an attacker
+        # who guesses (or harvests) a UUID confirm "this memory was once
+        # real" — meaningful for GDPR-style "we used to have a record about
+        # you" leaks. 410 is reserved for authorized callers who need to
+        # distinguish tombstones from never-existed.
         perm_service = PermissionService(self.db)
         can_access = await perm_service.can_access_memory(
             user_id=CallerId(user_id),
@@ -517,6 +521,9 @@ class MemoryService:
         )
         if not can_access:
             raise NotFoundException("Memory", str(memory_id))
+
+        if memory.deleted_at is not None:
+            raise MemoryGoneError("Memory", str(memory_id))
 
         # `exclude_unset=True` keeps None values that the client EXPLICITLY
         # sent, so `{"details": null}` lands in `provided` and clears the
