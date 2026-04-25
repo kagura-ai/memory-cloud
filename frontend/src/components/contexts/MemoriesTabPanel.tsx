@@ -309,6 +309,22 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     setDeleteOpen(true);
   }, []);
 
+  const handleDeleteOpenChange = useCallback(
+    (next: boolean) => {
+      setDeleteOpen(next);
+      // Cancel path (delete dialog dismissed without confirming): the
+      // detail dialog was closed when delete opened, but the URL still
+      // carries ``?memoryId=`` and the user expects to return to the
+      // detail view. Re-open the detail dialog if hydrated state is
+      // still around (it isn't on the success path — handleDeleteSuccess
+      // clears ``hydrated`` before this fires).
+      if (!next && hydrated) {
+        setDetailOpen(true);
+      }
+    },
+    [hydrated],
+  );
+
   const handleDeleteSuccess = useCallback(() => {
     setDeleteOpen(false);
     setDetailOpen(false);
@@ -379,7 +395,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         <DeleteMemoryDialog
           memory={hydrated}
           open={deleteOpen}
-          onOpenChange={setDeleteOpen}
+          onOpenChange={handleDeleteOpenChange}
           onSuccess={handleDeleteSuccess}
         />
       )}

@@ -106,10 +106,13 @@ export interface LinkedMemoryRef {
 
 // Exact mirror of backend `ReferenceResponse` (schemas.py:222) — returned by
 // `POST /api/v1/memory/reference`. This is NOT structurally equal to `Memory`:
-// `key`, `value`, `agent_name`, `user_id`, `updated_at`, `access_count` are
-// absent. Callers that feed a `MemoryDetailDialog` (which reads those fields)
-// must adapt at the boundary — see ``referenceAsMemory`` in
-// ``components/contexts/MemoriesTabPanel.tsx`` for the canonical adapter.
+// `key`, `value`, `agent_name`, `user_id`, and `access_count` are absent.
+// (Issue #434 added `scope` and `updated_at` to the response so the dialog
+// can render correctly from a deep-link without round-tripping through
+// `/memory/list` to discover them.) Callers that feed a `MemoryDetailDialog`
+// (which reads the absent legacy fields) must adapt at the boundary — see
+// ``referenceAsMemory`` in ``components/contexts/MemoriesTabPanel.tsx`` for
+// the canonical adapter.
 //
 // Issue #440: `outgoing_links`/`incoming_links` carry declared_link backlinks.
 // Naming: `*_has_more` matches `MemoryListResponse.has_more` (codebase
