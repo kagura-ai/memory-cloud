@@ -2674,6 +2674,11 @@
       "hydrateFailed": "Failed to load memory details",
       "deleteSuccess": "Memory deleted"
     },
+    "detailDialog": {
+      "memoryId": "Memory ID",
+      "copyMemoryId": "Copy memory ID",
+      "source": "Source"
+    },
     "deleteDialog": {
       "title": "Delete Memory",
       "description": "Are you sure you want to delete this memory? This action cannot be undone.",

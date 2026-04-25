@@ -20,7 +20,7 @@ import type { Memory } from "@/lib/types/memory";
 import { formatDateTime } from "@/lib/utils/datetime";
 import { useState } from "react";
 import { useAuth } from "@/contexts/AuthContext";
-import { useLocale } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 
 interface MemoryDetailDialogProps {
   memory: Memory;
@@ -42,6 +42,7 @@ export function MemoryDetailDialog({
 }: MemoryDetailDialogProps) {
   const { user } = useAuth();
   const locale = useLocale();
+  const t = useTranslations("contextDetail.detailDialog");
   const [copied, setCopied] = useState(false);
   const [idCopied, setIdCopied] = useState(false);
 
@@ -114,7 +115,7 @@ export function MemoryDetailDialog({
           {/* Memory ID — full row with copy button */}
           <div>
             <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
-              Memory ID
+              {t("memoryId")}
             </label>
             <div className="mt-1 flex items-center gap-2">
               <code className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded font-mono break-all">
@@ -125,7 +126,8 @@ export function MemoryDetailDialog({
                 size="sm"
                 onClick={copyId}
                 className="h-7 shrink-0"
-                title="Copy memory ID"
+                title={t("copyMemoryId")}
+                aria-label={t("copyMemoryId")}
               >
                 {idCopied ? (
                   <Check className="h-3.5 w-3.5" />
@@ -198,7 +200,7 @@ export function MemoryDetailDialog({
               <Separator />
               <div>
                 <label className="text-sm font-medium text-slate-500 dark:text-slate-400">
-                  Source
+                  {t("source")}
                 </label>
                 <div className="mt-1 flex items-center gap-2">
                   {memory.source_type && (

@@ -27,7 +27,10 @@ interface MemoriesTableProps {
   memories: Memory[];
   loading: boolean;
   onView: (memory: Memory) => void;
-  onEdit: (memory: Memory) => void;
+  // Optional: omit to hide the Edit icon. Same convention as MemoryDetailDialog
+  // — until a UUID-addressed update endpoint lands (#439), consumers without
+  // an edit path should pass nothing rather than a no-op callback.
+  onEdit?: (memory: Memory) => void;
   onDelete: (memory: Memory) => void;
   page: number;
   pageSize: number;
@@ -206,14 +209,16 @@ export function MemoriesTable({
                       >
                         <Eye className="h-4 w-4" />
                       </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => onEdit(memory)}
-                        title="Edit memory"
-                      >
-                        <Pencil className="h-4 w-4" />
-                      </Button>
+                      {onEdit && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => onEdit(memory)}
+                          title="Edit memory"
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                      )}
                       <Button
                         variant="ghost"
                         size="icon"

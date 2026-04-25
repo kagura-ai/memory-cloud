@@ -202,7 +202,6 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         memories={displayRows}
         loading={loading}
         onView={handleView}
-        onEdit={() => {}}
         onDelete={handleDelete}
         page={page}
         pageSize={PAGE_SIZE}

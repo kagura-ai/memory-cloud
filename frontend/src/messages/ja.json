@@ -2674,12 +2674,17 @@
       "hydrateFailed": "メモリ詳細の取得に失敗しました",
       "deleteSuccess": "メモリを削除しました"
     },
+    "detailDialog": {
+      "memoryId": "メモリID",
+      "copyMemoryId": "メモリIDをコピー",
+      "source": "ソース"
+    },
     "deleteDialog": {
       "title": "メモリを削除",
       "description": "このメモリを削除してもよろしいですか? この操作は取り消せません。",
-      "keyLabel": "Key:",
-      "scopeLabel": "Scope:",
-      "agentLabel": "Agent:",
+      "keyLabel": "キー:",
+      "scopeLabel": "スコープ:",
+      "agentLabel": "エージェント:",
       "previewLabel": "値(プレビュー):",
       "cancel": "キャンセル",
       "confirm": "メモリを削除",
