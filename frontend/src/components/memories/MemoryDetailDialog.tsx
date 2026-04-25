@@ -32,6 +32,7 @@ import type { LinkedMemoryRef, MemoryReference } from "@/lib/types/memory";
 import { formatDateTime } from "@/lib/utils/datetime";
 import { useAuth } from "@/contexts/AuthContext";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
+import { useToast } from "@/hooks/use-toast";
 import { useLocale, useTranslations } from "next-intl";
 
 interface MemoryDetailDialogProps {
@@ -74,14 +75,21 @@ export function MemoryDetailDialog({
   const { user } = useAuth();
   const locale = useLocale();
   const t = useTranslations("contextDetail.detailDialog");
+  const tCommon = useTranslations("common");
+  const { toast } = useToast();
   const { isCopied, copyToTarget } = useCopyFeedback();
 
   const copy = async (text: string, key: string) => {
     try {
       await copyToTarget(text, key);
-    } catch {
-      // Clipboard rejected (permissions, ephemeral env). Silent — the
-      // unflipped copy icon is the user-visible signal.
+    } catch (err) {
+      // useCopyFeedback re-throws clipboard errors so callers can surface
+      // them — frontend rule: button-driven mutation failures use toast.
+      toast({
+        variant: "destructive",
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : t("copyFailed"),
+      });
     }
   };
 

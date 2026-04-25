@@ -2703,6 +2703,7 @@
     "detailDialog": {
       "memoryId": "Memory ID",
       "copyMemoryId": "Copy memory ID",
+      "copyFailed": "Failed to copy to clipboard",
       "source": "Source",
       "scopePersistent": "Persistent",
       "scopeWorking": "Working",
