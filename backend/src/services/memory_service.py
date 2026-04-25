@@ -7,7 +7,6 @@ Issue #82: Context-based multi-collection support.
 
 from __future__ import annotations
 
-import asyncio
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, select
@@ -607,29 +606,33 @@ class MemoryService:
         re-scoped to (workspace_id, context_id, deleted_at IS NULL) as
         defense-in-depth — orphaned/soft-deleted/cross-context edges are
         silently dropped from the response.
+
+        Edge fetches run sequentially: SQLAlchemy AsyncSession forbids
+        concurrent operations on the same session, so ``asyncio.gather``
+        on two ``self.db.execute`` calls raises ``InvalidRequestError``.
+        Two sequential round-trips are cheap (≤100 rows each) and the
+        correctness gain dominates.
         """
         from repositories.neural_edge import NeuralEdgeRepository
 
         edge_repo = NeuralEdgeRepository(self.db)
         cap = 50
 
-        out_edges, in_edges = await asyncio.gather(
-            edge_repo.get_outgoing_edges(
-                user_id=None,
-                src_id=memory_id,
-                edge_types=["declared_link"],
-                limit=cap + 1,
-                workspace_id=str(workspace_id),
-                context_id=str(context_id),
-            ),
-            edge_repo.get_incoming_edges(
-                user_id=None,
-                dst_id=memory_id,
-                edge_types=["declared_link"],
-                limit=cap + 1,
-                workspace_id=str(workspace_id),
-                context_id=str(context_id),
-            ),
+        out_edges = await edge_repo.get_outgoing_edges(
+            user_id=None,
+            src_id=memory_id,
+            edge_types=["declared_link"],
+            limit=cap + 1,
+            workspace_id=str(workspace_id),
+            context_id=str(context_id),
+        )
+        in_edges = await edge_repo.get_incoming_edges(
+            user_id=None,
+            dst_id=memory_id,
+            edge_types=["declared_link"],
+            limit=cap + 1,
+            workspace_id=str(workspace_id),
+            context_id=str(context_id),
         )
 
         out_has_more = len(out_edges) > cap
