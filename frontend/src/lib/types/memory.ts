@@ -92,12 +92,31 @@ export interface MemoryListItem {
   updated_at: string;
 }
 
+// Issue #440: a single declared_link reference surfaced in MemoryReference.
+// Mirror of backend `LinkedMemoryRef` (schemas.py:LinkedMemoryRef). Used by
+// the dialog's "References" section — outgoing/incoming lists.
+export interface LinkedMemoryRef {
+  memory_id: string;
+  summary: string;
+  type?: string | null;
+  importance: number;
+  weight: number;
+  created_at: string;
+}
+
 // Exact mirror of backend `ReferenceResponse` (schemas.py:222) — returned by
 // `POST /api/v1/memory/reference`. This is NOT structurally equal to `Memory`:
-// `key`, `value`, `agent_name`, `user_id`, `updated_at`, `access_count` are
-// absent. Callers that feed a `MemoryDetailDialog` (which reads those fields)
-// must adapt at the boundary — see ``referenceAsMemory`` in
-// ``components/contexts/MemoriesTabPanel.tsx`` for the canonical adapter.
+// `key`, `value`, `agent_name`, `user_id`, and `access_count` are absent.
+// (Issue #434 added `scope` and `updated_at` to the response so the dialog
+// can render correctly from a deep-link without round-tripping through
+// `/memory/list` to discover them.) Callers that feed a `MemoryDetailDialog`
+// (which reads the absent legacy fields) must adapt at the boundary — see
+// ``referenceAsMemory`` in ``components/contexts/MemoriesTabPanel.tsx`` for
+// the canonical adapter.
+//
+// Issue #440: `outgoing_links`/`incoming_links` carry declared_link backlinks.
+// Naming: `*_has_more` matches `MemoryListResponse.has_more` (codebase
+// precedent for capped collections).
 export interface MemoryReference {
   memory_id: string;
   summary: string;
@@ -105,13 +124,19 @@ export interface MemoryReference {
   content: string;
   details: Record<string, unknown> | null;
   type: string;
+  scope: MemoryScope;
   importance: number;
   tags: string[];
   context: Record<string, unknown> | null;
   created_at: string;
+  updated_at: string;
   client: string;
   source_uri?: string | null;
   source_type?: string | null;
+  outgoing_links?: LinkedMemoryRef[];
+  outgoing_has_more?: boolean;
+  incoming_links?: LinkedMemoryRef[];
+  incoming_has_more?: boolean;
 }
 
 // Generic over the row shape: default is `MemoryListItem` (the structurally

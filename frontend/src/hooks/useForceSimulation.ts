@@ -273,16 +273,26 @@ export function useForceSimulation({
     // --- Node Drag (d3-drag) ---
     type DragEvent = D3DragEvent<SVGCircleElement, SimNode, SimNode>;
 
+    // ``event.sourceEvent.currentTarget`` is typed ``EventTarget | null``,
+    // and the ``?.setAttribute`` chain only short-circuits on null/undefined.
+    // On Next.js 16 + React 19 / Turbopack the value is sometimes a non-
+    // Element (Window or a stale target after the pointer event lifecycle
+    // resets), which lacks ``setAttribute`` and crashes the drag handler.
+    // Issue #444. Narrowing via ``instanceof Element`` is the minimal safe
+    // guard that preserves the cursor visual on real Elements.
+    const setCursor = (target: EventTarget | null, cursor: string) => {
+      if (target instanceof Element) {
+        target.setAttribute("cursor", cursor);
+      }
+    };
+
     const dragBehavior = drag<SVGCircleElement, SimNode>()
       .on("start", (event: DragEvent) => {
         if (!event.active) simulation.alphaTarget(0.3).restart();
         const d = event.subject;
         d.fx = d.x;
         d.fy = d.y;
-        (event.sourceEvent.currentTarget as SVGCircleElement)?.setAttribute(
-          "cursor",
-          "grabbing",
-        );
+        setCursor(event.sourceEvent.currentTarget, "grabbing");
       })
       .on("drag", (event: DragEvent) => {
         const d = event.subject;
@@ -294,10 +304,7 @@ export function useForceSimulation({
         const d = event.subject;
         d.fx = null;
         d.fy = null;
-        (event.sourceEvent.currentTarget as SVGCircleElement)?.setAttribute(
-          "cursor",
-          "grab",
-        );
+        setCursor(event.sourceEvent.currentTarget, "grab");
       });
 
     // Attach drag to each circle, binding the SimNode as datum

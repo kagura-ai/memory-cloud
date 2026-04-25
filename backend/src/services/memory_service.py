@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.retention import should_promote_to_persistent
@@ -26,6 +26,7 @@ from models.schemas import (
     ExploreResponse,
     ForgetRequest,
     ForgetResponse,
+    LinkedMemoryRef,
     MemoryResponse,
     MemoryStatsResponse,
     RecallRequest,
@@ -545,11 +546,40 @@ class MemoryService:
         if not can_access:
             raise NotFoundException("Memory", str(memory_id))
 
+        # Snapshot ``updated_at`` before bumping access stats. The Memory
+        # ORM column declares ``onupdate=func.now()``; a subsequent UPDATE
+        # (issued by ``update_access_stats``) makes SQLAlchemy expire the
+        # in-memory attribute so the next access triggers a sync lazy-load
+        # → ``MissingGreenlet`` outside the original IO context. Reading
+        # the value here is also semantically right: an access bump is
+        # not a meaningful edit, so the dialog's "Updated At" should
+        # reflect the last real change, not "now".
+        snapshot_updated_at = memory.updated_at or memory.created_at
+
         # Update access stats
         await self.memory_repo.update_access_stats(memory_id, client="api")
         await self.db.commit()
 
         logger.info("memory_referenced", memory_id=str(memory_id), user_id=user_id)
+
+        # Issue #440: Fetch declared_link references for the dialog References
+        # section. The edge invariant (`_validate_edge_context_invariant` in
+        # repositories/neural_edge.py) guarantees both endpoints share the same
+        # (workspace_id, context_id) as the source memory, so the access check
+        # above already covers them — no per-edge permission re-check needed.
+        # The bulk re-scope below is defense-in-depth, mirroring the pattern in
+        # routes/graph.py:284-291: it filters out soft-deleted or invariant-
+        # violating rows even before AC enforcement is universal.
+        (
+            outgoing_links,
+            outgoing_has_more,
+            incoming_links,
+            incoming_has_more,
+        ) = await self._fetch_declared_link_refs(
+            memory_id=memory.id,
+            workspace_id=memory.workspace_id,
+            context_id=memory.context_id,
+        )
 
         return ReferenceResponse(
             memory_id=memory.id,
@@ -558,14 +588,122 @@ class MemoryService:
             content=memory.content,
             details=memory.details,
             type=memory.type,
+            scope=memory.scope,
             importance=memory.importance,
             tags=memory.tags or [],
             context=memory.context,
             created_at=memory.created_at,
+            updated_at=snapshot_updated_at,
             client=memory.client,
             source_uri=memory.source_uri,
             source_type=memory.source_type,
+            outgoing_links=outgoing_links,
+            outgoing_has_more=outgoing_has_more,
+            incoming_links=incoming_links,
+            incoming_has_more=incoming_has_more,
         )
+
+    async def _fetch_declared_link_refs(
+        self,
+        memory_id: UUID,
+        workspace_id: UUID,
+        context_id: UUID,
+    ) -> tuple[list[LinkedMemoryRef], bool, list[LinkedMemoryRef], bool]:
+        """Fetch declared_link edges and resolve them to LinkedMemoryRef list.
+
+        Issue #440. Limit 50 each; setting limit=51 lets us detect "more
+        available" without paginating. The destination Memory bulk-fetch is
+        re-scoped to (workspace_id, context_id, deleted_at IS NULL) as
+        defense-in-depth — orphaned/soft-deleted/cross-context edges are
+        silently dropped from the response.
+
+        Edge fetches run sequentially: SQLAlchemy AsyncSession forbids
+        concurrent operations on the same session, so ``asyncio.gather``
+        on two ``self.db.execute`` calls raises ``InvalidRequestError``.
+        Two sequential round-trips are cheap (≤100 rows each) and the
+        correctness gain dominates.
+        """
+        from repositories.neural_edge import NeuralEdgeRepository
+
+        edge_repo = NeuralEdgeRepository(self.db)
+        cap = 50
+
+        out_edges = await edge_repo.get_outgoing_edges(
+            user_id=None,
+            src_id=memory_id,
+            edge_types=["declared_link"],
+            limit=cap + 1,
+            workspace_id=str(workspace_id),
+            context_id=str(context_id),
+        )
+        in_edges = await edge_repo.get_incoming_edges(
+            user_id=None,
+            dst_id=memory_id,
+            edge_types=["declared_link"],
+            limit=cap + 1,
+            workspace_id=str(workspace_id),
+            context_id=str(context_id),
+        )
+
+        out_has_more = len(out_edges) > cap
+        in_has_more = len(in_edges) > cap
+        out_edges = out_edges[:cap]
+        in_edges = in_edges[:cap]
+
+        linked_ids: set[UUID] = set()
+        for e in out_edges:
+            linked_ids.add(e.dst_id)
+        for e in in_edges:
+            linked_ids.add(e.src_id)
+
+        if not linked_ids:
+            return [], out_has_more, [], in_has_more
+
+        result = await self.db.execute(
+            select(Memory).where(
+                and_(
+                    Memory.id.in_(list(linked_ids)),
+                    Memory.workspace_id == workspace_id,
+                    Memory.context_id == context_id,
+                    Memory.deleted_at.is_(None),
+                )
+            )
+        )
+        memories_by_id = {m.id: m for m in result.scalars().all()}
+
+        outgoing_links: list[LinkedMemoryRef] = []
+        for e in out_edges:
+            target = memories_by_id.get(e.dst_id)
+            if target is None:
+                continue
+            outgoing_links.append(
+                LinkedMemoryRef(
+                    memory_id=target.id,
+                    summary=target.summary,
+                    type=target.type,
+                    importance=target.importance,
+                    weight=e.weight,
+                    created_at=e.created_at,
+                )
+            )
+
+        incoming_links: list[LinkedMemoryRef] = []
+        for e in in_edges:
+            source = memories_by_id.get(e.src_id)
+            if source is None:
+                continue
+            incoming_links.append(
+                LinkedMemoryRef(
+                    memory_id=source.id,
+                    summary=source.summary,
+                    type=source.type,
+                    importance=source.importance,
+                    weight=e.weight,
+                    created_at=e.created_at,
+                )
+            )
+
+        return outgoing_links, out_has_more, incoming_links, in_has_more
 
     async def _create_declared_links(
         self,

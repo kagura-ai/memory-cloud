@@ -200,15 +200,266 @@ class TestReference:
         service.memory_repo.update_access_stats = AsyncMock()
         service.db.commit = AsyncMock()
 
-        with patch("services.permission_service.PermissionService") as mock_perm_cls:
+        with (
+            patch("services.permission_service.PermissionService") as mock_perm_cls,
+            patch("repositories.neural_edge.NeuralEdgeRepository") as mock_edge_cls,
+        ):
             mock_perm = MagicMock()
             mock_perm.can_access_memory = AsyncMock(return_value=True)
             mock_perm_cls.return_value = mock_perm
+
+            # Issue #440: reference() now fetches declared_link refs after the
+            # access check. With both edge lists empty, _fetch_declared_link_refs
+            # short-circuits before touching db.execute.
+            mock_edge_repo = MagicMock()
+            mock_edge_repo.get_outgoing_edges = AsyncMock(return_value=[])
+            mock_edge_repo.get_incoming_edges = AsyncMock(return_value=[])
+            mock_edge_cls.return_value = mock_edge_repo
 
             response = await service.reference(memory_id=memory_id, user_id="test_user")
 
         assert response.memory_id == memory_id
         assert response.summary == "Test"
+        assert response.scope == "working"
+        assert response.outgoing_links == []
+        assert response.outgoing_has_more is False
+        assert response.incoming_links == []
+        assert response.incoming_has_more is False
+
+
+class TestReferenceWithLinks:
+    """Issue #440: reference() exposes outgoing/incoming declared_link refs."""
+
+    @pytest.fixture
+    def workspace_id(self):
+        return uuid4()
+
+    @pytest.fixture
+    def context_id(self):
+        return uuid4()
+
+    @pytest.fixture
+    def source_memory(self, workspace_id, context_id):
+        return MagicMock(
+            id=uuid4(),
+            user_id="user-a",
+            summary="Source",
+            content="src content",
+            context_summary=None,
+            details=None,
+            type="note",
+            importance=0.5,
+            tags=[],
+            context=None,
+            scope="working",
+            client="api",
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+            workspace_id=workspace_id,
+            context_id=context_id,
+            deleted_at=None,
+            source_uri=None,
+            source_type=None,
+        )
+
+    @staticmethod
+    def _linked_memory(workspace_id, context_id, summary="linked", deleted=False):
+        return MagicMock(
+            id=uuid4(),
+            user_id="user-a",
+            summary=summary,
+            type="note",
+            importance=0.6,
+            workspace_id=workspace_id,
+            context_id=context_id,
+            deleted_at=datetime.utcnow() if deleted else None,
+        )
+
+    @staticmethod
+    def _edge(src_id, dst_id, weight=1.0):
+        return MagicMock(
+            src_id=src_id,
+            dst_id=dst_id,
+            weight=weight,
+            edge_type="declared_link",
+            created_at=datetime.utcnow(),
+        )
+
+    def _make_service(self, source_memory):
+        service = MemoryService(MagicMock())
+        service.memory_repo.get = AsyncMock(return_value=source_memory)
+        service.memory_repo.update_access_stats = AsyncMock()
+        service.db.commit = AsyncMock()
+        return service
+
+    @staticmethod
+    def _bulk_select_returning(linked_memories):
+        """Build the AsyncMock used as ``service.db.execute`` for the
+        bulk Memory re-scope query in ``_fetch_declared_link_refs``."""
+        execute_result = MagicMock()
+        scalars = MagicMock()
+        scalars.all.return_value = linked_memories
+        execute_result.scalars.return_value = scalars
+        return AsyncMock(return_value=execute_result)
+
+    @pytest.mark.asyncio
+    async def test_returns_outgoing_declared_links(self, source_memory, workspace_id, context_id):
+        service = self._make_service(source_memory)
+        target_a = self._linked_memory(workspace_id, context_id, summary="A")
+        target_b = self._linked_memory(workspace_id, context_id, summary="B")
+        out_edges = [
+            self._edge(source_memory.id, target_a.id, weight=0.9),
+            self._edge(source_memory.id, target_b.id, weight=0.4),
+        ]
+        service.db.execute = self._bulk_select_returning([target_a, target_b])
+
+        with (
+            patch("services.permission_service.PermissionService") as mock_perm_cls,
+            patch("repositories.neural_edge.NeuralEdgeRepository") as mock_edge_cls,
+        ):
+            mock_perm = MagicMock()
+            mock_perm.can_access_memory = AsyncMock(return_value=True)
+            mock_perm_cls.return_value = mock_perm
+
+            mock_edge_repo = MagicMock()
+            mock_edge_repo.get_outgoing_edges = AsyncMock(return_value=out_edges)
+            mock_edge_repo.get_incoming_edges = AsyncMock(return_value=[])
+            mock_edge_cls.return_value = mock_edge_repo
+
+            response = await service.reference(memory_id=source_memory.id, user_id="user-a")
+
+        assert len(response.outgoing_links) == 2
+        summaries = {ref.summary for ref in response.outgoing_links}
+        assert summaries == {"A", "B"}
+        assert response.outgoing_has_more is False
+        assert response.incoming_links == []
+        assert response.incoming_has_more is False
+
+    @pytest.mark.asyncio
+    async def test_returns_incoming_declared_links(self, source_memory, workspace_id, context_id):
+        service = self._make_service(source_memory)
+        backlink = self._linked_memory(workspace_id, context_id, summary="Origin")
+        in_edges = [self._edge(backlink.id, source_memory.id)]
+        service.db.execute = self._bulk_select_returning([backlink])
+
+        with (
+            patch("services.permission_service.PermissionService") as mock_perm_cls,
+            patch("repositories.neural_edge.NeuralEdgeRepository") as mock_edge_cls,
+        ):
+            mock_perm = MagicMock()
+            mock_perm.can_access_memory = AsyncMock(return_value=True)
+            mock_perm_cls.return_value = mock_perm
+
+            mock_edge_repo = MagicMock()
+            mock_edge_repo.get_outgoing_edges = AsyncMock(return_value=[])
+            mock_edge_repo.get_incoming_edges = AsyncMock(return_value=in_edges)
+            mock_edge_cls.return_value = mock_edge_repo
+
+            response = await service.reference(memory_id=source_memory.id, user_id="user-a")
+
+        assert response.outgoing_links == []
+        assert len(response.incoming_links) == 1
+        assert response.incoming_links[0].summary == "Origin"
+
+    @pytest.mark.asyncio
+    async def test_caps_at_50_and_sets_has_more(self, source_memory, workspace_id, context_id):
+        """When >50 edges exist, response truncates to 50 and signals has_more."""
+        service = self._make_service(source_memory)
+        targets = [
+            self._linked_memory(workspace_id, context_id, summary=f"T{i}") for i in range(51)
+        ]
+        # repository sees limit=51 and returns all 51; service should cap at 50.
+        out_edges = [self._edge(source_memory.id, t.id) for t in targets]
+        service.db.execute = self._bulk_select_returning(targets)
+
+        with (
+            patch("services.permission_service.PermissionService") as mock_perm_cls,
+            patch("repositories.neural_edge.NeuralEdgeRepository") as mock_edge_cls,
+        ):
+            mock_perm = MagicMock()
+            mock_perm.can_access_memory = AsyncMock(return_value=True)
+            mock_perm_cls.return_value = mock_perm
+
+            mock_edge_repo = MagicMock()
+            mock_edge_repo.get_outgoing_edges = AsyncMock(return_value=out_edges)
+            mock_edge_repo.get_incoming_edges = AsyncMock(return_value=[])
+            mock_edge_cls.return_value = mock_edge_repo
+
+            response = await service.reference(memory_id=source_memory.id, user_id="user-a")
+
+            # Repo must have been called with limit=51 (cap+1) so service can
+            # detect has_more without paginating.
+            kwargs = mock_edge_repo.get_outgoing_edges.await_args.kwargs
+            assert kwargs["limit"] == 51
+            assert kwargs["edge_types"] == ["declared_link"]
+
+        assert len(response.outgoing_links) == 50
+        assert response.outgoing_has_more is True
+
+    @pytest.mark.asyncio
+    async def test_drops_soft_deleted_target(self, source_memory, workspace_id, context_id):
+        """Soft-deleted linked memory is dropped silently (defense-in-depth)."""
+        service = self._make_service(source_memory)
+        live = self._linked_memory(workspace_id, context_id, summary="Live")
+        dead = self._linked_memory(workspace_id, context_id, summary="Dead", deleted=True)
+        out_edges = [
+            self._edge(source_memory.id, live.id),
+            self._edge(source_memory.id, dead.id),
+        ]
+        # Bulk re-scope SQL filters `deleted_at IS NULL`, so only `live` is
+        # returned by the query — the test simulates that behavior directly.
+        service.db.execute = self._bulk_select_returning([live])
+
+        with (
+            patch("services.permission_service.PermissionService") as mock_perm_cls,
+            patch("repositories.neural_edge.NeuralEdgeRepository") as mock_edge_cls,
+        ):
+            mock_perm = MagicMock()
+            mock_perm.can_access_memory = AsyncMock(return_value=True)
+            mock_perm_cls.return_value = mock_perm
+
+            mock_edge_repo = MagicMock()
+            mock_edge_repo.get_outgoing_edges = AsyncMock(return_value=out_edges)
+            mock_edge_repo.get_incoming_edges = AsyncMock(return_value=[])
+            mock_edge_cls.return_value = mock_edge_repo
+
+            response = await service.reference(memory_id=source_memory.id, user_id="user-a")
+
+        assert len(response.outgoing_links) == 1
+        assert response.outgoing_links[0].summary == "Live"
+
+    @pytest.mark.asyncio
+    async def test_passes_declared_link_filter_to_repo(
+        self, source_memory, workspace_id, context_id
+    ):
+        """Edge fetch is restricted to declared_link only (not semantic/cooccurrence)."""
+        service = self._make_service(source_memory)
+        service.db.execute = self._bulk_select_returning([])
+
+        with (
+            patch("services.permission_service.PermissionService") as mock_perm_cls,
+            patch("repositories.neural_edge.NeuralEdgeRepository") as mock_edge_cls,
+        ):
+            mock_perm = MagicMock()
+            mock_perm.can_access_memory = AsyncMock(return_value=True)
+            mock_perm_cls.return_value = mock_perm
+
+            mock_edge_repo = MagicMock()
+            mock_edge_repo.get_outgoing_edges = AsyncMock(return_value=[])
+            mock_edge_repo.get_incoming_edges = AsyncMock(return_value=[])
+            mock_edge_cls.return_value = mock_edge_repo
+
+            await service.reference(memory_id=source_memory.id, user_id="user-a")
+
+        out_kwargs = mock_edge_repo.get_outgoing_edges.await_args.kwargs
+        in_kwargs = mock_edge_repo.get_incoming_edges.await_args.kwargs
+        assert out_kwargs["edge_types"] == ["declared_link"]
+        assert in_kwargs["edge_types"] == ["declared_link"]
+        # Both edge fetches are scoped to the source memory's workspace+context.
+        assert out_kwargs["workspace_id"] == str(workspace_id)
+        assert out_kwargs["context_id"] == str(context_id)
+        assert in_kwargs["workspace_id"] == str(workspace_id)
+        assert in_kwargs["context_id"] == str(context_id)
 
 
 class TestRememberRequest:
