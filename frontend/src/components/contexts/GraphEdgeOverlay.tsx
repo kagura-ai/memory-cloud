@@ -61,6 +61,20 @@ export function GraphEdgeOverlay({
   const locale = useLocale();
   const { user } = useAuth();
   const cardRef = useRef<HTMLDivElement | null>(null);
+  const closeBtnRef = useRef<HTMLButtonElement | null>(null);
+
+  // role="dialog" implies the overlay manages focus. Move focus into the
+  // close button on mount so keyboard / screen-reader users can discover and
+  // dismiss the overlay; restore focus to whatever held it before on unmount
+  // so tab order is not lost when the overlay closes (matches the contract
+  // expected by Radix / shadcn dialogs and by APG's dialog pattern).
+  useEffect(() => {
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    closeBtnRef.current?.focus();
+    return () => {
+      previouslyFocused?.focus?.();
+    };
+  }, []);
 
   // Esc and outside-click dismissal. Both listeners attach on mount and
   // detach on unmount, so the overlay does not leak handlers across the
@@ -108,6 +122,7 @@ export function GraphEdgeOverlay({
       style={{ left, top }}
     >
       <button
+        ref={closeBtnRef}
         type="button"
         onClick={onClose}
         aria-label={t("graphEdgeClose")}

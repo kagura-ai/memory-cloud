@@ -145,6 +145,20 @@ export function useForceSimulation({
     // do not intercept pointer events — otherwise the transparent 10px
     // stroke would silently swallow clicks the user expected to land on
     // something below the graph.
+    //
+    // `edgeClickEnabled` is captured at effect run, not reactively from
+    // `onEdgeClick` props. Toggling onEdgeClick from undefined ↔ defined
+    // without changing nodes/edges/preset/dims will NOT re-attach listeners
+    // until the SVG rebuilds. Current consumers (GraphTabPanel) always pass
+    // a stable callback, so this is acceptable. Adding `onEdgeClick` to the
+    // effect deps would force a full SVG rebuild on every parent render —
+    // that's a larger regression than the toggle-without-rebuild edge case.
+    //
+    // Edge keyboard parity (tabindex/role/Enter/Space on hit lines) is
+    // deferred to the Phase 3 edge-inline-edit feature: tab-stopping on
+    // every edge in an N=50 graph is poor UX without an alternate
+    // navigation model (e.g. an edge list view), and Phase 3 is the
+    // natural place to introduce that.
     const edgeClickEnabled = onEdgeClickRef.current !== undefined;
     const lines: SVGLineElement[] = [];
     const hitLines: SVGLineElement[] = [];

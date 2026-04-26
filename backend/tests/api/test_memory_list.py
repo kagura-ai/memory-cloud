@@ -157,7 +157,9 @@ class TestListMemoriesContextFilter:
         mock_perm_instance = MagicMock()
         mock_perm_instance.resolve_context_for_workspace_read = AsyncMock(return_value=mock_context)
 
-        with patch("api.routes.memory.PermissionService", return_value=mock_perm_instance):
+        with patch(
+            "api.routes.memory.PermissionService", return_value=mock_perm_instance
+        ) as mock_perm_cls:
             response = await list_memories(
                 user=MOCK_USER,
                 db=mock_db,
@@ -168,6 +170,14 @@ class TestListMemoriesContextFilter:
                 offset=0,
             )
 
+        # Permission gate must still run on the shared path — without these
+        # assertions a future refactor that accidentally drops the gate would
+        # silently expose every shared-context memory to anyone who can guess
+        # the context_id (CWE-639 regression).
+        mock_perm_cls.assert_called_once_with(mock_db)
+        mock_perm_instance.resolve_context_for_workspace_read.assert_awaited_once_with(
+            user_id="test_user_123", context_id=context_id
+        )
         assert response.total == 1
 
         # Regression guard: with a shared context, the WHERE clause must
