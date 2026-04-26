@@ -1132,6 +1132,10 @@
     "graphTarget": "Target",
     "graphWeight": "Weight",
     "graphType": "Type",
+    "graphEdgeOverlayTitle": "Edge",
+    "graphEdgeCreatedAt": "Created",
+    "graphEdgeConfidence": "Confidence",
+    "graphEdgeClose": "Close",
     "enabled": "Enabled",
     "off": "Off",
     "stats": "Stats",
@@ -2660,6 +2664,7 @@
     "default": "Default",
     "privateContext": "Private context",
     "sharedContext": "Shared context",
+    "publicContext": "Public context",
     "tabs": {
       "overview": "Overview",
       "memories": "Memories",

@@ -9,7 +9,9 @@ export interface GraphNode {
   type: string;
   importance: number;
   degree: number;
-  created_at?: string;
+  // Backend exposes this as `str | None`; nullable in the wire shape, not
+  // just absent. Treat absence and explicit null the same in renderers.
+  created_at?: string | null;
 }
 
 export interface GraphEdge {
@@ -18,12 +20,12 @@ export interface GraphEdge {
   weight: number;
   type: string;
   // #430: surfaced from the backend response so downstream UI consumers
-  // (e.g. the future graph edge metadata overlay #435) can render edge
-  // creation time + LLM-judge confidence. Both stay optional for response-
-  // shape compatibility — older API clients without these fields continue
-  // to deserialize unchanged.
-  created_at?: string;
-  confidence?: number;
+  // (e.g. the graph edge metadata overlay #435) can render edge creation
+  // time + LLM-judge confidence. Backend types are `str | None` /
+  // `float | None`; allowing both null and absent here keeps the type
+  // honest and saves call sites from `as unknown as` casts.
+  created_at?: string | null;
+  confidence?: number | null;
 }
 
 export interface GraphData {
