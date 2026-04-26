@@ -248,13 +248,39 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
     [dialog, toast, tMem],
   );
 
-  // After delete the node disappears from the graph — refetch so the
-  // visualization stays consistent with the underlying memory state.
+  // After delete: prune the node + its edges from local state instead of
+  // calling fetchData. Refetching would flip `loading=true` and unmount
+  // the SVG, but the d3 simulation closure inside useForceSimulation
+  // would keep ticking against the now-detached DOM until the dep array
+  // re-triggered cleanup — wasted CPU and a listener-leak risk. The
+  // local prune is also faster, avoids a network round-trip, and lets
+  // the simulation rebuild path (deps change → cleanup → new effect)
+  // do the right thing in one cycle.
   const handleDeleteSuccess = useCallback(() => {
+    const deletedId = dialog.hydrated?.memory_id;
     dialog.applyDeleteSuccess();
     toast({ title: tMem("deleteSuccess") });
-    void fetchData();
-  }, [dialog, toast, tMem, fetchData]);
+    if (deletedId) {
+      setGraphData((prev) =>
+        prev
+          ? {
+              ...prev,
+              nodes: prev.nodes.filter((node) => node.id !== deletedId),
+              edges: prev.edges.filter(
+                (edge) =>
+                  edge.source !== deletedId && edge.target !== deletedId,
+              ),
+              stats: prev.stats
+                ? {
+                    ...prev.stats,
+                    total_nodes: Math.max(0, prev.stats.total_nodes - 1),
+                  }
+                : prev.stats,
+            }
+          : prev,
+      );
+    }
+  }, [dialog, toast, tMem]);
 
   // The dialogs render alongside whatever the canvas branch picks below so
   // a deep-link URL hydrates the dialog the moment the panel mounts —
