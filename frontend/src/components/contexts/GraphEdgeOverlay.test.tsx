@@ -72,6 +72,20 @@ describe("GraphEdgeOverlay", () => {
     expect(screen.queryByText(/graphEdgeConfidence/)).not.toBeInTheDocument();
   });
 
+  // Backend GraphEdge response model is `confidence: float | None`, so null
+  // is a valid wire value. A naive `!== undefined` check would let null
+  // through and crash on `.toFixed(...)`.
+  it("omits the confidence row when null (not just undefined)", () => {
+    render(
+      <GraphEdgeOverlay
+        edge={{ ...makeEdge(), confidence: null as unknown as number }}
+        {...baseProps}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText(/graphEdgeConfidence/)).not.toBeInTheDocument();
+  });
+
   it("renders confidence when provided", () => {
     render(
       <GraphEdgeOverlay

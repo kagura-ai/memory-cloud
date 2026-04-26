@@ -131,7 +131,7 @@ export function GraphEdgeOverlay({
         <span className="font-semibold">{t("graphWeight")}: </span>
         <span>{edge.weight.toFixed(2)}</span>
       </div>
-      {edge.confidence !== undefined && (
+      {edge.confidence != null && (
         <div>
           <span className="font-semibold">{t("graphEdgeConfidence")}: </span>
           <span>{edge.confidence.toFixed(2)}</span>
