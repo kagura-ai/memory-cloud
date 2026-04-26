@@ -14,11 +14,11 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import and_, delete, desc, func, or_, select
+from sqlalchemy import and_, case, delete, desc, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.memory import Memory, NeuralMemoryEdge
+from models.memory import EDGE_TYPE_DECLARED_LINK, Memory, NeuralMemoryEdge
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -129,6 +129,8 @@ class NeuralEdgeRepository:
         edge_metadata: dict | None = None,
         workspace_id: str | None = None,
         context_id: str | None = None,
+        protect_declared_link: bool = False,
+        return_fresh_edge: bool = True,
     ) -> NeuralMemoryEdge:
         """Create or update an edge (upsert) with 3-level isolation.
 
@@ -144,9 +146,24 @@ class NeuralEdgeRepository:
             edge_metadata: Optional edge metadata
             workspace_id: Workspace ID (for 3-level isolation)
             context_id: Context ID (for 3-level isolation)
+            protect_declared_link: When True, ON CONFLICT preserves the
+                existing edge_type if it is "declared_link" (only weight/
+                confidence/metadata/last_updated update). Used by automated
+                writers (Hebbian co-activation, edge discovery) so user-
+                declared links survive co-activation retyping. User-driven
+                update_edge calls leave this False so an explicit type
+                change still works. (Issue #457)
+            return_fresh_edge: When True (default), the returned ORM is
+                refreshed from the DB so its Python attributes reflect what
+                RETURNING actually wrote (Issue #458). Hot-path callers that
+                discard the return value (Hebbian via GraphService.add_edge,
+                Sleep edge_discovery) pass False to skip the extra SELECT.
 
         Returns:
-            Created or updated edge
+            Created or updated edge. When ``return_fresh_edge=False`` the
+            returned ORM may carry stale Python attributes from the session's
+            identity map even though the DB row is correct — only safe to
+            ignore the return value.
 
         Note:
             Uses PostgreSQL ON CONFLICT DO UPDATE for atomic upsert.
@@ -176,11 +193,26 @@ class NeuralEdgeRepository:
             last_updated=utcnow(),
         )
 
+        # Issue #457: declared_link rows must survive Hebbian retyping.
+        # CASE keeps the existing edge_type when it is declared_link;
+        # weight/confidence/metadata/last_updated still update so co-
+        # activation can strengthen user-declared links.
+        if protect_declared_link:
+            edge_type_set = case(
+                (
+                    NeuralMemoryEdge.edge_type == EDGE_TYPE_DECLARED_LINK,
+                    EDGE_TYPE_DECLARED_LINK,
+                ),
+                else_=stmt.excluded.edge_type,
+            )
+        else:
+            edge_type_set = stmt.excluded.edge_type
+
         # ON CONFLICT: Update existing edge
         stmt = stmt.on_conflict_do_update(
             constraint="unique_edge",  # (user_id, src_id, dst_id)
             set_={
-                "edge_type": stmt.excluded.edge_type,
+                "edge_type": edge_type_set,
                 "weight": stmt.excluded.weight,
                 "confidence": stmt.excluded.confidence,
                 "metadata": stmt.excluded.metadata,
@@ -190,6 +222,16 @@ class NeuralEdgeRepository:
 
         result = await self.db.execute(stmt)
         edge = result.scalar_one()
+
+        # Issue #458: ON CONFLICT DO UPDATE ... RETURNING delivers the post-
+        # update row, but when the same primary key is in SQLAlchemy's
+        # identity map (e.g. a prior get_edge or a prior call in the same
+        # session) scalar_one() returns the cached ORM instance with stale
+        # Python attributes. Refresh so callers that read the return value
+        # see what RETURNING actually wrote. Hot-path writers that discard
+        # the return (Hebbian, Sleep edge_discovery) skip this extra SELECT.
+        if return_fresh_edge:
+            await self.db.refresh(edge)
 
         logger.debug(
             "edge_upserted",

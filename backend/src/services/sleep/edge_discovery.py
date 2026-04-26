@@ -467,6 +467,11 @@ class EdgeDiscoveryPhase:
                         workspace_id=workspace_id,
                         context_id=context_id,
                         edge_metadata={"source": "sleep_edge_discovery"},
+                        # Issue #457: automated writer; preserve declared_link.
+                        protect_declared_link=True,
+                        # Sleep edge_discovery discards the return; skip the
+                        # post-upsert SELECT for the same reason as Hebbian.
+                        return_fresh_edge=False,
                     )
                     edges_created += 1
                     if reporter and report_id:
