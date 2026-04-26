@@ -342,6 +342,12 @@ async def handle_update_edge(
                 operation_name="update_edge",
             )
 
+            # Issue #458: ON CONFLICT DO UPDATE ... RETURNING can return the cached
+            # ORM instance (loaded by the prior `repo.get_edge`) with stale Python
+            # attributes. Force a refresh so the response payload reflects the
+            # post-update DB state (weight, last_updated, edge_type).
+            await db.refresh(edge)
+
             await _log_tool_usage(
                 db, user_id, "update_edge", start_time, 200, current_context_id, workspace_id
             )
