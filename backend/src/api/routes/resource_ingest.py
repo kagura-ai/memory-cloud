@@ -694,9 +694,15 @@ async def _schedule_indexer_for_resource(
         )
         return
 
-    # Find all public contexts using this resource
+    # Find all public contexts using this resource. Scope to ``workspace_id``
+    # so a slug reused in another workspace cannot pull foreign Contexts into
+    # the iteration — every IndexerState row written below carries the caller's
+    # ``resource_pk`` and a ``context_id`` from the same workspace, keeping
+    # the (resource_pk, context_id) pairing consistent (Copilot review on PR
+    # for #456 + gate2 CSO note).
     result = await db.execute(
         select(Context).where(
+            Context.workspace_id == workspace_id,
             Context.resource_id == resource_id,
             Context.is_public.is_(True),
             Context.deleted_at.is_(None),
