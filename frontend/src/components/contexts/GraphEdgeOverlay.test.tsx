@@ -78,7 +78,7 @@ describe("GraphEdgeOverlay", () => {
   it("omits the confidence row when null (not just undefined)", () => {
     render(
       <GraphEdgeOverlay
-        edge={{ ...makeEdge(), confidence: null as unknown as number }}
+        edge={{ ...makeEdge(), confidence: null }}
         {...baseProps}
         onClose={vi.fn()}
       />,

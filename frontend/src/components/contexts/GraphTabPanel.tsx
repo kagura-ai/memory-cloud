@@ -218,6 +218,10 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
     [dialog, containerEl],
   );
 
+  // Stable identity so GraphEdgeOverlay's keydown/mousedown effect doesn't
+  // re-attach listeners every panel render (e.g. on hover state changes).
+  const handleOverlayClose = useCallback(() => setSelectedEdge(null), []);
+
   // --- Force simulation (auto-starts) ---
   useForceSimulation({
     nodes: filtered.nodes,
@@ -453,7 +457,7 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
               y={selectedEdge.y}
               containerWidth={dims.w}
               containerHeight={dims.h}
-              onClose={() => setSelectedEdge(null)}
+              onClose={handleOverlayClose}
             />
           )}
         </div>
