@@ -2684,8 +2684,6 @@
       "loading": "Loading memories...",
       "emptyTitle": "No memories found",
       "emptyDesc": "Try adjusting your search or filters",
-      "selectAll": "Select all",
-      "selectRow": "Select {summary}",
       "columnSummary": "Summary",
       "columnType": "Type",
       "columnScope": "Scope",
