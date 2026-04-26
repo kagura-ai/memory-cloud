@@ -2684,8 +2684,6 @@
       "loading": "メモリを読み込み中...",
       "emptyTitle": "メモリが見つかりません",
       "emptyDesc": "検索条件やフィルターを変更してください",
-      "selectAll": "すべて選択",
-      "selectRow": "{summary} を選択",
       "columnSummary": "サマリ",
       "columnType": "種別",
       "columnScope": "スコープ",
