@@ -139,6 +139,13 @@ export function useForceSimulation({
     // The hit line is a separate <line> stacked on top of the visual one so
     // users get a generous click target without having to land precisely on
     // the 1px stroke. Both lines update together inside writeDom.
+    // Hit lines are paired with the visual lines so writeDom can update both
+    // in lockstep. When `onEdgeClick` is not provided, the hit lines stay in
+    // the DOM (so the index alignment with `lines[]` is preserved) but they
+    // do not intercept pointer events — otherwise the transparent 10px
+    // stroke would silently swallow clicks the user expected to land on
+    // something below the graph.
+    const edgeClickEnabled = onEdgeClickRef.current !== undefined;
     const lines: SVGLineElement[] = [];
     const hitLines: SVGLineElement[] = [];
     const lineToEdge = new Map<SVGLineElement, GraphEdge>();
@@ -152,9 +159,11 @@ export function useForceSimulation({
       const hitLine = document.createElementNS(SVG_NS, "line");
       hitLine.setAttribute("stroke", "transparent");
       hitLine.setAttribute("stroke-width", "10");
-      hitLine.setAttribute("pointer-events", "stroke");
-      if (onEdgeClickRef.current) {
+      if (edgeClickEnabled) {
+        hitLine.setAttribute("pointer-events", "stroke");
         hitLine.setAttribute("cursor", "pointer");
+      } else {
+        hitLine.setAttribute("pointer-events", "none");
       }
       edgeGroup.appendChild(hitLine);
       hitLines.push(hitLine);
@@ -230,8 +239,10 @@ export function useForceSimulation({
         c.addEventListener("blur", handleBlur);
         c.addEventListener("keydown", handleKeyDown);
       }
-      for (const hl of hitLines) {
-        hl.addEventListener("click", handleEdgeClick);
+      if (edgeClickEnabled) {
+        for (const hl of hitLines) {
+          hl.addEventListener("click", handleEdgeClick);
+        }
       }
     };
     const detachListeners = () => {
@@ -242,8 +253,10 @@ export function useForceSimulation({
         c.removeEventListener("blur", handleBlur);
         c.removeEventListener("keydown", handleKeyDown);
       }
-      for (const hl of hitLines) {
-        hl.removeEventListener("click", handleEdgeClick);
+      if (edgeClickEnabled) {
+        for (const hl of hitLines) {
+          hl.removeEventListener("click", handleEdgeClick);
+        }
       }
     };
     attachListeners();

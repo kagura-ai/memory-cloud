@@ -107,6 +107,13 @@ export function useMemoryDetailDialog(
   // viaUrl=true notFound path.
   const skipNextDeepLinkEffectRef = useRef<string | null>(null);
 
+  // Tracks whether the delete dialog was opened FROM the detail dialog (via
+  // handleDetailDelete) vs. directly (via openDelete from a list row). On
+  // delete-cancel we only want to re-open detail in the first case —
+  // re-opening detail after a row-delete cancel surprises the user with a
+  // dialog they never explicitly opened.
+  const deleteOpenedFromDetailRef = useRef(false);
+
   const openWith = useCallback(
     async (id: string, target: DialogTarget, viaUrl = false) => {
       pendingHydrationRef.current = id;
@@ -188,6 +195,7 @@ export function useMemoryDetailDialog(
   // Skip URL sync — the delete confirmation isn't a shareable state.
   const openDelete = useCallback(
     (id: string) => {
+      deleteOpenedFromDetailRef.current = false;
       void openWith(id, "delete");
     },
     [openWith],
@@ -199,6 +207,7 @@ export function useMemoryDetailDialog(
   }, [hydrated]);
 
   const handleDetailDelete = useCallback(() => {
+    deleteOpenedFromDetailRef.current = true;
     setDetailOpen(false);
     setDeleteOpen(true);
   }, []);
@@ -210,11 +219,16 @@ export function useMemoryDetailDialog(
   const handleDeleteOpenChange = useCallback(
     (next: boolean) => {
       setDeleteOpen(next);
-      // Cancel path: detail dialog was closed when delete opened; re-open
-      // it so the user lands back where they were. On the success path
-      // applyDeleteSuccess clears `hydrated` first so this branch is skipped.
-      if (!next && hydrated) {
-        setDetailOpen(true);
+      if (!next) {
+        // Cancel path: re-open detail ONLY when delete was launched from
+        // the detail dialog itself. Direct row-deletes (openDelete) should
+        // close cleanly without bouncing the user into a detail view they
+        // never asked for. On the success path, applyDeleteSuccess clears
+        // `hydrated` first so this branch is skipped regardless.
+        if (hydrated && deleteOpenedFromDetailRef.current) {
+          setDetailOpen(true);
+        }
+        deleteOpenedFromDetailRef.current = false;
       }
     },
     [hydrated],
