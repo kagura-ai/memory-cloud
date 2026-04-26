@@ -173,7 +173,10 @@ export function useForceSimulation({
       circle.setAttribute("stroke", "hsl(var(--background))");
       circle.setAttribute("stroke-width", "1.5");
       circle.setAttribute("tabindex", "0");
-      circle.setAttribute("role", "img");
+      // Keyboard activates via Enter/Space (handleKeyDown below) and the
+      // pointer path opens the dialog after drag-discrimination — both make
+      // the circle behave like a button, so role/aria must match.
+      circle.setAttribute("role", "button");
       circle.setAttribute("aria-label", node.summary || node.id);
       circle.setAttribute("cursor", "grab");
       nodeGroup.appendChild(circle);

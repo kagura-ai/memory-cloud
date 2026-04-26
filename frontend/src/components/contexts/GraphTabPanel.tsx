@@ -76,7 +76,7 @@ function colorForNode(node: GraphNode): string {
 interface SelectedEdge {
   edge: GraphEdge;
   // Container-relative coordinates (clientX/clientY translated via
-  // containerRef.getBoundingClientRect()).
+  // getBoundingClientRect on the canvas wrapper element).
   x: number;
   y: number;
 }
@@ -101,7 +101,13 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
   });
 
   const svgRef = useRef<SVGSVGElement | null>(null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  // The canvas <div> is only mounted in the success branch (loading / error /
+  // empty branches render different JSX), so a `useRef` initialized at hook
+  // setup time would stay null when the panel first paints in a non-success
+  // state. A callback ref re-runs on every mount/unmount of the wrapper,
+  // letting the ResizeObserver effect attach as soon as the canvas appears
+  // (and detach if we ever fall back to loading mid-life).
+  const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
 
   const dialog = useMemoryDetailDialog({ memoryIdParam, setMemoryIdParam });
 
@@ -128,17 +134,16 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
 
   // --- Responsive dims ---
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
+    if (!containerEl) return;
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
         setDims({ w: Math.max(200, width), h: Math.max(200, height) });
       }
     });
-    observer.observe(el);
+    observer.observe(containerEl);
     return () => observer.disconnect();
-  }, []);
+  }, [containerEl]);
 
   // --- Filtered subset ---
   const filtered = useMemo(() => {
@@ -201,9 +206,8 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
   // dialog so dialog and overlay never compete for the same screen region.
   const handleEdgeClick = useCallback(
     (edge: GraphEdge, clientX: number, clientY: number) => {
-      const el = containerRef.current;
-      if (!el) return;
-      const rect = el.getBoundingClientRect();
+      if (!containerEl) return;
+      const rect = containerEl.getBoundingClientRect();
       dialog.handleDetailOpenChange(false);
       setSelectedEdge({
         edge,
@@ -211,7 +215,7 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
         y: clientY - rect.top,
       });
     },
-    [dialog],
+    [dialog, containerEl],
   );
 
   // --- Force simulation (auto-starts) ---
@@ -384,7 +388,7 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
 
         {/* Canvas */}
         <div
-          ref={containerRef}
+          ref={setContainerEl}
           className="relative w-full aspect-video rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 overflow-hidden"
         >
           <svg
