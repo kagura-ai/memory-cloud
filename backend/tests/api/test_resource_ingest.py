@@ -544,3 +544,136 @@ class TestResourceIngestWorkspaceBoundary:
             call_kwargs = mock_logger.warning.call_args.kwargs
             assert call_kwargs.get("token_workspace_id") == str(mismatched_workspace_id)
             assert call_kwargs.get("context_workspace_id") == str(mock_context.workspace_id)
+
+
+class TestScheduleIndexerForResource:
+    """#456: Phase 2 ``resource_pk`` writer contract for IndexerState.
+
+    Original bug: ``_schedule_indexer_for_resource`` created IndexerState rows
+    without populating ``resource_pk``, violating the validator at
+    ``models/resource.py:_enforce_resource_pk_invariant`` (#323). This made
+    ``setup_resource → ingest_events`` 100% fail in v0.14.0 production.
+
+    The fix resolves ``resource_pk`` via ``services/resource_lookup.resolve_resource_pk``
+    (workspace-scoped per CWE-639 hardening from PR #347) and writes it on
+    both the SELECT (with legacy NULL fallback) and the INSERT.
+
+    The model-level invariant in ``backend/tests/db/test_resource_pk_invariant.py``
+    pinned the validator but didn't exercise this route's writer — these
+    integration-shaped unit tests close that gap so the bug class can't
+    silently re-introduce.
+    """
+
+    @pytest.fixture
+    def workspace_id(self):
+        return uuid4()
+
+    @pytest.fixture
+    def resource_id(self):
+        return "test_resource_id"
+
+    @pytest.fixture
+    def resource_pk(self):
+        return uuid4()
+
+    @pytest.fixture
+    def context_pk(self):
+        return uuid4()
+
+    @pytest.fixture
+    def mock_db(self):
+        db = MagicMock()
+        db.execute = AsyncMock()
+        db.add = MagicMock()
+        db.flush = AsyncMock()
+        return db
+
+    @pytest.mark.asyncio
+    async def test_creates_indexer_state_with_resource_pk(
+        self, mock_db, workspace_id, resource_id, resource_pk, context_pk
+    ):
+        """#456 regression: IndexerState INSERT must carry ``resource_pk`` to
+        satisfy the Phase 2 writer contract validator. Pre-fix this insert
+        omitted ``resource_pk`` and the validator raised ValueError.
+        """
+        from api.routes.resource_ingest import _schedule_indexer_for_resource
+
+        # First execute() returns the contexts list (one public context bound to the resource)
+        contexts_result = MagicMock()
+        contexts_result.scalars.return_value.all.return_value = [
+            SimpleNamespace(
+                id=context_pk,
+                resource_id=resource_id,
+                workspace_id=workspace_id,
+            )
+        ]
+        # Second execute() returns no existing IndexerState row (forces INSERT path)
+        state_result = MagicMock()
+        state_result.scalar_one_or_none.return_value = None
+
+        mock_db.execute.side_effect = [contexts_result, state_result]
+
+        with patch(
+            "api.routes.resource_ingest.resolve_resource_pk",
+            new=AsyncMock(return_value=resource_pk),
+        ):
+            await _schedule_indexer_for_resource(mock_db, workspace_id, resource_id)
+
+        mock_db.add.assert_called_once()
+        added = mock_db.add.call_args.args[0]
+        assert added.resource_pk == resource_pk, (
+            "IndexerState must be created with resource_pk to satisfy Phase 2 writer contract"
+        )
+        assert added.resource_id == resource_id
+        assert added.context_id == context_pk
+        assert added.job_status == "queued"
+
+    @pytest.mark.asyncio
+    async def test_skips_when_resource_pk_unresolved(self, mock_db, workspace_id, resource_id):
+        """#456 fail-safe: a missing ``Resource`` row indicates an orphan or
+        cross-workspace probe (CWE-639). Must short-circuit BEFORE any DB
+        writes rather than fall back to a slug-only INSERT (which would both
+        violate the validator and surface another tenant's IndexerState).
+        """
+        from api.routes.resource_ingest import _schedule_indexer_for_resource
+
+        with (
+            patch(
+                "api.routes.resource_ingest.resolve_resource_pk",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("api.routes.resource_ingest.logger") as mock_logger,
+        ):
+            await _schedule_indexer_for_resource(mock_db, workspace_id, resource_id)
+
+        mock_db.add.assert_not_called()
+        mock_db.execute.assert_not_called()
+        mock_logger.debug.assert_called_with(
+            "schedule_indexer_skip_unknown_resource",
+            resource_id=resource_id,
+            workspace_id=str(workspace_id),
+        )
+
+    @pytest.mark.asyncio
+    async def test_resolves_resource_pk_with_workspace_scope(
+        self, mock_db, workspace_id, resource_id, resource_pk
+    ):
+        """Cross-tenant safety: ``resolve_resource_pk`` must receive
+        ``workspace_id`` so slug reuse across workspaces does not surface
+        another tenant's IndexerState (CWE-639 hardening, PR #347 lineage).
+        """
+        from api.routes.resource_ingest import _schedule_indexer_for_resource
+
+        # Empty contexts list short-circuits after the resolve, keeping the
+        # mock setup minimal.
+        contexts_result = MagicMock()
+        contexts_result.scalars.return_value.all.return_value = []
+        mock_db.execute.return_value = contexts_result
+
+        with patch(
+            "api.routes.resource_ingest.resolve_resource_pk",
+            new=AsyncMock(return_value=resource_pk),
+        ) as mock_resolve:
+            await _schedule_indexer_for_resource(mock_db, workspace_id, resource_id)
+
+        mock_resolve.assert_awaited_once_with(mock_db, workspace_id, resource_id)
