@@ -1132,6 +1132,10 @@
     "graphTarget": "ターゲット",
     "graphWeight": "重み",
     "graphType": "種別",
+    "graphEdgeOverlayTitle": "エッジ",
+    "graphEdgeCreatedAt": "作成日時",
+    "graphEdgeConfidence": "確信度",
+    "graphEdgeClose": "閉じる",
     "enabled": "有効",
     "off": "オフ",
     "stats": "統計",
@@ -2660,6 +2664,7 @@
     "default": "デフォルト",
     "privateContext": "プライベート",
     "sharedContext": "共有",
+    "publicContext": "パブリック",
     "tabs": {
       "overview": "概要",
       "memories": "メモリ",

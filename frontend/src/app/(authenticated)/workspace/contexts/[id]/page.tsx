@@ -30,6 +30,7 @@ import { hasWorkspaceRole } from "@/lib/auth/rbac";
 import {
   Lock,
   Users,
+  Globe,
   Check,
   ChevronRight,
   ArrowLeft,
@@ -166,14 +167,24 @@ export default function ContextDetailPage() {
   const isCurrent = currentContext?.id === context.id;
   const displayName = context.display_name || context.name;
 
-  const privacyIcon = context.is_private ? (
+  // Mirror the icon + color choice on the contexts list page so the title
+  // glyph is the same one the user just clicked through.
+  // - Public  → Globe (purple)
+  // - Private → Lock  (blue)
+  // - Shared  → Users (green)
+  const privacyIcon = context.is_public ? (
+    <Globe
+      className="h-5 w-5 text-purple-600 dark:text-purple-400 inline-block"
+      aria-label={t("publicContext")}
+    />
+  ) : context.is_private ? (
     <Lock
-      className="h-5 w-5 text-gray-400 inline-block"
+      className="h-5 w-5 text-blue-600 dark:text-blue-400 inline-block"
       aria-label={t("privateContext")}
     />
   ) : (
     <Users
-      className="h-5 w-5 text-blue-500 inline-block"
+      className="h-5 w-5 text-green-600 dark:text-green-400 inline-block"
       aria-label={t("sharedContext")}
     />
   );

@@ -536,11 +536,13 @@ async def list_memories(
         db: Database session
         scope: Filter by scope (working or persistent)
         type: Filter by memory type
-        context_id: Optional context ID. When present, results are restricted
-            to that context and the caller must have workspace-read access to
-            it (uniform 404 via ``PermissionService`` on denial / non-existence).
-            The ``user_id`` filter is applied unchanged — ``context_id`` is
-            additive, not a bypass.
+        context_id: Optional context ID. When present, the caller must have
+            workspace-read access (uniform 404 via ``PermissionService`` on
+            denial / non-existence). For shared contexts every member sees
+            every memory regardless of original creator; for private contexts
+            only the creator sees their own. Mirrors the graph routes'
+            ``owner_filter = user_id if context.is_private else None`` pattern
+            in ``api/routes/graph.py``.
         limit: Maximum number of memories to return
         offset: Pagination offset
 
@@ -559,20 +561,24 @@ async def list_memories(
         if not user_id:
             raise ValueError("user_id or sub not found in user object")
 
+        # `owner_filter` is `user_id` for private contexts (creator-only) or
+        # the unscoped "my memories" view (no context_id), and `None` for
+        # shared contexts (all workspace members see every memory).
+        owner_filter: str | None = user_id
         if context_id is not None:
             # Raises 404 on non-existent context, non-member, or private-context
             # non-creator (CWE-639 uniform disclosure). Matches the graph routes.
-            await PermissionService(db).resolve_context_for_workspace_read(
+            context = await PermissionService(db).resolve_context_for_workspace_read(
                 user_id=user_id, context_id=context_id
             )
+            owner_filter = user_id if context.is_private else None
 
         # Build query. Exclude soft-deleted rows — POST /forget sets
         # ``deleted_at`` rather than removing the row, and the list view
         # must not surface tombstones.
-        query = select(Memory).where(
-            Memory.user_id == user_id,
-            Memory.deleted_at.is_(None),
-        )
+        query = select(Memory).where(Memory.deleted_at.is_(None))
+        if owner_filter is not None:
+            query = query.where(Memory.user_id == owner_filter)
 
         if scope:
             query = query.where(Memory.scope == scope)
@@ -584,10 +590,9 @@ async def list_memories(
             query = query.where(Memory.context_id == context_id)
 
         # Get total count (with same filters as data query)
-        count_query = select(func.count(Memory.id)).where(
-            Memory.user_id == user_id,
-            Memory.deleted_at.is_(None),
-        )
+        count_query = select(func.count(Memory.id)).where(Memory.deleted_at.is_(None))
+        if owner_filter is not None:
+            count_query = count_query.where(Memory.user_id == owner_filter)
         if scope:
             count_query = count_query.where(Memory.scope == scope)
         if type:

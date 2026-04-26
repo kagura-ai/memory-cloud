@@ -21,6 +21,12 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
+# next.config.ts gates `output: "standalone"` on NODE_ENV === "production".
+# `next build` sets it internally, but pinning it here makes the contract
+# explicit so the standalone bundle (copied below in the runner stage) is
+# guaranteed to exist regardless of how the build is invoked.
+ENV NODE_ENV=production
+
 # Accept build-time environment variables
 ARG NEXT_PUBLIC_API_URL
 ARG NEXT_PUBLIC_APP_URL

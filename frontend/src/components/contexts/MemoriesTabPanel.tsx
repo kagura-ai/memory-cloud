@@ -7,14 +7,16 @@
  * view/edit/delete, deletes via `POST /forget`, and edits via
  * `PATCH /api/v1/memory/{id}` (Issue #439).
  *
+ * Dialog state machine extracted to `useMemoryDetailDialog` (Issue #435)
+ * so GraphTabPanel can reuse it.
+ *
  * Create is still deferred — needs an MCP-shape form rewrite.
  */
 
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { FileText } from "lucide-react";
 import { MemoriesTable } from "@/components/memories/MemoriesTable";
 import { MemoryDetailDialog } from "@/components/memories/MemoryDetailDialog";
@@ -23,52 +25,21 @@ import { EditMemoryDialog } from "@/components/memories/EditMemoryDialog";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useToast } from "@/hooks/use-toast";
-import { getMemories, referenceMemory } from "@/lib/api/memory";
-import type {
-  LinkedMemoryRef,
-  MemoryListItem,
-  MemoryReference,
-} from "@/lib/types/memory";
+import { useMemoryDetailDialog } from "@/hooks/useMemoryDetailDialog";
+import { useMemoryIdParam } from "@/hooks/useMemoryIdParam";
+import { getMemories } from "@/lib/api/memory";
+import type { MemoryListItem, MemoryReference } from "@/lib/types/memory";
 
 interface MemoriesTabPanelProps {
   contextId: string;
 }
 
 const PAGE_SIZE = 50;
-const MEMORY_ID_PARAM = "memoryId";
-
-type DialogTarget = "detail" | "delete" | "edit";
-
-interface LinkedRefsState {
-  outgoing: LinkedMemoryRef[];
-  outgoingHasMore: boolean;
-  incoming: LinkedMemoryRef[];
-  incomingHasMore: boolean;
-}
-
-const EMPTY_LINKED_REFS: LinkedRefsState = {
-  outgoing: [],
-  outgoingHasMore: false,
-  incoming: [],
-  incomingHasMore: false,
-};
-
-function linkedRefsFromMemoryReference(ref: MemoryReference): LinkedRefsState {
-  return {
-    outgoing: ref.outgoing_links ?? [],
-    outgoingHasMore: !!ref.outgoing_has_more,
-    incoming: ref.incoming_links ?? [],
-    incomingHasMore: !!ref.incoming_has_more,
-  };
-}
 
 export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   const t = useTranslations("contextDetail.memoriesPanel");
   const { toast } = useToast();
-  const router = useRouter();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
-  const memoryIdParam = searchParams.get(MEMORY_ID_PARAM);
+  const [memoryIdParam, setMemoryIdParam] = useMemoryIdParam();
 
   const [items, setItems] = useState<MemoryListItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -76,51 +47,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [hydrated, setHydrated] = useState<MemoryReference | null>(null);
-  const [linkedRefs, setLinkedRefs] =
-    useState<LinkedRefsState>(EMPTY_LINKED_REFS);
-  const [detailOpen, setDetailOpen] = useState(false);
-  const [detailNotFound, setDetailNotFound] = useState(false);
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [editOpen, setEditOpen] = useState(false);
-
-  // Race guard: when the user clicks row A then B before A's reference() has
-  // resolved, the B-click sets `pendingHydrationRef.current = B.id`; when A
-  // finally resolves we compare and discard the stale result. Without this
-  // the last-resolving call wins, so A's data can land in a dialog opened
-  // for B. Cleared on dialog close so a stale in-flight reference can't
-  // re-open the dialog after the user dismissed it.
-  const pendingHydrationRef = useRef<string | null>(null);
-
-  // Bypass token for the deep-link useEffect: when handleView /
-  // handleOpenLinkedMemory mutate the URL, they also call openWith()
-  // directly with viaUrl=false (so a failure surfaces as a toast — the
-  // user clicked, they expect a notification, not a silent EmptyState).
-  // Without this token the URL change would re-fire the effect, issue a
-  // duplicate referenceMemory call, AND swap the toast path for the
-  // viaUrl=true notFound path. Setting the ref to the id about to be
-  // pushed lets the effect skip exactly one cycle.
-  const skipNextDeepLinkEffectRef = useRef<string | null>(null);
-
-  // Replace the URL while preserving every other search param (e.g. ?tab=).
-  // ``router.replace`` (not push) keeps history clean — opening/closing the
-  // dialog does not stack new history entries the user has to back through.
-  // Anchoring on ``pathname`` matches the canonical pattern in
-  // ``hooks/useTabParam.ts`` and avoids leaving a bare trailing ``?`` when
-  // every search param has been removed.
-  const setMemoryIdParam = useCallback(
-    (id: string | null) => {
-      const params = new URLSearchParams(searchParams.toString());
-      if (id) {
-        params.set(MEMORY_ID_PARAM, id);
-      } else {
-        params.delete(MEMORY_ID_PARAM);
-      }
-      const qs = params.toString();
-      router.replace(`${pathname}${qs ? `?${qs}` : ""}`);
-    },
-    [pathname, router, searchParams],
-  );
+  const dialog = useMemoryDetailDialog({ memoryIdParam, setMemoryIdParam });
 
   const fetchMemories = useCallback(async () => {
     setLoading(true);
@@ -145,174 +72,27 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     fetchMemories();
   }, [fetchMemories]);
 
-  // Open the detail dialog for ``id``. ``viaUrl=true`` paths come from the
-  // deep-link effect and render an EmptyState in the dialog on failure
-  // (rather than a toast) because the user navigated by URL — there is no
-  // implicit row context to redirect them to.
-  const openWith = useCallback(
-    async (id: string, target: DialogTarget, viaUrl = false) => {
-      pendingHydrationRef.current = id;
-      try {
-        const ref = await referenceMemory(id);
-        if (pendingHydrationRef.current !== id) return;
-        setHydrated(ref);
-        setLinkedRefs(linkedRefsFromMemoryReference(ref));
-        setDetailNotFound(false);
-        if (target === "detail") setDetailOpen(true);
-        else if (target === "edit") setEditOpen(true);
-        else setDeleteOpen(true);
-      } catch (err) {
-        if (pendingHydrationRef.current !== id) return;
-        if (viaUrl && target === "detail") {
-          setHydrated(null);
-          setLinkedRefs(EMPTY_LINKED_REFS);
-          setDetailNotFound(true);
-          setDetailOpen(true);
-          return;
-        }
-        toast({
-          variant: "destructive",
-          title: t("hydrateFailed"),
-          description: err instanceof Error ? err.message : undefined,
-        });
-      }
-    },
-    [toast, t],
-  );
-
-  // Deep-link sync (Issue #434): when ?memoryId= appears in the URL, open
-  // the dialog for that memory. We do not depend on `items.find(id)` —
-  // hydration runs straight from the API so a URL referencing a memory on a
-  // different page (or even a different context the user has access to)
-  // works on first paint. The dependency on ``memoryIdParam`` only — not
-  // ``openWith`` — avoids re-firing when ``items`` re-renders. Click-driven
-  // URL mutations (handleView / handleOpenLinkedMemory) set
-  // ``skipNextDeepLinkEffectRef`` so this effect does NOT issue a duplicate
-  // referenceMemory and does NOT swap the click's toast path for the
-  // URL-paste notFound path.
-  useEffect(() => {
-    if (!memoryIdParam) {
-      // URL-driven dismiss (back/forward, manual edit) bypasses every
-      // dialog's onOpenChange — reset every flag those handlers do, or
-      // a stale `*Open=true` will cause that dialog to mount already-open
-      // the next time hydration completes for any memory.
-      setDetailOpen(false);
-      setDetailNotFound(false);
-      setHydrated(null);
-      setLinkedRefs(EMPTY_LINKED_REFS);
-      setEditOpen(false);
-      setDeleteOpen(false);
-      pendingHydrationRef.current = null;
-      return;
-    }
-    if (skipNextDeepLinkEffectRef.current === memoryIdParam) {
-      skipNextDeepLinkEffectRef.current = null;
-      return;
-    }
-    if (hydrated?.memory_id === memoryIdParam && detailOpen) return;
-    void openWith(memoryIdParam, "detail", true);
-    // openWith is stable enough; we want the trigger to be the URL value
-    // changing, not other panel state.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [memoryIdParam]);
-
-  const handleDetailOpenChange = useCallback(
-    (next: boolean) => {
-      setDetailOpen(next);
-      if (!next) {
-        // Drop the deep-link param so the URL matches dialog state. The
-        // useEffect above will see memoryIdParam=null on the next render
-        // and won't re-open.
-        if (memoryIdParam) setMemoryIdParam(null);
-        setDetailNotFound(false);
-        // Cancel any in-flight referenceMemory: setting the ref to null
-        // makes the openWith resolution path's identity check fail, so a
-        // late-arriving response can't re-open the dialog the user just
-        // closed.
-        pendingHydrationRef.current = null;
-      }
-    },
-    [memoryIdParam, setMemoryIdParam],
-  );
-
   const handleView = useCallback(
-    (memory: MemoryListItem) => {
-      // Sync URL first so refresh / share works; openWith fires alongside.
-      // The deep-link effect would otherwise see this URL change and issue
-      // a duplicate request, swapping our toast-on-failure for silent
-      // notFound — set the bypass token to skip one effect cycle.
-      skipNextDeepLinkEffectRef.current = memory.id;
-      setMemoryIdParam(memory.id);
-      void openWith(memory.id, "detail");
-    },
-    [openWith, setMemoryIdParam],
+    (memory: MemoryListItem) => dialog.openDetail(memory.id),
+    [dialog],
   );
 
   const handleDelete = useCallback(
-    (memory: MemoryListItem) => void openWith(memory.id, "delete"),
-    [openWith],
+    (memory: MemoryListItem) => dialog.openDelete(memory.id),
+    [dialog],
   );
-
-  const handleOpenLinkedMemory = useCallback(
-    (id: string) => {
-      // Backlink click in the References section — Issue #440 + #434
-      // composition: the URL becomes the canonical pointer to the new
-      // memory, the dialog rehydrates onto it. Same deep-link-effect
-      // bypass as handleView — see the comment there.
-      skipNextDeepLinkEffectRef.current = id;
-      setMemoryIdParam(id);
-      void openWith(id, "detail");
-    },
-    [openWith, setMemoryIdParam],
-  );
-
-  const handleDetailDelete = useCallback(() => {
-    setDetailOpen(false);
-    setDeleteOpen(true);
-  }, []);
-
-  const handleDetailEdit = useCallback(() => {
-    if (!hydrated) return;
-    setEditOpen(true);
-  }, [hydrated]);
-
-  const handleEditOpenChange = useCallback((next: boolean) => {
-    setEditOpen(next);
-  }, []);
 
   const handleEditSuccess = useCallback(
     (updated: MemoryReference) => {
-      setHydrated(updated);
-      setLinkedRefs(linkedRefsFromMemoryReference(updated));
-      setEditOpen(false);
+      dialog.applyEditSuccess(updated);
       toast({ title: t("editSuccess") });
       void fetchMemories();
     },
-    [fetchMemories, toast, t],
-  );
-
-  const handleDeleteOpenChange = useCallback(
-    (next: boolean) => {
-      setDeleteOpen(next);
-      // Cancel path (delete dialog dismissed without confirming): the
-      // detail dialog was closed when delete opened, but the URL still
-      // carries ``?memoryId=`` and the user expects to return to the
-      // detail view. Re-open the detail dialog if hydrated state is
-      // still around (it isn't on the success path — handleDeleteSuccess
-      // clears ``hydrated`` before this fires).
-      if (!next && hydrated) {
-        setDetailOpen(true);
-      }
-    },
-    [hydrated],
+    [dialog, fetchMemories, toast, t],
   );
 
   const handleDeleteSuccess = useCallback(() => {
-    setDeleteOpen(false);
-    setDetailOpen(false);
-    setHydrated(null);
-    setLinkedRefs(EMPTY_LINKED_REFS);
-    if (memoryIdParam) setMemoryIdParam(null);
+    dialog.applyDeleteSuccess();
     toast({ title: t("deleteSuccess") });
 
     // Avoid stranding the user on an empty page when the deleted row was the
@@ -323,15 +103,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     } else {
       void fetchMemories();
     }
-  }, [
-    fetchMemories,
-    toast,
-    t,
-    items.length,
-    page,
-    memoryIdParam,
-    setMemoryIdParam,
-  ]);
+  }, [dialog, fetchMemories, toast, t, items.length, page]);
 
   if (error) {
     return <ErrorBanner error={error} />;
@@ -360,31 +132,31 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         onPageChange={setPage}
       />
       <MemoryDetailDialog
-        memory={hydrated}
-        open={detailOpen}
-        onOpenChange={handleDetailOpenChange}
-        onEdit={hydrated ? handleDetailEdit : undefined}
-        onDelete={handleDetailDelete}
-        notFound={detailNotFound}
-        outgoingLinks={linkedRefs.outgoing}
-        outgoingHasMore={linkedRefs.outgoingHasMore}
-        incomingLinks={linkedRefs.incoming}
-        incomingHasMore={linkedRefs.incomingHasMore}
-        onOpenLinkedMemory={handleOpenLinkedMemory}
+        memory={dialog.hydrated}
+        open={dialog.detailOpen}
+        onOpenChange={dialog.handleDetailOpenChange}
+        onEdit={dialog.hydrated ? dialog.handleDetailEdit : undefined}
+        onDelete={dialog.handleDetailDelete}
+        notFound={dialog.detailNotFound}
+        outgoingLinks={dialog.linkedRefs.outgoing}
+        outgoingHasMore={dialog.linkedRefs.outgoingHasMore}
+        incomingLinks={dialog.linkedRefs.incoming}
+        incomingHasMore={dialog.linkedRefs.incomingHasMore}
+        onOpenLinkedMemory={dialog.openDetail}
       />
-      {hydrated && (
+      {dialog.hydrated && (
         <DeleteMemoryDialog
-          memory={hydrated}
-          open={deleteOpen}
-          onOpenChange={handleDeleteOpenChange}
+          memory={dialog.hydrated}
+          open={dialog.deleteOpen}
+          onOpenChange={dialog.handleDeleteOpenChange}
           onSuccess={handleDeleteSuccess}
         />
       )}
-      {hydrated && (
+      {dialog.hydrated && (
         <EditMemoryDialog
-          memory={hydrated}
-          open={editOpen}
-          onOpenChange={handleEditOpenChange}
+          memory={dialog.hydrated}
+          open={dialog.editOpen}
+          onOpenChange={dialog.handleEditOpenChange}
           onSuccess={handleEditSuccess}
         />
       )}

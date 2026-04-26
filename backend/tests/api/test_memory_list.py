@@ -92,14 +92,19 @@ class TestListMemoriesContextFilter:
             )
 
     @pytest.mark.asyncio
-    async def test_context_id_enforces_permission_and_filters(self):
-        """With context_id, PermissionService is invoked and the filter is applied."""
+    async def test_context_id_enforces_permission_and_filters_private(self):
+        """Private context: caller's user_id stays in the WHERE clause —
+        only the creator sees their own memories.
+        """
         mem = _mock_memory_row()
         mock_db = _db_with_rows(total=1, rows=[mem])
         context_id = uuid4()
 
+        mock_context = MagicMock()
+        mock_context.is_private = True
+
         mock_perm_instance = MagicMock()
-        mock_perm_instance.resolve_context_for_workspace_read = AsyncMock()
+        mock_perm_instance.resolve_context_for_workspace_read = AsyncMock(return_value=mock_context)
 
         with patch(
             "api.routes.memory.PermissionService", return_value=mock_perm_instance
@@ -120,13 +125,62 @@ class TestListMemoriesContextFilter:
         )
         assert response.total == 1
 
-        # Regression guard: the context_id predicate must land in BOTH the
-        # count query and the data query — asymmetric filtering would surface
-        # as `total=N, memories=[]` or broken pagination.
+        # Regression guard: BOTH the count query and the data query must
+        # carry the context_id predicate AND the user_id predicate (private
+        # context = creator-only).
         for call_index in (0, 1):
             sql = _where_sql(mock_db, call_index)
             assert "context_id" in sql, (
                 f"context_id predicate missing from SQL (call_index={call_index}): {sql}"
+            )
+            assert "user_id" in sql, (
+                f"user_id predicate missing for private context (call_index={call_index}): {sql}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_context_id_shared_drops_user_id_filter(self):
+        """Shared context: user_id filter is dropped so workspace members
+        see every memory in the context, not only their own.
+
+        Mirrors the graph endpoint's
+        ``owner_filter = user_id if context.is_private else None`` pattern
+        — without this, admin/non-creator viewers see an empty list even
+        though PermissionService granted access.
+        """
+        mem = _mock_memory_row()
+        mock_db = _db_with_rows(total=1, rows=[mem])
+        context_id = uuid4()
+
+        mock_context = MagicMock()
+        mock_context.is_private = False
+
+        mock_perm_instance = MagicMock()
+        mock_perm_instance.resolve_context_for_workspace_read = AsyncMock(return_value=mock_context)
+
+        with patch("api.routes.memory.PermissionService", return_value=mock_perm_instance):
+            response = await list_memories(
+                user=MOCK_USER,
+                db=mock_db,
+                scope=None,
+                type=None,
+                context_id=context_id,
+                limit=50,
+                offset=0,
+            )
+
+        assert response.total == 1
+
+        # Regression guard: with a shared context, the WHERE clause must
+        # NOT contain a `memories.user_id =` predicate in either query.
+        # `context_id` MUST still be present so other contexts don't leak.
+        for call_index in (0, 1):
+            sql = _where_sql(mock_db, call_index)
+            assert "context_id" in sql, (
+                f"context_id predicate missing from SQL (call_index={call_index}): {sql}"
+            )
+            assert "user_id" not in sql, (
+                f"user_id predicate must be dropped for shared context "
+                f"(call_index={call_index}): {sql}"
             )
 
     @pytest.mark.asyncio
