@@ -714,7 +714,7 @@ class TestIngestEventsHappyPath:
         async def mock_get_db():
             yield mock_db
 
-        async def mock_schedule(db, resource_id):
+        async def mock_schedule(db, workspace_id, resource_id):
             return None
 
         with (
