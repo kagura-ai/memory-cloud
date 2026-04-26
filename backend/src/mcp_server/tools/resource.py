@@ -692,7 +692,7 @@ async def handle_ingest_events(
             if created_ids:
                 from api.routes.resource_ingest import _schedule_indexer_for_resource
 
-                await _schedule_indexer_for_resource(db, resource_id)
+                await _schedule_indexer_for_resource(db, workspace_id, resource_id)
                 await db.commit()
 
             await _log_tool_usage(

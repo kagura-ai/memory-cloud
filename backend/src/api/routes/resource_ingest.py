@@ -10,7 +10,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +30,7 @@ from models.schemas import (
     ResourceEventResponse,
 )
 from services.permission_service import PermissionService
+from services.resource_lookup import resolve_resource_pk
 from services.resource_quota_service import check_event_quota
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, ValidationError
@@ -381,7 +382,7 @@ async def ingest_event(
         )
 
         # 4. Schedule indexer run (find all contexts using this resource)
-        await _schedule_indexer_for_resource(db, resource_id)
+        await _schedule_indexer_for_resource(db, context.workspace_id, resource_id)
 
         # 5. Log usage statistics (Issue #242)
         from utils.usage_logger import log_usage
@@ -622,7 +623,7 @@ async def ingest_batch(
 
     # 5. Schedule indexer run
     if created_ids:
-        await _schedule_indexer_for_resource(db, resource_id)
+        await _schedule_indexer_for_resource(db, context.workspace_id, resource_id)
 
         # 6. Log usage statistics (Issue #242)
         from utils.usage_logger import log_usage
@@ -659,17 +660,39 @@ async def ingest_batch(
 # ============================================================================
 
 
-async def _schedule_indexer_for_resource(db: AsyncSession, resource_id: str) -> None:
+async def _schedule_indexer_for_resource(
+    db: AsyncSession,
+    workspace_id: UUID,
+    resource_id: str,
+) -> None:
     """Schedule indexer runs for all contexts using this resource.
+
+    Resolves the workspace-scoped ``resource_pk`` and writes it onto every
+    IndexerState row, satisfying the Phase 2 writer contract enforced at
+    ``models/resource.py:_enforce_resource_pk_invariant`` (#323) and avoiding
+    the slug-only filter that is a CWE-639 cross-tenant leak vector when slug
+    reuse is possible (recall PR #347 iter 1).
 
     Args:
         db: Database session
-        resource_id: Resource identifier
+        workspace_id: Authoritative workspace scope for the slug lookup
+        resource_id: Resource identifier (slug)
     """
     from datetime import timedelta
 
     from models.auth import Context
     from models.resource import IndexerState
+
+    resource_pk = await resolve_resource_pk(db, workspace_id, resource_id)
+    if resource_pk is None:
+        # Fail-safe: missing Resource row indicates an orphan or cross-workspace
+        # probe; do not schedule against a resource we cannot bind.
+        logger.debug(
+            "schedule_indexer_skip_unknown_resource",
+            resource_id=resource_id,
+            workspace_id=str(workspace_id),
+        )
+        return
 
     # Find all public contexts using this resource
     result = await db.execute(
@@ -687,18 +710,31 @@ async def _schedule_indexer_for_resource(db: AsyncSession, resource_id: str) -> 
 
     # Schedule indexer for each context
     for context in contexts:
-        # Get or create indexer state
+        # Get or create indexer state. Prefer rows with resource_pk populated;
+        # fall back to legacy ``resource_pk IS NULL`` rows scoped by slug +
+        # context_id so Phase 1 → Phase 2 in-flight rows still match.
         state_result = await db.execute(
-            select(IndexerState).where(
-                IndexerState.resource_id == resource_id,
+            select(IndexerState)
+            .where(
                 IndexerState.context_id == context.id,
+                or_(
+                    IndexerState.resource_pk == resource_pk,
+                    (IndexerState.resource_pk.is_(None))
+                    & (IndexerState.resource_id == resource_id),
+                ),
             )
+            .order_by(
+                IndexerState.resource_pk.is_(None).asc(),
+                IndexerState.id.desc(),
+            )
+            .limit(1)
         )
         state = state_result.scalar_one_or_none()
 
         if not state:
             # Create new state
             state = IndexerState(
+                resource_pk=resource_pk,
                 resource_id=resource_id,
                 context_id=context.id,
                 last_offset=0,
