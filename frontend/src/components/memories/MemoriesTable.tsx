@@ -2,12 +2,10 @@
  * Memories Table Component
  *
  * Displays memories in a table with pagination
- * Issue #666: Phase 2 - Added bulk delete checkbox support
  */
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Table,
   TableBody,
@@ -36,10 +34,6 @@ interface MemoriesTableProps {
   pageSize: number;
   total: number;
   onPageChange: (page: number) => void;
-  // Bulk delete (Issue #666): wiring is the parent's responsibility.
-  // Currently blocked on a UUID bulk-forget endpoint backend-side.
-  selectedIds?: string[];
-  onSelectionChange?: (ids: string[]) => void;
 }
 
 export function MemoriesTable({
@@ -52,48 +46,11 @@ export function MemoriesTable({
   pageSize,
   total,
   onPageChange,
-  selectedIds = [],
-  onSelectionChange,
 }: MemoriesTableProps) {
   const { user } = useAuth();
   const locale = useLocale();
   const t = useTranslations("contextDetail.memoriesTable");
   const totalPages = Math.ceil(total / pageSize);
-  const bulkDeleteEnabled = !!onSelectionChange;
-
-  const allVisibleSelected =
-    memories.length > 0 && memories.every((m) => selectedIds.includes(m.id));
-
-  // Radix Checkbox `onCheckedChange` emits `boolean | "indeterminate"`.
-  // Coerce explicitly so the "indeterminate" branch is treated as unchecked,
-  // not as a silent truthy "select all".
-  const handleSelectAll = (checked: boolean | "indeterminate") => {
-    if (!onSelectionChange) return;
-
-    if (checked === true) {
-      const visibleIds = memories.map((m) => m.id);
-      onSelectionChange([...new Set([...selectedIds, ...visibleIds])]);
-    } else {
-      const visibleIds = new Set(memories.map((m) => m.id));
-      onSelectionChange(selectedIds.filter((id) => !visibleIds.has(id)));
-    }
-  };
-
-  const handleRowToggle = (
-    memory: MemoryListItem,
-    checked: boolean | "indeterminate",
-  ) => {
-    if (!onSelectionChange) return;
-
-    if (checked === true) {
-      // Dedup via Set — Radix Checkbox can re-fire `onCheckedChange(true)`
-      // on repeated clicks / re-renders, which would otherwise pile up
-      // duplicate entries in `selectedIds`.
-      onSelectionChange([...new Set([...selectedIds, memory.id])]);
-    } else {
-      onSelectionChange(selectedIds.filter((id) => id !== memory.id));
-    }
-  };
 
   const getImportanceBadge = (importance: number) => {
     if (importance >= 0.8)
@@ -135,15 +92,6 @@ export function MemoriesTable({
         <Table>
           <TableHeader>
             <TableRow>
-              {bulkDeleteEnabled && (
-                <TableHead className="w-12">
-                  <Checkbox
-                    checked={allVisibleSelected}
-                    onCheckedChange={handleSelectAll}
-                    aria-label={t("selectAll")}
-                  />
-                </TableHead>
-              )}
               <TableHead>{t("columnSummary")}</TableHead>
               <TableHead>{t("columnType")}</TableHead>
               <TableHead>{t("columnScope")}</TableHead>
@@ -153,81 +101,65 @@ export function MemoriesTable({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {memories.map((memory) => {
-              const isSelected = selectedIds.includes(memory.id);
-              return (
-                <TableRow key={memory.id}>
-                  {bulkDeleteEnabled && (
-                    <TableCell>
-                      <Checkbox
-                        checked={isSelected}
-                        onCheckedChange={(checked) =>
-                          handleRowToggle(memory, checked)
-                        }
-                        aria-label={t("selectRow", {
-                          summary: memory.summary,
-                        })}
-                      />
-                    </TableCell>
+            {memories.map((memory) => (
+              <TableRow key={memory.id}>
+                <TableCell className="font-medium max-w-xs truncate">
+                  {memory.summary}
+                </TableCell>
+                <TableCell>
+                  {memory.type ? (
+                    <code className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">
+                      {memory.type}
+                    </code>
+                  ) : (
+                    <span className="text-xs text-slate-400">—</span>
                   )}
-                  <TableCell className="font-medium max-w-xs truncate">
-                    {memory.summary}
-                  </TableCell>
-                  <TableCell>
-                    {memory.type ? (
-                      <code className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">
-                        {memory.type}
-                      </code>
-                    ) : (
-                      <span className="text-xs text-slate-400">—</span>
-                    )}
-                  </TableCell>
-                  <TableCell>{getScopeBadge(memory.scope)}</TableCell>
-                  <TableCell>{getImportanceBadge(memory.importance)}</TableCell>
-                  <TableCell className="text-sm text-slate-500">
-                    {formatRelativeTime(
-                      memory.updated_at,
-                      user?.timezone,
-                      locale,
-                    )}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex items-center justify-end gap-2">
+                </TableCell>
+                <TableCell>{getScopeBadge(memory.scope)}</TableCell>
+                <TableCell>{getImportanceBadge(memory.importance)}</TableCell>
+                <TableCell className="text-sm text-slate-500">
+                  {formatRelativeTime(
+                    memory.updated_at,
+                    user?.timezone,
+                    locale,
+                  )}
+                </TableCell>
+                <TableCell className="text-right">
+                  <div className="flex items-center justify-end gap-2">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => onView(memory)}
+                      title={t("actionView")}
+                      aria-label={t("actionView")}
+                    >
+                      <Eye className="h-4 w-4" />
+                    </Button>
+                    {onEdit && (
                       <Button
                         variant="ghost"
                         size="icon"
-                        onClick={() => onView(memory)}
-                        title={t("actionView")}
-                        aria-label={t("actionView")}
+                        onClick={() => onEdit(memory)}
+                        title={t("actionEdit")}
+                        aria-label={t("actionEdit")}
                       >
-                        <Eye className="h-4 w-4" />
+                        <Pencil className="h-4 w-4" />
                       </Button>
-                      {onEdit && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => onEdit(memory)}
-                          title={t("actionEdit")}
-                          aria-label={t("actionEdit")}
-                        >
-                          <Pencil className="h-4 w-4" />
-                        </Button>
-                      )}
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => onDelete(memory)}
-                        title={t("actionDelete")}
-                        aria-label={t("actionDelete")}
-                        className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              );
-            })}
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => onDelete(memory)}
+                      title={t("actionDelete")}
+                      aria-label={t("actionDelete")}
+                      className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
           </TableBody>
         </Table>
       </div>
