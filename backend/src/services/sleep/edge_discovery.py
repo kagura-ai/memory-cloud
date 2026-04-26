@@ -467,6 +467,8 @@ class EdgeDiscoveryPhase:
                         workspace_id=workspace_id,
                         context_id=context_id,
                         edge_metadata={"source": "sleep_edge_discovery"},
+                        # Issue #457: automated writer; preserve declared_link.
+                        protect_declared_link=True,
                     )
                     edges_created += 1
                     if reporter and report_id:

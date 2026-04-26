@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import and_, delete, desc, func, or_, select
+from sqlalchemy import and_, case, delete, desc, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -129,6 +129,7 @@ class NeuralEdgeRepository:
         edge_metadata: dict | None = None,
         workspace_id: str | None = None,
         context_id: str | None = None,
+        protect_declared_link: bool = False,
     ) -> NeuralMemoryEdge:
         """Create or update an edge (upsert) with 3-level isolation.
 
@@ -144,6 +145,13 @@ class NeuralEdgeRepository:
             edge_metadata: Optional edge metadata
             workspace_id: Workspace ID (for 3-level isolation)
             context_id: Context ID (for 3-level isolation)
+            protect_declared_link: When True, ON CONFLICT preserves the
+                existing edge_type if it is "declared_link" (only weight/
+                confidence/metadata/last_updated update). Used by automated
+                writers (Hebbian co-activation, edge discovery) so user-
+                declared links survive co-activation retyping. User-driven
+                update_edge calls leave this False so an explicit type
+                change still works. (Issue #457)
 
         Returns:
             Created or updated edge
@@ -176,11 +184,23 @@ class NeuralEdgeRepository:
             last_updated=utcnow(),
         )
 
+        # Issue #457: declared_link rows must survive Hebbian retyping.
+        # CASE keeps the existing edge_type when it is "declared_link";
+        # weight/confidence/metadata/last_updated still update so co-
+        # activation can strengthen user-declared links.
+        if protect_declared_link:
+            edge_type_set = case(
+                (NeuralMemoryEdge.edge_type == "declared_link", "declared_link"),
+                else_=stmt.excluded.edge_type,
+            )
+        else:
+            edge_type_set = stmt.excluded.edge_type
+
         # ON CONFLICT: Update existing edge
         stmt = stmt.on_conflict_do_update(
             constraint="unique_edge",  # (user_id, src_id, dst_id)
             set_={
-                "edge_type": stmt.excluded.edge_type,
+                "edge_type": edge_type_set,
                 "weight": stmt.excluded.weight,
                 "confidence": stmt.excluded.confidence,
                 "metadata": stmt.excluded.metadata,
@@ -190,6 +210,15 @@ class NeuralEdgeRepository:
 
         result = await self.db.execute(stmt)
         edge = result.scalar_one()
+
+        # Issue #458: PostgreSQL ON CONFLICT DO UPDATE ... RETURNING delivers
+        # the post-update row, but if the same primary key is already in
+        # SQLAlchemy's identity map (e.g. a prior get_edge or a prior
+        # create_or_update_edge call in the same session), result.scalar_one()
+        # returns the cached ORM instance with stale Python attributes.
+        # Refresh from the DB so the returned object reflects what RETURNING
+        # actually wrote (weight, edge_type, last_updated, ...).
+        await self.db.refresh(edge)
 
         logger.debug(
             "edge_upserted",

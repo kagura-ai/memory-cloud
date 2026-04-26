@@ -1,9 +1,12 @@
 """Tests for MCP edge CRUD tool handlers.
 
-Issue #458: handle_update_edge must refresh the ORM instance after
-create_or_update_edge so the response payload reflects post-update DB state
-(weight, last_updated, edge_type) rather than the cached pre-update snapshot
-loaded by the prior get_edge call.
+Issue #458: handle_update_edge response payload must reflect post-update DB
+state (weight, last_updated, edge_type) rather than the cached pre-update
+snapshot loaded by the prior get_edge call. The fix lives at the repository
+layer (NeuralEdgeRepository.create_or_update_edge refreshes the returned
+ORM after RETURNING), so this handler-level test pins only the contract
+the MCP tool exposes: whatever ORM the repo returns is what the response
+serializes.
 """
 
 import json
@@ -29,8 +32,8 @@ def _mock_edge(src_id, dst_id, *, edge_type="neural_association", weight=0.5):
     return e
 
 
-class TestUpdateEdgeRefreshesORM:
-    """Issue #458 regression: response must show post-update DB state."""
+class TestUpdateEdgeResponsePayload:
+    """Issue #458 regression: response must serialize whatever the repo returns."""
 
     @pytest.fixture
     def user_id(self):
@@ -45,14 +48,13 @@ class TestUpdateEdgeRefreshesORM:
         return uuid4()
 
     @pytest.mark.asyncio
-    async def test_handle_update_edge_calls_refresh_after_upsert(
-        self, user_id, workspace_id, context_id
-    ):
-        """db.refresh(edge) must be called between create_or_update_edge and commit.
+    async def test_response_reflects_repo_returned_edge(self, user_id, workspace_id, context_id):
+        """The response payload mirrors the post-update edge returned by the repo.
 
-        Without the refresh, the response payload can carry stale Python attributes
-        from the ORM identity map (the edge instance loaded by the prior get_edge
-        call), even though the DB row was correctly updated by the upsert.
+        The fix lives in NeuralEdgeRepository.create_or_update_edge (refreshes
+        the ORM after RETURNING). Here we pin the handler contract: response
+        weight/last_updated equal whatever the repo returned, with no
+        intervening transformation that could re-stale the value.
         """
         src_id = uuid4()
         dst_id = uuid4()
@@ -63,7 +65,6 @@ class TestUpdateEdgeRefreshesORM:
         mock_db = AsyncMock()
         mock_db.commit = AsyncMock()
         mock_db.rollback = AsyncMock()
-        mock_db.refresh = AsyncMock()
 
         async def mock_get_db():
             yield mock_db
@@ -108,29 +109,21 @@ class TestUpdateEdgeRefreshesORM:
                 workspace_id,
             )
 
-        mock_db.refresh.assert_awaited_once_with(post_update)
-        # Refresh must precede commit so the response sees post-update state.
-        refresh_idx = next(i for i, c in enumerate(mock_db.method_calls) if c[0] == "refresh")
-        commit_idx = next(i for i, c in enumerate(mock_db.method_calls) if c[0] == "commit")
-        assert refresh_idx < commit_idx, "db.refresh must be called before db.commit"
-
         data = json.loads(result[0].text)
         assert data["status"] == "success"
         assert data["edge"]["weight"] == 0.8
         assert data["edge"]["last_updated"] == "2026-04-26T09:19:11+00:00"
+        mock_db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_handle_update_edge_returns_error_when_edge_missing(
-        self, user_id, workspace_id, context_id
-    ):
-        """No refresh should happen when the edge does not exist."""
+    async def test_returns_error_when_edge_missing(self, user_id, workspace_id, context_id):
+        """update_edge for a nonexistent edge returns edge_not_found without upsert."""
         src_id = uuid4()
         dst_id = uuid4()
 
         mock_db = AsyncMock()
         mock_db.commit = AsyncMock()
         mock_db.rollback = AsyncMock()
-        mock_db.refresh = AsyncMock()
 
         async def mock_get_db():
             yield mock_db
@@ -179,4 +172,3 @@ class TestUpdateEdgeRefreshesORM:
         assert data["status"] == "error"
         assert data["error"] == "edge_not_found"
         mock_repo.create_or_update_edge.assert_not_awaited()
-        mock_db.refresh.assert_not_awaited()

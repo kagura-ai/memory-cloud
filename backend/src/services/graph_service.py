@@ -201,6 +201,9 @@ class GraphService:
             edge_metadata=edge_metadata,
             workspace_id=self.workspace_id,  # Single Collection Migration
             context_id=self.context_id,  # Single Collection Migration
+            # Issue #457: Hebbian co-activation flows through here; never let
+            # automated retyping clobber a user-declared link.
+            protect_declared_link=True,
         )
 
         logger.debug(
