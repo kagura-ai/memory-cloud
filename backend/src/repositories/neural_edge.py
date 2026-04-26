@@ -18,7 +18,7 @@ from sqlalchemy import and_, case, delete, desc, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.memory import Memory, NeuralMemoryEdge
+from models.memory import EDGE_TYPE_DECLARED_LINK, Memory, NeuralMemoryEdge
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -130,6 +130,7 @@ class NeuralEdgeRepository:
         workspace_id: str | None = None,
         context_id: str | None = None,
         protect_declared_link: bool = False,
+        return_fresh_edge: bool = True,
     ) -> NeuralMemoryEdge:
         """Create or update an edge (upsert) with 3-level isolation.
 
@@ -152,9 +153,17 @@ class NeuralEdgeRepository:
                 declared links survive co-activation retyping. User-driven
                 update_edge calls leave this False so an explicit type
                 change still works. (Issue #457)
+            return_fresh_edge: When True (default), the returned ORM is
+                refreshed from the DB so its Python attributes reflect what
+                RETURNING actually wrote (Issue #458). Hot-path callers that
+                discard the return value (Hebbian via GraphService.add_edge,
+                Sleep edge_discovery) pass False to skip the extra SELECT.
 
         Returns:
-            Created or updated edge
+            Created or updated edge. When ``return_fresh_edge=False`` the
+            returned ORM may carry stale Python attributes from the session's
+            identity map even though the DB row is correct — only safe to
+            ignore the return value.
 
         Note:
             Uses PostgreSQL ON CONFLICT DO UPDATE for atomic upsert.
@@ -185,12 +194,15 @@ class NeuralEdgeRepository:
         )
 
         # Issue #457: declared_link rows must survive Hebbian retyping.
-        # CASE keeps the existing edge_type when it is "declared_link";
+        # CASE keeps the existing edge_type when it is declared_link;
         # weight/confidence/metadata/last_updated still update so co-
         # activation can strengthen user-declared links.
         if protect_declared_link:
             edge_type_set = case(
-                (NeuralMemoryEdge.edge_type == "declared_link", "declared_link"),
+                (
+                    NeuralMemoryEdge.edge_type == EDGE_TYPE_DECLARED_LINK,
+                    EDGE_TYPE_DECLARED_LINK,
+                ),
                 else_=stmt.excluded.edge_type,
             )
         else:
@@ -211,14 +223,15 @@ class NeuralEdgeRepository:
         result = await self.db.execute(stmt)
         edge = result.scalar_one()
 
-        # Issue #458: PostgreSQL ON CONFLICT DO UPDATE ... RETURNING delivers
-        # the post-update row, but if the same primary key is already in
-        # SQLAlchemy's identity map (e.g. a prior get_edge or a prior
-        # create_or_update_edge call in the same session), result.scalar_one()
-        # returns the cached ORM instance with stale Python attributes.
-        # Refresh from the DB so the returned object reflects what RETURNING
-        # actually wrote (weight, edge_type, last_updated, ...).
-        await self.db.refresh(edge)
+        # Issue #458: ON CONFLICT DO UPDATE ... RETURNING delivers the post-
+        # update row, but when the same primary key is in SQLAlchemy's
+        # identity map (e.g. a prior get_edge or a prior call in the same
+        # session) scalar_one() returns the cached ORM instance with stale
+        # Python attributes. Refresh so callers that read the return value
+        # see what RETURNING actually wrote. Hot-path writers that discard
+        # the return (Hebbian, Sleep edge_discovery) skip this extra SELECT.
+        if return_fresh_edge:
+            await self.db.refresh(edge)
 
         logger.debug(
             "edge_upserted",

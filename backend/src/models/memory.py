@@ -263,6 +263,16 @@ class GraphMemory(Base):
         return f"<GraphMemory(user='{self.user_id}', nodes={self.total_nodes}, edges={self.total_edges})>"
 
 
+# Edge type constants. Mirrors the CHECK constraint values below — keep in sync.
+EDGE_TYPE_NEURAL_ASSOCIATION = "neural_association"
+EDGE_TYPE_RELATED_TO = "related_to"
+EDGE_TYPE_DEPENDS_ON = "depends_on"
+EDGE_TYPE_LEARNED_FROM = "learned_from"
+EDGE_TYPE_SEMANTIC_SIMILARITY = "semantic_similarity"
+EDGE_TYPE_DECLARED_LINK = "declared_link"
+EDGE_TYPE_TAG_COOCCURRENCE = "tag_cooccurrence"
+
+
 class NeuralMemoryEdge(Base):
     """Neural Memory edge model (Issue #84 Phase 1).
 

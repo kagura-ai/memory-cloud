@@ -204,6 +204,9 @@ class GraphService:
             # Issue #457: Hebbian co-activation flows through here; never let
             # automated retyping clobber a user-declared link.
             protect_declared_link=True,
+            # Hebbian / GraphService.add_edge callers discard the return value
+            # — skip the post-upsert SELECT (Issue #458 doesn't apply here).
+            return_fresh_edge=False,
         )
 
         logger.debug(
