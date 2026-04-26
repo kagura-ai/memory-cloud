@@ -261,12 +261,24 @@ describe("GraphTabPanel — node click integration (Issue #435)", () => {
 });
 
 describe("GraphTabPanel — edge click integration (Issue #435)", () => {
-  it("renders the edge overlay with metadata when an edge is clicked", async () => {
-    render(<GraphTabPanel contextId="ctx-1" />);
-
+  // Wait for both the simulation callback registration AND the success-branch
+  // canvas mount before firing onEdgeClick. Without this gate, the callback
+  // ref `setContainerEl` may not have run yet, so handleEdgeClick early-
+  // returns on `containerEl=null` and the overlay never appears — a flake
+  // that's invisible until the test environment changes scheduling.
+  async function waitForCanvasReady() {
     await waitFor(() => {
       expect(simCallbacks.onEdgeClick).toBeDefined();
     });
+    // graphVizNodeCount is the first label rendered in the canvas branch
+    // (the success path) — its presence proves the success JSX has mounted
+    // and any callback refs inside it (containerEl) have already fired.
+    await screen.findByText("graphVizNodeCount");
+  }
+
+  it("renders the edge overlay with metadata when an edge is clicked", async () => {
+    render(<GraphTabPanel contextId="ctx-1" />);
+    await waitForCanvasReady();
 
     simCallbacks.onEdgeClick!(
       {
@@ -289,10 +301,7 @@ describe("GraphTabPanel — edge click integration (Issue #435)", () => {
 
   it("does not call referenceMemory on edge click (overlay is local-only)", async () => {
     render(<GraphTabPanel contextId="ctx-1" />);
-
-    await waitFor(() => {
-      expect(simCallbacks.onEdgeClick).toBeDefined();
-    });
+    await waitForCanvasReady();
 
     simCallbacks.onEdgeClick!(
       {
@@ -312,10 +321,7 @@ describe("GraphTabPanel — edge click integration (Issue #435)", () => {
 
   it("dismisses the overlay on Escape", async () => {
     render(<GraphTabPanel contextId="ctx-1" />);
-
-    await waitFor(() => {
-      expect(simCallbacks.onEdgeClick).toBeDefined();
-    });
+    await waitForCanvasReady();
 
     simCallbacks.onEdgeClick!(
       {

@@ -3,10 +3,14 @@
 /**
  * useMemoryIdParam — read/write the `?memoryId=` deep-link parameter.
  *
- * Returns a stable `[memoryIdParam, setMemoryIdParam]` tuple that other tabs
- * (Memories, Graph, …) share so a memory opened via the URL stays open when
- * the user switches tabs. Uses `router.replace` (not push) so dialog
- * open/close cycles don't pollute browser history.
+ * Returns `[memoryIdParam, setMemoryIdParam]`. `setMemoryIdParam`'s identity
+ * changes whenever `searchParams` does (i.e. on every URL query change),
+ * because the callback closes over the latest query string to preserve other
+ * params. Treat it the same as React's own `useSearchParams` hook for
+ * dependency arrays — pass it explicitly when consumers need to react to
+ * URL-driven changes; do NOT cache it across renders expecting referential
+ * equality. Uses `router.replace` (not push) so dialog open/close cycles
+ * don't pollute browser history.
  */
 
 import { useCallback } from "react";
