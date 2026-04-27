@@ -57,7 +57,10 @@ def upgrade() -> None:
             server_default=sa.text("gen_random_uuid()"),
         ),
         # The user being erased (OAuth2 sub). Not a FK — repo convention.
-        sa.Column("user_id", sa.String(255), nullable=False, index=True),
+        # Indexed via the explicit op.create_index below to give the index
+        # a deterministic name (avoids the SQLAlchemy auto-name colliding
+        # with op.create_index inside the same migration).
+        sa.Column("user_id", sa.String(255), nullable=False),
         # SHA256 of the user's email at request time. Plaintext email is
         # never persisted here — the digest proves a request existed for
         # that email without storing recoverable PII.

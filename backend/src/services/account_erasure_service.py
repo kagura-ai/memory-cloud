@@ -395,20 +395,37 @@ class AccountErasureService:
     async def sweep_pending_erasures(self, *, batch_size: int = 50) -> int:
         """Pick up cooling_off rows whose scheduled_for has passed and execute.
 
-        Uses `FOR UPDATE SKIP LOCKED` so multiple scheduler workers (if we
-        ever scale horizontally) won't double-execute the same row.
+        Also reclaims stale ``in_progress`` rows whose ``started_at`` is
+        older than ``IN_PROGRESS_STALE_AFTER`` — those represent runs
+        that were marked in-progress but did not complete (process
+        SIGTERM/OOM between commit and ``_execute``). Without this, a
+        crash-killed sweep would leave erasure rows permanently stuck
+        and silently violate the GDPR 1-month SLA.
+
+        Uses ``FOR UPDATE SKIP LOCKED`` so multiple scheduler workers (if
+        we ever scale horizontally) won't double-execute the same row.
 
         Returns:
             Number of requests executed in this sweep.
         """
+        from sqlalchemy import or_
+
         now = utcnow()
+        # 1 hour is well over a normal _execute (seconds-to-minutes for the
+        # cross-store deletes); a row in_progress this long is presumed
+        # crashed.
+        stale_in_progress_cutoff = now - timedelta(hours=1)
         result = await self.db.execute(
             select(ErasureRequest)
             .where(
-                ErasureRequest.status == STATUS_COOLING_OFF,
-                ErasureRequest.scheduled_for <= now,
+                or_(
+                    (ErasureRequest.status == STATUS_COOLING_OFF)
+                    & (ErasureRequest.scheduled_for <= now),
+                    (ErasureRequest.status == STATUS_IN_PROGRESS)
+                    & (ErasureRequest.started_at <= stale_in_progress_cutoff),
+                )
             )
-            .order_by(ErasureRequest.scheduled_for.asc())
+            .order_by(ErasureRequest.scheduled_for.asc().nulls_last())
             .limit(batch_size)
             .with_for_update(skip_locked=True)
         )

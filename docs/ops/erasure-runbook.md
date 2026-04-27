@@ -78,9 +78,9 @@ FK の依存逆順で削除:
 
 - `session:*` (`SessionManager.delete_user_sessions`)
 - `co_act:{user_id}:*` (`clear_co_activations`)
-- `rate_limit:user:{user_id}:*` + `quota:{user:<user_id>}:*` (`clear_user_rate_limits`)
+- `rate_limit:user:{user_id}:*` + `quota:user:{user_id}:*` (`clear_user_rate_limits`)
 
-`quota:{ws:<workspace_id>}:*` は user-identifying でないため触らない。embedding cache は xxHash key で user-addressable でないため TTL 自然失効。
+`quota:ws:{workspace_id}:*` は user-identifying でないため触らない。embedding cache は xxHash key で user-addressable でないため TTL 自然失効。
 
 ### 2.7 Audit row + finalize (Steps 7-9)
 

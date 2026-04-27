@@ -299,15 +299,18 @@ async def clear_user_rate_limits(user_id: str) -> int:
     """Clear per-user rate-limit and quota counters for GDPR erasure.
 
     Covers ``rate_limit:user:{user_id}:*`` (per-minute burst counters) and
-    ``quota:{user:<user_id>}:*`` (daily user-scoped quota counters).
-    Workspace-scoped quota keys (``quota:{ws:<workspace_id>}:*``) are NOT
+    ``quota:user:{user_id}:*`` (daily user-scoped quota counters — the
+    rate_limit middleware writes these as ``quota:{scope_key}:{mode}:{date}``
+    where ``scope_key = f"user:{user_id}"``, NOT the brace-wrapped form).
+
+    Workspace-scoped quota keys (``quota:ws:{workspace_id}:*``) are NOT
     touched here — workspace IDs survive after the user's individual rows
     are gone and are not user-identifying.
     """
     return await _delete_keys_by_patterns(
         [
             f"rate_limit:user:{user_id}:*",
-            f"quota:{{user:{user_id}}}:*",
+            f"quota:user:{user_id}:*",
         ],
         log_event="user_rate_limits_cleared",
         user_id=user_id,

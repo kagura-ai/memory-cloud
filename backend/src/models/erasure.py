@@ -83,7 +83,9 @@ class ErasureRequest(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
 
     # Subject of the erasure (OAuth2 sub). Not a FK — repo convention.
-    user_id = Column(String(255), nullable=False, index=True)
+    # Indexed via the explicit Index() entry in __table_args__ below so the
+    # index has a deterministic name and matches the migration shape.
+    user_id = Column(String(255), nullable=False)
 
     # SHA256 of the user's email at request time. Plaintext email never on disk.
     user_email_hash = Column(String(64), nullable=False)
@@ -136,6 +138,7 @@ class ErasureRequest(Base):
             f"(is_self_service = false AND reason_code <> '{REASON_SELF_SERVICE}')",
             name="erasure_self_service_reason_consistency",
         ),
+        Index("ix_erasure_requests_user_id", "user_id"),
         Index(
             "ix_erasure_requests_pending_sweep",
             "scheduled_for",
