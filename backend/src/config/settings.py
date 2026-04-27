@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     )
     jwt_algorithm: str = Field(default="HS256", description="JWT algorithm")
     jwt_expire_minutes: int = Field(default=60, description="JWT expiration (minutes)")
+    audit_pseudo_salt: str = Field(
+        default="kagura-erasure-v1",
+        description="Per-deployment salt for audit_logs pseudonymization on account erasure (override in production)",
+    )
 
     # Session
     session_ttl_seconds: int = Field(

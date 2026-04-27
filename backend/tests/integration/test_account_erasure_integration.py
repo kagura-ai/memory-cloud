@@ -154,8 +154,9 @@ def patched_external_stores():
         "services.account_erasure_service.cancel_subscription_and_delete_customer_for_erasure",
         new=AsyncMock(return_value={"subscription_cancelled": False, "customer_deleted": False}),
     )
-    # SessionManager (sync Redis) — make the import resolve to None so the
-    # service skips the session-cleanup branch.
+    # SessionManager: patch the underlying module attribute the public
+    # get_session_manager() accessor reads, forcing the service to skip
+    # the session-cleanup branch.
     session_manager_patch = patch(
         "api.routes.auth._session_manager",
         new=None,

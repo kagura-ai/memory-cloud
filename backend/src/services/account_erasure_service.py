@@ -41,6 +41,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.settings import get_settings
 from db.qdrant import delete_user_points
 from db.redis import clear_co_activations, clear_user_rate_limits, get_redis_client
 from models.auth import (
@@ -99,14 +100,14 @@ CONFIRM_TOKEN_TTL_SECONDS = 3600
 # column stores SHA256(token); the raw token only ever lives here.
 _CONFIRM_TOKEN_KEY_PREFIX = "erasure_token:"
 
+
 # Salt used when pseudonymizing audit_log rows for an erased user. A
 # stable per-deployment salt (not per-row) lets ops cross-correlate audit
 # rows belonging to the same erased user without revealing the email/sub.
-# In a real deployment the salt would come from settings; for v0.14.1
-# this constant is acceptable because the goal is irreversibility, not
-# rainbow-table protection — once the user row is gone there's nothing to
-# rainbow-attack against.
-_AUDIT_PSEUDO_SALT = "kagura-erasure-v1"
+# Goal is irreversibility, not rainbow-table protection — once the user
+# row is gone there is no plaintext to recover.
+def _audit_salt() -> str:
+    return get_settings().audit_pseudo_salt
 
 
 _sha256_hex = sha256_hex  # backward-compat alias for tests + this module
@@ -870,7 +871,7 @@ class AccountErasureService:
         must survive but the personal-data link to the deleted user must
         not.
         """
-        pseudonym = sha256_hex(user_id, salt=_AUDIT_PSEUDO_SALT)
+        pseudonym = sha256_hex(user_id, salt=_audit_salt())
         result = await self.db.execute(
             update(model).where(column == user_id).values({column: pseudonym})
         )
@@ -906,8 +907,9 @@ class AccountErasureService:
         """
         from sqlalchemy import case, func
 
-        user_pseudonym = sha256_hex(user_id, salt=_AUDIT_PSEUDO_SALT)
-        email_pseudonym = sha256_hex(email, salt=_AUDIT_PSEUDO_SALT)
+        salt = _audit_salt()
+        user_pseudonym = sha256_hex(user_id, salt=salt)
+        email_pseudonym = sha256_hex(email, salt=salt)
         # Replace email first (longer / more specific), then user_id, so a
         # row whose resource contains both is fully scrubbed.
         scrubbed_resource = func.replace(
@@ -935,12 +937,13 @@ class AccountErasureService:
     async def _clear_redis(self, user_id: str) -> dict[str, int]:
         """Best-effort Redis cleanup. Failures are logged inside helpers."""
         # SessionManager uses a sync Redis client — fetch the live instance
-        # via the auth module's getter so we go through the same setup.
-        from api.routes.auth import _session_manager  # type: ignore
+        # via the auth module's public accessor so we go through the same setup.
+        from api.routes.auth import get_session_manager
 
         sessions_deleted = 0
-        if _session_manager is not None:
-            sessions_deleted = _session_manager.delete_user_sessions(user_id)
+        session_manager = get_session_manager()
+        if session_manager is not None:
+            sessions_deleted = session_manager.delete_user_sessions(user_id)
 
         return {
             "sessions": sessions_deleted,
@@ -958,8 +961,9 @@ class AccountErasureService:
         guarantees no plaintext email or user_id ever lands in audit_logs
         for this event — required for GDPR Art.5(1)(c) compliance.
         """
-        user_pseudonym = _sha256_hex(target.user_id, salt=_AUDIT_PSEUDO_SALT)
-        email_pseudonym = _sha256_hex(target.email, salt=_AUDIT_PSEUDO_SALT)
+        salt = _audit_salt()
+        user_pseudonym = _sha256_hex(target.user_id, salt=salt)
+        email_pseudonym = _sha256_hex(target.email, salt=salt)
         # Self-service `initiated_by` IS the subject's raw user_id (the
         # user clicked their own delete button). Storing it verbatim in
         # audit_logs.user_metadata would re-introduce a stable plaintext

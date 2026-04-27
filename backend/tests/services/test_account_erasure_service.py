@@ -515,3 +515,39 @@ def test_sha256_hex_is_stable_and_salt_aware():
     assert _sha256_hex("a") == _sha256_hex("a")
     assert _sha256_hex("a") != _sha256_hex("a", salt="x")
     assert len(_sha256_hex("anything")) == 64
+
+
+# ---------------------------------------------------------------------------
+# AUDIT_PSEUDO_SALT settings sourcing + SessionManager accessor
+# ---------------------------------------------------------------------------
+
+
+def test_audit_salt_reads_from_settings(monkeypatch):
+    """`_audit_salt()` must reflect the active Settings.audit_pseudo_salt."""
+    from services import account_erasure_service
+
+    fake_settings = SimpleNamespace(audit_pseudo_salt="prod-rotated-salt-2026Q2")
+    monkeypatch.setattr(account_erasure_service, "get_settings", lambda: fake_settings)
+
+    assert account_erasure_service._audit_salt() == "prod-rotated-salt-2026Q2"
+
+    pseudo_a = _sha256_hex("u-1", salt=account_erasure_service._audit_salt())
+    monkeypatch.setattr(
+        account_erasure_service,
+        "get_settings",
+        lambda: SimpleNamespace(audit_pseudo_salt="different-salt"),
+    )
+    pseudo_b = _sha256_hex("u-1", salt=account_erasure_service._audit_salt())
+    assert pseudo_a != pseudo_b, "rotating the salt must change downstream pseudonyms"
+
+
+def test_get_session_manager_returns_module_state(monkeypatch):
+    """`get_session_manager()` must expose the live `_session_manager` module attribute."""
+    from api.routes import auth as auth_module
+
+    sentinel = object()
+    monkeypatch.setattr(auth_module, "_session_manager", sentinel)
+    assert auth_module.get_session_manager() is sentinel
+
+    monkeypatch.setattr(auth_module, "_session_manager", None)
+    assert auth_module.get_session_manager() is None
