@@ -526,22 +526,39 @@ class AccountErasureService:
                     error=str(exc),
                 )
 
-        except WorkspaceTransferRequiredError:
-            # Caller-actionable error: don't mark as failed (request stays
-            # in_progress so the caller can fix the workspace and retry).
-            # Roll back any partial Postgres state from this transaction
-            # so the row reverts to its pre-execute snapshot. confirmed_at
-            # is also cleared on the admin path so a retry sees a clean
-            # PENDING state (admin-path rows were created with confirmed_at=now
-            # to skip cooling-off).
+        except WorkspaceTransferRequiredError as exc:
+            # Caller-actionable error. Move the row to the terminal `failed`
+            # state with a structured reason so the operator can fix
+            # workspace roles and create a *new* request, rather than
+            # reusing this one.
+            #
+            # Earlier revisions reverted the row to `cooling_off`/`pending`,
+            # but that produced two pathological behaviours flagged by the
+            # Copilot review on PR #464:
+            #   - Self-service: `scheduled_for` was already in the past, so
+            #     the cron sweep picked it up again immediately and fired
+            #     the same error every hour until the user cancelled.
+            #   - Admin: `_find_active_request` treats `pending` as active,
+            #     so a retry call to `admin_force_erase` hit
+            #     `ErasureAlreadyInProgressError` — the admin couldn't
+            #     unstick the row without manual DB intervention.
+            #
+            # Terminal `failed` is the cleanest semantics: the API exception
+            # tells the caller exactly what to fix (HTTP 409 + workspace_id
+            # + member_count), and a fresh request can be created once the
+            # workspace state is corrected.
             await self.db.rollback()
             await self.db.execute(
                 update(ErasureRequest)
                 .where(ErasureRequest.id == request.id)
                 .values(
-                    status=STATUS_COOLING_OFF if request.is_self_service else STATUS_PENDING,
-                    started_at=None,
-                    confirmed_at=None if not request.is_self_service else request.confirmed_at,
+                    status=STATUS_FAILED,
+                    failure_reason=(
+                        f"workspace_transfer_required: workspace_id={exc.details.get('workspace_id')} "
+                        f"member_count={exc.details.get('member_count')}. "
+                        "Promote another member to admin (or remove members), then create a new erasure request."
+                    )[:1000],
+                    deleted_data_summary=summary or None,
                 )
             )
             await self.db.commit()
