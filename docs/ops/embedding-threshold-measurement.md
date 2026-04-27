@@ -40,12 +40,15 @@ The script logs `context_memory_count=N` on the first line of its
 output, so you don't need a separate pre-check — just read it from the
 run's stdout. But know the threshold before running:
 
-Bootstrap gate (D3): the script warns if effective_memories < 200 or
-observations_total < 10,000. At `--memories 200 --top-k 50` you need
-roughly 220+ memories in the context to clear the gate cleanly (some
-samples drop out because they have no top-k neighbors above noise).
-Below that, the percentile estimate is still computed but should be
-treated as advisory.
+Bootstrap gate (D3): the script warns only if **both**
+`effective_memories < 200` **and** `observations_total < 10,000` —
+either signal alone is enough to clear the gate without warning. At
+`--memories 200 --top-k 50` you typically clear via the
+effective-memories signal: you want roughly 220+ memories in the
+context for sample-of-200 to land at effective_memories ≥ 200 cleanly
+(some samples drop out because they have no top-k neighbors above
+noise). When both signals are below threshold the percentile estimate
+is still computed but should be treated as advisory.
 
 ## Execution
 
@@ -118,12 +121,18 @@ compare:
 `sample_memories` uses `ORDER BY func.random()` **without** a SQL-level
 seed (the script's `--seed` argument only affects the diagnostic
 `measure_random_pair` call, not the top-k sampling). Two consecutive
-runs on the same context will sample different subsets, and the sample
-SE for a p90 estimate at n=200 is approximately:
-
-```
-SE(p90) ≈ sqrt(0.9 × 0.1 / 200) ≈ 0.021
-```
+runs on the same context will sample different subsets. Empirically,
+on the kagura-dev context (~500–700 memories) at `--memories 200
+--top-k 50` the run-to-run scatter of the p90 cosine value lands
+around **±0.02** — calibrated against the #407 W+0 vs W+7 measurement,
+where the observed Δp90 was +0.0176 over a 7-day window with no
+expected model drift. Theoretically this is a value-space
+manifestation of the rank-space binomial SE for the 90th order
+statistic (`sqrt(0.9·0.1/200) ≈ 0.021`) scaled by the inverse local
+CDF slope at p90; the conversion is not tight, so treat the ±0.02
+number as an **empirical noise band for this corpus**, not a
+closed-form prediction. Re-calibrate by repeated measurement when the
+context, model, or sample size changes materially.
 
 So a measured p90 difference of ±0.02 between two independent runs is
 **at the noise floor** — it should be read as "drift not detected,"
@@ -207,9 +216,9 @@ are diff-comparable by `grep`:
 <details>
 <summary>Full JSON report</summary>
 
-\```json
+~~~json
 <paste container's /tmp/measure_*.json contents>
-\```
+~~~
 
 </details>
 ```
@@ -241,9 +250,17 @@ drops below 150, the warning is real — the corpus has too many isolated
 memories with no neighbors above noise, and the percentile is
 unreliable.
 
-**Qdrant / Postgres version warnings** in the script output:
-informational only — the script tolerates the version skew that
-production currently runs.
+**`UserWarning: Qdrant client version X.X.X is incompatible with server
+version Y.Y.Y`** (raised by `qdrant_client/async_qdrant_remote.py`):
+informational — production tolerates the current minor-version skew.
+Set `check_compatibility=False` on the client constructor only if it
+adds noise to copy-pasted output; the measurement itself is not
+affected.
+
+**`UserWarning: Api key is used with an insecure connection`** (raised
+by `src/db/qdrant.py`): informational — production Qdrant runs over
+the internal docker network, so HTTPS isn't required for the API key
+to be safe in this path.
 
 **`docker exec` fails with "No such container"**: the active color
 flipped mid-deploy or the deploy is in progress. Re-read
