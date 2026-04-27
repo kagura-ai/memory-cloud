@@ -38,11 +38,17 @@ router = APIRouter(prefix="/me/account", tags=["account-erasure"])
 class ErasureRequestCreateResponse(BaseModel):
     """Returned after creating a self-service erasure request.
 
-    The raw confirmation token is returned ONCE in this response. For OAuth
-    users the email-link copy is sent via the (currently stub)
-    EmailService; password users use the token + their password directly
-    in the confirm call. The frontend SHOULD treat this token as
-    sensitive and not log it.
+    The raw confirmation token is returned ONCE in this response. The
+    frontend is responsible for the confirm UX — password-auth users
+    re-enter their password alongside this token; OAuth users present
+    the token via whatever flow the frontend wires (e.g. a confirm
+    button on the same screen). The token is also bound to the active
+    session via ``erasure_token:{token}`` in Redis (TTL 1h) and is
+    single-use.
+
+    The frontend SHOULD treat this token as sensitive and not log it.
+    Issue #463 #4 tracks gating the token-in-response on auth method
+    once a real email provider replaces the LoggingEmailService stub.
     """
 
     request_id: UUID

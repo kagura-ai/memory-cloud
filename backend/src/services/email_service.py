@@ -51,21 +51,6 @@ class EmailService(Protocol):
             False on hard failure.
         """
 
-    async def send_erasure_confirmation_link(
-        self,
-        *,
-        to_email: str,
-        request_id: str,
-        confirm_url: str,
-    ) -> bool:
-        """Send the one-time confirmation link for OAuth users.
-
-        Args:
-            to_email: Recipient address.
-            request_id: ``erasure_requests.id`` UUID.
-            confirm_url: Full HTTPS URL with one-time token (expires in 1h).
-        """
-
     async def send_erasure_cooling_off_started(
         self,
         *,
@@ -110,23 +95,6 @@ class LoggingEmailService:
             request_id=request_id,
             email_dispatch_required=True,
             template="erasure_receipt",
-        )
-        return True
-
-    async def send_erasure_confirmation_link(
-        self,
-        *,
-        to_email: str,
-        request_id: str,
-        confirm_url: str,
-    ) -> bool:
-        logger.info(
-            "erasure_email_confirmation_link",
-            to_email=to_email,
-            request_id=request_id,
-            confirm_url=confirm_url,
-            email_dispatch_required=True,
-            template="erasure_confirmation_link",
         )
         return True
 

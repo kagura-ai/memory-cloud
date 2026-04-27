@@ -618,8 +618,10 @@ class AccountErasureService:
         """Transfer ownership where possible, refuse where not.
 
         Per Q4 design:
-            - Other admin in the workspace -> auto-transfer (alphabetical
-              email order for determinism).
+            - Other admin in the workspace -> auto-transfer. The new owner
+              is the lowest-``user_id`` admin/owner in the workspace
+              (lexicographic ASC). ``WorkspaceMember`` carries no email
+              column, so user_id is the deterministic-ordering criterion.
             - Member(s) but no other admin -> raise WorkspaceTransferRequiredError.
             - Sole owner -> no transfer; workspace will be deleted in step 4.
         """
