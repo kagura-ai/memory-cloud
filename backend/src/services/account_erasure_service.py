@@ -761,20 +761,42 @@ class AccountErasureService:
         return result.rowcount or 0
 
     async def _pseudonymize_audit_logs(self, user_id: str, email: str) -> int:
-        """Replace user_email/user_id on audit_logs with stable hashes.
+        """Replace user_email/user_id/resource on audit_logs with stable hashes.
 
         Audit rows are kept (legal retention) but the link to the deleted
         user is broken. The pseudonyms use a per-deployment salt so
         cross-row correlation for the SAME erased user is still possible
         for compliance investigations, but the original sub/email is
         unrecoverable.
+
+        The ``resource`` column for user-targeted audit events in this repo
+        is conventionally formatted as ``user:{email}`` (e.g. role_assign,
+        system_admin_promote, system_admin_demote rows), so it carries
+        plaintext email after the user_id/user_email columns are scrubbed.
+        Use ``REPLACE`` chains to swap any occurrence of the email or raw
+        user_id in ``resource`` with their pseudonyms — covers both the
+        ``user:{email}`` and any future ``user_id``-bearing shape without
+        having to enumerate every audit-event flavour.
         """
+        from sqlalchemy import func
+
         user_pseudonym = sha256_hex(user_id, salt=_AUDIT_PSEUDO_SALT)
         email_pseudonym = sha256_hex(email, salt=_AUDIT_PSEUDO_SALT)
+        # Replace email first (longer / more specific), then user_id, so a
+        # row whose resource contains both is fully scrubbed.
+        scrubbed_resource = func.replace(
+            func.replace(AuditLog.resource, email, email_pseudonym),
+            user_id,
+            user_pseudonym,
+        )
         result = await self.db.execute(
             update(AuditLog)
             .where(AuditLog.user_id == user_id)
-            .values(user_id=user_pseudonym, user_email=email_pseudonym)
+            .values(
+                user_id=user_pseudonym,
+                user_email=email_pseudonym,
+                resource=scrubbed_resource,
+            )
         )
         return result.rowcount or 0
 
@@ -806,6 +828,15 @@ class AccountErasureService:
         """
         user_pseudonym = _sha256_hex(target.user_id, salt=_AUDIT_PSEUDO_SALT)
         email_pseudonym = _sha256_hex(target.email, salt=_AUDIT_PSEUDO_SALT)
+        # Self-service `initiated_by` IS the subject's raw user_id (the
+        # user clicked their own delete button). Storing it verbatim in
+        # audit_logs.user_metadata would re-introduce a stable plaintext
+        # identifier for the erased user — a regression of the
+        # pseudonymization invariant the rest of this row enforces.
+        # Admin path `initiated_by` is the admin's user_id (NOT the
+        # erased subject), which is legitimate audit-trail information
+        # and stays plaintext.
+        initiated_by_value = user_pseudonym if request.is_self_service else request.initiated_by
         self.db.add(
             AuditLog(
                 user_email=email_pseudonym,
@@ -815,7 +846,7 @@ class AccountErasureService:
                 user_metadata={
                     "request_id": str(request.id),
                     "is_self_service": request.is_self_service,
-                    "initiated_by": request.initiated_by,
+                    "initiated_by": initiated_by_value,
                     "reason_code": request.reason_code,
                     "deleted_data_summary": summary,
                 },

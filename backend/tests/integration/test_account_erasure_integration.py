@@ -234,6 +234,13 @@ class TestAdminForceEraseHappyPath:
         assert prior.user_email != target_email  # pseudonymized
         assert len(prior.user_id) == 64  # SHA256 hex
         assert len(prior.user_email) == 64
+        # The resource column for user-targeted audit events is conventionally
+        # `user:{email}` in this codebase (see SystemAdminService.promote /
+        # RoleManager.assign_role). Pseudonymization MUST scrub email AND
+        # user_id from `resource` too — otherwise plaintext PII survives in
+        # the legal-retention table (Copilot loop 3 finding).
+        assert target_email not in (prior.resource or "")
+        assert target_user_id not in (prior.resource or "")
 
         # The new "account_erasure" audit row is also pseudonymized at
         # insert — guards against the regression PR-review caught
@@ -245,6 +252,17 @@ class TestAdminForceEraseHappyPath:
         assert new_audit.user_id != target_user_id
         assert new_audit.user_email != target_email
         assert "user_pseudonym:" in new_audit.resource
+        # `initiated_by` for self-service IS the subject's user_id; it must
+        # be pseudonymized in user_metadata too. For the admin path tested
+        # here, initiated_by is the admin's user_id (NOT the erased subject)
+        # so it stays plaintext — the assertion below uses target_user_id,
+        # which would only appear if self-service had leaked it.
+        assert new_audit.user_metadata is not None
+        assert new_audit.user_metadata.get("initiated_by") != target_user_id
+        # And no plaintext email/user_id anywhere else in user_metadata.
+        metadata_repr = repr(new_audit.user_metadata)
+        assert target_email not in metadata_repr
+        assert target_user_id not in metadata_repr
 
 
 class TestPartialUniqueIndexRace:
