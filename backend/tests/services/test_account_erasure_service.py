@@ -154,6 +154,8 @@ class TestConfirmSelfService:
         svc = _service()
         target = _user(auth_method="oauth")
         svc._load_user_or_404 = AsyncMock(return_value=target)
+        # User owns no workspaces — workspace pre-check is a no-op.
+        svc._check_no_blocking_workspace_transfers = AsyncMock()
 
         token = "raw-token-abc"
         request_id = uuid4()

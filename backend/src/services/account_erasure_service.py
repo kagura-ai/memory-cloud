@@ -278,6 +278,15 @@ class AccountErasureService:
             if not target.password_hash or not verify_password(password, target.password_hash):
                 raise ErasureForbiddenError("Incorrect password")
 
+        # Pre-check: surface WorkspaceTransferRequiredError at confirm time
+        # rather than 7 days later in the cron sweep. Without this the
+        # user's only signal would be reading status=failed via GET
+        # /me/account/erasure-request a week after they confirmed —
+        # actively bad UX. Workspace state can still change during
+        # cooling-off (admin leaves, etc.), so this is best-effort, not
+        # a guarantee. The cron's identical check remains the safety net.
+        await self._check_no_blocking_workspace_transfers(user_id)
+
         now = utcnow()
         request.status = STATUS_COOLING_OFF
         request.confirmed_at = now
@@ -680,6 +689,42 @@ class AccountErasureService:
         """All workspaces this user owns (drives Stripe + member checks)."""
         result = await self.db.execute(select(Workspace).where(Workspace.owner_user_id == user_id))
         return list(result.scalars().all())
+
+    async def _check_no_blocking_workspace_transfers(self, user_id: str) -> None:
+        """Raise WorkspaceTransferRequiredError if any owned workspace would
+        block the eventual sweep execution.
+
+        Identical predicate to ``_handle_owned_workspaces``: a workspace
+        with members but no alternate admin/owner is "blocking". Sole-owner
+        workspaces (no other members) are fine — they get deleted in step 4.
+
+        Pre-check is best-effort: workspace membership can change during
+        the 7-day cooling-off window, so the cron's identical check is the
+        actual enforcement point. This method just surfaces the issue at
+        confirm time so the user gets a 409 instead of waiting a week to
+        learn their request will fail.
+        """
+        owned = await self._list_owned_workspaces(user_id)
+        if not owned:
+            return
+
+        ws_ids = [ws.id for ws in owned]
+        members_result = await self.db.execute(
+            select(WorkspaceMember).where(WorkspaceMember.workspace_id.in_(ws_ids))
+        )
+        members_by_ws: dict[Any, list[WorkspaceMember]] = {}
+        for m in members_result.scalars().all():
+            members_by_ws.setdefault(m.workspace_id, []).append(m)
+
+        for ws in owned:
+            other_members = [m for m in members_by_ws.get(ws.id, []) if m.user_id != user_id]
+            if not other_members:
+                continue  # sole owner — workspace will be deleted in step 4
+            other_admins = [m for m in other_members if m.role in ("owner", "admin")]
+            if not other_admins:
+                raise WorkspaceTransferRequiredError(
+                    workspace_id=str(ws.id), member_count=len(other_members)
+                )
 
     async def _handle_owned_workspaces(
         self, user_id: str, workspaces: list[Workspace]

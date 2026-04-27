@@ -101,8 +101,10 @@ class ErasureRequest(Base):
 
     status = Column(String(20), nullable=False, default=STATUS_PENDING)
 
-    # SHA256 of the one-time token; raw token in Redis only.
-    confirm_token_hash = Column(String(128), nullable=True)
+    # SHA256 of the one-time token; raw token in Redis only. Size is
+    # exact (SHA256 hex = 64 chars) so the column does not imply a
+    # different hash encoding.
+    confirm_token_hash = Column(String(64), nullable=True)
 
     requested_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     confirmed_at = Column(DateTime(timezone=True), nullable=True)

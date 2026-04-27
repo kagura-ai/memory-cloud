@@ -87,8 +87,10 @@ def upgrade() -> None:
         ),
         # SHA256 of the one-time confirmation token. The raw token only
         # ever lives in Redis (key: erasure_token:{token}, TTL 1h) and
-        # never on disk. Mirrors api_keys.key_hash discipline.
-        sa.Column("confirm_token_hash", sa.String(128), nullable=True),
+        # never on disk. Mirrors api_keys.key_hash discipline. SHA256 hex
+        # is exactly 64 chars; size matches the digest precisely so the
+        # column does not imply a different (longer) hash encoding.
+        sa.Column("confirm_token_hash", sa.String(64), nullable=True),
         sa.Column(
             "requested_at",
             sa.DateTime(timezone=True),
