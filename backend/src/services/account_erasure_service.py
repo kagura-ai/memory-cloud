@@ -9,12 +9,24 @@ Both paths converge on `_execute`, which performs the 12-step cross-store
 deletion (Stripe -> Qdrant -> workspace transfer -> Postgres -> Redis ->
 audit-log pseudonymize -> finalize) covered by the design pin in #360.
 
-Failure semantics: if any step in `_execute` raises, the request row is
-marked `failed` with `failure_reason`, the surrounding transaction is
-rolled back (so partial Postgres mutations don't escape), and the
-exception is re-raised. Stripe and Qdrant calls inside `_execute` are
-themselves best-effort and won't roll back — they're recorded in
-`deleted_data_summary` so ops can reconcile manually if anything stuck.
+Failure semantics: ``_execute`` is NOT a single atomic transaction.
+Each step commits when it completes (workspace ownership transfers,
+Postgres deletes, audit pseudonymization, audit-row insert, finalize),
+so a failure in step N leaves steps 1..N-1 already persisted. This is
+deliberate — partial progress is recorded in ``deleted_data_summary``
+and is what ops needs for manual reconciliation. On any raise:
+
+- the in-flight transaction is rolled back (so the failing step's
+  partial mutations don't escape),
+- the request row is marked ``failed`` with ``failure_reason`` via a
+  fresh ``UPDATE`` (independent of the rolled-back ORM state),
+- ``deleted_data_summary`` captures whatever steps did complete,
+- the exception is re-raised.
+
+Stripe and Qdrant calls are best-effort: their internal try/except
+swallows API failures and records the outcome in the summary, so a
+Stripe outage never blocks the Postgres delete pipeline (the orphan
+Stripe customer can be cleaned up manually via the Stripe dashboard).
 """
 
 from __future__ import annotations
