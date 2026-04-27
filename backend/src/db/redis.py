@@ -244,27 +244,74 @@ async def get_all_co_activations(user_id: str) -> dict[tuple[str, str], dict]:
         return {}
 
 
-async def clear_co_activations(user_id: str) -> int:
-    """Clear all co-activation data for a user (GDPR compliance).
+async def _delete_keys_by_patterns(
+    patterns: list[str],
+    *,
+    log_event: str,
+    **log_kw: object,
+) -> int:
+    """SCAN-and-delete every key matching any pattern. Returns deletion count.
 
-    Args:
-        user_id: User ID
+    Used by GDPR-erasure helpers that need to wipe per-user key namespaces.
+    Best-effort: returns 0 on failure rather than raising, matching the
+    discipline that Postgres is the source of truth.
 
-    Returns:
-        Number of records deleted
+    Batches keys into a single ``DELETE k1 k2 ...`` per 500-key chunk
+    rather than one ``DELETE`` round-trip per key — Redis ``DEL`` accepts
+    variadic keys.
     """
     client = get_redis_client()
-    pattern = f"co_act:{user_id}:*"
     deleted = 0
+    batch: list[str] = []
+
+    async def _flush() -> int:
+        nonlocal batch
+        if not batch:
+            return 0
+        n = await client.delete(*batch)
+        batch = []
+        return n
 
     try:
-        async for key in client.scan_iter(match=pattern):
-            await client.delete(key)
-            deleted += 1
-
-        logger.info("co_activations_cleared", user_id=user_id, deleted=deleted)
+        for pattern in patterns:
+            async for key in client.scan_iter(match=pattern):
+                batch.append(key)
+                if len(batch) >= 500:
+                    deleted += await _flush()
+        deleted += await _flush()
+        logger.info(log_event, deleted=deleted, **log_kw)
         return deleted
-
     except Exception as e:
-        logger.error("co_activation_clear_failed", user_id=user_id, error=str(e))
+        logger.error(f"{log_event}_failed", error=str(e), **log_kw)
         return 0
+
+
+async def clear_co_activations(user_id: str) -> int:
+    """Clear all co-activation data for a user (GDPR compliance)."""
+    return await _delete_keys_by_patterns(
+        [f"co_act:{user_id}:*"],
+        log_event="co_activations_cleared",
+        user_id=user_id,
+    )
+
+
+async def clear_user_rate_limits(user_id: str) -> int:
+    """Clear per-user rate-limit and quota counters for GDPR erasure.
+
+    Covers ``rate_limit:user:{user_id}:*`` (per-minute burst counters) and
+    ``quota:user:{user_id}:*`` (daily user-scoped quota counters — the
+    rate_limit middleware writes these as ``quota:{scope_key}:{mode}:{date}``
+    where ``scope_key = f"user:{user_id}"``, NOT the brace-wrapped form).
+
+    Workspace-scoped quota keys (``quota:ws:{workspace_id}:*``) are NOT
+    touched here — workspace IDs survive after the user's individual rows
+    are gone and are not user-identifying.
+    """
+    return await _delete_keys_by_patterns(
+        [
+            f"rate_limit:user:{user_id}:*",
+            f"quota:user:{user_id}:*",
+        ],
+        log_event="user_rate_limits_cleared",
+        user_id=user_id,
+    )

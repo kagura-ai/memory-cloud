@@ -6,7 +6,6 @@ Manages API keys using AsyncSession and async/await patterns.
 
 from __future__ import annotations
 
-import hashlib
 import secrets
 from datetime import timedelta
 from uuid import UUID
@@ -16,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import APIKey
 from utils.datetime import utcnow
+from utils.hashing import sha256_hex
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -40,15 +40,8 @@ class APIKeyManager:
 
     @staticmethod
     def _hash_key(api_key: str) -> str:
-        """Hash API key using SHA256.
-
-        Args:
-            api_key: Plaintext API key
-
-        Returns:
-            Hexadecimal hash string
-        """
-        return hashlib.sha256(api_key.encode()).hexdigest()
+        """Hash API key using SHA256."""
+        return sha256_hex(api_key)
 
     @staticmethod
     def _generate_key() -> str:

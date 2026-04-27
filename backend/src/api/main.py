@@ -66,6 +66,7 @@ async def lifespan(app: FastAPI):
         schedule_bm25_drift_tasks,
         schedule_credentials_tasks,
         schedule_embedding_tasks,
+        schedule_erasure_tasks,
         schedule_mcp_tasks,
         schedule_neural_tasks,
         schedule_resource_indexer_jobs,
@@ -81,6 +82,7 @@ async def lifespan(app: FastAPI):
     schedule_resource_indexer_jobs(scheduler)
     schedule_sleep_tasks(scheduler)
     schedule_bm25_drift_tasks(scheduler)
+    schedule_erasure_tasks(scheduler)
     start_scheduler()
     logger.info("background_tasks_scheduled")
 
@@ -109,6 +111,13 @@ openapi_tags = [
     # Authentication & Users
     {"name": "authentication", "description": "OAuth2 login and session management"},
     {"name": "users", "description": "User profile and settings"},
+    {
+        "name": "account-erasure",
+        "description": (
+            "GDPR Art.17 / APPI 第22条 right-to-erasure self-service flow "
+            "(Issue #360). Session-only auth (no API keys)."
+        ),
+    },
     # Workspace
     {"name": "workspace", "description": "Workspace dashboard and stats"},
     {"name": "workspaces", "description": "Workspace CRUD operations"},
@@ -337,6 +346,7 @@ from api.routes import (  # noqa: E402
     graph,
     invitations,
     mcp,
+    me_account,  # Issue #360: GDPR right-to-erasure self-service endpoints
     member_credentials,
     memory,
     neural_config,
@@ -363,6 +373,9 @@ app.include_router(auth.router, prefix="/api/v1")
 
 # User profile routes (Issue #175 - Timezone settings)
 app.include_router(users.router, prefix="/api/v1")
+
+# Account erasure self-service routes (Issue #360 - GDPR Art.17 / APPI compliance)
+app.include_router(me_account.router, prefix="/api/v1")
 
 # OAuth2 Server routes (Issue #33 - OAuth2 client management)
 app.include_router(oauth.router, prefix="/api/v1")
