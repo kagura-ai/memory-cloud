@@ -255,3 +255,76 @@ async def _handle_subscription_cancelled(
         workspace_id=str(workspace.id),
         old_plan=old_plan,
     )
+
+
+async def cancel_subscription_and_delete_customer_for_erasure(
+    workspace: Workspace,
+) -> dict[str, bool]:
+    """Cancel Stripe subscription and delete customer for GDPR right-to-erasure.
+
+    Issue #360: AccountErasureService calls this once per owned workspace
+    that has a Stripe customer linked. Best-effort: every Stripe call is
+    wrapped — failures are logged and the erasure flow continues. The
+    workspace row is about to be deleted regardless, so an orphaned Stripe
+    customer is the worst case (and is recoverable by ops via the Stripe
+    dashboard if it ever happens).
+
+    No-op when ``BILLING_ENABLED`` is false or when the workspace has no
+    Stripe IDs populated, so it is safe to call unconditionally.
+
+    Args:
+        workspace: Workspace ORM instance whose Stripe state should be
+            torn down.
+
+    Returns:
+        ``{"subscription_cancelled": bool, "customer_deleted": bool}`` —
+        included verbatim in the deleted_data_summary JSONB on the
+        ``erasure_requests`` row for audit.
+    """
+    from plugins.billing import is_billing_enabled
+
+    result = {"subscription_cancelled": False, "customer_deleted": False}
+
+    if not is_billing_enabled():
+        return result
+
+    if not workspace.stripe_customer_id and not workspace.stripe_subscription_id:
+        return result
+
+    _init_stripe()
+
+    if workspace.stripe_subscription_id:
+        try:
+            stripe.Subscription.cancel(workspace.stripe_subscription_id)
+            result["subscription_cancelled"] = True
+            logger.info(
+                "stripe_subscription_cancelled_for_erasure",
+                workspace_id=str(workspace.id),
+                subscription_id=workspace.stripe_subscription_id,
+            )
+        except Exception as e:
+            logger.error(
+                "stripe_subscription_cancel_failed_during_erasure",
+                workspace_id=str(workspace.id),
+                subscription_id=workspace.stripe_subscription_id,
+                error=str(e),
+            )
+
+    if workspace.stripe_customer_id:
+        try:
+            stripe.Customer.delete(workspace.stripe_customer_id)
+            result["customer_deleted"] = True
+            logger.info(
+                "stripe_customer_deleted_for_erasure",
+                workspace_id=str(workspace.id),
+                customer_id=workspace.stripe_customer_id,
+            )
+        except Exception as e:
+            logger.error(
+                "stripe_customer_delete_failed_during_erasure",
+                workspace_id=str(workspace.id),
+                customer_id=workspace.stripe_customer_id,
+                error=str(e),
+            )
+
+    return result

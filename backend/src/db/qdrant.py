@@ -1044,3 +1044,87 @@ async def delete_context_points(
             error=str(e),
         )
         raise QdrantError(f"Failed to delete context points: {e}") from e
+
+
+async def delete_user_points(user_id: str) -> dict[str, int]:
+    """Delete every point authored by a user across all kagura_memories collections.
+
+    Issue #360 (GDPR Art.17 / APPI 第22条): the user-scoped variant of
+    ``delete_context_points``. Filters by ``user_id`` alone — deliberately
+    crossing workspace + context boundaries because the GDPR data subject
+    is the *author* of the point, not the workspace owner. This means
+    points the user authored inside a shared workspace they were a member
+    of (but did not own) are also deleted; this is the correct
+    interpretation of "right to erasure" and is documented in the ops
+    runbook so it is not a surprise to workspace co-owners.
+
+    Iterates every collection whose name begins with ``kagura_memories``
+    so that per-model variant collections (``kagura_memories_<slug>_<dim>``,
+    see ``get_collection_name``) are covered without the caller having
+    to enumerate them.
+
+    Args:
+        user_id: OAuth2 ``sub`` of the user being erased.
+
+    Returns:
+        Dict mapping collection name to deleted point count.
+
+    Raises:
+        QdrantError: If listing collections or deleting from any single
+            collection fails. The error message includes the offending
+            collection so reconciliation knows where to retry.
+
+    Example:
+        >>> deleted = await delete_user_points("google-oauth2|123")
+        >>> sum(deleted.values())
+        42
+        >>> deleted
+        {'kagura_memories': 38, 'kagura_memories_voyage_2_1024': 4}
+    """
+    client = get_qdrant_client()
+    deleted_per_collection: dict[str, int] = {}
+
+    try:
+        collections_response = await client.get_collections()
+        target_collections = [
+            c.name
+            for c in collections_response.collections
+            if c.name.startswith(KAGURA_MEMORIES_COLLECTION)
+        ]
+    except Exception as e:
+        logger.error("user_points_list_collections_failed", user_id=user_id, error=str(e))
+        raise QdrantError(f"Failed to list collections for user erasure: {e}") from e
+
+    user_filter = Filter(must=[FieldCondition(key="user_id", match=MatchValue(value=user_id))])
+
+    for collection_name in target_collections:
+        try:
+            count_result = await client.count(
+                collection_name=collection_name,
+                count_filter=user_filter,
+            )
+            points_to_delete = count_result.count
+
+            if points_to_delete > 0:
+                await client.delete(
+                    collection_name=collection_name,
+                    points_selector=user_filter,
+                )
+
+            deleted_per_collection[collection_name] = points_to_delete
+            logger.info(
+                "user_points_deleted",
+                collection=collection_name,
+                user_id=user_id,
+                count=points_to_delete,
+            )
+        except Exception as e:
+            logger.error(
+                "user_points_deletion_failed",
+                collection=collection_name,
+                user_id=user_id,
+                error=str(e),
+            )
+            raise QdrantError(f"Failed to delete user points from {collection_name}: {e}") from e
+
+    return deleted_per_collection
