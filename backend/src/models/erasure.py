@@ -21,6 +21,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
@@ -142,14 +143,14 @@ class ErasureRequest(Base):
         Index(
             "ix_erasure_requests_pending_sweep",
             "scheduled_for",
-            postgresql_where=f"status = '{STATUS_COOLING_OFF}'",
+            postgresql_where=text(f"status = '{STATUS_COOLING_OFF}'"),
         ),
         Index("ix_erasure_requests_status", "status"),
         Index(
             "uq_erasure_one_active_per_user",
             "user_id",
             unique=True,
-            postgresql_where=(
+            postgresql_where=text(
                 f"status IN ('{STATUS_PENDING}', '{STATUS_COOLING_OFF}', '{STATUS_IN_PROGRESS}')"
             ),
         ),
