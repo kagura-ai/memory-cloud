@@ -7,7 +7,7 @@ Issue #106: Refactored to use consolidated utilities
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -686,6 +686,97 @@ async def delete_user(
                 "api_keys": api_key_count,
             },
         }
+
+
+# ============================================================================
+# Account Erasure (Issue #360, GDPR Art.17 / APPI compliance)
+# ============================================================================
+
+
+from typing import Literal  # noqa: E402  (kept local to the new endpoint)
+
+# Admin reason codes — explicitly excludes ``self_service`` (which is
+# locked to the self-service flow by the DB CHECK constraint). Pydantic
+# now rejects bad values at the API boundary (422) rather than letting
+# them reach the service layer.
+AdminErasureReasonCode = Literal[
+    "user_request_via_support",
+    "legal_order",
+    "inactivity_policy",
+    "abuse_violation",
+    "other",
+]
+
+
+class AdminErasureRequestBody(BaseModel):
+    """Payload for POST /admin/users/{user_id}/erase.
+
+    ``reason_detail`` is free-form admin notes bounded to 1000 chars at
+    the service layer (matches the ``valid_erasure_*`` CHECK constraint
+    in the migration).
+    """
+
+    reason_code: AdminErasureReasonCode
+    reason_detail: str | None = None
+
+
+@router.post("/users/{user_id}/erase")
+async def admin_force_erase_user(
+    user_id: str,
+    body: AdminErasureRequestBody,
+    request: Request,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Force-erase a user account (admin-only, GDPR Art.17 / APPI compliance).
+
+    Skips the 7-day cooling-off period: the deletion executes immediately.
+    Cross-store cleanup (Stripe + Qdrant + Postgres + Redis) is handled
+    by AccountErasureService following the same orchestration as the
+    self-service path.
+
+    Required body:
+        reason_code: one of user_request_via_support / legal_order /
+            inactivity_policy / abuse_violation / other
+        reason_detail: free-form admin note (max 1000 chars)
+
+    Protections (mirrors SystemAdminService.can_delete_admin):
+        - 403 if target is the initial admin
+        - 403 if target is the last remaining admin
+        - 403 if admin tries to erase their own account
+        - 409 if an erasure request is already in flight for this user
+        - 409 if the target owns a shared workspace and no alternate
+          admin exists for auto-transfer
+
+    This endpoint replaces the older `DELETE /admin/users/{user_id}` for
+    new integrations. The old route is kept temporarily for backward
+    compatibility but does NOT clean Qdrant or all OAuth artifacts.
+    """
+    from services.account_erasure_service import AccountErasureService
+
+    admin_id = get_user_id(admin)
+
+    if admin_id == user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot erase your own account via the admin path",
+        )
+
+    service = AccountErasureService(db)
+    record = await service.admin_force_erase(
+        target_user_id=user_id,
+        initiator_user_id=admin_id,
+        reason_code=body.reason_code,
+        reason_detail=body.reason_detail,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    return {
+        "request_id": str(record.id),
+        "status": record.status,
+        "deleted_data_summary": record.deleted_data_summary,
+    }
 
 
 # ============================================================================
