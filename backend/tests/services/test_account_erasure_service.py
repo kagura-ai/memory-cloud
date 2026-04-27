@@ -68,6 +68,8 @@ def _service() -> AccountErasureService:
     db = MagicMock()
     db.add = MagicMock()
     db.commit = AsyncMock()
+    db.flush = AsyncMock()
+    db.rollback = AsyncMock()
     db.refresh = AsyncMock()
     db.execute = AsyncMock()
     email = AsyncMock()

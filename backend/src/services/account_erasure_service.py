@@ -172,28 +172,40 @@ class AccountErasureService:
             user_agent=user_agent,
         )
         self.db.add(request)
-        # Defense-in-depth: the partial unique index
-        # `uq_erasure_one_active_per_user` rejects a second active row even
-        # if `_find_active_request` raced with another concurrent caller.
-        # Translate the IntegrityError to the typed business error so the
-        # API surface is identical between the in-memory and DB-enforced
-        # detection paths.
+        # Order matters: flush() (issues INSERT, populates request.id, surfaces
+        # IntegrityError early) → Redis SETEX → commit(). The previous order
+        # (commit-then-Redis) wedged the user when Redis briefly failed: a
+        # committed pending row is "active" per the partial unique index, but
+        # without the Redis token nothing can confirm or cancel it (the cancel
+        # path covers cooling_off only). 1-hour Redis TTL was no protection
+        # because the key was never written.
+        #
+        # New order's failure modes:
+        #  - flush() IntegrityError → rollback (no row, no Redis key) → user
+        #    sees ErasureAlreadyInProgressError, can retry once the prior
+        #    request is resolved.
+        #  - Redis SETEX raises → rollback PG → no orphan row.
+        #  - commit() fails after Redis SETEX → orphan Redis key, but its
+        #    1h TTL guarantees self-cleanup.
         try:
-            await self.db.commit()
+            await self.db.flush()
         except IntegrityError as exc:
             await self.db.rollback()
             raise ErasureAlreadyInProgressError("active") from exc
-        await self.db.refresh(request)
 
-        # Store raw token in Redis with TTL. Failure here would force a
-        # 500 because the user can never confirm without a Redis token —
-        # let it propagate so the caller can surface the issue.
         redis = get_redis_client()
-        await redis.setex(
-            f"{_CONFIRM_TOKEN_KEY_PREFIX}{token}",
-            CONFIRM_TOKEN_TTL_SECONDS,
-            str(request.id),
-        )
+        try:
+            await redis.setex(
+                f"{_CONFIRM_TOKEN_KEY_PREFIX}{token}",
+                CONFIRM_TOKEN_TTL_SECONDS,
+                str(request.id),
+            )
+        except Exception:
+            await self.db.rollback()
+            raise
+
+        await self.db.commit()
+        await self.db.refresh(request)
 
         await self.email_service.send_erasure_receipt(
             to_email=target.email,
