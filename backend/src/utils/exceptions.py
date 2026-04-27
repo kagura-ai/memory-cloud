@@ -297,3 +297,82 @@ class InternalError(MemoryCloudException):
 
     def __init__(self, message: str = "Internal server error", **details: Any):
         super().__init__(message, status_code=500, error_code="INT-001", **details)
+
+
+# Account Erasure Errors (Issue #360, GDPR Art.17 / APPI compliance)
+
+
+class ErasureRequestNotFoundError(NotFoundException):
+    """No erasure request found (404)."""
+
+    def __init__(self, user_id: str | None = None):
+        super().__init__("Erasure request", resource_id=user_id)
+        self.error_code = "ERASURE-001"
+
+
+class ErasureTokenInvalidError(MemoryCloudException):
+    """Confirmation token is missing, expired, or does not match (400)."""
+
+    def __init__(self, message: str = "Invalid or expired confirmation token"):
+        super().__init__(message, status_code=400, error_code="ERASURE-002")
+
+
+class ErasureForbiddenError(MemoryCloudException):
+    """Erasure cannot proceed for this user (403).
+
+    Raised when the caller does not have permission to erase this account
+    (e.g. password mismatch on self-service path) or when the operation is
+    blocked by business rules other than initial-admin protection.
+    """
+
+    def __init__(self, message: str = "Erasure not permitted"):
+        super().__init__(message, status_code=403, error_code="ERASURE-003")
+
+
+class InitialAdminCannotBeErasedError(MemoryCloudException):
+    """The initial system administrator cannot be erased (403).
+
+    Mirrors SystemAdminService.can_delete_admin() — the initial admin row
+    is permanently protected to prevent the platform from being left
+    without any administrator.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Cannot erase the initial system administrator. This is a protected account.",
+            status_code=403,
+            error_code="ERASURE-004",
+        )
+
+
+class WorkspaceTransferRequiredError(MemoryCloudException):
+    """User owns a shared workspace and must transfer ownership before erasure (409).
+
+    Raised when the user is the sole owner of a workspace that has other
+    members and no alternate admin to auto-transfer ownership to. The user
+    must promote another member to admin (or remove members) before retrying.
+    """
+
+    def __init__(self, workspace_id: str, member_count: int):
+        super().__init__(
+            (
+                f"Workspace {workspace_id} has {member_count} other member(s) "
+                f"and no alternate admin. Transfer ownership before erasure."
+            ),
+            status_code=409,
+            error_code="ERASURE-005",
+            workspace_id=workspace_id,
+            member_count=member_count,
+        )
+
+
+class ErasureAlreadyInProgressError(MemoryCloudException):
+    """An erasure request for this user is already pending or in progress (409)."""
+
+    def __init__(self, status: str):
+        super().__init__(
+            f"An erasure request is already {status} for this account.",
+            status_code=409,
+            error_code="ERASURE-006",
+            existing_status=status,
+        )

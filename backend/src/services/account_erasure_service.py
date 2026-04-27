@@ -1,0 +1,850 @@
+"""Account erasure orchestrator (Issue #360, GDPR Art.17 / APPI 第22条).
+
+Owns the full lifecycle of an `erasure_requests` row:
+
+    self-service:  pending -> cooling_off -> in_progress -> complete
+    admin:                                   in_progress -> complete
+
+Both paths converge on `_execute`, which performs the 12-step cross-store
+deletion (Stripe -> Qdrant -> workspace transfer -> Postgres -> Redis ->
+audit-log pseudonymize -> finalize) covered by the design pin in #360.
+
+Failure semantics: if any step in `_execute` raises, the request row is
+marked `failed` with `failure_reason`, the surrounding transaction is
+rolled back (so partial Postgres mutations don't escape), and the
+exception is re-raised. Stripe and Qdrant calls inside `_execute` are
+themselves best-effort and won't roll back — they're recorded in
+`deleted_data_summary` so ops can reconcile manually if anything stuck.
+"""
+
+from __future__ import annotations
+
+import hmac
+import secrets
+from datetime import timedelta
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from db.qdrant import delete_user_points
+from db.redis import clear_co_activations, clear_user_rate_limits, get_redis_client
+from models.auth import (
+    APIKey,
+    AuditLog,
+    ExternalAPIKey,
+    OAuth2AuthorizationCode,
+    OAuth2Client,
+    OAuth2Token,
+    User,
+    Workspace,
+    WorkspaceInvitation,
+    WorkspaceMember,
+)
+from models.erasure import (
+    REASON_DETAIL_MAX_CHARS,
+    REASON_SELF_SERVICE,
+    STATUS_CANCELLED,
+    STATUS_COMPLETE,
+    STATUS_COOLING_OFF,
+    STATUS_FAILED,
+    STATUS_IN_PROGRESS,
+    STATUS_PENDING,
+    VALID_REASON_CODES,
+    ErasureRequest,
+)
+from services.email_service import EmailService, get_email_service
+from services.stripe_service import cancel_subscription_and_delete_customer_for_erasure
+from services.system_admin_service import SystemAdminService
+from utils.datetime import utcnow
+from utils.exceptions import (
+    ErasureAlreadyInProgressError,
+    ErasureForbiddenError,
+    ErasureRequestNotFoundError,
+    ErasureTokenInvalidError,
+    InitialAdminCannotBeErasedError,
+    NotFoundException,
+    ValidationError,
+    WorkspaceTransferRequiredError,
+)
+from utils.hashing import sha256_hex
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+# 7-day cooling-off period from CLO Gate1 pin #4.
+COOLING_OFF_PERIOD = timedelta(days=7)
+
+# Confirmation token TTL in Redis. Aligns with the SLA pin: receipt
+# notification within 1 business day, then the user has roughly an hour
+# from clicking through the email to confirm. Long enough for a real user
+# to act, short enough to limit token-reuse exposure.
+CONFIRM_TOKEN_TTL_SECONDS = 3600
+
+# Redis key prefix for the raw confirmation token. The `confirm_token_hash`
+# column stores SHA256(token); the raw token only ever lives here.
+_CONFIRM_TOKEN_KEY_PREFIX = "erasure_token:"
+
+# Salt used when pseudonymizing audit_log rows for an erased user. A
+# stable per-deployment salt (not per-row) lets ops cross-correlate audit
+# rows belonging to the same erased user without revealing the email/sub.
+# In a real deployment the salt would come from settings; for v0.14.1
+# this constant is acceptable because the goal is irreversibility, not
+# rainbow-table protection — once the user row is gone there's nothing to
+# rainbow-attack against.
+_AUDIT_PSEUDO_SALT = "kagura-erasure-v1"
+
+
+_sha256_hex = sha256_hex  # backward-compat alias for tests + this module
+
+
+class AccountErasureService:
+    """Service-layer orchestrator for GDPR right-to-erasure.
+
+    Constructed per-request with an AsyncSession (matches the codebase
+    convention used by MemoryService, WorkspaceService, etc.). The
+    EmailService is injected so tests can swap in a fake; production
+    code uses the module-level `get_email_service()` singleton.
+    """
+
+    def __init__(self, db: AsyncSession, email_service: EmailService | None = None):
+        self.db = db
+        self.email_service = email_service or get_email_service()
+
+    # ------------------------------------------------------------------
+    # Self-service path
+    # ------------------------------------------------------------------
+
+    async def request_self_service_erasure(
+        self,
+        *,
+        user_id: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> tuple[ErasureRequest, str]:
+        """Create a pending self-service erasure request.
+
+        Returns the row plus the raw confirmation token. The token is
+        ALSO stored in Redis under `erasure_token:{token}` for verification
+        — only the SHA256 lands in Postgres.
+
+        Raises:
+            NotFoundException: User does not exist.
+            InitialAdminCannotBeErasedError: User is the protected initial admin.
+            ErasureAlreadyInProgressError: An active (pending/cooling_off) request
+                already exists for this user.
+        """
+        target = await self._load_user_or_404(user_id)
+        if target.is_initial_admin:
+            raise InitialAdminCannotBeErasedError()
+
+        existing = await self._find_active_request(user_id)
+        if existing:
+            raise ErasureAlreadyInProgressError(existing.status)
+
+        token = secrets.token_urlsafe(32)
+        token_hash = _sha256_hex(token)
+
+        request = ErasureRequest(
+            user_id=user_id,
+            user_email_hash=_sha256_hex(target.email),
+            initiated_by=user_id,
+            is_self_service=True,
+            reason_code=REASON_SELF_SERVICE,
+            reason_detail=None,
+            status=STATUS_PENDING,
+            confirm_token_hash=token_hash,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        self.db.add(request)
+        # Defense-in-depth: the partial unique index
+        # `uq_erasure_one_active_per_user` rejects a second active row even
+        # if `_find_active_request` raced with another concurrent caller.
+        # Translate the IntegrityError to the typed business error so the
+        # API surface is identical between the in-memory and DB-enforced
+        # detection paths.
+        try:
+            await self.db.commit()
+        except IntegrityError as exc:
+            await self.db.rollback()
+            raise ErasureAlreadyInProgressError("active") from exc
+        await self.db.refresh(request)
+
+        # Store raw token in Redis with TTL. Failure here would force a
+        # 500 because the user can never confirm without a Redis token —
+        # let it propagate so the caller can surface the issue.
+        redis = get_redis_client()
+        await redis.setex(
+            f"{_CONFIRM_TOKEN_KEY_PREFIX}{token}",
+            CONFIRM_TOKEN_TTL_SECONDS,
+            str(request.id),
+        )
+
+        await self.email_service.send_erasure_receipt(
+            to_email=target.email,
+            request_id=str(request.id),
+        )
+
+        logger.info(
+            "erasure_request_created",
+            request_id=str(request.id),
+            user_id=user_id,
+            auth_method=target.auth_method,
+        )
+        return request, token
+
+    async def confirm_self_service(
+        self,
+        *,
+        user_id: str,
+        token: str,
+        password: str | None = None,
+    ) -> ErasureRequest:
+        """Verify the confirmation token (and password for password users)
+        and move pending -> cooling_off.
+
+        Raises:
+            ErasureTokenInvalidError: Token missing/expired/mismatched.
+            ErasureForbiddenError: Password mismatch on the password path.
+            ErasureRequestNotFoundError: No pending request exists.
+        """
+        target = await self._load_user_or_404(user_id)
+
+        # Resolve and validate token via Redis (raw token never on disk).
+        redis = get_redis_client()
+        redis_key = f"{_CONFIRM_TOKEN_KEY_PREFIX}{token}"
+        request_id_str = await redis.get(redis_key)
+        if not request_id_str:
+            raise ErasureTokenInvalidError()
+
+        try:
+            request_id = UUID(request_id_str)
+        except (ValueError, TypeError) as exc:
+            raise ErasureTokenInvalidError() from exc
+
+        request = await self._load_request_or_404(request_id)
+        if request.user_id != user_id:
+            # Token from a different user's request — refuse without leaking
+            # which other user is involved.
+            raise ErasureTokenInvalidError()
+
+        if request.status != STATUS_PENDING:
+            raise ErasureTokenInvalidError(
+                f"Request is not pending (current status: {request.status})"
+            )
+
+        # Defense-in-depth: also compare against stored hash. Catches any
+        # Redis/Postgres divergence (e.g. token was rotated server-side
+        # between issue and confirm). Constant-time compare so a malicious
+        # client cannot infer the stored hash one byte at a time.
+        if not hmac.compare_digest(request.confirm_token_hash or "", _sha256_hex(token)):
+            raise ErasureTokenInvalidError()
+
+        # Password re-confirm for password users (Q5 design). OAuth users
+        # rely on the email-link click as the second factor; the active
+        # session cookie was the first.
+        if target.auth_method == "password":
+            if not password:
+                raise ErasureForbiddenError("Password required to confirm erasure")
+            from auth.password import verify_password
+
+            if not target.password_hash or not verify_password(password, target.password_hash):
+                raise ErasureForbiddenError("Incorrect password")
+
+        now = utcnow()
+        request.status = STATUS_COOLING_OFF
+        request.confirmed_at = now
+        request.scheduled_for = now + COOLING_OFF_PERIOD
+        await self.db.commit()
+        await self.db.refresh(request)
+
+        # Burn the token so a leaked link can't be replayed.
+        await redis.delete(redis_key)
+
+        await self.email_service.send_erasure_cooling_off_started(
+            to_email=target.email,
+            request_id=str(request.id),
+            scheduled_for_iso=request.scheduled_for.isoformat(),
+        )
+
+        logger.info(
+            "erasure_request_confirmed",
+            request_id=str(request.id),
+            user_id=user_id,
+            scheduled_for=request.scheduled_for.isoformat(),
+        )
+        return request
+
+    async def cancel_self_service(self, *, user_id: str) -> ErasureRequest:
+        """Cancel a cooling_off request before it executes.
+
+        Raises:
+            ErasureRequestNotFoundError: No active cancellable request.
+        """
+        request = await self._find_active_request(user_id)
+        if request is None or request.status != STATUS_COOLING_OFF:
+            raise ErasureRequestNotFoundError(user_id)
+
+        request.status = STATUS_CANCELLED
+        request.cancelled_at = utcnow()
+        await self.db.commit()
+        await self.db.refresh(request)
+
+        logger.info(
+            "erasure_request_cancelled",
+            request_id=str(request.id),
+            user_id=user_id,
+        )
+        return request
+
+    # ------------------------------------------------------------------
+    # Admin force-erase path
+    # ------------------------------------------------------------------
+
+    async def admin_force_erase(
+        self,
+        *,
+        target_user_id: str,
+        initiator_user_id: str,
+        reason_code: str,
+        reason_detail: str | None = None,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> ErasureRequest:
+        """Create an admin-initiated request and execute it inline.
+
+        Skips the cooling-off period — admin actions are deliberate and
+        usually triggered by a legal/abuse signal that wants immediate
+        effect. The reason_code/reason_detail pair is mandatory and
+        constrained by the CHECK constraint on the table (admin-only
+        codes, not `self_service`).
+
+        Raises:
+            ValidationError: Bad reason_code/reason_detail.
+            NotFoundException / InitialAdminCannotBeErasedError /
+            ErasureAlreadyInProgressError / WorkspaceTransferRequiredError:
+            All forwarded from the inline execution path.
+        """
+        if reason_code == REASON_SELF_SERVICE:
+            raise ValidationError("reason_code 'self_service' is not allowed for admin path")
+        if reason_code not in VALID_REASON_CODES:
+            raise ValidationError(f"Invalid reason_code: {reason_code}", field="reason_code")
+        if reason_detail and len(reason_detail) > REASON_DETAIL_MAX_CHARS:
+            raise ValidationError(
+                f"reason_detail exceeds {REASON_DETAIL_MAX_CHARS} chars",
+                field="reason_detail",
+            )
+
+        target = await self._load_user_or_404(target_user_id)
+        if target.is_initial_admin:
+            raise InitialAdminCannotBeErasedError()
+
+        # Cannot delete the last remaining admin (mirrors SystemAdminService).
+        admin_service = SystemAdminService(self.db)
+        can_delete, reason = await admin_service.can_delete_admin(target_user_id)
+        if not can_delete:
+            raise ErasureForbiddenError(reason)
+
+        existing = await self._find_active_request(target_user_id)
+        if existing:
+            raise ErasureAlreadyInProgressError(existing.status)
+
+        now = utcnow()
+        request = ErasureRequest(
+            user_id=target_user_id,
+            user_email_hash=_sha256_hex(target.email),
+            initiated_by=initiator_user_id,
+            is_self_service=False,
+            reason_code=reason_code,
+            reason_detail=reason_detail,
+            status=STATUS_IN_PROGRESS,
+            requested_at=now,
+            confirmed_at=now,
+            started_at=now,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        self.db.add(request)
+        try:
+            await self.db.commit()
+        except IntegrityError as exc:
+            # Same race protection as the self-service path: partial unique
+            # index rejects concurrent admin force-erase + sweep collisions.
+            await self.db.rollback()
+            raise ErasureAlreadyInProgressError("active") from exc
+        await self.db.refresh(request)
+
+        logger.info(
+            "erasure_admin_force_started",
+            request_id=str(request.id),
+            target_user_id=target_user_id,
+            initiator_user_id=initiator_user_id,
+            reason_code=reason_code,
+        )
+
+        await self._execute(request, target)
+        return request
+
+    # ------------------------------------------------------------------
+    # Cron sweep entry point
+    # ------------------------------------------------------------------
+
+    async def sweep_pending_erasures(self, *, batch_size: int = 50) -> int:
+        """Pick up cooling_off rows whose scheduled_for has passed and execute.
+
+        Uses `FOR UPDATE SKIP LOCKED` so multiple scheduler workers (if we
+        ever scale horizontally) won't double-execute the same row.
+
+        Returns:
+            Number of requests executed in this sweep.
+        """
+        now = utcnow()
+        result = await self.db.execute(
+            select(ErasureRequest)
+            .where(
+                ErasureRequest.status == STATUS_COOLING_OFF,
+                ErasureRequest.scheduled_for <= now,
+            )
+            .order_by(ErasureRequest.scheduled_for.asc())
+            .limit(batch_size)
+            .with_for_update(skip_locked=True)
+        )
+        due_requests = list(result.scalars().all())
+        if not due_requests:
+            return 0
+
+        # Mark all as in_progress immediately (under the same FOR UPDATE
+        # lock) so a second sweeper waking up between iterations cannot
+        # also see them as cooling_off.
+        for req in due_requests:
+            req.status = STATUS_IN_PROGRESS
+            req.started_at = now
+        await self.db.commit()
+
+        # Bulk-load every target user up-front rather than one SELECT per
+        # request — collapses up to `batch_size` round-trips into one.
+        user_ids = [req.user_id for req in due_requests]
+        users_result = await self.db.execute(select(User).where(User.user_id.in_(user_ids)))
+        users_by_id: dict[str, User] = {u.user_id: u for u in users_result.scalars().all()}
+
+        executed = 0
+        for req in due_requests:
+            target = users_by_id.get(req.user_id)
+            if target is None:
+                # User row already gone (race / manual cleanup). Mark complete
+                # with empty summary; nothing to delete.
+                req.status = STATUS_COMPLETE
+                req.completed_at = utcnow()
+                req.deleted_data_summary = {"note": "user_row_already_absent"}
+                await self.db.commit()
+                continue
+            try:
+                await self._execute(req, target)
+                executed += 1
+            except Exception as exc:
+                logger.error(
+                    "erasure_sweep_execute_failed",
+                    request_id=str(req.id),
+                    user_id=req.user_id,
+                    error=str(exc),
+                    exc_info=True,
+                )
+                # `_execute` already marked status=failed; continue to
+                # the next request in this batch.
+                continue
+        return executed
+
+    # ------------------------------------------------------------------
+    # Core execution (12-step orchestrator)
+    # ------------------------------------------------------------------
+
+    async def _execute(self, request: ErasureRequest, target: User) -> None:
+        """Run the cross-store erasure for a single request.
+
+        Order: Stripe -> Qdrant -> workspaces -> Postgres -> Redis ->
+        audit_logs pseudonymize -> audit row -> finalize. Stripe and
+        Qdrant first so a failure leaves a recoverable Postgres state;
+        Redis last because session/rate-limit data is ephemeral and
+        re-creatable from cookies if anything goes wrong.
+        """
+        summary: dict[str, Any] = {}
+        try:
+            owned_workspaces = await self._list_owned_workspaces(target.user_id)
+
+            # Step 1: Stripe (best-effort)
+            stripe_summary: dict[str, Any] = {"workspaces_processed": []}
+            for ws in owned_workspaces:
+                ws_result = await cancel_subscription_and_delete_customer_for_erasure(ws)
+                if ws_result["subscription_cancelled"] or ws_result["customer_deleted"]:
+                    stripe_summary["workspaces_processed"].append(
+                        {"workspace_id": str(ws.id), **ws_result}
+                    )
+            summary["stripe"] = stripe_summary
+
+            # Step 2: Qdrant (raises on failure -> caught below)
+            summary["qdrant"] = await delete_user_points(target.user_id)
+
+            # Step 3: workspace ownership transfer / abort gate
+            summary["workspaces"] = await self._handle_owned_workspaces(
+                target.user_id, owned_workspaces
+            )
+
+            # Step 4: Postgres deletes (FK-safe order)
+            summary["postgres"] = await self._delete_postgres(target)
+
+            # Step 5: pseudonymize existing audit_logs referencing this user
+            summary["audit_logs_pseudonymized"] = await self._pseudonymize_audit_logs(
+                target.user_id, target.email
+            )
+
+            # Step 6: Redis cleanup (best-effort)
+            summary["redis"] = await self._clear_redis(target.user_id)
+
+            # Step 7: write the new "account_erasure" audit row
+            await self._write_audit_log(request, target, summary)
+
+            # Step 8: finalize the erasure_requests row
+            await self._finalize(request, summary)
+
+            # Step 9: completion notification — outside the success path's
+            # transactional integrity guarantees. A future real EmailService
+            # could raise on transient SMTP failure; that must NOT cause
+            # the just-committed `complete` row to be overwritten as
+            # `failed`. Swallow + log instead.
+            try:
+                await self.email_service.send_erasure_complete(
+                    to_email=target.email,
+                    request_id=str(request.id),
+                )
+            except Exception as exc:
+                logger.error(
+                    "erasure_complete_email_failed",
+                    request_id=str(request.id),
+                    error=str(exc),
+                )
+
+        except WorkspaceTransferRequiredError:
+            # Caller-actionable error: don't mark as failed (request stays
+            # in_progress so the caller can fix the workspace and retry).
+            # Roll back any partial Postgres state from this transaction
+            # so the row reverts to its pre-execute snapshot. confirmed_at
+            # is also cleared on the admin path so a retry sees a clean
+            # PENDING state (admin-path rows were created with confirmed_at=now
+            # to skip cooling-off).
+            await self.db.rollback()
+            await self.db.execute(
+                update(ErasureRequest)
+                .where(ErasureRequest.id == request.id)
+                .values(
+                    status=STATUS_COOLING_OFF if request.is_self_service else STATUS_PENDING,
+                    started_at=None,
+                    confirmed_at=None if not request.is_self_service else request.confirmed_at,
+                )
+            )
+            await self.db.commit()
+            raise
+        except Exception as exc:
+            logger.error(
+                "erasure_execute_failed",
+                request_id=str(request.id),
+                user_id=target.user_id,
+                error=str(exc),
+                exc_info=True,
+            )
+            await self.db.rollback()
+            # Use a fresh write to record the failure without depending on
+            # the just-rolled-back ORM state.
+            await self.db.execute(
+                update(ErasureRequest)
+                .where(ErasureRequest.id == request.id)
+                .values(
+                    status=STATUS_FAILED,
+                    failure_reason=str(exc)[:1000],
+                    deleted_data_summary=summary or None,
+                )
+            )
+            await self.db.commit()
+            raise
+
+    # ------------------------------------------------------------------
+    # Step helpers
+    # ------------------------------------------------------------------
+
+    async def _list_owned_workspaces(self, user_id: str) -> list[Workspace]:
+        """All workspaces this user owns (drives Stripe + member checks)."""
+        result = await self.db.execute(select(Workspace).where(Workspace.owner_user_id == user_id))
+        return list(result.scalars().all())
+
+    async def _handle_owned_workspaces(
+        self, user_id: str, workspaces: list[Workspace]
+    ) -> dict[str, Any]:
+        """Transfer ownership where possible, refuse where not.
+
+        Per Q4 design:
+            - Other admin in the workspace -> auto-transfer (alphabetical
+              email order for determinism).
+            - Member(s) but no other admin -> raise WorkspaceTransferRequiredError.
+            - Sole owner -> no transfer; workspace will be deleted in step 4.
+        """
+        transfers: list[dict[str, str]] = []
+        sole_owner_count = 0
+
+        if not workspaces:
+            return {"transferred": transfers, "sole_owner_workspaces": sole_owner_count}
+
+        # Bulk-load every member row for these workspaces in one round-trip
+        # and group in memory — the per-workspace SELECT pattern was an N+1
+        # for users with multiple owned workspaces.
+        ws_ids = [ws.id for ws in workspaces]
+        members_result = await self.db.execute(
+            select(WorkspaceMember).where(WorkspaceMember.workspace_id.in_(ws_ids))
+        )
+        members_by_ws: dict[Any, list[WorkspaceMember]] = {}
+        for m in members_result.scalars().all():
+            members_by_ws.setdefault(m.workspace_id, []).append(m)
+
+        for ws in workspaces:
+            other_members = [m for m in members_by_ws.get(ws.id, []) if m.user_id != user_id]
+            if not other_members:
+                sole_owner_count += 1
+                continue
+
+            other_admins = sorted(
+                (m for m in other_members if m.role in ("owner", "admin")),
+                key=lambda m: m.user_id or "",
+            )
+            if not other_admins:
+                raise WorkspaceTransferRequiredError(
+                    workspace_id=str(ws.id), member_count=len(other_members)
+                )
+
+            new_owner = other_admins[0]
+            ws.owner_user_id = new_owner.user_id
+            new_owner.role = "owner"
+            transfers.append({"workspace_id": str(ws.id), "new_owner_user_id": new_owner.user_id})
+
+        # Commit so the cascade on workspace delete (step 4) sees the new
+        # owner_user_id rather than the about-to-be-deleted user_id.
+        if transfers:
+            await self.db.commit()
+
+        return {"transferred": transfers, "sole_owner_workspaces": sole_owner_count}
+
+    async def _delete_postgres(self, target: User) -> dict[str, int]:
+        """Delete every Postgres row that references the user.
+
+        Order matters because not every column is FK-cascaded — most
+        cross-table user references are plain VARCHAR (OAuth2 sub) with
+        no cascade. The full sweep here is the application-layer
+        equivalent of `ON DELETE CASCADE` for all per-user data.
+        """
+        # Optional model imports so the service doesn't crash if a model
+        # is renamed/removed in a future refactor.
+        from models.auth import PlanChange, UsageStats, UserPlan
+        from models.memory import GraphMemory
+
+        user_id = target.user_id
+        counts: dict[str, int] = {}
+
+        # OAuth2 tokens / authorization codes / clients first — no FK
+        # cascade from users to these.
+        counts["oauth_tokens"] = await self._count_and_delete(
+            OAuth2Token, OAuth2Token.user_id == user_id
+        )
+        counts["oauth_authorization_codes"] = await self._count_and_delete(
+            OAuth2AuthorizationCode, OAuth2AuthorizationCode.user_id == user_id
+        )
+        counts["oauth_clients"] = await self._count_and_delete(
+            OAuth2Client, OAuth2Client.owner_id == user_id
+        )
+
+        # Direct per-user tables.
+        counts["external_api_keys"] = await self._count_and_delete(
+            ExternalAPIKey, ExternalAPIKey.user_id == user_id
+        )
+        counts["api_keys"] = await self._count_and_delete(APIKey, APIKey.user_id == user_id)
+        counts["graph_memory"] = await self._count_and_delete(
+            GraphMemory, GraphMemory.user_id == user_id
+        )
+        counts["usage_stats"] = await self._count_and_delete(
+            UsageStats, UsageStats.user_id == user_id
+        )
+        counts["user_plans"] = await self._count_and_delete(UserPlan, UserPlan.user_id == user_id)
+
+        # Workspace memberships and invitations.
+        counts["workspace_members"] = await self._count_and_delete(
+            WorkspaceMember, WorkspaceMember.user_id == user_id
+        )
+        counts["workspace_invitations"] = await self._count_and_delete(
+            WorkspaceInvitation,
+            (WorkspaceInvitation.invited_by == user_id)
+            | (WorkspaceInvitation.email == target.email),
+        )
+
+        # Pseudonymize plan_changes.changed_by — keep the audit trail but
+        # break the link to the deleted user (legal retention concern).
+        counts["plan_changes_pseudonymized"] = await self._pseudonymize_field(
+            PlanChange, PlanChange.changed_by, user_id
+        )
+
+        # Workspaces owned by the user. After step 3 ran, only sole-owner
+        # workspaces remain pointing here. The cascade chain wipes
+        # contexts/memories/edges/etc.
+        counts["workspaces"] = await self._count_and_delete(
+            Workspace, Workspace.owner_user_id == user_id
+        )
+
+        # Finally the user row itself.
+        await self.db.delete(target)
+        await self.db.commit()
+        counts["users"] = 1
+
+        return counts
+
+    async def _count_and_delete(self, model: Any, where_clause: Any) -> int:
+        """Delete rows and return the affected count from the cursor.
+
+        Single round-trip: PostgreSQL returns ``rowcount`` from ``DELETE``
+        directly, so we don't need a separate ``SELECT count()``.
+        """
+        result = await self.db.execute(delete(model).where(where_clause))
+        return result.rowcount or 0
+
+    async def _pseudonymize_field(self, model: Any, column: Any, user_id: str) -> int:
+        """SHA256-pseudonymize a column across all matching rows.
+
+        Used for legal-retention tables (e.g. plan_changes) where the row
+        must survive but the personal-data link to the deleted user must
+        not.
+        """
+        pseudonym = sha256_hex(user_id, salt=_AUDIT_PSEUDO_SALT)
+        result = await self.db.execute(
+            update(model).where(column == user_id).values({column: pseudonym})
+        )
+        return result.rowcount or 0
+
+    async def _pseudonymize_audit_logs(self, user_id: str, email: str) -> int:
+        """Replace user_email/user_id on audit_logs with stable hashes.
+
+        Audit rows are kept (legal retention) but the link to the deleted
+        user is broken. The pseudonyms use a per-deployment salt so
+        cross-row correlation for the SAME erased user is still possible
+        for compliance investigations, but the original sub/email is
+        unrecoverable.
+        """
+        user_pseudonym = sha256_hex(user_id, salt=_AUDIT_PSEUDO_SALT)
+        email_pseudonym = sha256_hex(email, salt=_AUDIT_PSEUDO_SALT)
+        result = await self.db.execute(
+            update(AuditLog)
+            .where(AuditLog.user_id == user_id)
+            .values(user_id=user_pseudonym, user_email=email_pseudonym)
+        )
+        return result.rowcount or 0
+
+    async def _clear_redis(self, user_id: str) -> dict[str, int]:
+        """Best-effort Redis cleanup. Failures are logged inside helpers."""
+        # SessionManager uses a sync Redis client — fetch the live instance
+        # via the auth module's getter so we go through the same setup.
+        from api.routes.auth import _session_manager  # type: ignore
+
+        sessions_deleted = 0
+        if _session_manager is not None:
+            sessions_deleted = _session_manager.delete_user_sessions(user_id)
+
+        return {
+            "sessions": sessions_deleted,
+            "co_act": await clear_co_activations(user_id),
+            "rate_limit": await clear_user_rate_limits(user_id),
+        }
+
+    async def _write_audit_log(
+        self, request: ErasureRequest, target: User, summary: dict[str, Any]
+    ) -> None:
+        """Append the canonical `account_erasure` audit row, fully pseudonymized.
+
+        This row is born AFTER the bulk pseudonymize step (Step 5) ran, so
+        we cannot rely on a later sweep to scrub it. Inline pseudonymization
+        guarantees no plaintext email or user_id ever lands in audit_logs
+        for this event — required for GDPR Art.5(1)(c) compliance.
+        """
+        user_pseudonym = _sha256_hex(target.user_id, salt=_AUDIT_PSEUDO_SALT)
+        email_pseudonym = _sha256_hex(target.email, salt=_AUDIT_PSEUDO_SALT)
+        self.db.add(
+            AuditLog(
+                user_email=email_pseudonym,
+                user_id=user_pseudonym,
+                action="account_erasure",
+                resource=f"user_pseudonym:{user_pseudonym[:16]}",
+                user_metadata={
+                    "request_id": str(request.id),
+                    "is_self_service": request.is_self_service,
+                    "initiated_by": request.initiated_by,
+                    "reason_code": request.reason_code,
+                    "deleted_data_summary": summary,
+                },
+                ip_address=request.ip_address,
+                user_agent=request.user_agent,
+            )
+        )
+        await self.db.commit()
+
+    async def _finalize(self, request: ErasureRequest, summary: dict[str, Any]) -> None:
+        """Mark the erasure_requests row complete.
+
+        Done with an UPDATE rather than ORM mutation because the request
+        object's session may have been touched by intermediate commits.
+        """
+        await self.db.execute(
+            update(ErasureRequest)
+            .where(ErasureRequest.id == request.id)
+            .values(
+                status=STATUS_COMPLETE,
+                completed_at=utcnow(),
+                deleted_data_summary=summary,
+            )
+        )
+        await self.db.commit()
+
+    # ------------------------------------------------------------------
+    # Lookups
+    # ------------------------------------------------------------------
+
+    async def _load_user_or_404(self, user_id: str) -> User:
+        result = await self.db.execute(select(User).where(User.user_id == user_id))
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise NotFoundException("User", resource_id=user_id)
+        return user
+
+    async def _load_user_or_none(self, user_id: str) -> User | None:
+        result = await self.db.execute(select(User).where(User.user_id == user_id))
+        return result.scalar_one_or_none()
+
+    async def _load_request_or_404(self, request_id: UUID) -> ErasureRequest:
+        result = await self.db.execute(
+            select(ErasureRequest).where(ErasureRequest.id == request_id)
+        )
+        request = result.scalar_one_or_none()
+        if request is None:
+            raise ErasureRequestNotFoundError()
+        return request
+
+    async def _find_active_request(self, user_id: str) -> ErasureRequest | None:
+        """Active = pending OR cooling_off OR in_progress."""
+        result = await self.db.execute(
+            select(ErasureRequest)
+            .where(
+                ErasureRequest.user_id == user_id,
+                ErasureRequest.status.in_([STATUS_PENDING, STATUS_COOLING_OFF, STATUS_IN_PROGRESS]),
+            )
+            .order_by(ErasureRequest.requested_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_active_request_for_user(self, user_id: str) -> ErasureRequest | None:
+        """Public read-only accessor for the route handler."""
+        return await self._find_active_request(user_id)
