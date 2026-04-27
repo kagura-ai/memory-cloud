@@ -67,6 +67,16 @@ def initialize_auth_routes(oauth2_manager: OAuth2Manager, session_manager: Sessi
     _session_manager = session_manager
 
 
+def get_session_manager() -> SessionManager | None:
+    """Return the active SessionManager instance (or None if not initialized).
+
+    Use this in code that lives outside ``api.routes.auth`` instead of
+    importing the private ``_session_manager`` module attribute directly.
+    Returns ``None`` if called before :func:`initialize_auth_routes`.
+    """
+    return _session_manager
+
+
 # Models
 class LoginResponse(BaseModel):
     """OAuth2 login response."""
