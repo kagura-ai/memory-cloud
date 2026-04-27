@@ -102,11 +102,17 @@ def upgrade() -> None:
         sa.Column("cancelled_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("failure_reason", sa.Text, nullable=True),
         # Per-store / per-table row count summary captured at completion
-        # time. Schema:
-        #   {"postgres": {"memories": 42, "api_keys": 3, ...},
+        # time. Schema (matches AccountErasureService._execute exactly):
+        #   {"postgres": {"users": 1, "memories": 42, "api_keys": 3, ...},
         #    "qdrant":   {"kagura_memories": 38},
         #    "redis":    {"sessions": 2, "co_act": 17, "rate_limit": 1},
-        #    "stripe":   {"subscriptions_cancelled": 1, "customer_deleted": true}}
+        #    "stripe":   {"workspaces_processed": [
+        #        {"workspace_id": "<uuid>",
+        #         "subscription_cancelled": true,
+        #         "customer_deleted": true}
+        #    ]},
+        #    "workspaces": {"transferred": [...], "sole_owner_workspaces": <n>},
+        #    "audit_logs_pseudonymized": <n>}
         # JSONB so admin tooling can query keys without unmarshaling.
         sa.Column("deleted_data_summary", JSONB, nullable=True),
         sa.Column("ip_address", sa.String(45), nullable=True),
