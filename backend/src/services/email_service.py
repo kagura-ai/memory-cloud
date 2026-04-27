@@ -50,7 +50,6 @@ class EmailService(Protocol):
             True if dispatch succeeded (or was logged for manual handling),
             False on hard failure.
         """
-        ...
 
     async def send_erasure_confirmation_link(
         self,
@@ -66,7 +65,6 @@ class EmailService(Protocol):
             request_id: ``erasure_requests.id`` UUID.
             confirm_url: Full HTTPS URL with one-time token (expires in 1h).
         """
-        ...
 
     async def send_erasure_cooling_off_started(
         self,
@@ -82,7 +80,6 @@ class EmailService(Protocol):
             request_id: ``erasure_requests.id`` UUID.
             scheduled_for_iso: ISO-8601 timestamp when erasure executes.
         """
-        ...
 
     async def send_erasure_complete(self, *, to_email: str, request_id: str) -> bool:
         """Notify that the erasure has completed and the account is gone.
@@ -95,7 +92,6 @@ class EmailService(Protocol):
                 contact we will have with the subject).
             request_id: ``erasure_requests.id`` UUID.
         """
-        ...
 
 
 class LoggingEmailService:
