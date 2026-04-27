@@ -303,15 +303,30 @@ class AccountErasureService:
         return request
 
     async def cancel_self_service(self, *, user_id: str) -> ErasureRequest:
-        """Cancel a cooling_off request before it executes.
+        """Cancel a pending or cooling_off request.
+
+        Both states are cancellable:
+        - ``pending``: user requested but never confirmed. The Redis token
+          may have already expired (1h TTL); without this allow-cancel, a
+          forgotten pending row would block all future erasure requests
+          from this user (partial unique index treats pending as active).
+        - ``cooling_off``: user confirmed but the 7-day window hasn't elapsed.
+
+        ``in_progress`` rows are NOT cancellable — the orchestrator is
+        already running, and racing it would risk an inconsistent half-
+        applied erasure.
 
         Raises:
             ErasureRequestNotFoundError: No active cancellable request.
         """
         request = await self._find_active_request(user_id)
-        if request is None or request.status != STATUS_COOLING_OFF:
+        if request is None or request.status not in (
+            STATUS_PENDING,
+            STATUS_COOLING_OFF,
+        ):
             raise ErasureRequestNotFoundError(user_id)
 
+        cancelled_from = request.status
         request.status = STATUS_CANCELLED
         request.cancelled_at = utcnow()
         await self.db.commit()
@@ -321,6 +336,7 @@ class AccountErasureService:
             "erasure_request_cancelled",
             request_id=str(request.id),
             user_id=user_id,
+            cancelled_from=cancelled_from,
         )
         return request
 
@@ -419,18 +435,27 @@ class AccountErasureService:
     async def sweep_pending_erasures(self, *, batch_size: int = 50) -> int:
         """Pick up cooling_off rows whose scheduled_for has passed and execute.
 
-        Also reclaims stale ``in_progress`` rows whose ``started_at`` is
-        older than ``IN_PROGRESS_STALE_AFTER`` — those represent runs
-        that were marked in-progress but did not complete (process
-        SIGTERM/OOM between commit and ``_execute``). Without this, a
-        crash-killed sweep would leave erasure rows permanently stuck
-        and silently violate the GDPR 1-month SLA.
+        Also handles two stale-state cleanup paths:
+
+        - **Stale ``in_progress``** (``started_at`` older than 1h): these
+          are runs that were marked in-progress but did not complete
+          (process SIGTERM/OOM between commit and ``_execute``). Picked
+          up by the main sweep query and re-executed.
+
+        - **Stale ``pending``** (``requested_at`` older than 1h + 5min
+          grace): the Redis confirm token (TTL 1h) has expired and the
+          user can no longer confirm. The row would otherwise block all
+          future erasure requests via the partial unique index. Marked
+          ``cancelled`` in a single UPDATE before the main sweep — no
+          per-row execution needed since these rows have nothing to
+          delete (they never reached cooling_off).
 
         Uses ``FOR UPDATE SKIP LOCKED`` so multiple scheduler workers (if
         we ever scale horizontally) won't double-execute the same row.
 
         Returns:
-            Number of requests executed in this sweep.
+            Number of requests executed (does NOT count cancelled stale
+            pending rows — those are reclaim, not execution).
         """
         from sqlalchemy import or_
 
@@ -439,6 +464,26 @@ class AccountErasureService:
         # cross-store deletes); a row in_progress this long is presumed
         # crashed.
         stale_in_progress_cutoff = now - timedelta(hours=1)
+
+        # Pending token TTL is 1h (CONFIRM_TOKEN_TTL_SECONDS); add 5min
+        # grace so we don't race a user who just clicked confirm but
+        # whose Redis SETEX is in flight.
+        pending_token_expired_cutoff = now - timedelta(hours=1, minutes=5)
+        stale_pending_result = await self.db.execute(
+            update(ErasureRequest)
+            .where(
+                (ErasureRequest.status == STATUS_PENDING)
+                & (ErasureRequest.requested_at <= pending_token_expired_cutoff)
+            )
+            .values(status=STATUS_CANCELLED, cancelled_at=now)
+        )
+        if (stale_pending_result.rowcount or 0) > 0:
+            logger.info(
+                "erasure_sweep_pending_reclaimed",
+                count=stale_pending_result.rowcount,
+                reason="token_expired_no_confirm",
+            )
+            await self.db.commit()
         result = await self.db.execute(
             select(ErasureRequest)
             .where(
@@ -787,7 +832,7 @@ class AccountErasureService:
         return result.rowcount or 0
 
     async def _pseudonymize_audit_logs(self, user_id: str, email: str) -> int:
-        """Replace user_email/user_id/resource on audit_logs with stable hashes.
+        """Replace user_id/resource (and conditionally user_email) on audit_logs.
 
         Audit rows are kept (legal retention) but the link to the deleted
         user is broken. The pseudonyms use a per-deployment salt so
@@ -795,16 +840,26 @@ class AccountErasureService:
         for compliance investigations, but the original sub/email is
         unrecoverable.
 
-        The ``resource`` column for user-targeted audit events in this repo
-        is conventionally formatted as ``user:{email}`` (e.g. role_assign,
-        system_admin_promote, system_admin_demote rows), so it carries
-        plaintext email after the user_id/user_email columns are scrubbed.
-        Use ``REPLACE`` chains to swap any occurrence of the email or raw
-        user_id in ``resource`` with their pseudonyms — covers both the
-        ``user:{email}`` and any future ``user_id``-bearing shape without
-        having to enumerate every audit-event flavour.
+        Column-by-column rules:
+        - ``user_id``: ALWAYS rewritten when the row matches the erased
+          subject's user_id. ``user_id`` is the subject column.
+        - ``user_email``: in this codebase, ``audit_logs.user_email`` is
+          often the *actor's* email, not the subject's (see
+          RoleManager.assign_role and SystemAdminService.promote/demote).
+          A blind overwrite would clobber the actor's identity and
+          misattribute every audit row about the subject. Use a SQL
+          CASE: rewrite only when ``user_email`` equals the erased
+          subject's email; preserve otherwise.
+        - ``resource``: conventionally ``user:{email}`` for user-targeted
+          events. Chain ``func.replace`` to swap any occurrence of the
+          subject's email or raw user_id with their pseudonyms — covers
+          ``user:{email}`` and any future ``user_id``-bearing shape
+          without enumerating every event flavour.
+
+        Caught by Copilot /review iter 2: prior version overwrote
+        user_email indiscriminately, breaking actor attribution.
         """
-        from sqlalchemy import func
+        from sqlalchemy import case, func
 
         user_pseudonym = sha256_hex(user_id, salt=_AUDIT_PSEUDO_SALT)
         email_pseudonym = sha256_hex(email, salt=_AUDIT_PSEUDO_SALT)
@@ -815,12 +870,18 @@ class AccountErasureService:
             user_id,
             user_pseudonym,
         )
+        # Pseudonymize user_email only when it equals the erased subject's
+        # email — preserves actor email on audit rows where actor != subject.
+        conditional_email = case(
+            (AuditLog.user_email == email, email_pseudonym),
+            else_=AuditLog.user_email,
+        )
         result = await self.db.execute(
             update(AuditLog)
             .where(AuditLog.user_id == user_id)
             .values(
                 user_id=user_pseudonym,
-                user_email=email_pseudonym,
+                user_email=conditional_email,
                 resource=scrubbed_resource,
             )
         )

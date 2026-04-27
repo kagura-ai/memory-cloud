@@ -336,10 +336,14 @@ class TestCancelSelfService:
             await svc.cancel_self_service(user_id="u-1")
 
     @pytest.mark.asyncio
-    async def test_pending_request_cannot_be_cancelled(self):
-        """Pending = before the user clicked confirm. Cancel only applies
-        to cooling_off; a pending row simply expires when its Redis token
-        TTL elapses."""
+    async def test_pending_request_can_be_cancelled(self):
+        """Pending IS cancellable now (Copilot /review iter 2 finding).
+
+        Without this, an unconfirmed pending row whose Redis token TTL
+        has elapsed would block all future erasure requests via the
+        partial unique index — user permanently wedged. Allow cancel
+        to give the user immediate recourse.
+        """
         svc = _service()
         pending = ErasureRequest(
             user_id="u-1",
@@ -352,8 +356,9 @@ class TestCancelSelfService:
         pending.id = uuid4()
         svc._find_active_request = AsyncMock(return_value=pending)
 
-        with pytest.raises(ErasureRequestNotFoundError):
-            await svc.cancel_self_service(user_id="u-1")
+        result = await svc.cancel_self_service(user_id="u-1")
+        assert result.status == STATUS_CANCELLED
+        assert result.cancelled_at is not None
 
 
 # ---------------------------------------------------------------------------
