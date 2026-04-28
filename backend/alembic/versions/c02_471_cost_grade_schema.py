@@ -193,11 +193,12 @@ def upgrade() -> None:
             name="valid_llm_pricing_context_max_gt_min",
         ),
     )
-    op.create_index(
-        "idx_llm_pricing_lookup",
-        "llm_pricing",
-        ["provider", "model", "unit_type", "effective_from"],
-    )
+    # NOTE: no explicit ``idx_llm_pricing_lookup`` — PostgreSQL's
+    # auto-created index for the ``uq_llm_pricing_lookup_key`` UNIQUE
+    # constraint covers the lookup query (provider, model, unit_type,
+    # effective_from prefix). An additional index would just duplicate
+    # write cost and storage. See models/llm_pricing.py for the same
+    # decision documented at the model level.
 
     # 3. Embedding cost-grade columns on sleep_reports. All nullable / 0
     # default for backfill compatibility — pre-migration rows render as
@@ -228,7 +229,6 @@ def downgrade() -> None:
     op.drop_column("sleep_reports", "embedding_model")
     op.drop_column("sleep_reports", "embedding_provider")
 
-    op.drop_index("idx_llm_pricing_lookup", table_name="llm_pricing")
     op.drop_table("llm_pricing")
 
     op.drop_index(

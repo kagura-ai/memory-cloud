@@ -170,6 +170,14 @@ class LLMPricingService:
         """
         if units < 0:
             raise ValueError(f"units must be >= 0, got {units}")
+        # Validate ``unit_type`` BEFORE the ``units == 0`` fast-path so a
+        # typo gets the same ValueError it would in ``lookup()``. Otherwise
+        # ``compute_cost_usd(unit_type='input_tokens_typo', units=0)`` would
+        # silently return 0.0 and hide the bug until the next non-zero call.
+        if unit_type not in LLM_PRICING_UNIT_TYPES:
+            raise ValueError(
+                f"Invalid unit_type {unit_type!r}; must be one of {LLM_PRICING_UNIT_TYPES}"
+            )
         if units == 0:
             return 0.0
 

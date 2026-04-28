@@ -50,7 +50,6 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     DateTime,
-    Index,
     Integer,
     Numeric,
     String,
@@ -172,13 +171,14 @@ class LLMPricing(Base):
             "context_max_tokens IS NULL OR context_max_tokens > context_min_tokens",
             name="valid_llm_pricing_context_max_gt_min",
         ),
-        Index(
-            "idx_llm_pricing_lookup",
-            "provider",
-            "model",
-            "unit_type",
-            "effective_from",
-        ),
+        # NOTE: no explicit ``idx_llm_pricing_lookup`` — PostgreSQL's
+        # auto-created index for ``uq_llm_pricing_lookup_key`` covers the
+        # lookup query as a prefix index (provider, model, unit_type,
+        # effective_from, context_min_tokens). An additional 4-column
+        # index would just duplicate write cost and storage with no
+        # measured query benefit. Add an explicit index later if EXPLAIN
+        # ANALYZE on #472's queries shows the prefix index isn't being
+        # picked up.
     )
 
     def __repr__(self) -> str:
