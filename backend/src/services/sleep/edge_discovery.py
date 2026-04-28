@@ -44,7 +44,12 @@ from services.sleep.prompts import (
     EDGE_DISCOVERY_SYSTEM,
     EDGE_DISCOVERY_USER,
 )
-from services.sleep.reporter import PhaseResult, SleepBudget
+from services.sleep.reporter import (
+    LLMCallBreakdown,
+    PhaseResult,
+    SleepBudget,
+    accumulate_llm_response,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -349,6 +354,10 @@ class EdgeDiscoveryPhase:
         # Reset on every execute(); init here so _llm_judge_batch can be called
         # in isolation (e.g. from unit tests) without AttributeError (#306).
         self._tokens_used = 0
+        # #471: per-(provider, model) cost-grade accumulator. Lazily
+        # initialized on the first LLM call so we don't fabricate empty
+        # rows for runs that early-return before any LLM use.
+        self._llm_breakdown: LLMCallBreakdown | None = None
 
     async def execute(
         self,
@@ -365,6 +374,7 @@ class EdgeDiscoveryPhase:
         result = PhaseResult(phase_name="edge_discovery")
         llm_calls_before = budget.llm_calls_used
         self._tokens_used = 0
+        self._llm_breakdown = None
 
         if not config.sleep_edge_discovery_enabled:
             result.skipped = True
@@ -503,6 +513,9 @@ class EdgeDiscoveryPhase:
         result.memories_processed = len(sampled)
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
         result.tokens_used = self._tokens_used
+        # #471: attach per-(provider, model) breakdown for child-row write.
+        if self._llm_breakdown is not None:
+            result.llm_breakdown = [self._llm_breakdown]
         result.details = {
             "sampled": len(sampled),
             "candidates": len(candidates),
@@ -767,7 +780,7 @@ class EdgeDiscoveryPhase:
         # failed). Addresses Copilot review #371 finding (loop 2).
         budget.consume(llm_calls=1)
         try:
-            response, tokens = await self.llm_service.complete_json(
+            llm_resp = await self.llm_service.complete_json(
                 user_id=user_id,
                 prompt=prompt,
                 system_prompt=EDGE_DISCOVERY_SYSTEM,
@@ -776,7 +789,9 @@ class EdgeDiscoveryPhase:
                 model=config.sleep_llm_model,
                 provider=config.sleep_llm_provider,
             )
-            self._tokens_used += tokens
+            response = llm_resp.parsed
+            self._tokens_used += llm_resp.total_tokens
+            self._llm_breakdown = accumulate_llm_response(self._llm_breakdown, llm_resp)
 
         except Exception as e:
             logger.warning("edge_discovery_llm_failed", error=str(e))

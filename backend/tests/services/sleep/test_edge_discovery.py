@@ -82,24 +82,37 @@ def _make_edge(edge_type, weight, dst_id=None):
 
 
 def _make_llm_response(edges, tokens=100):
-    """Build a canned `complete_json` return value: (response_dict, tokens).
+    """Build a canned ``complete_json`` return value (Issue #471 LLMResponse).
 
     Each entry in ``edges`` is a tuple of:
         (label_a, label_b, related: bool, edge_type: str, confidence: float)
+
+    The returned ``LLMResponse`` mirrors the new cost-grade signature: it
+    provides ``parsed`` (the JSON dict the prod code reads), ``total_tokens``
+    (the legacy aggregate the budget tracker reads), and zeroed per-class
+    counters since these tests don't assert on cost.
     """
-    return (
-        {
-            "edges": [
-                {
-                    "pair": [a, b],
-                    "related": related,
-                    "edge_type": edge_type,
-                    "confidence": confidence,
-                }
-                for (a, b, related, edge_type, confidence) in edges
-            ]
-        },
-        tokens,
+    from services.llm_service import LLMResponse
+
+    parsed = {
+        "edges": [
+            {
+                "pair": [a, b],
+                "related": related,
+                "edge_type": edge_type,
+                "confidence": confidence,
+            }
+            for (a, b, related, edge_type, confidence) in edges
+        ]
+    }
+    return LLMResponse(
+        parsed=parsed,
+        total_tokens=tokens,
+        input_tokens=tokens,
+        output_tokens=0,
+        cached_input_tokens=0,
+        provider="openai",
+        model="gpt-5-nano",
     )
 
 
@@ -886,8 +899,11 @@ class TestDirectedEdgeOrientation:
         labels = _labels_for(memory_map)
 
         # Build the response by hand — _make_llm_response only takes str.
-        llm_judge_phase.llm_service.complete_json.return_value = (
-            {
+        # Issue #471: complete_json now returns LLMResponse, not a tuple.
+        from services.llm_service import LLMResponse
+
+        llm_judge_phase.llm_service.complete_json.return_value = LLMResponse(
+            parsed={
                 "edges": [
                     {
                         "pair": [labels[batch[0][0]], labels[batch[0][1]]],
@@ -905,7 +921,12 @@ class TestDirectedEdgeOrientation:
                     },
                 ]
             },
-            100,
+            total_tokens=100,
+            input_tokens=100,
+            output_tokens=0,
+            cached_input_tokens=0,
+            provider="openai",
+            model="gpt-5-nano",
         )
 
         confirmed, stats = await llm_judge_phase._llm_judge_batch(

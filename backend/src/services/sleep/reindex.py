@@ -84,13 +84,26 @@ class ReindexPhase:
                 continue
 
             try:
-                vector = await self.embedding_service.embed(
+                # #471: use embed_with_usage() to capture token count for
+                # cost-grade reporting. Cache hits return (vector, 0) which
+                # is the correct cost attribution — cached responses don't
+                # bill API tokens.
+                vector, tokens = await self.embedding_service.embed_with_usage(
                     memory.summary,
                     user_id=user_id,
                     context_id=context_id,
                     workspace_id=workspace_id,
                 )
                 result.embedding_calls_used += 1
+                result.embedding_tokens += tokens
+                # Embedding model is instance-global per the
+                # ``EmbeddingService`` config; capture the (provider, model)
+                # identity from the service on the first call so the
+                # reporter can populate the scalar columns on
+                # ``sleep_reports``.
+                if result.embedding_provider is None:
+                    result.embedding_provider = self.embedding_service.provider
+                    result.embedding_model = self.embedding_service.model
 
                 # Payload aligned with memory_service.py canonical format
                 payload = {

@@ -32,7 +32,12 @@ from db.qdrant import update_memory_payload_in_qdrant
 from models.memory import Memory
 from services.llm_service import LLMService
 from services.sleep.prompts import IMPORTANCE_REEVAL_SYSTEM, IMPORTANCE_REEVAL_USER
-from services.sleep.reporter import PhaseResult, SleepBudget
+from services.sleep.reporter import (
+    LLMCallBreakdown,
+    PhaseResult,
+    SleepBudget,
+    accumulate_llm_response,
+)
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -75,6 +80,8 @@ class ImportanceReevalPhase:
         result = PhaseResult(phase_name="importance_reeval")
         llm_calls_before = budget.llm_calls_used
         self._tokens_used = 0
+        # #471: per-(provider, model) accumulator (lazy-init).
+        self._llm_breakdown: LLMCallBreakdown | None = None
 
         if not config.sleep_importance_reeval_enabled:
             result.skipped = True
@@ -152,6 +159,9 @@ class ImportanceReevalPhase:
         result.memories_processed = updated_count
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
         result.tokens_used = self._tokens_used
+        # #471: attach per-(provider, model) breakdown.
+        if self._llm_breakdown is not None:
+            result.llm_breakdown = [self._llm_breakdown]
         result.details = {
             "candidates": len(candidates),
             "updated": updated_count,
@@ -218,7 +228,7 @@ class ImportanceReevalPhase:
         prompt = IMPORTANCE_REEVAL_USER.format(memories="\n".join(memory_lines))
 
         try:
-            response, tokens = await self.llm_service.complete_json(
+            llm_resp = await self.llm_service.complete_json(
                 user_id=user_id,
                 prompt=prompt,
                 system_prompt=IMPORTANCE_REEVAL_SYSTEM,
@@ -228,14 +238,15 @@ class ImportanceReevalPhase:
                 provider=config.sleep_llm_provider,
             )
             budget.consume(llm_calls=1)
-            self._tokens_used += tokens
+            self._tokens_used += llm_resp.total_tokens
+            self._llm_breakdown = accumulate_llm_response(self._llm_breakdown, llm_resp)
         except Exception as e:
             logger.warning("importance_reeval_llm_failed", error=str(e))
             return {}
 
         # Parse with label validation
         scores: dict[UUID, float] = {}
-        for item in response.get("scores", []):
+        for item in llm_resp.parsed.get("scores", []):
             label = item.get("label")
             importance = item.get("importance")
             if label not in label_to_id:

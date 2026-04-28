@@ -11,6 +11,14 @@ from sqlalchemy.pool import NullPool
 from models.auth import Base as AuthBase
 from models.memory import Base as MemoryBase
 
+# Issue #471: import the cost-grade pricing model so its table is
+# registered with the shared declarative ``Base.metadata`` and gets
+# created by ``create_all`` below. Sleep models are picked up
+# transitively via service imports today; importing explicitly here
+# keeps the test setup robust to future import-graph changes.
+import models.llm_pricing  # noqa: F401  isort: skip
+import models.sleep  # noqa: F401  isort: skip
+
 
 def pytest_configure(config: pytest.Config) -> None:
     """Validate asyncio_default_test_loop_scope matches fixture loop scope.

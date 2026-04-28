@@ -37,7 +37,12 @@ from repositories.neural_edge import NeuralEdgeRepository
 from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService
 from services.sleep.prompts import DEDUP_JUDGE_SYSTEM, DEDUP_JUDGE_USER
-from services.sleep.reporter import PhaseResult, SleepBudget
+from services.sleep.reporter import (
+    LLMCallBreakdown,
+    PhaseResult,
+    SleepBudget,
+    accumulate_llm_response,
+)
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -132,6 +137,8 @@ class DedupMergePhase:
         result = PhaseResult(phase_name="dedup_merge")
         llm_calls_before = budget.llm_calls_used
         self._tokens_used = 0
+        # #471: per-(provider, model) accumulator (lazy-init).
+        self._llm_breakdown: LLMCallBreakdown | None = None
 
         if not config.sleep_dedup_enabled:
             result.skipped = True
@@ -237,6 +244,9 @@ class DedupMergePhase:
 
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
         result.tokens_used = self._tokens_used
+        # #471: attach per-(provider, model) breakdown for child-row write.
+        if self._llm_breakdown is not None:
+            result.llm_breakdown = [self._llm_breakdown]
 
         logger.info(
             "dedup_merge_phase_completed",
@@ -407,7 +417,7 @@ class DedupMergePhase:
         )
 
         try:
-            response, tokens = await self.llm_service.complete_json(
+            llm_resp = await self.llm_service.complete_json(
                 user_id=user_id,
                 prompt=prompt,
                 system_prompt=DEDUP_JUDGE_SYSTEM,
@@ -417,9 +427,10 @@ class DedupMergePhase:
                 provider=config.sleep_llm_provider,
             )
             budget.consume(llm_calls=1)
-            self._tokens_used += tokens
+            self._tokens_used += llm_resp.total_tokens
+            self._llm_breakdown = accumulate_llm_response(self._llm_breakdown, llm_resp)
 
-            return self._parse_dedup_response(response, label_to_id)
+            return self._parse_dedup_response(llm_resp.parsed, label_to_id)
 
         except Exception as e:
             logger.warning("dedup_llm_judge_failed", error=str(e))
