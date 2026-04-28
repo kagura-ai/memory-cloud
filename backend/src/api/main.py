@@ -100,25 +100,15 @@ async def lifespan(app: FastAPI):
     logger.info("scheduler_stopped")
 
     # Stop the dedicated Stripe erasure ThreadPoolExecutor (Issue #468).
-    # No-op when billing is disabled (the executor is lazy-initialized).
-    # Bounded by a 30s timeout so an erasure mid-shutdown cannot hold the
-    # lifespan past typical orchestrator grace periods (e.g. Kubernetes
-    # terminationGracePeriodSeconds=30). Orphaned in-flight Stripe calls
-    # are equivalent to the SIGKILL fallback that would have fired anyway.
+    # ``wait=False`` returns immediately so lifespan shutdown is not held
+    # by in-flight Stripe HTTP calls — k8s SIGKILL after the grace period
+    # is the existing process-exit fallback either way, and erasure is
+    # best-effort (Stripe processes the request server-side regardless of
+    # whether we read the ack). No-op when billing is disabled.
     from services.stripe_service import shutdown_erasure_executor
 
-    stripe_erasure_shutdown_timeout_seconds = 30
-    try:
-        await asyncio.wait_for(
-            asyncio.to_thread(shutdown_erasure_executor),
-            timeout=stripe_erasure_shutdown_timeout_seconds,
-        )
-        logger.info("stripe_erasure_executor_stopped")
-    except TimeoutError:
-        logger.warning(
-            "stripe_erasure_executor_shutdown_timed_out",
-            timeout_seconds=stripe_erasure_shutdown_timeout_seconds,
-        )
+    shutdown_erasure_executor()
+    logger.info("stripe_erasure_executor_stopped")
 
     # Close database
     from db.base import close_db

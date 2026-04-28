@@ -52,20 +52,23 @@ def _get_erasure_executor() -> ThreadPoolExecutor:
 
 
 def shutdown_erasure_executor() -> None:
-    """Tear down the erasure executor cleanly on app shutdown.
+    """Tear down the erasure executor on app shutdown.
 
     Registered from ``api.main.lifespan``. Safe to call when the executor
     was never created (no-op) and safe to call twice (second call is a
     no-op).
 
-    ``cancel_futures=True`` drops queued (not-yet-started) tasks so the
-    shutdown latency is bounded by ``max_workers × stripe_default_timeout``
-    (~160s) instead of ``pending_count × stripe_default_timeout``. In-flight
-    Stripe calls still finish so customer-deletion isn't half-committed.
+    Uses ``wait=False`` so this returns immediately rather than blocking
+    the lifespan on in-flight Stripe HTTP calls. ``cancel_futures=True``
+    drops queued (not-yet-started) tasks. Any in-flight Stripe call
+    keeps running in its worker thread until either the call completes
+    or the process is killed by the orchestrator's SIGKILL after grace
+    period — erasure is best-effort, so an orphaned ack is acceptable
+    (Stripe processes the cancel/delete server-side regardless).
     """
     global _erasure_executor
     if _erasure_executor is not None:
-        _erasure_executor.shutdown(wait=True, cancel_futures=True)
+        _erasure_executor.shutdown(wait=False, cancel_futures=True)
         _erasure_executor = None
 
 
