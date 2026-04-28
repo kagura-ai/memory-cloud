@@ -77,10 +77,28 @@ class SleepReport(Base):
     consolidation_result = Column(JSON, nullable=True)
     reindex_result = Column(JSON, nullable=True)
 
-    # Cost tracking
+    # Cost tracking — legacy roll-up totals (#101).
+    # Issue #471 split per-(phase, provider, model) LLM usage into the
+    # ``sleep_report_llm_usage`` child table (see below). These three columns
+    # remain populated by the reporter as a sum of child rows for back-compat:
+    # any reader that selects them directly (legacy dashboards, log analyzers,
+    # MCP tools) continues to work without change.
     llm_calls_made = Column(Integer, nullable=False, default=0)
     llm_tokens_used = Column(Integer, nullable=False, default=0)
     embedding_calls_made = Column(Integer, nullable=False, default=0)
+
+    # Embedding cost-grade columns (#471). Embedding is instance-global per
+    # ``backend/src/config/settings.py`` (one EMBEDDING_PROVIDER /
+    # EMBEDDING_MODEL per process), so a single (provider, model, tokens)
+    # triple per run is sufficient — no child table needed.
+    #
+    # NOTE for v0.15.0: these columns track ONLY the reindex phase's embedding
+    # API calls today, mirroring the existing ``embedding_calls_made``
+    # behavior. Sleep phases 1 (edge_discovery) and 2 (dedup_merge) also call
+    # the embedding API but don't increment any counter; #475 closes that gap.
+    embedding_provider = Column(String(50), nullable=True)
+    embedding_model = Column(String(100), nullable=True)
+    embedding_tokens = Column(Integer, nullable=False, default=0)
 
     # Activity counters
     memories_processed = Column(Integer, nullable=False, default=0)
@@ -147,3 +165,92 @@ class SleepAction(Base):
 
     def __repr__(self) -> str:
         return f"<SleepAction(id={self.id}, phase={self.phase}, action={self.action_type})>"
+
+
+class SleepReportLLMUsage(Base):
+    """Per-(phase, provider, model) LLM call breakdown for a sleep run.
+
+    Issue #471: cost-grade telemetry. Captures the dimensions needed to
+    compute actual `$` cost from token counts:
+
+    - ``provider`` + ``model`` → joined against ``llm_pricing`` to resolve
+      the per-token rate active at the parent run's ``started_at``.
+    - ``input_tokens`` / ``output_tokens`` / ``cached_input_tokens`` →
+      separate counters because output is typically ~5× input rate and
+      Anthropic's prompt cache discounts cached input by ~90%.
+    - ``tokenizer_version`` is **audit only**; it is not a price-lookup key
+      and the system never re-prices on a tokenizer change. It exists so
+      analysts can spot the case where a provider ships a new tokenizer
+      under an unchanged-rate model (Anthropic Opus 4.7 issued ~35% more
+      tokens than 4.6 for the same text).
+
+    A run typically emits one row per phase × model. Today all phases use
+    a single ``config.sleep_llm_model``, so a typical run produces 4-5 rows
+    (one per LLM-using phase). The schema is per-(phase, provider, model)
+    to remain correct if a future change lets phases pick different models.
+
+    Phases that don't call the LLM (currently only ``reindex``) emit no
+    row. The aggregation API in #472 uses these rows directly via
+    ``GROUP BY provider, model`` joins; the legacy roll-up columns on
+    ``sleep_reports`` are computed as the sum of these rows for back-compat.
+    """
+
+    __tablename__ = "sleep_report_llm_usage"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    # report_id has an explicit ``Index`` in __table_args__ below to match
+    # the migration's ``idx_sleep_report_llm_usage_report_id`` name.
+    # ``index=True`` here would create an auto-named index
+    # (``ix_sleep_report_llm_usage_report_id``) and cause schema-drift
+    # noise on alembic autogenerate or duplicate indexes when
+    # Base.metadata.create_all is used in tests.
+    report_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("sleep_reports.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    phase = Column(String(30), nullable=False)
+    provider = Column(String(50), nullable=False)
+    model = Column(String(100), nullable=False)
+
+    input_tokens = Column(Integer, nullable=False, default=0)
+    output_tokens = Column(Integer, nullable=False, default=0)
+    cached_input_tokens = Column(Integer, nullable=False, default=0)
+    calls = Column(Integer, nullable=False, default=0)
+    tokenizer_version = Column(String(50), nullable=True)
+
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        # Single-column index on report_id (FK join key). PostgreSQL does
+        # NOT auto-index FK columns, and the explicit name here matches
+        # the migration so model + migration agree on a single index.
+        Index(
+            "idx_sleep_report_llm_usage_report_id",
+            "report_id",
+        ),
+        # Composite index supports the #472 aggregation queries that
+        # ``GROUP BY provider, model`` after filtering by report period.
+        Index(
+            "idx_sleep_report_llm_usage_provider_model",
+            "provider",
+            "model",
+            "report_id",
+        ),
+        # CHECK on phase keeps the audit trail readable even if a future
+        # phase name slips in via reporter changes — same defensive pattern
+        # as ``valid_sleep_report_status`` on ``sleep_reports``.
+        CheckConstraint(
+            "phase IN ('edge_discovery', 'dedup_merge', 'importance_reeval', "
+            "'consolidation', 'reindex')",
+            name="valid_sleep_report_llm_usage_phase",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<SleepReportLLMUsage(report={self.report_id}, "
+            f"phase={self.phase}, model={self.model}, "
+            f"in={self.input_tokens}, out={self.output_tokens})>"
+        )

@@ -24,10 +24,35 @@ def llm_service(mock_db):
     return LLMService(mock_db)
 
 
-def _make_completion_response(content: str, total_tokens: int = 42):
-    """Create a mock chat completion response."""
+def _make_completion_response(
+    content: str,
+    total_tokens: int = 42,
+    *,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    cached_tokens: int = 0,
+):
+    """Create a mock chat completion response.
+
+    Defaults split ``total_tokens`` evenly into prompt+completion when the
+    caller doesn't specify, so the new ``LLMResponse`` extractor (#471)
+    can decompose into per-class counters without hitting MagicMock
+    arithmetic. Pass ``prompt_tokens`` / ``completion_tokens`` explicitly
+    to test the decomposition.
+    """
+    if prompt_tokens is None:
+        prompt_tokens = total_tokens // 2
+    if completion_tokens is None:
+        completion_tokens = total_tokens - prompt_tokens
+
+    details = MagicMock()
+    details.cached_tokens = cached_tokens
+
     usage = MagicMock()
     usage.total_tokens = total_tokens
+    usage.prompt_tokens = prompt_tokens
+    usage.completion_tokens = completion_tokens
+    usage.prompt_tokens_details = details
 
     message = MagicMock()
     message.content = content
@@ -56,14 +81,14 @@ class TestCompleteJson:
             mock_client.chat.completions.create.return_value = mock_response
             mock_get_client.return_value = mock_client
 
-            result, tokens = await llm_service.complete_json(
+            resp = await llm_service.complete_json(
                 user_id="user-1",
                 prompt="Test prompt",
                 system_prompt="You are a judge.",
             )
 
-        assert result == {"result": "ok", "score": 0.95}
-        assert tokens == 50
+        assert resp.parsed == {"result": "ok", "score": 0.95}
+        assert resp.total_tokens == 50
 
         # Verify system + user messages
         call_kwargs = mock_client.chat.completions.create.call_args[1]
@@ -199,12 +224,12 @@ class TestCompleteJson:
             mock_client.chat.completions.create.return_value = mock_response
             mock_get_client.return_value = mock_client
 
-            result, _ = await llm_service.complete_json(
+            resp = await llm_service.complete_json(
                 user_id="user-1",
                 prompt="Test",
             )
 
-        assert result == {"ok": True}
+        assert resp.parsed == {"ok": True}
         call_kwargs = mock_client.chat.completions.create.call_args[1]
         assert len(call_kwargs["messages"]) == 1
         assert call_kwargs["messages"][0]["role"] == "user"
@@ -227,14 +252,14 @@ class TestCompleteJson:
             ]
             mock_get_client.return_value = mock_client
 
-            result, tokens = await llm_service.complete_json(
+            resp = await llm_service.complete_json(
                 user_id="user-1",
                 prompt="Test",
                 model="gpt-4o-mini",
             )
 
-        assert result == {"retried": True}
-        assert tokens == 30 + 35  # Both attempts counted
+        assert resp.parsed == {"retried": True}
+        assert resp.total_tokens == 30 + 35  # Both attempts counted
 
         # Verify retry used higher temperature (GPT-4 path, temperature kwarg present)
         calls = mock_client.chat.completions.create.call_args_list
@@ -311,12 +336,12 @@ class TestCompleteJson:
             mock_client.chat.completions.create.return_value = response
             mock_get_client.return_value = mock_client
 
-            _, tokens = await llm_service.complete_json(
+            resp = await llm_service.complete_json(
                 user_id="user-1",
                 prompt="Test",
             )
 
-        assert tokens == 0
+        assert resp.total_tokens == 0
 
 
 class TestGetClient:

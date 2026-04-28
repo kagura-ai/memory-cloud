@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 
 from openai import AsyncOpenAI
 from sqlalchemy import and_, select
@@ -28,6 +29,152 @@ logger = get_logger(__name__)
 
 class LLMServiceError(Exception):
     """Error from LLM service (parse failure, API error, etc.)."""
+
+
+@dataclass(frozen=True)
+class LLMResponse:
+    """Cost-grade LLM response payload (Issue #471).
+
+    Replaces the prior ``tuple[dict, int]`` return shape so callers can
+    record per-(provider, model) cost breakdowns without re-deriving which
+    model was used. Dropping a field would have meant another tuple-unpack
+    refactor across every phase; the dataclass scales cleanly.
+
+    **Back-compat**: this dataclass also unpacks as
+    ``(parsed, total_tokens)`` via ``__iter__`` below, so any caller
+    that still uses the legacy tuple shape (``parsed, tokens = await
+    complete_json(...)``) keeps working. New code should use the named
+    fields directly to avoid silently dropping per-class token data.
+
+    Token counts decompose ``response.usage`` for billing purposes:
+
+    - ``input_tokens``: ``prompt_tokens`` - ``cached_input_tokens`` (the
+      portion billed at the standard input rate).
+    - ``cached_input_tokens``: from
+      ``response.usage.prompt_tokens_details.cached_tokens`` when the
+      provider exposes it (OpenAI / Anthropic prompt caching). 0 otherwise.
+    - ``output_tokens``: ``response.usage.completion_tokens``.
+    - ``total_tokens``: legacy aggregate (``prompt_tokens +
+      completion_tokens``) — kept for the back-compat
+      ``sleep_reports.llm_tokens_used`` roll-up column. New cost code
+      should use the per-class fields, not this one.
+
+    ``tokenizer_version`` is None today (OpenAI does not expose the
+    tokenizer version in the API response). The field exists so future
+    Anthropic-SDK or per-deployment-pinned model paths can fill it in
+    without another return-shape change.
+    """
+
+    parsed: dict
+    total_tokens: int
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
+    provider: str
+    model: str
+    tokenizer_version: str | None = None
+
+    def __iter__(self):
+        """Yield (parsed, total_tokens) so tuple-unpacking callers still work.
+
+        Pre-#471 the function returned ``tuple[dict, int]`` and callers
+        wrote ``parsed, tokens = await complete_json(...)``. Yielding
+        exactly two fields keeps that pattern functional. Three-element
+        unpacking would raise the standard ValueError, which is fine —
+        there was no 3-tuple legacy contract.
+        """
+        yield self.parsed
+        yield self.total_tokens
+
+
+@dataclass(frozen=True)
+class _Usage:
+    """Per-attempt token counts extracted from an OpenAI-compatible response.
+
+    Internal to ``LLMService``. Decomposes ``response.usage`` into the
+    billing-relevant classes (input net of cache, cached input, output)
+    and a pre-summed ``total`` for back-compat logging.
+    """
+
+    total: int
+    input: int
+    output: int
+    cached: int
+
+
+_ZERO_USAGE = _Usage(total=0, input=0, output=0, cached=0)
+
+
+def _extract_usage(response) -> _Usage:
+    """Read per-class token counts out of an OpenAI-compatible response.
+
+    Cached tokens come from ``response.usage.prompt_tokens_details.
+    cached_tokens`` when the provider exposes the field (modern OpenAI;
+    Ollama returns 0 because it has no cache concept). The cached portion
+    is *included in* ``prompt_tokens``, so the standard-rate input is
+    ``prompt_tokens - cached``.
+
+    PROVIDER-SPECIFIC: this function reads the OpenAI SDK response shape.
+    When a future provider with its own SDK is wired in (Anthropic
+    direct, etc.), branch on a provider parameter or split into
+    ``_extract_usage_openai`` / ``_extract_usage_anthropic``. Anthropic
+    in particular reports caching separately as
+    ``usage.cache_read_input_tokens`` / ``cache_creation_input_tokens``
+    and won't fit through this OpenAI-shaped reader without changes.
+    """
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return _ZERO_USAGE
+
+    prompt = getattr(usage, "prompt_tokens", 0) or 0
+    completion = getattr(usage, "completion_tokens", 0) or 0
+    total = getattr(usage, "total_tokens", prompt + completion) or (prompt + completion)
+
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = getattr(details, "cached_tokens", 0) if details is not None else 0
+    cached = cached or 0
+
+    # Cached tokens are reported as a subset of prompt_tokens. The
+    # standard-rate input is what's left after subtracting cache.
+    standard_input = max(prompt - cached, 0)
+
+    return _Usage(total=total, input=standard_input, output=completion, cached=cached)
+
+
+def _build_response(
+    *,
+    parsed: dict,
+    first: _Usage,
+    retry: _Usage | None,
+    provider: str,
+    model: str,
+) -> LLMResponse:
+    """Combine first-attempt and (optional) retry usage into one LLMResponse.
+
+    Retries inflate the token bill (we paid for the failed attempt too);
+    matching the legacy behavior of ``tokens_used + retry_tokens`` for the
+    aggregate total. Per-class fields sum the same way.
+    """
+    if retry is None:
+        return LLMResponse(
+            parsed=parsed,
+            total_tokens=first.total,
+            input_tokens=first.input,
+            output_tokens=first.output,
+            cached_input_tokens=first.cached,
+            provider=provider,
+            model=model,
+        )
+
+    return LLMResponse(
+        parsed=parsed,
+        total_tokens=first.total + retry.total,
+        input_tokens=first.input + retry.input,
+        output_tokens=first.output + retry.output,
+        cached_input_tokens=first.cached + retry.cached,
+        provider=provider,
+        model=model,
+    )
 
 
 class LLMService:
@@ -58,8 +205,8 @@ class LLMService:
         provider: str | None = None,
         temperature: float = 0.1,
         max_tokens: int = 1024,
-    ) -> tuple[dict, int]:
-        """Call LLM with JSON mode and return parsed response.
+    ) -> LLMResponse:
+        """Call LLM with JSON mode and return cost-grade response.
 
         Args:
             user_id: User ID for API key retrieval
@@ -73,7 +220,9 @@ class LLMService:
             max_tokens: Max response tokens
 
         Returns:
-            Tuple of (parsed_json_dict, tokens_used)
+            LLMResponse — parsed JSON + per-class token counts +
+            (provider, model) identity. See ``LLMResponse`` docstring for
+            field semantics.
 
         Raises:
             LLMServiceError: On API error or JSON parse failure after retry
@@ -88,22 +237,31 @@ class LLMService:
 
         # First attempt
         content = ""
-        tokens_used = 0
+        first_usage = _ZERO_USAGE
         client = await self._get_client(user_id, resolved_provider, context_id, workspace_id)
         try:
             response = await client.chat.completions.create(
                 **self._build_create_kwargs(resolved_model, messages, temperature, max_tokens),
             )
             content = response.choices[0].message.content or "{}"
-            tokens_used = response.usage.total_tokens if response.usage else 0
+            first_usage = _extract_usage(response)
 
             parsed = json.loads(content)
             logger.debug(
                 "llm_complete_json_success",
                 model=resolved_model,
-                tokens=tokens_used,
+                tokens=first_usage.total,
+                input=first_usage.input,
+                cached=first_usage.cached,
+                output=first_usage.output,
             )
-            return parsed, tokens_used
+            return _build_response(
+                parsed=parsed,
+                first=first_usage,
+                retry=None,
+                provider=resolved_provider,
+                model=resolved_model,
+            )
 
         except json.JSONDecodeError:
             # Retry once with slightly higher temperature
@@ -124,15 +282,21 @@ class LLMService:
                 **self._build_create_kwargs(resolved_model, messages, 0.3, max_tokens),
             )
             content = response.choices[0].message.content or "{}"
-            retry_tokens = response.usage.total_tokens if response.usage else 0
+            retry_usage = _extract_usage(response)
 
             parsed = json.loads(content)
             logger.info(
                 "llm_complete_json_retry_success",
                 model=resolved_model,
-                tokens=tokens_used + retry_tokens,
+                tokens=first_usage.total + retry_usage.total,
             )
-            return parsed, tokens_used + retry_tokens
+            return _build_response(
+                parsed=parsed,
+                first=first_usage,
+                retry=retry_usage,
+                provider=resolved_provider,
+                model=resolved_model,
+            )
 
         except json.JSONDecodeError as e:
             raise LLMServiceError(

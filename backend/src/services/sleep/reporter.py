@@ -1,6 +1,9 @@
 """Sleep Maintenance Phase 6: Report.
 
 Issue #101: Tracks sleep maintenance execution in sleep_reports table.
+Issue #471: Per-(provider, model) cost-grade breakdown via the
+``LLMCallBreakdown`` dataclass and ``embedding_*`` fields, persisted to
+``sleep_report_llm_usage`` / ``sleep_reports`` by ``complete_report()``.
 """
 
 from __future__ import annotations
@@ -10,7 +13,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.sleep import SleepAction, SleepReport
+from models.sleep import SleepAction, SleepReport, SleepReportLLMUsage
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -18,10 +21,100 @@ logger = get_logger(__name__)
 
 
 @dataclass
+class LLMCallBreakdown:
+    """Per-(provider, model) token usage from one or more LLM calls (#471).
+
+    Phases append one entry per (provider, model) actually used during the
+    phase. With today's single-model architecture (every phase reads
+    ``config.sleep_llm_model``), each phase produces exactly one entry,
+    and a typical sleep run produces 4 entries (one per LLM-using phase).
+    The schema and reporter are designed to scale to per-call multi-model
+    use without changing the call-site contract.
+
+    ``tokenizer_version`` is audit-only — never used as a price-lookup
+    key. See ``models/llm_pricing.py`` and #471 design references.
+    """
+
+    provider: str
+    model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0
+    calls: int = 0
+    tokenizer_version: str | None = None
+
+    @property
+    def total_tokens(self) -> int:
+        """Reconstruct ``prompt_tokens + completion_tokens`` for the back-compat roll-up.
+
+        ``input_tokens`` here is the *standard-rate* portion
+        (``prompt_tokens - cached_input_tokens``) — see ``LLMResponse``
+        docstring. Adding the three back together rebuilds
+        ``prompt_tokens + completion_tokens``, which is what the
+        pre-#471 ``sleep_reports.llm_tokens_used`` column carried. This
+        is intentionally NOT a sum of "independent token classes" —
+        ``cached_input_tokens`` is a sub-component of ``prompt_tokens``,
+        not an additional axis. Use the per-class fields directly when
+        computing cost.
+        """
+        return self.input_tokens + self.output_tokens + self.cached_input_tokens
+
+    def add_call(
+        self,
+        *,
+        input_tokens: int,
+        output_tokens: int,
+        cached_input_tokens: int,
+    ) -> None:
+        """Accumulate one LLM call's tokens into this breakdown.
+
+        Used by phases that make multiple LLM calls against the same
+        (provider, model) within a single phase (e.g. edge_discovery
+        running N batches of pair judgments).
+        """
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+        self.cached_input_tokens += cached_input_tokens
+        self.calls += 1
+
+
+def accumulate_llm_response(
+    breakdown: LLMCallBreakdown | None,
+    resp,  # services.llm_service.LLMResponse — late-bound to avoid import cycle
+) -> LLMCallBreakdown:
+    """Lazy-init + add_call combined for the four sleep phases (#471).
+
+    Phases all share the same single-(provider, model) accumulation
+    pattern — null-check, construct on first call, add tokens. Wrapping
+    that in a helper means a future field rename on ``LLMResponse``
+    only needs to be applied here, not in four phase files.
+    """
+    if breakdown is None:
+        breakdown = LLMCallBreakdown(
+            provider=resp.provider,
+            model=resp.model,
+            tokenizer_version=resp.tokenizer_version,
+        )
+    breakdown.add_call(
+        input_tokens=resp.input_tokens,
+        output_tokens=resp.output_tokens,
+        cached_input_tokens=resp.cached_input_tokens,
+    )
+    return breakdown
+
+
+@dataclass
 class PhaseResult:
     """Result from a single sleep phase execution.
 
     Used by all phases to report back to the orchestrator.
+
+    Issue #471 added the per-(provider, model) ``llm_breakdown`` list and
+    the ``embedding_*`` cost-grade fields. The legacy scalar counters
+    (``llm_calls_used`` / ``tokens_used`` / ``embedding_calls_used``)
+    remain the source of the back-compat roll-up columns on
+    ``sleep_reports``; reporter writes both. New code should consume
+    ``llm_breakdown`` directly for cost computation.
     """
 
     phase_name: str
@@ -35,6 +128,11 @@ class PhaseResult:
     memories_processed: int = 0
     changed_memory_ids: set[UUID] = field(default_factory=set)
     details: dict | None = None
+    # #471: cost-grade fields.
+    llm_breakdown: list[LLMCallBreakdown] = field(default_factory=list)
+    embedding_provider: str | None = None
+    embedding_model: str | None = None
+    embedding_tokens: int = 0
 
 
 @dataclass
@@ -123,23 +221,90 @@ class SleepReporter:
         report: SleepReport,
         phase_results: list[PhaseResult],
     ) -> None:
-        """Finalize a report with aggregated phase results."""
+        """Finalize a report with aggregated phase results.
+
+        Writes three layers of cost telemetry (#471):
+
+        1. ``sleep_report_llm_usage`` child rows — one per
+           (phase, provider, model) actually used. Drives #472's
+           ``GROUP BY`` cost-aggregation queries.
+        2. Embedding scalar columns on ``sleep_reports`` — captures
+           the (instance-global) embedding provider/model + token total,
+           sourced from any phase that populated them
+           (currently only reindex; #475 closes the phase 1/2 gap).
+        3. Legacy roll-up columns (``llm_calls_made``, ``llm_tokens_used``,
+           ``embedding_calls_made``) — populated as the sum of child rows
+           for back-compat with existing dashboards / log analyzers.
+        """
         report.status = "completed"
         report.completed_at = utcnow()
 
-        # Aggregate stats from all phases
+        # Single pass over phase_results: write child rows + per-phase
+        # JSON blob + accumulate roll-ups + embedding scalars + the
+        # divergence sanity check, all colocated. Phases that didn't
+        # call the LLM (today: only reindex) contribute no child rows.
+        # Embedding is instance-global per
+        # ``backend/src/config/settings.py:86-93`` — one provider/model
+        # per process, so we take the first non-empty pair and sum
+        # tokens (today only reindex contributes; phase 1/2 gap is #475).
+        # Legacy roll-up columns aggregate from ``result.llm_calls_used``
+        # / ``result.tokens_used`` (post-#471 phases populate both the
+        # legacy fields AND ``llm_breakdown`` — the divergence check
+        # below catches the case where they disagree).
         total_llm_calls = 0
         total_tokens = 0
         total_embedding_calls = 0
         total_memories = 0
+        embedding_tokens_total = 0
 
         for result in phase_results:
+            for breakdown in result.llm_breakdown:
+                self.db.add(
+                    SleepReportLLMUsage(
+                        report_id=report.id,
+                        phase=result.phase_name,
+                        provider=breakdown.provider,
+                        model=breakdown.model,
+                        input_tokens=breakdown.input_tokens,
+                        output_tokens=breakdown.output_tokens,
+                        cached_input_tokens=breakdown.cached_input_tokens,
+                        calls=breakdown.calls,
+                        tokenizer_version=breakdown.tokenizer_version,
+                    )
+                )
+
+            embedding_tokens_total += result.embedding_tokens
+            if report.embedding_provider is None and result.embedding_provider is not None:
+                report.embedding_provider = result.embedding_provider
+                report.embedding_model = result.embedding_model
+
             total_llm_calls += result.llm_calls_used
             total_tokens += result.tokens_used
             total_embedding_calls += result.embedding_calls_used
             total_memories += result.memories_processed
 
-            # Store per-phase results as JSON
+            # Sanity invariant: ``breakdown`` counts only successful
+            # LLM calls (the accumulate_llm_response() call is inside
+            # the ``try`` block, after the response is parsed).
+            # ``llm_calls_used`` / ``tokens_used`` are populated from the
+            # ``budget`` tracker, which in edge_discovery's pre-consume
+            # pattern (``edge_discovery.py`` line 768) counts FAILED
+            # calls too. So ``breakdown <= legacy`` is invariant; only
+            # ``breakdown > legacy`` is a real bug (would mean the
+            # phase is incorrectly accumulating breakdown for a call
+            # the budget didn't track — a future-arch regression).
+            breakdown_calls = sum(b.calls for b in result.llm_breakdown)
+            breakdown_tokens = sum(b.total_tokens for b in result.llm_breakdown)
+            if breakdown_calls > result.llm_calls_used or breakdown_tokens > result.tokens_used:
+                logger.warning(
+                    "phase_breakdown_exceeds_legacy",
+                    phase=result.phase_name,
+                    legacy_llm_calls=result.llm_calls_used,
+                    breakdown_calls=breakdown_calls,
+                    legacy_tokens=result.tokens_used,
+                    breakdown_tokens=breakdown_tokens,
+                )
+
             phase_data = {
                 "success": result.success,
                 "skipped": result.skipped,
@@ -148,6 +313,17 @@ class SleepReporter:
                 "llm_calls": result.llm_calls_used,
                 "memories_processed": result.memories_processed,
                 "details": result.details,
+                "llm_breakdown": [
+                    {
+                        "provider": b.provider,
+                        "model": b.model,
+                        "input_tokens": b.input_tokens,
+                        "output_tokens": b.output_tokens,
+                        "cached_input_tokens": b.cached_input_tokens,
+                        "calls": b.calls,
+                    }
+                    for b in result.llm_breakdown
+                ],
             }
 
             if result.phase_name == "edge_discovery":
@@ -161,6 +337,7 @@ class SleepReporter:
             elif result.phase_name == "reindex":
                 report.reindex_result = phase_data
 
+        report.embedding_tokens = embedding_tokens_total
         report.llm_calls_made = total_llm_calls
         report.llm_tokens_used = total_tokens
         report.embedding_calls_made = total_embedding_calls
@@ -185,6 +362,7 @@ class SleepReporter:
             report_id=str(report.id),
             llm_calls=total_llm_calls,
             tokens=total_tokens,
+            embedding_tokens=embedding_tokens_total,
             memories=total_memories,
         )
 

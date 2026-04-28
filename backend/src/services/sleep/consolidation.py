@@ -33,7 +33,12 @@ from repositories.memory import MemoryRepository
 from services.graph_service import GraphService
 from services.llm_service import LLMService
 from services.sleep.prompts import CONSOLIDATION_JUDGE_SYSTEM, CONSOLIDATION_JUDGE_USER
-from services.sleep.reporter import PhaseResult, SleepBudget
+from services.sleep.reporter import (
+    LLMCallBreakdown,
+    PhaseResult,
+    SleepBudget,
+    accumulate_llm_response,
+)
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -69,6 +74,8 @@ class ConsolidationPhase:
         result = PhaseResult(phase_name="consolidation")
         llm_calls_before = budget.llm_calls_used
         self._tokens_used = 0
+        # #471: per-(provider, model) accumulator (lazy-init).
+        self._llm_breakdown: LLMCallBreakdown | None = None
 
         # Fetch working memories
         working = await self._fetch_working_memories(user_id, workspace_id, context_id)
@@ -216,6 +223,9 @@ class ConsolidationPhase:
         result.memories_processed = len(working)
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
         result.tokens_used = self._tokens_used
+        # #471: attach per-(provider, model) breakdown.
+        if self._llm_breakdown is not None:
+            result.llm_breakdown = [self._llm_breakdown]
         result.details = {
             "working_count": len(working),
             "rule_promoted": promoted,
@@ -313,7 +323,7 @@ class ConsolidationPhase:
         prompt = CONSOLIDATION_JUDGE_USER.format(memories="\n".join(memory_lines))
 
         try:
-            response, tokens = await self.llm_service.complete_json(
+            llm_resp = await self.llm_service.complete_json(
                 user_id=user_id,
                 prompt=prompt,
                 system_prompt=CONSOLIDATION_JUDGE_SYSTEM,
@@ -323,14 +333,15 @@ class ConsolidationPhase:
                 provider=config.sleep_llm_provider,
             )
             budget.consume(llm_calls=1)
-            self._tokens_used += tokens
+            self._tokens_used += llm_resp.total_tokens
+            self._llm_breakdown = accumulate_llm_response(self._llm_breakdown, llm_resp)
         except Exception as e:
             logger.warning("consolidation_llm_failed", error=str(e))
             return {}
 
         # Parse with label validation
         decisions: dict[UUID, str] = {}
-        for item in response.get("decisions", []):
+        for item in llm_resp.parsed.get("decisions", []):
             label = item.get("label")
             action = item.get("action")
             if label not in label_to_id:

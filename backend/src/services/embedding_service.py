@@ -227,6 +227,11 @@ class EmbeddingService:
     ) -> list[float]:
         """Generate embedding for text with Redis caching.
 
+        Thin wrapper around ``embed_with_usage()`` that discards the
+        token count — kept for callers that don't need cost attribution
+        (recall, search). Issue #475 will migrate the remaining callers
+        to ``embed_with_usage()`` directly.
+
         Args:
             text: Text to embed (summary)
             user_id: User ID (to retrieve API key)
@@ -239,34 +244,52 @@ class EmbeddingService:
         Raises:
             OpenAIError: If embedding generation fails
             ConfigurationError: If API key not configured
+        """
+        vector, _ = await self.embed_with_usage(
+            text,
+            user_id=user_id,
+            context_id=context_id,
+            workspace_id=workspace_id,
+        )
+        return vector
 
-        Example:
-            >>> service = EmbeddingService(db)
-            >>> vector = await service.embed("認証エラー修正", user_id="kiyota")
-            >>> len(vector)
-            512
+    async def embed_with_usage(
+        self,
+        text: str,
+        user_id: str,
+        context_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> tuple[list[float], int]:
+        """Generate embedding and return token usage for cost tracking (#471).
 
-        Note:
-            Issue #84 Phase 2A: Uses Redis cache (TTL: 24h) to reduce API calls by 50-80%
+        Like ``embed()`` but also returns the input token count from the
+        provider's API response, so callers can attribute embedding cost
+        per-(provider, model) via ``llm_pricing``. Cache hits return
+        ``(vector, 0)`` because cached responses consume no API tokens.
+
+        This is an additive companion to ``embed()`` rather than a
+        breaking signature change — ``embed()`` keeps working for callers
+        that don't track cost (recall path, search service). #475 will
+        migrate the remaining callers as part of the
+        full-pipeline embedding-cost rollout.
+
+        Args:
+            text: Text to embed.
+            user_id: User ID for API key lookup.
+            context_id: Optional context ID for scoped API key.
+            workspace_id: Optional workspace ID for scoped API key.
+
+        Returns:
+            ``(vector, tokens_used)``. ``tokens_used`` is 0 for cache
+            hits and for providers that don't expose ``response.usage``.
+
+        Raises:
+            OpenAIError: If embedding generation fails.
+            ConfigurationError: If API key not configured.
         """
         try:
-            # ============================================================================
-            # BUG FIX #122-2: Unicode normalization for consistent cache keys
-            # ============================================================================
-            # Problem: Same Japanese text with different Unicode normalization
-            #          (NFC vs NFD) produces different xxHash digests, causing
-            #          cache misses for identical content.
-            #
-            # Example: "が" can be encoded as:
-            #   - NFC: U+304C (single codepoint) → one xxHash
-            #   - NFD: U+304B + U+3099 (two codepoints) → different xxHash
-            #
-            # Solution: Always normalize to NFC before hashing.
-            # ============================================================================
             normalized_text = unicodedata.normalize("NFC", text)
 
-            # Issue #84 Phase 2A: Check cache first (xxHash for 4x speed/space improvement)
-            # Include model in cache key to avoid cross-model collisions
             text_hash = xxhash.xxh64(normalized_text.encode()).hexdigest()[:16]
             cache_key = f"emb:{self.model}:{text_hash}"
             cached = await get_cache(cache_key)
@@ -279,17 +302,28 @@ class EmbeddingService:
                     text_length=len(text),
                     cache_key=cache_key[:16] + "...",
                 )
-                return vector
+                return vector, 0
 
-            # Cache miss - generate embedding (use normalized text for consistency)
             client = await self._get_client(user_id, context_id, workspace_id)
             response = await client.embeddings.create(
                 **self._build_embedding_kwargs(normalized_text)
             )
 
             vector = response.data[0].embedding
+            # Embeddings only have an "input" side — no completion tokens.
+            # OpenAI returns ``usage.prompt_tokens`` (and the same value as
+            # ``total_tokens``); Ollama returns 0 because it has no usage
+            # accounting. Read defensively — older provider SDKs may omit
+            # the usage object entirely.
+            usage = getattr(response, "usage", None)
+            tokens_used = 0
+            if usage is not None:
+                tokens_used = (
+                    getattr(usage, "prompt_tokens", None)
+                    or getattr(usage, "total_tokens", None)
+                    or 0
+                )
 
-            # Cache for 24 hours (86400 seconds)
             await set_cache(cache_key, json.dumps(vector), ttl=86400)
 
             logger.debug(
@@ -297,10 +331,11 @@ class EmbeddingService:
                 user_id=user_id,
                 text_length=len(text),
                 vector_dim=len(vector),
-                cached=True,
+                tokens=tokens_used,
+                cached=False,
             )
 
-            return vector
+            return vector, tokens_used
 
         except ConfigurationError:
             raise

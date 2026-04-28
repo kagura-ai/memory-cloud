@@ -76,7 +76,8 @@ class TestReindexPhase:
         changed_ids = {mem1.id, mem2.id}
 
         _mock_batch_fetch(mock_db, [mem1, mem2])
-        reindex_phase.embedding_service.embed = AsyncMock(return_value=[0.1] * 768)
+        # #471: reindex now calls embed_with_usage() returning (vector, tokens).
+        reindex_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1] * 768, 50))
 
         result = await reindex_phase.execute(
             changed_memory_ids=changed_ids,
@@ -120,8 +121,8 @@ class TestReindexPhase:
         _mock_batch_fetch(mock_db, [mem_fail, mem_ok])
 
         # First embed fails, second succeeds
-        reindex_phase.embedding_service.embed = AsyncMock(
-            side_effect=[RuntimeError("embed failed"), [0.1] * 768]
+        reindex_phase.embedding_service.embed_with_usage = AsyncMock(
+            side_effect=[RuntimeError("embed failed"), ([0.1] * 768, 50)]
         )
 
         result = await reindex_phase.execute(
@@ -144,7 +145,9 @@ class TestReindexPhase:
 
         _mock_batch_fetch(mock_db, [mem])
 
-        reindex_phase.embedding_service.embed = AsyncMock(side_effect=RuntimeError("embed failed"))
+        reindex_phase.embedding_service.embed_with_usage = AsyncMock(
+            side_effect=RuntimeError("embed failed")
+        )
 
         result = await reindex_phase.execute(
             changed_memory_ids=changed_ids,
