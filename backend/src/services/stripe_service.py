@@ -1,9 +1,16 @@
 """Stripe billing service.
 
 Issue #351: Stripe integration for SaaS deployments.
+Issue #468: synchronous stripe-python calls are wrapped via asyncio
+(see in-body docs at the executor declaration).
 Only active when BILLING_ENABLED=true.
 """
 
+import asyncio
+import functools
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, TypeVar
 from uuid import UUID
 
 import stripe
@@ -14,12 +21,77 @@ from config.plan_tiers import get_plan_tier
 from config.settings import get_settings
 from models.auth import PlanChange, Workspace
 from utils.datetime import utcnow
+from utils.exceptions import StripeError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 # Plan name → Stripe Price ID mapping
 _PLAN_PRICE_MAP: dict[str, str] = {}
+
+# Issue #468: dedicated ThreadPoolExecutor for the GDPR erasure sweep so a
+# burst of erasure requests cannot starve checkout/portal traffic on the
+# default ``asyncio.to_thread`` pool. The sweep is internally serialized
+# (one workspace at a time, cancel → delete in order), so workers=2 is
+# enough to allow concurrent erasures across users while keeping the pool
+# small. Lazy-initialized to avoid creating threads when billing is off.
+_erasure_executor: ThreadPoolExecutor | None = None
+
+T = TypeVar("T")
+
+
+def _get_erasure_executor() -> ThreadPoolExecutor:
+    """Lazily create and return the dedicated erasure ThreadPoolExecutor."""
+    global _erasure_executor
+    if _erasure_executor is None:
+        _erasure_executor = ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="stripe-erasure",
+        )
+    return _erasure_executor
+
+
+def shutdown_erasure_executor() -> None:
+    """Tear down the erasure executor on app shutdown.
+
+    Registered from ``api.main.lifespan``. Safe to call when the executor
+    was never created (no-op) and safe to call twice (second call is a
+    no-op).
+
+    Uses ``wait=False`` so this returns immediately rather than blocking
+    the lifespan on in-flight Stripe HTTP calls. ``cancel_futures=True``
+    drops queued (not-yet-started) tasks. Any in-flight Stripe call
+    keeps running in its worker thread until either the call completes
+    or the process is killed by the orchestrator's SIGKILL after grace
+    period — erasure is best-effort, so an orphaned ack is acceptable
+    (Stripe processes the cancel/delete server-side regardless).
+    """
+    global _erasure_executor
+    if _erasure_executor is not None:
+        _erasure_executor.shutdown(wait=False, cancel_futures=True)
+        _erasure_executor = None
+
+
+async def _run_stripe(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    """Run a synchronous stripe-python call on the default thread pool.
+
+    Suitable for low-rate user-initiated calls (checkout, portal). Use
+    ``_run_stripe_erasure`` for the erasure sweep so a burst of
+    erasures cannot starve checkout/portal.
+    """
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+
+async def _run_stripe_erasure(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    """Run a synchronous stripe-python call on the dedicated erasure pool.
+
+    ``functools.partial`` is required so ``**kwargs`` survive the
+    ``run_in_executor`` boundary (which only forwards positionals).
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _get_erasure_executor(), functools.partial(func, *args, **kwargs)
+    )
 
 
 def _init_stripe() -> None:
@@ -85,7 +157,14 @@ async def create_checkout_session(
     else:
         checkout_params["customer_creation"] = "always"
 
-    session = stripe.checkout.Session.create(**checkout_params)
+    session = await _run_stripe(stripe.checkout.Session.create, **checkout_params)
+    if session.url is None:
+        # ``Session.url`` is typed ``Optional[str]`` in stripe-python because
+        # non-redirect modes (``ui_mode="embedded"``, certain ``mode`` values)
+        # do not populate it. We always pass ``mode="subscription"`` with
+        # ``success_url``/``cancel_url`` here, so a ``None`` means an
+        # unexpected upstream change — surface as a typed 502.
+        raise StripeError("checkout Session.create returned no URL")
 
     logger.info(
         "stripe_checkout_created",
@@ -114,7 +193,8 @@ async def create_portal_session(
     if not workspace or not workspace.stripe_customer_id:
         raise ValueError("No Stripe customer linked to this workspace")
 
-    session = stripe.billing_portal.Session.create(
+    session = await _run_stripe(
+        stripe.billing_portal.Session.create,
         customer=workspace.stripe_customer_id,
         return_url=return_url,
     )
@@ -295,7 +375,7 @@ async def cancel_subscription_and_delete_customer_for_erasure(
 
     if workspace.stripe_subscription_id:
         try:
-            stripe.Subscription.cancel(workspace.stripe_subscription_id)
+            await _run_stripe_erasure(stripe.Subscription.cancel, workspace.stripe_subscription_id)
             result["subscription_cancelled"] = True
             logger.info(
                 "stripe_subscription_cancelled_for_erasure",
@@ -312,7 +392,7 @@ async def cancel_subscription_and_delete_customer_for_erasure(
 
     if workspace.stripe_customer_id:
         try:
-            stripe.Customer.delete(workspace.stripe_customer_id)
+            await _run_stripe_erasure(stripe.Customer.delete, workspace.stripe_customer_id)
             result["customer_deleted"] = True
             logger.info(
                 "stripe_customer_deleted_for_erasure",

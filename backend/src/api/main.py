@@ -99,6 +99,17 @@ async def lifespan(app: FastAPI):
     shutdown_scheduler()
     logger.info("scheduler_stopped")
 
+    # Stop the dedicated Stripe erasure ThreadPoolExecutor (Issue #468).
+    # ``wait=False`` returns immediately so lifespan shutdown is not held
+    # by in-flight Stripe HTTP calls — k8s SIGKILL after the grace period
+    # is the existing process-exit fallback either way, and erasure is
+    # best-effort (Stripe processes the request server-side regardless of
+    # whether we read the ack). No-op when billing is disabled.
+    from services.stripe_service import shutdown_erasure_executor
+
+    shutdown_erasure_executor()
+    logger.info("stripe_erasure_executor_stopped")
+
     # Close database
     from db.base import close_db
 

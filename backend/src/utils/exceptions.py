@@ -261,6 +261,19 @@ class VoyageError(ExternalServiceError):
         super().__init__("Voyage", message, error_code="EXT-203")
 
 
+class StripeError(ExternalServiceError):
+    """Stripe API error (502).
+
+    Issue #468: raised when stripe-python returns an unexpected shape
+    (e.g. a successful Session.create with no ``url`` populated) so the
+    failure routes through ``memory_cloud_exception_handler`` instead of
+    bubbling as an unhandled 500.
+    """
+
+    def __init__(self, message: str | None = None):
+        super().__init__("Stripe", message, error_code="EXT-204")
+
+
 # OAuth2 Token Errors (401) - RFC 6750
 
 
