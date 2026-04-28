@@ -7,7 +7,6 @@ ThreadPoolExecutor used by the GDPR erasure sweep.
 
 import asyncio
 import threading
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -33,39 +32,39 @@ def reset_erasure_executor():
 
 @pytest.mark.asyncio
 async def test_run_stripe_does_not_block_event_loop():
-    """A 100ms sync call must not block a 50ms concurrent asyncio.sleep.
+    """The wrapped sync call must run without preventing async progress.
 
-    Flake budget: the asyncio.sleep target is 50ms; we accept up to 90ms
-    real wall-clock for it to complete, which leaves 40ms of CI jitter
-    headroom while still catching a regression that would push it past
-    the 100ms ``time.sleep`` boundary.
+    Causal (not temporal) test: the sync call blocks on
+    ``allow_sync_finish`` until a concurrent asyncio task sets
+    ``async_progress`` and releases it. If the wrapper blocked the event
+    loop, ``allow_sync_finish.wait`` would time out and the test would
+    fail fast — no wall-clock thresholds, no CI flake budget.
     """
 
+    sync_started = threading.Event()
+    async_progress = threading.Event()
+    allow_sync_finish = threading.Event()
+
     def slow_sync_call() -> str:
-        time.sleep(0.1)
+        sync_started.set()
+        assert allow_sync_finish.wait(timeout=1), (
+            "sync call was never unblocked by the concurrent asyncio task"
+        )
+        assert async_progress.is_set(), "concurrent asyncio task never made progress"
         return "ok"
 
-    asyncio_done_at: list[float] = []
+    async def unblock_sync_call() -> None:
+        await asyncio.to_thread(sync_started.wait)
+        await asyncio.sleep(0)
+        async_progress.set()
+        allow_sync_finish.set()
 
-    async def measure_asyncio_sleep() -> None:
-        await asyncio.sleep(0.05)
-        asyncio_done_at.append(time.monotonic())
-
-    start = time.monotonic()
-    sleep_task = asyncio.create_task(measure_asyncio_sleep())
+    unblock_task = asyncio.create_task(unblock_sync_call())
     result = await _run_stripe(slow_sync_call)
-    stripe_done_at = time.monotonic()
-    await sleep_task
+    await unblock_task
 
     assert result == "ok"
-    assert asyncio_done_at, "concurrent asyncio.sleep never ran"
-    asyncio_elapsed = asyncio_done_at[0] - start
-    assert asyncio_elapsed < 0.09, (
-        f"asyncio.sleep appears blocked: completed at {asyncio_elapsed:.3f}s, "
-        "expected < 0.09s — the event loop did not yield during the wrapped "
-        "synchronous call"
-    )
-    assert stripe_done_at - start >= 0.1
+    assert async_progress.is_set(), "concurrent asyncio task never ran"
 
 
 @pytest.mark.asyncio
