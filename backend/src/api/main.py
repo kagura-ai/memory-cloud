@@ -99,6 +99,13 @@ async def lifespan(app: FastAPI):
     shutdown_scheduler()
     logger.info("scheduler_stopped")
 
+    # Stop the dedicated Stripe erasure ThreadPoolExecutor (Issue #468).
+    # No-op when billing is disabled (the executor is lazy-initialized).
+    from services.stripe_service import shutdown_erasure_executor
+
+    shutdown_erasure_executor()
+    logger.info("stripe_erasure_executor_stopped")
+
     # Close database
     from db.base import close_db
 
