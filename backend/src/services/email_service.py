@@ -170,12 +170,7 @@ class LoggingEmailService:
         confirm_token: str,
         confirm_url: str,
     ) -> bool:
-        # Issue #478: confirm_token AND confirm_url are intentionally NOT
-        # logged. The URL embeds the token as a query parameter, so logging
-        # it is equivalent to logging the token. While LoggingEmailService
-        # is the active provider, OAuth users cannot complete the email-
-        # only confirmation flow — that flow is gated on a real provider
-        # being wired in (#469 + #478 sequencing).
+        # confirm_url embeds the token; redact both per the Protocol's no-log discipline.
         del confirm_token, confirm_url
         logger.info(
             "erasure_email_confirmation",

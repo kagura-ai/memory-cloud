@@ -6,6 +6,7 @@ Database URLs are managed directly via os.getenv() in config/database.py.
 """
 
 import os
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -145,12 +146,14 @@ class Settings(BaseSettings):
     stripe_price_pro: str | None = Field(default=None, description="Stripe Price ID for Pro plan")
 
     # Transactional email (Issue #478 — unblocks #469's OAuth confirm-email path)
-    email_provider: str = Field(
+    email_provider: Literal["logging", "resend"] = Field(
         default="logging",
         description=(
             "Active EmailService backend. 'logging' writes structured log "
             "lines for ops to forward manually (closed-beta default). "
-            "'resend' delivers via Resend (requires resend_api_key)."
+            "'resend' delivers via Resend (requires resend_api_key). "
+            "Pydantic rejects other values at boot, so EMAIL_PROVIDER typos "
+            "fail loudly instead of silently falling back to logging."
         ),
     )
     resend_api_key: str | None = Field(
