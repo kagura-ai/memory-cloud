@@ -109,9 +109,10 @@ def upgrade() -> None:
             name="valid_sleep_report_llm_usage_phase",
         ),
     )
-    # FK column is auto-indexed via ForeignKey, but the GROUP BY query in
-    # #472 will frequently filter by (provider, model) across a date range
-    # of reports. report_id at the tail covers JOIN ordering.
+    # PostgreSQL does NOT automatically index foreign-key columns, so keep
+    # an explicit index on report_id. The GROUP BY query in #472 will also
+    # frequently filter by (provider, model) across a date range of reports;
+    # report_id at the tail of the composite index helps JOIN ordering.
     op.create_index(
         "idx_sleep_report_llm_usage_report_id",
         "sleep_report_llm_usage",

@@ -168,7 +168,9 @@ class LLMPricingService:
         ever becomes a concern (sub-cent billing across millions of
         calls), this returns to the conversation in #474.
         """
-        if units <= 0:
+        if units < 0:
+            raise ValueError(f"units must be >= 0, got {units}")
+        if units == 0:
             return 0.0
 
         row = await self.lookup(

@@ -332,7 +332,7 @@ class EmbeddingService:
                 text_length=len(text),
                 vector_dim=len(vector),
                 tokens=tokens_used,
-                cached=True,
+                cached=False,
             )
 
             return vector, tokens_used

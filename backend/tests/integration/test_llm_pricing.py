@@ -62,14 +62,22 @@ async def test_lookup_picks_most_recent_effective_from(db_session):
                 provider="anthropic",
                 model="claude-sonnet-4-6",
                 unit_type="input_tokens",
-                effective_from=datetime(2026, 1, 1, ),
+                effective_from=datetime(
+                    2026,
+                    1,
+                    1,
+                ),
                 price_per_unit="2.50",
             ),
             _make_row(
                 provider="anthropic",
                 model="claude-sonnet-4-6",
                 unit_type="input_tokens",
-                effective_from=datetime(2026, 4, 1, ),
+                effective_from=datetime(
+                    2026,
+                    4,
+                    1,
+                ),
                 price_per_unit="3.00",
             ),
         ]
@@ -83,7 +91,11 @@ async def test_lookup_picks_most_recent_effective_from(db_session):
         provider="anthropic",
         model="claude-sonnet-4-6",
         unit_type="input_tokens",
-        started_at=datetime(2026, 2, 15, ),
+        started_at=datetime(
+            2026,
+            2,
+            15,
+        ),
     )
     assert early is not None
     assert float(early.price_per_unit) == 2.50
@@ -93,7 +105,11 @@ async def test_lookup_picks_most_recent_effective_from(db_session):
         provider="anthropic",
         model="claude-sonnet-4-6",
         unit_type="input_tokens",
-        started_at=datetime(2026, 4, 28, ),
+        started_at=datetime(
+            2026,
+            4,
+            28,
+        ),
     )
     assert late is not None
     assert float(late.price_per_unit) == 3.00
@@ -102,7 +118,11 @@ async def test_lookup_picks_most_recent_effective_from(db_session):
 @pytest.mark.asyncio
 async def test_lookup_picks_correct_context_tier(db_session):
     """Gemini-shaped multi-tier model: lookup picks the matching tier row."""
-    effective = datetime(2026, 4, 28, )
+    effective = datetime(
+        2026,
+        4,
+        28,
+    )
     db_session.add_all(
         [
             _make_row(
@@ -158,7 +178,11 @@ async def test_lookup_miss_returns_none(db_session):
         provider="exotic",
         model="never-seeded",
         unit_type="input_tokens",
-        started_at=datetime(2026, 4, 28, ),
+        started_at=datetime(
+            2026,
+            4,
+            28,
+        ),
     )
     assert result is None
 
@@ -176,7 +200,11 @@ async def test_lookup_rerank_search_units_schema_supports_no_rows(db_session):
         provider="cohere",
         model="rerank-3.5",
         unit_type="rerank_search_units",
-        started_at=datetime(2026, 4, 28, ),
+        started_at=datetime(
+            2026,
+            4,
+            28,
+        ),
     )
     assert result is None
 
@@ -190,7 +218,11 @@ async def test_lookup_invalid_unit_type_raises(db_session):
             provider="anthropic",
             model="claude-sonnet-4-6",
             unit_type="not_a_real_unit_type",  # type: ignore[arg-type]
-            started_at=datetime(2026, 4, 28, ),
+            started_at=datetime(
+                2026,
+                4,
+                28,
+            ),
         )
 
 
@@ -202,7 +234,11 @@ async def test_compute_cost_usd_per_million_tokens(db_session):
             provider="anthropic",
             model="claude-sonnet-4-6",
             unit_type="input_tokens",
-            effective_from=datetime(2026, 4, 28, ),
+            effective_from=datetime(
+                2026,
+                4,
+                28,
+            ),
             price_per_unit="3.00",
         )
     )
@@ -213,7 +249,11 @@ async def test_compute_cost_usd_per_million_tokens(db_session):
         provider="anthropic",
         model="claude-sonnet-4-6",
         unit_type="input_tokens",
-        started_at=datetime(2026, 4, 28, ),
+        started_at=datetime(
+            2026,
+            4,
+            28,
+        ),
         units=100_000,
     )
     assert cost is not None
@@ -224,7 +264,11 @@ async def test_compute_cost_usd_per_million_tokens(db_session):
         provider="anthropic",
         model="claude-sonnet-4-6",
         unit_type="input_tokens",
-        started_at=datetime(2026, 4, 28, ),
+        started_at=datetime(
+            2026,
+            4,
+            28,
+        ),
         units=1_000_000,
     )
     assert cost_full == pytest.approx(3.00)
@@ -238,7 +282,11 @@ async def test_compute_cost_usd_per_thousand_search_units(db_session):
             provider="cohere",
             model="rerank-3.5",
             unit_type="rerank_search_units",
-            effective_from=datetime(2026, 4, 28, ),
+            effective_from=datetime(
+                2026,
+                4,
+                28,
+            ),
             price_per_unit="2.00",
             unit_denominator=1_000,
         )
@@ -250,7 +298,11 @@ async def test_compute_cost_usd_per_thousand_search_units(db_session):
         provider="cohere",
         model="rerank-3.5",
         unit_type="rerank_search_units",
-        started_at=datetime(2026, 4, 28, ),
+        started_at=datetime(
+            2026,
+            4,
+            28,
+        ),
         units=500,
     )
     assert cost == pytest.approx(1.00)
@@ -264,7 +316,11 @@ async def test_compute_cost_usd_zero_units(db_session):
         provider="ollama",
         model="never-seeded",
         unit_type="embedding_tokens",
-        started_at=datetime(2026, 4, 28, ),
+        started_at=datetime(
+            2026,
+            4,
+            28,
+        ),
         units=0,
     )
     assert cost == 0.0
@@ -278,7 +334,11 @@ async def test_compute_cost_usd_lookup_miss_returns_none(db_session):
         provider="exotic",
         model="never-seeded",
         unit_type="output_tokens",
-        started_at=datetime(2026, 4, 28, ),
+        started_at=datetime(
+            2026,
+            4,
+            28,
+        ),
         units=1000,
     )
     assert cost is None
@@ -292,7 +352,11 @@ async def test_check_constraint_invalid_unit_type(db_session):
             provider="anthropic",
             model="claude-sonnet-4-6",
             unit_type="bogus_type",
-            effective_from=datetime(2026, 4, 28, ),
+            effective_from=datetime(
+                2026,
+                4,
+                28,
+            ),
             price_per_unit="1.00",
         )
     )
@@ -309,13 +373,53 @@ async def test_check_constraint_negative_price(db_session):
             provider="anthropic",
             model="claude-sonnet-4-6",
             unit_type="input_tokens",
-            effective_from=datetime(2026, 4, 28, ),
+            effective_from=datetime(
+                2026,
+                4,
+                28,
+            ),
             price_per_unit="-1.00",
         )
     )
     with pytest.raises(IntegrityError):
         await db_session.flush()
     await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_check_constraint_zero_unit_denominator(db_session):
+    """DB CHECK rejects unit_denominator=0 (would produce divide-by-zero in cost math)."""
+    db_session.add(
+        LLMPricing(
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            unit_type="input_tokens",
+            effective_from=datetime(2026, 4, 28),
+            price_per_unit="3.00",
+            unit_denominator=0,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+    await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_compute_cost_usd_negative_units_raises(db_session):
+    """Negative ``units`` should raise ValueError (not silently return 0).
+
+    Hides upstream bugs and silently under-reports cost. The fast-path for
+    ``units == 0`` returning 0.0 is preserved.
+    """
+    svc = LLMPricingService(db_session)
+    with pytest.raises(ValueError, match="units must be >= 0"):
+        await svc.compute_cost_usd(
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            unit_type="input_tokens",
+            started_at=datetime(2026, 4, 28),
+            units=-1,
+        )
 
 
 @pytest.mark.asyncio
@@ -326,7 +430,11 @@ async def test_check_constraint_tier_max_must_exceed_min(db_session):
             provider="google",
             model="gemini-2.5-pro",
             unit_type="input_tokens",
-            effective_from=datetime(2026, 4, 28, ),
+            effective_from=datetime(
+                2026,
+                4,
+                28,
+            ),
             price_per_unit="1.25",
             context_min_tokens=200_000,
             context_max_tokens=200_000,  # equal — must be strictly greater

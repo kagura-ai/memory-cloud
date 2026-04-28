@@ -198,11 +198,16 @@ class SleepReportLLMUsage(Base):
     __tablename__ = "sleep_report_llm_usage"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    # report_id has an explicit ``Index`` in __table_args__ below to match
+    # the migration's ``idx_sleep_report_llm_usage_report_id`` name.
+    # ``index=True`` here would create an auto-named index
+    # (``ix_sleep_report_llm_usage_report_id``) and cause schema-drift
+    # noise on alembic autogenerate or duplicate indexes when
+    # Base.metadata.create_all is used in tests.
     report_id = Column(
         UUID(as_uuid=True),
         ForeignKey("sleep_reports.id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
     )
 
     phase = Column(String(30), nullable=False)
@@ -218,6 +223,13 @@ class SleepReportLLMUsage(Base):
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
     __table_args__ = (
+        # Single-column index on report_id (FK join key). PostgreSQL does
+        # NOT auto-index FK columns, and the explicit name here matches
+        # the migration so model + migration agree on a single index.
+        Index(
+            "idx_sleep_report_llm_usage_report_id",
+            "report_id",
+        ),
         # Composite index supports the #472 aggregation queries that
         # ``GROUP BY provider, model`` after filtering by report period.
         Index(
