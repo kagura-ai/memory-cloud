@@ -274,6 +274,21 @@ class StripeError(ExternalServiceError):
         super().__init__("Stripe", message, error_code="EXT-204")
 
 
+class EmailDeliveryError(ExternalServiceError):
+    """Transactional email provider error (502).
+
+    Issue #478: raised when the configured email provider (e.g. Resend)
+    fails in a way the caller wants surfaced as a typed 502 rather than
+    swallowed as best-effort. Most ``EmailService`` callers do NOT raise
+    on send failure — they log + return ``False`` per the Protocol's
+    "do not raise" contract — so this is reserved for paths that must
+    fail loudly (e.g. fail-fast on misconfiguration at boot).
+    """
+
+    def __init__(self, message: str | None = None):
+        super().__init__("Email", message, error_code="EXT-205")
+
+
 # OAuth2 Token Errors (401) - RFC 6750
 
 

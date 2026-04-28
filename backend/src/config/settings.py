@@ -144,6 +144,27 @@ class Settings(BaseSettings):
     )
     stripe_price_pro: str | None = Field(default=None, description="Stripe Price ID for Pro plan")
 
+    # Transactional email (Issue #478 — unblocks #469's OAuth confirm-email path)
+    email_provider: str = Field(
+        default="logging",
+        description=(
+            "Active EmailService backend. 'logging' writes structured log "
+            "lines for ops to forward manually (closed-beta default). "
+            "'resend' delivers via Resend (requires resend_api_key)."
+        ),
+    )
+    resend_api_key: str | None = Field(
+        default=None,
+        description="Resend API key (required when email_provider='resend')",
+    )
+    resend_from_email: str = Field(
+        default="noreply@kagura-ai.com",
+        description=(
+            "From address for transactional email. Must match a verified "
+            "sending domain on Resend; otherwise sends 403."
+        ),
+    )
+
     # Plan Tier Overrides (environment variable customization for OSS deployments)
     plan_free_max_contexts: int | None = Field(
         default=None, description="Override FREE plan max contexts per workspace"
