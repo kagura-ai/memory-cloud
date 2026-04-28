@@ -8,6 +8,8 @@ ThreadPoolExecutor used by the GDPR erasure sweep.
 import asyncio
 import threading
 import time
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -15,8 +17,10 @@ import services.stripe_service as stripe_service
 from services.stripe_service import (
     _run_stripe,
     _run_stripe_erasure,
+    create_checkout_session,
     shutdown_erasure_executor,
 )
+from utils.exceptions import StripeError
 
 
 @pytest.fixture(autouse=True)
@@ -142,6 +146,44 @@ def test_shutdown_erasure_executor_is_noop_when_uninitialized():
     shutdown_erasure_executor()
     shutdown_erasure_executor()
     assert stripe_service._erasure_executor is None
+
+
+@pytest.mark.asyncio
+async def test_create_checkout_session_raises_stripe_error_on_missing_url():
+    """Boundary guard: stripe-python types ``Session.url`` as
+    ``Optional[str]`` because non-redirect modes leave it unset. We
+    always pass ``mode="subscription"`` with ``success_url``/``cancel_url``,
+    so a ``None`` here means an unexpected upstream change — raise
+    ``StripeError`` (typed 502) instead of returning ``None`` into the
+    redirect path.
+    """
+    workspace_id = uuid4()
+    workspace = MagicMock()
+    workspace.id = workspace_id
+    workspace.stripe_customer_id = None
+
+    result_proxy = MagicMock()
+    result_proxy.scalar_one_or_none.return_value = workspace
+    db = AsyncMock()
+    db.execute.return_value = result_proxy
+
+    fake_session = MagicMock()
+    fake_session.id = "cs_test_123"
+    fake_session.url = None
+
+    with (
+        patch("services.stripe_service._init_stripe"),
+        patch("services.stripe_service.get_price_id", return_value="price_test"),
+        patch("stripe.checkout.Session.create", return_value=fake_session),
+    ):
+        with pytest.raises(StripeError, match="checkout Session.create returned no URL"):
+            await create_checkout_session(
+                db,
+                workspace_id,
+                "basic",
+                "https://example.com/success",
+                "https://example.com/cancel",
+            )
 
 
 @pytest.mark.asyncio
