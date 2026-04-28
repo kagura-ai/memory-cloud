@@ -168,14 +168,39 @@ def test_get_email_service_returns_singleton(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_get_email_service_resend_without_api_key_raises(monkeypatch: pytest.MonkeyPatch):
-    """EMAIL_PROVIDER=resend with no RESEND_API_KEY must fail fast at boot."""
+    """EMAIL_PROVIDER=resend with no RESEND_API_KEY must fail fast at Settings load.
+
+    Settings._validate_resend_config raises a ``ValueError`` inside a
+    ``model_validator(mode="after")``; pydantic surfaces it as a
+    ``ValidationError`` whose message embeds the original ``ValueError``
+    text, so the ``match=`` regex still binds against the meaningful token.
+    """
+    from pydantic import ValidationError
+
     monkeypatch.setenv("EMAIL_PROVIDER", "resend")
     monkeypatch.delenv("RESEND_API_KEY", raising=False)
     import config.settings as settings_module
 
     settings_module._settings = None
 
-    with pytest.raises(ValueError, match="RESEND_API_KEY"):
+    with pytest.raises(ValidationError, match="RESEND_API_KEY"):
+        get_email_service()
+
+
+def test_get_email_service_resend_with_blank_from_email_raises(monkeypatch: pytest.MonkeyPatch):
+    """Whitespace-only RESEND_FROM_EMAIL must fail at Settings load too —
+    the validator strips before checking, so ``"   "`` is rejected the same
+    way an empty string would be."""
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("EMAIL_PROVIDER", "resend")
+    monkeypatch.setenv("RESEND_API_KEY", "re_test_key_12345")
+    monkeypatch.setenv("RESEND_FROM_EMAIL", "   ")
+    import config.settings as settings_module
+
+    settings_module._settings = None
+
+    with pytest.raises(ValidationError, match="RESEND_FROM_EMAIL"):
         get_email_service()
 
 

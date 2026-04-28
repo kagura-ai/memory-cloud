@@ -215,10 +215,13 @@ def get_email_service() -> EmailService:
     settings = get_settings()
     instance: EmailService
     if settings.email_provider == "resend":
+        # Settings._validate_resend_config has already enforced that both
+        # resend_api_key and resend_from_email are non-empty when the
+        # provider is "resend"; the assert is a type-narrowing aid for
+        # pyright (resend_api_key is str | None on the model).
         from services.email_providers.resend import ResendEmailService
 
-        if not settings.resend_api_key:
-            raise ValueError("EMAIL_PROVIDER=resend requires RESEND_API_KEY to be set")
+        assert settings.resend_api_key is not None
         instance = ResendEmailService(
             api_key=settings.resend_api_key,
             from_email=settings.resend_from_email,

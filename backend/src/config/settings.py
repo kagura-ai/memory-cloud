@@ -8,7 +8,7 @@ Database URLs are managed directly via os.getenv() in config/database.py.
 import os
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -224,6 +224,27 @@ class Settings(BaseSettings):
     usage_critical_threshold: float = Field(
         default=0.95, description="Usage critical threshold (0.0-1.0)"
     )
+
+    @model_validator(mode="after")
+    def _validate_resend_config(self) -> "Settings":
+        """Fail-fast at Settings load when EMAIL_PROVIDER=resend is misconfigured.
+
+        Without this, EMAIL_PROVIDER=resend with no RESEND_API_KEY would boot
+        successfully and only fail at first email send — a delayed failure
+        mode that masks deployment-time config errors. Same intent for
+        RESEND_FROM_EMAIL: an empty/whitespace value would let the service
+        construct, then Resend would reject the first send with an opaque
+        4xx. Surfacing both here means misconfig surfaces in the lifespan
+        traceback, not in a request handler.
+        """
+        if self.email_provider == "resend":
+            if not self.resend_api_key:
+                raise ValueError("EMAIL_PROVIDER=resend requires RESEND_API_KEY to be set")
+            if not (self.resend_from_email or "").strip():
+                raise ValueError(
+                    "EMAIL_PROVIDER=resend requires RESEND_FROM_EMAIL to be a non-empty address"
+                )
+        return self
 
 
 # Global settings instance

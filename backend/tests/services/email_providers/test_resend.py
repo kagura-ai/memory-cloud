@@ -35,6 +35,26 @@ def test_constructor_rejects_empty_api_key():
         ResendEmailService(api_key="", from_email="noreply@example.com")
 
 
+def test_constructor_rejects_blank_from_email():
+    """Whitespace-only ``from_email`` is fail-fast — the constructor
+    strips before checking, so accidentally setting ``RESEND_FROM_EMAIL=""``
+    or ``"   "`` raises rather than constructing a service that would
+    later 4xx at first send.
+    """
+    with pytest.raises(ValueError, match="from_email"):
+        ResendEmailService(api_key="re_test", from_email="")
+    with pytest.raises(ValueError, match="from_email"):
+        ResendEmailService(api_key="re_test", from_email="   ")
+
+
+def test_constructor_strips_from_email_whitespace():
+    """Surrounding whitespace on ``from_email`` is normalized — Resend
+    rejects ``" noreply@... "`` and similar values, so trim before the
+    SDK ever sees them."""
+    svc = ResendEmailService(api_key="re_test", from_email="  noreply@example.com  ")
+    assert svc._from_email == "noreply@example.com"
+
+
 def test_constructor_sets_module_level_api_key():
     """Resend SDK uses module-level state. Constructor must propagate the
     api_key into that state so subsequent send calls authenticate.
@@ -215,7 +235,8 @@ async def test_synchronous_sdk_call_does_not_block_event_loop():
         return {"id": "re_unblocked"}
 
     async def unblock() -> None:
-        await asyncio.to_thread(sync_started.wait)
+        started = await asyncio.to_thread(sync_started.wait, 2)
+        assert started, "timed out waiting for sync send to start"
         await asyncio.sleep(0)
         async_progressed.set()
         allow_finish.set()
