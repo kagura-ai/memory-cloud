@@ -10,7 +10,7 @@
  *   - formatRelativeTime is locale-aware and timezone-independent by design.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   formatDate,
@@ -71,20 +71,31 @@ describe("formatTime", () => {
 });
 
 describe("formatRelativeTime", () => {
+  // Freeze the clock so date-fns rounding boundaries (e.g. 5→4 minutes) cannot
+  // tip under slow CI or clock skew.
+  const NOW = new Date("2026-04-29T12:00:00Z");
+  const FIVE_MIN_AGO = new Date(NOW.getTime() - 5 * 60 * 1000).toISOString();
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("returns an English relative string for en locale", () => {
-    const past = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-    expect(formatRelativeTime(past, "en")).toMatch(/minute/);
+    expect(formatRelativeTime(FIVE_MIN_AGO, "en")).toMatch(/minute/);
   });
 
   it("returns a Japanese relative string for ja locale", () => {
-    const past = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-    expect(formatRelativeTime(past, "ja")).toMatch(/分/);
+    expect(formatRelativeTime(FIVE_MIN_AGO, "ja")).toMatch(/分/);
   });
 
   it("omits the suffix when addSuffix=false", () => {
-    const past = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-    const withSuffix = formatRelativeTime(past, "en", true);
-    const withoutSuffix = formatRelativeTime(past, "en", false);
+    const withSuffix = formatRelativeTime(FIVE_MIN_AGO, "en", true);
+    const withoutSuffix = formatRelativeTime(FIVE_MIN_AGO, "en", false);
     expect(withSuffix).toMatch(/ago|in /);
     expect(withoutSuffix).not.toMatch(/ago|in /);
   });

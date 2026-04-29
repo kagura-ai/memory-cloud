@@ -37,9 +37,13 @@ vi.mock("next-intl", () => ({
 }));
 
 const mockPush = vi.fn();
+// Stable URLSearchParams instance — LoginPage's useEffect lists `searchParams`
+// in its dependency array, so a fresh instance per render would re-run the
+// effect (and getAuthConfig() / state updates) unnecessarily during tests.
+const mockSearchParams = new URLSearchParams();
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockPush }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => mockSearchParams,
 }));
 
 vi.mock("@/components/LanguageSelector", () => ({
