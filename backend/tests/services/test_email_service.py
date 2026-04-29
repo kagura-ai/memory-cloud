@@ -252,6 +252,28 @@ def test_get_email_service_resend_without_dpa_accepted_at_raises(
         get_email_service()
 
 
+def test_get_email_service_resend_with_blank_dpa_accepted_at_raises(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Whitespace-only RESEND_DPA_ACCEPTED_AT must fail at boot with the
+    friendly message — the field_validator coerces blank input to ``None``
+    so the model_validator's DPA-URL-bearing ValueError fires, mirroring
+    parity with RESEND_API_KEY and RESEND_FROM_EMAIL whitespace tests.
+    """
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("EMAIL_PROVIDER", "resend")
+    monkeypatch.setenv("RESEND_API_KEY", "re_test_key_12345")
+    monkeypatch.setenv("RESEND_FROM_EMAIL", "noreply@kagura-ai.com")
+    monkeypatch.setenv("RESEND_DPA_ACCEPTED_AT", "   ")
+    import config.settings as settings_module
+
+    settings_module._settings = None
+
+    with pytest.raises(ValidationError, match="RESEND_DPA_ACCEPTED_AT"):
+        get_email_service()
+
+
 def test_get_email_service_resend_with_dpa_accepted_at_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ):

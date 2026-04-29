@@ -7,9 +7,9 @@ Database URLs are managed directly via os.getenv() in config/database.py.
 
 import os
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -251,6 +251,21 @@ class Settings(BaseSettings):
     usage_critical_threshold: float = Field(
         default=0.95, description="Usage critical threshold (0.0-1.0)"
     )
+
+    @field_validator("resend_dpa_accepted_at", mode="before")
+    @classmethod
+    def _coerce_blank_dpa_to_none(cls, v: Any) -> Any:
+        """Treat blank/whitespace RESEND_DPA_ACCEPTED_AT as unset.
+
+        Without this, pydantic's strict datetime parser rejects an empty or
+        whitespace-only value with "Input should be a valid datetime" before
+        the model_validator runs, bypassing the friendly DPA-URL-bearing
+        error message in _validate_resend_config. Stripping here mirrors the
+        .strip() parity treatment on resend_api_key / resend_from_email.
+        """
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
     @model_validator(mode="after")
     def _validate_resend_config(self) -> "Settings":
