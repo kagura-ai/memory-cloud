@@ -8,11 +8,11 @@ until the column-type migration in #490 lands, this base class is the
 API-layer guarantee that wire-format datetimes are unambiguous.
 """
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, field_serializer
-from pydantic_core.core_schema import SerializerFunctionWrapHandler
 
 from utils.datetime import to_utc_iso
 
@@ -32,7 +32,7 @@ class TZAwareBaseModel(BaseModel):
     """
 
     @field_serializer("*", mode="wrap", when_used="json", check_fields=False)
-    def _serialize_datetime_as_utc(self, value: Any, handler: SerializerFunctionWrapHandler) -> Any:
+    def _serialize_datetime_as_utc(self, value: Any, handler: Callable[[Any], Any]) -> Any:
         """Serialize datetime fields with an explicit UTC `Z` suffix.
 
         Fires on every field during JSON serialization (`when_used="json"`).
