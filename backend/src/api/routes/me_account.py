@@ -38,28 +38,44 @@ router = APIRouter(prefix="/me/account", tags=["account-erasure"])
 class ErasureRequestCreateResponse(BaseModel):
     """Returned after creating a self-service erasure request.
 
-    The raw confirmation token is returned ONCE in this response. The
-    frontend is responsible for the confirm UX — password-auth users
-    re-enter their password alongside this token; OAuth users present
-    the token via whatever flow the frontend wires (e.g. a confirm
-    button on the same screen). The token is also bound to the active
-    session via ``erasure_token:{token}`` in Redis (TTL 1h) and is
-    single-use.
+    The confirmation token is delivered through one of two channels
+    depending on the user's auth method (Issue #469):
+
+    - **Password-auth users**: ``confirm_token`` is populated in this
+      response. The user re-enters their password alongside this token at
+      ``POST /me/account/erasure-confirm`` (the password is the second
+      factor — the response token is the first).
+    - **OAuth users**: ``confirm_token`` is ``None`` here. The token is
+      delivered via email to the user's account address as a one-time
+      confirm link. Email is the canonical second factor for OAuth, just
+      as the password re-prompt is for password-auth users — keeping the
+      raw token out of the response body removes a redundant copy that
+      would otherwise widen the disclosure surface (proxy access logs,
+      browser devtools, frontend error-reporters) once email actually
+      delivers it.
+
+    The raw token is stored in Redis under ``erasure_token:{token}`` with
+    a 1-hour TTL and is single-use regardless of delivery channel. The
+    Redis key maps token → ``request_id`` only — it is NOT session-bound.
+    Confirmation additionally requires the authenticated session user to
+    match the erasure request's ``user_id`` (enforced by
+    ``confirm_self_service``), so a leaked token alone is insufficient
+    without the matching session cookie.
 
     The frontend SHOULD treat this token as sensitive and not log it.
-    Issue #463 #4 tracks gating the token-in-response on auth method
-    once a real email provider replaces the LoggingEmailService stub.
     """
 
     request_id: UUID
     status: str
     requested_at: datetime
-    confirm_token: str = Field(
+    confirm_token: str | None = Field(
+        default=None,
         description=(
-            "One-time confirmation token. Use POST /me/account/erasure-confirm "
-            "within 1 hour. Password-auth users must additionally re-enter "
-            "their password."
-        )
+            "One-time confirmation token, valid for 1 hour. **Populated only "
+            "for password-auth users** — they re-enter their password "
+            "alongside this token at POST /me/account/erasure-confirm. **For "
+            "OAuth users this is null** and the token is delivered via email."
+        ),
     )
 
 
@@ -126,13 +142,25 @@ async def create_erasure_request(
 ) -> ErasureRequestCreateResponse:
     """Create a pending erasure request and issue a one-time token.
 
-    The receipt notification is dispatched (currently to logs, manually
-    forwarded by ops per the runbook). Returns 409 if an active request
-    already exists for the user, 403 if the user is the protected
-    initial admin.
+    Returns 201 with the new request's state. The ``confirm_token`` field
+    in the response is populated for password-auth users and ``null`` for
+    OAuth users (Issue #469): OAuth users receive the token via email
+    instead, keeping the raw secret out of the response surface.
+
+    Other status codes:
+        - 403: user is the protected initial admin
+        - 409: an active erasure request already exists for this user
+        - 503: OAuth user but the confirmation email failed to dispatch
+          (mapped from EmailDispatchError); the pending row is rolled back
+          so the user can retry once the email backend recovers.
+
+    The receipt notification (separate from the OAuth confirmation email)
+    is dispatched post-commit and is fire-and-forget — it tells the user
+    the request was received and is meant to be obvious to the human even
+    if they don't click any confirm link.
     """
     service = AccountErasureService(db)
-    record, token = await service.request_self_service_erasure(
+    record, response_token = await service.request_self_service_erasure(
         user_id=user["user_id"],
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
@@ -141,7 +169,7 @@ async def create_erasure_request(
         request_id=record.id,
         status=record.status,
         requested_at=record.requested_at,
-        confirm_token=token,
+        confirm_token=response_token,
     )
 
 

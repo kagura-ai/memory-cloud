@@ -31,6 +31,7 @@ Stripe customer can be cleaned up manually via the Stripe dashboard).
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import secrets
 from datetime import timedelta
@@ -73,6 +74,7 @@ from services.stripe_service import cancel_subscription_and_delete_customer_for_
 from services.system_admin_service import SystemAdminService
 from utils.datetime import utcnow
 from utils.exceptions import (
+    EmailDispatchError,
     ErasureAlreadyInProgressError,
     ErasureForbiddenError,
     ErasureRequestNotFoundError,
@@ -99,6 +101,16 @@ CONFIRM_TOKEN_TTL_SECONDS = 3600
 # Redis key prefix for the raw confirmation token. The `confirm_token_hash`
 # column stores SHA256(token); the raw token only ever lives here.
 _CONFIRM_TOKEN_KEY_PREFIX = "erasure_token:"
+
+# Timeout for the OAuth confirmation-email dispatch. Chosen so a stalled
+# email provider cannot hold a DB transaction open and exhaust the
+# connection pool: Resend p99 latency is well under 5s in practice;
+# 10s tolerates regional spikes while bounding the worst case. On
+# timeout, ``asyncio.TimeoutError`` is caught by the existing
+# ``except Exception as exc`` handler and treated as a dispatch failure
+# (rollback + Redis cleanup + ``EmailDispatchError``). Future: expose
+# via ``Settings`` if traffic patterns demand tuning.
+CONFIRMATION_EMAIL_TIMEOUT_SECONDS = 10.0
 
 
 # Salt used when pseudonymizing audit_log rows for an erased user. A
@@ -136,18 +148,32 @@ class AccountErasureService:
         user_id: str,
         ip_address: str | None = None,
         user_agent: str | None = None,
-    ) -> tuple[ErasureRequest, str]:
+    ) -> tuple[ErasureRequest, str | None]:
         """Create a pending self-service erasure request.
 
-        Returns the row plus the raw confirmation token. The token is
-        ALSO stored in Redis under `erasure_token:{token}` for verification
-        — only the SHA256 lands in Postgres.
+        Returns the row plus the **response token**. Issue #469: the
+        response token is the raw token for password-auth users (the
+        response body is their delivery channel — they re-enter their
+        password as the second factor at confirm time) and ``None`` for
+        OAuth users (the raw token is delivered out-of-band via
+        ``send_erasure_confirmation`` email — keeping it out of the
+        response body removes a redundant copy that would otherwise
+        widen the disclosure surface).
+
+        The raw token always exists internally regardless of channel:
+        SHA256 lands in Postgres (``confirm_token_hash``) and the raw
+        value lands in Redis under ``erasure_token:{token}`` with TTL
+        1h. Both ``confirm_self_service`` paths (password + OAuth) read
+        from the same Redis key.
 
         Raises:
             NotFoundException: User does not exist.
             InitialAdminCannotBeErasedError: User is the protected initial admin.
             ErasureAlreadyInProgressError: An active (pending/cooling_off) request
                 already exists for this user.
+            EmailDispatchError: OAuth user but ``send_erasure_confirmation``
+                failed; the pending row has been rolled back so the user is
+                free to retry. Maps to HTTP 503.
         """
         target = await self._load_user_or_404(user_id)
         if target.is_initial_admin:
@@ -174,20 +200,35 @@ class AccountErasureService:
         )
         self.db.add(request)
         # Order matters: flush() (issues INSERT, populates request.id, surfaces
-        # IntegrityError early) → Redis SETEX → commit(). The previous order
-        # (commit-then-Redis) wedged the user when Redis briefly failed: a
-        # committed pending row is "active" per the partial unique index, but
-        # without the Redis token nothing can confirm or cancel it (the cancel
-        # path covers cooling_off only). 1-hour Redis TTL was no protection
-        # because the key was never written.
+        # IntegrityError early) → Redis SETEX → OAuth confirmation email (if
+        # any) → commit() → receipt email (post-commit, fire-and-forget).
         #
-        # New order's failure modes:
+        # Failure modes:
         #  - flush() IntegrityError → rollback (no row, no Redis key) → user
         #    sees ErasureAlreadyInProgressError, can retry once the prior
         #    request is resolved.
         #  - Redis SETEX raises → rollback PG → no orphan row.
-        #  - commit() fails after Redis SETEX → orphan Redis key, but its
-        #    1h TTL guarantees self-cleanup.
+        #  - send_erasure_confirmation fails (OAuth only, Issue #469) →
+        #    rollback PG + best-effort Redis key delete → no orphan row,
+        #    no orphan token. Pre-commit placement is essential because
+        #    OAuth users have no in-band token: a committed pending row
+        #    without delivered email would wedge the user (cancel works
+        #    on pending, but only if they realize there is a pending row
+        #    to cancel — UX failure). Explicit Redis delete narrows the
+        #    orphan-token window from the 1h TTL to "immediate"; this
+        #    matters when a provider partially delivers (recipient inbox
+        #    receives the link) before raising on the response, where
+        #    the 1h orphan would leave a live confirm path against a
+        #    rolled-back row.
+        #  - commit() fails after Redis SETEX (and after OAuth email send) →
+        #    rollback PG + best-effort Redis key delete + structured
+        #    log of "commit_failed_after_side_effects". The OAuth user
+        #    has already received the confirm email; if they click, the
+        #    confirm endpoint hits _load_request_or_404 → 404 (existing
+        #    ErasureRequestNotFoundError path), so the user sees a
+        #    legitimate "request not found" rather than confirming a
+        #    rolled-back row. Rare in practice but explicitly handled
+        #    so ops can correlate the (rare) ghost-link reports.
         try:
             await self.db.flush()
         except IntegrityError as exc:
@@ -205,9 +246,117 @@ class AccountErasureService:
             await self.db.rollback()
             raise
 
-        await self.db.commit()
+        is_oauth = target.auth_method == "oauth"
+
+        if is_oauth:
+            try:
+                # ``.strip()`` defends against trailing whitespace in env vars
+                # (a common deploy hazard); ``.rstrip("/")`` normalizes the
+                # trailing slash so the f-string below produces a single slash.
+                # Both URL construction AND the email send are inside this
+                # try so that ANY failure after Redis SETEX (settings access,
+                # f-string interp, email dispatch) routes through the same
+                # rollback + Redis-cleanup + ``EmailDispatchError`` path. A
+                # bare exception escaping here would leave an open transaction
+                # plus an orphan Redis token (until 1h TTL).
+                # Boot-time validation (non-empty + http(s)-prefixed) is
+                # tracked separately in #480 alongside RESEND_DPA_ACCEPTED_AT.
+                base_url = get_settings().frontend_url.strip().rstrip("/")
+                confirm_url = f"{base_url}/account/erasure/confirm?token={token}"
+                sent = await asyncio.wait_for(
+                    self.email_service.send_erasure_confirmation(
+                        to_email=target.email,
+                        request_id=str(request.id),
+                        confirm_token=token,
+                        confirm_url=confirm_url,
+                    ),
+                    timeout=CONFIRMATION_EMAIL_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                # Protocol contract says implementations MUST NOT raise on
+                # send failure, but defend against future regressions and
+                # misbehaving custom backends. Log only the type and a
+                # numeric status_code if the SDK exception exposes one —
+                # str(exc) can echo the SDK request body which contains
+                # confirm_url (and thus the raw token). Mirror the existing
+                # discipline in email_providers/resend.py:_send so future
+                # SDK integrations have a single referenced pattern.
+                log_kwargs: dict[str, Any] = {
+                    "request_id": str(request.id),
+                    "user_id": user_id,
+                    "error_type": type(exc).__name__,
+                }
+                exc_status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+                if isinstance(exc_status, int):
+                    log_kwargs["status_code"] = exc_status
+                logger.error("erasure_confirmation_email_dispatch_failed", **log_kwargs)
+                await self.db.rollback()
+                # Best-effort Redis cleanup: explicitly delete the token
+                # key so a partially-delivered email cannot drive a
+                # confirm against the now-rolled-back row. Failure here
+                # falls back to the 1h TTL self-clean (no raise — the
+                # primary error is the email dispatch, not Redis).
+                try:
+                    await redis.delete(f"{_CONFIRM_TOKEN_KEY_PREFIX}{token}")
+                except Exception:
+                    pass
+                # ``from None`` suppresses the original __context__ — SDK
+                # exception messages can leak the token via repr/str.
+                # ``EmailDispatchError`` is zero-argument by design (see
+                # its docstring) so no token-bearing string can land in
+                # the exception's surfaced ``message`` field; the cause
+                # is captured via the structured log entry above.
+                raise EmailDispatchError() from None
+            if not sent:
+                logger.error(
+                    "erasure_confirmation_email_dispatch_failed",
+                    request_id=str(request.id),
+                    user_id=user_id,
+                    error_type="send_returned_false",
+                )
+                await self.db.rollback()
+                try:
+                    await redis.delete(f"{_CONFIRM_TOKEN_KEY_PREFIX}{token}")
+                except Exception:
+                    pass
+                raise EmailDispatchError()
+
+        try:
+            await self.db.commit()
+        except Exception as exc:
+            # Commit failure after side-effects (Redis SETEX done; for
+            # OAuth users, confirmation email already sent). Rare —
+            # network blip during transaction commit, deadlock, etc. —
+            # but worth distinguishing from earlier failure modes for
+            # ops diagnosis. Best-effort cleanup so the token doesn't
+            # survive on Redis: a clicked confirm link would 404 against
+            # ``_load_request_or_404`` (no row), which is the existing
+            # ErasureRequestNotFoundError path. Log redaction follows
+            # the same discipline as the email-dispatch failure path:
+            # ``error_type`` only, never ``str(exc)``.
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
+            try:
+                await redis.delete(f"{_CONFIRM_TOKEN_KEY_PREFIX}{token}")
+            except Exception:
+                pass
+            logger.error(
+                "erasure_request_commit_failed_after_side_effects",
+                request_id=str(request.id),
+                user_id=user_id,
+                auth_method=target.auth_method,
+                email_sent=is_oauth,
+                error_type=type(exc).__name__,
+            )
+            raise
         await self.db.refresh(request)
 
+        # Receipt is advisory and fires post-commit (matches the pattern
+        # used by send_erasure_cooling_off_started and send_erasure_complete).
+        # A receipt failure is acceptable: the row exists, the user already
+        # has the token (password) or the confirmation email (OAuth).
         await self.email_service.send_erasure_receipt(
             to_email=target.email,
             request_id=str(request.id),
@@ -218,8 +367,9 @@ class AccountErasureService:
             request_id=str(request.id),
             user_id=user_id,
             auth_method=target.auth_method,
+            token_in_response=not is_oauth,
         )
-        return request, token
+        return request, (None if is_oauth else token)
 
     async def confirm_self_service(
         self,
