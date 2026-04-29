@@ -2755,7 +2755,7 @@
         "truncated": "Showing first 50 — view full graph in the Graph tab",
         "unknown": "(unavailable)",
         "emptyTitle": "No references yet",
-        "emptyDesc": "This memory has no incoming or outgoing links. Pass linked_memory_ids when remembering related memories to create explicit references."
+        "emptyDesc": "This memory has no incoming or outgoing links. Add links when creating related memories to create explicit references."
       }
     },
     "deleteDialog": {
