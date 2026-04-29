@@ -62,12 +62,13 @@ def test_llm_emittable_edge_types_subset_of_valid_edge_types() -> None:
 
 
 def test_valid_edge_type_check_constraint_matches_migration_literal() -> None:
-    """``valid_edge_type`` CHECK constraint text is byte-identical to b03_396.
+    """``valid_edge_type`` CHECK constraint text is byte-identical to b05_223.
 
     Issue #509 (Phase B of #461): the CHECK constraint is now derived from
     ``_ALL_EDGE_TYPES`` via f-string instead of being a hardcoded literal.
-    This test pins the *exact* output string against the literal that the
-    b03_396 migration installed on production. Two reasons:
+    This test pins the *exact* output string against the literal that
+    ``b05_223_tag_cooccurrence.py`` installed on production via its
+    ``_NEW_EDGE_TYPES_SQL`` constant. Two reasons:
 
     1. ``Base.metadata.create_all()`` (used by tests + fresh dev DBs) must
        produce a CHECK constraint identical to the alembic head, so test

@@ -275,10 +275,11 @@ EDGE_TYPE_TAG_COOCCURRENCE = "tag_cooccurrence"
 
 # Issue #509 (Phase B of #461): registration-order tuple used to derive the
 # ``valid_edge_type`` CHECK constraint string in ``NeuralMemoryEdge.__table_args__``.
-# Order MUST match the literal order the b03_396 migration installed on prod
-# so ``Base.metadata.create_all()`` produces a CHECK string byte-identical to
-# what alembic head shows — preventing ``alembic revision --autogenerate``
-# from generating a spurious no-op migration on future runs.
+# Order MUST match the literal order ``b05_223_tag_cooccurrence.py`` installed
+# on prod (its ``_NEW_EDGE_TYPES_SQL``) so ``Base.metadata.create_all()`` produces
+# a CHECK string byte-identical to alembic head — preventing
+# ``alembic revision --autogenerate`` from generating a spurious no-op migration
+# on future runs.
 _ALL_EDGE_TYPES: tuple[str, ...] = (
     EDGE_TYPE_NEURAL_ASSOCIATION,
     EDGE_TYPE_RELATED_TO,
@@ -344,10 +345,14 @@ class NeuralMemoryEdge(Base):
         CheckConstraint("weight >= 0.0 AND weight <= 3.0", name="valid_weight"),
         CheckConstraint("confidence >= 0.0 AND confidence <= 1.0", name="valid_confidence"),
         # Issue #509 (Phase B of #461): CHECK constraint derived from
-        # ``_ALL_EDGE_TYPES`` so adding a new edge_type requires editing the
-        # constants block only. The f-string output is byte-identical to the
-        # original literal that the b03_396 migration installed on prod
-        # (registration order, single quotes, exact whitespace).
+        # ``_ALL_EDGE_TYPES``. Adding a new edge_type requires THREE coordinated
+        # edits (caught by the regression test if any are missed): (1) add
+        # ``EDGE_TYPE_NEW`` to the constants block above, (2) append it to
+        # ``_ALL_EDGE_TYPES``, (3) update the expected literal in
+        # ``test_valid_edge_type_check_constraint_matches_migration_literal``,
+        # plus a corresponding alembic migration that ALTERs the prod CHECK.
+        # The f-string output is byte-identical to ``b05_223_tag_cooccurrence.py``'s
+        # ``_NEW_EDGE_TYPES_SQL`` (registration order, single quotes, exact whitespace).
         CheckConstraint(
             f"edge_type IN ({', '.join(repr(t) for t in _ALL_EDGE_TYPES)})",
             name="valid_edge_type",
