@@ -274,6 +274,36 @@ class StripeError(ExternalServiceError):
         super().__init__("Stripe", message, error_code="EXT-204")
 
 
+class EmailDispatchError(ExternalServiceError):
+    """Email-provider dispatch failed (503, overrides ExternalServiceError 502).
+
+    Issue #469: raised by ``AccountErasureService.request_self_service_erasure``
+    when ``send_erasure_confirmation`` fails for an OAuth user. The 503
+    status (instead of the 502 default) signals retriable: the user can
+    cancel and re-request once the email backend recovers. There is no
+    in-band fallback because the response body intentionally withholds
+    the raw ``confirm_token`` for OAuth users — email is the canonical
+    delivery channel for the OAuth confirm path.
+
+    The constructor is **zero-argument by design**: any string passed
+    here would land in ``self.message`` and ``memory_cloud_exception_handler``
+    surfaces ``self.message`` directly in both structured logs and the
+    JSON response body. SDK error messages and request bodies for the
+    confirmation send embed ``confirm_url`` (which contains the raw
+    token), so accepting a free-form ``message`` argument creates a
+    quiet exfiltration path. Callers MUST log distinguishing metadata
+    (``error_type``, ``status_code``) via structlog at the call site
+    rather than embedding it in the exception.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Email dispatch", message=None, error_code="EXT-205")
+        # ExternalServiceError hardcodes 502; override to 503 so FastAPI's
+        # global handler maps to a retriable response. Direct attribute
+        # mutation avoids reworking the parent's signature.
+        self.status_code = 503
+
+
 # OAuth2 Token Errors (401) - RFC 6750
 
 
