@@ -100,15 +100,15 @@ class EmailService(Protocol):
         Implementations MUST NOT log the raw token or the confirm_url —
         the URL embeds the token as a query parameter, so logging either
         is equivalent to leaking the credential. See ``LoggingEmailService``
-        for the redaction discipline; ``ResendEmailService`` ships the
-        token to the recipient inbox via TLS-encrypted SMTP and never
+        for the redaction discipline; ``ResendEmailService`` delivers the
+        token to the recipient inbox via Resend's HTTPS API and never
         writes it to local logs.
 
         Args:
             to_email: Recipient address (must match the user's account email).
             request_id: ``erasure_requests.id`` UUID.
             confirm_token: One-time raw confirmation token. **Sensitive** —
-                do not log, do not write to disk outside the SMTP envelope.
+                do not log, do not persist it outside the outbound email request.
             confirm_url: Front-end confirmation URL (typically
                 ``https://<app-host>/account/erasure/confirm?token=<raw-token>``).
                 **Sensitive for the same reason** — contains the raw token.

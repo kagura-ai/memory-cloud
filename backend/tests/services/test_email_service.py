@@ -128,10 +128,17 @@ async def test_logging_send_erasure_confirmation_does_not_log_raw_token():
     assert kwargs["email_dispatch_required"] is True
 
     # Raw token and confirm_url are NEVER in any log field — neither in
-    # keys nor in values. We scan the entire kwargs payload (and the
-    # positional event name) so a future regression that adds the token
-    # under a new key gets caught.
-    haystack = " ".join(str(v) for v in (*args, *kwargs.values()))
+    # keys nor in values. The haystack flattens kwargs into both keys and
+    # values so a future regression that names a kwarg literally after
+    # the token (e.g. an accidental ``token=raw_token`` kwarg) is caught
+    # the same way a value-side leak would be.
+    haystack = " ".join(
+        str(part)
+        for part in (
+            *args,
+            *(item_part for item in kwargs.items() for item_part in item),
+        )
+    )
     assert raw_token not in haystack, "raw confirm_token leaked into log payload"
     assert confirm_url not in haystack, "confirm_url leaked into log payload"
 
