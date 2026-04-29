@@ -564,6 +564,15 @@
         "usageData": "**Usage Data**: API call counts, feature usage, and system performance metrics to improve our service.",
         "technicalData": "**Technical Data**: IP address, browser type, and device information for security and analytics."
       },
+      "observabilityMetrics": {
+        "title": "Internal Observability Metrics",
+        "intro": "We collect daily statistical metrics to monitor search quality and detect drift in our ranking system. This data is treated with the same legal protections as your primary memory content.",
+        "purpose": "**Purpose**: Daily monitoring of BM25 IDF distribution per context to detect search-quality drift and guide ranking-model updates.",
+        "dataCategory": "**Data Category**: Hashed representations of rare-term tokens (mmh3 32-bit integer hashes) and their document frequencies, scoped per workspace context. **No raw token text is stored.**",
+        "classification": "**Classification**: This data is **pseudonymous personal data** under GDPR Art. 4(5) and Recital 26. Although the hash itself is opaque, we as the controller hold both the source memory text and the hash, so re-identification by reasonable means remains possible. This data therefore falls within GDPR's protective scope and is treated with the same legal safeguards as your primary memory content.",
+        "retention": "**Retention**: Maximum 90 days.",
+        "erasureCascade": "**Right to Erasure**: When you exercise your right to erasure (GDPR Art. 17 / Japan APPI), these observability records are deleted via the same cascade as your primary memory content. See the Your Rights (GDPR) section."
+      },
       "dataStorage": {
         "title": "Data Storage & Security",
         "intro": "Your data is encrypted and securely stored:",
@@ -587,7 +596,7 @@
         "intro": "As a data subject, you have the following rights:",
         "access": "**Access**: Request a copy of all data we store about you.",
         "rectification": "**Rectification**: Correct inaccurate or incomplete data.",
-        "erasure": "**Erasure (Right to be Forgotten)**: Delete your account and all associated data permanently.",
+        "erasure": "**Erasure (Right to be Forgotten)**: Delete your account and all associated data permanently (includes internal observability metrics — see that section).",
         "portability": "**Portability**: Export your memory data in JSON format.",
         "restriction": "**Restriction**: Limit how we process your data.",
         "objection": "**Objection**: Object to data processing for legitimate interests.",
@@ -621,7 +630,8 @@
         "inactiveAccounts": "**Inactive Accounts**: Accounts inactive for 2 years may be deleted after email notification.",
         "deletedAccounts": "**Deleted Accounts**: All data is permanently deleted within 30 days of account deletion (soft delete period for recovery).",
         "backups": "**Backups**: Deleted data is removed from backups after 90 days.",
-        "logs": "**Logs**: System logs are retained for 90 days for security and debugging purposes."
+        "logs": "**Logs**: System logs are retained for 90 days for security and debugging purposes.",
+        "observabilityMetrics": "**Internal Observability Metrics**: Search-quality monitoring data (BM25 IDF drift logs) is retained for a maximum of 90 days. See the Internal Observability Metrics section above for full details."
       },
       "cookies": {
         "title": "Cookies & Tracking",
