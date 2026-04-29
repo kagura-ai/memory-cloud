@@ -33,7 +33,7 @@ describe("formatDateTime", () => {
     expect(out).toContain("12:56");
   });
 
-  it("renders America/New_York hour as 23 (EDT = UTC-4) on the previous day", () => {
+  it("renders America/New_York as 11:56 PM (EDT = UTC-4) on the previous day", () => {
     const out = formatDateTime(SAMPLE_UTC, "America/New_York", "en");
     expect(out).toContain("11:56");
     expect(out).toContain("PM");

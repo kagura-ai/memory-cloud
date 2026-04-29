@@ -142,6 +142,9 @@ function LoginContent() {
 
   const handleMfaVerify = (e: React.FormEvent) => {
     e.preventDefault();
+    if (totpCode.length !== 6 || loadingAction !== null) {
+      return;
+    }
     void submitMfa();
   };
 

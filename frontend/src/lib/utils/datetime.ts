@@ -11,7 +11,7 @@ import { ja } from "date-fns/locale";
 /**
  * Format UTC datetime to user's timezone
  *
- * @param utcTime - ISO datetime string in UTC. MUST include a timezone designator
+ * @param utcTime - ISO datetime string in UTC. MUST include a UTC designator
  *                  (`Z` or `+00:00`) — bare local-time strings are parsed as the
  *                  runtime's local timezone, which would silently produce wrong
  *                  output here.
@@ -52,9 +52,9 @@ export function formatDateTime(
 /**
  * Format UTC datetime to user's timezone (date only)
  *
- * @param utcTime - ISO datetime string in UTC (with `Z` suffix), or a date-only
- *                  `YYYY-MM-DD` string which is rendered as-is without timezone
- *                  conversion.
+ * @param utcTime - ISO datetime string in UTC (with `Z` or `+00:00` designator),
+ *                  or a date-only `YYYY-MM-DD` string which is rendered as-is
+ *                  without timezone conversion.
  * @param timezone - IANA timezone
  * @returns Formatted date string
  *
@@ -93,7 +93,7 @@ export function formatDate(
 /**
  * Format UTC datetime to user's timezone (time only)
  *
- * @param utcTime - ISO datetime string in UTC (with `Z` suffix)
+ * @param utcTime - ISO datetime string in UTC (with `Z` or `+00:00` designator)
  * @param timezone - IANA timezone
  * @returns Formatted time string
  *
@@ -125,7 +125,7 @@ export function formatTime(
  * reads identically in any zone. To show the absolute moment, pair this
  * with `formatDateTime(...)` in a tooltip (e.g., `<span title={...}>`).
  *
- * @param utcTime - ISO datetime string in UTC (with `Z` suffix)
+ * @param utcTime - ISO datetime string in UTC (with `Z` or `+00:00` designator)
  * @param locale - 'en' or 'ja'
  * @param addSuffix - When false, returns 'about 9 minutes' instead of 'about 9 minutes ago'
  *
