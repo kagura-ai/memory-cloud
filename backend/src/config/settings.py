@@ -84,7 +84,7 @@ class Settings(BaseSettings):
             "Set FRONTEND_URL to the deployed origin in production. The "
             "field is plain ``str`` rather than ``HttpUrl`` to match the "
             "existing ``os.getenv('FRONTEND_URL')`` call sites in "
-            "``auth/routes/auth.py`` and avoid f-string serialization "
+            "``api/routes/auth.py`` and avoid f-string serialization "
             "differences — those raw call sites can be migrated in a "
             "separate cleanup once this field is established."
         ),

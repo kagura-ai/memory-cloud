@@ -31,6 +31,7 @@ Stripe customer can be cleaned up manually via the Stripe dashboard).
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import secrets
 from datetime import timedelta
@@ -100,6 +101,16 @@ CONFIRM_TOKEN_TTL_SECONDS = 3600
 # Redis key prefix for the raw confirmation token. The `confirm_token_hash`
 # column stores SHA256(token); the raw token only ever lives here.
 _CONFIRM_TOKEN_KEY_PREFIX = "erasure_token:"
+
+# Timeout for the OAuth confirmation-email dispatch. Chosen so a stalled
+# email provider cannot hold a DB transaction open and exhaust the
+# connection pool: Resend p99 latency is well under 5s in practice;
+# 10s tolerates regional spikes while bounding the worst case. On
+# timeout, ``asyncio.TimeoutError`` is caught by the existing
+# ``except Exception as exc`` handler and treated as a dispatch failure
+# (rollback + Redis cleanup + ``EmailDispatchError``). Future: expose
+# via ``Settings`` if traffic patterns demand tuning.
+CONFIRMATION_EMAIL_TIMEOUT_SECONDS = 10.0
 
 
 # Salt used when pseudonymizing audit_log rows for an erased user. A
@@ -246,11 +257,14 @@ class AccountErasureService:
             base_url = get_settings().frontend_url.strip().rstrip("/")
             confirm_url = f"{base_url}/account/erasure/confirm?token={token}"
             try:
-                sent = await self.email_service.send_erasure_confirmation(
-                    to_email=target.email,
-                    request_id=str(request.id),
-                    confirm_token=token,
-                    confirm_url=confirm_url,
+                sent = await asyncio.wait_for(
+                    self.email_service.send_erasure_confirmation(
+                        to_email=target.email,
+                        request_id=str(request.id),
+                        confirm_token=token,
+                        confirm_url=confirm_url,
+                    ),
+                    timeout=CONFIRMATION_EMAIL_TIMEOUT_SECONDS,
                 )
             except Exception as exc:
                 # Protocol contract says implementations MUST NOT raise on

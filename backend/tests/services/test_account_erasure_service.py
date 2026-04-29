@@ -313,6 +313,50 @@ class TestRequestSelfServiceErasure:
         assert deleted_key == f"erasure_token:{actual_raw_token}"
 
     @pytest.mark.asyncio
+    async def test_oauth_send_timeout_raises_dispatch_error(self):
+        """OAuth path: a stalled email provider exceeding the
+        ``CONFIRMATION_EMAIL_TIMEOUT_SECONDS`` bound (``asyncio.wait_for``)
+        must trigger the same rollback + Redis cleanup + ``EmailDispatchError``
+        as a thrown SDK exception. This protects the DB connection pool
+        from long-stalled requests during provider outages.
+
+        The simulation raises ``asyncio.TimeoutError`` directly from the
+        AsyncMock — semantically equivalent to ``wait_for`` exhausting
+        the timeout, since both surface the same exception type to the
+        caller's ``except Exception`` handler.
+        """
+        svc = _service()
+        svc.email_service.send_erasure_confirmation = AsyncMock(
+            side_effect=TimeoutError("simulated provider stall")
+        )
+        target = _user(auth_method="oauth")
+        self._wire_typical_path(svc, target)
+
+        with (
+            patch("services.account_erasure_service.get_redis_client") as mock_redis,
+            patch("services.account_erasure_service.logger") as mock_logger,
+        ):
+            mock_redis.return_value = MagicMock(setex=AsyncMock(), delete=AsyncMock())
+            with pytest.raises(EmailDispatchError) as exc_info:
+                await svc.request_self_service_erasure(user_id="u-1")
+
+        assert exc_info.value.status_code == 503
+        svc.db.rollback.assert_awaited_once()
+        svc.db.commit.assert_not_awaited()
+        mock_redis.return_value.delete.assert_awaited_once()
+        # Verify the structured log captures error_type="TimeoutError" so
+        # ops can distinguish stall-induced rollbacks from generic SDK errors.
+        haystack_parts: list[str] = []
+        for call in mock_logger.method_calls:
+            _name, args, kwargs = call
+            haystack_parts.extend(str(a) for a in args)
+            for k, v in kwargs.items():
+                haystack_parts.append(str(k))
+                haystack_parts.append(str(v))
+        haystack = " ".join(haystack_parts)
+        assert "TimeoutError" in haystack
+
+    @pytest.mark.asyncio
     async def test_commit_fails_after_oauth_email_send_cleans_up(self):
         """OAuth path: if ``db.commit()`` fails AFTER the confirmation email
         has already been sent (rare — DB blip during commit), the service
