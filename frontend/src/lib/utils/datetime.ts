@@ -11,14 +11,17 @@ import { ja } from "date-fns/locale";
 /**
  * Format UTC datetime to user's timezone
  *
- * @param utcTime - ISO datetime string (UTC)
+ * @param utcTime - ISO datetime string in UTC. MUST include a timezone designator
+ *                  (`Z` or `+00:00`) — bare local-time strings are parsed as the
+ *                  runtime's local timezone, which would silently produce wrong
+ *                  output here.
  * @param timezone - IANA timezone (e.g., 'Asia/Tokyo', 'America/New_York')
  * @param options - Intl.DateTimeFormat options
  * @returns Formatted datetime string
  *
  * @example
- * formatDateTime('2025-12-09T17:15:30', 'Asia/Tokyo')
- * // => '2025/12/10 2:15:30'
+ * formatDateTime('2025-12-09T17:15:30Z', 'Asia/Tokyo')
+ * // => '2025/12/10 02:15:30'
  */
 export function formatDateTime(
   utcTime: string,
@@ -49,12 +52,14 @@ export function formatDateTime(
 /**
  * Format UTC datetime to user's timezone (date only)
  *
- * @param utcTime - ISO datetime string (UTC)
+ * @param utcTime - ISO datetime string in UTC (with `Z` suffix), or a date-only
+ *                  `YYYY-MM-DD` string which is rendered as-is without timezone
+ *                  conversion.
  * @param timezone - IANA timezone
  * @returns Formatted date string
  *
  * @example
- * formatDate('2025-12-09T17:15:30', 'Asia/Tokyo')
+ * formatDate('2025-12-09T17:15:30Z', 'Asia/Tokyo')
  * // => '2025/12/10'
  */
 export function formatDate(
@@ -88,12 +93,12 @@ export function formatDate(
 /**
  * Format UTC datetime to user's timezone (time only)
  *
- * @param utcTime - ISO datetime string (UTC)
+ * @param utcTime - ISO datetime string in UTC (with `Z` suffix)
  * @param timezone - IANA timezone
  * @returns Formatted time string
  *
  * @example
- * formatTime('2025-12-09T17:15:30', 'Asia/Tokyo')
+ * formatTime('2025-12-09T17:15:30Z', 'Asia/Tokyo')
  * // => '02:15:30'
  */
 export function formatTime(
@@ -120,12 +125,12 @@ export function formatTime(
  * reads identically in any zone. To show the absolute moment, pair this
  * with `formatDateTime(...)` in a tooltip (e.g., `<span title={...}>`).
  *
- * @param utcTime - ISO datetime string (UTC)
+ * @param utcTime - ISO datetime string in UTC (with `Z` suffix)
  * @param locale - 'en' or 'ja'
  * @param addSuffix - When false, returns 'about 9 minutes' instead of 'about 9 minutes ago'
  *
  * @example
- * formatRelativeTime('2025-12-09T17:15:30')
+ * formatRelativeTime('2025-12-09T17:15:30Z')
  * // => 'about 9 minutes ago'
  */
 export function formatRelativeTime(

@@ -26,6 +26,7 @@ import { getUserDetails, UserDetail } from "@/lib/api/admin";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/contexts/AuthContext";
+import { useLocale } from "next-intl";
 import { formatRelativeTime, formatDate } from "@/lib/utils/datetime";
 
 interface UserDetailModalProps {
@@ -35,6 +36,7 @@ interface UserDetailModalProps {
 
 export function UserDetailModal({ userId, onClose }: UserDetailModalProps) {
   const { user } = useAuth();
+  const locale = useLocale();
   const [details, setDetails] = useState<UserDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -177,7 +179,7 @@ export function UserDetailModal({ userId, onClose }: UserDetailModalProps) {
                 </dt>
                 <dd className="text-sm text-gray-900 dark:text-gray-100 mt-1">
                   {details.user.last_login_at
-                    ? formatRelativeTime(details.user.last_login_at)
+                    ? formatRelativeTime(details.user.last_login_at, locale)
                     : "Never"}
                 </dd>
               </div>
@@ -266,7 +268,7 @@ export function UserDetailModal({ userId, onClose }: UserDetailModalProps) {
                     </div>
                     {ctx.last_used_at && (
                       <p className="text-xs text-gray-500 dark:text-gray-400">
-                        Last used {formatRelativeTime(ctx.last_used_at)}
+                        Last used {formatRelativeTime(ctx.last_used_at, locale)}
                       </p>
                     )}
                   </div>
