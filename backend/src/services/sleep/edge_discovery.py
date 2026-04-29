@@ -116,12 +116,17 @@ CONFIDENCE_HISTOGRAM_KEYS: tuple[str, ...] = ("0.0-0.5", "0.5-0.7", "0.7-0.85", 
 # Issue #374: `EdgeType` is the type-level source of truth for valid
 # `NeuralMemoryEdge.edge_type` values emitted by the LLM judge (a deliberate
 # subset of the DB CHECK constraint in `models/memory.py` — the DB accepts
-# additional non-LLM types like `tag_cooccurrence`). `VALID_EDGE_TYPES` is
-# derived via `get_args` so the runtime membership check and the type
+# additional non-LLM types like `tag_cooccurrence`). `LLM_EMITTABLE_EDGE_TYPES`
+# is derived via `get_args` so the runtime membership check and the type
 # annotation cannot drift. Adding a new LLM-emittable edge type only requires
 # editing the Literal.
+#
+# Issue #461: renamed from `VALID_EDGE_TYPES` to disambiguate from the
+# full DB-accepted set in `mcp_server/tools/edge.py::VALID_EDGE_TYPES`.
+# `Literal` cannot reference module-level constants, so the string literals
+# stay here; cross-module subset invariant is pinned by a regression test.
 EdgeType = Literal["related_to", "depends_on", "learned_from"]
-VALID_EDGE_TYPES: frozenset[EdgeType] = frozenset(get_args(EdgeType))
+LLM_EMITTABLE_EDGE_TYPES: frozenset[EdgeType] = frozenset(get_args(EdgeType))
 
 # Issue #373: edge_type directionality semantics.
 # `related_to` is undirected (A related_to B ⇔ B related_to A); the parser
@@ -828,11 +833,11 @@ class EdgeDiscoveryPhase:
             raw_type = edge.get("edge_type", "related_to")
             # `frozenset.__contains__` does not narrow `raw_type` to `EdgeType`
             # for type checkers, so the membership check is promoted to a
-            # `cast` — the `in VALID_EDGE_TYPES` predicate is the runtime
+            # `cast` — the `in LLM_EMITTABLE_EDGE_TYPES` predicate is the runtime
             # guarantee that the cast is sound.
             edge_type: EdgeType = (
                 cast(EdgeType, raw_type)
-                if isinstance(raw_type, str) and raw_type in VALID_EDGE_TYPES
+                if isinstance(raw_type, str) and raw_type in LLM_EMITTABLE_EDGE_TYPES
                 else "related_to"
             )
 

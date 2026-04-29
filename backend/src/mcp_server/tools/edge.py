@@ -22,20 +22,31 @@ from mcp_server.tools._helpers import (
     _validate_memory_id,
     execute_with_timeout,
 )
+from models.memory import (
+    EDGE_TYPE_DECLARED_LINK,
+    EDGE_TYPE_DEPENDS_ON,
+    EDGE_TYPE_LEARNED_FROM,
+    EDGE_TYPE_NEURAL_ASSOCIATION,
+    EDGE_TYPE_RELATED_TO,
+    EDGE_TYPE_SEMANTIC_SIMILARITY,
+    EDGE_TYPE_TAG_COOCCURRENCE,
+)
 
+# Issue #461: full set of edge_types accepted by the DB CHECK constraint
+# (`models/memory.py::valid_edge_type`). Sourced from `EDGE_TYPE_*` constants
+# so this set cannot drift from the schema literal. Includes both LLM-emittable
+# types (#374 → see `services/sleep/edge_discovery.py::LLM_EMITTABLE_EDGE_TYPES`)
+# and synthetic seeding types (#221 `semantic_similarity`, #223 `tag_cooccurrence`)
+# plus client-declared links (#215 `declared_link`).
 VALID_EDGE_TYPES = frozenset(
     {
-        "neural_association",
-        "related_to",
-        "depends_on",
-        "learned_from",
-        # Cold-start seeding (Issue #221): synthetic edges from k-NN at remember() time
-        "semantic_similarity",
-        # Issue #215: Explicit links from clients (Obsidian wikilinks, code imports, etc.)
-        "declared_link",
-        # Issue #223 (Tier 2 cold-start seeding): synthetic edges from
-        # tag co-occurrence at remember() time
-        "tag_cooccurrence",
+        EDGE_TYPE_NEURAL_ASSOCIATION,
+        EDGE_TYPE_RELATED_TO,
+        EDGE_TYPE_DEPENDS_ON,
+        EDGE_TYPE_LEARNED_FROM,
+        EDGE_TYPE_SEMANTIC_SIMILARITY,
+        EDGE_TYPE_DECLARED_LINK,
+        EDGE_TYPE_TAG_COOCCURRENCE,
     }
 )
 
