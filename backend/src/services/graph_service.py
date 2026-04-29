@@ -14,6 +14,15 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from models.memory import (
+    EDGE_TYPE_DECLARED_LINK,
+    EDGE_TYPE_DEPENDS_ON,
+    EDGE_TYPE_LEARNED_FROM,
+    EDGE_TYPE_NEURAL_ASSOCIATION,
+    EDGE_TYPE_RELATED_TO,
+    EDGE_TYPE_SEMANTIC_SIMILARITY,
+    EDGE_TYPE_TAG_COOCCURRENCE,
+)
 from repositories.neural_edge import NeuralEdgeRepository
 from utils.datetime import to_utc_iso
 from utils.logger import get_logger
@@ -36,11 +45,14 @@ class GraphService:
         - topic: Topic/entity nodes (Phase 3)
         - user: User nodes (future)
 
-    Edge Types:
+    Edge Types (mirrors the DB CHECK constraint and ``EDGE_TYPE_*`` constants):
         - neural_association: Learned associations (Hebbian)
         - related_to: Semantic relationship
         - depends_on: Dependency relationship
         - learned_from: Learning source
+        - semantic_similarity: k-NN cold-start seeding (#221)
+        - declared_link: Client-declared explicit link (#215)
+        - tag_cooccurrence: Tag co-occurrence cold-start seeding (#223)
 
     Attributes:
         user_id: Owner user ID (GDPR compliance)
@@ -57,14 +69,22 @@ class GraphService:
     _STATS_OWNER_DEFAULT: Any = object()
 
     NODE_TYPES = ["memory", "user", "topic"]
-    EDGE_TYPES = [
-        "neural_association",
-        "related_to",
-        "depends_on",
-        "learned_from",
-        "semantic_similarity",
-        "declared_link",
-    ]
+    # Issue #506: full set of edge_types accepted by the DB CHECK constraint
+    # (mirrors ``mcp_server/tools/edge.py::VALID_EDGE_TYPES`` from PR #507).
+    # ``frozenset`` for immutability + O(1) ``not in`` lookup at the validator
+    # in ``add_edge``. Sourced from ``EDGE_TYPE_*`` constants so this set
+    # cannot drift from the schema literal.
+    EDGE_TYPES: frozenset[str] = frozenset(
+        {
+            EDGE_TYPE_NEURAL_ASSOCIATION,
+            EDGE_TYPE_RELATED_TO,
+            EDGE_TYPE_DEPENDS_ON,
+            EDGE_TYPE_LEARNED_FROM,
+            EDGE_TYPE_SEMANTIC_SIMILARITY,
+            EDGE_TYPE_DECLARED_LINK,
+            EDGE_TYPE_TAG_COOCCURRENCE,
+        }
+    )
 
     def __init__(
         self,
@@ -168,7 +188,7 @@ class GraphService:
         self,
         src_id: str | UUID,
         dst_id: str | UUID,
-        rel_type: str = "neural_association",
+        rel_type: str = EDGE_TYPE_NEURAL_ASSOCIATION,
         weight: float = 1.0,
         edge_metadata: dict[str, Any] | None = None,
         confidence: float = 1.0,
