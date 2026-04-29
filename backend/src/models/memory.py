@@ -309,7 +309,7 @@ class NeuralMemoryEdge(Base):
     )
 
     # Edge properties
-    edge_type = Column(String(50), nullable=False, default="neural_association")
+    edge_type = Column(String(50), nullable=False, default=EDGE_TYPE_NEURAL_ASSOCIATION)
     weight = Column(Float, nullable=False, default=0.0)
     confidence = Column(Float, nullable=False, default=1.0)
 
