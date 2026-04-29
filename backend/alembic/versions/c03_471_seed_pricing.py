@@ -45,6 +45,8 @@ NOTE: Revision ID is 21 chars (under the 32-char alembic limit).
 """
 
 from collections.abc import Sequence
+from datetime import datetime
+from decimal import Decimal
 
 import sqlalchemy as sa
 
@@ -61,7 +63,12 @@ depends_on: str | Sequence[str] | None = None
 # upgrade() (for INSERTs) and downgrade() (for the targeted DELETE).
 # Naive UTC to match ``llm_pricing.effective_from`` (DateTime, naive)
 # and the rest of the codebase's "store UTC, ignore tz metadata" pattern.
-_SEED_EFFECTIVE_FROM = "2026-04-28 00:00:00"
+#
+# MUST be a ``datetime`` not a ``str``: asyncpg infers bind types from the
+# Python value, so a string would render as ``$N::VARCHAR`` and PostgreSQL
+# refuses to coerce VARCHAR into TIMESTAMP WITHOUT TIME ZONE without an
+# explicit cast — the upgrade INSERT (and the downgrade DELETE) blow up.
+_SEED_EFFECTIVE_FROM = datetime(2026, 4, 28, 0, 0, 0)
 
 
 # Parameterized INSERT — bind params keep the migration aligned with
@@ -96,9 +103,12 @@ def _insert_pricing_row(
     ``unit_denominator=1000000``, ``currency='USD'``,
     ``context_min_tokens=0``, ``context_max_tokens=NULL``.
 
-    Pass ``price_per_unit`` as a string to keep the value deterministic
-    across Python float repr quirks; PostgreSQL parses the string into
-    NUMERIC(14,10) at INSERT time.
+    Call sites pass ``price_per_unit`` as a string for literal-precision
+    ergonomics (``"0.5"`` reads cleanly, no float repr quirk). It is
+    converted to ``Decimal`` here before binding so asyncpg infers
+    ``NUMERIC`` instead of ``VARCHAR`` — without the cast, PostgreSQL
+    refuses to coerce VARCHAR into NUMERIC(14,10) at INSERT time and
+    the migration aborts.
     """
     op.execute(
         _INSERT_PRICING_SQL.bindparams(
@@ -106,7 +116,7 @@ def _insert_pricing_row(
             model=model,
             unit_type=unit_type,
             effective_from=_SEED_EFFECTIVE_FROM,
-            price_per_unit=price_per_unit,
+            price_per_unit=Decimal(price_per_unit),
         )
     )
 
