@@ -280,10 +280,13 @@ class EmailDispatchError(ExternalServiceError):
     Issue #469: raised by ``AccountErasureService.request_self_service_erasure``
     when ``send_erasure_confirmation`` fails for an OAuth user. The 503
     status (instead of the 502 default) signals retriable: the user can
-    cancel and re-request once the email backend recovers. There is no
-    in-band fallback because the response body intentionally withholds
-    the raw ``confirm_token`` for OAuth users — email is the canonical
-    delivery channel for the OAuth confirm path.
+    retry the request once the email backend recovers. The pending row
+    has already been rolled back by the time this exception fires, so
+    there is no committed request to cancel — the user simply re-issues
+    ``POST /me/account/erasure-request``. There is no in-band fallback
+    because the response body intentionally withholds the raw
+    ``confirm_token`` for OAuth users — email is the canonical delivery
+    channel for the OAuth confirm path.
 
     The constructor is **zero-argument by design**: any string passed
     here would land in ``self.message`` and ``memory_cloud_exception_handler``

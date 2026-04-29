@@ -54,9 +54,13 @@ class ErasureRequestCreateResponse(BaseModel):
       browser devtools, frontend error-reporters) once email actually
       delivers it.
 
-    The token is also bound to the active session via
-    ``erasure_token:{token}`` in Redis (TTL 1 hour) and is single-use
-    regardless of delivery channel.
+    The raw token is stored in Redis under ``erasure_token:{token}`` with
+    a 1-hour TTL and is single-use regardless of delivery channel. The
+    Redis key maps token → ``request_id`` only — it is NOT session-bound.
+    Confirmation additionally requires the authenticated session user to
+    match the erasure request's ``user_id`` (enforced by
+    ``confirm_self_service``), so a leaked token alone is insufficient
+    without the matching session cookie.
 
     The frontend SHOULD treat this token as sensitive and not log it.
     """
