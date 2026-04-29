@@ -127,11 +127,18 @@ export function MemoryDetailDialog({
 
   const hasOutgoing = (outgoingLinks?.length ?? 0) > 0;
   const hasIncoming = (incomingLinks?.length ?? 0) > 0;
-  // ``undefined`` = caller hasn't wired up references yet — keep the section
-  // hidden rather than rendering an empty-state for a memory that was never
-  // queried.
-  const referencesProvided =
-    outgoingLinks !== undefined || incomingLinks !== undefined;
+  // "No references yet" fires only when BOTH directions resolved with zero
+  // links. Partial fetches (one side ``[]``, the other ``undefined``) must
+  // not claim "no incoming or outgoing" when one side was never queried.
+  const referencesAreEmpty =
+    outgoingLinks !== undefined &&
+    incomingLinks !== undefined &&
+    !hasOutgoing &&
+    !hasIncoming;
+  // Hide the section unless we have something honest to show — actual links
+  // in either direction, or a confirmed empty state. Avoids rendering an
+  // empty "References" header during partial fetches.
+  const showReferences = hasOutgoing || hasIncoming || referencesAreEmpty;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -289,7 +296,7 @@ export function MemoryDetailDialog({
               with the deep-link path: the panel-side handler updates
               ``?memoryId=`` so the URL stays canonical when the user
               navigates between linked memories. */}
-          {referencesProvided && (
+          {showReferences && (
             <>
               <Separator />
               <div>
@@ -319,7 +326,7 @@ export function MemoryDetailDialog({
                       onOpen={onOpenLinkedMemory}
                     />
                   )}
-                  {!hasOutgoing && !hasIncoming && (
+                  {referencesAreEmpty && (
                     <EmptyState
                       icon={Link2Off}
                       title={t("references.emptyTitle")}

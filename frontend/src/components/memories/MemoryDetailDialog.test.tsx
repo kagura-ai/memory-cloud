@@ -219,6 +219,24 @@ describe("MemoryDetailDialog — References (Issue #440)", () => {
     expect(screen.queryByText("references.title")).not.toBeInTheDocument();
     expect(screen.queryByText("references.emptyTitle")).not.toBeInTheDocument();
   });
+
+  it("does not render empty-state on partial fetch (#441)", () => {
+    // Mixed-case: outgoing fetched (empty), incoming never queried. Claiming
+    // "no incoming or outgoing links" would misrepresent the unfetched side,
+    // so the empty-state must stay hidden until both directions resolve.
+    render(
+      <MemoryDetailDialog
+        memory={makeRef()}
+        open={true}
+        onOpenChange={vi.fn()}
+        onDelete={vi.fn()}
+        outgoingLinks={[]}
+      />,
+    );
+
+    expect(screen.queryByText("references.emptyTitle")).not.toBeInTheDocument();
+    expect(screen.queryByText("references.emptyDesc")).not.toBeInTheDocument();
+  });
 });
 
 describe("MemoryDetailDialog — notFound mode (Issue #434)", () => {
