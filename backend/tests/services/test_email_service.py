@@ -9,7 +9,8 @@ The Resend integration tests live in
 2. ``reset_email_service_for_testing`` drops the singleton so a switch
    of ``EMAIL_PROVIDER`` between tests rebuilds the right backend.
 3. ``get_email_service`` fails fast at boot when ``EMAIL_PROVIDER=resend``
-   is set without a key (per Issue #478 design).
+   is set without a key (per Issue #478 design) or without a recorded DPA
+   acceptance timestamp (per Issue #480 GDPR Art. 28 pre-flip gate).
 """
 
 from __future__ import annotations
@@ -225,6 +226,77 @@ def test_get_email_service_resend_with_blank_from_email_raises(monkeypatch: pyte
 
     with pytest.raises(ValidationError, match="RESEND_FROM_EMAIL"):
         get_email_service()
+
+
+def test_get_email_service_resend_without_dpa_accepted_at_raises(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """EMAIL_PROVIDER=resend with no RESEND_DPA_ACCEPTED_AT must fail at boot.
+
+    GDPR Art. 28 requires controllers to engage processors only under a
+    documented DPA; this boot-time gate prevents production traffic from
+    flipping to Resend before ops has recorded the DPA acceptance
+    timestamp. Defense-in-depth alongside the Privacy Policy disclosure.
+    """
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("EMAIL_PROVIDER", "resend")
+    monkeypatch.setenv("RESEND_API_KEY", "re_test_key_12345")
+    monkeypatch.setenv("RESEND_FROM_EMAIL", "noreply@kagura-ai.com")
+    monkeypatch.delenv("RESEND_DPA_ACCEPTED_AT", raising=False)
+    import config.settings as settings_module
+
+    settings_module._settings = None
+
+    with pytest.raises(ValidationError, match="RESEND_DPA_ACCEPTED_AT"):
+        get_email_service()
+
+
+def test_get_email_service_resend_with_blank_dpa_accepted_at_raises(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Whitespace-only RESEND_DPA_ACCEPTED_AT must fail at boot with the
+    friendly message — the field_validator coerces blank input to ``None``
+    so the model_validator's DPA-URL-bearing ValueError fires, mirroring
+    parity with RESEND_API_KEY and RESEND_FROM_EMAIL whitespace tests.
+    """
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("EMAIL_PROVIDER", "resend")
+    monkeypatch.setenv("RESEND_API_KEY", "re_test_key_12345")
+    monkeypatch.setenv("RESEND_FROM_EMAIL", "noreply@kagura-ai.com")
+    monkeypatch.setenv("RESEND_DPA_ACCEPTED_AT", "   ")
+    import config.settings as settings_module
+
+    settings_module._settings = None
+
+    with pytest.raises(ValidationError, match="RESEND_DPA_ACCEPTED_AT"):
+        get_email_service()
+
+
+def test_get_email_service_resend_with_dpa_accepted_at_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A fully-configured Resend deployment (API key + from-email + DPA timestamp)
+    must boot successfully and yield a ResendEmailService instance.
+
+    Pydantic auto-parses the ISO 8601 string into a ``datetime``; the
+    validator only enforces presence (not a future-dated value or a
+    specific timezone), so the happy path is "any non-empty ISO datetime
+    accepted by pydantic".
+    """
+    from services.email_providers.resend import ResendEmailService
+
+    monkeypatch.setenv("EMAIL_PROVIDER", "resend")
+    monkeypatch.setenv("RESEND_API_KEY", "re_test_key_12345")
+    monkeypatch.setenv("RESEND_FROM_EMAIL", "noreply@kagura-ai.com")
+    monkeypatch.setenv("RESEND_DPA_ACCEPTED_AT", "2026-01-01T00:00:00Z")
+    import config.settings as settings_module
+
+    settings_module._settings = None
+
+    svc = get_email_service()
+    assert isinstance(svc, ResendEmailService)
 
 
 def test_reset_email_service_for_testing_drops_singleton(monkeypatch: pytest.MonkeyPatch):

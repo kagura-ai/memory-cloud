@@ -6,9 +6,10 @@ Database URLs are managed directly via os.getenv() in config/database.py.
 """
 
 import os
-from typing import Literal
+from datetime import datetime
+from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -182,6 +183,17 @@ class Settings(BaseSettings):
             "sending domain on Resend; otherwise sends 403."
         ),
     )
+    resend_dpa_accepted_at: datetime | None = Field(
+        default=None,
+        description=(
+            "ISO 8601 timestamp when ops accepted the Resend Data Processing "
+            "Addendum (https://resend.com/legal/dpa). Required when "
+            "email_provider='resend' as a defense-in-depth GDPR Art.28 control: "
+            "without an accepted DPA on record, Resend cannot legally process "
+            "personal data on our behalf, so the boot-time validator refuses "
+            "to start the app."
+        ),
+    )
 
     # Plan Tier Overrides (environment variable customization for OSS deployments)
     plan_free_max_contexts: int | None = Field(
@@ -240,6 +252,21 @@ class Settings(BaseSettings):
         default=0.95, description="Usage critical threshold (0.0-1.0)"
     )
 
+    @field_validator("resend_dpa_accepted_at", mode="before")
+    @classmethod
+    def _coerce_blank_dpa_to_none(cls, v: Any) -> Any:
+        """Treat blank/whitespace RESEND_DPA_ACCEPTED_AT as unset.
+
+        Without this, pydantic's strict datetime parser rejects an empty or
+        whitespace-only value with "Input should be a valid datetime" before
+        the model_validator runs, bypassing the friendly DPA-URL-bearing
+        error message in _validate_resend_config. Stripping here mirrors the
+        .strip() parity treatment on resend_api_key / resend_from_email.
+        """
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
     @model_validator(mode="after")
     def _validate_resend_config(self) -> "Settings":
         """Fail-fast at Settings load when EMAIL_PROVIDER=resend is misconfigured.
@@ -258,6 +285,12 @@ class Settings(BaseSettings):
             if not (self.resend_from_email or "").strip():
                 raise ValueError(
                     "EMAIL_PROVIDER=resend requires RESEND_FROM_EMAIL to be a non-empty address"
+                )
+            if self.resend_dpa_accepted_at is None:
+                raise ValueError(
+                    "EMAIL_PROVIDER=resend requires RESEND_DPA_ACCEPTED_AT to be set "
+                    "(ISO 8601 timestamp when ops accepted the Resend DPA — "
+                    "see https://resend.com/legal/dpa)"
                 )
         return self
 
