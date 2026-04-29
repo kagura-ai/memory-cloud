@@ -249,14 +249,20 @@ class AccountErasureService:
         is_oauth = target.auth_method == "oauth"
 
         if is_oauth:
-            # ``.strip()`` defends against trailing whitespace in env vars
-            # (a common deploy hazard); ``.rstrip("/")`` normalizes the
-            # trailing slash so the f-string below produces a single slash.
-            # Boot-time validation (non-empty + http(s)-prefixed) is
-            # tracked separately in #480 alongside RESEND_DPA_ACCEPTED_AT.
-            base_url = get_settings().frontend_url.strip().rstrip("/")
-            confirm_url = f"{base_url}/account/erasure/confirm?token={token}"
             try:
+                # ``.strip()`` defends against trailing whitespace in env vars
+                # (a common deploy hazard); ``.rstrip("/")`` normalizes the
+                # trailing slash so the f-string below produces a single slash.
+                # Both URL construction AND the email send are inside this
+                # try so that ANY failure after Redis SETEX (settings access,
+                # f-string interp, email dispatch) routes through the same
+                # rollback + Redis-cleanup + ``EmailDispatchError`` path. A
+                # bare exception escaping here would leave an open transaction
+                # plus an orphan Redis token (until 1h TTL).
+                # Boot-time validation (non-empty + http(s)-prefixed) is
+                # tracked separately in #480 alongside RESEND_DPA_ACCEPTED_AT.
+                base_url = get_settings().frontend_url.strip().rstrip("/")
+                confirm_url = f"{base_url}/account/erasure/confirm?token={token}"
                 sent = await asyncio.wait_for(
                     self.email_service.send_erasure_confirmation(
                         to_email=target.email,

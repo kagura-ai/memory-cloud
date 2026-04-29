@@ -313,6 +313,39 @@ class TestRequestSelfServiceErasure:
         assert deleted_key == f"erasure_token:{actual_raw_token}"
 
     @pytest.mark.asyncio
+    async def test_oauth_settings_failure_rolls_back_and_cleans_redis(self):
+        """OAuth path: a failure during ``confirm_url`` construction
+        (e.g. ``get_settings()`` raises, frontend_url access fails) AFTER
+        Redis SETEX must still trigger rollback + Redis token delete.
+
+        This guards against the regression where these lines lived
+        outside the protected ``try`` and a bare exception would leave
+        an open transaction + orphan Redis token (Loop 4 review).
+        """
+        svc = _service()
+        target = _user(auth_method="oauth")
+        self._wire_typical_path(svc, target)
+
+        with (
+            patch("services.account_erasure_service.get_redis_client") as mock_redis,
+            patch(
+                "services.account_erasure_service.get_settings",
+                side_effect=RuntimeError("simulated settings failure"),
+            ),
+        ):
+            mock_redis.return_value = MagicMock(setex=AsyncMock(), delete=AsyncMock())
+            with pytest.raises(EmailDispatchError) as exc_info:
+                await svc.request_self_service_erasure(user_id="u-1")
+
+        assert exc_info.value.status_code == 503
+        # Email send was NEVER attempted (failure happened before).
+        svc.email_service.send_erasure_confirmation.assert_not_awaited()
+        # But the protective handler still ran — rollback and Redis delete.
+        svc.db.rollback.assert_awaited_once()
+        svc.db.commit.assert_not_awaited()
+        mock_redis.return_value.delete.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_oauth_send_timeout_raises_dispatch_error(self):
         """OAuth path: a stalled email provider exceeding the
         ``CONFIRMATION_EMAIL_TIMEOUT_SECONDS`` bound (``asyncio.wait_for``)
