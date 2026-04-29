@@ -263,8 +263,10 @@ class GraphMemory(Base):
         return f"<GraphMemory(user='{self.user_id}', nodes={self.total_nodes}, edges={self.total_edges})>"
 
 
-# Edge type constants. Sole source of truth — the CHECK constraint below and
-# all Python validators (#461 PR #507, #506 PR #508) derive from these.
+# Edge type constants — named aliases for the persisted edge_type string values.
+# Python validators (#461 PR #507, #506 PR #508) reference these constants by name.
+# The DB CHECK constraint is generated from the ordered ``_ALL_EDGE_TYPES`` tuple
+# (see below), which enumerates the same values in registration order.
 EDGE_TYPE_NEURAL_ASSOCIATION = "neural_association"
 EDGE_TYPE_RELATED_TO = "related_to"
 EDGE_TYPE_DEPENDS_ON = "depends_on"
