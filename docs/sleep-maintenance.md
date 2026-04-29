@@ -51,6 +51,7 @@ Finds missing edges between related memories using medium-similarity Qdrant sear
 - **Algorithm**: recency-weighted sampling of edge-poor memories → medium-similarity neighbor search (0.6–0.9) → drop pairs that already have edges → LLM batch judgment for `related`, `edge_type`, `confidence` → create confirmed edges via `NeuralEdgeRepository`.
 - **LLM**: yes (optional — skipped if the LLM service is disabled).
 - **Notes**: positional bias is mitigated by shuffling batch order; short labels (A, B, C) in prompts prevent ID hallucination.
+- **Offline evaluation**: see [`docs/eval/edge_discovery_labeling.md`](eval/edge_discovery_labeling.md) for the labeling protocol used to measure judge correctness on labeled pairs (complementary to production observability metrics).
 
 ### Phase 2 — Dedup / Merge
 

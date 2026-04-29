@@ -2,6 +2,8 @@
 
 Evaluation of the Neural Memory (Hebbian learning + activation spreading) system, based on systematic benchmarking with the [Python SDK](https://github.com/kagura-ai/kagura-memory-python-sdk).
 
+> Component-level labeling protocols for the LLM Judge surfaces feeding into these benchmarks live under [`docs/eval/`](eval/). See [`docs/eval/README.md`](eval/README.md) for the documentation map.
+
 ## Architecture
 
 Neural Memory uses brain-inspired algorithms to build an association graph between memories:
