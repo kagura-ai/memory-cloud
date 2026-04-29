@@ -18,6 +18,7 @@ from models.memory import Memory
 from models.resource import ResourceSchema, ResourceToken
 from services.permission_service import PermissionService
 from services.resource_lookup import resolve_resource_pk
+from utils.datetime import to_utc_iso
 from utils.exceptions import NotFoundException, ValidationError
 from utils.logger import get_logger
 
@@ -163,7 +164,7 @@ async def get_schema(
         resource_id=schema.resource_id,
         schema_version=schema.schema_version,
         field_definitions=schema.field_definitions,
-        created_at=schema.created_at.isoformat(),
+        created_at=to_utc_iso(schema.created_at) or "",
     )
 
 
@@ -286,7 +287,7 @@ async def create_schema(
         resource_id=schema.resource_id,
         schema_version=schema.schema_version,
         field_definitions=schema.field_definitions,
-        created_at=schema.created_at.isoformat(),
+        created_at=to_utc_iso(schema.created_at) or "",
     )
 
 

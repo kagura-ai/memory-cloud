@@ -9,15 +9,15 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, field_serializer
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import require_admin
 from db.base import get_db
+from models.api_base import TZAwareBaseModel
 from models.auth import Context
 from models.sleep import SleepAction, SleepReport
-from utils.datetime import to_utc_iso
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -30,7 +30,7 @@ router = APIRouter(prefix="/admin/sleep-reports", tags=["sleep-reports"])
 # ============================================================================
 
 
-class SleepReportSummary(BaseModel):
+class SleepReportSummary(TZAwareBaseModel):
     """Sleep report summary for list view."""
 
     id: UUID
@@ -49,10 +49,6 @@ class SleepReportSummary(BaseModel):
     llm_calls_made: int
     llm_tokens_used: int
 
-    @field_serializer("started_at", "completed_at")
-    def _serialize_dt(self, dt: datetime | None) -> str | None:
-        return to_utc_iso(dt)
-
 
 class SleepReportDetail(SleepReportSummary):
     """Sleep report full detail."""
@@ -67,7 +63,7 @@ class SleepReportDetail(SleepReportSummary):
     reindex_result: dict[str, Any] | None
 
 
-class SleepActionItem(BaseModel):
+class SleepActionItem(TZAwareBaseModel):
     """Sleep action audit log entry."""
 
     id: int
@@ -77,10 +73,6 @@ class SleepActionItem(BaseModel):
     target_id: UUID | None
     details: dict[str, Any] | None
     created_at: datetime
-
-    @field_serializer("created_at")
-    def _serialize_dt(self, dt: datetime) -> str:
-        return to_utc_iso(dt) or ""
 
 
 class SleepReportListResponse(BaseModel):

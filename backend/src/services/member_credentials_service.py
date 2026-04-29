@@ -24,7 +24,7 @@ from models.auth import (
     OAuth2Token,
     WorkspaceMember,
 )
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import ValidationError
 from utils.logger import get_logger
 
@@ -659,11 +659,7 @@ class MemberCredentialsService:
             "key_prefix": api_key.key_prefix,
             "plaintext_key": plaintext_key,
             "is_visible": is_visible,
-            "visibility_expires_at": (
-                api_key.visibility_expires_at.isoformat() + "Z"
-                if api_key.visibility_expires_at
-                else None
-            ),
-            "created_at": api_key.created_at.isoformat() + "Z",
-            "revoked_at": (api_key.revoked_at.isoformat() + "Z" if api_key.revoked_at else None),
+            "visibility_expires_at": to_utc_iso(api_key.visibility_expires_at),
+            "created_at": to_utc_iso(api_key.created_at),
+            "revoked_at": to_utc_iso(api_key.revoked_at),
         }

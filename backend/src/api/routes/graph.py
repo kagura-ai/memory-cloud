@@ -16,7 +16,7 @@ from db.base import get_db
 from models.memory import Memory
 from services.graph_service import GraphService
 from services.permission_service import PermissionService
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -148,7 +148,7 @@ async def get_graph_stats(
                     top_connections=[],
                     recent_edges=[],
                 ),
-                last_updated=utcnow().isoformat(),
+                last_updated=to_utc_iso(utcnow()) or "",
             )
 
         context = await PermissionService(db).resolve_context_for_workspace_read(
@@ -215,7 +215,7 @@ async def get_graph_stats(
                 top_connections=top_connections,
                 recent_edges=recent_edges,
             ),
-            last_updated=utcnow().isoformat(),
+            last_updated=to_utc_iso(utcnow()) or "",
         )
 
     except HTTPException:
@@ -346,7 +346,7 @@ async def get_graph_data(
                     type=memory.type,
                     importance=memory.importance,
                     degree=int(degree),
-                    created_at=memory.created_at.isoformat() if memory.created_at else None,
+                    created_at=to_utc_iso(memory.created_at),
                 )
             )
             included_node_ids.add(node_id_str)
@@ -365,7 +365,7 @@ async def get_graph_data(
                         target=target_str,
                         weight=edge.weight,
                         type=edge.edge_type,
-                        created_at=edge.created_at.isoformat() if edge.created_at else None,
+                        created_at=to_utc_iso(edge.created_at),
                         confidence=edge.confidence,
                     )
                 )

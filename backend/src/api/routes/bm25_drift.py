@@ -14,17 +14,17 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, field_serializer
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import require_admin
 from db.base import get_db
+from models.api_base import TZAwareBaseModel
 from models.auth import Context
 from models.bm25_drift import Bm25IdfDriftLog
 from services.bm25_drift.orchestrator import Bm25DriftOrchestrator
 from services.bm25_drift.psi_calculator import PsiStatus
-from utils.datetime import to_utc_iso
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -40,7 +40,7 @@ router = APIRouter(
 # ============================================================================
 
 
-class Bm25DriftSummary(BaseModel):
+class Bm25DriftSummary(TZAwareBaseModel):
     """Drift log row, list-view shape (no top_divergent_terms)."""
 
     id: int
@@ -52,10 +52,6 @@ class Bm25DriftSummary(BaseModel):
     m_memory_points: int
     r_resource_points: int
     num_terms: int
-
-    @field_serializer("measured_at")
-    def _serialize_dt(self, dt: datetime) -> str:
-        return to_utc_iso(dt) or ""
 
 
 class Bm25DriftDetail(Bm25DriftSummary):

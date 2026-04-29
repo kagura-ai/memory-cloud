@@ -24,7 +24,7 @@ from models.auth import Context, PlanChange, User, Workspace, WorkspaceInvitatio
 from models.memory import Memory
 from services.effective_quota_service import EffectiveQuotaService
 from utils import db_transaction
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -375,7 +375,7 @@ async def get_plan_change_audit(
                     old_plan=audit.old_plan,
                     new_plan=audit.new_plan,
                     changed_by=user_name or audit.changed_by,
-                    changed_at=audit.changed_at.isoformat(),
+                    changed_at=to_utc_iso(audit.changed_at) or "",
                     reason=audit.reason,
                 )
             )

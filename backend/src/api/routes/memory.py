@@ -32,7 +32,7 @@ from models.schemas import (
 from services.context_service import ContextService
 from services.memory_service import MemoryService
 from services.permission_service import PermissionService
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -616,9 +616,6 @@ async def list_memories(
         # ``created_at`` for fresh rows that haven't been touched since
         # insert. The frontend renders both as the row "updated" timestamp,
         # so created_at is the correct fallback rather than null/empty.
-        def _utc_iso(dt: Any) -> str:
-            return dt.isoformat() + ("Z" if dt.tzinfo is None else "")
-
         memory_items = [
             MemoryListItem(
                 id=str(m.id),
@@ -626,8 +623,8 @@ async def list_memories(
                 type=m.type,
                 scope=m.scope,
                 importance=m.importance,
-                created_at=_utc_iso(m.created_at),
-                updated_at=_utc_iso(m.updated_at or m.created_at),
+                created_at=to_utc_iso(m.created_at) or "",
+                updated_at=to_utc_iso(m.updated_at or m.created_at) or "",
             )
             for m in memories
         ]
@@ -731,7 +728,7 @@ async def get_access_patterns(
                     "summary": m.summary,
                     "type": m.type,
                     "access_count": m.access_count,
-                    "last_used_at": m.last_used_at.isoformat() if m.last_used_at else None,
+                    "last_used_at": to_utc_iso(m.last_used_at),
                 }
                 for m in most_accessed
             ],

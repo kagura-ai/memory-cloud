@@ -8,7 +8,9 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from models.api_base import TZAwareBaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +164,7 @@ class RecallRequest(BaseModel):
     )
 
 
-class MemoryResponse(BaseModel):
+class MemoryResponse(TZAwareBaseModel):
     """Response schema for single memory."""
 
     memory_id: UUID
@@ -219,7 +221,7 @@ class ReferenceRequest(BaseModel):
     memory_id: UUID
 
 
-class LinkedMemoryRef(BaseModel):
+class LinkedMemoryRef(TZAwareBaseModel):
     """A single declared_link reference surfaced in ReferenceResponse.
 
     Issue #440: outgoing_links / incoming_links items. Edge invariant
@@ -237,12 +239,8 @@ class LinkedMemoryRef(BaseModel):
     weight: float
     created_at: datetime
 
-    @field_serializer("created_at")
-    def _serialize_created_at(self, dt: datetime) -> str:
-        return dt.isoformat() + ("Z" if dt.tzinfo is None else "")
 
-
-class ReferenceResponse(BaseModel):
+class ReferenceResponse(TZAwareBaseModel):
     """Response schema for reference() API (full details)."""
 
     memory_id: UUID
@@ -275,13 +273,6 @@ class ReferenceResponse(BaseModel):
     outgoing_has_more: bool = False
     incoming_links: list[LinkedMemoryRef] = Field(default_factory=list)
     incoming_has_more: bool = False
-
-    @field_serializer("created_at", "updated_at")
-    def _serialize_dt(self, dt: datetime) -> str:
-        # Memory.created_at/updated_at are stored as naive UTC. Tag with "Z"
-        # so JS clients parse them as UTC (without it, naive ISO is
-        # interpreted as local time, which JST shifts by +9 hours).
-        return dt.isoformat() + ("Z" if dt.tzinfo is None else "")
 
 
 class ForgetRequest(BaseModel):
@@ -519,7 +510,7 @@ class UserResponse(BaseModel):
         from_attributes = True
 
 
-class UserProfileResponse(BaseModel):
+class UserProfileResponse(TZAwareBaseModel):
     """Response schema for user profile.
 
     Issue #175: User timezone settings
@@ -563,7 +554,7 @@ class APIKeyCreate(BaseModel):
     expires_in_days: int | None = Field(None, ge=1, le=365, description="有効期限（日数）")
 
 
-class APIKeyResponse(BaseModel):
+class APIKeyResponse(TZAwareBaseModel):
     """Response schema for API key."""
 
     id: int
@@ -593,7 +584,7 @@ class ExternalAPIKeyCreate(BaseModel):
     api_key_value: str = Field(..., min_length=1, description="API key value (will be encrypted)")
 
 
-class ExternalAPIKeyResponse(BaseModel):
+class ExternalAPIKeyResponse(TZAwareBaseModel):
     """Response schema for external API key (masked)."""
 
     id: int
@@ -612,7 +603,7 @@ class ExternalAPIKeyResponse(BaseModel):
 # ============================================================================
 
 
-class ContextSearchConfigResponse(BaseModel):
+class ContextSearchConfigResponse(TZAwareBaseModel):
     """Response schema for context search configuration.
 
     Issue #130: Context-scoped Search & Reranker Settings
@@ -696,7 +687,7 @@ class ContextSearchConfigUpdate(BaseModel):
 # ============================================================================
 
 
-class UserWithAdminFlag(BaseModel):
+class UserWithAdminFlag(TZAwareBaseModel):
     """User model with system admin flags for admin management.
 
     Issue #166: System Admin vs Workspace Admin RBAC separation.
@@ -714,14 +705,7 @@ class UserWithAdminFlag(BaseModel):
     memory_count: int
     is_active: bool
 
-    model_config = {
-        "from_attributes": True,
-        "json_encoders": {
-            datetime: lambda v: (
-                v.isoformat() + "Z" if v and v.tzinfo is None else v.isoformat() if v else None
-            )
-        },
-    }
+    model_config = {"from_attributes": True}
 
 
 class SystemAdminListResponse(BaseModel):
@@ -760,7 +744,7 @@ class PromoteToSystemAdminResponse(BaseModel):
 # ============================================================================
 
 
-class UserWorkspaceInfo(BaseModel):
+class UserWorkspaceInfo(TZAwareBaseModel):
     """Workspace membership info for a user.
 
     Issue #164: User Management拡張.
@@ -778,7 +762,7 @@ class UserWorkspaceInfo(BaseModel):
         from_attributes = True
 
 
-class UserAccessibleContext(BaseModel):
+class UserAccessibleContext(TZAwareBaseModel):
     """Context accessible to user.
 
     Issue #164: User detail - accessible contexts.
@@ -846,7 +830,7 @@ class WorkspaceInvitationCreate(BaseModel):
     )
 
 
-class WorkspaceInvitationResponse(BaseModel):
+class WorkspaceInvitationResponse(TZAwareBaseModel):
     """Workspace invitation response.
 
     Issue #165: Team Collaboration - Workspace Invitation System
@@ -915,7 +899,7 @@ class OpenAIKeyStatusResponse(BaseModel):
 # ============================================================================
 
 
-class PendingInvitationItem(BaseModel):
+class PendingInvitationItem(TZAwareBaseModel):
     """Pending invitation item for current user.
 
     Issue #179: In-app invitation notifications.

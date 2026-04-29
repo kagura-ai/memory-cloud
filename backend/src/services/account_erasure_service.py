@@ -72,7 +72,7 @@ from models.erasure import (
 from services.email_service import EmailService, get_email_service
 from services.stripe_service import cancel_subscription_and_delete_customer_for_erasure
 from services.system_admin_service import SystemAdminService
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
     EmailDispatchError,
     ErasureAlreadyInProgressError,
@@ -451,14 +451,14 @@ class AccountErasureService:
         await self.email_service.send_erasure_cooling_off_started(
             to_email=target.email,
             request_id=str(request.id),
-            scheduled_for_iso=request.scheduled_for.isoformat(),
+            scheduled_for_iso=to_utc_iso(request.scheduled_for) or "",
         )
 
         logger.info(
             "erasure_request_confirmed",
             request_id=str(request.id),
             user_id=user_id,
-            scheduled_for=request.scheduled_for.isoformat(),
+            scheduled_for=to_utc_iso(request.scheduled_for),
         )
         return request
 

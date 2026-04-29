@@ -22,6 +22,7 @@ from db.constraint_names import (
 )
 from models.auth import ExternalAPIKey
 from utils import db_transaction, get_user_email, mask_secret
+from utils.datetime import to_utc_iso
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -239,8 +240,8 @@ async def list_external_keys(
                     masked_value=masked,
                     user_id=key.user_id,
                     enabled=key.enabled,  # Issue #105
-                    created_at=key.created_at.isoformat(),
-                    updated_at=key.updated_at.isoformat(),
+                    created_at=to_utc_iso(key.created_at) or "",
+                    updated_at=to_utc_iso(key.updated_at) or "",
                 )
             )
 
@@ -390,8 +391,8 @@ async def create_external_key(
             masked_value=mask_secret(request.value),
             user_id=new_key.user_id,
             enabled=new_key.enabled,  # Issue #105
-            created_at=new_key.created_at.isoformat(),
-            updated_at=new_key.updated_at.isoformat(),
+            created_at=to_utc_iso(new_key.created_at) or "",
+            updated_at=to_utc_iso(new_key.updated_at) or "",
         )
 
 
@@ -450,8 +451,8 @@ async def update_external_key(
             masked_value=mask_secret(request.value),
             user_id=key.user_id,
             enabled=key.enabled,  # Issue #105
-            created_at=key.created_at.isoformat(),
-            updated_at=key.updated_at.isoformat(),
+            created_at=to_utc_iso(key.created_at) or "",
+            updated_at=to_utc_iso(key.updated_at) or "",
         )
 
 
@@ -575,8 +576,8 @@ async def toggle_external_key(
             masked_value=mask_secret(decrypt_value(key.encrypted_value)),
             user_id=key.user_id,
             enabled=key.enabled,
-            created_at=key.created_at.isoformat(),
-            updated_at=key.updated_at.isoformat(),
+            created_at=to_utc_iso(key.created_at) or "",
+            updated_at=to_utc_iso(key.updated_at) or "",
         )
 
 

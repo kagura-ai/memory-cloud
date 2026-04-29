@@ -27,7 +27,7 @@ from models.schemas import (
     RegenerateOAuthSecretResponse,
 )
 from services.member_credentials_service import MemberCredentialsService
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -356,10 +356,8 @@ async def create_api_key(
             "key_prefix": new_key.key_prefix,
             "plaintext_key": plaintext_key,
             "is_visible": True,
-            "visibility_expires_at": new_key.visibility_expires_at.isoformat()
-            if new_key.visibility_expires_at
-            else None,
-            "created_at": new_key.created_at.isoformat(),
+            "visibility_expires_at": to_utc_iso(new_key.visibility_expires_at),
+            "created_at": to_utc_iso(new_key.created_at),
             "revoked_at": None,
         }
 

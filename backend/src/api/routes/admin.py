@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import require_admin
 from db.base import get_db
+from models.api_base import TZAwareBaseModel
 from models.auth import (
     APIKey,
     Context,
@@ -25,6 +26,7 @@ from models.auth import (
 )
 from models.memory import Memory
 from utils import db_transaction, get_user_id
+from utils.datetime import to_utc_iso
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -37,20 +39,12 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 # ============================================================================
 
 
-class UserInfo(BaseModel):
+class UserInfo(TZAwareBaseModel):
     """User information for admin view.
 
     Issue #164: Extended with workspaces field.
     Issue #175: Added timezone field for user preferences.
     """
-
-    model_config = {
-        "json_encoders": {
-            datetime: lambda v: (
-                v.isoformat() + "Z" if v and v.tzinfo is None else v.isoformat() if v else None
-            )
-        }
-    }
 
     id: str
     email: str
@@ -258,7 +252,7 @@ async def list_users(
                         "workspace_name": workspace.name,
                         "role": member.role,
                         "is_primary": is_primary,
-                        "joined_at": member.joined_at.isoformat() if member.joined_at else None,
+                        "joined_at": to_utc_iso(member.joined_at),
                     }
                 )
 
@@ -519,16 +513,8 @@ async def get_user_detail(
                 "picture": target_user.picture,
                 "role": target_user.role,
                 "is_initial_admin": getattr(target_user, "is_initial_admin", False),
-                "created_at": target_user.created_at.isoformat() + "Z"
-                if target_user.created_at.tzinfo is None
-                else target_user.created_at.isoformat(),
-                "last_login_at": (
-                    target_user.last_login_at.isoformat() + "Z"
-                    if target_user.last_login_at.tzinfo is None
-                    else target_user.last_login_at.isoformat()
-                )
-                if target_user.last_login_at
-                else None,
+                "created_at": to_utc_iso(target_user.created_at),
+                "last_login_at": to_utc_iso(target_user.last_login_at),
                 "auth_provider": target_user.auth_provider,
             },
             workspaces=workspaces,

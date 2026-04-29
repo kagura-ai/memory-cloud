@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser
 from db.base import get_db
+from models.api_base import TZAwareBaseModel
 from services.account_erasure_service import AccountErasureService
 from utils.logger import get_logger
 
@@ -35,7 +36,7 @@ router = APIRouter(prefix="/me/account", tags=["account-erasure"])
 # ---------------------------------------------------------------------------
 
 
-class ErasureRequestCreateResponse(BaseModel):
+class ErasureRequestCreateResponse(TZAwareBaseModel):
     """Returned after creating a self-service erasure request.
 
     The confirmation token is delivered through one of two channels
@@ -89,7 +90,7 @@ class ErasureConfirmRequest(BaseModel):
     )
 
 
-class ErasureRequestStateResponse(BaseModel):
+class ErasureRequestStateResponse(TZAwareBaseModel):
     """Read-only view of an erasure request's lifecycle state."""
 
     request_id: UUID
