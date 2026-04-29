@@ -210,8 +210,14 @@ class AccountErasureService:
         #    the 1h orphan would leave a live confirm path against a
         #    rolled-back row.
         #  - commit() fails after Redis SETEX (and after OAuth email send) →
-        #    orphan Redis key + email already sent. Rare; Redis TTL bounds
-        #    the orphan and the receipt email is what the user sees.
+        #    rollback PG + best-effort Redis key delete + structured
+        #    log of "commit_failed_after_side_effects". The OAuth user
+        #    has already received the confirm email; if they click, the
+        #    confirm endpoint hits _load_request_or_404 → 404 (existing
+        #    ErasureRequestNotFoundError path), so the user sees a
+        #    legitimate "request not found" rather than confirming a
+        #    rolled-back row. Rare in practice but explicitly handled
+        #    so ops can correlate the (rare) ghost-link reports.
         try:
             await self.db.flush()
         except IntegrityError as exc:
@@ -232,7 +238,12 @@ class AccountErasureService:
         is_oauth = target.auth_method == "oauth"
 
         if is_oauth:
-            base_url = get_settings().frontend_url.rstrip("/")
+            # ``.strip()`` defends against trailing whitespace in env vars
+            # (a common deploy hazard); ``.rstrip("/")`` normalizes the
+            # trailing slash so the f-string below produces a single slash.
+            # Boot-time validation (non-empty + http(s)-prefixed) is
+            # tracked separately in #480 alongside RESEND_DPA_ACCEPTED_AT.
+            base_url = get_settings().frontend_url.strip().rstrip("/")
             confirm_url = f"{base_url}/account/erasure/confirm?token={token}"
             try:
                 sent = await self.email_service.send_erasure_confirmation(
@@ -290,7 +301,36 @@ class AccountErasureService:
                     pass
                 raise EmailDispatchError()
 
-        await self.db.commit()
+        try:
+            await self.db.commit()
+        except Exception as exc:
+            # Commit failure after side-effects (Redis SETEX done; for
+            # OAuth users, confirmation email already sent). Rare —
+            # network blip during transaction commit, deadlock, etc. —
+            # but worth distinguishing from earlier failure modes for
+            # ops diagnosis. Best-effort cleanup so the token doesn't
+            # survive on Redis: a clicked confirm link would 404 against
+            # ``_load_request_or_404`` (no row), which is the existing
+            # ErasureRequestNotFoundError path. Log redaction follows
+            # the same discipline as the email-dispatch failure path:
+            # ``error_type`` only, never ``str(exc)``.
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
+            try:
+                await redis.delete(f"{_CONFIRM_TOKEN_KEY_PREFIX}{token}")
+            except Exception:
+                pass
+            logger.error(
+                "erasure_request_commit_failed_after_side_effects",
+                request_id=str(request.id),
+                user_id=user_id,
+                auth_method=target.auth_method,
+                email_sent=is_oauth,
+                error_type=type(exc).__name__,
+            )
+            raise
         await self.db.refresh(request)
 
         # Receipt is advisory and fires post-commit (matches the pattern

@@ -95,6 +95,17 @@ class TestRequestSelfServiceErasure:
 
         Returns the ``added_rows`` capture list so callers can inspect the
         ``ErasureRequest`` row built by the service.
+
+        Critical detail: ``db.flush`` is wired to populate ``request.id`` —
+        in real SQLAlchemy the server-default UUID is materialized at flush
+        time, and the service relies on that for ``redis.setex`` value and
+        the ``request_id`` passed to ``send_erasure_confirmation`` BEFORE
+        ``db.commit()/refresh()`` runs. Without simulating this, a
+        regression that uses ``request.id`` against an unflushed row would
+        silently pass tests by writing ``"None"`` to Redis and the email
+        body. The ``db.refresh`` callback is kept as well — it represents
+        the in-prod path where committed-state attributes (``status``, etc.)
+        are reconciled from the DB.
         """
         svc._load_user_or_404 = AsyncMock(return_value=target)
         svc._find_active_request = AsyncMock(return_value=None)
@@ -102,9 +113,16 @@ class TestRequestSelfServiceErasure:
         added_rows: list[ErasureRequest] = []
         svc.db.add = lambda row: added_rows.append(row)
 
-        async def _refresh(row):
-            row.id = uuid4()
+        async def _flush_populates_id() -> None:
+            for row in added_rows:
+                if getattr(row, "id", None) is None:
+                    row.id = uuid4()
 
+        async def _refresh(row: ErasureRequest) -> None:
+            if getattr(row, "id", None) is None:
+                row.id = uuid4()
+
+        svc.db.flush = AsyncMock(side_effect=_flush_populates_id)
         svc.db.refresh = AsyncMock(side_effect=_refresh)
         return added_rows
 
@@ -166,6 +184,17 @@ class TestRequestSelfServiceErasure:
         # Success path must NOT delete the Redis token — the key is what the
         # downstream confirm endpoint validates against.
         mock_redis.return_value.delete.assert_not_awaited()
+        # Regression guard: ``request_id`` passed to the email send must be
+        # the real UUID populated at flush time, NOT "None". A regression
+        # that uses ``request.id`` before flush would silently write "None"
+        # into the email body and Redis SETEX value. The ``_wire_typical_path``
+        # harness simulates server-default population on flush.
+        assert call_kwargs["request_id"] != "None"
+        assert call_kwargs["request_id"]  # non-empty
+        # Same guard on the Redis SETEX call: third arg is the request id.
+        setex_call = mock_redis.return_value.setex.await_args
+        assert setex_call.args[2] != "None"
+        assert setex_call.args[2]  # non-empty
 
     @pytest.mark.asyncio
     async def test_oauth_send_returns_false_raises_dispatch_error(self):
@@ -282,6 +311,47 @@ class TestRequestSelfServiceErasure:
         mock_redis.return_value.delete.assert_awaited_once()
         deleted_key = mock_redis.return_value.delete.await_args.args[0]
         assert deleted_key == f"erasure_token:{actual_raw_token}"
+
+    @pytest.mark.asyncio
+    async def test_commit_fails_after_oauth_email_send_cleans_up(self):
+        """OAuth path: if ``db.commit()`` fails AFTER the confirmation email
+        has already been sent (rare — DB blip during commit), the service
+        must still rollback, best-effort delete the Redis token, log
+        ``erasure_request_commit_failed_after_side_effects``, and re-raise.
+
+        The user has the confirm email already; if they click, the confirm
+        endpoint sees no row → ``ErasureRequestNotFoundError`` (404) — same
+        UX as Redis TTL self-clean, but explicit cleanup means the failure
+        is observable in logs.
+        """
+        svc = _service()
+        svc.db.commit = AsyncMock(side_effect=RuntimeError("simulated commit blip"))
+        target = _user(auth_method="oauth")
+        self._wire_typical_path(svc, target)
+
+        with (
+            patch("services.account_erasure_service.get_redis_client") as mock_redis,
+            patch("services.account_erasure_service.logger") as mock_logger,
+        ):
+            mock_redis.return_value = MagicMock(setex=AsyncMock(), delete=AsyncMock())
+            with pytest.raises(RuntimeError, match="simulated commit blip"):
+                await svc.request_self_service_erasure(user_id="u-1")
+
+        # Confirmation email DID fire (commit failed AFTER it).
+        svc.email_service.send_erasure_confirmation.assert_awaited_once()
+        # Receipt did NOT fire (it's after the failed commit).
+        svc.email_service.send_erasure_receipt.assert_not_awaited()
+        # Both rollback and Redis delete were attempted.
+        svc.db.rollback.assert_awaited_once()
+        mock_redis.return_value.delete.assert_awaited_once()
+        # Structured log was emitted with the right event name and metadata.
+        log_event_logged = any(
+            call.args and call.args[0] == "erasure_request_commit_failed_after_side_effects"
+            for call in mock_logger.error.call_args_list
+        )
+        assert log_event_logged, (
+            "expected structured log 'erasure_request_commit_failed_after_side_effects'"
+        )
 
     @pytest.mark.asyncio
     async def test_blocks_initial_admin(self):
