@@ -122,8 +122,7 @@ function LoginContent() {
     }
   };
 
-  const handleMfaVerify = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitMfa = async () => {
     setLoadingAction("mfa");
     setError(null);
 
@@ -139,6 +138,11 @@ function LoginContent() {
       setLoadingAction(null);
       setError(t("invalidCredentials"));
     }
+  };
+
+  const handleMfaVerify = (e: React.FormEvent) => {
+    e.preventDefault();
+    void submitMfa();
   };
 
   const handleGoogleLogin = async () => {
@@ -252,6 +256,19 @@ function LoginContent() {
                     maxLength={6}
                     value={totpCode}
                     onChange={(e) => setTotpCode(e.target.value)}
+                    onKeyDown={(e) => {
+                      // Implicit form submit can be suppressed when the submit
+                      // button is disabled at the keypress moment; handle Enter
+                      // explicitly once the TOTP code is complete.
+                      if (
+                        e.key === "Enter" &&
+                        totpCode.length === 6 &&
+                        loadingAction === null
+                      ) {
+                        e.preventDefault();
+                        void submitMfa();
+                      }
+                    }}
                     placeholder="000000"
                     className="bg-white text-gray-900 text-center text-2xl tracking-widest"
                     autoFocus
