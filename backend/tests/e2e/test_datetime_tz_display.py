@@ -17,7 +17,6 @@ Run:
     pytest tests/e2e/test_datetime_tz_display.py -m e2e -v
 """
 
-import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -45,6 +44,12 @@ def jst_authenticated_context(browser):
     context = browser.new_context(
         viewport={"width": 1280, "height": 800},
         timezone_id=NON_UTC_BROWSER_TZ,
+        # Force navigator.language = "ja" so the i18n provider
+        # (frontend/src/i18n/config.ts:30-41) selects the ja locale and
+        # `formatDateTime` uses ja-JP `YYYY/MM/DD HH:MM:SS`. Without this
+        # override, CI envs without `kagura_locale` in localStorage default
+        # to `en` and the tooltip renders en-US format → locator miss.
+        locale="ja",
     )
     page = context.new_page()
     login_admin(page)
@@ -173,7 +178,9 @@ def test_last_activity_tooltip_displays_jst_under_non_utc_browser_tz(jst_page: P
 
     jst_page.goto(f"{BASE_URL}/workspace/contexts")
     jst_page.wait_for_load_state("networkidle")
-    time.sleep(1)
+    # Deterministic wait for the contexts table to hydrate at least one
+    # tooltip span — replaces the brittle `time.sleep(1)` flagged by Copilot.
+    jst_page.wait_for_selector("table span[title]", state="attached", timeout=15000)
 
     # Anchor on the exact JST string — second-precision makes it row-unique.
     tooltip_locator = jst_page.locator(f'span[title="{expected_jst}"]')
