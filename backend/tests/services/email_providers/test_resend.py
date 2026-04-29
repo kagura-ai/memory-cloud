@@ -6,8 +6,10 @@ Covers:
 - The synchronous SDK call runs on a worker thread (causal test, no
   wall-clock thresholds — mirrors PR #477's stripe_service test pattern).
 - Hard failures from the SDK return ``False`` per the Protocol's "do not
-  raise" contract; the failure log includes type + bounded message but
-  never echoes the request body.
+  raise" contract; the failure log records the exception type (and
+  status code when the SDK exposes one) without logging ``str(exc)`` or
+  echoing the request body — defense in depth against SDK error messages
+  that might surface request fields including the confirm URL.
 - ``send_erasure_confirmation`` does NOT write the raw token or the
   confirm_url into any log (parity with the LoggingEmailService check
   in tests/services/test_email_service.py).
