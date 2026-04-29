@@ -25,6 +25,7 @@ import {
   Check,
   Copy,
   FileQuestion,
+  Link2Off,
   Pencil,
   Trash2,
 } from "lucide-react";
@@ -126,7 +127,11 @@ export function MemoryDetailDialog({
 
   const hasOutgoing = (outgoingLinks?.length ?? 0) > 0;
   const hasIncoming = (incomingLinks?.length ?? 0) > 0;
-  const showReferences = hasOutgoing || hasIncoming;
+  // ``undefined`` = caller hasn't wired up references yet — keep the section
+  // hidden rather than rendering an empty-state for a memory that was never
+  // queried.
+  const referencesProvided =
+    outgoingLinks !== undefined || incomingLinks !== undefined;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -280,11 +285,11 @@ export function MemoryDetailDialog({
             </>
           )}
 
-          {/* References — declared_link backlinks (Issue #440). Hidden when
-              both lists are empty. The buttons compose with #434's deep-link:
-              the panel-side handler updates ``?memoryId=`` so the URL stays
-              canonical when the user navigates between linked memories. */}
-          {showReferences && (
+          {/* References — declared_link backlinks. The list buttons compose
+              with the deep-link path: the panel-side handler updates
+              ``?memoryId=`` so the URL stays canonical when the user
+              navigates between linked memories. */}
+          {referencesProvided && (
             <>
               <Separator />
               <div>
@@ -312,6 +317,14 @@ export function MemoryDetailDialog({
                       truncatedLabel={t("references.truncated")}
                       unknownLabel={t("references.unknown")}
                       onOpen={onOpenLinkedMemory}
+                    />
+                  )}
+                  {!hasOutgoing && !hasIncoming && (
+                    <EmptyState
+                      icon={Link2Off}
+                      title={t("references.emptyTitle")}
+                      description={t("references.emptyDesc")}
+                      compact
                     />
                   )}
                 </div>

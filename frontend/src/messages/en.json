@@ -1134,8 +1134,8 @@
     "graphTopConnections": "Top Connected Memories",
     "graphConnections": "connections",
     "graphEdgeList": "Edges",
-    "graphEmpty": "Use recall to build connections between memories.",
-    "graphEmptyTitle": "No neural edges yet",
+    "graphEmpty": "Memories build connections automatically as you use this context — through recall co-activation and during Sleep Maintenance. Newer contexts may take a day to populate.",
+    "graphEmptyTitle": "No connections yet",
     "graphVizLoading": "Loading graph data…",
     "graphVizLoadError": "Failed to load graph data",
     "graphVizNodeCount": "Nodes",
@@ -2753,7 +2753,9 @@
         "outgoing": "Outgoing",
         "incoming": "Incoming",
         "truncated": "Showing first 50 — view full graph in the Graph tab",
-        "unknown": "(unavailable)"
+        "unknown": "(unavailable)",
+        "emptyTitle": "No references yet",
+        "emptyDesc": "This memory has no incoming or outgoing links. Pass linked_memory_ids when remembering related memories to create explicit references."
       }
     },
     "deleteDialog": {
