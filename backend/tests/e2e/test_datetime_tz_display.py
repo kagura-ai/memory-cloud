@@ -178,16 +178,19 @@ def test_last_activity_tooltip_displays_jst_under_non_utc_browser_tz(jst_page: P
 
     jst_page.goto(f"{BASE_URL}/workspace/contexts")
     jst_page.wait_for_load_state("networkidle")
-    # Deterministic wait for the contexts table to hydrate at least one
-    # tooltip span — replaces the brittle `time.sleep(1)` flagged by Copilot.
-    jst_page.wait_for_selector("table span[title]", state="attached", timeout=15000)
 
-    # Anchor on the exact JST string — second-precision makes it row-unique.
+    # Wait deterministically for the SPECIFIC tooltip we expect to render.
+    # `count() > 0` is non-waiting and races client-side hydration; Playwright's
+    # `wait_for(state="attached")` polls until the element is in the DOM or the
+    # timeout fires. Custom diagnostic preserved via the try/except wrapper.
     tooltip_locator = jst_page.locator(f'span[title="{expected_jst}"]')
-    assert tooltip_locator.count() > 0, (
-        f"No tooltip with the expected JST format was found on /workspace/contexts.\n"
-        f"  API last_activity_at : {raw_last_activity!r}\n"
-        f"  Expected JST tooltip : {expected_jst!r}\n"
-        f"  Browser timezone     : {NON_UTC_BROWSER_TZ}\n"
-        f"  Profile timezone     : {TARGET_PROFILE_TZ}"
-    )
+    try:
+        tooltip_locator.first.wait_for(state="attached", timeout=15000)
+    except Exception as exc:
+        raise AssertionError(
+            f"No tooltip with the expected JST format was found on /workspace/contexts.\n"
+            f"  API last_activity_at : {raw_last_activity!r}\n"
+            f"  Expected JST tooltip : {expected_jst!r}\n"
+            f"  Browser timezone     : {NON_UTC_BROWSER_TZ}\n"
+            f"  Profile timezone     : {TARGET_PROFILE_TZ}"
+        ) from exc

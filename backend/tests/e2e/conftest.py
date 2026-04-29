@@ -9,7 +9,6 @@ Usage:
 
 import os
 import re
-import time
 
 import pytest
 from playwright.sync_api import Page, sync_playwright
@@ -46,15 +45,22 @@ def login_admin(page: Page) -> None:
     if admin_link.count() > 0:
         admin_link.first.click()
         page.wait_for_load_state("networkidle")
-        time.sleep(1)
 
+    # Wait deterministically for the login form input to be present —
+    # replaces the previous time.sleep(1) hard-pause after the admin-link
+    # click (which only fires on first login but is shared across every
+    # authenticated_context variant).
+    page.wait_for_selector('input[type="text"]', state="visible", timeout=10000)
     page.fill('input[type="text"]', ADMIN_LOGIN_ID)
     page.fill('input[type="password"]', ADMIN_PASSWORD)
 
     terms_checkbox = page.locator('input[type="checkbox"], button[role="checkbox"]')
     if terms_checkbox.count() > 0:
         terms_checkbox.first.click()
-        time.sleep(0.3)
+        # No explicit wait — the next click('button[type="submit"]') auto-waits
+        # for the submit button to be enabled (Playwright actionability check),
+        # which implicitly waits for the checkbox click to flip the form into
+        # a submittable state.
 
     page.click('button[type="submit"]')
     page.wait_for_url("**/workspace/**", timeout=15000)
