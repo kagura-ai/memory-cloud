@@ -1,11 +1,11 @@
 """Shared base classes for API response models.
 
 `TZAwareBaseModel` ensures every `datetime` field on a response model is
-serialized to ISO 8601 with an explicit `Z` (or `+00:00`) UTC marker, so JS
-clients parse the result as UTC instead of local time. The DB stores naive
-UTC (TIMESTAMP WITHOUT TIME ZONE) for now; until the column-type migration
-in #490 lands, this base class is the API-layer guarantee that wire-format
-datetimes are unambiguous.
+serialized to ISO 8601 with `Z` for UTC datetimes, while non-UTC offsets are
+preserved as `+HH:MM`, so JS clients parse the result unambiguously instead
+of local time. The DB stores naive UTC (TIMESTAMP WITHOUT TIME ZONE) for now;
+until the column-type migration in #490 lands, this base class is the
+API-layer guarantee that wire-format datetimes are unambiguous.
 """
 
 from datetime import datetime
