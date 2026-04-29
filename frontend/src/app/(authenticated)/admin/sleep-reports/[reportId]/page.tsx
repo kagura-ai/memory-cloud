@@ -253,11 +253,7 @@ export default function AdminSleepReportDetailPage() {
     report,
   );
 
-  const relativeStarted = formatRelativeTime(
-    report.started_at,
-    timezone,
-    locale,
-  );
+  const relativeStarted = formatRelativeTime(report.started_at, locale);
   const duration = formatDuration(report.started_at, report.completed_at);
 
   return (

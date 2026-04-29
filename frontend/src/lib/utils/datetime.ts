@@ -114,21 +114,22 @@ export function formatTime(
 }
 
 /**
- * Format relative time with timezone awareness
+ * Format relative time (e.g., '5 minutes ago'). Locale-aware.
+ *
+ * Note: relative time is timezone-independent by definition — elapsed time
+ * reads identically in any zone. To show the absolute moment, pair this
+ * with `formatDateTime(...)` in a tooltip (e.g., `<span title={...}>`).
  *
  * @param utcTime - ISO datetime string (UTC)
- * @param timezone - IANA timezone
- * @returns Relative time string (e.g., '5 minutes ago', 'about 3 hours')
+ * @param locale - 'en' or 'ja'
+ * @param addSuffix - When false, returns 'about 9 minutes' instead of 'about 9 minutes ago'
  *
  * @example
- * formatRelativeTime('2025-12-09T17:15:30', 'Asia/Tokyo')
+ * formatRelativeTime('2025-12-09T17:15:30')
  * // => 'about 9 minutes ago'
- * formatRelativeTime('2025-12-09T17:15:30', 'Asia/Tokyo', 'en', false)
- * // => 'about 9 minutes'  (no suffix, for embedding in other strings)
  */
 export function formatRelativeTime(
   utcTime: string,
-  timezone: string = "UTC",
   locale: string = "en",
   addSuffix: boolean = true,
 ): string {

@@ -177,10 +177,7 @@ export function UserDetailModal({ userId, onClose }: UserDetailModalProps) {
                 </dt>
                 <dd className="text-sm text-gray-900 dark:text-gray-100 mt-1">
                   {details.user.last_login_at
-                    ? formatRelativeTime(
-                        details.user.last_login_at,
-                        user?.timezone,
-                      )
+                    ? formatRelativeTime(details.user.last_login_at)
                     : "Never"}
                 </dd>
               </div>
@@ -269,8 +266,7 @@ export function UserDetailModal({ userId, onClose }: UserDetailModalProps) {
                     </div>
                     {ctx.last_used_at && (
                       <p className="text-xs text-gray-500 dark:text-gray-400">
-                        Last used{" "}
-                        {formatRelativeTime(ctx.last_used_at, user?.timezone)}
+                        Last used {formatRelativeTime(ctx.last_used_at)}
                       </p>
                     )}
                   </div>

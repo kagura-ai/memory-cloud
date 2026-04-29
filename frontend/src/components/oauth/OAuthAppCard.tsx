@@ -114,7 +114,6 @@ export function OAuthAppCard({
                       ? t("hideInTime", {
                           time: formatRelativeTime(
                             app.visibility_expires_at,
-                            timezone,
                             locale,
                             false,
                           ),

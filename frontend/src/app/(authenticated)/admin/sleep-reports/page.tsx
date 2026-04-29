@@ -71,7 +71,6 @@ export default function AdminSleepReportsPage() {
   const tCommon = useTranslations("admin.common");
   const locale = useLocale();
   const { user } = useAuth();
-  const timezone = user?.timezone || "UTC";
 
   const [reports, setReports] = useState<SleepReportSummary[]>([]);
   const [total, setTotal] = useState(0);
@@ -271,7 +270,7 @@ export default function AdminSleepReportsPage() {
                 {reports.map((report) => (
                   <TableRow key={report.id}>
                     <TableCell className="text-sm whitespace-nowrap">
-                      {formatRelativeTime(report.started_at, timezone, locale)}
+                      {formatRelativeTime(report.started_at, locale)}
                     </TableCell>
                     <TableCell className="text-sm">
                       {report.context_name ?? "—"}

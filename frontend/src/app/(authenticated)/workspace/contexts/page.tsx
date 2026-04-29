@@ -15,7 +15,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations, useLocale } from "next-intl";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
-import { formatRelativeTime } from "@/lib/utils/datetime";
+import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import {
   Plus,
   FolderOpen,
@@ -978,13 +978,19 @@ export default function ContextsPage() {
 
                   {/* Last Activity */}
                   <td className="px-4 py-3 text-center text-xs text-gray-500 dark:text-gray-400">
-                    {context.last_activity_at
-                      ? formatRelativeTime(
+                    {context.last_activity_at ? (
+                      <span
+                        title={formatDateTime(
                           context.last_activity_at,
                           user?.timezone,
                           locale,
-                        )
-                      : "—"}
+                        )}
+                      >
+                        {formatRelativeTime(context.last_activity_at, locale)}
+                      </span>
+                    ) : (
+                      "—"
+                    )}
                   </td>
 
                   {/* Visibility */}

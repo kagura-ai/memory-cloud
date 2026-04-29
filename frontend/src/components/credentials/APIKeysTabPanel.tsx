@@ -502,7 +502,6 @@ export function APIKeysTabPanel() {
                                 ? t("hideInTime", {
                                     time: formatRelativeTime(
                                       apiKey.visibility_expires_at,
-                                      user?.timezone,
                                       locale,
                                       false,
                                     ),

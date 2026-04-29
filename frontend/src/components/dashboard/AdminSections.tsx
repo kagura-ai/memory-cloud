@@ -21,7 +21,6 @@ import {
 import { AlertCircle, Users, ChevronDown } from "lucide-react";
 import { InlineSpinner } from "@/components/common/LoadingState";
 import { formatRelativeTime } from "@/lib/utils/datetime";
-import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import {
   getContextUserActivity,
@@ -110,7 +109,6 @@ function UserActivitySection({
 }) {
   const t = useTranslations("workspace");
   const tCommon = useTranslations("common");
-  const { user: authUser } = useAuth();
   const locale = useLocale();
 
   const [activityDays, setActivityDays] = useState<7 | 30>(7);
@@ -220,11 +218,7 @@ function UserActivitySection({
                       </TableCell>
                       <TableCell className="text-right text-sm text-gray-500">
                         {user.last_activity
-                          ? formatRelativeTime(
-                              user.last_activity,
-                              authUser?.timezone,
-                              locale,
-                            )
+                          ? formatRelativeTime(user.last_activity, locale)
                           : "Never"}
                       </TableCell>
                     </TableRow>

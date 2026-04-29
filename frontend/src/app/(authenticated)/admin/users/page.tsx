@@ -373,7 +373,7 @@ export default function AdminUsersPage() {
                   <TableCell>{user.memory_count}</TableCell>
                   <TableCell className="text-sm text-gray-500">
                     {user.last_login
-                      ? formatRelativeTime(user.last_login, user.timezone)
+                      ? formatRelativeTime(user.last_login)
                       : "Never"}
                   </TableCell>
                   <TableCell className="text-right">
