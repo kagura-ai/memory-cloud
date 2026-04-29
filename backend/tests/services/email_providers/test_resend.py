@@ -35,6 +35,25 @@ def test_constructor_rejects_empty_api_key():
         ResendEmailService(api_key="", from_email="noreply@example.com")
 
 
+def test_constructor_rejects_blank_api_key():
+    """Whitespace-only ``api_key`` is fail-fast — same discipline as
+    ``from_email``. A bare-truthy check ``if not api_key`` would let
+    ``"   "`` through and end up assigned to ``resend.api_key``."""
+    with pytest.raises(ValueError, match="api_key"):
+        ResendEmailService(api_key="   ", from_email="noreply@example.com")
+
+
+def test_constructor_strips_api_key_whitespace():
+    """Surrounding whitespace on ``api_key`` is normalized — a
+    ``RESEND_API_KEY`` env value with stray leading/trailing whitespace
+    (e.g. from a multi-line shell heredoc) gets trimmed before reaching
+    the SDK."""
+    svc = ResendEmailService(api_key="  re_test_abc  ", from_email="noreply@example.com")
+    assert resend_module.resend.api_key == "re_test_abc"
+    # Verify the service is usable; we re-derive the key from module state.
+    del svc
+
+
 def test_constructor_rejects_blank_from_email():
     """Whitespace-only ``from_email`` is fail-fast — the constructor
     strips before checking, so accidentally setting ``RESEND_FROM_EMAIL=""``

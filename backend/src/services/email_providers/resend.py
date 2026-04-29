@@ -38,7 +38,8 @@ class ResendEmailService:
     """
 
     def __init__(self, *, api_key: str, from_email: str) -> None:
-        if not api_key:
+        normalized_api_key = (api_key or "").strip()
+        if not normalized_api_key:
             raise ValueError("ResendEmailService requires a non-empty api_key")
         normalized_from_email = (from_email or "").strip()
         if not normalized_from_email:
@@ -48,7 +49,7 @@ class ResendEmailService:
         # writer wins. Tests that need a clean slate should reset both
         # this attribute and the email_service singleton via
         # services.email_service.reset_email_service_for_testing.
-        resend.api_key = api_key
+        resend.api_key = normalized_api_key
         self._from_email = normalized_from_email
 
     async def _send(

@@ -238,7 +238,7 @@ class Settings(BaseSettings):
         traceback, not in a request handler.
         """
         if self.email_provider == "resend":
-            if not self.resend_api_key:
+            if not (self.resend_api_key or "").strip():
                 raise ValueError("EMAIL_PROVIDER=resend requires RESEND_API_KEY to be set")
             if not (self.resend_from_email or "").strip():
                 raise ValueError(
