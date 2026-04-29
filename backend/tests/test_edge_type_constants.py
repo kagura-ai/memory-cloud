@@ -93,4 +93,8 @@ def test_valid_edge_type_check_constraint_matches_migration_literal() -> None:
     valid_edge_type_check = next(
         c for c in NeuralMemoryEdge.__table_args__ if getattr(c, "name", None) == "valid_edge_type"
     )
-    assert str(valid_edge_type_check.sqltext) == expected
+    # Use ``.text`` (raw TextClause attribute) instead of ``str()`` which
+    # would route through SQLAlchemy compilation and could shift across
+    # SQLAlchemy/dialect versions. ``.text`` is the original CheckConstraint
+    # string, so byte-identical comparison stays stable across upgrades.
+    assert valid_edge_type_check.sqltext.text == expected

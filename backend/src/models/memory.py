@@ -357,12 +357,13 @@ class NeuralMemoryEdge(Base):
             f"edge_type IN ({', '.join(repr(t) for t in _ALL_EDGE_TYPES)})",
             name="valid_edge_type",
         ),
-        # Mirrors the CHECK the b03_396 migration installs so Base.metadata.
-        # create_all() (tests, fresh dev DB) produces the same schema the
-        # migration path leaves production in. NOT NULL on the columns already
-        # enforces this, so the CHECK is belt-and-braces — but keeping it
-        # symmetric with the migration avoids "works on prod, silently lax
-        # on test fixtures" drift.
+        # Mirrors the workspace_id/context_id NOT NULL CHECK that
+        # b03_396_neural_edges_ws_ctx_not_null.py installed so
+        # Base.metadata.create_all() (tests, fresh dev DB) produces the same
+        # schema the migration path leaves production in. NOT NULL on the
+        # columns already enforces this, so the CHECK is belt-and-braces — but
+        # keeping it symmetric with the migration avoids "works on prod,
+        # silently lax on test fixtures" drift.
         CheckConstraint(
             "workspace_id IS NOT NULL AND context_id IS NOT NULL",
             name="ck_neural_memory_edges_ws_ctx_not_null",
