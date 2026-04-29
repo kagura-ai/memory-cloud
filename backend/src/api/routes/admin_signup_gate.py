@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import AdminUser
 from db.base import get_db
+from models.api_base import TZAwareBaseModel
 from services.signup_gate_service import SignupGateService
 from utils.github_user import GitHubUserNotFound
 from utils.logger import get_logger
@@ -57,7 +58,7 @@ class SignupGateConfigUpdate(BaseModel):
     mode: Literal["manual"]
 
 
-class AllowlistEntryResponse(BaseModel):
+class AllowlistEntryResponse(TZAwareBaseModel):
     id: UUID
     github_user_id: str
     github_username: str

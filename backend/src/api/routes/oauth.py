@@ -36,7 +36,7 @@ from auth.oauth2_server import create_authorization_server
 from db.base import get_db, get_sync_session
 from models.auth import OAuth2Client, OAuth2Token, User
 from models.schemas import TokenIntrospectionResponse
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
 from utils.oauth_messages import get_oauth_messages
 from utils.redirect_uri import is_valid_redirect_uri_pattern
@@ -324,14 +324,10 @@ async def list_oauth2_clients(
                     token_endpoint_auth_method=client.token_endpoint_auth_method,
                     owner_id=client.owner_id,
                     provider=client.provider,  # Migration 036
-                    created_at=client.created_at.isoformat() + "Z",  # Issue #175: UTC explicit
+                    created_at=to_utc_iso(client.created_at) or "",
                     plaintext_secret=plaintext_secret,
                     is_visible=is_visible,
-                    visibility_expires_at=(
-                        client.visibility_expires_at.isoformat() + "Z"
-                        if client.visibility_expires_at
-                        else None
-                    ),  # Issue #175: UTC explicit
+                    visibility_expires_at=to_utc_iso(client.visibility_expires_at),
                 )
             )
 
@@ -434,13 +430,12 @@ async def create_oauth2_client(
             token_endpoint_auth_method=client.token_endpoint_auth_method,
             owner_id=client.owner_id,
             provider=client.provider,  # Migration 036
-            created_at=client.created_at.isoformat() + "Z",  # Issue #175: UTC explicit
+            created_at=to_utc_iso(client.created_at) or "",
             client_secret=client_secret,  # ⚠️ Only shown once!
             # Migration 034-035: Visibility fields
             plaintext_secret=client_secret,  # Same as client_secret
             is_visible=True,  # Newly created = visible
-            visibility_expires_at=visibility_expires_at.isoformat()
-            + "Z",  # Issue #175: UTC explicit
+            visibility_expires_at=to_utc_iso(visibility_expires_at),
         )
 
     except Exception as e:
@@ -598,11 +593,11 @@ async def dynamic_client_registration(
             token_endpoint_auth_method=client.token_endpoint_auth_method,
             owner_id=client.owner_id,
             provider=client.provider,
-            created_at=client.created_at.isoformat() + "Z",
+            created_at=to_utc_iso(client.created_at) or "",
             client_secret=client_secret,
             plaintext_secret=client_secret,
             is_visible=True,
-            visibility_expires_at=visibility_expires_at.isoformat() + "Z",
+            visibility_expires_at=to_utc_iso(visibility_expires_at),
         )
 
     except Exception as e:
@@ -676,15 +671,11 @@ async def get_oauth2_client(
             token_endpoint_auth_method=client.token_endpoint_auth_method,
             owner_id=client.owner_id,
             provider=client.provider,
-            created_at=client.created_at.isoformat() + "Z",  # Issue #175: UTC explicit
+            created_at=to_utc_iso(client.created_at) or "",
             # Migration 034-035: Visibility fields
             plaintext_secret=plaintext_secret,
             is_visible=is_visible,
-            visibility_expires_at=(
-                client.visibility_expires_at.isoformat() + "Z"
-                if client.visibility_expires_at
-                else None
-            ),  # Issue #175: UTC explicit
+            visibility_expires_at=to_utc_iso(client.visibility_expires_at),
         )
 
     finally:
@@ -758,15 +749,11 @@ async def update_oauth2_client(
             token_endpoint_auth_method=client.token_endpoint_auth_method,
             owner_id=client.owner_id,
             provider=client.provider,
-            created_at=client.created_at.isoformat() + "Z",  # Issue #175: UTC explicit
+            created_at=to_utc_iso(client.created_at) or "",
             # Migration 034-035: Visibility fields (no secret on update)
             plaintext_secret=None,
             is_visible=client.hidden_at is None,
-            visibility_expires_at=(
-                client.visibility_expires_at.isoformat() + "Z"
-                if client.visibility_expires_at
-                else None
-            ),  # Issue #175: UTC explicit
+            visibility_expires_at=to_utc_iso(client.visibility_expires_at),
         )
 
     except HTTPException:
@@ -928,16 +915,12 @@ async def regenerate_oauth2_client_secret(
             token_endpoint_auth_method=client.token_endpoint_auth_method,
             owner_id=client.owner_id,
             provider=client.provider,  # Migration 036
-            created_at=client.created_at.isoformat() + "Z",  # Issue #175: UTC explicit
+            created_at=to_utc_iso(client.created_at) or "",
             client_secret=new_client_secret,  # New secret - only shown once!
             # Migration 034-035: Visibility fields
             plaintext_secret=new_client_secret,  # Same as client_secret
             is_visible=True,  # Newly regenerated = visible
-            visibility_expires_at=(
-                client.visibility_expires_at.isoformat() + "Z"
-                if client.visibility_expires_at
-                else None
-            ),  # Issue #175: UTC explicit
+            visibility_expires_at=to_utc_iso(client.visibility_expires_at),
         )
 
     except HTTPException:

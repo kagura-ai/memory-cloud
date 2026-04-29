@@ -35,7 +35,7 @@ from models.memory import Memory  # Issue #262: Memory model for resource data s
 from models.resource import IndexerState, Resource, ResourceEvent, ResourceSchema
 from services.context_routing import resolve_context_routing
 from services.embedding_service import EmbeddingService
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import QdrantError
 from utils.logger import get_logger
 from utils.sparse_vector import build_resource_sparse_vector
@@ -238,14 +238,8 @@ async def get_indexer_status_for_context(
 
         state_dict = {
             "job_status": state_row.job_status,
-            "last_run_at": last_run_at.isoformat() + "Z"
-            if last_run_at and last_run_at.tzinfo is None
-            else (last_run_at.isoformat() if last_run_at else None),
-            "next_run_at": (
-                state_row.next_run_at.isoformat() + "Z"
-                if state_row.next_run_at and state_row.next_run_at.tzinfo is None
-                else (state_row.next_run_at.isoformat() if state_row.next_run_at else None)
-            ),
+            "last_run_at": to_utc_iso(last_run_at),
+            "next_run_at": to_utc_iso(state_row.next_run_at),
             "active_version": state_row.active_version,
             "last_offset": state_row.last_offset,
             "lag_seconds": lag_seconds,
@@ -259,12 +253,7 @@ async def get_indexer_status_for_context(
 
     event_dicts = []
     for ev in events:
-        created_at = ev.created_at
-        created_iso = (
-            created_at.isoformat() + "Z"
-            if created_at and created_at.tzinfo is None
-            else (created_at.isoformat() if created_at else None)
-        )
+        created_iso = to_utc_iso(ev.created_at)
         event_dicts.append(
             {
                 "id": ev.id,
@@ -585,7 +574,7 @@ class ResourceIndexer:
                 "facets": projected["facets"],
                 "sortable": projected["sortable"],
                 "metadata": projected["metadata"],
-                "updated_at": event.created_at.isoformat(),
+                "updated_at": to_utc_iso(event.created_at),
                 "memory_id": str(memory_id),
                 "point_id_source": point_id_str,
             },
@@ -666,7 +655,7 @@ class ResourceIndexer:
                     "doc_id": event.doc_id,
                     "version": event.version,
                     # Bugfix: Keep timezone for ISO string
-                    "indexed_at": utcnow().isoformat(),
+                    "indexed_at": to_utc_iso(utcnow()),
                 }
                 # Bugfix: Remove timezone for DB compatibility
                 existing_memory.updated_at = utcnow()
@@ -702,7 +691,7 @@ class ResourceIndexer:
                         "doc_id": event.doc_id,
                         "version": event.version,
                         # Bugfix: Keep timezone for ISO string
-                        "indexed_at": utcnow().isoformat(),
+                        "indexed_at": to_utc_iso(utcnow()),
                     },
                     type="resource_data",
                     # P0-2: Fix - use 'is not None' to allow importance=0.0

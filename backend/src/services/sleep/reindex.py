@@ -16,6 +16,7 @@ from db.qdrant import add_memory_to_qdrant
 from models.memory import Memory
 from services.embedding_service import EmbeddingService
 from services.sleep.reporter import PhaseResult
+from utils.datetime import to_utc_iso
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -114,12 +115,8 @@ class ReindexPhase:
                     "importance": memory.importance,
                     "scope": memory.scope,
                     "tags": memory.tags or [],
-                    "created_at": (
-                        memory.created_at.isoformat() + "Z" if memory.created_at else None
-                    ),
-                    "updated_at": (
-                        memory.updated_at.isoformat() + "Z" if memory.updated_at else None
-                    ),
+                    "created_at": to_utc_iso(memory.created_at),
+                    "updated_at": to_utc_iso(memory.updated_at),
                 }
 
                 await add_memory_to_qdrant(

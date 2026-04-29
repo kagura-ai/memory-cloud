@@ -21,7 +21,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import APIKeyOrSessionUser, SessionUser, get_current_user
 from db.base import get_db
+from models.api_base import TZAwareBaseModel
 from services.context_service import ContextService
+from utils.datetime import to_utc_iso
 from utils.exceptions import NotFoundException, ValidationError
 from utils.logger import get_logger
 
@@ -186,7 +188,7 @@ class ContextUpdate(BaseModel):
     )
 
 
-class ContextResponse(BaseModel):
+class ContextResponse(TZAwareBaseModel):
     """Response model for context data."""
 
     id: UUID = Field(..., description="Context UUID")
@@ -1110,7 +1112,7 @@ async def list_context_members(
                 user_name=user_info.name if user_info else None,
                 user_email=user_info.email if user_info else None,
                 role=om.role,
-                added_at=om.joined_at.isoformat() if om.joined_at else None,
+                added_at=to_utc_iso(om.joined_at),
                 is_workspace_admin=True,
             )
         )
@@ -1130,7 +1132,7 @@ async def list_context_members(
                 user_name=user_info.name if user_info else None,
                 user_email=user_info.email if user_info else None,
                 role=cm.role,
-                added_at=cm.created_at.isoformat() if cm.created_at else None,
+                added_at=to_utc_iso(cm.created_at),
                 is_workspace_admin=False,
             )
         )
@@ -1149,7 +1151,7 @@ async def list_context_members(
                 user_name=user_info.name if user_info else None,
                 user_email=user_info.email if user_info else None,
                 role=om.role,
-                added_at=om.joined_at.isoformat() if om.joined_at else None,
+                added_at=to_utc_iso(om.joined_at),
                 is_workspace_admin=True,
             )
         )
@@ -1244,7 +1246,7 @@ async def add_context_member(
     return ContextMemberResponse(
         user_id=member.user_id,
         role=member.role,
-        added_at=member.created_at.isoformat(),
+        added_at=to_utc_iso(member.created_at),
     )
 
 
@@ -1323,7 +1325,7 @@ async def update_context_member_role(
     return ContextMemberResponse(
         user_id=member.user_id,
         role=member.role,
-        added_at=member.created_at.isoformat(),
+        added_at=to_utc_iso(member.created_at),
     )
 
 
@@ -1490,9 +1492,9 @@ async def get_memory_usage_stats(
             scope=m.scope or "persistent",
             use_count=m.use_count or 0,
             access_count=m.access_count or 0,
-            last_used_at=m.last_used_at.isoformat() if m.last_used_at else None,
+            last_used_at=to_utc_iso(m.last_used_at),
             embedding_status=m.embedding_status or "pending",
-            created_at=m.created_at.isoformat() if m.created_at else "",
+            created_at=to_utc_iso(m.created_at) or "",
         )
         for m in memories
     ]
@@ -1636,13 +1638,13 @@ async def find_duplicates(
                             id=str(a),
                             summary=mem_a.summary[:200] if mem_a.summary else "",
                             type=mem_a.type or "note",
-                            created_at=mem_a.created_at.isoformat() if mem_a.created_at else "",
+                            created_at=to_utc_iso(mem_a.created_at) or "",
                         ),
                         memory_b=DuplicateMemoryInfo(
                             id=str(b),
                             summary=mem_b.summary[:200] if mem_b.summary else "",
                             type=mem_b.type or "note",
-                            created_at=mem_b.created_at.isoformat() if mem_b.created_at else "",
+                            created_at=to_utc_iso(mem_b.created_at) or "",
                         ),
                         similarity=hit["score"],
                     )

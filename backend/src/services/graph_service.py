@@ -15,6 +15,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from repositories.neural_edge import NeuralEdgeRepository
+from utils.datetime import to_utc_iso
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -242,8 +243,8 @@ class GraphService:
             "weight": edge.weight,
             "confidence": edge.confidence,
             "metadata": edge.edge_metadata,
-            "created_at": edge.created_at.isoformat(),
-            "last_updated": edge.last_updated.isoformat(),
+            "created_at": to_utc_iso(edge.created_at),
+            "last_updated": to_utc_iso(edge.last_updated),
         }
 
     async def has_edge(self, src_id: str | UUID, dst_id: str | UUID) -> bool:

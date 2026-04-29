@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import require_admin
 from db.base import get_db
+from models.api_base import TZAwareBaseModel
 from models.neural import NeuralConfig
 from neural.config import NeuralMemoryConfig
 from utils import db_transaction, get_user_id
@@ -29,7 +30,7 @@ router = APIRouter(prefix="/admin/neural-config", tags=["neural-config"])
 # ============================================================================
 
 
-class NeuralConfigItem(BaseModel):
+class NeuralConfigItem(TZAwareBaseModel):
     """Neural config item response."""
 
     key: str

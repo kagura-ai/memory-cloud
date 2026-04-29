@@ -33,7 +33,7 @@ from db.base import get_db
 from models.auth import Context, User, Workspace, WorkspaceMember
 from models.auth import UsageStats as UsageStatsModel
 from models.memory import Memory
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -752,8 +752,8 @@ async def get_embedding_status(
                     id=str(mem.id),
                     summary=mem.summary[:200] if mem.summary else "",
                     embedding_error=mem.embedding_error,
-                    created_at=mem.created_at.isoformat() if mem.created_at else "",
-                    updated_at=mem.updated_at.isoformat() if mem.updated_at else None,
+                    created_at=to_utc_iso(mem.created_at) or "",
+                    updated_at=to_utc_iso(mem.updated_at),
                 )
             )
 

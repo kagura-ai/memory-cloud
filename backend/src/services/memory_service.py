@@ -47,7 +47,7 @@ from services.context_routing import resolve_collection_name
 from services.context_service import ContextService
 from services.embedding_service import EmbeddingService
 from services.search_service import SearchService
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import MemoryGoneError, NotFoundException, QuotaExceededError
 from utils.logger import get_logger
 
@@ -433,7 +433,7 @@ class MemoryService:
 
             if payload_updates:
                 # Sync updated_at to Qdrant for date range filtering (Issue #78)
-                payload_updates["updated_at"] = utcnow().isoformat() + "Z"
+                payload_updates["updated_at"] = to_utc_iso(utcnow())
                 collection = await resolve_collection_name(self.db, memory.context_id)
                 await update_memory_payload_in_qdrant(
                     memory_id=memory.id,
@@ -668,7 +668,7 @@ class MemoryService:
                 payload_updates["type"] = request.type
 
             if payload_updates:
-                payload_updates["updated_at"] = utcnow().isoformat() + "Z"
+                payload_updates["updated_at"] = to_utc_iso(utcnow())
                 try:
                     collection = await resolve_collection_name(self.db, memory.context_id)
                     await update_memory_payload_in_qdrant(
@@ -2627,9 +2627,8 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 "tags": memory.tags or [],
                 "scope": memory.scope,
                 "client": memory.client or "unknown",
-                "created_at": (memory.created_at or utcnow()).isoformat() + "Z",
-                "updated_at": (memory.updated_at or memory.created_at or utcnow()).isoformat()
-                + "Z",
+                "created_at": to_utc_iso(memory.created_at or utcnow()),
+                "updated_at": to_utc_iso(memory.updated_at or memory.created_at or utcnow()),
             }
             if memory.context:
                 payload["context"] = memory.context

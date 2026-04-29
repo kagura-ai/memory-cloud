@@ -29,7 +29,7 @@ from models.schemas import (
 )
 from services.invitation_service import InvitationService
 from services.permission_service import PermissionService
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import NotFoundException, ValidationError
 from utils.logger import get_logger
 
@@ -495,7 +495,7 @@ async def get_invitation_info(
         return {
             "workspace_name": workspace.name,
             "role": invitation.role,
-            "expires_at": invitation.expires_at.isoformat() if invitation.expires_at else None,
+            "expires_at": to_utc_iso(invitation.expires_at),
             "email_restricted": invitation.email is not None,
         }
 

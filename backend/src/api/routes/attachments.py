@@ -16,6 +16,7 @@ from auth.dependencies import APIKeyOrSessionUser
 from db.base import get_db
 from models.auth import WorkspaceMember
 from models.memory import Attachment, Memory
+from utils.datetime import to_utc_iso
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -154,7 +155,7 @@ async def upload_attachment(
         filename=attachment.filename,
         content_type=attachment.content_type,
         size_bytes=attachment.size_bytes,
-        created_at=attachment.created_at.isoformat(),
+        created_at=to_utc_iso(attachment.created_at) or "",
     )
 
 
@@ -180,7 +181,7 @@ async def list_attachments(
             filename=a.filename,
             content_type=a.content_type,
             size_bytes=a.size_bytes,
-            created_at=a.created_at.isoformat(),
+            created_at=to_utc_iso(a.created_at) or "",
         )
         for a in attachments
     ]

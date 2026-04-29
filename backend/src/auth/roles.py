@@ -19,7 +19,7 @@ from enum import StrEnum
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
 
 
 class Role(StrEnum):
@@ -332,7 +332,7 @@ class RoleManager:
                         email=u.email,
                         user_id=u.user_id,
                         role=Role(u.role),
-                        assigned_at=u.created_at.isoformat() if u.created_at else "",
+                        assigned_at=to_utc_iso(u.created_at) or "",
                         assigned_by=None,  # TODO: Track who assigned role
                     )
                     for u in db_users

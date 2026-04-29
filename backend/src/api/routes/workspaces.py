@@ -15,10 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import get_current_user
 from db.base import get_db
+from models.api_base import TZAwareBaseModel
 from models.auth import Context, ExternalAPIKey, User
 from models.schemas import OpenAIKeyStatusResponse
 from services.permission_service import PermissionService
 from services.workspace_service import WorkspaceService
+from utils.datetime import to_utc_iso
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -91,7 +93,7 @@ class CredentialsStatusInfo(BaseModel):
     custom_app_count: int = 0
 
 
-class ContextStatsItem(BaseModel):
+class ContextStatsItem(TZAwareBaseModel):
     """Context usage statistics item.
 
     Issue #249: Per-context statistics for workspace overview.
@@ -138,7 +140,7 @@ class DailyUsageItem(BaseModel):
     unique_users: int
 
 
-class UserActivityItem(BaseModel):
+class UserActivityItem(TZAwareBaseModel):
     """User activity statistics item.
 
     Issue #249: Per-user activity breakdown.
@@ -359,7 +361,7 @@ async def create_workspace(
         plan_name=workspace.plan_name,
         member_count=stats["member_count"],
         context_count=stats["context_count"],
-        created_at=workspace.created_at.isoformat(),
+        created_at=to_utc_iso(workspace.created_at) or "",
     )
 
 
@@ -394,7 +396,7 @@ async def list_workspaces(
                 plan_name=workspace.plan_name,
                 member_count=stats["member_count"],
                 context_count=stats["context_count"],
-                created_at=workspace.created_at.isoformat(),
+                created_at=to_utc_iso(workspace.created_at) or "",
                 current_user_role=user_role,
             )
         )
@@ -427,7 +429,7 @@ async def get_workspace(
         plan_name=workspace.plan_name,
         member_count=stats["member_count"],
         context_count=stats["context_count"],
-        created_at=workspace.created_at.isoformat(),
+        created_at=to_utc_iso(workspace.created_at) or "",
     )
 
 
@@ -467,7 +469,7 @@ async def update_workspace(
         plan_name=workspace.plan_name,
         member_count=stats["member_count"],
         context_count=stats["context_count"],
-        created_at=workspace.created_at.isoformat(),
+        created_at=to_utc_iso(workspace.created_at) or "",
     )
 
 
@@ -652,11 +654,9 @@ async def list_members(
                 user_name=user_record.name if user_record else None,
                 user_email=user_record.email if user_record else None,
                 role=m.role,
-                joined_at=m.joined_at.isoformat() if m.joined_at else None,
+                joined_at=to_utc_iso(m.joined_at),
                 credentials_status=credentials_status,
-                last_login_at=user_record.last_login_at.isoformat()
-                if user_record and user_record.last_login_at
-                else None,
+                last_login_at=to_utc_iso(user_record.last_login_at) if user_record else None,
                 allowed_context_ids=allowed_context_ids_str,
             )
         )
@@ -692,7 +692,7 @@ async def add_member(
     return WorkspaceMemberResponse(
         user_id=member.user_id,
         role=member.role,
-        joined_at=member.joined_at.isoformat() if member.joined_at else None,
+        joined_at=to_utc_iso(member.joined_at),
     )
 
 
@@ -739,7 +739,7 @@ async def update_member_role(
     return WorkspaceMemberResponse(
         user_id=member.user_id,
         role=member.role,
-        joined_at=member.joined_at.isoformat() if member.joined_at else None,
+        joined_at=to_utc_iso(member.joined_at),
     )
 
 

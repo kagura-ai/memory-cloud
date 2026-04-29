@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import WorkspaceOwner
 from auth.resource_tokens import ResourceTokenManager
 from db.base import get_db
+from models.api_base import TZAwareBaseModel
 from models.resource import ResourceToken
 from services.resource_lookup import resolve_resource_pk
 from utils.logger import get_logger
@@ -71,7 +72,7 @@ class ResourceTokenUpdate(BaseModel):
     )
 
 
-class ResourceTokenResponse(BaseModel):
+class ResourceTokenResponse(TZAwareBaseModel):
     """Response model for resource token metadata (no plaintext)."""
 
     id: int = Field(..., description="Database ID")

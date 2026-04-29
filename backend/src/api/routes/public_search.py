@@ -19,7 +19,7 @@ from db.redis import increment_counter
 from models.auth import Context
 from services.resource_lookup import get_latest_schema
 from services.search_service import SearchService
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import AuthorizationError, NotFoundException, RateLimitError
 from utils.logger import get_logger
 from utils.usage_logger import log_usage
@@ -399,9 +399,9 @@ async def get_public_context_info(
         "schema": {
             "version": schema.schema_version,
             "field_definitions": schema.field_definitions,
-            "updated_at": schema.updated_at.isoformat(),
+            "updated_at": to_utc_iso(schema.updated_at),
         }
         if schema
         else None,
-        "created_at": context.created_at.isoformat(),
+        "created_at": to_utc_iso(context.created_at),
     }

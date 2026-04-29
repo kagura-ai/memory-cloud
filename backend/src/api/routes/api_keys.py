@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.api_keys import APIKeyManager
 from auth.dependencies import SessionUser, get_current_user
 from db.base import get_db
+from models.api_base import TZAwareBaseModel
 from models.auth import APIKey
 from utils import db_transaction, get_user_id
 from utils.datetime import utcnow
@@ -80,7 +81,7 @@ class APIKeyStats(BaseModel):
     period_end: str = Field(..., description="End date of statistics period")
 
 
-class APIKeyResponse(BaseModel):
+class APIKeyResponse(TZAwareBaseModel):
     """Response model for API key metadata."""
 
     id: int = Field(..., description="Database ID")
