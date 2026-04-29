@@ -96,8 +96,10 @@ def test_last_activity_tooltip_displays_jst_under_non_utc_browser_tz(jst_page: P
     - `TZAwareBaseModel` is removed or bypassed → the wire-format assertion
       in step 3 fails before the UI assertion runs, with a precise diagnostic.
 
-    Skips when the admin workspace has no context with `last_activity_at` set
-    (a test-data condition, not a regression).
+    Self-sufficient on clean DB volumes: if no context yet has
+    `last_activity_at`, seeds a memory via `POST /api/v1/memory/remember`
+    and re-fetches before asserting. Skips only when the workspace has
+    zero contexts (environmental — rarer than the data-empty case).
     """
     profile_response = jst_page.request.put(
         f"{API_URL}/api/v1/users/profile",
@@ -115,12 +117,44 @@ def test_last_activity_tooltip_displays_jst_under_non_utc_browser_tz(jst_page: P
         f"Unexpected /api/v1/contexts shape: {type(payload).__name__}"
     )
 
+    # On a clean DB volume the admin workspace may have contexts with no
+    # last_activity_at yet. Seed one so the regression protection actually
+    # runs in CI / fresh local envs — Copilot review on PR #505 flagged
+    # the prior unconditional skip as silent-disablement risk.
     contexts_with_activity = [c for c in contexts if c.get("last_activity_at")]
     if not contexts_with_activity:
-        pytest.skip(
-            "No context in the admin workspace has last_activity_at set — "
-            "regression coverage requires at least one active context. "
-            "Add a memory to any context to populate last_activity_at."
+        if not contexts:
+            pytest.skip(
+                "Admin workspace has zero contexts — environmental, not a "
+                "regression. Provision the admin user's default context first."
+            )
+        seed_context_id = contexts[0]["id"]
+        seed_response = jst_page.request.post(
+            f"{API_URL}/api/v1/memory/remember",
+            data={
+                "summary": "e2e: JST tz display test seed (#491)",
+                "content": "Seeded by test_datetime_tz_display to populate last_activity_at",
+                "type": "test-seed",
+                "context": {"context_id": seed_context_id},
+            },
+        )
+        assert seed_response.ok, (
+            f"POST /api/v1/memory/remember failed while seeding last_activity_at: "
+            f"{seed_response.status} {seed_response.text()}"
+        )
+        contexts_response = jst_page.request.get(f"{API_URL}/api/v1/contexts")
+        assert contexts_response.ok, (
+            f"Re-fetch GET /api/v1/contexts failed: {contexts_response.status}"
+        )
+        payload = contexts_response.json()
+        contexts = payload.get("contexts") if isinstance(payload, dict) else payload
+        assert isinstance(contexts, list), (
+            f"Unexpected /api/v1/contexts shape after seed: {type(payload).__name__}"
+        )
+        contexts_with_activity = [c for c in contexts if c.get("last_activity_at")]
+        assert contexts_with_activity, (
+            "After seeding a memory, no context shows last_activity_at — "
+            "likely a backend bug or the seeded context_id was rejected, not a test-data issue."
         )
 
     target = contexts_with_activity[0]
