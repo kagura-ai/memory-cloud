@@ -170,7 +170,7 @@ export function UserDetailModal({ userId, onClose }: UserDetailModalProps) {
                   Created
                 </dt>
                 <dd className="text-sm text-gray-900 dark:text-gray-100 mt-1">
-                  {formatDate(details.user.created_at, user?.timezone)}
+                  {formatDate(details.user.created_at, user?.timezone, locale)}
                 </dd>
               </div>
               <div className="bg-gray-50 dark:bg-gray-900 rounded-lg p-3">
@@ -226,7 +226,12 @@ export function UserDetailModal({ userId, onClose }: UserDetailModalProps) {
                     </div>
                     {workspace.joined_at && (
                       <div className="text-xs text-gray-500 dark:text-gray-400">
-                        Joined {formatDate(workspace.joined_at, user?.timezone)}
+                        Joined{" "}
+                        {formatDate(
+                          workspace.joined_at,
+                          user?.timezone,
+                          locale,
+                        )}
                       </div>
                     )}
                   </div>
