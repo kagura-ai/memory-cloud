@@ -29,17 +29,17 @@ def browser():
         browser.close()
 
 
-@pytest.fixture(scope="session")
-def authenticated_context(browser):
-    """Create an authenticated browser context (login once per session)."""
-    context = browser.new_context(viewport={"width": 1280, "height": 800})
-    page = context.new_page()
+def login_admin(page: Page) -> None:
+    """Perform the admin login flow on the given page.
 
-    # Navigate to login page
+    Shared by every authenticated_context fixture variant so login UI
+    changes (selectors, terms checkbox, redirect target) only need updating
+    here. Terminates on the post-login `**/workspace/**` redirect; callers
+    own the page lifecycle around it.
+    """
     page.goto(f"{BASE_URL}/login")
     page.wait_for_load_state("networkidle")
 
-    # Click admin login link if present
     admin_link = page.locator(
         "a, button", has_text=re.compile(r"管理者ログイン|Admin Login|管理者")
     )
@@ -48,20 +48,24 @@ def authenticated_context(browser):
         page.wait_for_load_state("networkidle")
         time.sleep(1)
 
-    # Fill login form
     page.fill('input[type="text"]', ADMIN_LOGIN_ID)
     page.fill('input[type="password"]', ADMIN_PASSWORD)
 
-    # Check terms checkbox if present
     terms_checkbox = page.locator('input[type="checkbox"], button[role="checkbox"]')
     if terms_checkbox.count() > 0:
         terms_checkbox.first.click()
         time.sleep(0.3)
 
-    # Submit and wait for redirect
     page.click('button[type="submit"]')
     page.wait_for_url("**/workspace/**", timeout=15000)
 
+
+@pytest.fixture(scope="session")
+def authenticated_context(browser):
+    """Create an authenticated browser context (login once per session)."""
+    context = browser.new_context(viewport={"width": 1280, "height": 800})
+    page = context.new_page()
+    login_admin(page)
     page.close()
     yield context
     context.close()
