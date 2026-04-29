@@ -8,7 +8,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { useTranslations } from "next-intl";
+import { useTranslations, useLocale } from "next-intl";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
@@ -80,6 +80,7 @@ interface User {
 export default function AdminUsersPage() {
   const t = useTranslations("admin.users");
   const tCommon = useTranslations("admin.common");
+  const locale = useLocale();
 
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
@@ -373,7 +374,7 @@ export default function AdminUsersPage() {
                   <TableCell>{user.memory_count}</TableCell>
                   <TableCell className="text-sm text-gray-500">
                     {user.last_login
-                      ? formatRelativeTime(user.last_login, user.timezone)
+                      ? formatRelativeTime(user.last_login, locale)
                       : "Never"}
                   </TableCell>
                   <TableCell className="text-right">

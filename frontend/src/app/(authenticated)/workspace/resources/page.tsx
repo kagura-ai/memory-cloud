@@ -13,7 +13,6 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useTranslations, useLocale } from "next-intl";
-import { useAuth } from "@/contexts/AuthContext";
 import { ChevronRight, Database } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -37,9 +36,7 @@ export default function ResourcesListPage() {
   const router = useRouter();
   const t = useTranslations("resources");
   const { currentWorkspace } = useWorkspace();
-  const { user } = useAuth();
   const locale = useLocale();
-  const timezone = user?.timezone || "UTC";
   // Route number formatting through next-intl locale so grouping rules match
   // the selected UI language (e.g., 1,234 in en, 1,234 in ja for Latin digits
   // but proper grouping semantics per locale).
@@ -234,7 +231,7 @@ export default function ResourcesListPage() {
                       )}
                     </TableCell>
                     <TableCell className="text-muted-foreground text-sm">
-                      {formatRelativeTime(r.updated_at, timezone, locale)}
+                      {formatRelativeTime(r.updated_at, locale)}
                     </TableCell>
                     <TableCell className="w-8 text-muted-foreground">
                       <ChevronRight className="h-4 w-4" aria-hidden="true" />

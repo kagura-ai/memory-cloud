@@ -14,7 +14,6 @@ import {
 } from "@/components/ui/table";
 import { Download, ArrowUpDown, Lock, Users, Eye, EyeOff } from "lucide-react";
 import { formatRelativeTime } from "@/lib/utils/datetime";
-import { useAuth } from "@/contexts/AuthContext";
 import Link from "next/link";
 import type {
   ContextStatsResponse,
@@ -70,7 +69,6 @@ export function ContextBreakdownTable({
 }: ContextBreakdownTableProps) {
   const t = useTranslations("workspace");
   const tDashboard = useTranslations("dashboard");
-  const { user: authUser } = useAuth();
   const locale = useLocale();
 
   const [sortBy, setSortBy] = useState<SortColumn>("memory");
@@ -292,7 +290,6 @@ export function ContextBreakdownTable({
                           {contextDetail?.last_activity
                             ? formatRelativeTime(
                                 contextDetail.last_activity,
-                                authUser?.timezone,
                                 locale,
                               )
                             : "Never"}

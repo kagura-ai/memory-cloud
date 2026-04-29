@@ -19,7 +19,6 @@ import type { MemoryListItem } from "@/lib/types/memory";
 import { formatRelativeTime } from "@/lib/utils/datetime";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { EmptyState } from "@/components/ui/empty-state";
-import { useAuth } from "@/contexts/AuthContext";
 import { useLocale, useTranslations } from "next-intl";
 
 interface MemoriesTableProps {
@@ -47,7 +46,6 @@ export function MemoriesTable({
   total,
   onPageChange,
 }: MemoriesTableProps) {
-  const { user } = useAuth();
   const locale = useLocale();
   const t = useTranslations("contextDetail.memoriesTable");
   const totalPages = Math.ceil(total / pageSize);
@@ -118,11 +116,7 @@ export function MemoriesTable({
                 <TableCell>{getScopeBadge(memory.scope)}</TableCell>
                 <TableCell>{getImportanceBadge(memory.importance)}</TableCell>
                 <TableCell className="text-sm text-slate-500">
-                  {formatRelativeTime(
-                    memory.updated_at,
-                    user?.timezone,
-                    locale,
-                  )}
+                  {formatRelativeTime(memory.updated_at, locale)}
                 </TableCell>
                 <TableCell className="text-right">
                   <div className="flex items-center justify-end gap-2">

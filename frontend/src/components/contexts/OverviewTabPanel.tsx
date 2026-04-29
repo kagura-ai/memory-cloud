@@ -314,11 +314,7 @@ export function OverviewTabPanel({
                       </TableCell>
                       <TableCell className="text-right text-sm text-gray-500">
                         {user.last_activity
-                          ? formatRelativeTime(
-                              user.last_activity,
-                              authUser?.timezone,
-                              locale,
-                            )
+                          ? formatRelativeTime(user.last_activity, locale)
                           : t("never")}
                       </TableCell>
                     </TableRow>

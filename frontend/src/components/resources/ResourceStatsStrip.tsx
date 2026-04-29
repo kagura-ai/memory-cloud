@@ -55,7 +55,7 @@ export function ResourceStatsStrip({ resource }: ResourceStatsStripProps) {
       <KpiCard
         icon={Clock}
         label={t("stats.lastActivity")}
-        value={formatRelativeTime(resource.updated_at, timezone, locale)}
+        value={formatRelativeTime(resource.updated_at, locale)}
         valueTitle={formatDateTime(resource.updated_at, timezone, locale)}
         tone="secondary"
       />

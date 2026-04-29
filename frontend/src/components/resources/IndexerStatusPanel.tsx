@@ -148,7 +148,7 @@ export function IndexerStatusPanel({
           label={t("indexer.lastRun")}
           value={
             state?.last_run_at
-              ? formatRelativeTime(state.last_run_at, timezone, locale)
+              ? formatRelativeTime(state.last_run_at, locale)
               : "—"
           }
           valueTitle={
@@ -250,7 +250,7 @@ function RecentEventsTable({
                 }
               >
                 {ev.created_at
-                  ? formatRelativeTime(ev.created_at, timezone, locale)
+                  ? formatRelativeTime(ev.created_at, locale)
                   : "—"}
               </TableCell>
             </TableRow>

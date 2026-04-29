@@ -10,7 +10,7 @@
  * Issue #360: Provider discovery.
  */
 
-import { useEffect, useState, Suspense } from "react";
+import { useEffect, useRef, useState, Suspense } from "react";
 import { useTranslations } from "next-intl";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
@@ -49,6 +49,10 @@ function LoginContent() {
   const [mfaRequired, setMfaRequired] = useState(false);
   const [mfaSessionToken, setMfaSessionToken] = useState("");
   const [totpCode, setTotpCode] = useState("");
+  // Synchronous guard: setLoadingAction is batched, so rapid Enter key
+  // auto-repeat could fire submitMfa() multiple times before the state
+  // re-renders. A ref flag is set/read atomically within the same tick.
+  const submittingMfaRef = useRef(false);
 
   const returnTo = searchParams.get("return_to") ?? undefined;
 
@@ -122,8 +126,9 @@ function LoginContent() {
     }
   };
 
-  const handleMfaVerify = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitMfa = async () => {
+    if (submittingMfaRef.current) return;
+    submittingMfaRef.current = true;
     setLoadingAction("mfa");
     setError(null);
 
@@ -138,7 +143,16 @@ function LoginContent() {
     } catch {
       setLoadingAction(null);
       setError(t("invalidCredentials"));
+      submittingMfaRef.current = false;
     }
+  };
+
+  const handleMfaVerify = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (totpCode.length !== 6 || loadingAction !== null) {
+      return;
+    }
+    void submitMfa();
   };
 
   const handleGoogleLogin = async () => {
@@ -252,6 +266,19 @@ function LoginContent() {
                     maxLength={6}
                     value={totpCode}
                     onChange={(e) => setTotpCode(e.target.value)}
+                    onKeyDown={(e) => {
+                      // Implicit form submit can be suppressed when the submit
+                      // button is disabled at the keypress moment; handle Enter
+                      // explicitly once the TOTP code is complete.
+                      if (
+                        e.key === "Enter" &&
+                        totpCode.length === 6 &&
+                        loadingAction === null
+                      ) {
+                        e.preventDefault();
+                        void submitMfa();
+                      }
+                    }}
                     placeholder="000000"
                     className="bg-white text-gray-900 text-center text-2xl tracking-widest"
                     autoFocus
