@@ -198,11 +198,17 @@ class AccountErasureService:
         #    request is resolved.
         #  - Redis SETEX raises → rollback PG → no orphan row.
         #  - send_erasure_confirmation fails (OAuth only, Issue #469) →
-        #    rollback PG → no orphan row, Redis key self-cleans via 1h TTL.
-        #    Pre-commit placement is essential because OAuth users have no
-        #    in-band token: a committed pending row without delivered email
-        #    would wedge the user (cancel works on pending, but only if
-        #    they realize there is a pending row to cancel — UX failure).
+        #    rollback PG + best-effort Redis key delete → no orphan row,
+        #    no orphan token. Pre-commit placement is essential because
+        #    OAuth users have no in-band token: a committed pending row
+        #    without delivered email would wedge the user (cancel works
+        #    on pending, but only if they realize there is a pending row
+        #    to cancel — UX failure). Explicit Redis delete narrows the
+        #    orphan-token window from the 1h TTL to "immediate"; this
+        #    matters when a provider partially delivers (recipient inbox
+        #    receives the link) before raising on the response, where
+        #    the 1h orphan would leave a live confirm path against a
+        #    rolled-back row.
         #  - commit() fails after Redis SETEX (and after OAuth email send) →
         #    orphan Redis key + email already sent. Rare; Redis TTL bounds
         #    the orphan and the receipt email is what the user sees.
@@ -238,16 +244,31 @@ class AccountErasureService:
             except Exception as exc:
                 # Protocol contract says implementations MUST NOT raise on
                 # send failure, but defend against future regressions and
-                # misbehaving custom backends. Log only the type — str(exc)
-                # can echo the SDK request body which contains confirm_url
-                # (and thus the raw token).
-                logger.error(
-                    "erasure_confirmation_email_dispatch_failed",
-                    request_id=str(request.id),
-                    user_id=user_id,
-                    error_type=type(exc).__name__,
-                )
+                # misbehaving custom backends. Log only the type and a
+                # numeric status_code if the SDK exception exposes one —
+                # str(exc) can echo the SDK request body which contains
+                # confirm_url (and thus the raw token). Mirror the existing
+                # discipline in email_providers/resend.py:_send so future
+                # SDK integrations have a single referenced pattern.
+                log_kwargs: dict[str, Any] = {
+                    "request_id": str(request.id),
+                    "user_id": user_id,
+                    "error_type": type(exc).__name__,
+                }
+                exc_status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+                if isinstance(exc_status, int):
+                    log_kwargs["status_code"] = exc_status
+                logger.error("erasure_confirmation_email_dispatch_failed", **log_kwargs)
                 await self.db.rollback()
+                # Best-effort Redis cleanup: explicitly delete the token
+                # key so a partially-delivered email cannot drive a
+                # confirm against the now-rolled-back row. Failure here
+                # falls back to the 1h TTL self-clean (no raise — the
+                # primary error is the email dispatch, not Redis).
+                try:
+                    await redis.delete(f"{_CONFIRM_TOKEN_KEY_PREFIX}{token}")
+                except Exception:
+                    pass
                 # ``from None`` suppresses the original __context__ — SDK
                 # exception messages can leak the token via repr/str.
                 # ``EmailDispatchError`` is zero-argument by design (see
@@ -263,6 +284,10 @@ class AccountErasureService:
                     error_type="send_returned_false",
                 )
                 await self.db.rollback()
+                try:
+                    await redis.delete(f"{_CONFIRM_TOKEN_KEY_PREFIX}{token}")
+                except Exception:
+                    pass
                 raise EmailDispatchError()
 
         await self.db.commit()

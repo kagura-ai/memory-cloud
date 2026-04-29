@@ -118,7 +118,7 @@ class TestRequestSelfServiceErasure:
         added_rows = self._wire_typical_path(svc, target)
 
         with patch("services.account_erasure_service.get_redis_client") as mock_redis:
-            mock_redis.return_value = MagicMock(setex=AsyncMock())
+            mock_redis.return_value = MagicMock(setex=AsyncMock(), delete=AsyncMock())
             request, response_token = await svc.request_self_service_erasure(user_id="u-1")
 
         assert response_token is not None, "password users must receive raw token"
@@ -145,7 +145,7 @@ class TestRequestSelfServiceErasure:
         added_rows = self._wire_typical_path(svc, target)
 
         with patch("services.account_erasure_service.get_redis_client") as mock_redis:
-            mock_redis.return_value = MagicMock(setex=AsyncMock())
+            mock_redis.return_value = MagicMock(setex=AsyncMock(), delete=AsyncMock())
             request, response_token = await svc.request_self_service_erasure(user_id="u-1")
 
         assert response_token is None, "OAuth users must NOT receive token in response"
@@ -163,6 +163,9 @@ class TestRequestSelfServiceErasure:
         # implementation keeps the token in the URL only, not the body).
         assert sent_raw_token in call_kwargs["confirm_url"]
         assert call_kwargs["confirm_url"].startswith("http")  # built from frontend_url
+        # Success path must NOT delete the Redis token — the key is what the
+        # downstream confirm endpoint validates against.
+        mock_redis.return_value.delete.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_oauth_send_returns_false_raises_dispatch_error(self):
@@ -176,7 +179,7 @@ class TestRequestSelfServiceErasure:
         self._wire_typical_path(svc, target)
 
         with patch("services.account_erasure_service.get_redis_client") as mock_redis:
-            mock_redis.return_value = MagicMock(setex=AsyncMock())
+            mock_redis.return_value = MagicMock(setex=AsyncMock(), delete=AsyncMock())
             with pytest.raises(EmailDispatchError) as exc_info:
                 await svc.request_self_service_erasure(user_id="u-1")
 
@@ -186,6 +189,13 @@ class TestRequestSelfServiceErasure:
         svc.db.commit.assert_not_awaited()
         # Receipt must not have fired either (it's post-commit).
         svc.email_service.send_erasure_receipt.assert_not_awaited()
+        # Redis token must be explicitly deleted on rollback — this narrows
+        # the orphan-token window from the 1h TTL to "immediate" so a
+        # partially-delivered email cannot drive a confirm against the
+        # rolled-back row.
+        mock_redis.return_value.delete.assert_awaited_once()
+        deleted_key = mock_redis.return_value.delete.await_args.args[0]
+        assert deleted_key.startswith("erasure_token:")
 
     @pytest.mark.asyncio
     async def test_oauth_send_raises_redacts_log_and_rolls_back(self):
@@ -210,7 +220,7 @@ class TestRequestSelfServiceErasure:
             patch("services.account_erasure_service.get_redis_client") as mock_redis,
             patch("services.account_erasure_service.logger") as mock_logger,
         ):
-            mock_redis.return_value = MagicMock(setex=AsyncMock())
+            mock_redis.return_value = MagicMock(setex=AsyncMock(), delete=AsyncMock())
             with pytest.raises(EmailDispatchError) as exc_info:
                 await svc.request_self_service_erasure(user_id="u-1")
 
@@ -266,6 +276,12 @@ class TestRequestSelfServiceErasure:
 
         svc.db.rollback.assert_awaited_once()
         svc.db.commit.assert_not_awaited()
+        # Redis token must be explicitly deleted on the exception rollback
+        # path — same defense as the False-return path. The key passed must
+        # match the actual generated token recovered above.
+        mock_redis.return_value.delete.assert_awaited_once()
+        deleted_key = mock_redis.return_value.delete.await_args.args[0]
+        assert deleted_key == f"erasure_token:{actual_raw_token}"
 
     @pytest.mark.asyncio
     async def test_blocks_initial_admin(self):
