@@ -59,3 +59,37 @@ def test_llm_emittable_edge_types_subset_of_valid_edge_types() -> None:
     test pins the cross-module subset invariant.
     """
     assert LLM_EMITTABLE_EDGE_TYPES.issubset(VALID_EDGE_TYPES)
+
+
+def test_valid_edge_type_check_constraint_matches_migration_literal() -> None:
+    """``valid_edge_type`` CHECK constraint text is byte-identical to b03_396.
+
+    Issue #509 (Phase B of #461): the CHECK constraint is now derived from
+    ``_ALL_EDGE_TYPES`` via f-string instead of being a hardcoded literal.
+    This test pins the *exact* output string against the literal that the
+    b03_396 migration installed on production. Two reasons:
+
+    1. ``Base.metadata.create_all()`` (used by tests + fresh dev DBs) must
+       produce a CHECK constraint identical to the alembic head, so test
+       fixtures and prod schema stay in sync.
+    2. ``alembic revision --autogenerate`` compares the model's CheckConstraint
+       string against the migration head; any textual divergence (sorted vs
+       registration order, whitespace, quote style) generates a spurious
+       no-op migration. This test catches such drift before it lands.
+
+    If a future PR legitimately changes the CHECK string (adds a new
+    edge_type, reorders, etc.), update this expected literal AND write the
+    accompanying alembic migration in the same PR.
+    """
+    from models.memory import NeuralMemoryEdge
+
+    expected = (
+        "edge_type IN ('neural_association', 'related_to', 'depends_on', "
+        "'learned_from', 'semantic_similarity', 'declared_link', "
+        "'tag_cooccurrence')"
+    )
+
+    valid_edge_type_check = next(
+        c for c in NeuralMemoryEdge.__table_args__ if getattr(c, "name", None) == "valid_edge_type"
+    )
+    assert str(valid_edge_type_check.sqltext) == expected
