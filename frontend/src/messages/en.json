@@ -580,7 +580,7 @@
         "serviceImprovement": "**Service Improvement**: Aggregate usage data (anonymized) helps us improve performance and features.",
         "support": "**Support**: To respond to support requests and troubleshoot issues.",
         "security": "**Security**: To detect and prevent fraud, abuse, and security threats.",
-        "weNever": "**We Never**: Sell your data, use it to train AI models, or share it with third parties (except service providers like GCP, Qdrant Cloud)."
+        "weNever": "**We Never**: Sell your data, use it to train AI models, or share it with third parties (except service providers acting as data processors under contract — see the Sub-processors section for details)."
       },
       "gdprRights": {
         "title": "Your Rights (GDPR)",
@@ -600,6 +600,19 @@
         "infrastructure": "**Infrastructure**: Google Cloud Platform (hosting), Qdrant Cloud (vector database)",
         "aiApis": "**AI APIs**: OpenAI (embeddings), Voyage AI / Cohere (reranking) - only when explicitly enabled by you.",
         "conclusion": "These services have their own privacy policies and we carefully vet all providers for compliance."
+      },
+      "subProcessors": {
+        "title": "Sub-processors (External Data Processors)",
+        "intro": "We engage the following sub-processors to deliver specific services. Each entry follows GDPR Art. 28 disclosure requirements and Japan APPI 委託先 disclosure norms. We supervise each sub-processor through a binding Data Processing Agreement and review their compliance posture before activation and on contract renewal.",
+        "vendors": {
+          "resend": {
+            "vendor": "**Vendor**: Resend (resend.com) — DPA: https://resend.com/legal/dpa",
+            "purpose": "**Purpose**: Transactional email delivery (account-erasure confirmation for the Right-to-Erasure flow; future password reset and receipts).",
+            "dataCategories": "**Data Categories**: Email address, request_id (UUID linked to your account), opaque template variables. **No memory content is sent.**",
+            "transfer": "**Cross-Border Transfer**: Resend is US-based. We rely on Resend's Data Processing Agreement and their listed transfer mechanism (EU-US Data Privacy Framework / Standard Contractual Clauses — verify the current status at https://resend.com/legal/dpa).",
+            "retention": "**Retention**: Per Resend's plan-tier logs retention policy — see https://resend.com/pricing for current values. Post-termination deletion is governed by Resend's DPA at https://resend.com/legal/dpa."
+          }
+        }
       },
       "dataRetention": {
         "title": "Data Retention",

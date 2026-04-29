@@ -6,6 +6,7 @@ Database URLs are managed directly via os.getenv() in config/database.py.
 """
 
 import os
+from datetime import datetime
 from typing import Literal
 
 from pydantic import Field, model_validator
@@ -182,6 +183,17 @@ class Settings(BaseSettings):
             "sending domain on Resend; otherwise sends 403."
         ),
     )
+    resend_dpa_accepted_at: datetime | None = Field(
+        default=None,
+        description=(
+            "ISO 8601 timestamp when ops accepted the Resend Data Processing "
+            "Addendum (https://resend.com/legal/dpa). Required when "
+            "email_provider='resend' as a defense-in-depth GDPR Art.28 control: "
+            "without an accepted DPA on record, Resend cannot legally process "
+            "personal data on our behalf, so the boot-time validator refuses "
+            "to start the app."
+        ),
+    )
 
     # Plan Tier Overrides (environment variable customization for OSS deployments)
     plan_free_max_contexts: int | None = Field(
@@ -258,6 +270,12 @@ class Settings(BaseSettings):
             if not (self.resend_from_email or "").strip():
                 raise ValueError(
                     "EMAIL_PROVIDER=resend requires RESEND_FROM_EMAIL to be a non-empty address"
+                )
+            if self.resend_dpa_accepted_at is None:
+                raise ValueError(
+                    "EMAIL_PROVIDER=resend requires RESEND_DPA_ACCEPTED_AT to be set "
+                    "(ISO 8601 timestamp when ops accepted the Resend DPA — "
+                    "see https://resend.com/legal/dpa)"
                 )
         return self
 
