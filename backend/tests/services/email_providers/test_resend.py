@@ -211,13 +211,16 @@ async def test_send_returns_false_when_sdk_returns_no_id():
 
 @pytest.mark.asyncio
 async def test_synchronous_sdk_call_runs_on_worker_thread():
-    """Causal (not temporal) test: the wrapped SDK call must complete via
-    a thread other than the asyncio event loop's thread. If it ran on
-    the loop's thread, ``threading.current_thread()`` would equal the
-    main thread — the assertion below catches that regression.
+    """Causal (not temporal) test: the wrapped SDK call must complete on
+    a thread other than the one driving the asyncio loop. We capture the
+    caller's thread before invoking the service so the assertion stays
+    correct even when the loop runs on a non-main thread (e.g. some test
+    runners or app harnesses), instead of relying on
+    ``threading.main_thread()``.
     """
     svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
     captured: dict[str, threading.Thread] = {}
+    caller_thread = threading.current_thread()
 
     def fake_send(_params: dict) -> dict:
         captured["thread"] = threading.current_thread()
@@ -230,8 +233,8 @@ async def test_synchronous_sdk_call_runs_on_worker_thread():
         )
 
     assert result is True
-    assert captured["thread"] is not threading.main_thread(), (
-        "resend.Emails.send must run on a worker thread, not the asyncio main thread"
+    assert captured["thread"] is not caller_thread, (
+        "resend.Emails.send must run on a worker thread, not the asyncio loop thread"
     )
 
 
@@ -317,19 +320,27 @@ async def test_send_erasure_confirmation_does_not_leak_token_in_logs():
 
 @pytest.mark.asyncio
 async def test_send_erasure_confirmation_failure_does_not_leak_token_in_logs():
-    """When the SDK raises, the failure-log path runs. Verify token / URL
-    redaction discipline holds on that branch too — that's the more
-    failure-prone path and where leaks are easiest to slip in.
+    """When the SDK raises, the failure-log path runs. Verify the redaction
+    discipline holds even when the SDK exception message itself contains
+    the request body (and therefore the confirm URL with the raw token) —
+    a documented Resend SDK behavior under some failure modes. The
+    implementation must NOT propagate ``str(exc)`` to the log; only
+    structured non-sensitive metadata (exception type, status code if
+    available) may be emitted.
     """
     svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
     raw_token = "raw-secret-DO-NOT-LEAK-fail-4a"  # noqa: S105
     confirm_url = f"https://app.example.com/account/erasure/confirm?token={raw_token}"
+    # Worst-case: the SDK echoes the request body in its exception. The
+    # fix in resend.py:_send must drop this string before it reaches the
+    # logger, no matter how the SDK chose to compose its error message.
+    leaky_exc_message = f"Resend API error: invalid request body — {confirm_url}"
 
     with (
         patch.object(
             resend_module.resend.Emails,
             "send",
-            side_effect=RuntimeError("API rate limit exceeded"),
+            side_effect=RuntimeError(leaky_exc_message),
         ),
         patch.object(resend_module, "logger") as mock_logger,
     ):

@@ -70,15 +70,21 @@ class ResendEmailService:
         try:
             response = await asyncio.to_thread(resend.Emails.send, params)
         except Exception as exc:
-            # Only log the exception type and a short stringified summary —
-            # Resend SDK exceptions surface API status + reason ("Domain
-            # not found", "Invalid API key", etc.) and do not echo the
-            # request body, but we keep the message bounded as defense
-            # in depth.
+            # Defense in depth: do NOT log ``str(exc)``. The SDK exception
+            # message can — under some failure modes — echo request fields,
+            # and the request body of ``send_erasure_confirmation`` contains
+            # the confirm_url that embeds the raw token. Restrict the log
+            # to non-sensitive structured metadata: the exception type and,
+            # when the SDK exposes one, an HTTP status code. Operators who
+            # need the raw error to debug should reproduce in staging with
+            # logging-only or use Resend's own dashboard.
+            error_fields: dict[str, Any] = {"error_type": type(exc).__name__}
+            status_code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+            if isinstance(status_code, (int, str)):
+                error_fields["status_code"] = status_code
             logger.warning(
                 f"{log_event}_failed",
-                error_type=type(exc).__name__,
-                error=str(exc)[:200],
+                **error_fields,
                 **log_context,
             )
             return False
