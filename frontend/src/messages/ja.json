@@ -1134,8 +1134,8 @@
     "graphTopConnections": "接続数の多いメモリ",
     "graphConnections": "接続",
     "graphEdgeList": "エッジ一覧",
-    "graphEmpty": "recallを使用してメモリ間の接続を構築してください。",
-    "graphEmptyTitle": "Neural edgeがまだありません",
+    "graphEmpty": "コンテキストを使ううちにメモリ同士の接続が自動的に形成されます — recall の共起と Sleep Maintenance によるものです。新しいコンテキストでは反映までに 1 日ほどかかる場合があります。",
+    "graphEmptyTitle": "まだ接続はありません",
     "graphVizLoading": "グラフデータを読み込み中…",
     "graphVizLoadError": "グラフデータの読み込みに失敗しました",
     "graphVizNodeCount": "ノード数",
@@ -2753,7 +2753,9 @@
         "outgoing": "発信リンク",
         "incoming": "被リンク",
         "truncated": "最初の 50 件を表示中 — グラフタブで全件確認できます",
-        "unknown": "(取得不可)"
+        "unknown": "(取得不可)",
+        "emptyTitle": "まだ参照はありません",
+        "emptyDesc": "このメモリには発信リンクも被リンクもありません。関連するメモリを指定して保存すると、明示的な参照が作成されます。"
       }
     },
     "deleteDialog": {

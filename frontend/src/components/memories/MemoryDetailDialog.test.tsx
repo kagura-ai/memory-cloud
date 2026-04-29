@@ -1,5 +1,5 @@
 /**
- * Tests for MemoryDetailDialog (Issues #443 / #440 / #434).
+ * Tests for MemoryDetailDialog (Issues #443 / #441 / #440 / #434).
  *
  * Covers:
  *   - i18n: every user-visible string resolves through useTranslations (#443)
@@ -7,7 +7,8 @@
  *   - References click invokes onOpenLinkedMemory (#440 + #434 composition)
  *   - References truncated hint renders when *HasMore is true (#440)
  *   - notFound mode renders an EmptyState body, not a hard 404 (#434)
- *   - References section is hidden when both lists are empty
+ *   - References empty-state renders when both lists are empty arrays (#441)
+ *   - References section stays hidden when both lists are undefined (#441)
  */
 
 import { render, screen, fireEvent } from "@testing-library/react";
@@ -186,7 +187,7 @@ describe("MemoryDetailDialog — References (Issue #440)", () => {
     expect(screen.getByText("references.truncated")).toBeInTheDocument();
   });
 
-  it("hides the References section when both lists are empty", () => {
+  it("renders the References empty-state when both lists are empty arrays (#441)", () => {
     render(
       <MemoryDetailDialog
         memory={makeRef()}
@@ -198,7 +199,43 @@ describe("MemoryDetailDialog — References (Issue #440)", () => {
       />,
     );
 
+    expect(screen.getByText("references.title")).toBeInTheDocument();
+    expect(screen.getByText("references.emptyTitle")).toBeInTheDocument();
+    expect(screen.getByText("references.emptyDesc")).toBeInTheDocument();
+    expect(screen.queryByText("references.outgoing")).not.toBeInTheDocument();
+    expect(screen.queryByText("references.incoming")).not.toBeInTheDocument();
+  });
+
+  it("hides the References section when both link props are undefined", () => {
+    render(
+      <MemoryDetailDialog
+        memory={makeRef()}
+        open={true}
+        onOpenChange={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
     expect(screen.queryByText("references.title")).not.toBeInTheDocument();
+    expect(screen.queryByText("references.emptyTitle")).not.toBeInTheDocument();
+  });
+
+  it("does not render empty-state on partial fetch (#441)", () => {
+    // Mixed-case: outgoing fetched (empty), incoming never queried. Claiming
+    // "no incoming or outgoing links" would misrepresent the unfetched side,
+    // so the empty-state must stay hidden until both directions resolve.
+    render(
+      <MemoryDetailDialog
+        memory={makeRef()}
+        open={true}
+        onOpenChange={vi.fn()}
+        onDelete={vi.fn()}
+        outgoingLinks={[]}
+      />,
+    );
+
+    expect(screen.queryByText("references.emptyTitle")).not.toBeInTheDocument();
+    expect(screen.queryByText("references.emptyDesc")).not.toBeInTheDocument();
   });
 });
 

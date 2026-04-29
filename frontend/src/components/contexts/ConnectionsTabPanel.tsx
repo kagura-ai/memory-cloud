@@ -226,10 +226,8 @@ export function ConnectionsTabPanel({ contextId }: ConnectionsTabPanelProps) {
       ) : (
         <EmptyState
           icon={Brain}
-          title={t("graphEmptyTitle", { default: "No neural edges yet" })}
-          description={t("graphEmpty", {
-            default: "Use recall to build connections between memories.",
-          })}
+          title={t("graphEmptyTitle")}
+          description={t("graphEmpty")}
         />
       )}
     </div>
