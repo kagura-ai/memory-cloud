@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  <strong>Adaptive AI Memory Platform</strong> — セルフホスト、オープンソース。<br>
-  AI アシスタントに、使うほど賢くなる永続メモリを。
+  <strong>AI のための、共有メモリ</strong> — セルフホスト・オープンソース。<br>
+  使うほど賢くなる、適応するメモリ。
 </p>
 
 <p align="center">

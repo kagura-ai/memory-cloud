@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  <strong>Adaptive AI Memory Platform</strong> — Self-hosted, open source.<br>
-  Give your AI assistants persistent memory that gets smarter as you use it.
+  <strong>Shared memory for AI</strong> — Self-hosted, open source.<br>
+  Adaptive memory that gets smarter every time you use it.
 </p>
 
 <p align="center">
