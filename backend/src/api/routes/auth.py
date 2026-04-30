@@ -42,6 +42,7 @@ from services.signup_gate_service import check_signup_access
 from services.workspace_service import WorkspaceService
 from utils.datetime import utcnow
 from utils.encryption import get_encryptor
+from utils.exceptions import ConflictError
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,13 @@ async def _check_registration_allowed(
     settings = get_settings()
 
     async def _run(session: AsyncSession) -> RedirectResponse | None:
-        # Existing users can always login
+        # Existing users can always login. NOTE (#481): an email match here
+        # also lets through cross-provider squatters (e.g. Google user
+        # alice@x.com → GitHub login with same address). That case is caught
+        # downstream by RoleManager.ensure_user, which raises ConflictError
+        # → callback redirects to /login?error=email_in_use. Don't tighten
+        # this gate to also reject cross-provider — multi-provider account
+        # linking is intentionally deferred to a separate issue.
         result = await session.execute(select(User).filter_by(email=email))
         if result.scalar_one_or_none():
             return None
@@ -161,6 +168,22 @@ async def _check_registration_allowed(
     async for session in get_db():
         return await _run(session)
     return None
+
+
+def _email_in_use_redirect() -> RedirectResponse:
+    """Redirect to the frontend login page on cross-provider email collision.
+
+    Issue #481: when ``RoleManager.ensure_user`` raises ``ConflictError`` (the
+    OAuth user's email is already bound to a different provider's account),
+    surface a stable error code on the login page rather than a JSON 409 mid-
+    redirect. Mirrors the shape of ``_check_registration_allowed``'s blocked
+    branch so both Google and GitHub callbacks end on the same UX surface.
+    """
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    return RedirectResponse(
+        f"{frontend_url}/login?error=email_in_use",
+        status_code=303,
+    )
 
 
 # ============================================================================
@@ -272,6 +295,7 @@ async def google_login(
 
 @google_router.get("/callback")
 async def google_callback(
+    request: Request,
     code: str = Query(..., description="OAuth2 authorization code"),
     state: str = Query(..., description="CSRF state token"),
 ):
@@ -343,13 +367,23 @@ async def google_callback(
         if blocked:
             return blocked
 
-        # 4. Ensure user exists in database & assign role
+        # 4. Ensure user exists in database & assign role.
+        # Issue #481: pass email_verified from Google's userinfo response so
+        # ensure_user can sync mutable email/name without trusting the IdP
+        # blindly. Google v3 /oauth2/v3/userinfo always populates the
+        # email_verified boolean; default False here so a missing field is
+        # treated as unverified rather than implicitly trusted.
         role_manager = get_role_manager()
         role = await role_manager.ensure_user(
             email=user_info["email"],
             user_id=user_info["sub"],
             name=user_info.get("name"),
             auth_provider="google",
+            # Strict identity check (not bool coercion) so a stringly-typed
+            # "True" / "false" from a misconfigured IdP cannot pass the gate.
+            email_verified=user_info.get("email_verified") is True,
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
         )
 
         # 5. Create session
@@ -454,6 +488,8 @@ async def google_callback(
 
         return redirect
 
+    except ConflictError:
+        return _email_in_use_redirect()
     except Exception as e:
         logger.error(f"OAuth2 callback failed: {e}")
         raise HTTPException(
@@ -641,43 +677,44 @@ async def _github_exchange_code(code: str) -> str:
 
 
 async def _github_get_user_info(access_token: str) -> dict[str, Any]:
-    """Get user info from GitHub API."""
+    """Get user info from GitHub API.
+
+    Always fetches ``/user/emails`` and selects the primary verified address,
+    ignoring the public-profile ``email`` field on ``/user``. The public field
+    is user-mutable in GitHub UI and verification status is not exposed there,
+    so trusting it would defeat the ``email_verified`` gate (Issue #481): a
+    user could surface an unverified address as their public email and have
+    it written into ``users.email`` on every login.
+
+    The returned dict carries ``email_verified=True`` as an invariant — if no
+    verified primary exists, the function raises ``ValueError`` and the OAuth
+    callback fails before any DB write. Callers can therefore unconditionally
+    pass ``email_verified=True`` to ``RoleManager.ensure_user`` without a
+    second-guessing branch.
+    """
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.github+json",
+    }
     async with httpx.AsyncClient() as client:
-        # Get user profile
-        user_resp = await client.get(
-            GITHUB_USER_URL,
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Accept": "application/vnd.github+json",
-            },
-            timeout=10.0,
-        )
+        user_resp = await client.get(GITHUB_USER_URL, headers=headers, timeout=10.0)
         user_resp.raise_for_status()
         user_data = user_resp.json()
 
-        # Get primary email (may be private)
-        email = user_data.get("email")
-        if not email:
-            emails_resp = await client.get(
-                GITHUB_EMAILS_URL,
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Accept": "application/vnd.github+json",
-                },
-                timeout=10.0,
-            )
-            emails_resp.raise_for_status()
-            for e in emails_resp.json():
-                if e.get("primary") and e.get("verified"):
-                    email = e["email"]
-                    break
+        emails_resp = await client.get(GITHUB_EMAILS_URL, headers=headers, timeout=10.0)
+        emails_resp.raise_for_status()
+        primary_verified = next(
+            (e["email"] for e in emails_resp.json() if e.get("primary") and e.get("verified")),
+            None,
+        )
 
-        if not email:
-            raise ValueError("GitHub account has no verified email")
+    if not primary_verified:
+        raise ValueError("GitHub account has no verified primary email")
 
     return {
         "sub": str(user_data["id"]),  # GitHub user ID as string (like Google's sub)
-        "email": email,
+        "email": primary_verified,
+        "email_verified": True,  # Invariant — only verified primary reaches here
         "name": user_data.get("name") or user_data.get("login"),
         "picture": user_data.get("avatar_url"),
         "login": user_data.get("login"),  # GitHub username for audit logging (Issue #358)
@@ -686,6 +723,7 @@ async def _github_get_user_info(access_token: str) -> dict[str, Any]:
 
 @github_router.get("/callback")
 async def github_callback(
+    request: Request,
     code: str = Query(..., description="GitHub authorization code"),
     state: str = Query(..., description="CSRF state token"),
 ):
@@ -721,32 +759,33 @@ async def github_callback(
         if blocked:
             return blocked
 
-        # 4. Ensure user exists & assign role
-        # Use GitHub's user ID for new users, but for existing users (e.g., logged in
-        # via Google before), ensure_user returns the role and we need to look up the
-        # actual DB user_id which may differ from GitHub's ID.
+        # 4. Ensure user exists & assign role.
+        # Issue #481: lookup is by user_id (GitHub sub), so the post-call DB
+        # re-query previously needed for cross-provider account linking is
+        # no longer correct — when a Google user attempts a GitHub login with
+        # the same email, ensure_user raises ConflictError(409) instead of
+        # silently linking the GitHub login to the Google row. The session
+        # subject can therefore be user_info["sub"] directly.
+        # email_verified is an invariant True here: _github_get_user_info
+        # always selects the verified primary address from /user/emails or
+        # raises before reaching this point.
         role_manager = get_role_manager()
         role = await role_manager.ensure_user(
             email=user_info["email"],
             user_id=user_info["sub"],
             name=user_info.get("name"),
             auth_provider="github",
+            # _github_get_user_info enforces the verified-primary invariant
+            # and always sets email_verified=True; KeyError on a missing key
+            # is the desired loud failure.
+            email_verified=user_info["email_verified"],
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
         )
 
-        # Look up actual DB user_id (may differ from GitHub ID if user first logged in via Google)
-        from sqlalchemy import select
+        db_user_id = user_info["sub"]
 
-        from models.auth import User
-
-        db_user_id = user_info["sub"]  # fallback
-        async for db in get_db():
-            result = await db.execute(select(User).filter_by(email=user_info["email"]))
-            db_user = result.scalar_one_or_none()
-            if db_user:
-                db_user_id = db_user.user_id
-            break
-
-        # 5. Create session using DB user_id (not GitHub's sub)
+        # 5. Create session using GitHub sub as user_id
         deleted_count = _session_manager.delete_user_sessions(db_user_id)
         if deleted_count > 0:
             logger.info(f"Invalidated {deleted_count} old session(s) for {user_info['email']}")
@@ -803,6 +842,8 @@ async def github_callback(
         logger.info(f"GitHub OAuth2 login successful: {user_info['email']} (role={role})")
         return redirect
 
+    except ConflictError:
+        return _email_in_use_redirect()
     except Exception as e:
         logger.error(f"GitHub OAuth2 callback failed: {e}")
         raise HTTPException(

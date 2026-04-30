@@ -57,6 +57,16 @@ class Settings(BaseSettings):
         default="kagura-erasure-v1",
         description="Per-deployment salt for audit_logs pseudonymization on account erasure (override in production)",
     )
+    audit_hmac_key: str = Field(
+        default="dev-audit-hmac-change-in-production",
+        description=(
+            "HMAC-SHA256 key for keyed hashing of mutable identifiers in "
+            "audit_logs.old_value_hash / new_value_hash columns (Issue #481, "
+            "OAuth email-sync events). Independent from API_KEY_SECRET so a "
+            "rotation of either does not invalidate the other's audit trail. "
+            "Override in production via AUDIT_HMAC_KEY (use: openssl rand -hex 32)."
+        ),
+    )
 
     # Session
     session_ttl_seconds: int = Field(

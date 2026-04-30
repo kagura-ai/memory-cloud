@@ -8,6 +8,7 @@ underlying primitive (SHA256 → SHA3, BLAKE2, …) in a single edit.
 from __future__ import annotations
 
 import hashlib
+import hmac
 
 
 def sha256_hex(value: str, *, salt: str = "") -> str:
@@ -24,3 +25,24 @@ def sha256_hex(value: str, *, salt: str = "") -> str:
         64-character lowercase hex digest.
     """
     return hashlib.sha256(f"{salt}{value}".encode()).hexdigest()
+
+
+def hmac_sha256_hex(value: str, key: str) -> str:
+    """Return the HMAC-SHA256 hex digest of ``value`` keyed by ``key``.
+
+    Use this for audit-log columns where a plain salted SHA256 is too weak —
+    e.g. ``audit_logs.old_value_hash`` / ``new_value_hash`` storing email
+    address hashes (Issue #481). The keyed primitive resists rainbow-table
+    attacks against small-domain inputs (email local-part ≤ 64 chars) that
+    a public salt cannot, because the attacker would need to obtain ``key``.
+
+    Args:
+        value: Input string to hash. Must be UTF-8 encodable.
+        key: HMAC key (server secret). Must be UTF-8 encodable. Pass the
+            ``Settings.audit_hmac_key`` value, never a hard-coded constant.
+
+    Returns:
+        64-character lowercase hex digest. Same shape as ``sha256_hex`` —
+        fits the existing ``String(64)`` audit-log columns without DDL.
+    """
+    return hmac.new(key.encode(), value.encode(), hashlib.sha256).hexdigest()
