@@ -102,7 +102,7 @@ class CallbackResponse(BaseModel):
 
 
 async def _check_registration_allowed(
-    email: str, db: AsyncSession | None = None
+    email: str, db: AsyncSession | None = None, *, user_id: str | None = None
 ) -> RedirectResponse | None:
     """Check if a new user is allowed to register.
 
@@ -119,8 +119,12 @@ async def _check_registration_allowed(
         db: Optional existing session. When provided, the check runs on the
             caller's session (avoids opening a second pool connection when
             dispatched from SignupGateService's fallback path).
+        user_id: OAuth sub claim. When provided, an existing-user match on
+            *either* email or user_id counts as "existing" so a returning
+            user whose IdP email changed is still recognised as a login (not
+            blocked as a new signup).
     """
-    from sqlalchemy import func, select
+    from sqlalchemy import func, or_, select
 
     from config.settings import get_settings
     from models.auth import User
@@ -136,7 +140,15 @@ async def _check_registration_allowed(
         # → callback redirects to /login?error=email_in_use. Don't tighten
         # this gate to also reject cross-provider — multi-provider account
         # linking is intentionally deferred to a separate issue.
-        result = await session.execute(select(User).filter_by(email=email))
+        #
+        # user_id (OAuth sub) is included as an OR condition so a returning
+        # user whose email changed at the IdP is recognised as existing and
+        # never blocked — RoleManager.ensure_user handles the email sync.
+        if user_id:
+            cond = or_(User.email == email, User.user_id == user_id)
+        else:
+            cond = User.email == email
+        result = await session.execute(select(User).where(cond))
         if result.scalar_one_or_none():
             return None
 

@@ -13,7 +13,7 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi.responses import RedirectResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -79,7 +79,8 @@ class SignupGateService:
         1. ``enabled=false`` → delegate to legacy env-based gate (OSS path).
         2. ``provider == "google"`` → pass through (Google-side controls signup;
            backend is a no-op for Google in Phase 1).
-        3. Existing user (users row for this email) → allowed (login, not signup).
+        3. Existing user (users row matching this email or user_id/sub) → allowed
+           (login not signup; user_id match handles email-change-at-IdP case).
         4. First user (users table empty) → allowed (initial admin bootstrap).
         5. ``mode == "manual"`` → allowed iff ``github_user_id`` is on the
            allowlist with ``state='active'``.
@@ -89,7 +90,7 @@ class SignupGateService:
         config = await self._load_config()
 
         if not config.enabled:
-            return await self._legacy_check(email)
+            return await self._legacy_check(email, oauth_sub)
 
         # Google's own OAuth + workspace configuration decides who can sign up
         # on that side — having two places (backend allowlist + Google console)
@@ -98,7 +99,7 @@ class SignupGateService:
         if provider == "google":
             return None
 
-        if await self._is_existing_user(email):
+        if await self._is_existing_user(email, oauth_sub):
             return None
 
         if await self._is_first_user():
@@ -238,8 +239,10 @@ class SignupGateService:
                 await self.db.refresh(config)
         return config
 
-    async def _is_existing_user(self, email: str) -> bool:
-        result = await self.db.execute(select(User).where(User.email == email))
+    async def _is_existing_user(self, email: str, user_id: str) -> bool:
+        result = await self.db.execute(
+            select(User).where(or_(User.email == email, User.user_id == user_id))
+        )
         return result.scalar_one_or_none() is not None
 
     async def _is_first_user(self) -> bool:
@@ -267,7 +270,7 @@ class SignupGateService:
         result = await self.db.execute(select(SignupAllowlistEntry.id).where(*filters).limit(1))
         return result.first() is not None
 
-    async def _legacy_check(self, email: str) -> RedirectResponse | None:
+    async def _legacy_check(self, email: str, user_id: str) -> RedirectResponse | None:
         """Delegate to the pre-existing env-based gate.
 
         Lazy import to avoid a circular dependency (``api.routes.auth``
@@ -277,7 +280,7 @@ class SignupGateService:
         """
         from api.routes.auth import _check_registration_allowed
 
-        return await _check_registration_allowed(email, self.db)
+        return await _check_registration_allowed(email, self.db, user_id=user_id)
 
     def _blocked_response(self) -> RedirectResponse:
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
