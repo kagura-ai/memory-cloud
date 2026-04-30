@@ -54,36 +54,92 @@ if str(_BACKEND_SRC) not in sys.path:
     sys.path.insert(0, str(_BACKEND_SRC))
 
 import pytest  # noqa: E402
+from alembic.config import Config  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import create_engine, text  # noqa: E402
+from sqlalchemy import text  # noqa: E402
 
+from alembic import command  # noqa: E402
 from api.main import app  # noqa: E402
 from db.base import get_sync_session  # noqa: E402
-from models.auth import Base as AuthBase  # noqa: E402
 from models.auth import OAuth2Client  # noqa: E402
+
+
+def _check_db_available() -> bool:
+    """Return ``True`` iff the test Postgres at ``DATABASE_URL`` accepts a connection.
+
+    Mirrors the ``_check_db_available()`` helper in
+    ``tests/api/test_api_integration.py`` so this module skips cleanly
+    when the test DB isn't running, instead of erroring at fixture setup.
+    """
+    try:
+        import psycopg2
+
+        url = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
+        conn = psycopg2.connect(url, connect_timeout=3)
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _check_db_available(),
+    reason="Test database not available (set TEST_DATABASE_URL)",
+)
 
 
 @pytest.fixture(scope="module", autouse=True)
 def _ensure_oauth_clients_schema():
-    """Ensure ``oauth_clients`` exists in the test DB.
+    """Apply alembic migrations so the test DB matches the production schema.
 
-    Other integration tests rely on ``conftest.py``'s session-scoped async
-    engine fixture which calls ``Base.metadata.create_all`` — but this test
-    uses ``get_sync_session()`` so its DB visibility is independent. Create
-    the auth tables directly through a sync engine before the suite runs;
-    this is idempotent (``checkfirst=True`` is the default).
+    Critical: setting up the schema via ``alembic upgrade head`` (instead of
+    ``Base.metadata.create_all``) means this test actually exercises migration
+    ``d04_519_oauth_owner_nullable``. Using ``create_all`` would build tables
+    from the *current ORM models* (which already have ``owner_id`` nullable),
+    so a missing or buggy migration would still let the test pass — defeating
+    the regression-pin purpose. Only ``alembic upgrade head`` proves the
+    migration itself produces the expected DB constraint.
+
+    Mirrors the ``_alembic_at_test_db`` pattern in
+    ``tests/integration/test_alembic_migrations.py``: alembic's ``env.py``
+    re-reads ``get_database_url()`` on import and clobbers any
+    ``Config.set_main_option("sqlalchemy.url", ...)``, so the test DB URL
+    must be in the process env at command time. The module-level
+    ``os.environ["DATABASE_URL"]`` override above is already in place;
+    ``alembic.ini`` is at ``backend/alembic.ini``.
     """
-    sync_url = os.environ["DATABASE_URL"].replace("+asyncpg", "")
-    engine = create_engine(sync_url, future=True)
+    backend_dir = Path(__file__).resolve().parents[2]
+    config = Config(str(backend_dir / "alembic.ini"))
+    command.upgrade(config, "head")
+    yield
+
+
+def _assert_oauth_clients_owner_id_nullable() -> None:
+    """Pin that ``oauth_clients.owner_id`` is nullable post-migration.
+
+    Reads ``information_schema.columns`` directly so the assertion does not
+    depend on the ORM model's view of the column — this catches the case
+    where the migration is missing or wrong even though the model still says
+    ``nullable=True``.
+    """
+    sync_url = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
+    import psycopg2
+
+    conn = psycopg2.connect(sync_url, connect_timeout=3)
     try:
-        # ``oauth_clients`` has a FK to ``workspaces``, which itself FKs to
-        # ``users``. ``create_all()`` (no ``tables=`` arg) walks the dependency
-        # graph and creates all auth tables in FK-safe order. Idempotent
-        # via ``checkfirst=True`` (the default).
-        AuthBase.metadata.create_all(engine)
-        yield
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT is_nullable FROM information_schema.columns "
+                "WHERE table_name = 'oauth_clients' AND column_name = 'owner_id'"
+            )
+            row = cur.fetchone()
+            assert row is not None, "oauth_clients.owner_id column missing"
+            assert row[0] == "YES", (
+                f"oauth_clients.owner_id must be nullable post-migration; "
+                f"information_schema reports is_nullable={row[0]!r}"
+            )
     finally:
-        engine.dispose()
+        conn.close()
 
 
 def _assert_test_db(session) -> None:
@@ -138,6 +194,17 @@ def sync_db():
 
 class TestDcrLoopbackPersistsNullOwnerId:
     """Issue #519: ``oauth_clients.owner_id`` must allow NULL for DCR clients."""
+
+    def test_migration_made_owner_id_nullable(self):
+        """Pin the migration's DB-level effect via information_schema.
+
+        This is the regression check that catches "migration is missing or
+        wrong" — independent of the ORM model's view of the column. If
+        ``d04_519_oauth_owner_nullable`` were dropped, the rest of the suite
+        would still pass (because Pydantic + SQLAlchemy say nullable=True),
+        but this assertion would fail on a freshly migrated DB.
+        """
+        _assert_oauth_clients_owner_id_nullable()
 
     def test_dcr_loopback_returns_201_and_persists_null_owner(self, client, sync_db):
         # Mock the rate-limit counter so this test doesn't share quota with
