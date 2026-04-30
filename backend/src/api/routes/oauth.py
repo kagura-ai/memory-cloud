@@ -480,11 +480,17 @@ _PROVIDER_HOSTNAMES: dict[str, tuple[str, ...]] = {
 # For loopback URIs only — the hostname is uninformative, so substring-match
 # the (NFKC-normalized, lowercased) ``client_name`` against the provider
 # names. Derived from ``_PROVIDER_HOSTNAMES`` so adding a provider only
-# requires editing one mapping. ``client_name`` is a user-supplied trust
-# signal: this is intentionally a soft check, paired with the existing rate
-# limit (5/min/IP) and the ``token_endpoint_auth_method="none"`` + PKCE
-# defaults — see issue #513 Security note for the threat model.
-_LOOPBACK_PROVIDER_KEYWORDS: frozenset[str] = frozenset(_PROVIDER_HOSTNAMES)
+# requires editing one mapping. Stored as ``tuple`` (not ``frozenset``) so
+# iteration order is deterministic — when a ``client_name`` contains more
+# than one provider keyword (e.g. "Claude Cursor"), the first match in
+# ``_PROVIDER_HOSTNAMES`` insertion order wins, which is reproducible across
+# processes (frozenset iteration depends on hash randomization).
+#
+# ``client_name`` is a user-supplied trust signal: this is intentionally a
+# soft check, paired with the existing rate limit (5/min/IP) and the
+# ``token_endpoint_auth_method="none"`` + PKCE defaults — see issue #513
+# Security note for the threat model.
+_LOOPBACK_PROVIDER_KEYWORDS: tuple[str, ...] = tuple(_PROVIDER_HOSTNAMES)
 
 
 def _normalize_client_name(client_name: str) -> str:

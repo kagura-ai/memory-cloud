@@ -167,7 +167,11 @@ def _patch_dcr_dependencies():
     fake_session.refresh.side_effect = _refresh
 
     fake_encryptor = MagicMock()
-    fake_encryptor.encrypt = MagicMock(return_value=b"encrypted-secret-blob")
+    # APIKeyEncryption.encrypt() returns a base64-encoded ``str`` in production,
+    # not ``bytes`` (and ``OAuth2Client.plaintext_secret_encrypted`` is a
+    # SQLAlchemy ``String`` column). Match the production type so the mock
+    # doesn't mask serialization issues.
+    fake_encryptor.encrypt = MagicMock(return_value="encrypted-secret-blob-base64")
 
     return rate_limit, fake_session, fake_encryptor
 

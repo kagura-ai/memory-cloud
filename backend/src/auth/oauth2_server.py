@@ -679,22 +679,36 @@ class OAuth2AuthorizationServer:
         code without a valid ``code_verifier``. Issue #157 added public-client
         support and PKCE plumbing but never registered this extension, leaving
         the gate unenforced — Authlib's ``CodeChallenge`` only triggers when
-        explicitly registered. The required flag is config-driven so a known-good
-        client breakage can be rolled back without redeploying.
+        explicitly registered.
+
+        The kill-switch ``settings.oauth_pkce_required`` controls whether the
+        extension is registered at all. Registering ``CodeChallenge(required=False)``
+        still enforces ``code_verifier`` whenever a ``code_challenge`` is stored
+        on the authorization code (Authlib's "challenge stored → verifier
+        required" branch fires regardless of the flag), so a true rollback to
+        pre-#513 behavior requires SKIPPING registration. We therefore:
+        - register with ``required=True`` when the kill-switch is on (default)
+        - skip registration entirely when the kill-switch is off (emergency
+          rollback path; matches pre-#513 behavior exactly).
         """
         pkce_required = bool(get_settings().oauth_pkce_required)
 
-        self.server.register_grant(
-            AuthorizationCodeGrant,
-            [CodeChallenge(required=pkce_required)],
-        )
+        if pkce_required:
+            self.server.register_grant(
+                AuthorizationCodeGrant,
+                [CodeChallenge(required=True)],
+            )
+        else:
+            # Emergency rollback: pre-#513 behavior with no PKCE enforcement.
+            self.server.register_grant(AuthorizationCodeGrant)
 
         # Refresh Token Grant
         self.server.register_grant(RefreshTokenGrant)
 
         logger.info(
-            f"OAuth2 server initialized: grants=[authorization_code, refresh_token], "
-            f"pkce_required={pkce_required}"
+            "oauth2_server_initialized",
+            grants=["authorization_code", "refresh_token"],
+            pkce_required=pkce_required,
         )
 
     def get_consent_grant(self, request: Any, end_user: Any = None) -> Any:

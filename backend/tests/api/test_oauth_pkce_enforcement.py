@@ -41,6 +41,22 @@ def _build_wrapper_with_mocked_server():
     return wrapper
 
 
+def _find_grant_call(wrapper, grant_cls):
+    """Locate the ``register_grant`` call for a given grant class.
+
+    Iterate ``call_args_list`` and return the matching call rather than
+    indexing ``[0]``. Robust against grant ordering changes inside
+    ``_register_grants``.
+    """
+    for call in wrapper.server.register_grant.call_args_list:
+        if call.args and call.args[0] is grant_cls:
+            return call
+    raise AssertionError(
+        f"register_grant was never called with {grant_cls.__name__}. "
+        f"Recorded calls: {wrapper.server.register_grant.call_args_list!r}"
+    )
+
+
 class TestPkceExtensionRegistration:
     """Pin that PKCE is enforced via Authlib's CodeChallenge extension."""
 
@@ -48,18 +64,13 @@ class TestPkceExtensionRegistration:
         wrapper = _build_wrapper_with_mocked_server()
         wrapper._register_grants()
 
-        # First register_grant call is for AuthorizationCodeGrant.
-        first_call = wrapper.server.register_grant.call_args_list[0]
-        grant_cls, *rest = first_call.args
-        assert grant_cls is AuthorizationCodeGrant, (
-            f"expected first register_grant call to be AuthorizationCodeGrant, got {grant_cls!r}"
-        )
-        assert rest, (
+        call = _find_grant_call(wrapper, AuthorizationCodeGrant)
+        assert len(call.args) >= 2, (
             "AuthorizationCodeGrant must be registered with an extensions list "
             "(positional arg 2). Authlib's CodeChallenge extension is required "
             "to enforce PKCE for public clients (issue #513)."
         )
-        extensions = rest[0]
+        extensions = call.args[1]
         assert any(isinstance(e, CodeChallenge) for e in extensions), (
             f"CodeChallenge extension missing from grant extensions {extensions!r}"
         )
@@ -68,7 +79,8 @@ class TestPkceExtensionRegistration:
         wrapper = _build_wrapper_with_mocked_server()
         wrapper._register_grants()
 
-        extensions = wrapper.server.register_grant.call_args_list[0].args[1]
+        call = _find_grant_call(wrapper, AuthorizationCodeGrant)
+        extensions = call.args[1]
         code_challenge = next(e for e in extensions if isinstance(e, CodeChallenge))
         assert code_challenge.required is True, (
             "PKCE must be required by default. The default in settings "
@@ -76,20 +88,49 @@ class TestPkceExtensionRegistration:
             "an explicit env var, not be the default."
         )
 
-    @pytest.mark.parametrize("required_setting", [True, False])
-    def test_pkce_required_follows_settings(self, required_setting):
-        """The kill-switch must propagate from settings.oauth_pkce_required."""
+    def test_pkce_required_true_registers_extension(self):
+        """``oauth_pkce_required=True`` registers the extension with required=True."""
         with patch("auth.oauth2_server.get_settings") as mock_get_settings:
             mock_settings = MagicMock()
-            mock_settings.oauth_pkce_required = required_setting
+            mock_settings.oauth_pkce_required = True
             mock_get_settings.return_value = mock_settings
 
             wrapper = _build_wrapper_with_mocked_server()
             wrapper._register_grants()
 
-        extensions = wrapper.server.register_grant.call_args_list[0].args[1]
+        call = _find_grant_call(wrapper, AuthorizationCodeGrant)
+        assert len(call.args) >= 2, "extensions list must be registered when required"
+        extensions = call.args[1]
         code_challenge = next(e for e in extensions if isinstance(e, CodeChallenge))
-        assert code_challenge.required is required_setting
+        assert code_challenge.required is True
+
+    def test_pkce_required_false_skips_extension_for_true_rollback(self):
+        """The kill-switch off path must SKIP CodeChallenge entirely.
+
+        Authlib's ``CodeChallenge`` extension still enforces ``code_verifier``
+        whenever a ``code_challenge`` is stored on the authorization code,
+        even when ``required=False`` (the "challenge stored → verifier
+        required" branch fires regardless of the flag). To make
+        ``OAUTH_PKCE_REQUIRED=false`` a true pre-#513-equivalent rollback,
+        we must not register the extension at all when the flag is off.
+        """
+        with patch("auth.oauth2_server.get_settings") as mock_get_settings:
+            mock_settings = MagicMock()
+            mock_settings.oauth_pkce_required = False
+            mock_get_settings.return_value = mock_settings
+
+            wrapper = _build_wrapper_with_mocked_server()
+            wrapper._register_grants()
+
+        call = _find_grant_call(wrapper, AuthorizationCodeGrant)
+        # Either no extensions arg at all, or a list without CodeChallenge.
+        if len(call.args) >= 2:
+            extensions = call.args[1] or []
+            assert not any(isinstance(e, CodeChallenge) for e in extensions), (
+                "CodeChallenge must NOT be registered when oauth_pkce_required=False — "
+                "registering with required=False still enforces the verifier when a "
+                "challenge is stored, so it's not a true rollback to pre-#513 behavior."
+            )
 
 
 class TestPkceCodeVerifierEnforcement:
