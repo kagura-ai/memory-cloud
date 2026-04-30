@@ -383,7 +383,12 @@ class OAuth2Client(Base):
     client_id = Column(String(48), nullable=False, unique=True, index=True)
     client_secret_hash = Column(String(64), nullable=False)  # SHA256 hash (always required)
     client_name = Column(String(100), nullable=False)
-    owner_id = Column(String(255), nullable=False, index=True)
+    # Issue #519 (#513 follow-up): DCR-registered clients (RFC 7591) have no
+    # human owner — ``dynamic_client_registration`` creates them with
+    # ``owner_id=None``. Admin-managed clients still record the creating
+    # user's id. Migration ``d04_519_oauth_clients_owner_id_nullable``
+    # drops the corresponding NOT NULL DB constraint.
+    owner_id = Column(String(255), nullable=True, index=True)
 
     # Issue #169: Workspace-scoped OAuth clients (access all contexts in workspace)
     # Migration 034: context_id removed (deprecated)
