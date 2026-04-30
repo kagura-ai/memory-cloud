@@ -98,12 +98,14 @@ export default function ProfilePage() {
       refetchUser();
       router.replace(cleanUrl);
     } else if (errorCode?.startsWith("refresh_")) {
+      // Wire-format contract with backend's _maybe_refresh_redirect:
+      // any code not in this map falls through to the generic message.
+      const errorMessageKey: Record<string, string> = {
+        refresh_user_mismatch: "refreshFromIdPErrorMismatch",
+        refresh_state_expired: "refreshFromIdPErrorExpired",
+      };
       const messageKey =
-        errorCode === "refresh_user_mismatch"
-          ? "refreshFromIdPErrorMismatch"
-          : errorCode === "refresh_state_expired"
-            ? "refreshFromIdPErrorExpired"
-            : "refreshFromIdPErrorGeneric";
+        errorMessageKey[errorCode] ?? "refreshFromIdPErrorGeneric";
       toast({
         title: tCommon("error"),
         description: t(messageKey, { provider }),

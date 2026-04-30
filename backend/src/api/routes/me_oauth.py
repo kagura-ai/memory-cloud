@@ -178,11 +178,8 @@ async def refresh_oauth(
             "GITHUB_REDIRECT_URI",
             "http://localhost:8080/api/v1/auth/github/callback",
         )
-        authorization_url = (
-            f"{auth_module.GITHUB_AUTH_URL}?client_id={client_id}"
-            f"&redirect_uri={github_redirect}"
-            f"&scope=read:user+user:email"
-            f"&state={state}"
+        authorization_url = auth_module.build_github_authorization_url(
+            client_id=client_id, redirect_uri=github_redirect, state=state
         )
 
     logger.info(f"refresh_oauth_initiated: user_id={user_id} provider={provider}")

@@ -722,6 +722,21 @@ GITHUB_USER_URL = "https://api.github.com/user"
 GITHUB_EMAILS_URL = "https://api.github.com/user/emails"
 
 
+def build_github_authorization_url(*, client_id: str, redirect_uri: str, state: str) -> str:
+    """Compose the GitHub OAuth2 authorization URL.
+
+    Shared by the login flow (``github_login``) and the manual-refresh
+    flow (``me_oauth.refresh_oauth``) so the scope string and parameter
+    order stay identical between them.
+    """
+    return (
+        f"{GITHUB_AUTH_URL}?client_id={client_id}"
+        f"&redirect_uri={redirect_uri}"
+        f"&scope=read:user+user:email"
+        f"&state={state}"
+    )
+
+
 @github_router.get("/login")
 async def github_login(
     return_to: str | None = None,
@@ -745,11 +760,8 @@ async def github_login(
         "http://localhost:8080/api/v1/auth/github/callback",
     )
 
-    auth_url = (
-        f"{GITHUB_AUTH_URL}?client_id={client_id}"
-        f"&redirect_uri={redirect_uri}"
-        f"&scope=read:user+user:email"
-        f"&state={state}"
+    auth_url = build_github_authorization_url(
+        client_id=client_id, redirect_uri=redirect_uri, state=state
     )
 
     if return_to:
