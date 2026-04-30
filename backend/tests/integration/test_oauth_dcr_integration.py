@@ -29,24 +29,12 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-# ---------------------------------------------------------------------------
-# Hermetic environment setup — must happen BEFORE importing the FastAPI app /
-# db modules, which read DATABASE_URL / API_KEY_SECRET at import time.
-#
-# - Force ``DATABASE_URL`` to ``TEST_DATABASE_URL`` (or the project default
-#   ``..._test`` DB) so a developer with a dev-DB ``DATABASE_URL`` exported
-#   in their shell cannot have this test write to or DELETE FROM the wrong
-#   database. Mirrors the safety pattern in
-#   ``tests/integration/test_alembic_migrations.py``.
-# - Provide test-only fallbacks for ``API_KEY_SECRET`` / ``JWT_SECRET`` via
-#   ``setdefault`` (do NOT override real values when the operator sourced
-#   ``.env.local`` themselves) so the test passes hermetically when run
-#   under bare ``pytest tests/integration/...`` without ``.env.local``.
-# ---------------------------------------------------------------------------
-_DEFAULT_TEST_DB_URL = "postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test"
-os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL", _DEFAULT_TEST_DB_URL)
-os.environ.setdefault("API_KEY_SECRET", "integration-test-api-key-secret-not-for-prod")
-os.environ.setdefault("JWT_SECRET", "integration-test-jwt-secret-not-for-prod")
+# ``DATABASE_URL``/``API_KEY_SECRET``/``JWT_SECRET`` are steered at
+# ``TEST_DATABASE_URL`` (and test-only fallbacks) by
+# ``backend/tests/integration/conftest.py`` at conftest-import time —
+# that runs before any test module is collected, so by the time this
+# module is imported (and ``api.main`` / ``config.database`` read the env)
+# the override is already in place. See conftest.py for rationale.
 
 # Match the sys.path layout the rest of the backend tests use.
 _BACKEND_SRC = Path(__file__).resolve().parents[2] / "src"
@@ -88,6 +76,31 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _assert_alembic_target_is_test_db() -> None:
+    """Refuse to run ``alembic upgrade head`` against a non-test database.
+
+    Mirrors the ``_reset_alembic_state`` safety guard in
+    ``tests/integration/test_alembic_migrations.py``. A misconfigured
+    ``TEST_DATABASE_URL`` (despite the conftest steering) must not be
+    able to migrate a dev or prod DB during fixture setup.
+    """
+    sync_url = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
+    import psycopg2
+
+    conn = psycopg2.connect(sync_url, connect_timeout=3)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT current_database()")
+            row = cur.fetchone()
+            db_name = row[0] if row else None
+            assert db_name and db_name.endswith("_test"), (
+                f"Refusing to run 'alembic upgrade head' against non-test "
+                f"database '{db_name}'. Set TEST_DATABASE_URL to a *_test database."
+            )
+    finally:
+        conn.close()
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _ensure_oauth_clients_schema():
     """Apply alembic migrations so the test DB matches the production schema.
@@ -100,14 +113,12 @@ def _ensure_oauth_clients_schema():
     the regression-pin purpose. Only ``alembic upgrade head`` proves the
     migration itself produces the expected DB constraint.
 
-    Mirrors the ``_alembic_at_test_db`` pattern in
-    ``tests/integration/test_alembic_migrations.py``: alembic's ``env.py``
-    re-reads ``get_database_url()`` on import and clobbers any
-    ``Config.set_main_option("sqlalchemy.url", ...)``, so the test DB URL
-    must be in the process env at command time. The module-level
-    ``os.environ["DATABASE_URL"]`` override above is already in place;
-    ``alembic.ini`` is at ``backend/alembic.ini``.
+    The DATABASE_URL steering happens in
+    ``backend/tests/integration/conftest.py`` at conftest-import time. Verify
+    the resolved DB is a ``*_test`` DB before invoking ``command.upgrade()``
+    so a misconfigured env cannot apply migrations to dev/prod.
     """
+    _assert_alembic_target_is_test_db()
     backend_dir = Path(__file__).resolve().parents[2]
     config = Config(str(backend_dir / "alembic.ini"))
     command.upgrade(config, "head")
