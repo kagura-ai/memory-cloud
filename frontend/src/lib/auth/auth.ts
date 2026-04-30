@@ -15,6 +15,9 @@ export interface User {
   timezone?: string; // Issue #175: User timezone
   current_workspace_id?: string;
   current_context_id?: string;
+  // Issue #514: sign-in method display
+  auth_method?: "password" | "oauth";
+  auth_provider?: "google" | "github" | null;
 }
 
 export interface AuthResponse {
