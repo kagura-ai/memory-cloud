@@ -353,7 +353,12 @@ class OAuth2Client(Base):
         client_id: OAuth2 client identifier (unique, public)
         client_secret_hash: SHA256 hash of client secret (confidential, always required)
         client_name: Human-readable name (e.g., "ChatGPT Connector")
-        owner_id: User ID who registered this client
+        owner_id: User ID who registered this client. ``None`` for clients
+            created via Dynamic Client Registration (RFC 7591) — DCR is a
+            public, owner-less endpoint, so the workspace context is resolved
+            from the consenting user's session at ``/authorize`` time
+            rather than from the client record. See migration revision
+            ``d04_519_oauth_owner_nullable`` (issue #519).
         redirect_uris: Allowed redirect URIs (JSON array)
         grant_types: Allowed grant types (JSON array: authorization_code, refresh_token)
         response_types: Allowed response types (JSON array: code)
@@ -383,7 +388,12 @@ class OAuth2Client(Base):
     client_id = Column(String(48), nullable=False, unique=True, index=True)
     client_secret_hash = Column(String(64), nullable=False)  # SHA256 hash (always required)
     client_name = Column(String(100), nullable=False)
-    owner_id = Column(String(255), nullable=False, index=True)
+    # Issue #519 (#513 follow-up): DCR-registered clients (RFC 7591) have no
+    # human owner — ``dynamic_client_registration`` creates them with
+    # ``owner_id=None``. Admin-managed clients still record the creating
+    # user's id. Migration revision ``d04_519_oauth_owner_nullable`` drops
+    # the corresponding NOT NULL DB constraint.
+    owner_id = Column(String(255), nullable=True, index=True)
 
     # Issue #169: Workspace-scoped OAuth clients (access all contexts in workspace)
     # Migration 034: context_id removed (deprecated)
