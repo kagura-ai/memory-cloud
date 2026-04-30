@@ -61,8 +61,16 @@ class TestPkceExtensionRegistration:
     """Pin that PKCE is enforced via Authlib's CodeChallenge extension."""
 
     def test_authorization_code_grant_registered_with_code_challenge_extension(self):
-        wrapper = _build_wrapper_with_mocked_server()
-        wrapper._register_grants()
+        # Mock get_settings so this test pins the contract independently of
+        # any CI env (``OAUTH_PKCE_REQUIRED=false``) or singleton-cache state
+        # left over from earlier tests.
+        with patch("auth.oauth2_server.get_settings") as mock_get_settings:
+            mock_settings = MagicMock()
+            mock_settings.oauth_pkce_required = True
+            mock_get_settings.return_value = mock_settings
+
+            wrapper = _build_wrapper_with_mocked_server()
+            wrapper._register_grants()
 
         call = _find_grant_call(wrapper, AuthorizationCodeGrant)
         assert len(call.args) >= 2, (

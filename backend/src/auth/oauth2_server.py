@@ -597,9 +597,14 @@ class OAuth2AuthorizationServer:
                 Returns:
                     Simple object with status_code, body, headers, and location
                 """
-                logger.info(
-                    f"OAuth2 handle_response: status={status_code}, payload={payload}, headers={headers}"
-                )
+                # Do NOT log ``payload`` or ``headers`` — token responses
+                # (RFC 6749 §5.1) carry ``access_token`` / ``refresh_token``
+                # in the payload and ``Authorization`` headers may be echoed
+                # back, both of which are credentials. Logging them at INFO
+                # leaks secrets into the application log stream. Status code
+                # alone is enough for operational visibility; deeper detail
+                # belongs at DEBUG with explicit redaction in a follow-up.
+                logger.info("oauth2_handle_response", status_code=status_code)
 
                 class SimpleResponse:
                     def __init__(self, status, body, headers):
