@@ -617,6 +617,9 @@ async def get_current_user_info(
             if user.get("current_workspace_id")
             else None,
             # Issue #246: current_context_id removed
+            # Issue #514: surface auth_method + auth_provider for sign-in-method display
+            "auth_method": db_user.auth_method if db_user else "oauth",
+            "auth_provider": db_user.auth_provider if db_user else None,
         }
     }
 

@@ -515,6 +515,7 @@ class UserProfileResponse(TZAwareBaseModel):
 
     Issue #175: User timezone settings
     Issue #221: i18n support (locale)
+    Issue #514: Expose auth_method + auth_provider for sign-in-method display
     """
 
     id: int
@@ -528,6 +529,8 @@ class UserProfileResponse(TZAwareBaseModel):
     # Issue #246: current_context_id removed (context always explicit)
     created_at: datetime
     last_login_at: datetime | None
+    auth_method: str
+    auth_provider: str | None = None
 
     class Config:
         from_attributes = True
