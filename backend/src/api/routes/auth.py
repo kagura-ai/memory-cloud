@@ -144,7 +144,7 @@ async def _check_registration_allowed(
         # user_id (OAuth sub) is included as an OR condition so a returning
         # user whose email changed at the IdP is recognised as existing and
         # never blocked — RoleManager.ensure_user handles the email sync.
-        if user_id:
+        if user_id is not None and user_id:
             cond = or_(User.email == email, User.user_id == user_id)
         else:
             cond = User.email == email
