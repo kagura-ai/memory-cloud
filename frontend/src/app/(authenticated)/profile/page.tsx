@@ -8,7 +8,7 @@
  * Issue #223: i18n support
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useTranslations } from "next-intl";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -76,17 +76,22 @@ export default function ProfilePage() {
   const [isEditMode, setIsEditMode] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  // Issue #515: handle the post-IdP-redirect search params
-  // (refreshed=1 / error=refresh_*). Surface as toasts then strip the
-  // params so a browser refresh of the page doesn't replay the toast.
-  // useSearchParams reference is stable; keys are read inside the effect
-  // so we don't need to depend on the SearchParams object identity.
-  // useAuth().refetchUser is included so a successful refresh re-pulls
-  // the auth context and the new email/name appear immediately.
+  // Wait for useAuth() to finish its initial /auth/me fetch before
+  // surfacing the refreshed=1 / error=refresh_* toast. If the effect
+  // ran on the first render (where user is still null), the toast
+  // would say "Profile refreshed from IdP" instead of "from Google" /
+  // "from GitHub". The ref ensures the effect handles the params
+  // exactly once even though the deps now include `user`.
+  const refreshParamsHandled = useRef(false);
   useEffect(() => {
+    if (refreshParamsHandled.current) return;
+    if (!user) return;
     const refreshed = searchParams.get("refreshed");
     const errorCode = searchParams.get("error");
-    const provider = getRefreshProviderName(user ?? {}) ?? "IdP";
+    if (refreshed !== "1" && !errorCode?.startsWith("refresh_")) return;
+    refreshParamsHandled.current = true;
+
+    const provider = getRefreshProviderName(user) ?? "IdP";
     const cleanUrl = "/profile";
 
     if (refreshed === "1") {
@@ -94,7 +99,6 @@ export default function ProfilePage() {
         title: t("refreshFromIdPSuccess", { provider }),
         description: t("refreshFromIdPSuccessDesc"),
       });
-      // Re-pull /auth/me so the new email/name reflect in the form.
       refetchUser();
       router.replace(cleanUrl);
     } else if (errorCode?.startsWith("refresh_")) {
@@ -113,10 +117,7 @@ export default function ProfilePage() {
       });
       router.replace(cleanUrl);
     }
-    // We intentionally only react to the params on first paint after
-    // the IdP redirect. Re-running on every render would cause loops.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [user, searchParams, t, tCommon, toast, refetchUser, router]);
 
   const handleRefreshFromIdP = async () => {
     const provider = getRefreshProviderName(user ?? {});
