@@ -313,26 +313,38 @@ class TestCreatePath:
         assert added.is_initial_admin is False
 
     @pytest.mark.asyncio
-    async def test_user_id_race_returns_existing_role(self, role_manager):
-        race_existing = _user_row(role="admin")
-        # Sequence: lookup miss → count=0 → commit raises (race) → re-lookup hits
+    async def test_user_id_race_routes_through_sync(self, role_manager):
+        """Concurrent first-login race (CREATE → IntegrityError on user_id UNIQUE)
+        must still update last_login_at AND sync changed email/name on the existing
+        row. Returning the role bare-bones would silently skip those side-effects
+        (Copilot review on PR #516).
+        """
+        # Existing row was just inserted by another concurrent request with a
+        # stale email — the racing caller's IdP payload has the fresher value.
+        race_existing = _user_row(email="alice@old.com", name="Alice Old", role="admin")
+        # Sequence: lookup miss → count=0 → commit raises (user_id race)
+        # → re-lookup hits → sync_existing_user commits the update
         db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing))
-        db.commit = AsyncMock(
-            side_effect=[
-                _email_unique_violation(),
-                None,
-            ]
-        )
+        db.commit = AsyncMock(side_effect=[_email_unique_violation(), None])
 
         with _patch_get_db(db):
             role = await role_manager.ensure_user(
-                email="alice@example.com",
+                email="alice@new.com",
                 user_id="u1",
+                name="Alice New",
+                auth_provider="google",
                 email_verified=True,
             )
 
         assert role == Role.ADMIN
         db.rollback.assert_awaited_once()
+        # Race-recovered row was synced (email + name)
+        assert race_existing.email == "alice@new.com"
+        assert race_existing.name == "Alice New"
+        # Audit row written for the email change
+        added = [c.args[0] for c in db.add.call_args_list]
+        audits = [a for a in added if getattr(a, "action", None) == "oauth_user_email_synced"]
+        assert len(audits) == 1
 
     @pytest.mark.asyncio
     async def test_email_collision_on_create_raises_conflict(self, role_manager):

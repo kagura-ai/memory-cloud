@@ -305,9 +305,11 @@ async def google_callback(
     creates session, and sets HttpOnly cookie.
 
     Args:
-        code: OAuth2 authorization code from Google
-        state: CSRF state token (must match stored state)
-        response: FastAPI response object (for cookie setting)
+        request: FastAPI request (used for IP / User-Agent capture on the
+            audit row written by ``RoleManager.ensure_user`` when the IdP-
+            provided email differs from the stored value).
+        code: OAuth2 authorization code from Google.
+        state: CSRF state token (must match stored state).
 
     Returns:
         Redirect to dashboard with session cookie set

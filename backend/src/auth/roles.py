@@ -299,7 +299,10 @@ class RoleManager:
             except IntegrityError as exc:
                 # Two collision shapes share this except:
                 #  (a) user_id race: another request just inserted the same
-                #      oauth_sub. Re-lookup by user_id and return its role.
+                #      oauth_sub. Re-lookup by user_id and route the existing
+                #      row through _sync_existing_user so concurrent
+                #      first-logins still get last_login_at updated and any
+                #      email/name drift synced (Copilot review #516).
                 #  (b) email collision: oauth_sub is novel but email belongs
                 #      to a different account (different provider, same
                 #      address). The user_id re-lookup misses; raise 409.
@@ -307,7 +310,16 @@ class RoleManager:
                 retry = await db.execute(select(User).filter_by(user_id=user_id))
                 existing = retry.scalar_one_or_none()
                 if existing is not None:
-                    return Role(existing.role)
+                    return await self._sync_existing_user(
+                        db=db,
+                        user=existing,
+                        new_email=email,
+                        new_name=name,
+                        auth_provider=auth_provider,
+                        email_verified=email_verified,
+                        ip_address=ip_address,
+                        user_agent=user_agent,
+                    )
                 if not _is_email_unique_violation(exc):
                     raise
                 logger.warning(
