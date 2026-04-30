@@ -24,6 +24,19 @@ class Settings(BaseSettings):
         env_prefix="",  # No prefix
     )
 
+    # OAuth2 - PKCE enforcement (Issue #513)
+    # When True, register the Authlib CodeChallenge extension with
+    # ``required=True`` so token_endpoint_auth_method="none" (public) clients
+    # cannot complete authorization without RFC 7636 PKCE — closes the gap
+    # introduced when Issue #157 added `none` auth without registering the
+    # CodeChallenge extension. Set to False only as an emergency rollback if a
+    # known-good client breaks; the default (True) matches the metadata this
+    # server already advertises (``code_challenge_methods_supported: ["S256"]``).
+    oauth_pkce_required: bool = Field(
+        default=True,
+        description="Enforce PKCE (RFC 7636) at /token for public clients",
+    )
+
     # OAuth2 - Google
     google_client_id: str = Field(default="", description="Google OAuth2 Client ID")
     google_client_secret: str = Field(default="", description="Google OAuth2 Client Secret")

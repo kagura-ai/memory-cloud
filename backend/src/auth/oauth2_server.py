@@ -3,9 +3,10 @@
 Issue #33 - OAuth2 authentication support for ChatGPT MCP integration
 
 Provides OAuth2 authorization server functionality with:
-- Authorization Code Grant (RFC 6749 Section 4.1)
+- Authorization Code Grant (RFC 6749 Section 4.1) with PKCE (RFC 7636) for
+  public clients (``token_endpoint_auth_method="none"``)
 - Refresh Token Grant (RFC 6749 Section 6)
-- Confidential Clients only (no PKCE public clients)
+- Both confidential and public clients are supported (Issue #157, #513)
 
 Architecture:
     Built on Authlib's SQLAlchemy integration pattern, adapted for FastAPI with
@@ -28,19 +29,21 @@ References:
     - RFC 6749: The OAuth 2.0 Authorization Framework
 """
 
-import logging
 import secrets
 from datetime import timedelta
 from typing import Any
 
 from authlib.oauth2 import OAuth2Request
 from authlib.oauth2.rfc6749 import grants
+from authlib.oauth2.rfc7636 import CodeChallenge
 from sqlalchemy.orm import Session
 
+from config.settings import get_settings
 from models.auth import OAuth2AuthorizationCode, OAuth2Client, OAuth2Token
 from utils.datetime import utcnow
+from utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ============================================================================
@@ -668,16 +671,30 @@ class OAuth2AuthorizationServer:
         self._register_grants()
 
     def _register_grants(self) -> None:
-        """Register grant types with the server."""
-        # Authorization Code Grant (no PKCE for confidential clients)
-        self.server.register_grant(AuthorizationCodeGrant)
+        """Register grant types with the server.
+
+        Issue #513: register the RFC 7636 ``CodeChallenge`` extension on the
+        Authorization Code Grant so that public clients (``token_endpoint_auth_method="none"``,
+        ChatGPT/Claude/Cursor/Claude Code CLI) cannot exchange an authorization
+        code without a valid ``code_verifier``. Issue #157 added public-client
+        support and PKCE plumbing but never registered this extension, leaving
+        the gate unenforced — Authlib's ``CodeChallenge`` only triggers when
+        explicitly registered. The required flag is config-driven so a known-good
+        client breakage can be rolled back without redeploying.
+        """
+        pkce_required = bool(get_settings().oauth_pkce_required)
+
+        self.server.register_grant(
+            AuthorizationCodeGrant,
+            [CodeChallenge(required=pkce_required)],
+        )
 
         # Refresh Token Grant
         self.server.register_grant(RefreshTokenGrant)
 
         logger.info(
-            "OAuth2 server initialized: grants=[authorization_code, refresh_token], "
-            "confidential_clients_only=true"
+            f"OAuth2 server initialized: grants=[authorization_code, refresh_token], "
+            f"pkce_required={pkce_required}"
         )
 
     def get_consent_grant(self, request: Any, end_user: Any = None) -> Any:
