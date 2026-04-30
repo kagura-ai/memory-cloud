@@ -49,11 +49,17 @@ def _is_email_unique_violation(exc: _IntegrityError) -> bool:
     """True iff ``exc`` is a UNIQUE violation on ``users.email``.
 
     Asyncpg surfaces UNIQUE violations with sqlstate=23505 and a
-    constraint_name. The schema declares ``email`` as ``unique=True, index=True``
-    so PostgreSQL names the unique index ``ix_users_email`` (other UNIQUE
-    columns get ``ix_users_user_id`` / ``ix_users_login_id``). Narrowing to
-    "email" prevents future constraint additions from being mis-mapped to
-    ConflictError("Email already in use") with the wrong message.
+    ``constraint_name``. The narrowing tolerates whichever name PostgreSQL
+    actually uses in this codebase: a ``Column(unique=True, index=True)``
+    declaration is realized in the alembic baseline migration as a unique
+    index named ``ix_users_email`` (verified against
+    asyncpg.exceptions.UniqueViolationError raised by the live DB —
+    constraint_name="ix_users_email"). On other Postgres + SQLAlchemy
+    deployments where ``unique=True`` produces a separate
+    ``users_email_key`` constraint instead, the substring match on
+    ``"email"`` still hits. Narrowing to "email" prevents future
+    constraint additions on other columns (e.g. UNIQUE on ``name``) from
+    being mis-mapped to ConflictError("Email already in use").
     """
     orig = getattr(exc, "orig", None)
     if orig is None:

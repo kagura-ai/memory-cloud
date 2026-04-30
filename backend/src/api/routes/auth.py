@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser
@@ -504,6 +505,13 @@ async def google_callback(
 
     except ConflictError:
         return _email_in_use_redirect()
+    except SQLAlchemyError:
+        # Don't swallow DB errors as 401 — let the app-wide
+        # @app.exception_handler(SQLAlchemyError) map them to 503 so DB
+        # availability issues surface as retriable, not as auth failures.
+        # ConflictError above already handles the email-collision IntegrityError
+        # path; anything else here is unexpected DB trouble.
+        raise
     except Exception as e:
         logger.error(f"OAuth2 callback failed: {e}")
         raise HTTPException(
@@ -858,6 +866,11 @@ async def github_callback(
 
     except ConflictError:
         return _email_in_use_redirect()
+    except SQLAlchemyError:
+        # See google_callback's matching block — let DB errors hit the
+        # global SQLAlchemyError → 503 handler instead of being misclassified
+        # as 401 auth failures.
+        raise
     except Exception as e:
         logger.error(f"GitHub OAuth2 callback failed: {e}")
         raise HTTPException(

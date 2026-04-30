@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 
 from auth.roles import _OAUTH_CALLBACK_ACTOR, Role, RoleManager
 from utils.exceptions import ConflictError
+from utils.hashing import hmac_sha256_hex
 
 
 class _AsyncpgUniqueViolationStub(Exception):
@@ -223,8 +224,9 @@ class TestAuditLogStructure:
     async def test_audit_log_uses_hmac_not_plaintext(self, role_manager):
         existing = _user_row(email="alice@old.com")
         db = _make_db_mock(_execute_returns(existing))
+        test_key = "test-key-32"
 
-        with patch.dict("os.environ", {"AUDIT_HMAC_KEY": "test-key-32"}, clear=False):
+        with patch.dict("os.environ", {"AUDIT_HMAC_KEY": test_key}, clear=False):
             # Reset settings singleton so the env var is observed
             import config.settings as cs
 
@@ -239,14 +241,15 @@ class TestAuditLogStructure:
 
         audit = db.add.call_args_list[0].args[0]
         assert audit.action == "oauth_user_email_synced"
-        # No plaintext email leaked into hash columns
-        assert audit.old_value_hash != "alice@old.com"
-        assert audit.new_value_hash != "alice@new.com"
-        # HMAC-SHA256 hex is exactly 64 chars
-        assert len(audit.old_value_hash) == 64
-        assert len(audit.new_value_hash) == 64
-        # Different inputs → different digests
-        assert audit.old_value_hash != audit.new_value_hash
+        # Strong assertion: the stored hashes must be exactly the HMAC under
+        # the configured key. A regression to plain sha256_hex (or any other
+        # non-plaintext 64-char digest) would fail this check, whereas the
+        # weaker "not equal to plaintext + 64 chars" form would pass silently.
+        assert audit.old_value_hash == hmac_sha256_hex("alice@old.com", test_key)
+        assert audit.new_value_hash == hmac_sha256_hex("alice@new.com", test_key)
+        # Defense-in-depth: digests change when the key changes (proves the key
+        # actually participates in the digest, not just the value).
+        assert audit.old_value_hash != hmac_sha256_hex("alice@old.com", "different-key")
 
     @pytest.mark.asyncio
     async def test_audit_log_captures_ip_user_agent(self, role_manager):
