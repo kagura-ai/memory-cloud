@@ -27,7 +27,7 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from api.main import app  # noqa: E402
-from api.routes.oauth import detect_dcr_provider  # noqa: E402
+from api.routes.oauth import OAuth2ClientResponse, detect_dcr_provider  # noqa: E402
 
 
 class TestDetectDcrProvider:
@@ -310,3 +310,56 @@ class TestDcrEndpointAcceptance:
         # DB write was attempted
         fake_session.add.assert_called_once()
         fake_session.commit.assert_called_once()
+
+
+class TestOAuth2ClientResponseOwnerIdSerialization:
+    """Pin that ``OAuth2ClientResponse.owner_id: str | None`` keeps both paths working.
+
+    Issue #513 widened the ``owner_id`` type from ``str`` to ``str | None`` so
+    DCR-registered clients (which have no owner) can serialize. This test class
+    pins both paths so a future tightening of the field back to ``str`` (or to
+    a different type) is caught immediately:
+
+    - Admin-managed clients (``POST /api/v1/oauth/clients/*``) always set
+      ``owner_id`` to the creating user's id — must continue to round-trip.
+    - DCR-registered clients (``POST /api/v1/oauth/register``) set
+      ``owner_id=None`` — the new behavior, must serialize to ``null``.
+    """
+
+    @staticmethod
+    def _common_fields() -> dict:
+        """Field skeleton shared by both admin and DCR client responses."""
+        return {
+            "id": 42,
+            "client_id": "oauth_test_client_id",
+            "redirect_uris": ["https://chatgpt.com/cb"],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "scope": "memory:read memory:write",
+            "provider": "chatgpt",
+            "created_at": "2026-04-30T00:00:00Z",
+            "plaintext_secret": None,
+            "is_visible": False,
+            "visibility_expires_at": None,
+        }
+
+    def test_admin_managed_client_with_string_owner_id(self):
+        response = OAuth2ClientResponse(
+            **self._common_fields(),
+            client_name="Admin-Created Client",
+            token_endpoint_auth_method="client_secret_post",
+            owner_id="user-12345",
+        )
+        assert response.owner_id == "user-12345"
+        # Round-trip via model_dump to confirm serializer accepts the value.
+        assert response.model_dump()["owner_id"] == "user-12345"
+
+    def test_dcr_registered_client_with_none_owner_id(self):
+        response = OAuth2ClientResponse(
+            **self._common_fields(),
+            client_name="DCR-Registered Client",
+            token_endpoint_auth_method="none",
+            owner_id=None,
+        )
+        assert response.owner_id is None
+        assert response.model_dump()["owner_id"] is None

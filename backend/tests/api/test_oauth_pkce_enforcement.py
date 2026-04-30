@@ -90,3 +90,72 @@ class TestPkceExtensionRegistration:
         extensions = wrapper.server.register_grant.call_args_list[0].args[1]
         code_challenge = next(e for e in extensions if isinstance(e, CodeChallenge))
         assert code_challenge.required is required_setting
+
+
+class TestPkceCodeVerifierEnforcement:
+    """Pin the runtime behavior of the registered ``CodeChallenge`` extension.
+
+    The ``TestPkceExtensionRegistration`` tests above prove the extension is
+    correctly wired into ``AuthorizationCodeGrant``. These tests prove the
+    wired-in extension actually rejects token exchange when the spec demands
+    it. Together they cover the wire-level PKCE enforcement contract: any
+    ``token_endpoint_auth_method="none"`` client that reaches ``/token``
+    without a ``code_verifier`` is rejected by Authlib's
+    ``after_validate_token_request`` hook with ``InvalidRequestError`` —
+    which FastAPI translates to HTTP 400.
+
+    A full HTTP TestClient round-trip would also exercise the wire format,
+    but it would require a sync DB session, a saved ``OAuth2AuthorizationCode``
+    row, and an OAuth2Client row, all per-test. These tests exercise the same
+    Authlib hook directly so the regression coverage holds without that setup
+    cost.
+    """
+
+    @staticmethod
+    def _build_grant(*, auth_method: str, code_verifier: str | None = None):
+        """Construct a minimal mock grant in the shape Authlib's hook expects."""
+        grant = MagicMock()
+        grant.request = MagicMock()
+        grant.request.form = {} if code_verifier is None else {"code_verifier": code_verifier}
+        grant.request.auth_method = auth_method
+        grant.request.authorization_code = MagicMock()
+        return grant
+
+    def test_none_auth_without_verifier_raises_invalid_request(self):
+        from authlib.oauth2.rfc6749.errors import InvalidRequestError
+
+        cc = CodeChallenge(required=True)
+        grant = self._build_grant(auth_method="none", code_verifier=None)
+
+        with pytest.raises(InvalidRequestError) as exc_info:
+            cc.validate_code_verifier(grant)
+        assert "code_verifier" in str(exc_info.value).lower(), (
+            f"expected error message to mention 'code_verifier', got: {exc_info.value}"
+        )
+
+    def test_confidential_client_without_verifier_is_allowed(self):
+        """Confidential clients (auth_method != 'none') skip the PKCE gate."""
+        cc = CodeChallenge(required=True)
+        grant = self._build_grant(auth_method="client_secret_basic", code_verifier=None)
+        # Patch get_authorization_code_challenge so the second branch in
+        # validate_code_verifier (challenge-stored-but-no-verifier) doesn't trip.
+        cc.get_authorization_code_challenge = lambda code: None  # type: ignore[method-assign]
+
+        # Must NOT raise: the `required` flag is gated on auth_method == 'none'
+        # (per Authlib 1.3.2 source). A confidential client without verifier
+        # is allowed — it authenticates via client_secret instead.
+        cc.validate_code_verifier(grant)
+
+    def test_required_false_does_not_force_verifier_for_none_clients(self):
+        """When the kill-switch flips ``required`` to False, the gate disengages.
+
+        This pins the rollback contract: setting ``OAUTH_PKCE_REQUIRED=false``
+        must allow ``none``-auth clients without ``code_verifier`` through
+        (matching the pre-#513 behavior).
+        """
+        cc = CodeChallenge(required=False)
+        grant = self._build_grant(auth_method="none", code_verifier=None)
+        cc.get_authorization_code_challenge = lambda code: None  # type: ignore[method-assign]
+
+        # Must NOT raise.
+        cc.validate_code_verifier(grant)
