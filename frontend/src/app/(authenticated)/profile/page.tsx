@@ -10,6 +10,7 @@
 
 import { useState, useEffect } from "react";
 import { useTranslations } from "next-intl";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Card,
   CardContent,
@@ -30,9 +31,9 @@ import {
 } from "@/components/ui/select";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
-import { User, Moon, Sun, Save } from "lucide-react";
+import { User, Moon, Sun, Save, RefreshCw } from "lucide-react";
 import { COMMON_TIMEZONES } from "@/lib/utils/datetime";
-import { apiClient } from "@/lib/api/base";
+import { apiClient, ApiError } from "@/lib/api/base";
 import type { User as AuthUser } from "@/lib/auth/auth";
 
 /**
@@ -51,12 +52,95 @@ export function getSignInMethodLabel(
   return t("signInMethodOther");
 }
 
+/**
+ * Issue #515: human-readable provider name for i18n message interpolation.
+ * Returns null when refresh is not available for the user (password auth or
+ * legacy OAuth row with no recorded provider).
+ */
+export function getRefreshProviderName(
+  user: Pick<AuthUser, "auth_method" | "auth_provider">,
+): "Google" | "GitHub" | null {
+  if (user.auth_method !== "oauth") return null;
+  if (user.auth_provider === "google") return "Google";
+  if (user.auth_provider === "github") return "GitHub";
+  return null;
+}
+
 export default function ProfilePage() {
   const t = useTranslations("profile");
   const tCommon = useTranslations("common");
   const { user, refetchUser } = useAuth();
   const { toast } = useToast();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [isEditMode, setIsEditMode] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Issue #515: handle the post-IdP-redirect search params
+  // (refreshed=1 / error=refresh_*). Surface as toasts then strip the
+  // params so a browser refresh of the page doesn't replay the toast.
+  // useSearchParams reference is stable; keys are read inside the effect
+  // so we don't need to depend on the SearchParams object identity.
+  // useAuth().refetchUser is included so a successful refresh re-pulls
+  // the auth context and the new email/name appear immediately.
+  useEffect(() => {
+    const refreshed = searchParams.get("refreshed");
+    const errorCode = searchParams.get("error");
+    const provider = getRefreshProviderName(user ?? {}) ?? "IdP";
+    const cleanUrl = "/profile";
+
+    if (refreshed === "1") {
+      toast({
+        title: t("refreshFromIdPSuccess", { provider }),
+        description: t("refreshFromIdPSuccessDesc"),
+      });
+      // Re-pull /auth/me so the new email/name reflect in the form.
+      refetchUser();
+      router.replace(cleanUrl);
+    } else if (errorCode?.startsWith("refresh_")) {
+      const messageKey =
+        errorCode === "refresh_user_mismatch"
+          ? "refreshFromIdPErrorMismatch"
+          : errorCode === "refresh_state_expired"
+            ? "refreshFromIdPErrorExpired"
+            : "refreshFromIdPErrorGeneric";
+      toast({
+        title: tCommon("error"),
+        description: t(messageKey, { provider }),
+        variant: "destructive",
+      });
+      router.replace(cleanUrl);
+    }
+    // We intentionally only react to the params on first paint after
+    // the IdP redirect. Re-running on every render would cause loops.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleRefreshFromIdP = async () => {
+    const provider = getRefreshProviderName(user ?? {});
+    if (!provider) return; // Defensive: button is hidden in this state
+    setIsRefreshing(true);
+    try {
+      const data = await apiClient.post<{
+        authorization_url: string;
+        state: string;
+      }>("/api/v1/me/refresh-oauth", {});
+      // Browser-level navigation: OAuth flow expects a full redirect.
+      window.location.href = data.authorization_url;
+    } catch (error) {
+      setIsRefreshing(false);
+      const messageKey =
+        error instanceof ApiError && error.status === 429
+          ? "refreshFromIdPErrorRateLimited"
+          : "refreshFromIdPErrorGeneric";
+      toast({
+        title: tCommon("error"),
+        description: t(messageKey, { provider }),
+        variant: "destructive",
+      });
+    }
+  };
+
   const [isDarkMode, setIsDarkMode] = useState(() => {
     if (typeof window !== "undefined") {
       return (
@@ -194,6 +278,39 @@ export default function ProfilePage() {
                   {t("signInMethodDesc")}
                 </p>
               </div>
+
+              {/* Issue #515: manual IdP refresh — only visible to OAuth
+                  users with a known provider. Password users and pre-#361
+                  null-provider users see nothing. */}
+              {(() => {
+                const refreshProvider = getRefreshProviderName(user);
+                if (!refreshProvider) return null;
+                return (
+                  <div className="space-y-2 rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/30 p-3">
+                    <Label className="text-sm">
+                      {t("refreshFromIdP", { provider: refreshProvider })}
+                    </Label>
+                    <p className="text-xs text-slate-500">
+                      {t("refreshFromIdPDesc", { provider: refreshProvider })}
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleRefreshFromIdP}
+                      disabled={isRefreshing}
+                    >
+                      <RefreshCw
+                        className={`h-4 w-4 mr-2 ${isRefreshing ? "animate-spin" : ""}`}
+                      />
+                      {isRefreshing
+                        ? t("refreshFromIdPLoading")
+                        : t("refreshFromIdPButton", {
+                            provider: refreshProvider,
+                          })}
+                    </Button>
+                  </div>
+                );
+              })()}
 
               <div className="space-y-2">
                 <Label htmlFor="timezone">{t("timezone")}</Label>
