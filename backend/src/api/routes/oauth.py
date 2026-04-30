@@ -22,11 +22,12 @@ Security:
 import hashlib
 import os
 import secrets
+import unicodedata
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +39,7 @@ from models.auth import OAuth2Client, OAuth2Token, User
 from models.schemas import TokenIntrospectionResponse
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
+from utils.oauth_errors import rfc6749_error_response
 from utils.oauth_messages import get_oauth_messages
 from utils.redirect_uri import is_valid_redirect_uri_pattern
 
@@ -103,7 +105,9 @@ class OAuth2ClientResponse(BaseModel):
     response_types: list[str]
     scope: str
     token_endpoint_auth_method: str
-    owner_id: str
+    # DCR-registered clients have no owner (owner_id=None); admin-managed
+    # clients store the creating user's id. Issue #513.
+    owner_id: str | None
     provider: str  # Migration 036
     created_at: str  # ISO 8601 with 'Z' (UTC)
     # Migration 034-035: Zero-knowledge visibility
@@ -450,6 +454,119 @@ async def create_oauth2_client(
         db_session.close()
 
 
+# --- Dynamic Client Registration (DCR) provider detection ----------------
+#
+# Issue #513: provider detection used to be a substring search on
+# ``redirect_uris[0]`` (e.g. ``"chatgpt.com" in redirect_uri``). That blocks
+# all RFC 8252 native-app clients (Claude Code CLI, Cursor CLI, etc.) which
+# use ``http://localhost``/``http://127.0.0.1``/``http://[::1]`` loopback
+# redirects, AND it accepts substring spoofs like
+# ``https://attacker.com/?fake=chatgpt.com``. The new detection parses the
+# URL and matches by hostname, with a ``client_name`` keyword fallback for
+# loopback URIs (where the host alone cannot identify the provider).
+
+# RFC 8252 §7.3 native-app loopback hosts.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+# Hostname suffixes that identify each pre-existing provider. A redirect_uri
+# whose hostname equals one of these (or is a subdomain — ``host.endswith("." + s)``)
+# maps to the provider.
+_PROVIDER_HOSTNAMES: dict[str, tuple[str, ...]] = {
+    "chatgpt": ("chatgpt.com", "chat.openai.com"),
+    "claude": ("claude.ai", "anthropic.com"),
+    "cursor": ("cursor.sh", "cursor.com"),
+}
+
+# For loopback URIs only — the hostname is uninformative, so substring-match
+# the (NFKC-normalized, lowercased) ``client_name`` against the provider
+# names. Derived from ``_PROVIDER_HOSTNAMES`` so adding a provider only
+# requires editing one mapping. Stored as ``tuple`` (not ``frozenset``) so
+# iteration order is deterministic — when a ``client_name`` contains more
+# than one provider keyword (e.g. "Claude Cursor"), the first match in
+# ``_PROVIDER_HOSTNAMES`` insertion order wins, which is reproducible across
+# processes (frozenset iteration depends on hash randomization).
+#
+# ``client_name`` is a user-supplied trust signal: this is intentionally a
+# soft check, paired with the existing rate limit (5/min/IP) and the
+# ``token_endpoint_auth_method="none"`` + PKCE defaults — see issue #513
+# Security note for the threat model.
+_LOOPBACK_PROVIDER_KEYWORDS: tuple[str, ...] = tuple(_PROVIDER_HOSTNAMES)
+
+
+def _normalize_client_name(client_name: str) -> str:
+    """NFKC-normalize, strip Cf/Cc invisibles, and lowercase ``client_name``.
+
+    NFKC alone collapses fullwidth homoglyphs (e.g. ``Ｃｌａｕｄｅ`` → ``Claude``)
+    but leaves zero-width / format characters (Unicode category ``Cf``) and
+    other invisibles (``Cc``) intact, which would let an attacker bypass the
+    keyword substring check by inserting ``\\u200B`` (ZWSP) inside a provider
+    name. Strip those before lowercasing to neutralize both attack shapes.
+    """
+    nfkc = unicodedata.normalize("NFKC", client_name)
+    visible = "".join(c for c in nfkc if unicodedata.category(c) not in {"Cf", "Cc"})
+    return visible.lower()
+
+
+def detect_dcr_provider(redirect_uri: str, client_name: str) -> str:
+    """Detect the DCR provider from ``redirect_uri`` (+ ``client_name`` for loopback).
+
+    Returns one of ``"chatgpt"``, ``"claude"``, ``"cursor"``, or ``"custom"``.
+    The caller rejects ``"custom"`` with an RFC 6749 §5.2 error response.
+
+    Strategy:
+        1. RFC 8252 loopback redirects (``http://localhost`` / ``127.0.0.1`` /
+           ``[::1]``) → fall back to ``client_name`` keyword match (NFKC
+           normalized, case-insensitive substring).
+        2. Otherwise → match the parsed hostname (case-insensitive) against
+           ``_PROVIDER_HOSTNAMES`` as exact host or single-suffix subdomain.
+
+    Spec:
+        RFC 8252 §7.3 — Loopback Interface Redirection.
+        RFC 7591 §2 — DCR client metadata (``client_name``, ``redirect_uris``).
+    """
+    try:
+        parsed = urlparse(redirect_uri)
+    except (ValueError, AttributeError):
+        return "custom"
+
+    # Reject malformed authorities — ``urlparse`` is lenient and will happily
+    # extract a clean ``hostname`` from inputs that have a junk port
+    # (``http://chatgpt.com:443.evil.com/cb`` returns hostname ``"chatgpt.com"``)
+    # or userinfo prefix (``http://attacker@chatgpt.com/cb``). A simple
+    # hostname-suffix match would let those slip through and re-introduce
+    # provider spoofing. Force a parse of the port to surface bad authorities,
+    # and reject any redirect_uri that carries username/password — neither is
+    # legitimate for the providers this DCR endpoint serves.
+    if parsed.username is not None or parsed.password is not None:
+        return "custom"
+    try:
+        _port = parsed.port  # raises ValueError on non-integer or out-of-range
+    except ValueError:
+        return "custom"
+    del _port
+
+    hostname = (parsed.hostname or "").lower()
+
+    # 1) Loopback path (RFC 8252 native apps): http scheme + loopback host.
+    if parsed.scheme == "http" and hostname in _LOOPBACK_HOSTS:
+        normalized = _normalize_client_name(client_name)
+        for keyword in _LOOPBACK_PROVIDER_KEYWORDS:
+            if keyword in normalized:
+                return keyword
+        return "custom"
+
+    # 2) Hostname suffix match for pre-existing providers. ``urlparse`` returns
+    # ``None`` for inputs without a netloc (e.g. ``"not a url"``); the
+    # ``or ""`` above turned that into an empty string — bail out early.
+    if not hostname:
+        return "custom"
+    for provider, suffixes in _PROVIDER_HOSTNAMES.items():
+        for suffix in suffixes:
+            if hostname == suffix or hostname.endswith("." + suffix):
+                return provider
+    return "custom"
+
+
 @router.post(
     "/register",
     response_model=OAuth2ClientWithSecretResponse,
@@ -458,7 +575,7 @@ async def create_oauth2_client(
 async def dynamic_client_registration(
     request: Request,
     data: DynamicClientRegistrationRequest,
-) -> OAuth2ClientWithSecretResponse:
+) -> OAuth2ClientWithSecretResponse | JSONResponse:
     """Dynamic Client Registration (DCR) for MCP clients.
 
     Public endpoint for ChatGPT/Claude/Cursor to register themselves automatically.
@@ -504,24 +621,19 @@ async def dynamic_client_registration(
             ip=client_ip,
             count=count,
         )
-        raise HTTPException(
+        return rfc6749_error_response(
+            error="invalid_request",
+            description="Too many registration requests. Please try again later.",
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many registration requests. Please try again later.",
         )
 
-    # Detect provider from redirect_uri patterns
+    # Detect provider from redirect_uri (hostname suffix match) with a
+    # client_name keyword fallback for RFC 8252 loopback redirects. See
+    # ``detect_dcr_provider`` above for the rationale.
     redirect_uri = data.redirect_uris[0] if data.redirect_uris else ""
-    detected_provider = "custom"
+    detected_provider = detect_dcr_provider(redirect_uri, data.client_name)
 
-    if "chatgpt.com" in redirect_uri or "chat.openai.com" in redirect_uri:
-        detected_provider = "chatgpt"
-    elif "claude.ai" in redirect_uri or "anthropic.com" in redirect_uri:
-        detected_provider = "claude"
-    elif "cursor.sh" in redirect_uri or "cursor.com" in redirect_uri:
-        detected_provider = "cursor"
-
-    # Provider whitelist check
-    ALLOWED_PROVIDERS = ["chatgpt", "claude", "cursor"]
+    ALLOWED_PROVIDERS = ("chatgpt", "claude", "cursor")
     if detected_provider not in ALLOWED_PROVIDERS:
         logger.warning(
             "dcr_provider_rejected",
@@ -529,9 +641,15 @@ async def dynamic_client_registration(
             redirect_uri=redirect_uri,
             detected_provider=detected_provider,
         )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Dynamic client registration is only allowed for: {', '.join(ALLOWED_PROVIDERS)}",
+        return rfc6749_error_response(
+            error="invalid_client_metadata",
+            description=(
+                "Dynamic client registration is only allowed for: "
+                f"{', '.join(ALLOWED_PROVIDERS)}. "
+                "Native CLIs (RFC 8252) must use http://localhost, "
+                "http://127.0.0.1, or http://[::1] with a recognized "
+                "client_name (Claude / Cursor / ChatGPT)."
+            ),
         )
 
     db_session = get_sync_session()

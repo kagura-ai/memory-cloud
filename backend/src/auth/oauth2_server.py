@@ -3,9 +3,10 @@
 Issue #33 - OAuth2 authentication support for ChatGPT MCP integration
 
 Provides OAuth2 authorization server functionality with:
-- Authorization Code Grant (RFC 6749 Section 4.1)
+- Authorization Code Grant (RFC 6749 Section 4.1) with PKCE (RFC 7636) for
+  public clients (``token_endpoint_auth_method="none"``)
 - Refresh Token Grant (RFC 6749 Section 6)
-- Confidential Clients only (no PKCE public clients)
+- Both confidential and public clients are supported (Issue #157, #513)
 
 Architecture:
     Built on Authlib's SQLAlchemy integration pattern, adapted for FastAPI with
@@ -28,19 +29,21 @@ References:
     - RFC 6749: The OAuth 2.0 Authorization Framework
 """
 
-import logging
 import secrets
 from datetime import timedelta
 from typing import Any
 
 from authlib.oauth2 import OAuth2Request
 from authlib.oauth2.rfc6749 import grants
+from authlib.oauth2.rfc7636 import CodeChallenge
 from sqlalchemy.orm import Session
 
+from config.settings import get_settings
 from models.auth import OAuth2AuthorizationCode, OAuth2Client, OAuth2Token
 from utils.datetime import utcnow
+from utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ============================================================================
@@ -60,10 +63,6 @@ def query_client(session: Session, client_id: str) -> OAuth2Client | None:
     Returns:
         OAuth2Client or None
     """
-    import logging
-
-    logger = logging.getLogger(__name__)
-
     client = session.query(OAuth2Client).filter_by(client_id=client_id).first()
     logger.info(f"query_client: client_id={client_id}, found={client is not None}")
 
@@ -598,12 +597,14 @@ class OAuth2AuthorizationServer:
                 Returns:
                     Simple object with status_code, body, headers, and location
                 """
-                import logging
-
-                logger = logging.getLogger(__name__)
-                logger.info(
-                    f"OAuth2 handle_response: status={status_code}, payload={payload}, headers={headers}"
-                )
+                # Do NOT log ``payload`` or ``headers`` — token responses
+                # (RFC 6749 §5.1) carry ``access_token`` / ``refresh_token``
+                # in the payload and ``Authorization`` headers may be echoed
+                # back, both of which are credentials. Logging them at INFO
+                # leaks secrets into the application log stream. Status code
+                # alone is enough for operational visibility; deeper detail
+                # belongs at DEBUG with explicit redaction in a follow-up.
+                logger.info("oauth2_handle_response", status_code=status_code)
 
                 class SimpleResponse:
                     def __init__(self, status, body, headers):
@@ -636,9 +637,6 @@ class OAuth2AuthorizationServer:
                 """
                 # No-op implementation for FastAPI
                 # Signals are optional; OAuth2 flow works without them
-                import logging
-
-                logger = logging.getLogger(__name__)
                 logger.debug(f"OAuth2 signal: {name}, kwargs={list(kwargs.keys())}")
                 return
 
@@ -668,16 +666,44 @@ class OAuth2AuthorizationServer:
         self._register_grants()
 
     def _register_grants(self) -> None:
-        """Register grant types with the server."""
-        # Authorization Code Grant (no PKCE for confidential clients)
-        self.server.register_grant(AuthorizationCodeGrant)
+        """Register grant types with the server.
+
+        Issue #513: register the RFC 7636 ``CodeChallenge`` extension on the
+        Authorization Code Grant so that public clients (``token_endpoint_auth_method="none"``,
+        ChatGPT/Claude/Cursor/Claude Code CLI) cannot exchange an authorization
+        code without a valid ``code_verifier``. Issue #157 added public-client
+        support and PKCE plumbing but never registered this extension, leaving
+        the gate unenforced — Authlib's ``CodeChallenge`` only triggers when
+        explicitly registered.
+
+        The kill-switch ``settings.oauth_pkce_required`` controls whether the
+        extension is registered at all. Registering ``CodeChallenge(required=False)``
+        still enforces ``code_verifier`` whenever a ``code_challenge`` is stored
+        on the authorization code (Authlib's "challenge stored → verifier
+        required" branch fires regardless of the flag), so a true rollback to
+        pre-#513 behavior requires SKIPPING registration. We therefore:
+        - register with ``required=True`` when the kill-switch is on (default)
+        - skip registration entirely when the kill-switch is off (emergency
+          rollback path; matches pre-#513 behavior exactly).
+        """
+        pkce_required = bool(get_settings().oauth_pkce_required)
+
+        if pkce_required:
+            self.server.register_grant(
+                AuthorizationCodeGrant,
+                [CodeChallenge(required=True)],
+            )
+        else:
+            # Emergency rollback: pre-#513 behavior with no PKCE enforcement.
+            self.server.register_grant(AuthorizationCodeGrant)
 
         # Refresh Token Grant
         self.server.register_grant(RefreshTokenGrant)
 
         logger.info(
-            "OAuth2 server initialized: grants=[authorization_code, refresh_token], "
-            "confidential_clients_only=true"
+            "oauth2_server_initialized",
+            grants=["authorization_code", "refresh_token"],
+            pkce_required=pkce_required,
         )
 
     def get_consent_grant(self, request: Any, end_user: Any = None) -> Any:
