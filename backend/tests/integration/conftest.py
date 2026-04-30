@@ -27,11 +27,11 @@ import pytest
 _DEFAULT_TEST_DB_URL = "postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test"
 
 # CRITICAL: this assignment runs at conftest *import* time, which pytest
-# does before collecting test modules. ``api.main`` and ``config.database``
-# read ``DATABASE_URL`` at their own import time, so the override must
-# happen before they are imported. ``_PREV_DATABASE_URL`` captures the
-# original value (if any) so the session-scoped fixture below can restore
-# it on exit.
+# does before collecting test modules in this directory. ``api.main`` and
+# ``config.database`` read ``DATABASE_URL`` at their own import time, so the
+# override must happen before they are imported. ``_PREV_DATABASE_URL``
+# captures the original value (if any) so the session-scoped fixture below
+# can restore it on exit.
 _PREV_DATABASE_URL = os.environ.get("DATABASE_URL")
 os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL", _DEFAULT_TEST_DB_URL)
 
@@ -41,6 +41,21 @@ os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL", _DEFAULT_TEST_D
 # sourced ``.env.local``), preserve those.
 os.environ.setdefault("API_KEY_SECRET", "integration-test-api-key-secret-not-for-prod")
 os.environ.setdefault("JWT_SECRET", "integration-test-jwt-secret-not-for-prod")
+
+# If a sibling test directory (e.g. ``tests/api/``) was collected before
+# ``tests/integration/`` and already imported ``config.database``, the
+# module-level ``DATABASE_URL`` constant in that module is frozen at the
+# pre-override value. Reload the affected modules so they re-read the env
+# we just set. This is defensive — when integration tests are run via
+# ``make test-integration`` (which does NOT mix with unit tests), no
+# reload is needed; the guard only fires in mixed-suite invocations
+# (``pytest tests/``).
+import importlib  # noqa: E402
+import sys  # noqa: E402
+
+for _modname in ("config.database", "db.base"):
+    if _modname in sys.modules:
+        importlib.reload(sys.modules[_modname])
 
 
 @pytest.fixture(scope="session", autouse=True)

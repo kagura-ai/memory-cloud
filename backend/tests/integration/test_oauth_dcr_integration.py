@@ -101,6 +101,40 @@ def _assert_alembic_target_is_test_db() -> None:
         conn.close()
 
 
+def _reset_alembic_state() -> None:
+    """Drop the public schema so ``alembic upgrade head`` starts clean.
+
+    Mirrors the helper of the same name in
+    ``tests/integration/test_alembic_migrations.py``. Needed when another
+    fixture (e.g. ``tests/conftest.py``'s session-scoped ``async_engine``
+    that does ``Base.metadata.create_all``) has already created tables
+    in the test DB but did not stamp ``alembic_version`` — running
+    ``command.upgrade()`` then fails because migrations attempt to
+    create tables that already exist.
+
+    Safety guard: refuses to drop a non-test database; the
+    ``_assert_alembic_target_is_test_db`` check above must already have
+    passed before this is invoked.
+    """
+    from sqlalchemy import create_engine, text
+
+    sync_url = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
+    db_name = sync_url.rsplit("/", 1)[-1].split("?")[0]
+    if not db_name.endswith("_test"):
+        raise RuntimeError(
+            f"Refusing to DROP SCHEMA on non-test database '{db_name}'. "
+            f"Set TEST_DATABASE_URL to a *_test database."
+        )
+
+    engine = create_engine(sync_url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DROP SCHEMA public CASCADE"))
+            conn.execute(text("CREATE SCHEMA public"))
+    finally:
+        engine.dispose()
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _ensure_oauth_clients_schema():
     """Apply alembic migrations so the test DB matches the production schema.
@@ -116,9 +150,13 @@ def _ensure_oauth_clients_schema():
     The DATABASE_URL steering happens in
     ``backend/tests/integration/conftest.py`` at conftest-import time. Verify
     the resolved DB is a ``*_test`` DB before invoking ``command.upgrade()``
-    so a misconfigured env cannot apply migrations to dev/prod.
+    so a misconfigured env cannot apply migrations to dev/prod, then drop
+    and recreate the public schema so alembic starts from a clean state
+    even if a sibling test fixture (e.g. ``tests/conftest.py``'s async
+    engine fixture) already did ``create_all`` in this session.
     """
     _assert_alembic_target_is_test_db()
+    _reset_alembic_state()
     backend_dir = Path(__file__).resolve().parents[2]
     config = Config(str(backend_dir / "alembic.ini"))
     command.upgrade(config, "head")
@@ -171,7 +209,12 @@ def _assert_test_db(session) -> None:
 
 @pytest.fixture
 def client():
-    with TestClient(app) as c:
+    # ``raise_server_exceptions=False`` lets the test inspect HTTP 5xx
+    # responses (e.g. the original ``NotNullViolation`` regression that
+    # this test pins) instead of having TestClient re-raise the underlying
+    # exception. Matches the convention used by other integration tests
+    # in this repo.
+    with TestClient(app, raise_server_exceptions=False) as c:
         yield c
 
 
