@@ -24,9 +24,29 @@ This test runs in ``backend/tests/integration/`` because it touches the DB.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+
+# ---------------------------------------------------------------------------
+# Hermetic environment setup — must happen BEFORE importing the FastAPI app /
+# db modules, which read DATABASE_URL / API_KEY_SECRET at import time.
+#
+# - Force ``DATABASE_URL`` to ``TEST_DATABASE_URL`` (or the project default
+#   ``..._test`` DB) so a developer with a dev-DB ``DATABASE_URL`` exported
+#   in their shell cannot have this test write to or DELETE FROM the wrong
+#   database. Mirrors the safety pattern in
+#   ``tests/integration/test_alembic_migrations.py``.
+# - Provide test-only fallbacks for ``API_KEY_SECRET`` / ``JWT_SECRET`` via
+#   ``setdefault`` (do NOT override real values when the operator sourced
+#   ``.env.local`` themselves) so the test passes hermetically when run
+#   under bare ``pytest tests/integration/...`` without ``.env.local``.
+# ---------------------------------------------------------------------------
+_DEFAULT_TEST_DB_URL = "postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test"
+os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL", _DEFAULT_TEST_DB_URL)
+os.environ.setdefault("API_KEY_SECRET", "integration-test-api-key-secret-not-for-prod")
+os.environ.setdefault("JWT_SECRET", "integration-test-jwt-secret-not-for-prod")
 
 # Match the sys.path layout the rest of the backend tests use.
 _BACKEND_SRC = Path(__file__).resolve().parents[2] / "src"
@@ -35,11 +55,51 @@ if str(_BACKEND_SRC) not in sys.path:
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import text  # noqa: E402
+from sqlalchemy import create_engine, text  # noqa: E402
 
 from api.main import app  # noqa: E402
 from db.base import get_sync_session  # noqa: E402
+from models.auth import Base as AuthBase  # noqa: E402
 from models.auth import OAuth2Client  # noqa: E402
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _ensure_oauth_clients_schema():
+    """Ensure ``oauth_clients`` exists in the test DB.
+
+    Other integration tests rely on ``conftest.py``'s session-scoped async
+    engine fixture which calls ``Base.metadata.create_all`` — but this test
+    uses ``get_sync_session()`` so its DB visibility is independent. Create
+    the auth tables directly through a sync engine before the suite runs;
+    this is idempotent (``checkfirst=True`` is the default).
+    """
+    sync_url = os.environ["DATABASE_URL"].replace("+asyncpg", "")
+    engine = create_engine(sync_url, future=True)
+    try:
+        # ``oauth_clients`` has a FK to ``workspaces``, which itself FKs to
+        # ``users``. ``create_all()`` (no ``tables=`` arg) walks the dependency
+        # graph and creates all auth tables in FK-safe order. Idempotent
+        # via ``checkfirst=True`` (the default).
+        AuthBase.metadata.create_all(engine)
+        yield
+    finally:
+        engine.dispose()
+
+
+def _assert_test_db(session) -> None:
+    """Refuse to run destructive cleanup on non-test databases.
+
+    Mirrors the safety pattern in ``test_alembic_migrations.py``. A
+    misconfigured ``DATABASE_URL`` (despite the module-level override above)
+    must not be able to ``DELETE FROM oauth_clients`` against a dev or prod
+    database. The check fires at fixture teardown immediately before the
+    cleanup statement runs.
+    """
+    db_name = session.execute(text("SELECT current_database()")).scalar()
+    assert db_name and db_name.endswith("_test"), (
+        f"Refusing to run integration test cleanup against non-test database "
+        f"'{db_name}'. Set TEST_DATABASE_URL to a *_test database."
+    )
 
 
 @pytest.fixture
@@ -50,11 +110,18 @@ def client():
 
 @pytest.fixture
 def sync_db():
-    """Yield a real sync DB session and clean up oauth_clients rows."""
+    """Yield a real sync DB session bound to the test database.
+
+    Asserts the connected DB name ends with ``_test`` before yielding; the
+    same guard runs again at teardown immediately before the cleanup DELETE
+    so a config drift cannot wipe oauth_clients rows from a dev/prod DB.
+    """
     session = get_sync_session()
+    _assert_test_db(session)
     try:
         yield session
     finally:
+        _assert_test_db(session)
         # Clean up any oauth_clients rows this test class created.
         session.execute(
             text(

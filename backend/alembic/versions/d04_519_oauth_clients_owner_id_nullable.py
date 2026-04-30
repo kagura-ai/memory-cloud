@@ -24,15 +24,20 @@ Downgrade re-applies ``SET NOT NULL``. Any existing rows with
 that is the correct fail-loud behavior; the operator must either delete
 the DCR rows or backfill an owner before downgrading.
 
-Revision ID: d04_519_oauth_clients_owner_id_nullable
+Revision ID: d04_519_oauth_owner_nullable
 Revises: c03_471_seed_pricing
 
 NOTE: Revision IDs are capped at 32 chars because
 ``alembic_version.version_num`` is ``VARCHAR(32)`` in this database
 (asyncpg raises ``StringDataRightTruncationError`` otherwise).
-``d04_519_oauth_clients_owner_id_nullable`` is exactly 41 chars; using
-the shorter ``d04_519_oauth_owner_nullable`` (29 chars) instead.
+The longer candidate ``d04_519_oauth_clients_owner_id_nullable`` is
+39 chars — still over the cap — so this migration uses the shorter
+``d04_519_oauth_owner_nullable`` (29 chars). The Python filename is
+allowed to be longer than the revision id, so we keep the descriptive
+filename for grep-ability.
 """
+
+import sqlalchemy as sa
 
 from alembic import op
 
@@ -48,6 +53,7 @@ def upgrade() -> None:
     op.alter_column(
         "oauth_clients",
         "owner_id",
+        existing_type=sa.String(length=255),
         nullable=True,
     )
 
@@ -62,5 +68,6 @@ def downgrade() -> None:
     op.alter_column(
         "oauth_clients",
         "owner_id",
+        existing_type=sa.String(length=255),
         nullable=False,
     )
