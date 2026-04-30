@@ -40,7 +40,7 @@ class TestCheckAccess:
         )
 
         assert result is None
-        svc._legacy_check.assert_awaited_once_with("a@b.com")
+        svc._legacy_check.assert_awaited_once_with("a@b.com", "1234")
 
     @pytest.mark.asyncio
     async def test_disabled_delegates_and_blocks(self):
@@ -86,6 +86,30 @@ class TestCheckAccess:
 
         assert result is None
         svc._is_allowlisted.assert_not_awaited()
+        # Ensure both email and oauth_sub are forwarded so a user whose email
+        # changed at the IdP is still found by user_id.
+        svc._is_existing_user.assert_awaited_once_with("a@b.com", "1234")
+
+    @pytest.mark.asyncio
+    async def test_existing_user_found_by_user_id_not_email(self):
+        """User whose IdP email changed is still recognised as existing (login, not signup)."""
+        svc = _svc()
+        svc._load_config = AsyncMock(return_value=_config(enabled=True, mode="manual"))
+        # Simulate: same user_id, different email (e.g. after IdP email rename).
+        svc._is_existing_user = AsyncMock(return_value=True)
+        svc._is_allowlisted = AsyncMock()
+
+        result = await svc.check_access(
+            provider="github",
+            oauth_sub="1234",
+            email="new@example.com",
+            username="octocat",
+        )
+
+        assert result is None
+        svc._is_allowlisted.assert_not_awaited()
+        # Both the new email and user_id must be passed down.
+        svc._is_existing_user.assert_awaited_once_with("new@example.com", "1234")
 
     @pytest.mark.asyncio
     async def test_first_user_bootstrap_allowed(self):
@@ -354,3 +378,69 @@ class TestIsAllowlistedSourceFiltering:
             assert not has_source_filter, f"mode=both must not filter by source: {captured['sql']}"
         else:
             assert has_source_filter, f"mode={mode} must filter by source: {captured['sql']}"
+
+
+class TestIsExistingUser:
+    """Verify _is_existing_user uses an OR condition on email + user_id."""
+
+    @pytest.mark.asyncio
+    async def test_query_includes_user_id_or_email(self):
+        """Generated SQL must include both email and user_id so a user whose
+        IdP email changed is still found by their stable OAuth sub."""
+        svc = _svc()
+        captured = {}
+
+        async def fake_execute(stmt):
+            captured["sql"] = str(stmt.compile())
+            result = MagicMock()
+            result.scalar_one_or_none = MagicMock(return_value=None)
+            return result
+
+        svc.db.execute = fake_execute
+
+        found = await svc._is_existing_user("old@example.com", "gh-sub-42")
+
+        assert found is False
+        sql = captured["sql"]
+        assert "users.email" in sql
+        assert "users.user_id" in sql
+        # OR semantics must be present (SQLAlchemy renders "OR" in uppercase)
+        assert " OR " in sql.upper()
+
+    @pytest.mark.asyncio
+    async def test_returns_true_when_row_exists(self):
+        svc = _svc()
+        result_mock = MagicMock()
+        result_mock.scalar_one_or_none = MagicMock(return_value=MagicMock())
+        svc.db.execute = AsyncMock(return_value=result_mock)
+
+        assert await svc._is_existing_user("a@b.com", "sub-1") is True
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_no_row(self):
+        svc = _svc()
+        result_mock = MagicMock()
+        result_mock.scalar_one_or_none = MagicMock(return_value=None)
+        svc.db.execute = AsyncMock(return_value=result_mock)
+
+        assert await svc._is_existing_user("unknown@b.com", "sub-99") is False
+
+
+class TestLegacyCheckPassesUserIdThrough:
+    """_legacy_check must forward user_id to _check_registration_allowed."""
+
+    @pytest.mark.asyncio
+    async def test_disabled_gate_passes_user_id_to_legacy(self):
+        """When gate is disabled the legacy path is called with both email and user_id."""
+        svc = _svc()
+        svc._load_config = AsyncMock(return_value=_config(enabled=False, mode="manual"))
+        svc._legacy_check = AsyncMock(return_value=None)
+
+        await svc.check_access(
+            provider="github",
+            oauth_sub="gh-sub-99",
+            email="user@example.com",
+            username="octocat",
+        )
+
+        svc._legacy_check.assert_awaited_once_with("user@example.com", "gh-sub-99")

@@ -69,6 +69,17 @@ function LoginContent() {
             "Registration is disabled. Please ask an admin for an invitation.",
         }),
       );
+    } else if (errorParam === "email_in_use") {
+      // Issue #481: cross-provider email collision. The user signed in with
+      // one provider (e.g. Google) using an email that's already bound to
+      // a different account. Account linking is intentionally not yet
+      // supported (#517) — direct the user to their original provider.
+      setError(
+        t("emailInUse", {
+          default:
+            "This email is already linked to another sign-in method. Please use the provider you originally signed in with.",
+        }),
+      );
     } else if (errorParam) {
       setError(decodeURIComponent(errorParam));
     }

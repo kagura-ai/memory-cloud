@@ -14,12 +14,60 @@ Example:
     True
 """
 
+from __future__ import annotations
+
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 
+from config.settings import get_settings
 from utils.datetime import to_utc_iso, utcnow
+from utils.exceptions import ConflictError
+from utils.hashing import hmac_sha256_hex
+from utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from sqlalchemy.exc import IntegrityError as _IntegrityError
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from models.auth import User as _UserModel
+
+logger = get_logger(__name__)
+
+
+# Sentinel actor identifier for audit_logs.user_email when the OAuth callback
+# itself initiates the row (e.g. oauth_user_email_synced). Distinct from the
+# admin/user email actor strings so audit_logs.user_email never carries the
+# subject's mutable email — the subject is identified by user_id, which is
+# pseudonymized at erasure time via _pseudonymize_audit_logs.
+_OAUTH_CALLBACK_ACTOR = "oauth-callback"
+
+
+def _is_email_unique_violation(exc: _IntegrityError) -> bool:
+    """True iff ``exc`` is a UNIQUE violation on ``users.email``.
+
+    Asyncpg surfaces UNIQUE violations with sqlstate=23505 and a
+    ``constraint_name``. The narrowing tolerates whichever name PostgreSQL
+    actually uses in this codebase: a ``Column(unique=True, index=True)``
+    declaration is realized in the alembic baseline migration as a unique
+    index named ``ix_users_email`` (verified against
+    asyncpg.exceptions.UniqueViolationError raised by the live DB —
+    constraint_name="ix_users_email"). On other Postgres + SQLAlchemy
+    deployments where ``unique=True`` produces a separate
+    ``users_email_key`` constraint instead, the substring match on
+    ``"email"`` still hits. Narrowing to "email" prevents future
+    constraint additions on other columns (e.g. UNIQUE on ``name``) from
+    being mis-mapped to ConflictError("Email already in use").
+    """
+    orig = getattr(exc, "orig", None)
+    if orig is None:
+        return False
+    if getattr(orig, "sqlstate", None) != "23505":
+        return False
+    constraint = (getattr(orig, "constraint_name", "") or "").lower()
+    return "email" in constraint
 
 
 class Role(StrEnum):
@@ -123,85 +171,245 @@ class RoleManager:
             self._roles = None  # Not used in PostgreSQL mode
 
     async def ensure_user(
-        self, email: str, user_id: str, name: str | None = None, auth_provider: str | None = None
+        self,
+        email: str,
+        user_id: str,
+        name: str | None = None,
+        auth_provider: str | None = None,
+        *,
+        email_verified: bool = False,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
     ) -> Role:
-        """Ensure user exists, create if first user or new.
+        """Ensure user exists; on existing users, sync email/name from IdP.
 
-        First user is automatically assigned ADMIN role.
-        Subsequent users are assigned USER role by default.
+        Issue #481: Lookup is keyed by ``user_id`` (OAuth ``sub`` claim), not by
+        email — ``user_id`` is the immutable identity, ``email`` is mutable
+        user-facing data. On hit, when ``email_verified=True`` and the IdP-
+        provided email differs from the stored value, the stored email is
+        updated and an ``oauth_user_email_synced`` audit row is written with
+        HMAC-SHA256 hashes of old/new values. Same-row no-op email writes and
+        ``email_verified=False`` paths skip the UPDATE entirely.
+
+        First user is automatically assigned ADMIN role. Subsequent users are
+        assigned USER role by default.
 
         Args:
-            email: User email address
-            user_id: User ID (OAuth2 sub claim)
-            name: User display name (optional)
-            auth_provider: OAuth provider used for registration (e.g., "google", "github").
-                          Only stored on new user creation; not updated on subsequent logins.
+            email: User email address (from IdP ``user_info["email"]``).
+            user_id: User ID (OAuth2 ``sub`` claim) — the lookup key.
+            name: User display name (optional). Synced on every login.
+            auth_provider: OAuth provider used for registration (e.g.,
+                ``"google"``, ``"github"``). Only stored on new user creation;
+                not updated on subsequent logins.
+            email_verified: Whether the IdP attested that ``email`` is verified.
+                Required for the email-sync UPDATE; absent or ``False`` skips
+                the email field. Name is always sync-safe regardless.
+            ip_address: Caller IP, captured for the audit log row when an email
+                change is recorded.
+            user_agent: Caller User-Agent, captured for the audit log row.
 
         Returns:
-            Assigned role
+            The user's assigned role.
+
+        Raises:
+            ConflictError: When an email UPDATE would violate the
+                ``users.email`` UNIQUE constraint (different account already
+                holds the new address). The caller's transaction is rolled
+                back; the row's prior state is preserved.
 
         Example:
-            >>> role = await role_manager.ensure_user("user@example.com", "google-123", auth_provider="google")
+            >>> role = await role_manager.ensure_user(
+            ...     email="user@example.com",
+            ...     user_id="google-123",
+            ...     auth_provider="google",
+            ...     email_verified=True,
+            ... )
         """
         if self.use_postgres:
-            # PostgreSQL backend (async)
-            from sqlalchemy import select
-            from sqlalchemy.exc import IntegrityError
+            return await self._ensure_user_postgres(
+                email=email,
+                user_id=user_id,
+                name=name,
+                auth_provider=auth_provider,
+                email_verified=email_verified,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
 
-            from db.base import get_db
-            from models.auth import User
+        # In-memory backend (testing only) — keyed by email for backward
+        # compatibility with existing test suite. Postgres path uses user_id.
+        if self._roles is None:
+            self._roles = {}
 
-            async for db in get_db():
-                try:
-                    # Check if user exists
-                    result = await db.execute(select(User).filter_by(email=email))
-                    user = result.scalar_one_or_none()
+        if email in self._roles:
+            return self._roles[email]
 
-                    if user:
-                        # Update last_login_at
-                        user.last_login_at = utcnow()
-                        await db.commit()
-                        return Role(user.role)
+        role = Role.ADMIN if len(self._roles) == 0 else Role.USER
+        self._roles[email] = role
+        return role
 
-                    # Determine role: first user = ADMIN, others = USER
-                    count_result = await db.execute(select(func.count()).select_from(User))
-                    user_count = count_result.scalar()
-                    role = Role.ADMIN if user_count == 0 else Role.USER
+    async def _ensure_user_postgres(
+        self,
+        *,
+        email: str,
+        user_id: str,
+        name: str | None,
+        auth_provider: str | None,
+        email_verified: bool,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> Role:
+        """PostgreSQL-backed ``ensure_user``. See ``ensure_user`` docstring."""
+        from sqlalchemy import select
+        from sqlalchemy.exc import IntegrityError
 
-                    # Create new user
-                    # Issue #166: Mark first admin as initial admin (protected from deletion/demotion)
-                    new_user = User(
-                        email=email,
-                        user_id=user_id,
-                        name=name,
-                        role=role.value,
-                        is_initial_admin=(role == Role.ADMIN and user_count == 0),
-                        last_login_at=utcnow(),
+        from db.base import get_db
+        from models.auth import User
+
+        async for db in get_db():
+            # Lookup key: user_id (oauth_sub), not email — email is mutable.
+            result = await db.execute(select(User).filter_by(user_id=user_id))
+            user = result.scalar_one_or_none()
+
+            if user is not None:
+                return await self._sync_existing_user(
+                    db=db,
+                    user=user,
+                    new_email=email,
+                    new_name=name,
+                    auth_provider=auth_provider,
+                    email_verified=email_verified,
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                )
+
+            # New user path. Determine role: first user = ADMIN, others = USER.
+            count_result = await db.execute(select(func.count()).select_from(User))
+            user_count = count_result.scalar() or 0
+            role = Role.ADMIN if user_count == 0 else Role.USER
+
+            new_user = User(
+                email=email,
+                user_id=user_id,
+                name=name,
+                role=role.value,
+                # Issue #166: first admin protected from deletion/demotion.
+                is_initial_admin=(role == Role.ADMIN),
+                last_login_at=utcnow(),
+                auth_provider=auth_provider,
+            )
+            db.add(new_user)
+            try:
+                await db.commit()
+                return role
+            except IntegrityError as exc:
+                # Two collision shapes share this except:
+                #  (a) user_id race: another request just inserted the same
+                #      oauth_sub. Re-lookup by user_id and route the existing
+                #      row through _sync_existing_user so concurrent
+                #      first-logins still get last_login_at updated and any
+                #      email/name drift synced (Copilot review #516).
+                #  (b) email collision: oauth_sub is novel but email belongs
+                #      to a different account (different provider, same
+                #      address). The user_id re-lookup misses; raise 409.
+                await db.rollback()
+                retry = await db.execute(select(User).filter_by(user_id=user_id))
+                existing = retry.scalar_one_or_none()
+                if existing is not None:
+                    return await self._sync_existing_user(
+                        db=db,
+                        user=existing,
+                        new_email=email,
+                        new_name=name,
                         auth_provider=auth_provider,
+                        email_verified=email_verified,
+                        ip_address=ip_address,
+                        user_agent=user_agent,
                     )
-                    db.add(new_user)
-                    await db.commit()
+                if not _is_email_unique_violation(exc):
+                    raise
+                logger.warning(
+                    "oauth_email_collision_attempt",
+                    auth_provider=auth_provider,
+                    new_email_hmac=hmac_sha256_hex(email, get_settings().audit_hmac_key),
+                    user_id=user_id,
+                    phase="create",
+                )
+                raise ConflictError("Email address is already in use by another account") from exc
 
-                    return role
+        # Defensive: get_db() yields exactly once; this is unreachable in
+        # practice but satisfies the type checker.
+        return Role.USER  # pragma: no cover
 
-                except IntegrityError:
-                    # Race condition: user created by another request
-                    await db.rollback()
-                    result = await db.execute(select(User).filter_by(email=email))
-                    user = result.scalar_one_or_none()
-                    return Role(user.role) if user else Role.USER
+    async def _sync_existing_user(
+        self,
+        *,
+        db: AsyncSession,
+        user: _UserModel,
+        new_email: str,
+        new_name: str | None,
+        auth_provider: str | None,
+        email_verified: bool,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> Role:
+        """Sync mutable attributes (email, name) on an existing user row.
 
-        else:
-            # In-memory backend
-            if self._roles is None:
-                self._roles = {}
+        Email syncs only when ``email_verified`` is True AND the value
+        differs. Name syncs whenever provided and different. UPDATE-collision
+        on ``users.email`` UNIQUE raises ``ConflictError`` (rolled back).
+        """
+        from sqlalchemy.exc import IntegrityError
 
-            if email in self._roles:
-                return self._roles[email]
+        from models.auth import AuditLog
 
-            role = Role.ADMIN if len(self._roles) == 0 else Role.USER
-            self._roles[email] = role
-            return role
+        sync_email = email_verified and user.email != new_email
+        sync_name = new_name is not None and user.name != new_name
+
+        if not sync_email and not sync_name:
+            user.last_login_at = utcnow()
+            await db.commit()
+            return Role(user.role)
+
+        hmac_key = get_settings().audit_hmac_key
+        try:
+            if sync_email:
+                # Audit row written first so a failed commit rolls it back too.
+                # user_email is a sentinel actor string, not the subject's
+                # email — keeping mutable email out of audit_logs.user_email
+                # avoids stranded plaintext after the next email rotation
+                # (the subject is recoverable via user_id, which is
+                # pseudonymized at erasure time).
+                audit = AuditLog(
+                    user_email=_OAUTH_CALLBACK_ACTOR,
+                    user_id=user.user_id,
+                    action="oauth_user_email_synced",
+                    resource=f"user:{user.user_id}",
+                    old_value_hash=hmac_sha256_hex(user.email, hmac_key),
+                    new_value_hash=hmac_sha256_hex(new_email, hmac_key),
+                    user_metadata={"auth_provider": auth_provider},
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                )
+                db.add(audit)
+                user.email = new_email
+            if sync_name:
+                user.name = new_name
+            user.last_login_at = utcnow()
+            await db.commit()
+            return Role(user.role)
+        except IntegrityError as exc:
+            await db.rollback()
+            if not _is_email_unique_violation(exc):
+                raise
+            logger.warning(
+                "oauth_email_collision_attempt",
+                auth_provider=auth_provider,
+                new_email_hmac=hmac_sha256_hex(new_email, hmac_key),
+                user_id=user.user_id,
+                phase="update",
+            )
+            raise ConflictError("Email address is already in use by another account") from exc
 
     async def get_role(self, email: str) -> Role | None:
         """Get user's role.

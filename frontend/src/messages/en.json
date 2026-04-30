@@ -101,6 +101,7 @@
     "continueWithGitHub": "Continue with GitHub",
     "redirecting": "Redirecting...",
     "registrationDisabled": "Registration is disabled. Please ask an admin for an invitation.",
+    "emailInUse": "This email is already linked to another sign-in method. Please use the provider you originally signed in with.",
     "loginId": "Login ID",
     "password": "Password",
     "signIn": "Sign In",
