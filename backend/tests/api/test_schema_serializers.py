@@ -401,6 +401,8 @@ class TestUserProfileResponseSerialization:
             current_workspace_id=None,
             created_at=datetime(2026, 4, 28, 17, 50, 22),
             last_login_at=None,
+            # Issue #514: auth_method is required (matches model default).
+            auth_method="oauth",
         )
         body = json.loads(u.model_dump_json())
         assert body["created_at"] == "2026-04-28T17:50:22Z"
