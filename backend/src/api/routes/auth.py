@@ -199,6 +199,80 @@ def _email_in_use_redirect() -> RedirectResponse:
     )
 
 
+async def _maybe_refresh_redirect(
+    *,
+    state: str,
+    idp_sub: str,
+) -> RedirectResponse | None:
+    """Issue #515: handle the manual-refresh branch of a callback.
+
+    Returns ``None`` if this callback is a normal login (no
+    ``oauth2_state_intent:{state}="refresh"`` was set), so the caller
+    proceeds with the existing session-creation flow. Returns a
+    ``RedirectResponse`` when this is a refresh round-trip, in which
+    case the caller MUST short-circuit before touching session state —
+    the user is already logged in and we want to leave their cookie alone.
+
+    Errors during a refresh redirect to ``/profile?error=<code>`` rather
+    than dropping the user on the dashboard, so the profile page can
+    surface the failure inline:
+
+    - ``error=refresh_state_expired``: the originating user_id record
+      expired or was never written. The user can click the button again.
+    - ``error=refresh_user_mismatch``: the IdP returned a different
+      account than the one that initiated the refresh (e.g. the user
+      switched Google accounts mid-flow). Treat as suspicious — do not
+      sync identity into the wrong session.
+    """
+    if not _session_manager:
+        return None
+
+    redis = _session_manager._redis
+    intent = redis.get(f"oauth2_state_intent:{state}")
+    if intent != "refresh":
+        return None
+    redis.delete(f"oauth2_state_intent:{state}")
+
+    expected_user_id = redis.get(f"oauth2_state_user:{state}")
+    if expected_user_id:
+        redis.delete(f"oauth2_state_user:{state}")
+
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+    if not expected_user_id:
+        # The originating user_id record expired (TTL ran out between
+        # POST /me/refresh-oauth and the IdP round-trip). Without it we
+        # cannot enforce the same-user check; safest is to refuse.
+        return RedirectResponse(
+            f"{frontend_url}/profile?error=refresh_state_expired",
+            status_code=303,
+        )
+
+    if idp_sub != expected_user_id:
+        # The IdP returned a different account. ``ensure_user`` has
+        # already been called by the caller for that other account —
+        # which is fine, that account's row is now up to date — but we
+        # must NOT redirect the originating session to a place that
+        # implies the refresh succeeded for them. Surface the mismatch.
+        # The expected/returned ids are not PII (opaque OAuth ``sub``
+        # values), but stay terse for log volume.
+        logger.warning(f"refresh_user_mismatch: expected={expected_user_id} got={idp_sub}")
+        return RedirectResponse(
+            f"{frontend_url}/profile?error=refresh_user_mismatch",
+            status_code=303,
+        )
+
+    # Happy path: same user. Honour return_to (set by the initiating
+    # endpoint to /profile?refreshed=1 by default).
+    return_to_url = redis.get(f"oauth2_return_to:{state}")
+    if return_to_url:
+        redis.delete(f"oauth2_return_to:{state}")
+    redirect_url = return_to_url or f"{frontend_url}/profile?refreshed=1"
+
+    logger.info(f"refresh_oauth_success: user_id={idp_sub}")
+    return RedirectResponse(url=redirect_url, status_code=303)
+
+
 # ============================================================================
 # Provider Discovery (Issue #360)
 # ============================================================================
@@ -400,6 +474,18 @@ async def google_callback(
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
         )
+
+        # Issue #515: refresh-mode short-circuit. POST /me/refresh-oauth set
+        # oauth2_state_intent:{state}="refresh" + oauth2_state_user:{state}
+        # to the originating session's user_id. ensure_user above has already
+        # synced email/name; we now skip session creation/workspace creation
+        # so the user keeps their current session, then redirect to return_to.
+        refresh_redirect = await _maybe_refresh_redirect(
+            state=state,
+            idp_sub=user_info["sub"],
+        )
+        if refresh_redirect is not None:
+            return refresh_redirect
 
         # 5. Create session
         # Note on key naming:
@@ -807,6 +893,16 @@ async def github_callback(
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
         )
+
+        # Issue #515: refresh-mode short-circuit (see google_callback for the
+        # full rationale). The branch must precede session swap so the user
+        # keeps their current cookie when refresh ends.
+        refresh_redirect = await _maybe_refresh_redirect(
+            state=state,
+            idp_sub=user_info["sub"],
+        )
+        if refresh_redirect is not None:
+            return refresh_redirect
 
         db_user_id = user_info["sub"]
 

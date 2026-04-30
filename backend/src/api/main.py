@@ -358,6 +358,7 @@ from api.routes import (  # noqa: E402
     invitations,
     mcp,
     me_account,  # Issue #360: GDPR right-to-erasure self-service endpoints
+    me_oauth,  # Issue #515: manual IdP refresh endpoint
     member_credentials,
     memory,
     neural_config,
@@ -387,6 +388,9 @@ app.include_router(users.router, prefix="/api/v1")
 
 # Account erasure self-service routes (Issue #360 - GDPR Art.17 / APPI compliance)
 app.include_router(me_account.router, prefix="/api/v1")
+
+# Manual OAuth refresh endpoint (Issue #515 - manual IdP re-sync)
+app.include_router(me_oauth.router, prefix="/api/v1")
 
 # OAuth2 Server routes (Issue #33 - OAuth2 client management)
 app.include_router(oauth.router, prefix="/api/v1")
