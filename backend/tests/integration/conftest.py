@@ -45,17 +45,60 @@ os.environ.setdefault("JWT_SECRET", "integration-test-jwt-secret-not-for-prod")
 # If a sibling test directory (e.g. ``tests/api/``) was collected before
 # ``tests/integration/`` and already imported ``config.database``, the
 # module-level ``DATABASE_URL`` constant in that module is frozen at the
-# pre-override value. Reload the affected modules so they re-read the env
-# we just set. This is defensive — when integration tests are run via
+# pre-override value. Reload only the configuration module so it re-reads
+# the env we just set. For ``db.base``, do NOT reload the module because
+# that would recreate ``Base = declarative_base()`` and split the
+# declarative metadata registry from the model modules that already
+# imported the original ``Base`` (alembic ``target_metadata`` and any
+# ``Base.metadata.create_all`` would then see only an empty registry).
+# Instead, reset the lazy-init globals (``engine``, ``async_session_factory``,
+# ``sync_engine``, ``sync_session_factory``) in place so the next call
+# to ``_get_engine()`` / ``_get_sync_engine()`` rebuilds them against the
+# freshly reloaded ``config.database.DATABASE_URL`` (those getters do
+# ``from config.database import DATABASE_URL`` at call time, so the
+# new value is picked up automatically).
+#
+# This is defensive — when integration tests are run via
 # ``make test-integration`` (which does NOT mix with unit tests), no
-# reload is needed; the guard only fires in mixed-suite invocations
+# reload/reset is needed; the guard only fires in mixed-suite invocations
 # (``pytest tests/``).
 import importlib  # noqa: E402
 import sys  # noqa: E402
 
-for _modname in ("config.database", "db.base"):
-    if _modname in sys.modules:
-        importlib.reload(sys.modules[_modname])
+
+def _reset_db_base_state() -> None:
+    """Clear cached engines/session factories on ``db.base`` without reloading.
+
+    ``db.base`` lazily creates engines on first access via the
+    ``from config.database import DATABASE_URL`` pattern inside its getter
+    functions. Setting the cached globals to ``None`` (and disposing the
+    engines first to release pooled connections) makes the next access
+    rebuild them with the freshly reloaded config — without touching the
+    declarative ``Base`` that model modules already hold a reference to.
+    """
+    db_base = sys.modules.get("db.base")
+    if db_base is None:
+        return
+
+    for engine_name in ("engine", "sync_engine"):
+        existing = getattr(db_base, engine_name, None)
+        if existing is not None and hasattr(existing, "dispose"):
+            try:
+                existing.dispose()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+        if hasattr(db_base, engine_name):
+            setattr(db_base, engine_name, None)
+
+    for factory_name in ("async_session_factory", "sync_session_factory"):
+        if hasattr(db_base, factory_name):
+            setattr(db_base, factory_name, None)
+
+
+if "config.database" in sys.modules:
+    importlib.reload(sys.modules["config.database"])
+
+_reset_db_base_state()
 
 
 @pytest.fixture(scope="session", autouse=True)
