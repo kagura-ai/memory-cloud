@@ -231,6 +231,14 @@ class TestDcrEndpointRejection:
         # FastAPI's default ``{"detail": "..."}`` envelope must not appear —
         # SDKs that schema-validate against RFC 6749 fields will trip on it.
         assert "detail" not in body, f"case={case_label}: {body!r}"
+        # RFC 6749 §5.1/§5.2 mandates Cache-Control: no-store + Pragma: no-cache
+        # so intermediaries don't cache OAuth error envelopes.
+        assert response.headers.get("cache-control") == "no-store", (
+            f"case={case_label}: missing/wrong Cache-Control"
+        )
+        assert response.headers.get("pragma") == "no-cache", (
+            f"case={case_label}: missing/wrong Pragma"
+        )
 
     def test_rate_limit_returns_rfc6749_format(self, client):
         """6th request from the same IP returns 429 with RFC 6749 envelope.

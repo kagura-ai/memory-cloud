@@ -63,10 +63,6 @@ def query_client(session: Session, client_id: str) -> OAuth2Client | None:
     Returns:
         OAuth2Client or None
     """
-    import logging
-
-    logger = logging.getLogger(__name__)
-
     client = session.query(OAuth2Client).filter_by(client_id=client_id).first()
     logger.info(f"query_client: client_id={client_id}, found={client is not None}")
 
@@ -601,9 +597,6 @@ class OAuth2AuthorizationServer:
                 Returns:
                     Simple object with status_code, body, headers, and location
                 """
-                import logging
-
-                logger = logging.getLogger(__name__)
                 logger.info(
                     f"OAuth2 handle_response: status={status_code}, payload={payload}, headers={headers}"
                 )
@@ -639,9 +632,6 @@ class OAuth2AuthorizationServer:
                 """
                 # No-op implementation for FastAPI
                 # Signals are optional; OAuth2 flow works without them
-                import logging
-
-                logger = logging.getLogger(__name__)
                 logger.debug(f"OAuth2 signal: {name}, kwargs={list(kwargs.keys())}")
                 return
 

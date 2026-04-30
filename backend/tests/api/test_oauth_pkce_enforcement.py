@@ -76,8 +76,17 @@ class TestPkceExtensionRegistration:
         )
 
     def test_pkce_required_defaults_to_true(self):
-        wrapper = _build_wrapper_with_mocked_server()
-        wrapper._register_grants()
+        # Mock get_settings rather than relying on the cached singleton, so
+        # this test stays deterministic regardless of CI env vars
+        # (e.g. OAUTH_PKCE_REQUIRED=false) or test ordering effects on the
+        # global ``_settings`` cache.
+        with patch("auth.oauth2_server.get_settings") as mock_get_settings:
+            mock_settings = MagicMock()
+            mock_settings.oauth_pkce_required = True
+            mock_get_settings.return_value = mock_settings
+
+            wrapper = _build_wrapper_with_mocked_server()
+            wrapper._register_grants()
 
         call = _find_grant_call(wrapper, AuthorizationCodeGrant)
         extensions = call.args[1]

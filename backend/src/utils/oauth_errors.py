@@ -18,8 +18,18 @@ def rfc6749_error_response(
     description: str,
     status_code: int = 400,
 ) -> JSONResponse:
-    """Build an OAuth 2.0 error response per RFC 6749 §5.2 / RFC 7591 §3.2.2."""
+    """Build an OAuth 2.0 error response per RFC 6749 §5.2 / RFC 7591 §3.2.2.
+
+    The response includes the ``Cache-Control: no-store`` and ``Pragma: no-cache``
+    headers required by RFC 6749 §5.1/§5.2 so that intermediaries cannot cache
+    the rejection envelope (caching a 4xx/429 OAuth response could mask
+    transient configuration problems and confuse re-authentication attempts).
+    """
     return JSONResponse(
         status_code=status_code,
         content={"error": error, "error_description": description},
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+        },
     )
