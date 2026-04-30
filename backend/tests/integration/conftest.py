@@ -82,9 +82,19 @@ def _reset_db_base_state() -> None:
 
     for engine_name in ("engine", "sync_engine"):
         existing = getattr(db_base, engine_name, None)
-        if existing is not None and hasattr(existing, "dispose"):
+        if existing is not None:
+            # ``db.base.engine`` is an ``AsyncEngine`` whose ``.dispose()``
+            # returns a coroutine — calling it without ``await`` here would
+            # leak an un-awaited coroutine and never actually release the
+            # pool. Dispose via the underlying ``sync_engine`` attribute
+            # for async engines (``AsyncEngine.sync_engine.dispose()`` is
+            # synchronous and releases the same pool); fall back to plain
+            # ``.dispose()`` for the sync engine in ``db.base.sync_engine``.
             try:
-                existing.dispose()
+                if hasattr(existing, "sync_engine") and hasattr(existing.sync_engine, "dispose"):
+                    existing.sync_engine.dispose()
+                elif hasattr(existing, "dispose"):
+                    existing.dispose()
             except Exception:  # noqa: BLE001 — best-effort cleanup
                 pass
         if hasattr(db_base, engine_name):
