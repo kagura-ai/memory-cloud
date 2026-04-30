@@ -146,6 +146,28 @@ class TestDetectDcrProvider:
         # default to custom rather than raising.
         assert detect_dcr_provider("not a url", "Claude Code") == "custom"
 
+    @pytest.mark.parametrize(
+        "redirect_uri",
+        [
+            # urlparse extracts hostname="chatgpt.com" but port is malformed.
+            # Without the port-parse guard, this would spoof "chatgpt".
+            "https://chatgpt.com:443.evil.com/cb",
+            "https://claude.ai:80.attacker.com/cb",
+            # Port out of range — also raises ValueError on parsed.port.
+            "https://chatgpt.com:99999/cb",
+            # Userinfo — not legitimate for any DCR provider.
+            "https://attacker@chatgpt.com/cb",
+            "https://user:pass@claude.ai/cb",
+        ],
+    )
+    def test_malformed_authority_rejected(self, redirect_uri: str) -> None:
+        # Pin the security upgrade: ``urlparse`` extracts a clean hostname
+        # from these inputs, but the explicit port-parse + userinfo check
+        # blocks them. Without the guards, the substring/suffix match on
+        # the host alone would re-introduce provider spoofing.
+        assert detect_dcr_provider(redirect_uri, "ChatGPT MCP") == "custom"
+        assert detect_dcr_provider(redirect_uri, "Claude Code") == "custom"
+
 
 def _patch_dcr_dependencies():
     """Build the patch context for DCR endpoint tests.

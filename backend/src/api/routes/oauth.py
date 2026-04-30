@@ -529,6 +529,22 @@ def detect_dcr_provider(redirect_uri: str, client_name: str) -> str:
     except (ValueError, AttributeError):
         return "custom"
 
+    # Reject malformed authorities — ``urlparse`` is lenient and will happily
+    # extract a clean ``hostname`` from inputs that have a junk port
+    # (``http://chatgpt.com:443.evil.com/cb`` returns hostname ``"chatgpt.com"``)
+    # or userinfo prefix (``http://attacker@chatgpt.com/cb``). A simple
+    # hostname-suffix match would let those slip through and re-introduce
+    # provider spoofing. Force a parse of the port to surface bad authorities,
+    # and reject any redirect_uri that carries username/password — neither is
+    # legitimate for the providers this DCR endpoint serves.
+    if parsed.username is not None or parsed.password is not None:
+        return "custom"
+    try:
+        _port = parsed.port  # raises ValueError on non-integer or out-of-range
+    except ValueError:
+        return "custom"
+    del _port
+
     hostname = (parsed.hostname or "").lower()
 
     # 1) Loopback path (RFC 8252 native apps): http scheme + loopback host.
