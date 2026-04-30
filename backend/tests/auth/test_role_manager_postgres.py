@@ -34,20 +34,41 @@ def _email_unique_violation() -> IntegrityError:
     return IntegrityError("UNIQUE", params={}, orig=_AsyncpgUniqueViolationStub())
 
 
+def _user_id_unique_violation() -> IntegrityError:
+    """IntegrityError with constraint_name=ix_users_user_id (race-condition shape).
+
+    Distinct from ``_email_unique_violation`` so race-recovery tests don't
+    accidentally exercise the email-collision narrowing path inside
+    ``_is_email_unique_violation`` — using the wrong constraint name would
+    silently still pass today (the re-lookup-by-user_id branch fires before
+    the narrowing check), but a future code reorder could mask a real bug.
+    """
+    return IntegrityError(
+        "UNIQUE", params={}, orig=_AsyncpgUniqueViolationStub(constraint_name="ix_users_user_id")
+    )
+
+
 def _execute_returns(*results):
     """Build a side_effect list of MagicMock execute results.
 
     Each entry models a single ``await db.execute(...)`` call. The result
-    object exposes ``scalar_one_or_none`` AND ``scalar`` because callers use
-    different terminators on different queries (User lookup vs count(*)).
+    object exposes both ``scalar_one_or_none`` and ``scalar`` so callers can
+    use either terminator without surprise: a result built for a User-lookup
+    sets ``scalar_one_or_none`` to the row (or None) and ``scalar`` to None;
+    a result built for a count(*) sets ``scalar`` to the count and
+    ``scalar_one_or_none`` to None. This avoids depending on MagicMock's
+    auto-attribute behavior, which would silently return a fresh MagicMock
+    instead of None and could mask future refactors.
     """
     side_effects = []
     for r in results:
         result_mock = MagicMock()
         if isinstance(r, dict) and "scalar" in r:
             result_mock.scalar = MagicMock(return_value=r["scalar"])
+            result_mock.scalar_one_or_none = MagicMock(return_value=None)
         else:
             result_mock.scalar_one_or_none = MagicMock(return_value=r)
+            result_mock.scalar = MagicMock(return_value=None)
         side_effects.append(result_mock)
     return side_effects
 
@@ -322,10 +343,12 @@ class TestCreatePath:
         # Existing row was just inserted by another concurrent request with a
         # stale email — the racing caller's IdP payload has the fresher value.
         race_existing = _user_row(email="alice@old.com", name="Alice Old", role="admin")
-        # Sequence: lookup miss → count=0 → commit raises (user_id race)
+        # Sequence: lookup miss → count=0 → commit raises (user_id race —
+        # constraint_name ix_users_user_id, NOT email, so we precisely model
+        # the user_id-collision shape rather than reusing the email helper)
         # → re-lookup hits → sync_existing_user commits the update
         db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing))
-        db.commit = AsyncMock(side_effect=[_email_unique_violation(), None])
+        db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 
         with _patch_get_db(db):
             role = await role_manager.ensure_user(

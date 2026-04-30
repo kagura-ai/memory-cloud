@@ -1,11 +1,19 @@
 """Integration tests for RoleManager.ensure_user against a real PostgreSQL DB.
 
-Issue #481: validates that:
-- ensure_user looks up by user_id (not email) so an IdP email change still
-  finds the existing row.
-- An UPDATE that would violate the users.email UNIQUE constraint is caught
-  inside ensure_user, the transaction is rolled back, and ConflictError is
-  raised — never IntegrityError or 503.
+Issue #481: validates that ensure_user looks up by ``user_id`` (not email) so
+an IdP email change still finds the existing row, and that the audit row +
+field update both land on a real Postgres connection.
+
+The UPDATE-collision path (`users.email` UNIQUE → ``ConflictError(409)``) is
+covered by the unit test
+``tests/auth/test_role_manager_postgres.py::TestUpdateCollision::test_collision_raises_conflict_and_logs_alert``,
+which mocks ``IntegrityError`` directly. A real-DB collision test was
+intentionally NOT included here — the asyncpg/SQLAlchemy async-session
+greenlet machinery raises ``MissingGreenlet`` during the IntegrityError
+unwind in pytest fixtures, even though the same code path works correctly
+inside the FastAPI request lifecycle (Starlette wraps each request in a
+greenlet that propagates correctly). See the inline comment after the
+remaining tests in this file for the full rationale.
 
 These run only when a Postgres test DB is reachable (``conftest.async_engine``
 skips otherwise). Each test seeds rows with uuid-suffixed identifiers so
