@@ -271,6 +271,8 @@ async def refresh_oauth(
             client_id=github_client_id, redirect_uri=github_redirect_uri, state=state
         )
 
-    logger.info(f"refresh_oauth_initiated: user_id={user_id} provider={provider}")
+    # See auth.py:_maybe_refresh_redirect for why this is f-string and
+    # not structlog kwargs (test infra doesn't call setup_logger()).
+    logger.info(f"refresh_oauth_initiated user_id={user_id} provider={provider}")
 
     return RefreshOAuthResponse(authorization_url=authorization_url, state=state)

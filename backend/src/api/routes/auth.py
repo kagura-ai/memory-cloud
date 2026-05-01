@@ -263,7 +263,16 @@ async def _maybe_refresh_redirect(
         # implies the refresh succeeded for them. Surface the mismatch.
         # The expected/returned ids are not PII (opaque OAuth ``sub``
         # values), but stay terse for log volume.
-        logger.warning(f"refresh_user_mismatch: expected={expected_user_id} got={idp_sub}")
+        # Note: structlog kwargs would be cleaner here, but `setup_logger()`
+        # is only called from api/main.py at app startup — pytest imports
+        # the route module directly, so structlog's default config falls
+        # back to stdlib Logger which rejects kwargs with TypeError. Until
+        # tests/conftest.py invokes setup_logger() (out of scope for #515),
+        # f-string is the portable form. Same applies to the success log
+        # below and to me_oauth.refresh_oauth_initiated.
+        logger.warning(
+            f"refresh_user_mismatch expected_user_id={expected_user_id} idp_sub={idp_sub}"
+        )
         return RedirectResponse(
             f"{frontend_url}/profile?error=refresh_user_mismatch",
             status_code=303,
@@ -280,7 +289,7 @@ async def _maybe_refresh_redirect(
     else:
         redirect_url = f"{frontend_url}/profile?refreshed=1"
 
-    logger.info(f"refresh_oauth_success: user_id={idp_sub}")
+    logger.info(f"refresh_oauth_success user_id={idp_sub}")
     return RedirectResponse(url=redirect_url, status_code=303)
 
 
