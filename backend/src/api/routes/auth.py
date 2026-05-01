@@ -270,7 +270,15 @@ async def _maybe_refresh_redirect(
         )
 
     # Happy path: same user. Honour return_to (already read above).
-    redirect_url = return_to_url or f"{frontend_url}/profile?refreshed=1"
+    # POST /me/refresh-oauth persists return_to as a same-origin
+    # frontend path (e.g. "/profile?refreshed=1") — prefix FRONTEND_URL
+    # so the redirect lands on the frontend origin, not the API origin.
+    # The validator at write-time already rejects absolute URLs, so any
+    # value reaching us here starts with "/" and is safe to prefix.
+    if return_to_url and return_to_url.startswith("/"):
+        redirect_url = f"{frontend_url}{return_to_url}"
+    else:
+        redirect_url = f"{frontend_url}/profile?refreshed=1"
 
     logger.info(f"refresh_oauth_success: user_id={idp_sub}")
     return RedirectResponse(url=redirect_url, status_code=303)

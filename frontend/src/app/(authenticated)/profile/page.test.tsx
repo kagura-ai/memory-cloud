@@ -149,33 +149,48 @@ describe("getSignInMethodLabel", () => {
 // ---------- getRefreshProviderName (#515) -----------------------------------
 
 describe("getRefreshProviderName", () => {
-  it('returns "Google" for OAuth + google', () => {
+  it("returns the i18n-resolved Google label for OAuth + google", () => {
+    // Helper now routes through t() so brand display can be localized
+    // (Copilot loop 3 #4). Stub translator surfaces the i18n key for
+    // assertion symmetry with the existing fixture pattern.
     expect(
-      getRefreshProviderName({ auth_method: "oauth", auth_provider: "google" }),
-    ).toBe("Google");
+      getRefreshProviderName(
+        { auth_method: "oauth", auth_provider: "google" },
+        stableTranslator,
+      ),
+    ).toBe("signInMethodGoogle");
   });
 
-  it('returns "GitHub" for OAuth + github', () => {
+  it("returns the i18n-resolved GitHub label for OAuth + github", () => {
     expect(
-      getRefreshProviderName({ auth_method: "oauth", auth_provider: "github" }),
-    ).toBe("GitHub");
+      getRefreshProviderName(
+        { auth_method: "oauth", auth_provider: "github" },
+        stableTranslator,
+      ),
+    ).toBe("signInMethodGitHub");
   });
 
   it("returns null for password user (no IdP to refresh from)", () => {
     expect(
-      getRefreshProviderName({ auth_method: "password", auth_provider: null }),
+      getRefreshProviderName(
+        { auth_method: "password", auth_provider: null },
+        stableTranslator,
+      ),
     ).toBeNull();
   });
 
   it("returns null for legacy OAuth user with null provider", () => {
     // Pre-#361 — backend would 400 anyway. UI hides the button.
     expect(
-      getRefreshProviderName({ auth_method: "oauth", auth_provider: null }),
+      getRefreshProviderName(
+        { auth_method: "oauth", auth_provider: null },
+        stableTranslator,
+      ),
     ).toBeNull();
   });
 
   it("returns null when both fields are undefined", () => {
-    expect(getRefreshProviderName({})).toBeNull();
+    expect(getRefreshProviderName({}, stableTranslator)).toBeNull();
   });
 });
 
@@ -227,9 +242,9 @@ describe("ProfilePage — refresh-from-IdP button visibility (#515)", () => {
     };
     render(<ProfilePage />);
     // Translator interpolates {provider} → label is "key|Google".
-    expect(screen.getByText("refreshFromIdP|Google")).toBeTruthy();
+    expect(screen.getByText("refreshFromIdP|signInMethodGoogle")).toBeTruthy();
     expect(
-      screen.getByRole("button", { name: /refreshFromIdPButton\|Google/ }),
+      screen.getByRole("button", { name: /refreshFromIdPButton\|signInMethodGoogle/ }),
     ).toBeTruthy();
   });
 
@@ -242,7 +257,7 @@ describe("ProfilePage — refresh-from-IdP button visibility (#515)", () => {
       auth_provider: "github",
     };
     render(<ProfilePage />);
-    expect(screen.getByText("refreshFromIdP|GitHub")).toBeTruthy();
+    expect(screen.getByText("refreshFromIdP|signInMethodGitHub")).toBeTruthy();
   });
 
   it("does NOT render the refresh button for a password user", () => {
@@ -329,7 +344,7 @@ describe("ProfilePage — refresh button click (#515)", () => {
     render(<ProfilePage />);
 
     const button = screen.getByRole("button", {
-      name: /refreshFromIdPButton\|Google/,
+      name: /refreshFromIdPButton\|signInMethodGoogle/,
     });
     fireEvent.click(button);
 
@@ -356,7 +371,7 @@ describe("ProfilePage — refresh button click (#515)", () => {
     render(<ProfilePage />);
 
     const button = screen.getByRole("button", {
-      name: /refreshFromIdPButton\|GitHub/,
+      name: /refreshFromIdPButton\|signInMethodGitHub/,
     });
     fireEvent.click(button);
 
@@ -365,7 +380,7 @@ describe("ProfilePage — refresh button click (#515)", () => {
     });
     const lastToast = mockToast.mock.calls[mockToast.mock.calls.length - 1][0];
     expect(lastToast.variant).toBe("destructive");
-    expect(lastToast.description).toBe("refreshFromIdPErrorRateLimited|GitHub");
+    expect(lastToast.description).toBe("refreshFromIdPErrorRateLimited|signInMethodGitHub");
   });
 
   it("on generic failure surfaces the generic error toast", async () => {
@@ -381,7 +396,7 @@ describe("ProfilePage — refresh button click (#515)", () => {
     render(<ProfilePage />);
 
     fireEvent.click(
-      screen.getByRole("button", { name: /refreshFromIdPButton\|Google/ }),
+      screen.getByRole("button", { name: /refreshFromIdPButton\|signInMethodGoogle/ }),
     );
 
     await waitFor(() => {
@@ -389,7 +404,7 @@ describe("ProfilePage — refresh button click (#515)", () => {
     });
     const lastToast = mockToast.mock.calls[mockToast.mock.calls.length - 1][0];
     expect(lastToast.variant).toBe("destructive");
-    expect(lastToast.description).toBe("refreshFromIdPErrorGeneric|Google");
+    expect(lastToast.description).toBe("refreshFromIdPErrorGeneric|signInMethodGoogle");
   });
 });
 
@@ -413,7 +428,7 @@ describe("ProfilePage — post-callback search-param handling (#515)", () => {
     });
     const successToast = mockToast.mock.calls[0][0];
     expect(successToast.variant).toBeUndefined(); // success = default variant
-    expect(successToast.title).toBe("refreshFromIdPSuccess|Google");
+    expect(successToast.title).toBe("refreshFromIdPSuccess|signInMethodGoogle");
     expect(mockRefetchUser).toHaveBeenCalled();
     expect(mockRouterReplace).toHaveBeenCalledWith("/profile");
   });
@@ -435,7 +450,7 @@ describe("ProfilePage — post-callback search-param handling (#515)", () => {
     });
     const errorToast = mockToast.mock.calls[0][0];
     expect(errorToast.variant).toBe("destructive");
-    expect(errorToast.description).toBe("refreshFromIdPErrorMismatch|Google");
+    expect(errorToast.description).toBe("refreshFromIdPErrorMismatch|signInMethodGoogle");
     expect(mockRouterReplace).toHaveBeenCalledWith("/profile");
   });
 
@@ -455,7 +470,7 @@ describe("ProfilePage — post-callback search-param handling (#515)", () => {
       expect(mockToast).toHaveBeenCalled();
     });
     const errorToast = mockToast.mock.calls[0][0];
-    expect(errorToast.description).toBe("refreshFromIdPErrorExpired|GitHub");
+    expect(errorToast.description).toBe("refreshFromIdPErrorExpired|signInMethodGitHub");
   });
 
   it("does nothing on a clean URL (no toast, no replace)", () => {

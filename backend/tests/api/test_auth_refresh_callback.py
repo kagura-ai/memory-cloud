@@ -79,7 +79,10 @@ class TestMaybeRefreshRedirect:
 
         assert isinstance(result, RedirectResponse)
         assert result.status_code == 303
-        assert result.headers["location"] == "/profile?refreshed=1&from=button"
+        # FRONTEND_URL is prefixed onto the relative return_to so the
+        # browser lands on the frontend origin, not the API origin
+        # (Copilot loop 3 #1).
+        assert result.headers["location"] == "http://localhost:3000/profile?refreshed=1&from=button"
         # The four keys the helper consumes must all be deleted on the
         # happy path (intent, user, return_to). State key itself is
         # cleaned by the surrounding callback before this helper is

@@ -529,8 +529,13 @@ class UserProfileResponse(TZAwareBaseModel):
     # Issue #246: current_context_id removed (context always explicit)
     created_at: datetime
     last_login_at: datetime | None
-    auth_method: str
-    auth_provider: str | None = None
+    # Issue #514: enum-shaped — DB CHECK constraint pins
+    # auth_method ∈ {oauth, password} (models/auth.py:124) and
+    # auth_provider ∈ {google, github, NULL} (filled in by OAuth callback).
+    # Tightening the schema layer to Literal catches accidental bad values
+    # before they leave the API contract.
+    auth_method: Literal["oauth", "password"]
+    auth_provider: Literal["google", "github"] | None = None
 
     class Config:
         from_attributes = True

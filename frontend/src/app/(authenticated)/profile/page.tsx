@@ -53,16 +53,19 @@ export function getSignInMethodLabel(
 }
 
 /**
- * Issue #515: human-readable provider name for i18n message interpolation.
- * Returns null when refresh is not available for the user (password auth or
- * legacy OAuth row with no recorded provider).
+ * Issue #515: localized provider name for i18n message interpolation.
+ * Returns null when refresh is not available for the user (password auth
+ * or legacy OAuth row with no recorded provider). The brand name itself
+ * comes from ``signInMethodGoogle`` / ``signInMethodGitHub`` so all
+ * user-visible text — even brand names — flows through next-intl.
  */
 export function getRefreshProviderName(
   user: Pick<AuthUser, "auth_method" | "auth_provider">,
-): "Google" | "GitHub" | null {
+  t: (key: string) => string,
+): string | null {
   if (user.auth_method !== "oauth") return null;
-  if (user.auth_provider === "google") return "Google";
-  if (user.auth_provider === "github") return "GitHub";
+  if (user.auth_provider === "google") return t("signInMethodGoogle");
+  if (user.auth_provider === "github") return t("signInMethodGitHub");
   return null;
 }
 
@@ -92,7 +95,7 @@ export default function ProfilePage() {
     refreshParamsHandled.current = true;
 
     const provider =
-      getRefreshProviderName(user) ?? t("signInProviderFallback");
+      getRefreshProviderName(user, t) ?? t("signInProviderFallback");
     const cleanUrl = "/profile";
 
     if (refreshed === "1") {
@@ -121,7 +124,7 @@ export default function ProfilePage() {
   }, [user, searchParams, t, tCommon, toast, refetchUser, router]);
 
   const handleRefreshFromIdP = async () => {
-    const provider = getRefreshProviderName(user ?? {});
+    const provider = getRefreshProviderName(user ?? {}, t);
     if (!provider) return; // Defensive: button is hidden in this state
     setIsRefreshing(true);
     try {
@@ -291,13 +294,19 @@ export default function ProfilePage() {
                   users with a known provider. Password users and pre-#361
                   null-provider users see nothing. */}
               {(() => {
-                const refreshProvider = getRefreshProviderName(user);
+                const refreshProvider = getRefreshProviderName(user, t);
                 if (!refreshProvider) return null;
                 return (
                   <div className="space-y-2 rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/30 p-3">
-                    <Label className="text-sm">
+                    {/* Use a <p> rather than <Label> here — the section
+                        heading is not the accessible name of any specific
+                        form control; the button below has its own visible
+                        text. <Label> without htmlFor renders an unbound
+                        <label> element which screen readers report as
+                        invalid. */}
+                    <p className="text-sm font-medium leading-none">
                       {t("refreshFromIdP", { provider: refreshProvider })}
-                    </Label>
+                    </p>
                     <p className="text-xs text-slate-500">
                       {t("refreshFromIdPDesc", { provider: refreshProvider })}
                     </p>
