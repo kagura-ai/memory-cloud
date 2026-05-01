@@ -399,6 +399,18 @@ class RoleManager:
             await db.commit()
             return Role(user.role)
 
+        # Capture user attributes BEFORE the commit attempt. After a failed
+        # commit (e.g. UNIQUE violation on email), SQLAlchemy expires the
+        # ORM instance and the next attribute access tries to lazy-load
+        # from the DB. With async sessions on asyncpg that lazy-load
+        # raises ``MissingGreenlet: greenlet_spawn has not been called``
+        # because we're already in an exception-handling path with the
+        # greenlet context torn down. Reading the values up front into
+        # plain locals avoids the lazy-load entirely.
+        existing_email = user.email
+        user_user_id = user.user_id
+        user_role = user.role
+
         hmac_key = get_settings().audit_hmac_key
         try:
             if sync_email:
@@ -410,10 +422,10 @@ class RoleManager:
                 # pseudonymized at erasure time).
                 audit = AuditLog(
                     user_email=_OAUTH_CALLBACK_ACTOR,
-                    user_id=user.user_id,
+                    user_id=user_user_id,
                     action="oauth_user_email_synced",
-                    resource=f"user:{user.user_id}",
-                    old_value_hash=hmac_sha256_hex(user.email, hmac_key),
+                    resource=f"user:{user_user_id}",
+                    old_value_hash=hmac_sha256_hex(existing_email, hmac_key),
                     new_value_hash=hmac_sha256_hex(new_email, hmac_key),
                     user_metadata={"auth_provider": auth_provider},
                     ip_address=ip_address,
@@ -425,7 +437,7 @@ class RoleManager:
                 user.name = new_name
             user.last_login_at = utcnow()
             await db.commit()
-            return Role(user.role)
+            return Role(user_role)
         except IntegrityError as exc:
             await db.rollback()
             if not _is_email_unique_violation(exc):
@@ -434,7 +446,7 @@ class RoleManager:
                 "oauth_email_collision_attempt",
                 auth_provider=auth_provider,
                 new_email_hmac=hmac_sha256_hex(new_email, hmac_key),
-                user_id=user.user_id,
+                user_id=user_user_id,
                 phase="update",
             )
             raise ConflictError("Email address is already in use by another account") from exc
