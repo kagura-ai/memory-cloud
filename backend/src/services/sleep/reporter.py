@@ -13,7 +13,13 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.sleep import SleepAction, SleepReport, SleepReportLLMUsage
+from models.sleep import (
+    SLEEP_REPORT_PAID_BY_VALUES,
+    SLEEP_REPORT_SOURCES,
+    SleepAction,
+    SleepReport,
+    SleepReportLLMUsage,
+)
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -186,11 +192,23 @@ class SleepReporter:
         The ``source`` and ``paid_by`` keyword arguments default to the
         scheduler-driven sleep run shape so existing callers receive the
         same behavior. Issue #495 broadlistening overrides them at its
-        own call site with ``source='analysis'`` / ``paid_by='byok'`` —
-        the values must come from ``SLEEP_REPORT_SOURCES`` /
-        ``SLEEP_REPORT_PAID_BY_VALUES`` in ``models/sleep.py`` so the
-        DB CHECK constraint added by #523 holds.
+        own call site with ``source='analysis'`` / ``paid_by='byok'``.
+
+        Raises:
+            ValueError: ``source`` not in ``SLEEP_REPORT_SOURCES`` or
+                ``paid_by`` not in ``SLEEP_REPORT_PAID_BY_VALUES``.
+                Service-layer validation surfaces a clear error rather
+                than letting the call reach the DB and fail with
+                ``IntegrityError`` from the CHECK constraint added by
+                #523 (see ``models/sleep.py:35-36`` for the canonical
+                tuples).
         """
+        if source not in SLEEP_REPORT_SOURCES:
+            raise ValueError(f"invalid source {source!r}; must be one of {SLEEP_REPORT_SOURCES}")
+        if paid_by not in SLEEP_REPORT_PAID_BY_VALUES:
+            raise ValueError(
+                f"invalid paid_by {paid_by!r}; must be one of {SLEEP_REPORT_PAID_BY_VALUES}"
+            )
         report = SleepReport(
             user_id=user_id,
             workspace_id=UUID(workspace_id) if workspace_id else None,

@@ -102,7 +102,15 @@ def _time_histogram(
     # regardless of the worker process's TZ env. ``Memory.created_at``
     # is naive UTC by repo convention (#489); ``to_utc_iso`` is
     # idempotent across naive/aware inputs.
-    start_epoch = start.timestamp()
+    #
+    # ``datetime.timestamp()`` on a NAIVE datetime interprets it in the
+    # process's LOCAL timezone (Python stdlib behavior). The repo
+    # convention is naive=UTC, so we attach ``tz=UTC`` before calling
+    # timestamp() to force UTC interpretation. Without this, bucket
+    # edges shift by the worker's UTC offset (e.g. JST workers would
+    # produce buckets shifted by 9 hours).
+    start_aware = start if start.tzinfo is not None else start.replace(tzinfo=UTC)
+    start_epoch = start_aware.timestamp()
     out: list[dict[str, Any]] = []
     for i in range(_TIME_BUCKETS):
         bucket_start = datetime.fromtimestamp(start_epoch + i * bucket_seconds, tz=UTC)

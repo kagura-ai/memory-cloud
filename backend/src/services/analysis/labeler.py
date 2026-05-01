@@ -30,6 +30,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from db.base import _get_session_factory
 from services.analysis.llm_caller import (
     OPENAI_FALLBACK_CHAIN,
     AnalysisLLMUpstreamError,
@@ -128,13 +129,22 @@ async def _label_one_cluster(
     *,
     cluster_index: int,
     reps: list[MemoryRecord],
-    llm_service: LLMService,
     user_id: str,
     workspace_id: str,
     context_id: str | None,
     sem: asyncio.Semaphore,
 ) -> ClusterLabel:
     """Single-cluster labeling with semaphore + frozenset guard.
+
+    Each task opens its own ``AsyncSession`` via the shared session
+    factory — SQLAlchemy 2.x ``AsyncSession`` does not allow concurrent
+    operations on the same session, and ``LLMService.complete_json``
+    performs a DB lookup (``_get_user_api_key`` resolving the BYOK key)
+    inside its coroutine frame. With ``Semaphore(8)`` over the gather,
+    8 concurrent tasks would race a single shared session and trigger
+    ``IllegalStateChangeError``. Per-task sessions isolate the DB
+    contention while keeping the parallelism (the slow part is the
+    OpenAI HTTP call, not the BYOK SELECT).
 
     Returns a ``ClusterLabel`` regardless of success — on full
     fallback exhaustion the labeler returns ``failed=True`` with a
@@ -146,37 +156,38 @@ async def _label_one_cluster(
     rep_ids = [str(r.id) for r in reps]
 
     async with sem:
-        # No explicit "consume budget before call" here — the LLM
-        # budget for the analysis run is implemented at the
-        # orchestrator level by capping ``max_llm_calls`` to
-        # ``len(clusters) + 1`` upstream. The call_with_fallback
-        # adapter exhausts the chain (1-2 attempts per cluster);
-        # once it returns an error, this cluster is done.
-        try:
-            result = await call_with_fallback(
-                llm_service=llm_service,
-                user_id=user_id,
-                workspace_id=workspace_id,
-                context_id=context_id,
-                system_prompt=CLUSTER_LABEL_SYSTEM,
-                prompt=CLUSTER_LABEL_USER.format(representatives=rep_block),
-                fallback_chain=OPENAI_FALLBACK_CHAIN,
-            )
-        except AnalysisLLMUpstreamError as e:
-            logger.warning(
-                "analysis_cluster_label_failed",
-                cluster_index=cluster_index,
-                error=str(e),
-            )
-            return ClusterLabel(
-                cluster_index=cluster_index,
-                label="(unlabeled)",
-                description="LLM labeling failed for this cluster.",
-                label_confidence=0.0,
-                representative_memory_ids=rep_ids,
-                breakdown=None,
-                failed=True,
-            )
+        # Per-task session — each LLMService gets its own AsyncSession
+        # so concurrent BYOK lookups don't race the orchestrator's
+        # shared session. The connection pool (size=5 + max_overflow=10)
+        # comfortably absorbs 8 concurrent borrowed connections.
+        session_factory = _get_session_factory()
+        async with session_factory() as task_session:
+            task_llm_service = LLMService(task_session)
+            try:
+                result = await call_with_fallback(
+                    llm_service=task_llm_service,
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    context_id=context_id,
+                    system_prompt=CLUSTER_LABEL_SYSTEM,
+                    prompt=CLUSTER_LABEL_USER.format(representatives=rep_block),
+                    fallback_chain=OPENAI_FALLBACK_CHAIN,
+                )
+            except AnalysisLLMUpstreamError as e:
+                logger.warning(
+                    "analysis_cluster_label_failed",
+                    cluster_index=cluster_index,
+                    error=str(e),
+                )
+                return ClusterLabel(
+                    cluster_index=cluster_index,
+                    label="(unlabeled)",
+                    description="LLM labeling failed for this cluster.",
+                    label_confidence=0.0,
+                    representative_memory_ids=rep_ids,
+                    breakdown=None,
+                    failed=True,
+                )
 
     # Frozenset guard: defense in depth across prompt evolutions —
     # if the LLM ever returns a ``representative_memory_ids`` field
@@ -213,7 +224,6 @@ async def label_clusters(
     centroids: np.ndarray,
     embeddings: np.ndarray,
     memories: list[MemoryRecord],
-    llm_service: LLMService,
     user_id: str,
     workspace_id: str,
     context_id: str | None,
@@ -221,12 +231,16 @@ async def label_clusters(
 ) -> list[ClusterLabel]:
     """Label every cluster in parallel (semaphore-bounded).
 
+    Each cluster task opens its own ``AsyncSession`` (see
+    ``_label_one_cluster``) so concurrent BYOK lookups don't race the
+    orchestrator's shared session. The orchestrator no longer needs to
+    pass an ``LLMService`` instance — each task constructs its own.
+
     Args:
         cluster_labels: Per-row cluster_index from clusterer.
         centroids: Cluster centroids (n_clusters, embedding_dim).
         embeddings: High-dim embedding matrix (n, embedding_dim).
         memories: Per-row memory metadata (len n).
-        llm_service: Resolved LLMService.
         user_id, workspace_id, context_id: Auth/scoping for BYOK.
         concurrency: Max in-flight LLM calls.
 
@@ -257,7 +271,6 @@ async def label_clusters(
                 _label_one_cluster(
                     cluster_index=cluster_index,
                     reps=reps,
-                    llm_service=llm_service,
                     user_id=user_id,
                     workspace_id=workspace_id,
                     context_id=context_id,

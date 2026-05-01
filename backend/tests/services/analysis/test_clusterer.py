@@ -70,10 +70,13 @@ def test_rejects_1d_input() -> None:
 
 
 def test_rejects_too_few_rows() -> None:
-    """KMeans requires at least 2 rows to make sense."""
+    """silhouette_score requires n>=3; reject smaller inputs upfront."""
     one_row = np.ones((1, 64), dtype=np.float32)
-    with pytest.raises(ValueError, match="at least 2"):
+    with pytest.raises(ValueError, match="at least 3"):
         cluster_high_dim(one_row)
+    two_rows = np.ones((2, 64), dtype=np.float32)
+    with pytest.raises(ValueError, match="at least 3"):
+        cluster_high_dim(two_rows)
 
 
 def test_kmeans_receives_high_dim_input() -> None:

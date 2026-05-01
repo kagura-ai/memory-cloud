@@ -60,7 +60,6 @@ from services.analysis.vector_pull import (
     EmbeddingMismatchError,
     pull_memories_with_vectors,
 )
-from services.llm_service import LLMService
 from utils.exceptions import ConflictError
 from utils.logger import get_logger
 
@@ -185,7 +184,6 @@ class AnalysisOrchestrator:
 
     def __init__(self, db: AsyncSession):
         self.db = db
-        self.llm_service = LLMService(db)
 
     async def start(
         self,
@@ -322,12 +320,15 @@ class AnalysisOrchestrator:
             )
 
             # Stage [F + G] — representative selection + LLM labeling.
+            # ``label_clusters`` no longer takes ``llm_service`` — each
+            # cluster task opens its own ``AsyncSession`` to avoid the
+            # SQLAlchemy concurrent-ops violation on the orchestrator's
+            # shared session. See labeler.py for the per-task pattern.
             cluster_label_results = await analysis_labeler.label_clusters(
                 cluster_labels=cluster_result.labels,
                 centroids=cluster_result.centroids,
                 embeddings=pull.embeddings,
                 memories=pull.memories,
-                llm_service=self.llm_service,
                 user_id=analysis.triggered_by,
                 workspace_id=str(analysis.workspace_id),
                 context_id=str(analysis.context_id),
@@ -348,7 +349,14 @@ class AnalysisOrchestrator:
                 window_from=from_dt,
                 window_to=to_dt,
             )
-            async with self.db.begin():
+            # SQLAlchemy 2.x ``AsyncSession`` autobegins a transaction on
+            # the first ``execute()`` / ``get()`` call (see ``self.db.get``
+            # at the top of this method). Calling ``async with
+            # self.db.begin()`` here would raise InvalidRequestError
+            # because a transaction is already active. Use explicit
+            # commit/rollback so the all-or-nothing boundary is correct
+            # against the autobegin transaction.
+            try:
                 await persist_results(
                     self.db,
                     inputs=inputs,
@@ -356,6 +364,10 @@ class AnalysisOrchestrator:
                     workspace_id=str(analysis.workspace_id),
                     context_id=str(analysis.context_id),
                 )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
 
             logger.info(
                 "analysis_run_succeeded",
@@ -379,6 +391,16 @@ class AnalysisOrchestrator:
             raise
 
     async def _mark_failed(self, analysis: MemoryAnalysis, error_message: str) -> None:
-        """Persist the failed status in its own transaction."""
-        async with self.db.begin():
+        """Persist the failed status in its own commit boundary.
+
+        The compute-stage transaction has already rolled back via
+        ``persist_results``' caller-managed try/except. We commit the
+        status update separately so ``status='failed'`` is observable
+        to the API caller polling the run row.
+        """
+        try:
             await persist_failure(self.db, analysis=analysis, error_message=error_message)
+            await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            raise

@@ -110,8 +110,16 @@ def cluster_high_dim(embeddings: np.ndarray) -> ClusterResult:
     if embeddings.ndim != 2:
         raise ValueError(f"embeddings must be 2D (n, embedding_dim); got ndim={embeddings.ndim}")
     n, embedding_dim = embeddings.shape
-    if n < 2:
-        raise ValueError(f"need at least 2 memories for clustering; got n={n}")
+    if n < 3:
+        # silhouette_score requires both n_clusters >= 2 AND n >= 3;
+        # for n=2 the ceil(sqrt(n)) heuristic also clamps n_clusters
+        # to 1 (via ``min(n_clusters, n - 1)``) which sklearn KMeans
+        # treats as a degenerate single-cluster fit and silhouette
+        # then raises. Reject n<3 upfront with a clear error.
+        raise ValueError(
+            f"need at least 3 memories for clustering; got n={n} "
+            "(silhouette_score requires n_clusters >= 2 and n >= 3)"
+        )
     if embedding_dim < 16:
         # 2D would mean UMAP output; 16 is a safe lower bound
         # for any real embedding model. Fail loud rather than
