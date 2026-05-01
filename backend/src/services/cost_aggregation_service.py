@@ -151,7 +151,14 @@ class CostAggregationRow:
 
 # LATERAL pricing lookup template. The ``context_min_tokens=0`` clause
 # pins to the lowest tier (see module docstring for the v1 limitation).
-# Bound parameter ``:unit_type_X`` distinguishes the three LLM units.
+# ``{unit_type}`` and ``{alias}`` are filled via Python ``.format()`` at
+# query build time — both arguments are HARDCODED constants from the
+# call sites below (``"input_tokens"``, ``"output_tokens"``,
+# ``"cache_read_tokens"`` and the matching ``p_in`` / ``p_out`` /
+# ``p_cache`` aliases), never user input. SQL injection is impossible
+# even though these are interpolated rather than bound. Filter VALUES
+# (``:start``, ``:end``, ``:workspace_id`` etc.) ARE bound parameters
+# in the outer query, per the project's ``security.md`` rule.
 _LLM_PRICING_LATERAL = """
 LEFT JOIN LATERAL (
     SELECT (price_per_unit / unit_denominator)::float8 AS rate
