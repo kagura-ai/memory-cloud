@@ -148,6 +148,25 @@ export function formatRelativeTime(
 }
 
 /**
+ * Format a JS ``Date`` as a local-timezone ``YYYY-MM-DD`` string.
+ *
+ * Use this when you need the calendar date as the user perceives it
+ * (e.g. for ``<input type="date">`` values, query params keyed on the
+ * date the user selected). Avoids the ``toISOString().slice(0, 10)``
+ * trap, which silently shifts JST midnight into the previous day in
+ * UTC and breaks every date-range filter at workspace timezones.
+ *
+ * @example
+ * formatLocalDate(new Date(2026, 4, 1)) // => "2026-05-01" (regardless of tz)
+ */
+export function formatLocalDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/**
  * Common IANA timezones
  */
 export const COMMON_TIMEZONES = [

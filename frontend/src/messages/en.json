@@ -63,6 +63,7 @@
     "quotas": "Quotas & Limits",
     "neuralConfig": "Neural Config",
     "sleepReports": "Sleep Reports",
+    "cost": "Cost",
     "environment": "Environment",
     "systemAdmin": "System Admin",
     "ownerOnly": "Owner",
@@ -2219,6 +2220,55 @@
         "sleep_edge_discovery_enabled": "Enable edge discovery phase",
         "sleep_edge_discovery_sample_size": "Number of memories to sample per edge discovery run",
         "sleep_importance_reeval_enabled": "Enable importance re-evaluation phase"
+      }
+    },
+    "cost": {
+      "title": "Cost Aggregation",
+      "description": "LLM and embedding cost ($) breakdown across all workspaces",
+      "descriptionWorkspace": "LLM and embedding cost ($) breakdown for this workspace",
+      "actions": {
+        "refresh": "Refresh"
+      },
+      "filter": {
+        "title": "Filters",
+        "from": "From",
+        "to": "To",
+        "period": "Period"
+      },
+      "period": {
+        "day": "Day",
+        "week": "Week",
+        "month": "Month"
+      },
+      "validation": {
+        "invertedRange": "'From' must be on or before 'To'.",
+        "windowTooWide": "Date range exceeds the {max}-day cap. Narrow the range and retry."
+      },
+      "chart": {
+        "title": "Cost Over Time",
+        "costPlatform": "Platform-billed (USD)",
+        "costByok": "BYOK (USD)",
+        "unknown": "cost unknown"
+      },
+      "table": {
+        "title": "Per-Period Breakdown",
+        "periodStart": "Period",
+        "workspaceId": "Workspace",
+        "userId": "User",
+        "calls": "Calls",
+        "tokensIn": "Tokens In",
+        "tokensOut": "Tokens Out",
+        "embeddingTokens": "Embedding",
+        "costPlatform": "Cost (Platform)",
+        "costByok": "Cost (BYOK)",
+        "costUnknownTooltip": "Cost unknown — at least one usage row had no resolved pricing."
+      },
+      "emptyState": {
+        "title": "No cost data in this period.",
+        "description": "Try widening the date range or check that Sleep Maintenance has produced cost-grade rows."
+      },
+      "errors": {
+        "forbidden": "Admin role required to view cost aggregation."
       }
     },
     "sleepReports": {

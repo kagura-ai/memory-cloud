@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   formatDate,
   formatDateTime,
+  formatLocalDate,
   formatRelativeTime,
   formatTime,
 } from "./datetime";
@@ -98,5 +99,32 @@ describe("formatRelativeTime", () => {
     const withoutSuffix = formatRelativeTime(FIVE_MIN_AGO, "en", false);
     expect(withSuffix).toMatch(/ago|in /);
     expect(withoutSuffix).not.toMatch(/ago|in /);
+  });
+});
+
+describe("formatLocalDate", () => {
+  // The whole point of this helper is to AVOID the
+  // toISOString().slice(0, 10) trap that silently shifts midnight in
+  // tz+9 (JST) into the previous day in UTC. Its contract is therefore
+  // tested via runtime-locale-independent inputs (Date constructed from
+  // explicit year/month/day) so the assertions hold regardless of the
+  // CI runner's TZ env.
+  it("formats a Date as local YYYY-MM-DD with two-digit month and day", () => {
+    expect(formatLocalDate(new Date(2026, 0, 1))).toBe("2026-01-01");
+    expect(formatLocalDate(new Date(2026, 4, 30))).toBe("2026-05-30");
+    expect(formatLocalDate(new Date(2026, 11, 31))).toBe("2026-12-31");
+  });
+
+  it("preserves single-digit months and days as 0-padded", () => {
+    expect(formatLocalDate(new Date(2026, 2, 5))).toBe("2026-03-05");
+    expect(formatLocalDate(new Date(2026, 8, 9))).toBe("2026-09-09");
+  });
+
+  it("returns the LOCAL date, not the UTC date — does not slice toISOString()", () => {
+    // Construct local midnight; toISOString().slice(0, 10) would shift
+    // this to the previous day for any tz east of UTC. formatLocalDate
+    // must read getFullYear / getMonth / getDate, which return local.
+    const localMidnight = new Date(2026, 4, 1, 0, 0, 0);
+    expect(formatLocalDate(localMidnight)).toBe("2026-05-01");
   });
 });
