@@ -58,45 +58,63 @@ STATE_TTL = 300  # 5 minutes — matches auth.py's existing oauth2_state TTL
 RATE_LIMIT_PER_MINUTE = 1
 
 
-def _is_safe_relative_return_to(value: str) -> bool:
-    """Reject anything that can escape the current origin when used as a
-    ``RedirectResponse`` target.
+def _normalize_return_to(value: str) -> str | None:
+    """Validate and normalize ``return_to`` for use as a same-origin
+    redirect target.
 
-    The OAuth callback redirects the browser to whatever string we
-    persist in ``oauth2_return_to:{state}``. Without this gate, a
-    crafted ``return_to`` such as ``//evil.com/x`` or
-    ``https://evil.com`` becomes an open redirect after a successful
-    re-auth (the IdP confirms the user, then the user lands on the
-    attacker's site as if signed in). Cross-origin exploitation of the
-    POST endpoint itself is blocked today by SameSite=Lax + CORS
-    preflight on JSON content-type, but defence in depth at the
-    write boundary is cheap and forward-proofs the gate against any
-    of those upstream protections being relaxed later.
+    Returns the trimmed, validated value when accepted, or ``None`` when
+    rejected. Callers should use the return value verbatim — never the
+    raw input — when persisting to Redis or building the
+    ``RedirectResponse`` Location header.
+
+    Why normalize before persist (Copilot review #5): if we validated
+    a stripped form but persisted the raw input, leading/trailing
+    whitespace or embedded control characters would survive into the
+    eventual ``Location`` header. Even if browsers tolerate
+    ``Location: /profile  ``, embedded ``\\r\\n`` characters can enable
+    HTTP response splitting on intermediaries that don't reject them.
+    Reject any C0 control character (0x00–0x1F, 0x7F) outright.
 
     Accepted shapes:
-    - Single leading ``/`` followed by a non-``/`` byte (e.g. ``/profile``).
+    - Single leading ``/`` followed by a non-``/`` byte (e.g. ``/profile``),
+      with no embedded control characters.
     Rejected shapes:
     - Empty / whitespace.
+    - Embedded CR / LF / NUL / any other C0 control byte.
+    - Missing leading ``/``.
     - Protocol-relative (``//host/...``).
     - Absolute URL (``http://...``, ``https://...``, ``javascript:...``).
     - Backslash path tricks (``\\evil`` — some browsers treat as ``//evil``).
     - URL-encoded equivalents of the above (``%2F%2Fevil``, ``%5Cevil``).
     """
-    s = value.strip()
+    # Reject any C0 control byte (0x00–0x1F, 0x7F) anywhere in the raw
+    # input. This MUST run before .strip() — Python treats \t, \r, \n,
+    # \v, \f as whitespace and would silently strip a trailing CR or LF,
+    # turning a CRLF-injection probe like ``/profile\\r`` into a clean
+    # ``/profile`` that flows through to Redis. Rejecting outright at
+    # the raw boundary forces buggy / hostile callers to fix their input.
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+        return None
+    s = value.strip(" ")  # only ASCII space, not \t / \r / \n / \v / \f
     if len(s) < 2:
-        return False
+        return None
     if not s.startswith("/"):
-        return False
+        return None
     if s.startswith("//"):
-        return False
+        return None
     if s.startswith("/\\"):
-        return False
-    # Reject any URL-encoded leading slash/backslash that could decode
-    # into the rejected shapes above before the browser navigates.
+        return None
     lowered = s.lower()
     if lowered.startswith("/%2f") or lowered.startswith("/%5c"):
-        return False
-    return True
+        return None
+    return s
+
+
+def _is_safe_relative_return_to(value: str) -> bool:
+    """Backward-compat shim used by tests that only need the predicate.
+    New callers should use ``_normalize_return_to`` and consume the
+    normalized value, not the raw input."""
+    return _normalize_return_to(value) is not None
 
 
 class RefreshOAuthRequest(BaseModel):
@@ -141,13 +159,19 @@ async def refresh_oauth(
     if not auth_module._session_manager:
         raise HTTPException(status_code=500, detail="Auth managers not initialized")
 
-    if payload.return_to is not None and not _is_safe_relative_return_to(payload.return_to):
-        # Block open-redirect via crafted return_to. See
-        # _is_safe_relative_return_to for the rejected shapes.
-        raise HTTPException(
-            status_code=400,
-            detail="return_to must be a same-origin relative path starting with '/'",
-        )
+    # Validate + normalize return_to up front. The normalized form is
+    # what gets persisted to Redis (Copilot review #5: validating a
+    # stripped form while persisting the raw input lets whitespace or
+    # control bytes survive into the Location header).
+    if payload.return_to is not None:
+        normalized_return_to = _normalize_return_to(payload.return_to)
+        if normalized_return_to is None:
+            raise HTTPException(
+                status_code=400,
+                detail="return_to must be a same-origin relative path starting with '/'",
+            )
+    else:
+        normalized_return_to = None
 
     user_id = user["user_id"]
 
@@ -173,6 +197,27 @@ async def refresh_oauth(
                 "Your account has no recorded OAuth provider. "
                 "Please sign out and sign in again to refresh your identity."
             ),
+        )
+
+    # Resolve provider-specific config BEFORE writing any Redis state
+    # (Copilot review #3: a missing GOOGLE_REDIRECT_URI / GITHUB_CLIENT_ID
+    # would otherwise 500 with 4 stale keys orphaned in Redis for 5min).
+    if provider == "google":
+        if not auth_module._oauth2_manager:
+            raise HTTPException(status_code=500, detail="OAuth2 manager not initialized")
+        google_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI")
+        if not google_redirect_uri:
+            raise HTTPException(status_code=500, detail="GOOGLE_REDIRECT_URI not configured")
+        github_client_id: str | None = None
+        github_redirect_uri: str | None = None
+    else:  # github
+        google_redirect_uri = None
+        github_client_id = os.getenv("GITHUB_CLIENT_ID")
+        if not github_client_id:
+            raise HTTPException(status_code=500, detail="GITHUB_CLIENT_ID not configured")
+        github_redirect_uri = os.getenv(
+            "GITHUB_REDIRECT_URI",
+            "http://localhost:8080/api/v1/auth/github/callback",
         )
 
     # Rate limit: 1/minute/user. Window-based on minute floor so a
@@ -209,29 +254,21 @@ async def refresh_oauth(
     redis.setex(USER_KEY.format(state=state), STATE_TTL, user_id)
 
     # Frontend default: bring the user back to /profile with a flag the
-    # page can read to show a success toast.
-    return_to = payload.return_to or "/profile?refreshed=1"
+    # page can read to show a success toast. Persist the *normalized*
+    # value (whitespace stripped, control bytes already rejected above).
+    return_to = normalized_return_to or "/profile?refreshed=1"
     redis.setex(f"oauth2_return_to:{state}", STATE_TTL, return_to)
 
     if provider == "google":
-        if not auth_module._oauth2_manager:
-            raise HTTPException(status_code=500, detail="OAuth2 manager not initialized")
-        redirect_uri = os.getenv("GOOGLE_REDIRECT_URI")
-        if not redirect_uri:
-            raise HTTPException(status_code=500, detail="GOOGLE_REDIRECT_URI not configured")
+        # google_redirect_uri is non-None here — guarded above.
+        assert google_redirect_uri is not None
         authorization_url = auth_module._oauth2_manager.get_authorization_url_web(
-            redirect_uri, state
+            google_redirect_uri, state
         )
     else:  # github
-        client_id = os.getenv("GITHUB_CLIENT_ID")
-        if not client_id:
-            raise HTTPException(status_code=500, detail="GITHUB_CLIENT_ID not configured")
-        github_redirect = os.getenv(
-            "GITHUB_REDIRECT_URI",
-            "http://localhost:8080/api/v1/auth/github/callback",
-        )
+        assert github_client_id is not None and github_redirect_uri is not None
         authorization_url = auth_module.build_github_authorization_url(
-            client_id=client_id, redirect_uri=github_redirect, state=state
+            client_id=github_client_id, redirect_uri=github_redirect_uri, state=state
         )
 
     logger.info(f"refresh_oauth_initiated: user_id={user_id} provider={provider}")

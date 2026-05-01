@@ -238,6 +238,11 @@ class TestRefreshOAuthReturnToValidation:
             "",  # empty
             "   ",  # whitespace
             "profile",  # missing leading slash
+            "/profile\r\nLocation: https://evil.com",  # CRLF injection
+            "/profile\nX-Header: x",  # bare LF
+            "/profile\r",  # bare CR
+            "/profile\x00null",  # NUL byte
+            "/profile\x07bell",  # BEL (C0 control)
         ],
     )
     @pytest.mark.asyncio
@@ -293,6 +298,79 @@ class TestRefreshOAuthReturnToValidation:
             c for c in redis.setex.call_args_list if c.args[0] == f"oauth2_return_to:{result.state}"
         )
         assert return_to_call.args[2] == good_value
+
+    @pytest.mark.asyncio
+    async def test_return_to_whitespace_is_normalized_before_persist(self, monkeypatch):
+        """Outer whitespace is stripped before the value reaches Redis,
+        so the eventual ``Location`` header carries no padding."""
+        session_manager, oauth2_manager, redis = _mock_managers()
+        monkeypatch.setenv("GOOGLE_REDIRECT_URI", "http://localhost:8080/cb")
+
+        with (
+            patch.object(me_oauth.auth_module, "_session_manager", session_manager),
+            patch.object(me_oauth.auth_module, "_oauth2_manager", oauth2_manager),
+            patch.object(me_oauth, "increment_counter", AsyncMock(return_value=1)),
+        ):
+            db = _mock_db(_db_user(auth_method="oauth", auth_provider="google"))
+            result = await refresh_oauth(
+                payload=RefreshOAuthRequest(return_to="  /profile?refreshed=1  "),
+                user=_session(),
+                db=db,
+            )
+        return_to_call = next(
+            c for c in redis.setex.call_args_list if c.args[0] == f"oauth2_return_to:{result.state}"
+        )
+        # Persisted value is the trimmed form, NOT the raw input.
+        assert return_to_call.args[2] == "/profile?refreshed=1"
+
+
+class TestRefreshOAuthConfigGuardOrdering:
+    """Provider-specific config (GOOGLE_REDIRECT_URI / GITHUB_CLIENT_ID)
+    must be validated BEFORE any Redis write so a missing env var doesn't
+    leave four orphaned ``oauth2_state*`` keys behind for 5 minutes
+    (Copilot review #3)."""
+
+    @pytest.mark.asyncio
+    async def test_missing_google_redirect_uri_does_not_pollute_redis(self, monkeypatch):
+        """Google flow with GOOGLE_REDIRECT_URI unset → 500, no setex."""
+        session_manager, oauth2_manager, redis = _mock_managers()
+        monkeypatch.delenv("GOOGLE_REDIRECT_URI", raising=False)
+
+        with (
+            patch.object(me_oauth.auth_module, "_session_manager", session_manager),
+            patch.object(me_oauth.auth_module, "_oauth2_manager", oauth2_manager),
+            patch.object(me_oauth, "increment_counter", AsyncMock(return_value=1)),
+        ):
+            db = _mock_db(_db_user(auth_method="oauth", auth_provider="google"))
+            with pytest.raises(Exception) as exc_info:
+                await refresh_oauth(
+                    payload=RefreshOAuthRequest(),
+                    user=_session(),
+                    db=db,
+                )
+            assert exc_info.value.status_code == 500  # type: ignore[attr-defined]
+        redis.setex.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_github_client_id_does_not_pollute_redis(self, monkeypatch):
+        """GitHub flow with GITHUB_CLIENT_ID unset → 500, no setex."""
+        session_manager, oauth2_manager, redis = _mock_managers()
+        monkeypatch.delenv("GITHUB_CLIENT_ID", raising=False)
+
+        with (
+            patch.object(me_oauth.auth_module, "_session_manager", session_manager),
+            patch.object(me_oauth.auth_module, "_oauth2_manager", oauth2_manager),
+            patch.object(me_oauth, "increment_counter", AsyncMock(return_value=1)),
+        ):
+            db = _mock_db(_db_user(auth_method="oauth", auth_provider="github"))
+            with pytest.raises(Exception) as exc_info:
+                await refresh_oauth(
+                    payload=RefreshOAuthRequest(),
+                    user=_session(),
+                    db=db,
+                )
+            assert exc_info.value.status_code == 500  # type: ignore[attr-defined]
+        redis.setex.assert_not_called()
 
 
 class TestRefreshOAuthRateLimit:

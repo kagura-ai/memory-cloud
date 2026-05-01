@@ -13,7 +13,7 @@
  */
 
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 import ProfilePage, {
   getSignInMethodLabel,
@@ -273,6 +273,23 @@ describe("ProfilePage — refresh-from-IdP button visibility (#515)", () => {
 // ---------- ProfilePage refresh-button click flow (#515) --------------------
 
 describe("ProfilePage — refresh button click (#515)", () => {
+  // Restore window.location after every test in this block so the patched
+  // proxy can't leak into other test files in the same vitest worker
+  // (Copilot review #2: shared-worker state contamination is a real
+  // contributor to the suite's existing parallel-flake surface area).
+  let originalLocationDescriptor: PropertyDescriptor | undefined;
+  beforeEach(() => {
+    originalLocationDescriptor = Object.getOwnPropertyDescriptor(
+      window,
+      "location",
+    );
+  });
+  afterEach(() => {
+    if (originalLocationDescriptor) {
+      Object.defineProperty(window, "location", originalLocationDescriptor);
+    }
+  });
+
   it("on click POSTs to /me/refresh-oauth and redirects to authorization_url", async () => {
     mockUser = {
       id: "u-1",
@@ -287,30 +304,16 @@ describe("ProfilePage — refresh button click (#515)", () => {
     });
 
     // Mock window.location.href setter — jsdom's default doesn't trigger
-    // navigation, but Object.defineProperty lets us spy on the assignment.
+    // navigation, but a Proxy lets us spy on the assignment. The
+    // descriptor is captured in beforeEach above and restored in
+    // afterEach so this stub does not survive the test.
     const hrefSetter = vi.fn();
-    Object.defineProperty(window, "location", {
-      value: {
-        href: "/profile",
-        get _href() {
-          return this.href;
-        },
-        set _href(v: string) {
-          hrefSetter(v);
-          this.href = v;
-        },
-      },
-      writable: true,
-    });
-    // The component does `window.location.href = ...`. We replace the
-    // descriptor for `href` directly so setter intercepts the assignment.
     const originalLocation = window.location;
     Object.defineProperty(window, "location", {
       value: new Proxy(originalLocation, {
         set(target, prop, value) {
           if (prop === "href") {
             hrefSetter(value);
-            // also reflect on target for any subsequent reads
             (target as unknown as Record<string, unknown>).href = value;
             return true;
           }
@@ -320,6 +323,7 @@ describe("ProfilePage — refresh button click (#515)", () => {
         },
       }),
       writable: true,
+      configurable: true,
     });
 
     render(<ProfilePage />);
