@@ -31,6 +31,7 @@ ADDON_UNIT_VALUES = {
     "extra_public_quota": 500,  # calls/day per unit
     "extra_members": 5,  # members per unit
     "extra_contexts": 5,  # contexts per unit
+    "extra_analysis_runs": 1,  # Issue #494: +1 broadlistening run/day per unit
 }
 
 
@@ -75,6 +76,7 @@ class AddonCalculatorService:
             "addon_public_quota_bonus": 0,
             "addon_member_bonus": 0,
             "addon_context_bonus": 0,
+            "addon_analysis_bonus": 0,
         }
 
         for addon in active_addons:
@@ -97,6 +99,8 @@ class AddonCalculatorService:
                 bonuses["addon_member_bonus"] += total_bonus
             elif addon_type == "extra_contexts":
                 bonuses["addon_context_bonus"] += total_bonus
+            elif addon_type == "extra_analysis_runs":
+                bonuses["addon_analysis_bonus"] += total_bonus
 
         # Update workspace table
         result = await self.db.execute(select(Workspace).where(Workspace.id == workspace_id))
@@ -113,6 +117,7 @@ class AddonCalculatorService:
         workspace.addon_public_quota_bonus = bonuses["addon_public_quota_bonus"]
         workspace.addon_member_bonus = bonuses["addon_member_bonus"]
         workspace.addon_context_bonus = bonuses["addon_context_bonus"]
+        workspace.addon_analysis_bonus = bonuses["addon_analysis_bonus"]
 
         await self.db.commit()
 

@@ -55,7 +55,8 @@ class EffectiveQuotaService:
                 "public_calls_per_day": int,
                 "public_calls_per_week": int,
                 "max_members": int,
-                "max_contexts": int
+                "max_contexts": int,
+                "analysis_runs_per_day": int  # Issue #494
             }
 
         Raises:
@@ -77,6 +78,7 @@ class EffectiveQuotaService:
             and workspace.addon_public_quota_bonus == 0
             and workspace.addon_member_bonus == 0
             and workspace.addon_context_bonus == 0
+            and workspace.addon_analysis_bonus == 0
         ):
             # Import here to avoid circular dependency
             from services.addon_calculator_service import AddonCalculatorService
@@ -101,6 +103,7 @@ class EffectiveQuotaService:
             "public_calls_per_week": workspace.effective_public_calls_per_week,
             "max_members": workspace.effective_max_members,
             "max_contexts": workspace.effective_max_contexts,
+            "analysis_runs_per_day": workspace.effective_analysis_runs_per_day,
         }
 
         logger.debug(
@@ -127,7 +130,9 @@ class EffectiveQuotaService:
                 "addon_mcp_quota_bonus": int,
                 "addon_rest_quota_bonus": int,
                 "addon_public_quota_bonus": int,
-                "addon_member_bonus": int
+                "addon_member_bonus": int,
+                "addon_context_bonus": int,
+                "addon_analysis_bonus": int  # Issue #494
             }
         """
         result = await self.db.execute(select(Workspace).where(Workspace.id == workspace_id))
@@ -143,4 +148,5 @@ class EffectiveQuotaService:
             "addon_public_quota_bonus": workspace.addon_public_quota_bonus,
             "addon_member_bonus": workspace.addon_member_bonus,
             "addon_context_bonus": workspace.addon_context_bonus,
+            "addon_analysis_bonus": workspace.addon_analysis_bonus,
         }

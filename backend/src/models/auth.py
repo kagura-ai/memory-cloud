@@ -21,6 +21,7 @@ from functools import cached_property
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Column,
@@ -1130,6 +1131,23 @@ class Workspace(Base):
     addon_public_quota_bonus = Column(Integer, nullable=False, server_default="0")
     addon_member_bonus = Column(Integer, nullable=False, server_default="0")
     addon_context_bonus = Column(Integer, nullable=False, server_default="0")  # Issue #15
+    addon_analysis_bonus = Column(Integer, nullable=False, server_default="0")  # Issue #494
+
+    # Issue #494: per-workspace default + quality model selection for
+    # Memory Broadlistening analyses. Both nullable — analysis is gated
+    # by a separate allowlist; until a workspace is opted-in there's no
+    # need for a model choice. SET NULL on llm_pricing delete so a
+    # pricing row removal does not cascade into the workspace.
+    analysis_default_model_id = Column(
+        BigInteger,
+        ForeignKey("llm_pricing.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    analysis_quality_model_id = Column(
+        BigInteger,
+        ForeignKey("llm_pricing.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     @cached_property
     def _plan_tier(self):
@@ -1182,6 +1200,11 @@ class Workspace(Base):
     def effective_max_members(self) -> int:
         """Max members: plan tier base + addon."""
         return self._plan_tier.max_members_per_workspace + (self.addon_member_bonus or 0)
+
+    @property
+    def effective_analysis_runs_per_day(self) -> int:
+        """Memory Broadlistening analysis runs/day: plan tier base + addon (Issue #494)."""
+        return self._plan_tier.analysis_runs_per_day + (self.addon_analysis_bonus or 0)
 
     # Stripe billing (Issue #351)
     stripe_customer_id = Column(String(255), nullable=True)

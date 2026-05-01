@@ -66,6 +66,7 @@ class PlanTier:
     rest_calls_per_week: int = 0  # Issue #238: REST API quota
     public_calls_per_day: int = 0  # Issue #238: Public REST API quota
     public_calls_per_week: int = 0  # Issue #238: Public REST API quota
+    analysis_runs_per_day: int = 0  # Issue #494: Memory Broadlistening analyses/day
     allows_shared_contexts: bool = False  # Issue #271: Shared context feature (Pro only)
     features: frozenset[str] = field(default_factory=frozenset)
 
@@ -131,6 +132,7 @@ PLAN_PRO = PlanTier(
     rest_calls_per_week=25000,
     public_calls_per_day=1000,
     public_calls_per_week=5000,
+    analysis_runs_per_day=3,  # Issue #494: Memory Broadlistening (Pro only; FREE/BASIC=0)
     features=frozenset(
         {
             "api_keys",
