@@ -738,14 +738,24 @@ def build_github_authorization_url(*, client_id: str, redirect_uri: str, state: 
 
     Shared by the login flow (``github_login``) and the manual-refresh
     flow (``me_oauth.refresh_oauth``) so the scope string and parameter
-    order stay identical between them.
+    order stay identical between them. Each value is URL-encoded so
+    that a ``redirect_uri`` carrying its own query string (or any value
+    with ``&`` / ``=`` / spaces) cannot inject extra top-level OAuth
+    params or corrupt GitHub's parameter parsing.
+
+    GitHub's ``scope`` parameter conventionally uses ``+`` (= space) as
+    the separator between scope tokens; ``urlencode`` will percent-encode
+    the space as ``%20``, which GitHub accepts as equivalent.
     """
-    return (
-        f"{GITHUB_AUTH_URL}?client_id={client_id}"
-        f"&redirect_uri={redirect_uri}"
-        f"&scope=read:user+user:email"
-        f"&state={state}"
-    )
+    from urllib.parse import urlencode
+
+    params = [
+        ("client_id", client_id),
+        ("redirect_uri", redirect_uri),
+        ("scope", "read:user user:email"),
+        ("state", state),
+    ]
+    return f"{GITHUB_AUTH_URL}?{urlencode(params)}"
 
 
 @github_router.get("/login")
