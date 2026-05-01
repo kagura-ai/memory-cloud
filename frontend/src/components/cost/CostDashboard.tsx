@@ -196,11 +196,12 @@ export function CostDashboard({
 
   const loadCost = useCallback(async () => {
     if (!ready) {
-      // Clear stale error from a prior fetch — otherwise a workspace
+      // Clear stale state from a prior fetch — otherwise a workspace
       // switch (which transiently flips ready→false) would leave the
-      // previous workspace's error banner visible while the new
-      // workspace_id resolves.
+      // previous workspace's error banner AND chart/table data visible
+      // while the new workspace_id resolves.
       setError(null);
+      setRows([]);
       setLoading(false);
       return;
     }
@@ -208,11 +209,12 @@ export function CostDashboard({
     // fetch with an invalid range (inverted, > MAX_LOOKBACK_DAYS) just
     // wastes a round-trip and risks flashing a backend 400 error
     // banner over the more specific rangeError banner that's already
-    // showing in the filter section. Also clear any prior backend
-    // error so the user sees only the current rangeError, not stacked
-    // banners from a now-corrected previous range.
+    // showing in the filter section. Also reset error + rows so the UI
+    // doesn't keep showing chart/table data from the previous (valid)
+    // range while the user is mid-correction.
     if (rangeError !== null) {
       setError(null);
+      setRows([]);
       setLoading(false);
       return;
     }
@@ -375,6 +377,13 @@ export function CostDashboard({
           <div className="p-6">
             <LoadingState lines={6} />
           </div>
+        ) : error ? (
+          // Render the same error in both sections so the table never
+          // misrepresents a fetch failure as "no data" — empty rows
+          // happen by design (cleared on error in catch), so the
+          // EmptyState branch alone would conflate failure with
+          // genuine zero results.
+          <ErrorBanner error={error.message} />
         ) : rows.length === 0 ? (
           <EmptyState
             icon={BarChart3}

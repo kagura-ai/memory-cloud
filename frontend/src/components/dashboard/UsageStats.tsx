@@ -167,12 +167,12 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
       return [
         ...top,
         {
-          endpoint: `Other (${rest.length})`,
+          endpoint: t("otherEndpointsLabel", { count: rest.length }),
           count: otherCount,
           percentage: otherPercentage,
         },
       ];
-    }, [breakdown]);
+    }, [breakdown, t]);
 
     const fetchAllStats = async () => {
       try {

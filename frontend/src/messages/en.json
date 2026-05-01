@@ -1707,7 +1707,8 @@
     "apiMcpDistribution": "API and MCP tool usage distribution",
     "noUsageData": "No usage data yet",
     "endpointDetails": "Endpoint Details",
-    "requestCountByEndpoint": "Request count by endpoint"
+    "requestCountByEndpoint": "Request count by endpoint",
+    "otherEndpointsLabel": "Other ({count})"
   },
   "memoryOverview": {
     "failedToLoad": "Failed to load memory overview",

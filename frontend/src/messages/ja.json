@@ -1707,7 +1707,8 @@
     "apiMcpDistribution": "APIとMCPツールの使用分布",
     "noUsageData": "使用データがまだありません",
     "endpointDetails": "エンドポイント詳細",
-    "requestCountByEndpoint": "エンドポイント別リクエスト数"
+    "requestCountByEndpoint": "エンドポイント別リクエスト数",
+    "otherEndpointsLabel": "その他 ({count})"
   },
   "memoryOverview": {
     "failedToLoad": "メモリー概要の読み込みに失敗しました",
