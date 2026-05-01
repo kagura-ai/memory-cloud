@@ -54,6 +54,7 @@ import {
   AlertTriangle,
   Moon,
   ShieldCheck,
+  DollarSign,
 } from "lucide-react";
 // Issue #246: ContextSelector removed - use /contexts link instead
 import { WorkspaceSwitcher } from "@/components/workspaces/WorkspaceSwitcher";
@@ -108,6 +109,16 @@ const navigationGroups: NavGroup[] = [
         icon: Users,
         showMemberCount: true,
         requiredWorkspaceRole: "admin", // Issue #398: hide from member/viewer
+      },
+      {
+        // Issue #473: workspace-scoped cost dashboard.
+        // Backend gates owner/admin via check_workspace_admin (#472);
+        // mirror that here so member/viewer don't see a nav entry that
+        // would 403 on click.
+        nameKey: "cost",
+        href: "/workspace/cost",
+        icon: DollarSign,
+        requiredWorkspaceRole: "admin",
       },
     ],
   },
@@ -170,6 +181,13 @@ const navigationGroups: NavGroup[] = [
         nameKey: "sleepReports",
         href: "/admin/sleep-reports",
         icon: Moon,
+        requiredRole: Role.ADMIN,
+      },
+      {
+        // Issue #473: cost dashboard
+        nameKey: "cost",
+        href: "/admin/cost",
+        icon: DollarSign,
         requiredRole: Role.ADMIN,
       },
       {
