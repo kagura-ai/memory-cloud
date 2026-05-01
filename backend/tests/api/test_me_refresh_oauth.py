@@ -221,6 +221,80 @@ class TestRefreshOAuthHappyPath:
         assert return_to_call.args[2] == "/profile?refreshed=1&from=button"
 
 
+class TestRefreshOAuthReturnToValidation:
+    """Block open-redirect via crafted ``return_to`` (defence in depth —
+    SameSite=Lax + CORS already block cross-origin POST exploitation)."""
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "//evil.com/x",  # protocol-relative
+            "https://evil.com",  # absolute URL
+            "http://evil.com",  # absolute URL
+            "javascript:alert(1)",  # data scheme
+            "/\\evil.com",  # backslash trick
+            "/%2F%2Fevil.com",  # URL-encoded protocol-relative
+            "/%5Cevil.com",  # URL-encoded backslash
+            "",  # empty
+            "   ",  # whitespace
+            "profile",  # missing leading slash
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_unsafe_return_to_rejected_400(self, bad_value: str, monkeypatch):
+        """Each of these shapes must 400 before any Redis writes happen."""
+        session_manager, oauth2_manager, redis = _mock_managers()
+        monkeypatch.setenv("GOOGLE_REDIRECT_URI", "http://localhost:8080/cb")
+
+        with (
+            patch.object(me_oauth.auth_module, "_session_manager", session_manager),
+            patch.object(me_oauth.auth_module, "_oauth2_manager", oauth2_manager),
+            patch.object(me_oauth, "increment_counter", AsyncMock(return_value=1)),
+        ):
+            db = _mock_db(_db_user(auth_method="oauth", auth_provider="google"))
+            with pytest.raises(Exception) as exc_info:
+                await refresh_oauth(
+                    payload=RefreshOAuthRequest(return_to=bad_value),
+                    user=_session(),
+                    db=db,
+                )
+            assert exc_info.value.status_code == 400  # type: ignore[attr-defined]
+        # The validator runs before any Redis write — no oauth2_state* keys
+        # may leak when an attack payload arrives.
+        redis.setex.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "good_value",
+        [
+            "/profile",
+            "/profile?refreshed=1",
+            "/profile?refreshed=1&from=button",
+            "/workspace/dashboard",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_safe_return_to_accepted(self, good_value: str, monkeypatch):
+        """Same-origin relative paths must continue to flow through unchanged."""
+        session_manager, oauth2_manager, redis = _mock_managers()
+        monkeypatch.setenv("GOOGLE_REDIRECT_URI", "http://localhost:8080/cb")
+
+        with (
+            patch.object(me_oauth.auth_module, "_session_manager", session_manager),
+            patch.object(me_oauth.auth_module, "_oauth2_manager", oauth2_manager),
+            patch.object(me_oauth, "increment_counter", AsyncMock(return_value=1)),
+        ):
+            db = _mock_db(_db_user(auth_method="oauth", auth_provider="google"))
+            result = await refresh_oauth(
+                payload=RefreshOAuthRequest(return_to=good_value),
+                user=_session(),
+                db=db,
+            )
+        return_to_call = next(
+            c for c in redis.setex.call_args_list if c.args[0] == f"oauth2_return_to:{result.state}"
+        )
+        assert return_to_call.args[2] == good_value
+
+
 class TestRefreshOAuthRateLimit:
     @pytest.mark.asyncio
     async def test_second_call_in_same_minute_returns_429(self, monkeypatch):

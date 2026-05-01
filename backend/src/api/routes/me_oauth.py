@@ -58,10 +58,54 @@ STATE_TTL = 300  # 5 minutes — matches auth.py's existing oauth2_state TTL
 RATE_LIMIT_PER_MINUTE = 1
 
 
+def _is_safe_relative_return_to(value: str) -> bool:
+    """Reject anything that can escape the current origin when used as a
+    ``RedirectResponse`` target.
+
+    The OAuth callback redirects the browser to whatever string we
+    persist in ``oauth2_return_to:{state}``. Without this gate, a
+    crafted ``return_to`` such as ``//evil.com/x`` or
+    ``https://evil.com`` becomes an open redirect after a successful
+    re-auth (the IdP confirms the user, then the user lands on the
+    attacker's site as if signed in). Cross-origin exploitation of the
+    POST endpoint itself is blocked today by SameSite=Lax + CORS
+    preflight on JSON content-type, but defence in depth at the
+    write boundary is cheap and forward-proofs the gate against any
+    of those upstream protections being relaxed later.
+
+    Accepted shapes:
+    - Single leading ``/`` followed by a non-``/`` byte (e.g. ``/profile``).
+    Rejected shapes:
+    - Empty / whitespace.
+    - Protocol-relative (``//host/...``).
+    - Absolute URL (``http://...``, ``https://...``, ``javascript:...``).
+    - Backslash path tricks (``\\evil`` — some browsers treat as ``//evil``).
+    - URL-encoded equivalents of the above (``%2F%2Fevil``, ``%5Cevil``).
+    """
+    s = value.strip()
+    if len(s) < 2:
+        return False
+    if not s.startswith("/"):
+        return False
+    if s.startswith("//"):
+        return False
+    if s.startswith("/\\"):
+        return False
+    # Reject any URL-encoded leading slash/backslash that could decode
+    # into the rejected shapes above before the browser navigates.
+    lowered = s.lower()
+    if lowered.startswith("/%2f") or lowered.startswith("/%5c"):
+        return False
+    return True
+
+
 class RefreshOAuthRequest(BaseModel):
     """Optional ``return_to`` lets the frontend control the post-callback
-    landing page. Defaults to ``/profile?refreshed=1`` so a vanilla
-    button click works without extra wiring."""
+    landing page. Must be a same-origin relative path starting with ``/``;
+    absolute or protocol-relative URLs are rejected at the endpoint to
+    block open-redirect after successful re-auth. Defaults to
+    ``/profile?refreshed=1`` so a vanilla button click works without
+    extra wiring."""
 
     return_to: str | None = None
 
@@ -96,6 +140,14 @@ async def refresh_oauth(
     """
     if not auth_module._session_manager:
         raise HTTPException(status_code=500, detail="Auth managers not initialized")
+
+    if payload.return_to is not None and not _is_safe_relative_return_to(payload.return_to):
+        # Block open-redirect via crafted return_to. See
+        # _is_safe_relative_return_to for the rejected shapes.
+        raise HTTPException(
+            status_code=400,
+            detail="return_to must be a same-origin relative path starting with '/'",
+        )
 
     user_id = user["user_id"]
 
