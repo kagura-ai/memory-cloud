@@ -25,6 +25,7 @@ import models.hub_tag  # noqa: F401
 import models.erasure  # noqa: F401
 import models.sleep  # noqa: F401  # Issue #471: SleepReportLLMUsage child added
 import models.llm_pricing  # noqa: F401  # Issue #471: cost-grade pricing master
+import models.analysis  # noqa: F401  # Issue #494: Memory Broadlistening tables
 
 # Alembic Config object
 config = context.config

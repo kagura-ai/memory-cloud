@@ -18,6 +18,7 @@ from models.memory import Base as MemoryBase
 # keeps the test setup robust to future import-graph changes.
 import models.llm_pricing  # noqa: F401  isort: skip
 import models.sleep  # noqa: F401  isort: skip
+import models.analysis  # noqa: F401  isort: skip  # Issue #494: Memory Broadlistening tables
 
 # Configure structlog the same way api/main.py does at app startup so
 # logger.info("event", key=value) calls inside route modules work in
