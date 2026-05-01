@@ -26,7 +26,6 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
-import sqlalchemy as sa
 
 from models.llm_pricing import LLMPricing
 from models.sleep import SleepReport, SleepReportLLMUsage
@@ -121,23 +120,9 @@ def _make_usage(
     )
 
 
-async def _truncate_cost_grade_tables(db_session) -> None:
-    """Wipe cost-grade tables so each test starts from a known empty state.
-
-    Uses TRUNCATE ... CASCADE because session rollback is not enough —
-    the session-scoped fixture means uncommitted writes from a prior
-    test could leak across via the rollback timing in pytest-asyncio.
-    """
-    await db_session.execute(
-        sa.text("TRUNCATE TABLE sleep_report_llm_usage, sleep_reports, llm_pricing CASCADE")
-    )
-    await db_session.flush()
-
-
 @pytest.mark.asyncio
 async def test_empty_period_returns_empty_list(db_session):
     """A period with no sleep_reports rows returns an empty list."""
-    await _truncate_cost_grade_tables(db_session)
     await _seed_pricing(db_session)
 
     service = CostAggregationService(db_session)
@@ -156,7 +141,6 @@ async def test_multi_model_rolls_into_breakdown_by_model(db_session):
     Sonnet 100 calls × (10k in @ $3/1M + 2k out @ $15/1M) = $0.06
     Haiku 50 calls × (8k in @ $1/1M + 1k out @ $5/1M) = $0.013
     """
-    await _truncate_cost_grade_tables(db_session)
     await _seed_pricing(db_session)
 
     workspace_id = uuid4()
@@ -225,7 +209,6 @@ async def test_multi_model_rolls_into_breakdown_by_model(db_session):
 @pytest.mark.asyncio
 async def test_byok_never_contributes_to_cost_usd(db_session):
     """A ``paid_by='byok'`` row's cost lands in cost_usd_byok, not cost_usd."""
-    await _truncate_cost_grade_tables(db_session)
     await _seed_pricing(db_session)
 
     workspace_id = uuid4()
@@ -294,7 +277,6 @@ async def test_pricing_miss_keeps_row_with_zero_cost(db_session):
     figures are preserved so the dashboard still shows tokens spent;
     only the ``$`` column is blank.
     """
-    await _truncate_cost_grade_tables(db_session)
     await _seed_pricing(db_session)
 
     workspace_id = uuid4()
@@ -337,7 +319,6 @@ async def test_pricing_miss_keeps_row_with_zero_cost(db_session):
 @pytest.mark.asyncio
 async def test_embedding_cost_attributed_via_sleep_reports_columns(db_session):
     """``embedding_tokens`` × embedding price contributes to cost_usd."""
-    await _truncate_cost_grade_tables(db_session)
     await _seed_pricing(db_session)
 
     workspace_id = uuid4()
@@ -370,7 +351,6 @@ async def test_embedding_cost_attributed_via_sleep_reports_columns(db_session):
 @pytest.mark.asyncio
 async def test_filter_combination_source_and_paid_by(db_session):
     """``source=analysis & paid_by=byok`` returns only the intersection."""
-    await _truncate_cost_grade_tables(db_session)
     await _seed_pricing(db_session)
 
     workspace_id = uuid4()
@@ -452,7 +432,6 @@ async def test_period_week_collapses_seven_daily_reports_into_one_bucket(db_sess
     seven. Without this assertion the route layer's ``period=week``
     contract is only exercised in SQL but never verified at the row count.
     """
-    await _truncate_cost_grade_tables(db_session)
     await _seed_pricing(db_session)
 
     workspace_id = uuid4()
@@ -508,7 +487,6 @@ async def test_window_upper_bound_includes_late_day_records(db_session):
     Without this assertion, an off-by-one in the route's window
     construction would silently drop the last second of every query.
     """
-    await _truncate_cost_grade_tables(db_session)
     await _seed_pricing(db_session)
 
     workspace_id = uuid4()
