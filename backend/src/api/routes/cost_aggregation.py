@@ -53,21 +53,33 @@ router = APIRouter()
 
 
 class CostBreakdownByModelResponse(TZAwareBaseModel):
-    """Per-model cost split inside a CostAggregationRowResponse."""
+    """Per-model cost split inside a CostAggregationRowResponse.
+
+    ``cost_usd`` / ``cost_usd_byok`` are nullable: ``null`` means
+    "cost unknown" (some contributing usage row had no resolved
+    pricing — e.g. a model with no row in ``llm_pricing`` at the
+    run's ``started_at``). Distinguishes "no pricing snapshot" from
+    "genuinely $0", same semantics as ``LLMPricingService.lookup()``
+    returning ``None`` on a miss.
+    """
 
     model: str | None
     calls: int
-    cost_usd: float
-    cost_usd_byok: float
+    cost_usd: float | None
+    cost_usd_byok: float | None
 
 
 class CostBreakdownBySourceResponse(TZAwareBaseModel):
-    """Per-source cost split inside a CostAggregationRowResponse."""
+    """Per-source cost split inside a CostAggregationRowResponse.
+
+    ``cost_usd`` / ``cost_usd_byok`` are nullable for the same
+    reason documented on ``CostBreakdownByModelResponse``.
+    """
 
     source: str
     calls: int
-    cost_usd: float
-    cost_usd_byok: float
+    cost_usd: float | None
+    cost_usd_byok: float | None
 
 
 class CostAggregationRowResponse(TZAwareBaseModel):
@@ -77,6 +89,11 @@ class CostAggregationRowResponse(TZAwareBaseModel):
     ``cost_usd_byok`` is the workspace's BYOK observability total
     (informational only — Kagura does not bill it). The split is
     enforced at the SQL level so it cannot accidentally re-merge.
+
+    Both cost fields are nullable: ``null`` means "cost unknown" (some
+    contributing usage row had no resolved pricing). The UI should
+    render NULL as "—" rather than "$0.00" to make the distinction
+    visible to operators.
     """
 
     period_start: date
@@ -87,8 +104,8 @@ class CostAggregationRowResponse(TZAwareBaseModel):
     tokens_out: int
     tokens_cached_in: int
     embedding_tokens: int
-    cost_usd: float
-    cost_usd_byok: float
+    cost_usd: float | None
+    cost_usd_byok: float | None
     cost_breakdown_by_model: list[CostBreakdownByModelResponse]
     cost_breakdown_by_source: list[CostBreakdownBySourceResponse]
 
@@ -160,8 +177,9 @@ def _validate_enums(source: str | None, paid_by: str | None) -> None:
 _COST_DECIMALS = 6
 
 
-def _round(v: float) -> float:
-    return round(v, _COST_DECIMALS)
+def _round(v: float | None) -> float | None:
+    """Round to display precision; NULL stays NULL ("cost unknown")."""
+    return None if v is None else round(v, _COST_DECIMALS)
 
 
 def _to_response_row(row: CostAggregationRow) -> CostAggregationRowResponse:

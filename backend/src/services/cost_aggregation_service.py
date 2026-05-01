@@ -67,8 +67,8 @@ class CostBreakdownByModel:
         self,
         model: str | None,
         calls: int,
-        cost_usd: float,
-        cost_usd_byok: float,
+        cost_usd: float | None,
+        cost_usd_byok: float | None,
     ) -> None:
         self.model = model
         self.calls = calls
@@ -85,8 +85,8 @@ class CostBreakdownBySource:
         self,
         source: str,
         calls: int,
-        cost_usd: float,
-        cost_usd_byok: float,
+        cost_usd: float | None,
+        cost_usd_byok: float | None,
     ) -> None:
         self.source = source
         self.calls = calls
@@ -130,8 +130,12 @@ class CostAggregationRow:
         self.tokens_out = 0
         self.tokens_cached_in = 0
         self.embedding_tokens = 0
-        self.cost_usd = 0.0
-        self.cost_usd_byok = 0.0
+        # cost_usd / cost_usd_byok are NULL ("cost unknown") if any
+        # contributing SQL row had unresolved pricing. They start at 0.0
+        # and become None on the first NULL contribution; once None, they
+        # stay None (NULL is sticky — partial cost would be misleading).
+        self.cost_usd: float | None = 0.0
+        self.cost_usd_byok: float | None = 0.0
         self.cost_breakdown_by_model: list[CostBreakdownByModel] = []
         self.cost_breakdown_by_source: list[CostBreakdownBySource] = []
 
@@ -292,7 +296,25 @@ class CostAggregationService:
         # tags rows with ``kind`` so the Python merge step knows which
         # array to populate.
         sql = f"""
-        WITH llm_per_model AS (
+        -- Two CTEs, both two-stage (per-row → per-group):
+        --
+        -- Stage 1 computes per-(report × usage) row cost as **NULLABLE** —
+        -- if any required price (e.g. input_tokens > 0 but no
+        -- llm_pricing row for that (provider, model, unit_type) at the
+        -- run's started_at) is missing, row_cost is NULL. Otherwise
+        -- it's the float8 sum across the priced unit_types.
+        --
+        -- Stage 2 collapses to (period, workspace, user, model, source,
+        -- paid_by) and propagates NULL via BOOL_AND: if EVERY row in the
+        -- group is fully priced, cost = SUM(row_cost); if ANY row is
+        -- unpriced, cost = NULL ("cost unknown" — same semantics as
+        -- LLMPricingService.lookup() returning None on a miss).
+        --
+        -- Without this, COALESCE(... * rate, 0) made unpriced usage
+        -- silently look free, breaking the existing service contract
+        -- and Issue #472 design intent (NULL-model rows surface as
+        -- "—" in the dashboard, not as "$0.00").
+        WITH llm_per_row AS (
             SELECT
                 date_trunc(:period, sr.started_at)::date AS period_start,
                 sr.workspace_id,
@@ -300,32 +322,59 @@ class CostAggregationService:
                 u.model,
                 sr.source,
                 sr.paid_by,
-                SUM(u.calls)::bigint               AS calls,
-                SUM(u.input_tokens)::bigint        AS tokens_in,
-                SUM(u.output_tokens)::bigint       AS tokens_out,
-                SUM(u.cached_input_tokens)::bigint AS tokens_cached_in,
-                SUM(
-                    COALESCE(u.input_tokens        * p_in.rate,    0) +
-                    COALESCE(u.output_tokens       * p_out.rate,   0) +
-                    COALESCE(u.cached_input_tokens * p_cache.rate, 0)
-                )::float8 AS cost
+                u.calls,
+                u.input_tokens,
+                u.output_tokens,
+                u.cached_input_tokens,
+                CASE
+                    WHEN (u.input_tokens        > 0 AND p_in.rate    IS NULL)
+                      OR (u.output_tokens       > 0 AND p_out.rate   IS NULL)
+                      OR (u.cached_input_tokens > 0 AND p_cache.rate IS NULL)
+                    THEN NULL::float8
+                    ELSE (
+                        COALESCE(u.input_tokens        * p_in.rate,    0) +
+                        COALESCE(u.output_tokens       * p_out.rate,   0) +
+                        COALESCE(u.cached_input_tokens * p_cache.rate, 0)
+                    )::float8
+                END AS row_cost
             FROM sleep_reports sr
             JOIN sleep_report_llm_usage u ON u.report_id = sr.id
             {_LLM_PRICING_LATERAL.format(unit_type="input_tokens", alias="p_in")}
             {_LLM_PRICING_LATERAL.format(unit_type="output_tokens", alias="p_out")}
             {_LLM_PRICING_LATERAL.format(unit_type="cache_read_tokens", alias="p_cache")}
             WHERE {base_where}
+        ),
+        llm_per_model AS (
+            SELECT
+                period_start,
+                workspace_id,
+                user_id,
+                model,
+                source,
+                paid_by,
+                SUM(calls)::bigint               AS calls,
+                SUM(input_tokens)::bigint        AS tokens_in,
+                SUM(output_tokens)::bigint       AS tokens_out,
+                SUM(cached_input_tokens)::bigint AS tokens_cached_in,
+                CASE
+                    WHEN BOOL_AND(row_cost IS NOT NULL) THEN SUM(row_cost)::float8
+                    ELSE NULL::float8
+                END AS cost
+            FROM llm_per_row
             GROUP BY 1, 2, 3, 4, 5, 6
         ),
-        emb_per_source AS (
+        emb_per_row AS (
             SELECT
                 date_trunc(:period, sr.started_at)::date AS period_start,
                 sr.workspace_id,
                 sr.user_id,
                 sr.source,
                 sr.paid_by,
-                SUM(sr.embedding_tokens)::bigint AS embedding_tokens,
-                SUM(COALESCE(sr.embedding_tokens * p_emb.rate, 0))::float8 AS cost
+                sr.embedding_tokens,
+                CASE
+                    WHEN sr.embedding_tokens > 0 AND p_emb.rate IS NULL THEN NULL::float8
+                    ELSE (sr.embedding_tokens * p_emb.rate)::float8
+                END AS row_cost
             FROM sleep_reports sr
             {_EMBEDDING_PRICING_LATERAL}
             WHERE {base_where}
@@ -333,10 +382,22 @@ class CostAggregationService:
               -- run with no LLM child rows AND no embedding tokens" does
               -- not surface as an all-zero aggregation row. This also
               -- excludes status='running'/'failed' reports that have not
-              -- yet recorded embedding usage. Reports that legitimately
-              -- have embedding_tokens > 0 still appear, regardless of
-              -- their status (running embedding writes are observable).
+              -- yet recorded embedding usage.
               AND sr.embedding_tokens > 0
+        ),
+        emb_per_source AS (
+            SELECT
+                period_start,
+                workspace_id,
+                user_id,
+                source,
+                paid_by,
+                SUM(embedding_tokens)::bigint AS embedding_tokens,
+                CASE
+                    WHEN BOOL_AND(row_cost IS NOT NULL) THEN SUM(row_cost)::float8
+                    ELSE NULL::float8
+                END AS cost
+            FROM emb_per_row
             GROUP BY 1, 2, 3, 4, 5
         )
         SELECT
@@ -391,15 +452,28 @@ def _assemble_rows(raw_rows: Sequence[RowMapping]) -> list[CostAggregationRow]:
     # Inner trackers: per-model cost split by paid_by; per-source cost split.
     # ``defaultdict`` keeps the per-(model | source) sub-totals tidy
     # without per-row branching.
+    # Bucket value shape: {"calls": int, "platform": float | None,
+    # "byok": float | None}. None means "cost unknown" (any contributing
+    # SQL row had unresolved pricing). Sticky — once None, stays None.
     aggregates: dict[tuple[date, UUID | None, str], CostAggregationRow] = {}
     by_model_acc: dict[
         tuple[date, UUID | None, str],
-        dict[str | None, dict[str, float | int]],
+        dict[str | None, dict[str, float | int | None]],
     ] = defaultdict(lambda: defaultdict(lambda: {"calls": 0, "platform": 0.0, "byok": 0.0}))
     by_source_acc: dict[
         tuple[date, UUID | None, str],
-        dict[str, dict[str, float | int]],
+        dict[str, dict[str, float | int | None]],
     ] = defaultdict(lambda: defaultdict(lambda: {"calls": 0, "platform": 0.0, "byok": 0.0}))
+
+    def _add_or_null(current: float | None, increment: float | None) -> float | None:
+        """Sum two cost values with sticky-NULL semantics.
+
+        If either side is None ("cost unknown"), the result is None —
+        a partial total over a partly-priced group would be misleading.
+        """
+        if current is None or increment is None:
+            return None
+        return current + increment
 
     for r in raw_rows:
         key = (r["period_start"], r["workspace_id"], r["user_id"])
@@ -434,43 +508,48 @@ def _assemble_rows(raw_rows: Sequence[RowMapping]) -> list[CostAggregationRow]:
         paid_by_col = paid_by_value
         cost_field = "cost_usd" if paid_by_col == "platform" else "cost_usd_byok"
 
+        # cost from SQL is float | None (None when CTE detected an
+        # unpriced contribution via BOOL_AND). Pass through as-is — the
+        # _add_or_null helper handles the sticky-NULL aggregation.
+        sql_cost: float | None = float(r["cost"]) if r["cost"] is not None else None
+
         if kind == "llm":
             calls = int(r["calls"] or 0)
-            cost = float(r["cost"] or 0.0)
             agg.calls += calls
             agg.tokens_in += int(r["tokens_in"] or 0)
             agg.tokens_out += int(r["tokens_out"] or 0)
             agg.tokens_cached_in += int(r["tokens_cached_in"] or 0)
-            setattr(agg, cost_field, getattr(agg, cost_field) + cost)
+            setattr(agg, cost_field, _add_or_null(getattr(agg, cost_field), sql_cost))
 
             model_bucket = by_model_acc[key][r["model"]]
-            model_bucket["calls"] = int(model_bucket["calls"]) + calls
-            model_bucket[paid_by_col] = float(model_bucket[paid_by_col]) + cost
+            model_bucket["calls"] = int(model_bucket["calls"] or 0) + calls
+            model_bucket[paid_by_col] = _add_or_null(model_bucket[paid_by_col], sql_cost)
 
             source_bucket = by_source_acc[key][r["source"]]
-            source_bucket["calls"] = int(source_bucket["calls"]) + calls
-            source_bucket[paid_by_col] = float(source_bucket[paid_by_col]) + cost
+            source_bucket["calls"] = int(source_bucket["calls"] or 0) + calls
+            source_bucket[paid_by_col] = _add_or_null(source_bucket[paid_by_col], sql_cost)
         else:
             # kind == 'emb' — embedding rows contribute tokens + cost but
             # no LLM call count (embedding is metered separately and the
             # response shape exposes embedding_tokens at the top level
             # only). They DO contribute to source-level cost so the
             # by_source breakdown matches the row-level cost_usd totals.
-            cost = float(r["cost"] or 0.0)
             agg.embedding_tokens += int(r["embedding_tokens"] or 0)
-            setattr(agg, cost_field, getattr(agg, cost_field) + cost)
+            setattr(agg, cost_field, _add_or_null(getattr(agg, cost_field), sql_cost))
 
             source_bucket = by_source_acc[key][r["source"]]
-            source_bucket[paid_by_col] = float(source_bucket[paid_by_col]) + cost
+            source_bucket[paid_by_col] = _add_or_null(source_bucket[paid_by_col], sql_cost)
 
-    # Materialize breakdowns onto each row.
+    # Materialize breakdowns onto each row. cost_usd / cost_usd_byok are
+    # ``float | None`` per the sticky-NULL rule; the route layer's
+    # response model declares the same nullable shape.
     for key, agg in aggregates.items():
         agg.cost_breakdown_by_model = [
             CostBreakdownByModel(
                 model=model,
-                calls=int(b["calls"]),
-                cost_usd=float(b["platform"]),
-                cost_usd_byok=float(b["byok"]),
+                calls=int(b["calls"] or 0),
+                cost_usd=b["platform"],  # float | None
+                cost_usd_byok=b["byok"],  # float | None
             )
             for model, b in sorted(
                 by_model_acc[key].items(),
@@ -480,9 +559,9 @@ def _assemble_rows(raw_rows: Sequence[RowMapping]) -> list[CostAggregationRow]:
         agg.cost_breakdown_by_source = [
             CostBreakdownBySource(
                 source=source,
-                calls=int(b["calls"]),
-                cost_usd=float(b["platform"]),
-                cost_usd_byok=float(b["byok"]),
+                calls=int(b["calls"] or 0),
+                cost_usd=b["platform"],
+                cost_usd_byok=b["byok"],
             )
             for source, b in sorted(by_source_acc[key].items())
         ]

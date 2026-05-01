@@ -270,12 +270,14 @@ async def test_byok_never_contributes_to_cost_usd(db_session):
 
 
 @pytest.mark.asyncio
-async def test_pricing_miss_keeps_row_with_zero_cost(db_session):
-    """A model with no pricing row emits the row anyway — cost rolls to 0.
+async def test_pricing_miss_surfaces_cost_unknown_as_null(db_session):
+    """A usage row with no resolved pricing yields cost_usd = None.
 
-    Mirrors the documented behavior for legacy NULL-model rows: usage
-    figures are preserved so the dashboard still shows tokens spent;
-    only the ``$`` column is blank.
+    "cost unknown" must be distinguishable from "genuinely $0" so the
+    dashboard renders "—" instead of "$0.00" for legacy / unpriced
+    models. Same semantics as ``LLMPricingService.lookup()`` returning
+    ``None`` on a miss. Usage figures (calls / tokens_in / tokens_out)
+    are still surfaced — only the cost is NULL.
     """
     await _seed_pricing(db_session)
 
@@ -309,11 +311,83 @@ async def test_pricing_miss_keeps_row_with_zero_cost(db_session):
     )
     assert len(rows) == 1
     row = rows[0]
+    # Usage preserved
     assert row.calls == 10
     assert row.tokens_in == 1_000_000
     assert row.tokens_out == 500_000
-    assert row.cost_usd == 0.0
-    assert row.cost_usd_byok == 0.0
+    # Cost is None ("cost unknown") because the model has no pricing row.
+    assert row.cost_usd is None, "unpriced usage must surface as cost_usd=None, not 0.0"
+    assert row.cost_usd_byok == 0.0  # no BYOK contribution at all → stays 0.0
+    # Breakdown also propagates None.
+    by_model = {b.model: b for b in row.cost_breakdown_by_model}
+    assert by_model["not-yet-priced-1.0"].cost_usd is None
+    by_source = {b.source: b for b in row.cost_breakdown_by_source}
+    assert by_source["sleep"].cost_usd is None
+
+
+@pytest.mark.asyncio
+async def test_pricing_miss_for_one_model_taints_full_aggregate(db_session):
+    """Mixed priced+unpriced models in one bucket → cost_usd is NULL overall.
+
+    NULL is sticky: once any contributing row is unpriced, the bucket's
+    cost_usd is None for the whole row, the matching by_source entry,
+    AND the unpriced model's by_model entry. The PRICED model's by_model
+    entry retains its real cost so the operator can see at least the
+    portion that IS computable.
+    """
+    await _seed_pricing(db_session)
+
+    workspace_id = uuid4()
+    user_id = "user-mixed"
+
+    report = _make_report(
+        user_id=user_id, workspace_id=workspace_id, started_at=datetime(2026, 4, 5, 3, 0)
+    )
+    db_session.add(report)
+    await db_session.flush()
+
+    # Two usage rows under one report — one priced model, one unpriced.
+    db_session.add_all(
+        [
+            _make_usage(
+                report_id=report.id,
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+                calls=10,
+                input_tokens=1_000_000,  # $3
+                output_tokens=0,
+            ),
+            _make_usage(
+                report_id=report.id,
+                provider="exotic-vendor",
+                model="not-yet-priced-1.0",
+                calls=5,
+                input_tokens=500_000,
+                output_tokens=0,
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    service = CostAggregationService(db_session)
+    rows = await service.aggregate(
+        period="day",
+        start=datetime(2026, 4, 1),
+        end=datetime(2026, 4, 8),
+        workspace_id=workspace_id,
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.calls == 15
+    # Total cost is None because the by_source aggregate sums priced+unpriced.
+    assert row.cost_usd is None
+    # Per-model breakdown: priced model keeps its $3, unpriced is None.
+    by_model = {b.model: b for b in row.cost_breakdown_by_model}
+    assert by_model["claude-sonnet-4-6"].cost_usd == pytest.approx(3.0)
+    assert by_model["not-yet-priced-1.0"].cost_usd is None
+    # Per-source breakdown collapses both → None (sticky NULL).
+    by_source = {b.source: b for b in row.cost_breakdown_by_source}
+    assert by_source["sleep"].cost_usd is None
 
 
 @pytest.mark.asyncio
