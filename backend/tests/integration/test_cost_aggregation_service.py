@@ -440,3 +440,120 @@ async def test_inverted_window_raises_value_error(db_session):
             start=datetime(2026, 4, 8),
             end=datetime(2026, 4, 1),
         )
+
+
+@pytest.mark.asyncio
+async def test_period_week_collapses_seven_daily_reports_into_one_bucket(db_session):
+    """Seven reports across one ISO week roll into a single weekly bucket.
+
+    Postgres ``date_trunc('week', ...)`` snaps to the ISO Monday. Seeding
+    Mon–Sun in the same ISO week verifies that the bucket key is computed
+    correctly and that all seven daily reports collapse to one row, not
+    seven. Without this assertion the route layer's ``period=week``
+    contract is only exercised in SQL but never verified at the row count.
+    """
+    await _truncate_cost_grade_tables(db_session)
+    await _seed_pricing(db_session)
+
+    workspace_id = uuid4()
+    user_id = "user-weekly"
+
+    # 2026-04-06 is a Monday → 2026-04-12 is the following Sunday. All
+    # seven dates share the same ISO week, so date_trunc('week', ...)
+    # returns 2026-04-06 for every row.
+    week_dates = [datetime(2026, 4, d, 12, 0) for d in range(6, 13)]
+    reports = [
+        _make_report(user_id=user_id, workspace_id=workspace_id, started_at=ts) for ts in week_dates
+    ]
+    db_session.add_all(reports)
+    await db_session.flush()
+
+    for r in reports:
+        db_session.add(
+            _make_usage(
+                report_id=r.id,
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+                calls=1,
+                input_tokens=1_000_000,  # $3 each → $21 total for the week
+                output_tokens=0,
+            )
+        )
+    await db_session.flush()
+
+    service = CostAggregationService(db_session)
+    rows = await service.aggregate(
+        period="week",
+        start=datetime(2026, 4, 1),
+        end=datetime(2026, 4, 15),
+        workspace_id=workspace_id,
+    )
+
+    assert len(rows) == 1, "seven daily reports must collapse into one weekly bucket"
+    row = rows[0]
+    assert row.period_start == date(2026, 4, 6)  # ISO Monday
+    assert row.calls == 7
+    assert row.tokens_in == 7_000_000
+    assert row.cost_usd == pytest.approx(21.0)
+
+
+@pytest.mark.asyncio
+async def test_window_upper_bound_includes_late_day_records(db_session):
+    """A report at 23:59:59 on the route's ``to`` day is still included.
+
+    The route layer turns ``to=YYYY-MM-DD`` into a half-open
+    ``[start, end)`` window where ``end = (to + 1 day) at 00:00:00``. A
+    record at the very end of the ``to`` day (23:59:59) MUST be included;
+    a record one second later (the next day 00:00:00) MUST be excluded.
+    Without this assertion, an off-by-one in the route's window
+    construction would silently drop the last second of every query.
+    """
+    await _truncate_cost_grade_tables(db_session)
+    await _seed_pricing(db_session)
+
+    workspace_id = uuid4()
+    user_id = "user-boundary"
+
+    # Two reports: one at the very end of the to-day (must include),
+    # one at the start of the day after (must exclude). Same workspace
+    # + user so the inclusion/exclusion shows up as a count delta.
+    in_window = _make_report(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        started_at=datetime(2026, 4, 7, 23, 59, 59),
+    )
+    out_of_window = _make_report(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        started_at=datetime(2026, 4, 8, 0, 0, 0),
+    )
+    db_session.add_all([in_window, out_of_window])
+    await db_session.flush()
+
+    for r in (in_window, out_of_window):
+        db_session.add(
+            _make_usage(
+                report_id=r.id,
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+                calls=1,
+                input_tokens=1_000_000,  # $3
+                output_tokens=0,
+            )
+        )
+    await db_session.flush()
+
+    service = CostAggregationService(db_session)
+    # Mirror the route's window math: to=2026-04-07 → end=2026-04-08T00:00.
+    rows = await service.aggregate(
+        period="day",
+        start=datetime(2026, 4, 1),
+        end=datetime(2026, 4, 8),
+        workspace_id=workspace_id,
+    )
+
+    assert len(rows) == 1, "only the in-window report should appear"
+    row = rows[0]
+    assert row.period_start == date(2026, 4, 7)
+    assert row.calls == 1
+    assert row.cost_usd == pytest.approx(3.0)
