@@ -407,15 +407,21 @@ async def persist_failure(
     ``status='failed'`` is observable to the API caller polling
     the run row.
     """
+    truncated_error = error_message[:_ERROR_FIELD_MAX_CHARS]
     analysis.status = _STATUS_FAILED
     analysis.finished_at = utcnow()
-    analysis.error = error_message[:_ERROR_FIELD_MAX_CHARS]
+    analysis.error = truncated_error
     # Explicit flush makes the failure status observable BEFORE the
     # surrounding ``async with db.begin()`` block commits — useful for
     # tests that introspect the row inside the same transaction.
     await db.flush()
+    # Log the SAME truncated value, not the unbounded original — an
+    # upstream exception with a large embedded payload (e.g. dumped
+    # response body, stack trace) would otherwise produce log lines
+    # bigger than the DB column allows AND leak more bytes than
+    # what's actually persisted.
     logger.error(
         "analysis_persist_failure",
         analysis_id=str(analysis.id),
-        error=error_message,
+        error=truncated_error,
     )

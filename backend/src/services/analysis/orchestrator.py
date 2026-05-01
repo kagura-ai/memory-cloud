@@ -147,15 +147,24 @@ async def _resolve_pricing_row(db: AsyncSession, model_id: int | None) -> tuple[
         primary = target
     else:
         # Default path: pull every row for (provider=openai, model=gpt-5-nano)
-        # ordered by effective_from desc, then take the latest
-        # effective_from group as primary + its rates. One SELECT.
+        # ordered by effective_from desc with a stable tie-breaker on
+        # ``unit_type`` then ``id``. Without the tie-breaker the
+        # ``primary`` row chosen for ``MemoryAnalysis.model_id`` (the
+        # FK we persist) varies between equally-recent rows
+        # (input_tokens / output_tokens / cache_read_tokens all share
+        # the same ``effective_from``). The deterministic order pins
+        # the FK to one specific row across DBs / re-runs.
         stmt = (
             select(LLMPricing)
             .where(
                 LLMPricing.provider == _DEFAULT_PROVIDER,
                 LLMPricing.model == _DEFAULT_MODEL,
             )
-            .order_by(LLMPricing.effective_from.desc())
+            .order_by(
+                LLMPricing.effective_from.desc(),
+                LLMPricing.unit_type,
+                LLMPricing.id,
+            )
         )
         all_rows = list((await db.execute(stmt)).scalars().all())
         if not all_rows:

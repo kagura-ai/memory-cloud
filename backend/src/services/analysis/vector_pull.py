@@ -233,29 +233,40 @@ async def pull_memories_with_vectors(
 
     async def _retrieve_batch(batch_ids: list[str]) -> list[Any]:
         async with sem:
+            # ``with_payload=False`` because the embedding-model
+            # homogeneity check is now done via ``ContextSearchConfig``
+            # (the canonical declared model for the context), not by
+            # reading a per-point payload key. Memory points written
+            # by ``services/memory_service.py`` do NOT include an
+            # ``embedding_model`` payload field, so the previous
+            # ``with_payload=["embedding_model"]`` fetch was always
+            # empty and the check was effectively dead code.
             return await client.retrieve(
                 collection_name=collection_name,
                 ids=batch_ids,
                 with_vectors=[KAGURA_MEMORIES_VECTOR_NAME],
-                with_payload=["embedding_model"],
+                with_payload=False,
             )
 
     batch_results = await asyncio.gather(*(_retrieve_batch(b) for b in batches))
 
     vector_by_id: dict[str, np.ndarray] = {}
-    seen_models: set[str] = set()
     for points in batch_results:
         for p in points:
-            payload_model = (p.payload or {}).get("embedding_model") or declared_model
-            if payload_model:
-                seen_models.add(str(payload_model))
             vec_dict = p.vector if isinstance(p.vector, dict) else {}
             vec = vec_dict.get(KAGURA_MEMORIES_VECTOR_NAME)
             if vec is not None:
                 vector_by_id[str(p.id)] = np.asarray(vec, dtype=np.float32)
 
-    if len(seen_models) > 1:
-        raise EmbeddingMismatchError(sorted(seen_models))
+    # Embedding-model homogeneity is enforced at the COLLECTION level:
+    # ``ContextSearchConfig`` declares one (model, dim) pair per
+    # context, and ``get_collection_name`` resolves that to a single
+    # Qdrant collection. All vectors retrieved above came from the
+    # same collection, so by construction they share the same
+    # embedding model. The ``EmbeddingMismatchError`` path is reserved
+    # for a future feature that scans across multiple collections in
+    # one run; for v1 it cannot fire and we set it as the declared
+    # model with no per-point check.
 
     # 4. Build aligned outputs. Drop memories that have no Qdrant
     #    vector (rare — would mean a half-indexed memory). Log at
@@ -292,7 +303,7 @@ async def pull_memories_with_vectors(
         raise ValueError(f"No memories had matching Qdrant vectors in {collection_name!r}.")
 
     embeddings = np.vstack(aligned_vectors)
-    final_model = next(iter(seen_models)) if seen_models else (declared_model or "unknown")
+    final_model = declared_model or "unknown"
     return VectorPullResult(
         memories=aligned_memories,
         embeddings=embeddings,
