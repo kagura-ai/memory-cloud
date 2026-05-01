@@ -5,8 +5,9 @@
  *
  * Cross-workspace view: admin-only. Renders the shared
  * ``CostDashboard`` against the admin endpoint, which returns one row
- * per (period × workspace × user × model × source × paid_by) — hence
- * the workspace column is shown for cross-workspace comparison.
+ * per (period × workspace × user) with model/source rollups in
+ * ``cost_breakdown_by_model`` / ``cost_breakdown_by_source`` arrays —
+ * hence the workspace column is shown for cross-workspace comparison.
  *
  * Workspace owner / admin self-service is at ``/workspace/cost`` and
  * uses the workspace-scoped endpoint shipped in #472.
