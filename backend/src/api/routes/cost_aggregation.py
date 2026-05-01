@@ -18,7 +18,9 @@ The split (instead of a single auth-scoped route) keeps:
 - ``/admin/`` prefix semantics honest — only system admins can hit it.
 - Workspace path consistency with the future B2B billing endpoint
   (``/api/v1/workspaces/{id}/invoices`` and friends).
-- Distinct OpenAPI tags so the docs render two clearly-purposed groups.
+- Distinct OpenAPI tags (admin vs workspaces) so the docs render the
+  two endpoints in separate, semantically-named groups rather than a
+  shared "cost-aggregation" bucket.
 """
 
 from __future__ import annotations
@@ -225,7 +227,7 @@ def _to_response_row(row: CostAggregationRow) -> CostAggregationRowResponse:
     "/admin/cost-aggregation",
     response_model=CostAggregationResponse,
     summary="Cost aggregation across all workspaces (admin)",
-    tags=["admin", "cost-aggregation"],
+    tags=["admin"],
 )
 async def admin_cost_aggregation(
     _admin: AdminUser,  # noqa: ARG001 — FastAPI dep, access guard only
@@ -272,7 +274,7 @@ async def admin_cost_aggregation(
     "/workspaces/{workspace_id}/cost-aggregation",
     response_model=CostAggregationResponse,
     summary="Cost aggregation scoped to one workspace (owner/admin)",
-    tags=["workspaces", "cost-aggregation"],
+    tags=["workspaces"],
 )
 async def workspace_cost_aggregation(
     workspace_id: UUID,

@@ -19,8 +19,13 @@ column) so it cannot accidentally re-merge in application code.
 Pricing lookup: each LLM unit (input / output / cache_read) and the
 embedding unit are joined to the active ``llm_pricing`` row via a
 LATERAL subquery that picks the latest ``effective_from <= started_at``.
-A miss contributes 0 cost (same "cost unknown" semantics as the
-existing ``LLMPricingService``); the usage figures are still surfaced.
+A miss leaves the corresponding cost as ``NULL`` / ``None`` ("cost
+unknown" — same semantics as ``LLMPricingService.lookup()`` returning
+``None`` on a miss). NULL is sticky: if any contributing usage row
+in a (period, workspace, user, model, source, paid_by) bucket is
+unpriced, the bucket's cost is ``None`` so that partial totals don't
+look like real money. Usage figures (calls, tokens) are still surfaced
+even when cost is unknown.
 
 v1 limitation: pricing-tier lookup uses ``context_min_tokens=0`` because
 ``sleep_report_llm_usage`` does not store the per-call context window
