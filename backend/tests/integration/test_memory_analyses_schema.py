@@ -184,6 +184,29 @@ async def test_workspace_default_model_fk_enforced(
 
 
 @pytest.mark.asyncio
+async def test_workspace_default_model_set_null_on_pricing_delete(
+    db_session: AsyncSession,
+) -> None:
+    """Deleting the pricing row clears ``analysis_default_model_id`` to NULL.
+
+    Verifies the ``ON DELETE SET NULL`` semantics — a pricing-row cleanup
+    must not cascade-delete the workspace, only clear its model selection.
+    """
+    ws, _, pricing, _ = await _seed_workspace_context_pricing(db_session)
+
+    ws.analysis_default_model_id = pricing.id
+    await db_session.flush()
+    assert ws.analysis_default_model_id == pricing.id
+
+    await db_session.delete(pricing)
+    await db_session.flush()
+    await db_session.refresh(ws)
+
+    assert ws.analysis_default_model_id is None
+    await db_session.rollback()
+
+
+@pytest.mark.asyncio
 async def test_assignment_composite_pk_blocks_duplicate(
     db_session: AsyncSession,
 ) -> None:

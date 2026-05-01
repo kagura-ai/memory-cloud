@@ -202,6 +202,10 @@ class MemoryAnalysisCluster(Base):
     description = Column(Text, nullable=True)
     count = Column(Integer, nullable=False)
     centroid_2d = Column(ARRAY(Float), nullable=False)
+    # NOTE: PostgreSQL cannot enforce FK on array elements, so a memory
+    # deleted after a run lands here as a stale UUID. Read paths
+    # (#496 API / #497 frontend) MUST LEFT JOIN against ``memories`` and
+    # filter out NULLs rather than trusting every ID resolves.
     representative_memory_ids = Column(
         ARRAY(UUID(as_uuid=True)),
         nullable=False,

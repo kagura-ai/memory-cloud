@@ -315,6 +315,21 @@ def downgrade() -> None:
     constraint recreate at the end of downgrade would otherwise fail
     validation against existing rows, so we delete those rows first —
     same destructive pattern documented in b05_223 for tag_cooccurrence.
+
+    OPS WARNING: ``extra_analysis_runs`` is a Stripe-backed paid SKU, NOT a
+    regenerable artifact like b05_223's tag-cooccurrence edges. Deleting
+    these rows on rollback severs a paying-customer addon from the
+    workspace and the Stripe webhook will NOT re-insert it (subscription
+    history is retained Stripe-side, but the DB linkage is lost). Before
+    running this downgrade against production:
+
+        SELECT count(*) FROM workspace_addons
+         WHERE addon_type = 'extra_analysis_runs';
+
+    If the count is non-zero, do NOT downgrade — coordinate Stripe-side
+    cancellation first, or accept that re-applying the migration later
+    will leave those workspaces without their paid bonus until manually
+    re-inserted.
     """
     # 5'. Restore old CHECK. Delete any rows that the old constraint
     #     would reject so the recreate succeeds.

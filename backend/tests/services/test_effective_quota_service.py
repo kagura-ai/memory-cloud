@@ -139,6 +139,7 @@ class TestDashboardAddonReflection:
         ws.addon_public_quota_bonus = 50
         ws.addon_member_bonus = 3
         ws.addon_context_bonus = 5
+        ws.addon_analysis_bonus = 2  # Issue #494
         from config.plan_tiers import get_plan_tier
 
         tier = get_plan_tier("pro")
@@ -151,6 +152,7 @@ class TestDashboardAddonReflection:
         ws.effective_public_calls_per_week = tier.public_calls_per_week + 50
         ws.effective_max_contexts = tier.max_contexts_per_workspace + 5
         ws.effective_max_members = tier.max_members_per_workspace + 3
+        ws.effective_analysis_runs_per_day = tier.analysis_runs_per_day + 2
 
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = ws
@@ -166,3 +168,5 @@ class TestDashboardAddonReflection:
         assert quotas["mcp_calls_per_week"] == tier.mcp_calls_per_week + 200
         assert quotas["rest_calls_per_week"] == tier.rest_calls_per_week + 100
         assert quotas["public_calls_per_week"] == tier.public_calls_per_week + 50
+        # Issue #494: broadlistening analysis runs/day surfaces here too.
+        assert quotas["analysis_runs_per_day"] == tier.analysis_runs_per_day + 2
