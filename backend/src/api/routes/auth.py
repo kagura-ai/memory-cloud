@@ -18,7 +18,6 @@ Security features:
 - First user auto-assigned ADMIN role
 """
 
-import logging
 import os
 import secrets
 from typing import Any
@@ -44,8 +43,16 @@ from services.workspace_service import WorkspaceService
 from utils.datetime import utcnow
 from utils.encryption import get_encryptor
 from utils.exceptions import ConflictError
+from utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+# auth.py historically bound logger via stdlib ``logging.getLogger``
+# while every other module in the project uses ``utils.logger.get_logger``
+# (structlog). The mismatch meant ``logger.info("event", key=value)`` calls
+# anywhere in this file would TypeError at runtime — only the f-string
+# style worked. Switching to ``get_logger`` aligns this module with the
+# rest of the codebase so the structlog kwargs convention works uniformly
+# (Copilot review on PR #522).
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
@@ -263,15 +270,10 @@ async def _maybe_refresh_redirect(
         # implies the refresh succeeded for them. Surface the mismatch.
         # The expected/returned ids are not PII (opaque OAuth ``sub``
         # values), but stay terse for log volume.
-        # Note: structlog kwargs would be cleaner here, but `setup_logger()`
-        # is only called from api/main.py at app startup — pytest imports
-        # the route module directly, so structlog's default config falls
-        # back to stdlib Logger which rejects kwargs with TypeError. Until
-        # tests/conftest.py invokes setup_logger() (out of scope for #515),
-        # f-string is the portable form. Same applies to the success log
-        # below and to me_oauth.refresh_oauth_initiated.
         logger.warning(
-            f"refresh_user_mismatch expected_user_id={expected_user_id} idp_sub={idp_sub}"
+            "refresh_user_mismatch",
+            expected_user_id=expected_user_id,
+            idp_sub=idp_sub,
         )
         return RedirectResponse(
             f"{frontend_url}/profile?error=refresh_user_mismatch",
@@ -289,7 +291,7 @@ async def _maybe_refresh_redirect(
     else:
         redirect_url = f"{frontend_url}/profile?refreshed=1"
 
-    logger.info(f"refresh_oauth_success user_id={idp_sub}")
+    logger.info("refresh_oauth_success", user_id=idp_sub)
     return RedirectResponse(url=redirect_url, status_code=303)
 
 
@@ -752,9 +754,10 @@ def build_github_authorization_url(*, client_id: str, redirect_uri: str, state: 
     with ``&`` / ``=`` / spaces) cannot inject extra top-level OAuth
     params or corrupt GitHub's parameter parsing.
 
-    GitHub's ``scope`` parameter conventionally uses ``+`` (= space) as
-    the separator between scope tokens; ``urlencode`` will percent-encode
-    the space as ``%20``, which GitHub accepts as equivalent.
+    GitHub's ``scope`` parameter accepts both ``+`` and a literal space
+    as the token separator. ``urlencode`` defaults to ``quote_plus``,
+    which encodes spaces as ``+`` — exactly the form GitHub's OAuth doc
+    examples use, so no override is needed.
     """
     from urllib.parse import urlencode
 
