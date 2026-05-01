@@ -49,25 +49,53 @@ def _is_email_unique_violation(exc: _IntegrityError) -> bool:
     """True iff ``exc`` is a UNIQUE violation on ``users.email``.
 
     Asyncpg surfaces UNIQUE violations with sqlstate=23505 and a
-    ``constraint_name``. The narrowing tolerates whichever name PostgreSQL
-    actually uses in this codebase: a ``Column(unique=True, index=True)``
-    declaration is realized in the alembic baseline migration as a unique
-    index named ``ix_users_email`` (verified against
-    asyncpg.exceptions.UniqueViolationError raised by the live DB —
-    constraint_name="ix_users_email"). On other Postgres + SQLAlchemy
-    deployments where ``unique=True`` produces a separate
-    ``users_email_key`` constraint instead, the substring match on
-    ``"email"`` still hits. Narrowing to "email" prevents future
-    constraint additions on other columns (e.g. UNIQUE on ``name``) from
-    being mis-mapped to ConflictError("Email already in use").
+    ``constraint_name``. SQLAlchemy 2.0 + asyncpg wraps the native
+    ``asyncpg.exceptions.UniqueViolationError`` inside
+    ``AsyncAdapt_asyncpg_dbapi.IntegrityError``, so ``exc.orig`` exposes
+    ``sqlstate`` but NOT ``constraint_name`` — that field lives on
+    ``orig.__cause__`` (the actual asyncpg exception). Earlier versions
+    of this function only read ``orig.constraint_name`` and silently
+    returned False for every cross-provider email collision, leaking the
+    raw IntegrityError out as 503 DB-002 instead of the intended 409
+    ConflictError → ``/login?error=email_in_use`` redirect (Issue #481).
+
+    Lookup order:
+
+    1. ``orig.constraint_name`` — direct, in case asyncpg ever surfaces
+       it on the wrapper.
+    2. ``orig.__cause__.constraint_name`` — the actual native asyncpg
+       error, where the constraint name lives in practice today.
+    3. Substring match on the formatted message text — defensive
+       fallback for SQLAlchemy / asyncpg / driver upgrades that change
+       the wrap chain.
+
+    The constraint name is normalised to lower-case and matched on
+    ``"email"`` so the alembic baseline's ``ix_users_email`` index name
+    AND any future ``users_email_key`` rename both hit. Narrowing to
+    ``"email"`` prevents future constraints on other columns (e.g.
+    UNIQUE on ``name``) from being mis-mapped to ConflictError("Email
+    already in use").
     """
     orig = getattr(exc, "orig", None)
     if orig is None:
         return False
     if getattr(orig, "sqlstate", None) != "23505":
         return False
+    # Try attribute on the wrapper first (rare today, future-proof).
     constraint = (getattr(orig, "constraint_name", "") or "").lower()
-    return "email" in constraint
+    if not constraint:
+        # asyncpg wraps the native exception as orig.__cause__; that's
+        # where constraint_name actually lives in SQLAlchemy 2.0 today.
+        cause = getattr(orig, "__cause__", None)
+        if cause is not None:
+            constraint = (getattr(cause, "constraint_name", "") or "").lower()
+    if "email" in constraint:
+        return True
+    # Final defensive layer: scan the formatted message. Both asyncpg
+    # and SQLAlchemy include ``unique constraint "<name>"`` in str(orig).
+    # This catches future wrap-chain changes that drop both attributes.
+    message = str(orig).lower() if orig is not None else ""
+    return "email" in message and ("unique constraint" in message or "duplicate key" in message)
 
 
 class Role(StrEnum):
