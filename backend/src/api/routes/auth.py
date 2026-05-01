@@ -18,7 +18,6 @@ Security features:
 - First user auto-assigned ADMIN role
 """
 
-import logging
 import os
 import secrets
 from typing import Any
@@ -44,8 +43,16 @@ from services.workspace_service import WorkspaceService
 from utils.datetime import utcnow
 from utils.encryption import get_encryptor
 from utils.exceptions import ConflictError
+from utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+# auth.py historically bound logger via stdlib ``logging.getLogger``
+# while every other module in the project uses ``utils.logger.get_logger``
+# (structlog). The mismatch meant ``logger.info("event", key=value)`` calls
+# anywhere in this file would TypeError at runtime — only the f-string
+# style worked. Switching to ``get_logger`` aligns this module with the
+# rest of the codebase so the structlog kwargs convention works uniformly
+# (Copilot review on PR #522).
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
@@ -168,9 +175,17 @@ async def _check_registration_allowed(
         if pending_invites:
             return None
 
-        # Block
+        # Block. Log the HMAC of the email rather than the plaintext —
+        # mirrors the audit-log pattern used elsewhere in the auth flow
+        # (see RoleManager._sync_existing_user) so production logs don't
+        # carry stranded PII.
+        from utils.hashing import hmac_sha256_hex
+
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-        logger.warning("registration_blocked: %s", email)
+        logger.warning(
+            "registration_blocked",
+            email_hmac=hmac_sha256_hex(email, settings.audit_hmac_key),
+        )
         return RedirectResponse(
             f"{frontend_url}/login?error=registration_disabled",
             status_code=303,
@@ -197,6 +212,95 @@ def _email_in_use_redirect() -> RedirectResponse:
         f"{frontend_url}/login?error=email_in_use",
         status_code=303,
     )
+
+
+async def _maybe_refresh_redirect(
+    *,
+    state: str,
+    idp_sub: str,
+) -> RedirectResponse | None:
+    """Issue #515: handle the manual-refresh branch of a callback.
+
+    Returns ``None`` if this callback is a normal login (no
+    ``oauth2_state_intent:{state}="refresh"`` was set), so the caller
+    proceeds with the existing session-creation flow. Returns a
+    ``RedirectResponse`` when this is a refresh round-trip, in which
+    case the caller MUST short-circuit before touching session state —
+    the user is already logged in and we want to leave their cookie alone.
+
+    Errors during a refresh redirect to ``/profile?error=<code>`` rather
+    than dropping the user on the dashboard, so the profile page can
+    surface the failure inline:
+
+    - ``error=refresh_state_expired``: the originating user_id record
+      expired or was never written. The user can click the button again.
+    - ``error=refresh_user_mismatch``: the IdP returned a different
+      account than the one that initiated the refresh (e.g. the user
+      switched Google accounts mid-flow). Treat as suspicious — do not
+      sync identity into the wrong session.
+    """
+    if not _session_manager:
+        return None
+
+    redis = _session_manager._redis
+    intent = redis.get(f"oauth2_state_intent:{state}")
+    if intent != "refresh":
+        return None
+
+    # Once intent="refresh" is confirmed, ALL refresh-only keys must be
+    # deleted on every branch (delete-on-read contract). Reading them all
+    # up front + deleting unconditionally prevents stale keys from piling
+    # up under repeated mismatch / expired errors before TTL clears them.
+    redis.delete(f"oauth2_state_intent:{state}")
+    expected_user_id = redis.get(f"oauth2_state_user:{state}")
+    if expected_user_id:
+        redis.delete(f"oauth2_state_user:{state}")
+    return_to_url = redis.get(f"oauth2_return_to:{state}")
+    if return_to_url:
+        redis.delete(f"oauth2_return_to:{state}")
+
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+    if not expected_user_id:
+        # The originating user_id record expired (TTL ran out between
+        # POST /me/refresh-oauth and the IdP round-trip). Without it we
+        # cannot enforce the same-user check; safest is to refuse.
+        return RedirectResponse(
+            f"{frontend_url}/profile?error=refresh_state_expired",
+            status_code=303,
+        )
+
+    if idp_sub != expected_user_id:
+        # The IdP returned a different account. ``ensure_user`` has
+        # already been called by the caller for that other account —
+        # which is fine, that account's row is now up to date — but we
+        # must NOT redirect the originating session to a place that
+        # implies the refresh succeeded for them. Surface the mismatch.
+        # The expected/returned ids are not PII (opaque OAuth ``sub``
+        # values), but stay terse for log volume.
+        logger.warning(
+            "refresh_user_mismatch",
+            expected_user_id=expected_user_id,
+            idp_sub=idp_sub,
+        )
+        return RedirectResponse(
+            f"{frontend_url}/profile?error=refresh_user_mismatch",
+            status_code=303,
+        )
+
+    # Happy path: same user. Honour return_to (already read above).
+    # POST /me/refresh-oauth persists return_to as a same-origin
+    # frontend path (e.g. "/profile?refreshed=1") — prefix FRONTEND_URL
+    # so the redirect lands on the frontend origin, not the API origin.
+    # The validator at write-time already rejects absolute URLs, so any
+    # value reaching us here starts with "/" and is safe to prefix.
+    if return_to_url and return_to_url.startswith("/"):
+        redirect_url = f"{frontend_url}{return_to_url}"
+    else:
+        redirect_url = f"{frontend_url}/profile?refreshed=1"
+
+    logger.info("refresh_oauth_success", user_id=idp_sub)
+    return RedirectResponse(url=redirect_url, status_code=303)
 
 
 # ============================================================================
@@ -400,6 +504,18 @@ async def google_callback(
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
         )
+
+        # Issue #515: refresh-mode short-circuit. POST /me/refresh-oauth set
+        # oauth2_state_intent:{state}="refresh" + oauth2_state_user:{state}
+        # to the originating session's user_id. ensure_user above has already
+        # synced email/name; we now skip session creation/workspace creation
+        # so the user keeps their current session, then redirect to return_to.
+        refresh_redirect = await _maybe_refresh_redirect(
+            state=state,
+            idp_sub=user_info["sub"],
+        )
+        if refresh_redirect is not None:
+            return refresh_redirect
 
         # 5. Create session
         # Note on key naming:
@@ -617,6 +733,9 @@ async def get_current_user_info(
             if user.get("current_workspace_id")
             else None,
             # Issue #246: current_context_id removed
+            # Issue #514: surface auth_method + auth_provider for sign-in-method display
+            "auth_method": db_user.auth_method if db_user else "oauth",
+            "auth_provider": db_user.auth_provider if db_user else None,
         }
     }
 
@@ -631,6 +750,32 @@ GITHUB_AUTH_URL = "https://github.com/login/oauth/authorize"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_USER_URL = "https://api.github.com/user"
 GITHUB_EMAILS_URL = "https://api.github.com/user/emails"
+
+
+def build_github_authorization_url(*, client_id: str, redirect_uri: str, state: str) -> str:
+    """Compose the GitHub OAuth2 authorization URL.
+
+    Shared by the login flow (``github_login``) and the manual-refresh
+    flow (``me_oauth.refresh_oauth``) so the scope string and parameter
+    order stay identical between them. Each value is URL-encoded so
+    that a ``redirect_uri`` carrying its own query string (or any value
+    with ``&`` / ``=`` / spaces) cannot inject extra top-level OAuth
+    params or corrupt GitHub's parameter parsing.
+
+    GitHub's ``scope`` parameter accepts both ``+`` and a literal space
+    as the token separator. ``urlencode`` defaults to ``quote_plus``,
+    which encodes spaces as ``+`` — exactly the form GitHub's OAuth doc
+    examples use, so no override is needed.
+    """
+    from urllib.parse import urlencode
+
+    params = [
+        ("client_id", client_id),
+        ("redirect_uri", redirect_uri),
+        ("scope", "read:user user:email"),
+        ("state", state),
+    ]
+    return f"{GITHUB_AUTH_URL}?{urlencode(params)}"
 
 
 @github_router.get("/login")
@@ -656,11 +801,8 @@ async def github_login(
         "http://localhost:8080/api/v1/auth/github/callback",
     )
 
-    auth_url = (
-        f"{GITHUB_AUTH_URL}?client_id={client_id}"
-        f"&redirect_uri={redirect_uri}"
-        f"&scope=read:user+user:email"
-        f"&state={state}"
+    auth_url = build_github_authorization_url(
+        client_id=client_id, redirect_uri=redirect_uri, state=state
     )
 
     if return_to:
@@ -804,6 +946,16 @@ async def github_callback(
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
         )
+
+        # Issue #515: refresh-mode short-circuit (see google_callback for the
+        # full rationale). The branch must precede session swap so the user
+        # keeps their current cookie when refresh ends.
+        refresh_redirect = await _maybe_refresh_redirect(
+            state=state,
+            idp_sub=user_info["sub"],
+        )
+        if refresh_redirect is not None:
+            return refresh_redirect
 
         db_user_id = user_info["sub"]
 

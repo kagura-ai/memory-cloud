@@ -381,19 +381,24 @@ class TestIsAllowlistedSourceFiltering:
 
 
 class TestIsExistingUser:
-    """Verify _is_existing_user uses an OR condition on email + user_id."""
+    """Verify _is_existing_user uses an OR condition on email + user_id and
+    tolerates the OR predicate matching two different rows (which legitimately
+    happens when GitHub primary email drifts onto an existing other-provider
+    user's email — see _is_existing_user docstring)."""
 
     @pytest.mark.asyncio
     async def test_query_includes_user_id_or_email(self):
         """Generated SQL must include both email and user_id so a user whose
-        IdP email changed is still found by their stable OAuth sub."""
+        IdP email changed is still found by their stable OAuth sub. The query
+        also LIMITs to 1 row so the OR predicate hitting two different
+        legitimate rows doesn't raise MultipleResultsFound."""
         svc = _svc()
         captured = {}
 
         async def fake_execute(stmt):
             captured["sql"] = str(stmt.compile())
             result = MagicMock()
-            result.scalar_one_or_none = MagicMock(return_value=None)
+            result.first = MagicMock(return_value=None)
             return result
 
         svc.db.execute = fake_execute
@@ -406,12 +411,14 @@ class TestIsExistingUser:
         assert "users.user_id" in sql
         # OR semantics must be present (SQLAlchemy renders "OR" in uppercase)
         assert " OR " in sql.upper()
+        # LIMIT 1 must be present so the multi-row case doesn't blow up
+        assert "LIMIT" in sql.upper()
 
     @pytest.mark.asyncio
     async def test_returns_true_when_row_exists(self):
         svc = _svc()
         result_mock = MagicMock()
-        result_mock.scalar_one_or_none = MagicMock(return_value=MagicMock())
+        result_mock.first = MagicMock(return_value=MagicMock())
         svc.db.execute = AsyncMock(return_value=result_mock)
 
         assert await svc._is_existing_user("a@b.com", "sub-1") is True
@@ -420,10 +427,29 @@ class TestIsExistingUser:
     async def test_returns_false_when_no_row(self):
         svc = _svc()
         result_mock = MagicMock()
-        result_mock.scalar_one_or_none = MagicMock(return_value=None)
+        result_mock.first = MagicMock(return_value=None)
         svc.db.execute = AsyncMock(return_value=result_mock)
 
         assert await svc._is_existing_user("unknown@b.com", "sub-99") is False
+
+    @pytest.mark.asyncio
+    async def test_multi_row_match_does_not_raise_and_returns_true(self):
+        """Regression: the OR predicate can match two distinct rows when a
+        user has rows under two providers and one IdP's primary email
+        drifts onto the other row's email. ``.first()`` + ``LIMIT 1`` keep
+        this case sane — the cross-row email collision is later detected
+        and surfaced as ConflictError → /login?error=email_in_use by
+        RoleManager._sync_existing_user when the email UPDATE attempts the
+        move. We just need _is_existing_user to NOT raise here.
+        """
+        svc = _svc()
+        result_mock = MagicMock()
+        # ``.first()`` returns the first row even when the underlying query
+        # would have hit multiple — that's the contract we're pinning.
+        result_mock.first = MagicMock(return_value=(1,))
+        svc.db.execute = AsyncMock(return_value=result_mock)
+
+        assert await svc._is_existing_user("collision@b.com", "sub-2") is True
 
 
 class TestLegacyCheckPassesUserIdThrough:

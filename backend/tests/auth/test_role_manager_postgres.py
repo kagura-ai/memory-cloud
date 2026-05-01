@@ -10,7 +10,7 @@ import pytest
 import structlog
 from sqlalchemy.exc import IntegrityError
 
-from auth.roles import _OAUTH_CALLBACK_ACTOR, Role, RoleManager
+from auth.roles import _OAUTH_CALLBACK_ACTOR, Role, RoleManager, _is_email_unique_violation
 from utils.exceptions import ConflictError
 from utils.hashing import hmac_sha256_hex
 
@@ -19,15 +19,41 @@ class _AsyncpgUniqueViolationStub(Exception):
     """asyncpg-shaped UNIQUE violation stub for the narrowing check.
 
     ``_is_email_unique_violation`` reads ``exc.orig.sqlstate`` and
-    ``exc.orig.constraint_name``. Real asyncpg surfaces these as instance
-    attributes on ``UniqueViolationError``; this minimal stub mimics that
-    shape so unit tests don't need a live PostgreSQL connection.
+    ``exc.orig.constraint_name`` (or its ``__cause__`` chain). Real
+    asyncpg surfaces these as instance attributes on
+    ``UniqueViolationError``; this minimal stub mimics that shape so
+    unit tests don't need a live PostgreSQL connection.
     """
 
     def __init__(self, constraint_name: str = "ix_users_email"):
         super().__init__(f"unique violation on {constraint_name}")
         self.sqlstate = "23505"
         self.constraint_name = constraint_name
+
+
+class _SqlAlchemyAsyncpgWrapperStub(Exception):
+    """Match the SQLAlchemy 2.0 + asyncpg wrap shape that production hits.
+
+    ``AsyncAdapt_asyncpg_dbapi.IntegrityError`` (the real wrapper) exposes
+    ``sqlstate`` and ``pgcode`` on the instance but does NOT set
+    ``constraint_name``. The native ``asyncpg.exceptions.UniqueViolationError``
+    that carries ``constraint_name`` lives on ``__cause__``. This stub
+    mimics that two-level shape so the regression test against the live
+    asyncpg behaviour pins ``_is_email_unique_violation``'s cause-walk
+    fallback added after a 503 leak was observed during local GitHub
+    OAuth testing of PR #522.
+    """
+
+    def __init__(self, constraint_name: str = "ix_users_email"):
+        super().__init__(
+            f"<class 'asyncpg.exceptions.UniqueViolationError'>: "
+            f'duplicate key value violates unique constraint "{constraint_name}"'
+        )
+        self.sqlstate = "23505"
+        self.pgcode = "23505"
+        # constraint_name intentionally NOT set on this wrapper — that's
+        # the wrap behaviour we're regression-testing against.
+        self.__cause__ = _AsyncpgUniqueViolationStub(constraint_name=constraint_name)
 
 
 def _email_unique_violation() -> IntegrityError:
@@ -390,3 +416,77 @@ class TestCreatePath:
         alerts = [e for e in logs if e.get("event") == "oauth_email_collision_attempt"]
         assert len(alerts) == 1
         assert alerts[0]["phase"] == "create"
+
+
+class TestIsEmailUniqueViolationWrapShapes:
+    """Regression: ``_is_email_unique_violation`` must handle the
+    SQLAlchemy 2.0 + asyncpg wrap shape where ``constraint_name`` lives
+    on ``orig.__cause__`` (the native asyncpg exception), NOT on
+    ``orig`` itself. The pre-fix version only read ``orig.constraint_name``
+    and silently returned False for every cross-provider email collision,
+    leaking the raw IntegrityError out as 503 DB-002 instead of the
+    intended 409 ConflictError → ``/login?error=email_in_use`` redirect.
+    Surfaced during local GitHub OAuth testing of PR #522.
+    """
+
+    def test_constraint_name_on_orig_directly(self):
+        """Legacy / future-proof path: constraint_name on the wrapper itself."""
+        exc = IntegrityError("UNIQUE", params={}, orig=_AsyncpgUniqueViolationStub())
+        assert _is_email_unique_violation(exc) is True
+
+    def test_constraint_name_on_cause_chain(self):
+        """Today's production wrap shape: constraint_name on orig.__cause__.
+
+        This is what real SQLAlchemy 2.0 + asyncpg produces when the
+        users.email UNIQUE constraint trips during a github_callback
+        INSERT after a same-email Google account already exists.
+        """
+        exc = IntegrityError("UNIQUE", params={}, orig=_SqlAlchemyAsyncpgWrapperStub())
+        assert _is_email_unique_violation(exc) is True
+
+    def test_message_fallback_when_neither_attribute_set(self):
+        """Defensive layer: if a future driver upgrade drops both the
+        wrapper and __cause__ constraint_name attributes, the message
+        substring scan still hits.
+        """
+
+        class _MessageOnlyStub(Exception):
+            def __init__(self) -> None:
+                super().__init__('duplicate key value violates unique constraint "ix_users_email"')
+                self.sqlstate = "23505"
+
+        exc = IntegrityError("UNIQUE", params={}, orig=_MessageOnlyStub())
+        assert _is_email_unique_violation(exc) is True
+
+    def test_non_email_constraint_returns_false(self):
+        """user_id collision (race) must NOT mis-route as an email
+        ConflictError — it goes through the re-lookup-by-user_id branch
+        instead. Pinning the negative case so future column additions
+        on UNIQUE indexes can't silently piggyback on this narrow gate.
+        """
+        exc = IntegrityError(
+            "UNIQUE",
+            params={},
+            orig=_AsyncpgUniqueViolationStub(constraint_name="ix_users_user_id"),
+        )
+        assert _is_email_unique_violation(exc) is False
+
+    def test_non_unique_violation_returns_false(self):
+        """A foreign-key or check-constraint violation has different
+        sqlstate; the gate must not match."""
+
+        class _FkViolation(Exception):
+            sqlstate = "23503"  # FK violation
+            constraint_name = "fk_users_workspace"
+
+        exc = IntegrityError("FK", params={}, orig=_FkViolation())
+        assert _is_email_unique_violation(exc) is False
+
+    def test_orig_is_none_returns_false(self):
+        """Driver-less IntegrityError (defensive): no orig → False.
+        Should never happen with asyncpg but pin the fail-safe."""
+        # SQLAlchemy's IntegrityError __init__ types orig as BaseException,
+        # but the runtime accepts None and our predicate must handle it via
+        # getattr(...).
+        exc = IntegrityError("UNIQUE", params={}, orig=None)  # type: ignore[arg-type]
+        assert _is_email_unique_violation(exc) is False

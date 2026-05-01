@@ -240,10 +240,24 @@ class SignupGateService:
         return config
 
     async def _is_existing_user(self, email: str, user_id: str) -> bool:
+        # Use ``.first()`` rather than ``.scalar_one_or_none()`` because the
+        # ``or_(email, user_id)`` predicate can legitimately match two
+        # DIFFERENT rows once a user has signed up via two providers and
+        # the IdP-side primary email then drifts onto a third row's email.
+        # Concrete shape that triggered MultipleResultsFound: GitHub user
+        # (sub=N, email=A) exists, separate Google user (sub=M, email=B)
+        # exists, the GitHub user's primary email at the IdP changes to B,
+        # callback fires with sub=N + email=B → email matches the Google
+        # row, user_id matches the GitHub row, two distinct hits.
+        # Returning True is correct here — the user IS existing (the
+        # GitHub row), and the cross-row email collision is detected and
+        # surfaced as ConflictError → /login?error=email_in_use down in
+        # RoleManager._sync_existing_user when the UPDATE attempts the
+        # email move.
         result = await self.db.execute(
-            select(User).where(or_(User.email == email, User.user_id == user_id))
+            select(User.id).where(or_(User.email == email, User.user_id == user_id)).limit(1)
         )
-        return result.scalar_one_or_none() is not None
+        return result.first() is not None
 
     async def _is_first_user(self) -> bool:
         result = await self.db.execute(select(func.count()).select_from(User))

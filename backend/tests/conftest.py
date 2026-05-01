@@ -19,6 +19,20 @@ from models.memory import Base as MemoryBase
 import models.llm_pricing  # noqa: F401  isort: skip
 import models.sleep  # noqa: F401  isort: skip
 
+# Configure structlog the same way api/main.py does at app startup so
+# logger.info("event", key=value) calls inside route modules work in
+# pytest too. Without this, structlog's BoundLoggerLazyProxy falls back
+# to wrapping stdlib logging.Logger, which rejects kwargs with
+# ``TypeError: Logger._log() got an unexpected keyword argument 'X'``
+# the first time any structured-kwargs logger.info/.warning is hit.
+# Production runs setup_logger() from api/main.py:25; pytest skips that
+# entry point and imports route modules directly, so we mirror it here
+# so the project's structlog kwargs convention works uniformly across
+# both contexts (Copilot review on PR #522).
+from utils.logger import setup_logger as _setup_logger  # noqa: E402
+
+_setup_logger()
+
 
 def pytest_configure(config: pytest.Config) -> None:
     """Validate asyncio_default_test_loop_scope matches fixture loop scope.
