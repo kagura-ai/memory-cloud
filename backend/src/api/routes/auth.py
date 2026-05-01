@@ -175,9 +175,17 @@ async def _check_registration_allowed(
         if pending_invites:
             return None
 
-        # Block
+        # Block. Log the HMAC of the email rather than the plaintext —
+        # mirrors the audit-log pattern used elsewhere in the auth flow
+        # (see RoleManager._sync_existing_user) so production logs don't
+        # carry stranded PII.
+        from utils.hashing import hmac_sha256_hex
+
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-        logger.warning("registration_blocked: %s", email)
+        logger.warning(
+            "registration_blocked",
+            email_hmac=hmac_sha256_hex(email, settings.audit_hmac_key),
+        )
         return RedirectResponse(
             f"{frontend_url}/login?error=registration_disabled",
             status_code=303,
