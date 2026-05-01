@@ -184,6 +184,9 @@ class SleepReporter:
             workspace_id=UUID(workspace_id) if workspace_id else None,
             context_id=UUID(context_id) if context_id else None,
             status="running",
+            # #523: broadlistening (#495) overrides these at its own call site.
+            source="sleep",
+            paid_by="platform",
         )
         self.db.add(report)
         await self.db.flush()

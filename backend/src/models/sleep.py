@@ -17,10 +17,23 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 
 from db.base import Base
+
+# Allowed values for the sleep_reports cost-grade dimensions (#523).
+# Mirror the ``LLM_PRICING_UNIT_TYPES`` pattern: the DB CHECK constraint is
+# the source of truth, these tuples exist for service-layer validation and
+# are imported by future call sites (#495 broadlistening pipeline) to
+# validate inputs cleanly with ValueError rather than IntegrityError.
+# Keep in sync with the ``valid_sleep_report_source`` /
+# ``valid_sleep_report_paid_by`` CHECK strings in ``SleepReport.__table_args__``
+# and the matching ``ALTER TABLE ... ADD CONSTRAINT ... NOT VALID`` strings in
+# the migration (raw ``op.execute(sa.text(...))`` form, see d05_523).
+SLEEP_REPORT_SOURCES: tuple[str, ...] = ("sleep", "analysis")
+SLEEP_REPORT_PAID_BY_VALUES: tuple[str, ...] = ("platform", "byok")
 
 
 class SleepReport(Base):
@@ -100,6 +113,23 @@ class SleepReport(Base):
     embedding_model = Column(String(100), nullable=True)
     embedding_tokens = Column(Integer, nullable=False, default=0)
 
+    # Cost-grade dimensions (#523). Both columns carry a Python-side
+    # ``default`` (in-memory ORM objects readable after flush without
+    # refresh) AND a ``server_default`` (raw INSERT paths that bypass the
+    # ORM still satisfy NOT NULL). #472 aggregates by these axes.
+    source = Column(
+        String(20),
+        nullable=False,
+        default="sleep",
+        server_default=text("'sleep'"),
+    )
+    paid_by = Column(
+        String(20),
+        nullable=False,
+        default="platform",
+        server_default=text("'platform'"),
+    )
+
     # Activity counters
     memories_processed = Column(Integer, nullable=False, default=0)
     edges_created = Column(Integer, nullable=False, default=0)
@@ -115,8 +145,26 @@ class SleepReport(Base):
             "status IN ('running', 'completed', 'failed', 'cancelled', 'rolled_back')",
             name="valid_sleep_report_status",
         ),
+        # #523 cost-grade dimensions
+        CheckConstraint(
+            "source IN ('sleep', 'analysis')",
+            name="valid_sleep_report_source",
+        ),
+        CheckConstraint(
+            "paid_by IN ('platform', 'byok')",
+            name="valid_sleep_report_paid_by",
+        ),
         Index("idx_sleep_reports_user_status", "user_id", "status"),
         Index("idx_sleep_reports_started_at", "started_at"),
+        # #523 supports #472 aggregation queries that filter by workspace+source
+        # and order newest-first. ``text("started_at DESC")`` mirrors the
+        # migration so alembic autogenerate sees identical AST nodes.
+        Index(
+            "idx_sleep_reports_workspace_source_started",
+            "workspace_id",
+            "source",
+            text("started_at DESC"),
+        ),
     )
 
     def __repr__(self) -> str:
