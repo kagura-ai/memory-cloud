@@ -2268,9 +2268,11 @@
         "title": "この期間にコストデータがありません。",
         "description": "日付範囲を広げるか、Sleep Maintenance が cost-grade な行を生成しているか確認してください。"
       },
+      "rangeErrorPlaceholder": "上の日付範囲を修正するとチャートとテーブルが読み込まれます。",
       "errors": {
         "forbidden": "コスト集計の閲覧には admin 権限が必要です。",
-        "forbiddenWorkspace": "コスト集計の閲覧には workspace の owner または admin 権限が必要です。"
+        "forbiddenWorkspace": "コスト集計の閲覧には workspace の owner または admin 権限が必要です。",
+        "unknown": "コスト集計の読み込み中に不明なエラーが発生しました。"
       }
     },
     "sleepReports": {

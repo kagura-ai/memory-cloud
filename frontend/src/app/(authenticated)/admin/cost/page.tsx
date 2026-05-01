@@ -17,6 +17,7 @@ import { useTranslations } from "next-intl";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
+import { LoadingState } from "@/components/common/LoadingState";
 import { CostDashboard } from "@/components/cost/CostDashboard";
 import { useAuth } from "@/contexts/AuthContext";
 import { isAdmin } from "@/lib/auth/rbac";
@@ -24,7 +25,19 @@ import { fetchAdminCostAggregation } from "@/lib/api";
 
 export default function AdminCostPage() {
   const t = useTranslations("admin.cost");
-  const { user } = useAuth();
+  const { user, isLoading: authLoading } = useAuth();
+
+  // Render a loading skeleton until AuthProvider resolves. Without
+  // this, real admins see a brief "Admin role required" flash on every
+  // first paint because user is null until getCurrentUser() returns.
+  if (authLoading) {
+    return (
+      <PageContainer>
+        <PageHeader title={t("title")} />
+        <LoadingState lines={6} />
+      </PageContainer>
+    );
+  }
 
   if (!isAdmin(user)) {
     return (

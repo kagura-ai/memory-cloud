@@ -2268,9 +2268,11 @@
         "title": "No cost data in this period.",
         "description": "Try widening the date range or check that Sleep Maintenance has produced cost-grade rows."
       },
+      "rangeErrorPlaceholder": "Adjust the date range above to load chart and table data.",
       "errors": {
         "forbidden": "Admin role required to view cost aggregation.",
-        "forbiddenWorkspace": "Workspace owner or admin role required to view cost aggregation."
+        "forbiddenWorkspace": "Workspace owner or admin role required to view cost aggregation.",
+        "unknown": "Unknown error while loading cost aggregation."
       }
     },
     "sleepReports": {

@@ -34,7 +34,11 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
-import { LoadingState, InlineSpinner } from "@/components/common/LoadingState";
+import {
+  LoadingState,
+  TableLoadingState,
+  InlineSpinner,
+} from "@/components/common/LoadingState";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -227,13 +231,13 @@ export function CostDashboard({
       setError(
         err instanceof Error
           ? err
-          : new Error(typeof err === "string" ? err : "Unknown error"),
+          : new Error(typeof err === "string" ? err : t("errors.unknown")),
       );
       setRows([]);
     } finally {
       setLoading(false);
     }
-  }, [from, to, period, ready, rangeError, fetchData]);
+  }, [from, to, period, ready, rangeError, fetchData, t]);
 
   useEffect(() => {
     loadCost();
@@ -308,7 +312,16 @@ export function CostDashboard({
       </Section>
 
       <Section title={t("chart.title")}>
-        {loading ? (
+        {/* Range-error placeholder check ordered first so the section
+            doesn't fall through to "No cost data" while the user is
+            mid-correction — the rangeError banner in the filter
+            section already explains WHAT is wrong; here we just hint
+            that the chart will populate once they fix it. */}
+        {rangeError !== null ? (
+          <p className="text-sm text-gray-500 dark:text-gray-400 p-6">
+            {t("rangeErrorPlaceholder")}
+          </p>
+        ) : loading ? (
           <div className="p-6">
             <LoadingState lines={6} />
           </div>
@@ -373,9 +386,13 @@ export function CostDashboard({
       </Section>
 
       <Section title={t("table.title")}>
-        {loading ? (
+        {rangeError !== null ? (
+          <p className="text-sm text-gray-500 dark:text-gray-400 p-6">
+            {t("rangeErrorPlaceholder")}
+          </p>
+        ) : loading ? (
           <div className="p-6">
-            <LoadingState lines={6} />
+            <TableLoadingState rows={6} />
           </div>
         ) : error ? (
           // Render the same error in both sections so the table never
