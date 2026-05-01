@@ -329,6 +329,14 @@ class CostAggregationService:
             FROM sleep_reports sr
             {_EMBEDDING_PRICING_LATERAL}
             WHERE {base_where}
+              -- Filter to rows with actual embedding usage so a "completed
+              -- run with no LLM child rows AND no embedding tokens" does
+              -- not surface as an all-zero aggregation row. This also
+              -- excludes status='running'/'failed' reports that have not
+              -- yet recorded embedding usage. Reports that legitimately
+              -- have embedding_tokens > 0 still appear, regardless of
+              -- their status (running embedding writes are observable).
+              AND sr.embedding_tokens > 0
             GROUP BY 1, 2, 3, 4, 5
         )
         SELECT
@@ -405,7 +413,25 @@ def _assemble_rows(raw_rows: Sequence[RowMapping]) -> list[CostAggregationRow]:
             aggregates[key] = agg
 
         kind = r["kind"]
-        paid_by_col = "platform" if r["paid_by"] == "platform" else "byok"
+        # Defensive validation: even with the DB CHECK constraint and the
+        # service-level allowlist guard, an unexpected paid_by value
+        # reaching this point indicates a bug (legacy NULL row, schema
+        # drift, future enum expansion not handled here). Fail loud
+        # rather than silently miscategorising billing totals.
+        paid_by_value = r["paid_by"]
+        if paid_by_value not in SLEEP_REPORT_PAID_BY_VALUES:
+            logger.error(
+                "cost_aggregation_unexpected_paid_by",
+                paid_by=paid_by_value,
+                period_start=r["period_start"].isoformat()
+                if r["period_start"] is not None
+                else None,
+                workspace_id=str(r["workspace_id"]) if r["workspace_id"] else None,
+                user_id=r["user_id"],
+                kind=kind,
+            )
+            raise ValueError(f"Unexpected paid_by value in raw row: {paid_by_value!r}")
+        paid_by_col = paid_by_value
         cost_field = "cost_usd" if paid_by_col == "platform" else "cost_usd_byok"
 
         if kind == "llm":
@@ -461,4 +487,20 @@ def _assemble_rows(raw_rows: Sequence[RowMapping]) -> list[CostAggregationRow]:
             for source, b in sorted(by_source_acc[key].items())
         ]
 
-    return list(aggregates.values())
+    # Explicit sort by (period_start, workspace_id, user_id) — the
+    # docstring promises this ordering. Dict insertion order would
+    # preserve the SQL ORDER BY in CPython 3.7+, but relying on that is
+    # brittle: a future query rewrite could drop the ORDER BY (it has
+    # no effect on the SQL semantics, only on the assembly side) and
+    # silently break the response contract. ``workspace_id is None``
+    # is the primary key for None-vs-UUID ordering so admin queries
+    # with NULL workspace rows (legacy data) sort deterministically.
+    return sorted(
+        aggregates.values(),
+        key=lambda row: (
+            row.period_start,
+            row.workspace_id is None,
+            str(row.workspace_id) if row.workspace_id is not None else "",
+            row.user_id,
+        ),
+    )

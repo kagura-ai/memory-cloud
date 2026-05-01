@@ -2,12 +2,13 @@
 
 Covers:
 
-- Admin route: admin sees all (200), non-admin gets 403, anonymous 401
-- Workspace route: workspace owner/admin sees their workspace, non-owner
-  gets 403, anonymous 401, cross-workspace probe gets 403
-- Query parsing: invalid period / source / paid_by → 400; missing
-  required from/to → 422
-- Response shape: rows, breakdowns, datetime serialization (Z suffix)
+- Admin route: admin sees all (200), non-admin gets 403, anonymous gets 401
+- Workspace route: owner/admin sees their workspace, non-owner gets 403,
+  anonymous gets 401, cross-workspace probe gets 403, query-string
+  ``workspace_id`` cannot override the path-bound value
+- Query parsing on BOTH routes: invalid ``period`` / ``source`` / ``paid_by``
+  return 400; missing required ``from`` / ``to`` return 422
+- Response shape: rows, breakdowns, JSON wire format
 
 The SQL pipeline is exercised end-to-end in
 ``tests/integration/test_cost_aggregation_service.py``; here we mock the
@@ -356,3 +357,51 @@ class TestWorkspaceRoute:
             "?period=hour&from=2026-04-01&to=2026-04-07"
         )
         assert response.status_code == 400
+
+    def test_invalid_source_returns_400(self, client):
+        _install_workspace_overrides(client, [], user=_regular_user())
+        response = client.get(
+            f"/api/v1/workspaces/{_WORKSPACE_ID}/cost-aggregation"
+            "?period=day&from=2026-04-01&to=2026-04-07&source=manual"
+        )
+        assert response.status_code == 400
+        assert "Invalid source" in response.json()["detail"]
+
+    def test_invalid_paid_by_returns_400(self, client):
+        _install_workspace_overrides(client, [], user=_regular_user())
+        response = client.get(
+            f"/api/v1/workspaces/{_WORKSPACE_ID}/cost-aggregation"
+            "?period=day&from=2026-04-01&to=2026-04-07&paid_by=user"
+        )
+        assert response.status_code == 400
+        assert "Invalid paid_by" in response.json()["detail"]
+
+
+# ============================================================================
+# Anonymous-access regression — both routes
+# ============================================================================
+
+
+class TestAnonymousAccess:
+    """Verify both routes reject unauthenticated callers (covers the auth gate
+    BEFORE any service or query-parsing logic runs).
+
+    These tests do NOT install dependency overrides for ``get_current_user``
+    or ``require_admin`` — the FastAPI dependency raises 401 the same way it
+    would for a real anonymous request (no session cookie, no API key).
+    """
+
+    def test_admin_route_rejects_anonymous(self, client):
+        # No auth dep override → get_current_user / require_admin raises
+        # the standard 401 from the auth middleware path.
+        response = client.get(
+            "/api/v1/admin/cost-aggregation?period=day&from=2026-04-01&to=2026-04-07"
+        )
+        assert response.status_code == 401
+
+    def test_workspace_route_rejects_anonymous(self, client):
+        response = client.get(
+            f"/api/v1/workspaces/{_WORKSPACE_ID}/cost-aggregation"
+            "?period=day&from=2026-04-01&to=2026-04-07"
+        )
+        assert response.status_code == 401

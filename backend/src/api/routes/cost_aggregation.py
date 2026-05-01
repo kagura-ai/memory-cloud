@@ -39,12 +39,11 @@ from services.cost_aggregation_service import (
     CostAggregationService,
 )
 from services.permission_service import PermissionService
-from utils.logger import get_logger
-
-logger = get_logger(__name__)
 
 # No router-level tags so each route picks its own group ("admin" vs
 # "workspaces") in the OpenAPI docs without duplicating "cost-aggregation".
+# Logging happens inside CostAggregationService, not here — the route
+# layer just shapes inputs/outputs.
 router = APIRouter()
 
 
