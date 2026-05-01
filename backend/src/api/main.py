@@ -353,6 +353,7 @@ from api.routes import (  # noqa: E402
     config,
     context_search_config,
     contexts,
+    cost_aggregation,  # Issue #472: cost aggregation API (admin + workspace-scoped)
     external_keys,
     graph,
     invitations,
@@ -427,6 +428,9 @@ app.include_router(neural_config.router, prefix="/api/v1")
 
 # Sleep Reports admin routes (Issue #179 - Sleep Report admin UI)
 app.include_router(sleep_reports.router, prefix="/api/v1")
+
+# Cost Aggregation routes (Issue #472 - admin cross-workspace + workspace-scoped)
+app.include_router(cost_aggregation.router, prefix="/api/v1")
 
 # Admin Sleep trigger (Issue #247 - Manual Sleep Maintenance trigger)
 app.include_router(admin_sleep.router, prefix="/api/v1")
