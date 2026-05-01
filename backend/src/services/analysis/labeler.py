@@ -13,14 +13,29 @@ in the cluster (it shouldn't return any ids in the response, but
 this defense holds even if the prompt template later evolves to
 ask for citations).
 
-LLM budget consume happens **before** the call (sleep precedent
-``edge_discovery.py:786``): failed attempts still count, otherwise
-a flapping provider can blow past ``max_llm_calls = ceil(sqrt(n))+1``.
+**LLM call cap (no explicit budget object in v1)**: total LLM calls
+per run are bounded structurally by `n_clusters = ceil(sqrt(n))`
+(one labeling call per cluster) plus the fallback chain length (1-2
+attempts per cluster — primary `gpt-5-nano`, fallback `gpt-5.5`).
+Worst-case ~`2 * n_clusters` calls. Unlike sleep's `SleepBudget` which
+pre-consumes calls before each LLM op so failed attempts still count,
+the analysis labeler relies on the structural cap and the
+`Semaphore(8)` concurrency cap. A real budget object (mirror
+``services/sleep/reporter.SleepBudget``) is tracked as a v1.5
+follow-up — relevant when v1.5 adds Gemini's batch-with-quota
+characteristics where attempt counting matters more.
 
 The labeler uses the existing ``LLMService`` from
 ``services/llm_service`` (which carries BYOK key resolution). The
 fallback chain stays within OpenAI; v1.5 will lift this to a
 provider-keyed mapping.
+
+**Per-task AsyncSession**: each ``_label_one_cluster`` task opens
+its own session via ``_get_session_factory()``. SQLAlchemy 2.x
+``AsyncSession`` does not allow concurrent operations on a single
+session, and ``LLMService.complete_json`` performs a DB lookup
+(``_get_user_api_key`` resolving the BYOK key) inside its coroutine
+frame.
 """
 
 from __future__ import annotations

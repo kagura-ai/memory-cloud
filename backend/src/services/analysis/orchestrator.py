@@ -103,10 +103,21 @@ class AnalysisParams:
 _DEFAULT_PROVIDER = "openai"
 _DEFAULT_MODEL = "gpt-5-nano"
 
-# Status values pulled from the model-side tuple so a re-ordering of
-# the tuple doesn't silently change call-site semantics.
-_STATUS_RUNNING = MEMORY_ANALYSIS_STATUSES[0]  # "running"
-_PAID_BY_BYOK = MEMORY_ANALYSIS_PAID_BY_VALUES[0]  # "byok"
+# Status / dimension constants. Use explicit string literals (NOT
+# tuple indices) so a future tuple reordering does not silently flip
+# the values. The asserts pin the contract that these literals must
+# remain members of the canonical tuples — if someone removes
+# "running" from MEMORY_ANALYSIS_STATUSES the import-time assertion
+# fires loud at startup rather than at the first INSERT.
+_STATUS_RUNNING = "running"
+_PAID_BY_BYOK = "byok"
+assert _STATUS_RUNNING in MEMORY_ANALYSIS_STATUSES, (
+    f"_STATUS_RUNNING out of sync with MEMORY_ANALYSIS_STATUSES: {MEMORY_ANALYSIS_STATUSES}"
+)
+assert _PAID_BY_BYOK in MEMORY_ANALYSIS_PAID_BY_VALUES, (
+    f"_PAID_BY_BYOK out of sync with MEMORY_ANALYSIS_PAID_BY_VALUES: "
+    f"{MEMORY_ANALYSIS_PAID_BY_VALUES}"
+)
 
 
 async def _resolve_pricing_row(db: AsyncSession, model_id: int | None) -> tuple[LLMPricing, dict]:
@@ -287,6 +298,10 @@ class AnalysisOrchestrator:
 
         try:
             # Stage [C] — pull memories + their existing Qdrant vectors.
+            # This is the LAST DB-using step before compute. After it
+            # we commit the read-side state and release the connection
+            # back to the pool — KMeans / UMAP / labeler work without
+            # holding an orchestrator-level DB connection.
             pull = await pull_memories_with_vectors(
                 self.db,
                 workspace_id=analysis.workspace_id,
@@ -308,6 +323,14 @@ class AnalysisOrchestrator:
                 model_id=str(snapshot_dict.get("model", "gpt-5-nano")),
             )
             analysis.cost_estimated_cents = estimate.estimated_cost_cents
+
+            # Commit the read + vector_pull state, releasing the
+            # orchestrator's connection. Compute stages below run with
+            # NO open transaction; ``persist_results`` autobegins a
+            # fresh transaction on its first SQL op. Without this commit
+            # the connection would stay checked out for the whole
+            # ~2-20s compute window. (Per Copilot review on PR #530.)
+            await self.db.commit()
 
             # Stages [D] and [E] are CPU-bound (sklearn KMeans + UMAP).
             # Run them concurrently in worker threads so the asyncio
@@ -349,13 +372,17 @@ class AnalysisOrchestrator:
                 window_from=from_dt,
                 window_to=to_dt,
             )
-            # SQLAlchemy 2.x ``AsyncSession`` autobegins a transaction on
-            # the first ``execute()`` / ``get()`` call (see ``self.db.get``
-            # at the top of this method). Calling ``async with
-            # self.db.begin()`` here would raise InvalidRequestError
-            # because a transaction is already active. Use explicit
-            # commit/rollback so the all-or-nothing boundary is correct
-            # against the autobegin transaction.
+            # The previous ``await self.db.commit()`` after vector_pull
+            # released the connection. ``persist_results`` autobegins a
+            # FRESH transaction on its first SQL op (it adds rows and
+            # flushes), wrapping the cluster + assignment + sleep_reports
+            # writes in a single all-or-nothing tx. The caller of run()
+            # owns the session lifecycle (closes it on task exit).
+            #
+            # The ``analysis`` ORM instance was loaded BEFORE the
+            # earlier commit; SQLAlchemy with ``expire_on_commit=False``
+            # keeps the in-memory state intact and the next op
+            # re-attaches it to the new transaction.
             try:
                 await persist_results(
                     self.db,

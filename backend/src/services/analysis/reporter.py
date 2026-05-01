@@ -63,16 +63,21 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-# Status / dimension constants pulled from the model-side tuples so
-# the values cannot drift from the DB CHECK constraints. Index lookups
-# rather than literals so a future re-ordering of the tuple still
-# resolves to the right value (status_succeeded != status_running).
-_STATUS_SUCCEEDED = MEMORY_ANALYSIS_STATUSES[1]  # "succeeded"
-_STATUS_FAILED = MEMORY_ANALYSIS_STATUSES[2]  # "failed"
-
-# sleep_reports cost row: source='analysis', paid_by='byok' for B2.
-_SOURCE_ANALYSIS = SLEEP_REPORT_SOURCES[1]  # "analysis"
-_SLEEP_PAID_BY_BYOK = SLEEP_REPORT_PAID_BY_VALUES[1]  # "byok"
+# Status / dimension constants. Use explicit string literals (NOT
+# tuple indices) so a future tuple reordering does not silently flip
+# the values. The asserts at module-load pin the contract that these
+# literals must remain members of the canonical tuples; if a tuple
+# value is removed, the assertion fires loud at startup rather than
+# at the first INSERT (where it would surface as IntegrityError from
+# the DB CHECK constraint).
+_STATUS_SUCCEEDED = "succeeded"
+_STATUS_FAILED = "failed"
+_SOURCE_ANALYSIS = "analysis"
+_SLEEP_PAID_BY_BYOK = "byok"
+assert _STATUS_SUCCEEDED in MEMORY_ANALYSIS_STATUSES
+assert _STATUS_FAILED in MEMORY_ANALYSIS_STATUSES
+assert _SOURCE_ANALYSIS in SLEEP_REPORT_SOURCES
+assert _SLEEP_PAID_BY_BYOK in SLEEP_REPORT_PAID_BY_VALUES
 
 # sleep_report_llm_usage.phase value for analysis runs. The DB CHECK
 # constraint added by the d07_495 migration must list this exact

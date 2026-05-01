@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 import numpy as np
@@ -63,6 +64,13 @@ logger = get_logger(__name__)
 # round trips. 1000 is a good middle ground for the 8000-memory
 # canonical run (8 round trips).
 _QDRANT_SCROLL_BATCH = 1000
+
+# Bound on concurrent Qdrant retrieve() calls. Without this, an
+# n=50000 run would fan out 50 simultaneous requests and overload
+# Qdrant's connection limits / hit client timeouts. 4 keeps the
+# parallelism gain (8 batches at n=8000 → 2 round-trip waves)
+# without risking pool exhaustion on larger runs.
+_QDRANT_RETRIEVE_CONCURRENCY = 4
 
 
 class EmbeddingMismatchError(ValidationError):
@@ -184,37 +192,55 @@ async def pull_memories_with_vectors(
         # row's tag array. Postgres array overlap operator (&&).
         conditions.append(Memory.tags.op("&&")(tags))
 
-    stmt = select(Memory).where(and_(*conditions)).order_by(Memory.created_at)
-    memories: list[Memory] = list((await db.execute(stmt)).scalars().all())
+    # Select only the columns the pipeline needs. Loading full ORM
+    # rows would pull large Layer-3 fields (Memory.content / .details)
+    # for every row — at n=8000 that's tens of MB transferred from
+    # Postgres for nothing, since the pipeline only needs metadata
+    # plus the Qdrant vector fetched separately below.
+    stmt = (
+        select(
+            Memory.id,
+            Memory.type,
+            Memory.summary,
+            Memory.tags,
+            Memory.importance,
+            Memory.created_at,
+        )
+        .where(and_(*conditions))
+        .order_by(Memory.created_at)
+    )
+    memory_rows = list((await db.execute(stmt)).all())
 
-    if not memories:
+    if not memory_rows:
         raise ValueError(
             "No memories matched the analysis filters; refusing to start an "
             "empty run. The API layer should pre-flight this and surface 422."
         )
 
-    # 3. Pull vectors from Qdrant in parallel batches. ``retrieve``
-    #    (point-id lookup) is preferred over ``scroll`` because we
-    #    already know the exact IDs. Independent batches are gathered
-    #    concurrently — at n=8000 this is 8 round-trips that previously
-    #    serialized into ~400-800ms of network latency.
+    # 3. Pull vectors from Qdrant in semaphore-bounded parallel batches.
+    #    ``retrieve`` (point-id lookup) is preferred over ``scroll`` because
+    #    we already know the exact IDs. ``_QDRANT_RETRIEVE_CONCURRENCY``
+    #    bounds the fan-out — at n=50000 (50 batches) we'd otherwise
+    #    issue 50 simultaneous Qdrant requests and risk overloading
+    #    the client / server.
     client = get_qdrant_client()
-    memory_ids_str = [str(m.id) for m in memories]
+    memory_ids_str = [str(row.id) for row in memory_rows]
     batches = [
         memory_ids_str[i : i + _QDRANT_SCROLL_BATCH]
         for i in range(0, len(memory_ids_str), _QDRANT_SCROLL_BATCH)
     ]
-    batch_results = await asyncio.gather(
-        *(
-            client.retrieve(
+    sem = asyncio.Semaphore(_QDRANT_RETRIEVE_CONCURRENCY)
+
+    async def _retrieve_batch(batch_ids: list[str]) -> list[Any]:
+        async with sem:
+            return await client.retrieve(
                 collection_name=collection_name,
                 ids=batch_ids,
                 with_vectors=[KAGURA_MEMORIES_VECTOR_NAME],
                 with_payload=["embedding_model"],
             )
-            for batch_ids in batches
-        )
-    )
+
+    batch_results = await asyncio.gather(*(_retrieve_batch(b) for b in batches))
 
     vector_by_id: dict[str, np.ndarray] = {}
     seen_models: set[str] = set()
@@ -237,19 +263,19 @@ async def pull_memories_with_vectors(
     aligned_memories: list[MemoryRecord] = []
     aligned_vectors: list[np.ndarray] = []
     missing = 0
-    for m in memories:
-        v = vector_by_id.get(str(m.id))
+    for row in memory_rows:
+        v = vector_by_id.get(str(row.id))
         if v is None:
             missing += 1
             continue
         aligned_memories.append(
             MemoryRecord(
-                id=m.id,
-                type=m.type,
-                summary=m.summary or "",
-                tags=list(m.tags or []),
-                importance=float(m.importance or 0.0),
-                created_at=m.created_at,
+                id=row.id,
+                type=row.type,
+                summary=row.summary or "",
+                tags=list(row.tags or []),
+                importance=float(row.importance or 0.0),
+                created_at=row.created_at,
             )
         )
         aligned_vectors.append(v)
@@ -258,7 +284,7 @@ async def pull_memories_with_vectors(
         logger.warning(
             "analysis_vector_pull_missing_vectors",
             missing=missing,
-            total=len(memories),
+            total=len(memory_rows),
             collection=collection_name,
         )
 

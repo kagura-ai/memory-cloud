@@ -13,13 +13,17 @@ This migration extends the CHECK to also accept ``'cluster_labeling'``
 (the analysis labeler stage). It is a metadata-only catalog change on
 PostgreSQL >= 11; no table rewrite occurs even on a populated table.
 
-The drop-and-recreate is performed inside a single ALTER TABLE so it
-runs as one atomic catalog operation. We use the zero-downtime
-``NOT VALID`` then ``VALIDATE CONSTRAINT`` pair (matches ``d05_523``
-precedent) so the validation scan runs under SHARE UPDATE EXCLUSIVE
-rather than ACCESS EXCLUSIVE — production reads/writes continue
-during the migration. Existing rows already satisfy the new (broader)
-CHECK by definition, so VALIDATE is effectively a no-op scan.
+The drop-and-recreate uses a single ``ALTER TABLE ... DROP
+CONSTRAINT ..., ADD CONSTRAINT ... NOT VALID`` statement so the
+catalog mutation is atomic — there is no window where the table has
+no phase CHECK. The follow-up ``VALIDATE CONSTRAINT`` is necessarily
+a separate statement (Postgres does not allow combining VALIDATE
+with other actions in the same ALTER TABLE), but it runs under
+SHARE UPDATE EXCLUSIVE rather than ACCESS EXCLUSIVE so production
+reads/writes continue during the validation scan. Existing rows
+already satisfy the new (broader) CHECK by definition, so VALIDATE
+is effectively a no-op scan. Mirrors the zero-downtime ``NOT VALID``
++ ``VALIDATE CONSTRAINT`` pattern from ``d05_523``.
 
 Revision ID: d07_495_cluster_label_phase
 Revises: d06_494_memory_analyses
@@ -52,16 +56,16 @@ _NEW_CHECK = (
 
 
 def upgrade() -> None:
-    """Drop the old CHECK and add the broader one as NOT VALID + VALIDATE."""
+    """Drop the old CHECK and add the broader one as NOT VALID + VALIDATE.
+
+    DROP + ADD are combined in one ALTER TABLE so the catalog mutation
+    is atomic (no window where the table has no phase CHECK). VALIDATE
+    must be a separate statement per Postgres semantics.
+    """
     op.execute(
         sa.text(
             "ALTER TABLE sleep_report_llm_usage "
-            "DROP CONSTRAINT IF EXISTS valid_sleep_report_llm_usage_phase"
-        )
-    )
-    op.execute(
-        sa.text(
-            "ALTER TABLE sleep_report_llm_usage "
+            "DROP CONSTRAINT IF EXISTS valid_sleep_report_llm_usage_phase, "
             "ADD CONSTRAINT valid_sleep_report_llm_usage_phase "
             f"CHECK ({_NEW_CHECK}) NOT VALID"
         )
@@ -75,16 +79,15 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Restore the original CHECK (rejects 'cluster_labeling')."""
+    """Restore the original CHECK (rejects 'cluster_labeling').
+
+    Symmetric to ``upgrade``: DROP + ADD are atomic, VALIDATE is
+    separate.
+    """
     op.execute(
         sa.text(
             "ALTER TABLE sleep_report_llm_usage "
-            "DROP CONSTRAINT IF EXISTS valid_sleep_report_llm_usage_phase"
-        )
-    )
-    op.execute(
-        sa.text(
-            "ALTER TABLE sleep_report_llm_usage "
+            "DROP CONSTRAINT IF EXISTS valid_sleep_report_llm_usage_phase, "
             "ADD CONSTRAINT valid_sleep_report_llm_usage_phase "
             f"CHECK ({_OLD_CHECK}) NOT VALID"
         )
