@@ -177,16 +177,27 @@ class SleepReporter:
         user_id: str,
         workspace_id: str | None = None,
         context_id: str | None = None,
+        *,
+        source: str = "sleep",
+        paid_by: str = "platform",
     ) -> SleepReport:
-        """Create a new sleep report with status='running'."""
+        """Create a new sleep report with status='running'.
+
+        The ``source`` and ``paid_by`` keyword arguments default to the
+        scheduler-driven sleep run shape so existing callers receive the
+        same behavior. Issue #495 broadlistening overrides them at its
+        own call site with ``source='analysis'`` / ``paid_by='byok'`` —
+        the values must come from ``SLEEP_REPORT_SOURCES`` /
+        ``SLEEP_REPORT_PAID_BY_VALUES`` in ``models/sleep.py`` so the
+        DB CHECK constraint added by #523 holds.
+        """
         report = SleepReport(
             user_id=user_id,
             workspace_id=UUID(workspace_id) if workspace_id else None,
             context_id=UUID(context_id) if context_id else None,
             status="running",
-            # #523: broadlistening (#495) overrides these at its own call site.
-            source="sleep",
-            paid_by="platform",
+            source=source,
+            paid_by=paid_by,
         )
         self.db.add(report)
         await self.db.flush()

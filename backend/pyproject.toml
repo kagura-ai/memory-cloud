@@ -82,6 +82,15 @@ dependencies = [
 
     # Environment
     "python-dotenv>=1.0.0",
+
+    # Memory Broadlistening (#495 / umbrella #493)
+    # KMeans + silhouette_score for cluster_index assignments and quality
+    # metrics (Stage [D]). scipy is pulled transitively by sklearn.
+    "scikit-learn>=1.4.0",
+    # UMAP 2D projection for cluster scatter visualization (Stage [E]).
+    # Pinned to 0.5.x so the numba JIT path is the version we test against.
+    # Lazy-imported in services/analysis/projector.py — heavy import time.
+    "umap-learn>=0.5,<0.6",
 ]
 
 [project.optional-dependencies]
