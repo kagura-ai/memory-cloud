@@ -2268,7 +2268,8 @@
         "description": "Try widening the date range or check that Sleep Maintenance has produced cost-grade rows."
       },
       "errors": {
-        "forbidden": "Admin role required to view cost aggregation."
+        "forbidden": "Admin role required to view cost aggregation.",
+        "forbiddenWorkspace": "Workspace owner or admin role required to view cost aggregation."
       }
     },
     "sleepReports": {

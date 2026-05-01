@@ -6,9 +6,11 @@
  * - GET /api/v1/admin/cost-aggregation (admin cross-workspace)
  * - GET /api/v1/workspaces/{workspace_id}/cost-aggregation (owner/admin scoped)
  *
- * v1 frontend only consumes the admin endpoint (per #473 issue body —
- * "admin-only route guard"). The workspace-scoped endpoint stays for
- * the future workspace-owner dashboard or B2B billing UI.
+ * Both endpoints are now consumed:
+ * - ``fetchAdminCostAggregation`` powers ``/admin/cost`` (admin-only,
+ *   cross-workspace view).
+ * - ``fetchWorkspaceCostAggregation`` powers ``/workspace/cost``
+ *   (workspace owner/admin self-service, single workspace).
  */
 
 import { apiClient } from "./base";

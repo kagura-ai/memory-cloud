@@ -2268,7 +2268,8 @@
         "description": "日付範囲を広げるか、Sleep Maintenance が cost-grade な行を生成しているか確認してください。"
       },
       "errors": {
-        "forbidden": "コスト集計の閲覧には admin 権限が必要です。"
+        "forbidden": "コスト集計の閲覧には admin 権限が必要です。",
+        "forbiddenWorkspace": "コスト集計の閲覧には workspace の owner または admin 権限が必要です。"
       }
     },
     "sleepReports": {

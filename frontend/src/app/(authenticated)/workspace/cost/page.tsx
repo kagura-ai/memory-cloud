@@ -59,7 +59,7 @@ export default function WorkspaceCostPage() {
     return (
       <PageContainer>
         <PageHeader title={t("title")} />
-        <ErrorBanner error={t("errors.forbidden")} />
+        <ErrorBanner error={t("errors.forbiddenWorkspace")} />
       </PageContainer>
     );
   }

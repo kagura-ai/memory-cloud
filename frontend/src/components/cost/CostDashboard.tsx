@@ -176,10 +176,18 @@ export function CostDashboard({
   const rangeError = useMemo<string | null>(() => {
     if (!from || !to) return null;
     if (from > to) return t("validation.invertedRange");
-    const fromDate = new Date(`${from}T00:00:00`);
-    const toDate = new Date(`${to}T00:00:00`);
+    // Use UTC anchors for the day-window math. Local-tz construction
+    // (`new Date(\`${from}T00:00:00\`)`) drifts ±1 across DST transitions
+    // because a local "day" is 23/25 hours those days, which can flip
+    // a 365-day window to 364 or 366 and spuriously trigger / suppress
+    // the windowTooWide error at the boundary. Date.UTC always
+    // returns 86,400,000 ms per day.
+    const [fy, fm, fd] = from.split("-").map(Number);
+    const [ty, tm, td] = to.split("-").map(Number);
     const days =
-      Math.round((toDate.getTime() - fromDate.getTime()) / 86400000) + 1;
+      Math.round(
+        (Date.UTC(ty, tm - 1, td) - Date.UTC(fy, fm - 1, fd)) / 86400000,
+      ) + 1;
     if (days > MAX_LOOKBACK_DAYS) {
       return t("validation.windowTooWide", { max: MAX_LOOKBACK_DAYS });
     }
@@ -188,6 +196,11 @@ export function CostDashboard({
 
   const loadCost = useCallback(async () => {
     if (!ready) {
+      // Clear stale error from a prior fetch — otherwise a workspace
+      // switch (which transiently flips ready→false) would leave the
+      // previous workspace's error banner visible while the new
+      // workspace_id resolves.
+      setError(null);
       setLoading(false);
       return;
     }
@@ -195,8 +208,11 @@ export function CostDashboard({
     // fetch with an invalid range (inverted, > MAX_LOOKBACK_DAYS) just
     // wastes a round-trip and risks flashing a backend 400 error
     // banner over the more specific rangeError banner that's already
-    // showing in the filter section.
+    // showing in the filter section. Also clear any prior backend
+    // error so the user sees only the current rangeError, not stacked
+    // banners from a now-corrected previous range.
     if (rangeError !== null) {
+      setError(null);
       setLoading(false);
       return;
     }

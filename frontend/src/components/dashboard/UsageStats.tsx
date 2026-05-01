@@ -101,13 +101,21 @@ interface UsageBreakdown {
   period_days: number;
 }
 
-const COLORS = [
-  "#10b981",
-  "#3b82f6",
-  "#8b5cf6",
-  "#f59e0b",
-  "#ef4444",
-  "#06b6d4",
+// Tailwind background classes for the per-endpoint color chips next to
+// each list row. Index-based cycling keeps the row chips visually
+// distinct without inline `style={{ backgroundColor }}` (which would
+// violate the "no inline styles" rule in .claude/rules/frontend.md).
+// Tailwind's JIT only retains classes that appear as static strings
+// somewhere in the source — the literal strings here are what makes
+// that work; do not switch to dynamic concatenation like
+// `bg-${color}-500`.
+const SWATCH_BG_CLASSES = [
+  "bg-emerald-500",
+  "bg-blue-500",
+  "bg-violet-500",
+  "bg-amber-500",
+  "bg-red-500",
+  "bg-cyan-500",
 ];
 
 export interface UsageStatsRef {
@@ -465,10 +473,7 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
                   >
                     <div className="flex items-center gap-2">
                       <div
-                        className="w-3 h-3 rounded-full"
-                        style={{
-                          backgroundColor: COLORS[index % COLORS.length],
-                        }}
+                        className={`w-3 h-3 rounded-full ${SWATCH_BG_CLASSES[index % SWATCH_BG_CLASSES.length]}`}
                       />
                       <span className="text-sm font-medium">{ep.endpoint}</span>
                     </div>
