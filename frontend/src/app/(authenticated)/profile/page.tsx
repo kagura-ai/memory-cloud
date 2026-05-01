@@ -91,7 +91,8 @@ export default function ProfilePage() {
     if (refreshed !== "1" && !errorCode?.startsWith("refresh_")) return;
     refreshParamsHandled.current = true;
 
-    const provider = getRefreshProviderName(user) ?? "IdP";
+    const provider =
+      getRefreshProviderName(user) ?? t("signInProviderFallback");
     const cleanUrl = "/profile";
 
     if (refreshed === "1") {
@@ -154,12 +155,16 @@ export default function ProfilePage() {
     return false;
   });
 
-  // Profile form state
+  // Profile form state. ``email`` is intentionally derived directly from
+  // ``user?.email`` (no local state) so a successful refresh + refetchUser()
+  // updates the displayed value without an extra setEmail step. ``name``
+  // and ``timezone`` are local state because the form lets the operator
+  // edit them; we sync from ``user`` on change so an edit cancellation
+  // restores the latest server-side value.
   const [name, setName] = useState(user?.name || "");
-  const [email] = useState(user?.email || ""); // Email is read-only
+  const email = user?.email || "";
   const [timezone, setTimezone] = useState(user?.timezone || "UTC");
 
-  // Sync state with user data when it changes
   useEffect(() => {
     if (user) {
       setName(user.name || "");

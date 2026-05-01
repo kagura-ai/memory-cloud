@@ -796,6 +796,7 @@
     "signInMethodGitHub": "GitHub",
     "signInMethodPassword": "メール + パスワード",
     "signInMethodOther": "その他",
+    "signInProviderFallback": "認証プロバイダ",
     "refreshFromIdP": "{provider}からアイデンティティを再同期",
     "refreshFromIdPDesc": "{provider}から最新のメールアドレスと氏名を再取得します。プロバイダ側で変更した場合に便利です。",
     "refreshFromIdPButton": "{provider}から再同期",

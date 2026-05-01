@@ -796,6 +796,7 @@
     "signInMethodGitHub": "GitHub",
     "signInMethodPassword": "Email + Password",
     "signInMethodOther": "Other",
+    "signInProviderFallback": "Identity provider",
     "refreshFromIdP": "Refresh identity from {provider}",
     "refreshFromIdPDesc": "Pull your latest email and name from {provider}. Useful if you've changed them on the provider side.",
     "refreshFromIdPButton": "Refresh from {provider}",

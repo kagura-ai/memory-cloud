@@ -161,3 +161,42 @@ class TestMaybeRefreshRedirect:
         with patch.object(auth_module, "_session_manager", None):
             result = await _maybe_refresh_redirect(state="s1", idp_sub="u-1")
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_return_to_deleted_on_user_mismatch(self, monkeypatch):
+        """Delete-on-read contract: oauth2_return_to:{state} must be
+        cleared on the mismatch branch too, not just on happy path —
+        otherwise repeated mismatch errors leak stale keys until TTL."""
+        monkeypatch.setenv("FRONTEND_URL", "http://localhost:3000")
+        sm, redis = _mock_session_manager_with_redis(
+            {
+                "oauth2_state_intent:s1": "refresh",
+                "oauth2_state_user:s1": "u-orig",
+                "oauth2_return_to:s1": "/profile?refreshed=1",
+            }
+        )
+        with patch.object(auth_module, "_session_manager", sm):
+            await _maybe_refresh_redirect(state="s1", idp_sub="u-different")
+        deleted = {call.args[0] for call in redis.delete.call_args_list}
+        assert "oauth2_return_to:s1" in deleted, (
+            "return_to key must be cleared even when the user-mismatch "
+            "branch fires, to honour the delete-on-read contract"
+        )
+
+    @pytest.mark.asyncio
+    async def test_return_to_deleted_on_state_expired(self, monkeypatch):
+        """Same delete-on-read contract for the expired-state branch."""
+        monkeypatch.setenv("FRONTEND_URL", "http://localhost:3000")
+        sm, redis = _mock_session_manager_with_redis(
+            {
+                "oauth2_state_intent:s1": "refresh",
+                # No oauth2_state_user — expired branch.
+                "oauth2_return_to:s1": "/profile?refreshed=1",
+            }
+        )
+        with patch.object(auth_module, "_session_manager", sm):
+            await _maybe_refresh_redirect(state="s1", idp_sub="u-1")
+        deleted = {call.args[0] for call in redis.delete.call_args_list}
+        assert "oauth2_return_to:s1" in deleted, (
+            "return_to key must be cleared even when the state-expired branch fires"
+        )

@@ -231,11 +231,18 @@ async def _maybe_refresh_redirect(
     intent = redis.get(f"oauth2_state_intent:{state}")
     if intent != "refresh":
         return None
-    redis.delete(f"oauth2_state_intent:{state}")
 
+    # Once intent="refresh" is confirmed, ALL refresh-only keys must be
+    # deleted on every branch (delete-on-read contract). Reading them all
+    # up front + deleting unconditionally prevents stale keys from piling
+    # up under repeated mismatch / expired errors before TTL clears them.
+    redis.delete(f"oauth2_state_intent:{state}")
     expected_user_id = redis.get(f"oauth2_state_user:{state}")
     if expected_user_id:
         redis.delete(f"oauth2_state_user:{state}")
+    return_to_url = redis.get(f"oauth2_return_to:{state}")
+    if return_to_url:
+        redis.delete(f"oauth2_return_to:{state}")
 
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
@@ -262,11 +269,7 @@ async def _maybe_refresh_redirect(
             status_code=303,
         )
 
-    # Happy path: same user. Honour return_to (set by the initiating
-    # endpoint to /profile?refreshed=1 by default).
-    return_to_url = redis.get(f"oauth2_return_to:{state}")
-    if return_to_url:
-        redis.delete(f"oauth2_return_to:{state}")
+    # Happy path: same user. Honour return_to (already read above).
     redirect_url = return_to_url or f"{frontend_url}/profile?refreshed=1"
 
     logger.info(f"refresh_oauth_success: user_id={idp_sub}")
