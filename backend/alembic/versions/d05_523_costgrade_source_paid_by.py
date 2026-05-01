@@ -17,12 +17,17 @@ required. On PostgreSQL >= 11 (production runs ``postgres:15-alpine``)
 adding a ``NOT NULL`` column with a constant ``DEFAULT`` is a metadata-
 only catalog change; no table rewrite occurs even on a populated table.
 
-DB-level CHECK constraints (separate ``op.create_check_constraint``
-calls, matching the codebase's idiom for ``ADD COLUMN`` on existing
-tables) enforce the enum sets:
+DB-level CHECK constraints enforce the enum sets:
 
     source  IN ('sleep', 'analysis')
     paid_by IN ('platform', 'byok')
+
+The constraints are added via raw ``op.execute(sa.text(...))`` calls of
+``ALTER TABLE ... ADD CONSTRAINT ... NOT VALID`` followed by
+``ALTER TABLE ... VALIDATE CONSTRAINT ...`` — the zero-downtime two-step
+that mirrors the ``b03_396_neural_edges_ws_ctx_not_null`` precedent so
+the validation scan runs under SHARE UPDATE EXCLUSIVE rather than
+ACCESS EXCLUSIVE on populated tables.
 
 A composite index ``idx_sleep_reports_workspace_source_started`` on
 ``(workspace_id, source, started_at DESC)`` supports the #472 cost

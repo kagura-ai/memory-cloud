@@ -56,16 +56,18 @@ async def test_check_rejects_invalid_paid_by(db_session):
 
 
 @pytest.mark.asyncio
-async def test_orm_defaults_populate_in_memory_before_flush(db_session):
+async def test_orm_defaults_populate_after_flush_without_refresh(db_session):
     """A SleepReport built without source/paid_by persists with the Python defaults.
 
-    Verifies the Python-side ``default=`` fires at construction time so the
-    in-memory object is readable without a post-flush ``refresh()``.
+    Verifies the Python-side ``default=`` fires during ``flush()`` and the
+    resulting value is visible on the in-memory object without a separate
+    ``refresh()`` round-trip. (SQLAlchemy applies scalar ``default=`` at
+    INSERT time, not at ``__init__``; the guarantee here is "no refresh
+    needed", not "no flush needed".)
     """
     report = SleepReport(user_id="test-user", status="completed")
     db_session.add(report)
     await db_session.flush()
-    await db_session.refresh(report)
 
     assert report.source == "sleep"
     assert report.paid_by == "platform"

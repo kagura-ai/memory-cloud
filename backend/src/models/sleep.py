@@ -30,7 +30,8 @@ from db.base import Base
 # validate inputs cleanly with ValueError rather than IntegrityError.
 # Keep in sync with the ``valid_sleep_report_source`` /
 # ``valid_sleep_report_paid_by`` CHECK strings in ``SleepReport.__table_args__``
-# and the matching ``op.create_check_constraint`` strings in the migration.
+# and the matching ``ALTER TABLE ... ADD CONSTRAINT ... NOT VALID`` strings in
+# the migration (raw ``op.execute(sa.text(...))`` form, see d05_523).
 SLEEP_REPORT_SOURCES: tuple[str, ...] = ("sleep", "analysis")
 SLEEP_REPORT_PAID_BY_VALUES: tuple[str, ...] = ("platform", "byok")
 
