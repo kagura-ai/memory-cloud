@@ -55,6 +55,19 @@ export default function WorkspaceCostPage() {
     [currentWorkspaceId],
   );
 
+  // Distinguish "no workspace exists / selected" from "wrong role".
+  // Without this branch a brand-new account with zero workspaces would
+  // see a misleading "owner/admin role required" banner; the real
+  // issue is that there's no workspace to be the owner OF.
+  if (!loading && !currentWorkspaceId) {
+    return (
+      <PageContainer>
+        <PageHeader title={t("title")} />
+        <ErrorBanner error={t("errors.noWorkspaceSelected")} />
+      </PageContainer>
+    );
+  }
+
   if (!loading && !allowed) {
     return (
       <PageContainer>

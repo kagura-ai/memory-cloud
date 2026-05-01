@@ -174,9 +174,12 @@ export function CostDashboard({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
-  // Validate the date range client-side so an obvious mistake doesn't
-  // round-trip to the server. Server still validates as the source of
-  // truth (defense in depth — same pattern as the backend).
+  // Client-side range validation. The server validates `period` and
+  // `from <= to` (#472), but does NOT enforce a maximum window today —
+  // so MAX_LOOKBACK_DAYS is a UI-only soft cap to keep accidental huge
+  // queries from hitting the backend. A non-UI caller (curl / SDK)
+  // can still request arbitrarily large ranges. Backend enforcement
+  // is tracked as a follow-up to #472.
   const rangeError = useMemo<string | null>(() => {
     if (!from || !to) return null;
     if (from > to) return t("validation.invertedRange");

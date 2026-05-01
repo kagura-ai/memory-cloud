@@ -2272,6 +2272,7 @@
       "errors": {
         "forbidden": "コスト集計の閲覧には admin 権限が必要です。",
         "forbiddenWorkspace": "コスト集計の閲覧には workspace の owner または admin 権限が必要です。",
+        "noWorkspaceSelected": "workspace が選択されていません。workspace を作成または選択してからコスト集計を確認してください。",
         "unknown": "コスト集計の読み込み中に不明なエラーが発生しました。"
       }
     },
