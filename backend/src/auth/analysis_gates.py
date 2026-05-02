@@ -52,8 +52,13 @@ from fastapi import Depends, HTTPException
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# Re-exported from ``auth.analysis_allowlist`` so existing callers
+# (gate functions below + tests) keep working unchanged. The pure
+# helper lives in its own module to avoid pulling the rest of this
+# module's quota/tier/BYOK dependency tree into callers that only
+# need the membership check (PR #538 / #497 review).
+from auth.analysis_allowlist import check_workspace_in_allowlist  # noqa: F401
 from auth.dependencies import get_user_from_api_key_or_session
-from config.settings import get_settings
 from db.base import get_db
 from models.auth import User
 from services.analysis.query_service import day_window_utc
@@ -61,30 +66,6 @@ from utils.exceptions import ConfigurationError, FeatureNotAvailableError, Quota
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-
-# ============================================================================
-# Allowlist kill switch
-# ============================================================================
-
-
-def check_workspace_in_allowlist(workspace_id: UUID | str) -> bool:
-    """Return True iff the workspace is permitted to run analyses.
-
-    Empty ``ANALYSIS_ENABLED_WORKSPACE_IDS`` (default) → returns False
-    for every workspace, i.e. the feature is disabled platform-wide.
-    Populated → only listed workspace UUIDs return True.
-
-    Pure function (settings is a global singleton). Safe to call from
-    tests via ``monkeypatch.setenv`` without DB.
-    """
-    settings = get_settings()
-    allowed = settings.analysis_enabled_workspace_ids_list
-    if not allowed:
-        return False
-    # Both sides lower-cased so ops can paste env values in either case
-    # without a silent kill-switch lockout (see settings property comment).
-    return str(workspace_id).lower() in allowed
 
 
 # ============================================================================

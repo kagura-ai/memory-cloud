@@ -236,6 +236,168 @@ class TestGetRun:
 
 
 # ============================================================================
+# GET /{run_id}/clusters (#497 list_run_clusters)
+# ============================================================================
+
+
+class TestListRunClusters:
+    def test_returns_clusters_ordered_by_index(self, client, db_mock):
+        """Happy path: existing run, non-empty cluster list."""
+        run_id = uuid4()
+        db_mock.execute.side_effect = [_scalar_one(_TEST_CONTEXT_ID)]
+        fake_run = MagicMock(
+            id=run_id,
+            workspace_id=_TEST_WORKSPACE_ID,
+            context_id=_TEST_CONTEXT_ID,
+            status="succeeded",
+        )
+        fake_clusters = [
+            MagicMock(
+                cluster_index=0,
+                label="Cluster A",
+                description="first cluster",
+                count=42,
+                centroid_2d=[0.1, 0.2],
+                representative_memory_ids=[uuid4(), uuid4()],
+                property_stats={"top_tags": []},
+                label_confidence=0.91,
+            ),
+            MagicMock(
+                cluster_index=1,
+                label="Cluster B",
+                description=None,
+                count=15,
+                centroid_2d=[1.5, -0.4],
+                representative_memory_ids=[],
+                property_stats={},
+                label_confidence=0.78,
+            ),
+        ]
+        with (
+            patch(
+                "services.analysis.query_service.get_analysis",
+                AsyncMock(return_value=fake_run),
+            ),
+            patch(
+                "services.analysis.query_service.list_clusters",
+                AsyncMock(return_value=fake_clusters),
+            ),
+        ):
+            response = client.get(f"/api/v1/contexts/{_TEST_CONTEXT_ID}/analyses/{run_id}/clusters")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert len(body["items"]) == 2
+        assert body["items"][0]["cluster_index"] == 0
+        assert body["items"][0]["label"] == "Cluster A"
+        assert body["items"][0]["centroid_2d"] == [0.1, 0.2]
+        assert body["items"][1]["description"] is None
+
+    def test_returns_empty_items_for_running_run(self, client, db_mock):
+        """No 404 when the labeler has not produced clusters yet."""
+        run_id = uuid4()
+        db_mock.execute.side_effect = [_scalar_one(_TEST_CONTEXT_ID)]
+        fake_run = MagicMock(
+            id=run_id,
+            workspace_id=_TEST_WORKSPACE_ID,
+            context_id=_TEST_CONTEXT_ID,
+            status="running",
+        )
+        with (
+            patch(
+                "services.analysis.query_service.get_analysis",
+                AsyncMock(return_value=fake_run),
+            ),
+            patch(
+                "services.analysis.query_service.list_clusters",
+                AsyncMock(return_value=[]),
+            ),
+        ):
+            response = client.get(f"/api/v1/contexts/{_TEST_CONTEXT_ID}/analyses/{run_id}/clusters")
+        assert response.status_code == 200, response.text
+        assert response.json()["items"] == []
+
+    def test_404_when_run_belongs_to_another_context(self, client, db_mock):
+        """Cross-context run lookup returns 404, not the foreign clusters."""
+        run_id = uuid4()
+        db_mock.execute.side_effect = [_scalar_one(_TEST_CONTEXT_ID)]
+        foreign_run = MagicMock(
+            id=run_id,
+            workspace_id=_TEST_WORKSPACE_ID,
+            context_id=uuid4(),  # different context
+            status="succeeded",
+        )
+        with patch(
+            "services.analysis.query_service.get_analysis",
+            AsyncMock(return_value=foreign_run),
+        ):
+            response = client.get(f"/api/v1/contexts/{_TEST_CONTEXT_ID}/analyses/{run_id}/clusters")
+        assert response.status_code == 404
+
+
+# ============================================================================
+# GET /{run_id}/positions (#497 list_run_positions)
+# ============================================================================
+
+
+class TestListRunPositions:
+    def test_returns_position_rows(self, client, db_mock):
+        run_id = uuid4()
+        memory_a, memory_b = uuid4(), uuid4()
+        db_mock.execute.side_effect = [_scalar_one(_TEST_CONTEXT_ID)]
+        fake_run = MagicMock(
+            id=run_id,
+            workspace_id=_TEST_WORKSPACE_ID,
+            context_id=_TEST_CONTEXT_ID,
+            status="succeeded",
+        )
+        fake_positions = [
+            {
+                "memory_id": str(memory_a),
+                "x": 1.23,
+                "y": -0.45,
+                "cluster_index": 0,
+            },
+            {
+                "memory_id": str(memory_b),
+                "x": 0.0,
+                "y": 0.0,
+                "cluster_index": 1,
+            },
+        ]
+        with (
+            patch(
+                "services.analysis.query_service.get_analysis",
+                AsyncMock(return_value=fake_run),
+            ),
+            patch(
+                "services.analysis.query_service.list_positions",
+                AsyncMock(return_value=fake_positions),
+            ),
+        ):
+            response = client.get(
+                f"/api/v1/contexts/{_TEST_CONTEXT_ID}/analyses/{run_id}/positions"
+            )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert len(body["items"]) == 2
+        assert body["items"][0]["memory_id"] == str(memory_a)
+        assert body["items"][0]["x"] == 1.23
+        assert body["items"][1]["cluster_index"] == 1
+
+    def test_404_when_run_unknown(self, client, db_mock):
+        run_id = uuid4()
+        db_mock.execute.side_effect = [_scalar_one(_TEST_CONTEXT_ID)]
+        with patch(
+            "services.analysis.query_service.get_analysis",
+            AsyncMock(return_value=None),
+        ):
+            response = client.get(
+                f"/api/v1/contexts/{_TEST_CONTEXT_ID}/analyses/{run_id}/positions"
+            )
+        assert response.status_code == 404
+
+
+# ============================================================================
 # DELETE /{run_id} (soft cancel)
 # ============================================================================
 

@@ -447,6 +447,144 @@ async def get_cluster(
     }
 
 
+async def list_clusters(
+    db: AsyncSession,
+    *,
+    workspace_id: UUID,
+    run_id: UUID,
+) -> list[MemoryAnalysisCluster] | None:
+    """Return every cluster row for a run, ordered by ``cluster_index``.
+
+    Used by the REST surface in #497 to render the cluster list, scatter
+    centroids, and per-cluster property stats. The MCP tool
+    ``get_cluster`` already paginates the *member* memories of a single
+    cluster; this helper is the complementary "list all clusters of a
+    run" read that the frontend needs to bootstrap the scatter view.
+
+    Tenancy invariant matches ``get_cluster``: workspace boundary is
+    enforced by checking ``MemoryAnalysis.workspace_id == workspace_id``
+    BEFORE fetching cluster rows. Returns:
+
+    - ``None`` when the run does not exist or belongs to a foreign
+      workspace (callers map to 404 — same disclosure shape as the
+      run-level read).
+    - ``[]`` when the run exists but has no cluster rows yet (a still-
+      running or failed run that never completed the labeler stage).
+    - ``list[MemoryAnalysisCluster]`` ordered by ``cluster_index ASC``
+      otherwise. Cluster count is bounded by
+      ``ceil(sqrt(memory_count))`` ≈ 90 clusters on an 8000-memory run,
+      so no pagination is offered.
+    """
+    boundary = (
+        await db.execute(
+            select(MemoryAnalysis.id).where(
+                and_(
+                    MemoryAnalysis.id == run_id,
+                    MemoryAnalysis.workspace_id == workspace_id,
+                )
+            )
+        )
+    ).scalar_one_or_none()
+    if boundary is None:
+        return None
+
+    stmt = (
+        select(MemoryAnalysisCluster)
+        .where(MemoryAnalysisCluster.analysis_id == run_id)
+        .order_by(MemoryAnalysisCluster.cluster_index.asc())
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def list_positions(
+    db: AsyncSession,
+    *,
+    workspace_id: UUID,
+    run_id: UUID,
+) -> list[dict[str, Any]] | None:
+    """Return every ``(memory_id, x, y, cluster_index)`` for the scatter plot.
+
+    Joins ``memory_analysis_assignments`` → ``memory_analysis_clusters``
+    so the frontend can render dots colored by ``cluster_index`` without
+    a second round-trip per cluster. Sorted by
+    ``(cluster_index, memory_id)`` for deterministic z-order.
+
+    Tenancy invariant: ``workspace_id`` is verified via the
+    ``memory_analyses`` row before any assignment SELECT. A stolen
+    run UUID from another workspace returns ``None``.
+
+    Payload sizing: each row is ~80 bytes JSON; an 8000-memory run
+    produces ~640 KB which is acceptable for an analyses UI page that
+    the operator explicitly opens (not on hover or background poll).
+    No pagination is offered for v1 — split if a run ever exceeds 50k
+    memories.
+
+    Returns:
+
+    - ``None`` if the run is foreign / unknown (callers map to 404).
+    - ``[]`` if the run exists but has no assignments (still running).
+    - ``list[dict]`` of ``{memory_id, x, y, cluster_index}`` otherwise.
+    """
+    boundary = (
+        await db.execute(
+            select(MemoryAnalysis.id).where(
+                and_(
+                    MemoryAnalysis.id == run_id,
+                    MemoryAnalysis.workspace_id == workspace_id,
+                )
+            )
+        )
+    ).scalar_one_or_none()
+    if boundary is None:
+        return None
+
+    # Filter out soft-deleted memories so the scatter does not render
+    # orphan dots for memories the user has since forgotten — matches
+    # ``get_cluster``'s ``Memory.deleted_at.is_(None)`` discipline so
+    # the two read paths agree on which assignments are visible.
+    # ``Memory.workspace_id == workspace_id`` is defense-in-depth: the
+    # boundary was already verified above, but if a future repair
+    # script ever inserts a foreign-workspace ``memory_id`` into an
+    # assignment row this predicate would still keep tenancy intact.
+    stmt = (
+        select(
+            MemoryAnalysisAssignment.memory_id,
+            MemoryAnalysisAssignment.x,
+            MemoryAnalysisAssignment.y,
+            MemoryAnalysisCluster.cluster_index,
+        )
+        .join(
+            MemoryAnalysisCluster,
+            MemoryAnalysisCluster.id == MemoryAnalysisAssignment.cluster_id,
+        )
+        .join(
+            Memory,
+            Memory.id == MemoryAnalysisAssignment.memory_id,
+        )
+        .where(
+            and_(
+                MemoryAnalysisAssignment.analysis_id == run_id,
+                Memory.deleted_at.is_(None),
+                Memory.workspace_id == workspace_id,
+            )
+        )
+        .order_by(
+            MemoryAnalysisCluster.cluster_index.asc(),
+            MemoryAnalysisAssignment.memory_id.asc(),
+        )
+    )
+    rows = (await db.execute(stmt)).all()
+    return [
+        {
+            "memory_id": str(memory_id),
+            "x": float(x),
+            "y": float(y),
+            "cluster_index": int(cluster_index),
+        }
+        for (memory_id, x, y, cluster_index) in rows
+    ]
+
+
 async def get_memory_ids_in_cluster(
     db: AsyncSession,
     *,

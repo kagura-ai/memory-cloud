@@ -3067,5 +3067,132 @@
     "message": "このアカウントは許可リストに登録されていません。アクセスをご希望の場合は管理者にお問い合わせください。",
     "contact": "アクセス権限が必要な場合は、管理者までご連絡ください。",
     "backToLogin": "ログインに戻る"
+  },
+  "analyses": {
+    "tabLabel": "分析",
+    "header": {
+      "title": "ブロードリスニング分析",
+      "subtitle": "クラスタ俯瞰で memory の地形を見る · Owner のみ"
+    },
+    "actions": {
+      "newAnalysis": "分析を実行",
+      "exportJson": "JSON をエクスポート",
+      "refresh": "更新",
+      "cancel": "キャンセル"
+    },
+    "kpi": {
+      "lastRun": "前回の run",
+      "memoriesSurveyed": "対象 memory 数",
+      "runCost": "コスト",
+      "quality": "品質",
+      "qualityValue": "信頼度 {value}",
+      "neverRun": "未実行",
+      "qualityNoData": "データなし"
+    },
+    "scatter": {
+      "title": "Memory マップ",
+      "subtitle": "UMAP 射影 · 高次元 embedding を KMeans クラスタリング",
+      "legendMemory": "memory",
+      "legendCentroid": "クラスタ重心",
+      "legendBoundary": "クラスタ境界",
+      "focusedOn": "Focus 中",
+      "showAllClusters": "すべてのクラスタを表示",
+      "noPositions": "scatter 座標が未生成です。run が完了していないか projection が失敗した可能性があります。"
+    },
+    "clusters": {
+      "title": "クラスタ",
+      "subtitleZero": "0 個",
+      "subtitle": "{count} 個 · クリックで地図を focus · サイズ順",
+      "allClusters": "全クラスタ",
+      "memberCount": "{count} 件",
+      "confidence": "信頼度 {value}",
+      "noClustersTitle": "クラスタがまだありません",
+      "noClustersDescription": "active run がクラスタを生成していません。新しい分析を実行するとクラスタ俯瞰が表示されます。",
+      "outlierLabel": "外れ値クラスタ"
+    },
+    "representatives": {
+      "headerLabel": "代表 memory",
+      "totalInCluster": "クラスタ内 {count} 件",
+      "loading": "代表 memory を読み込み中…",
+      "empty": "このクラスタには代表 memory がありません。",
+      "emptyAfterLoad": "代表 memory はこの run の完了後に全て削除されています。",
+      "emptyNoFocus": "クラスタをクリックして代表 memory を表示。",
+      "metaLine": "{idShort} · {type} · importance {importance}"
+    },
+    "propertyStats": {
+      "title": "プロパティ",
+      "subtitleAll": "全クラスタ · context 全体の集計",
+      "subtitleCluster": "クラスタ {index} · {label}",
+      "topTags": "上位タグ",
+      "byType": "タイプ別",
+      "importance": "重要度",
+      "activity": "期間内のアクティビティ",
+      "empty": "プロパティ統計はありません。"
+    },
+    "history": {
+      "title": "過去の run",
+      "subtitle": "直近 {visible} / 全 {total} 件",
+      "subtitleAtMost": "直近 {visible} 件",
+      "headerDate": "日付",
+      "headerStatus": "ステータス",
+      "headerMemories": "Memory 数",
+      "headerCost": "コスト",
+      "noRunsTitle": "まだ run がありません",
+      "noRunsDescription": "最初の分析を実行すると履歴がここに表示されます。",
+      "status": {
+        "running": "実行中",
+        "succeeded": "成功",
+        "failed": "失敗",
+        "cancelled": "キャンセル · {reason}",
+        "unknown": "{raw}"
+      }
+    },
+    "modal": {
+      "title": "分析を実行",
+      "subtitle": "{contextName} · フィルタ済みの memory にクラスタ分析を実行",
+      "period": "期間",
+      "tags": "タグ",
+      "tagsHint": "(いずれか、任意)",
+      "tagsAddPlaceholder": "+ 追加",
+      "types": "タイプ",
+      "typesAll": "すべてのタイプ",
+      "minImportance": "最低重要度",
+      "narrativeQuery": "ナラティブクエリ",
+      "narrativeQueryHint": "(任意)",
+      "narrativeQueryPlaceholder": "このフレーズに合致する memory に絞り込む",
+      "model": "モデル",
+      "preflight": {
+        "memoriesCount": "対象になる memory 数",
+        "estimatedCost": "推定コスト",
+        "quotaRemaining": "クォータ",
+        "embeddingUniform": "embedding が統一されている",
+        "loading": "計算中…"
+      },
+      "footerHint": "Owner のみ · workspace allowlist で制限",
+      "submit": "分析を実行",
+      "submitting": "Run を起動中…",
+      "errorLoadingPreview": "コスト推定に失敗しました — 接続を確認して再試行してください。",
+      "errorStarting": "Run の起動に失敗しました — 詳細は下記を確認してください。",
+      "errorPreviewFallback": "preview に失敗しました",
+      "errorStartFallback": "起動に失敗しました"
+    },
+    "running": {
+      "title": "実行中",
+      "startedAt": "開始: {when} — クラスタリング + LLM ラベリング処理中…",
+      "cancel": "実行をキャンセル",
+      "errorFallback": "Run の取得に失敗しました。"
+    },
+    "states": {
+      "loading": "Analyses を読み込み中…",
+      "empty": {
+        "title": "まだ分析がありません",
+        "description": "最初の分析を実行するとクラスタ俯瞰、scatter map、各クラスタのプロパティ統計が表示されます。"
+      },
+      "notEnabled": {
+        "title": "この workspace では Analyses はまだ有効化されていません",
+        "description": "Memory Broadlistening は v1 ロールアウト中、選定された workspace に限定されています。アクセスをご希望の場合はお問い合わせください。"
+      },
+      "loadFailed": "Analyses の読み込みに失敗しました — 接続を確認してください。"
+    }
   }
 }

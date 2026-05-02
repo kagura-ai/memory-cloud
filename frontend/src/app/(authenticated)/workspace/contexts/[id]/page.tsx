@@ -51,6 +51,16 @@ const GraphTabPanel = dynamic(
     })),
   { ssr: false },
 );
+// Issue #497: analyses tab — lazy-loaded so the broadlistening bundle
+// (recharts placeholder + scatter SVG + modal) stays out of the
+// non-owner sessions even though the tab itself is owner-gated upstream.
+const AnalysesTabPanel = dynamic(
+  () =>
+    import("@/components/contexts/analyses/AnalysesTabPanel").then((m) => ({
+      default: m.AnalysesTabPanel,
+    })),
+  { ssr: false },
+);
 
 const ADMIN_CONTEXT_TABS = [
   "overview",
@@ -59,17 +69,30 @@ const ADMIN_CONTEXT_TABS = [
   "graph",
   "settings",
 ] as const;
+const OWNER_CONTEXT_TABS = [
+  "overview",
+  "memories",
+  "connections",
+  "graph",
+  "analyses",
+  "settings",
+] as const;
 const NON_ADMIN_CONTEXT_TABS = ["overview"] as const;
 
 export default function ContextDetailPage() {
   const params = useParams();
   const contextId = params.id as string;
   const t = useTranslations("contextDetail");
+  // Issue #497: analyses namespace is top-level, so a second hook
+  // call is needed for the tab label. next-intl supports multiple
+  // useTranslations() in one component.
+  const tAnalyses = useTranslations("analyses");
   const { user } = useAuth();
   const { currentContext } = useMemoryContext();
   const { currentWorkspace } = useWorkspace();
 
   // Issue #398: member/viewer only see Overview. Admin+ see all four tabs.
+  // Issue #497: owner additionally sees the Analyses tab.
   // hasWorkspaceRole returns false while currentWorkspace hydrates — the
   // admin tabs stay hidden until role is known, preventing a flash where
   // a member briefly sees admin-only triggers.
@@ -77,9 +100,18 @@ export default function ContextDetailPage() {
     currentWorkspace?.current_user_role,
     "admin",
   );
-  const visibleTabs = canSeeAdminTabs
-    ? ADMIN_CONTEXT_TABS
-    : NON_ADMIN_CONTEXT_TABS;
+  // Analyses tab gating: requires owner role AND workspace allowlist
+  // membership (#497). Hiding the tab entirely for non-allowlisted owners
+  // keeps the UX honest — there is no path forward inside the tab until
+  // the workspace is on the allowlist.
+  const canSeeAnalysesTab =
+    hasWorkspaceRole(currentWorkspace?.current_user_role, "owner") &&
+    currentWorkspace?.analyses_enabled === true;
+  const visibleTabs = canSeeAnalysesTab
+    ? OWNER_CONTEXT_TABS
+    : canSeeAdminTabs
+      ? ADMIN_CONTEXT_TABS
+      : NON_ADMIN_CONTEXT_TABS;
 
   // Passing visibleTabs as allowedValues makes useTabParam clamp unknown
   // URL values (e.g. member lands on ?tab=settings via deep-link) back to
@@ -239,7 +271,10 @@ export default function ContextDetailPage() {
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="overview">{t("tabs.overview")}</TabsTrigger>
-          {/* Issue #398: connections/graph/settings tabs are admin-only. */}
+          {/* Issue #398: memories/connections/graph tabs are admin-only.
+              Settings is rendered separately below so the analyses tab
+              (owner-only, #497) can land between graph and settings —
+              matching the ordering in OWNER_CONTEXT_TABS. */}
           {canSeeAdminTabs && (
             <>
               <TabsTrigger value="memories">{t("tabs.memories")}</TabsTrigger>
@@ -247,8 +282,17 @@ export default function ContextDetailPage() {
                 {t("tabs.connections")}
               </TabsTrigger>
               <TabsTrigger value="graph">{t("tabs.graph")}</TabsTrigger>
-              <TabsTrigger value="settings">{t("tabs.settings")}</TabsTrigger>
             </>
+          )}
+          {/* Analyses tab is owner-only AND requires allowlist membership.
+              Owners whose workspace is not on the allowlist do not see
+              the tab at all (#497 — operator preference). */}
+          {canSeeAnalysesTab && (
+            <TabsTrigger value="analyses">{tAnalyses("tabLabel")}</TabsTrigger>
+          )}
+          {/* Settings stays last — admin-only. */}
+          {canSeeAdminTabs && (
+            <TabsTrigger value="settings">{t("tabs.settings")}</TabsTrigger>
           )}
         </TabsList>
 
@@ -292,6 +336,16 @@ export default function ContextDetailPage() {
               <ProtectionSection context={context} />
             </TabsContent>
           </>
+        )}
+        {/* Analyses TabsContent gated on tab visibility so the scatter
+            bundle never enters non-owner / non-allowlisted sessions. */}
+        {canSeeAnalysesTab && (
+          <TabsContent value="analyses">
+            <AnalysesTabPanel
+              contextId={contextId}
+              contextName={context.display_name || context.name}
+            />
+          </TabsContent>
         )}
       </Tabs>
     </PageContainer>
