@@ -10,13 +10,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
 
 from models.auth import Context, User, Workspace, WorkspaceMember
 from models.memory import Memory
 from services.workspace_service import WorkspaceService
 from utils.exceptions import NotFoundException, ValidationError
-
 
 # ---------------------------------------------------------------------------
 # validate_role

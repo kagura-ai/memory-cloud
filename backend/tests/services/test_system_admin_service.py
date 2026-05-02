@@ -6,21 +6,37 @@ All tests use the real db_session fixture (async SQLAlchemy).
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 import pytest_asyncio
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from models.auth import AuditLog, User
 from services.system_admin_service import SystemAdminService
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def cleanup_admin_test_data(db_session):
+    """Remove admin-test side-effects that survive db_session rollback
+    because SystemAdminService methods commit internally.
+    Clean-up runs both before and after each test since db_session is
+    session-scoped and other tests may leak committed rows.
+    """
+    await db_session.execute(text("TRUNCATE TABLE audit_logs RESTART IDENTITY CASCADE"))
+    await db_session.execute(text("TRUNCATE TABLE users RESTART IDENTITY CASCADE"))
+    await db_session.commit()
+    yield
+
+
 @pytest_asyncio.fixture
 async def fixture_admin(db_session):
     """Create a system admin user."""
+    suffix = uuid4().hex[:8]
     user = User(
-        email="admin@example.com",
-        user_id="admin-001",
+        email=f"admin-{suffix}@example.com",
+        user_id=f"admin-{suffix}",
         role="admin",
         is_initial_admin=True,
         auth_provider="google",
@@ -33,9 +49,10 @@ async def fixture_admin(db_session):
 @pytest_asyncio.fixture
 async def fixture_regular(db_session):
     """Create a regular user."""
+    suffix = uuid4().hex[:8]
     user = User(
-        email="user@example.com",
-        user_id="user-001",
+        email=f"user-{suffix}@example.com",
+        user_id=f"user-{suffix}",
         role="user",
         is_initial_admin=False,
         auth_provider="google",
@@ -48,9 +65,10 @@ async def fixture_regular(db_session):
 @pytest_asyncio.fixture
 async def fixture_second_admin(db_session):
     """Create a second system admin (not initial)."""
+    suffix = uuid4().hex[:8]
     user = User(
-        email="admin2@example.com",
-        user_id="admin-002",
+        email=f"admin2-{suffix}@example.com",
+        user_id=f"admin2-{suffix}",
         role="admin",
         is_initial_admin=False,
         auth_provider="github",
@@ -88,7 +106,13 @@ class TestListSystemAdmins:
     @pytest.mark.asyncio
     async def test_fallback_first_admin_when_no_initial_flag(self, db_session):
         """If no admin has is_initial_admin=True, initial_id falls back to first admin."""
-        a1 = User(email="a1@example.com", user_id="a1", role="admin", is_initial_admin=False)
+        suffix = uuid4().hex[:8]
+        a1 = User(
+            email=f"a1-{suffix}@example.com",
+            user_id=f"a1-{suffix}",
+            role="admin",
+            is_initial_admin=False,
+        )
         db_session.add(a1)
         await db_session.flush()
 
@@ -119,7 +143,11 @@ class TestPromoteToSystemAdmin:
         )
         await db_session.flush()
 
-        stmt = select(AuditLog).where(AuditLog.action == "system_admin_promote")
+        stmt = (
+            select(AuditLog)
+            .where(AuditLog.action == "system_admin_promote")
+            .where(AuditLog.user_id == fixture_regular.user_id)
+        )
         audit = (await db_session.execute(stmt)).scalar_one()
         assert audit.user_id == fixture_regular.user_id
         assert audit.old_value_hash == "user"
@@ -160,7 +188,11 @@ class TestDemoteSystemAdmin:
         )
         await db_session.flush()
 
-        stmt = select(AuditLog).where(AuditLog.action == "system_admin_demote")
+        stmt = (
+            select(AuditLog)
+            .where(AuditLog.action == "system_admin_demote")
+            .where(AuditLog.user_id == fixture_second_admin.user_id)
+        )
         audit = (await db_session.execute(stmt)).scalar_one()
         assert audit.user_id == fixture_second_admin.user_id
         assert audit.old_value_hash == "admin"
@@ -190,11 +222,21 @@ class TestDemoteSystemAdmin:
         assert "initial" in exc.value.detail.lower()
 
     @pytest.mark.asyncio
-    async def test_demote_last_admin_raises_403(self, db_session, fixture_admin):
+    async def test_demote_last_admin_raises_403(self, db_session):
         """Only one admin exists — cannot demote them."""
+        suffix = uuid4().hex[:8]
+        lone_admin = User(
+            email=f"lone-admin-{suffix}@example.com",
+            user_id=f"lone-admin-{suffix}",
+            role="admin",
+            is_initial_admin=False,
+        )
+        db_session.add(lone_admin)
+        await db_session.flush()
+
         service = SystemAdminService(db_session)
         with pytest.raises(HTTPException) as exc:
-            await service.demote_system_admin(fixture_admin.user_id, "demoter@example.com")
+            await service.demote_system_admin(lone_admin.user_id, "demoter@example.com")
         assert exc.value.status_code == 403
         assert "last" in exc.value.detail.lower()
 
@@ -222,9 +264,19 @@ class TestCanDeleteAdmin:
         assert "initial" in reason.lower()
 
     @pytest.mark.asyncio
-    async def test_last_admin_blocked(self, db_session, fixture_admin):
+    async def test_last_admin_blocked(self, db_session):
+        suffix = uuid4().hex[:8]
+        lone_admin = User(
+            email=f"lone-admin-{suffix}@example.com",
+            user_id=f"lone-admin-{suffix}",
+            role="admin",
+            is_initial_admin=False,
+        )
+        db_session.add(lone_admin)
+        await db_session.flush()
+
         service = SystemAdminService(db_session)
-        ok, reason = await service.can_delete_admin(fixture_admin.user_id)
+        ok, reason = await service.can_delete_admin(lone_admin.user_id)
         assert ok is False
         assert "last" in reason.lower()
 
