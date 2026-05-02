@@ -39,6 +39,16 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+# Default analysis provider + model (issue #496/B3 - shared by REST
+# routes, MCP tools, orchestrator's pricing FK resolution, and the
+# BYOK key assertion). v1.5 will replace these with per-workspace
+# ``Workspace.analysis_default_model_id`` / ``analysis_default_provider``
+# lookups; until then single named constants are the canonical source
+# so route code, MCP code, orchestrator, and byok_resolver never drift
+# out of sync on the provider/model pair.
+DEFAULT_PROVIDER = "openai"
+DEFAULT_MODEL_ID = "gpt-5-nano"
+
 # Per-call estimates. Tuned to match the Phase 3 cost target;
 # revisit when Gemini integration lands in v1.5.
 _INPUT_TOKENS_PER_CALL = 1500
@@ -69,7 +79,7 @@ class CostEstimate:
     breakdown: dict[str, int]
 
 
-def estimate_cost(memory_count: int, *, model_id: str = "gpt-5-nano") -> CostEstimate:
+def estimate_cost(memory_count: int, *, model_id: str = DEFAULT_MODEL_ID) -> CostEstimate:
     """Compute the pre-flight estimate for a memory_count-sized run.
 
     The model_id parameter is forward-compatibility scaffolding;

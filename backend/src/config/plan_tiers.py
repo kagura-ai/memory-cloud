@@ -142,6 +142,7 @@ PLAN_PRO = PlanTier(
             "team_invitations",  # Issue #165: Team collaboration
             "shared_contexts",  # Issue #165: Shared contexts with role-based access
             "public_contexts",  # Issue #238: Public contexts
+            "memory_analysis",  # Issue #496: Memory Broadlistening
         }
     ),
 )
@@ -162,6 +163,7 @@ FEATURE_MIN_PLANS: dict[str, str] = {
     "team_invitations": "pro",  # Issue #165: Team collaboration requires Pro
     "shared_contexts": "pro",  # Issue #165: Shared contexts require Pro
     "public_contexts": "pro",  # Issue #242: Public contexts require PRO only
+    "memory_analysis": "pro",  # Issue #496: Memory Broadlistening (Pro only; FREE/BASIC=0)
 }
 
 

@@ -41,6 +41,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import ExternalAPIKey
+from services.analysis.preview import DEFAULT_PROVIDER
 from utils.exceptions import ValidationError
 from utils.logger import get_logger
 
@@ -89,7 +90,7 @@ async def assert_openai_byok_key_available(
 
     conditions = [
         ExternalAPIKey.workspace_id == workspace_uuid,
-        ExternalAPIKey.provider == "openai",
+        ExternalAPIKey.provider == DEFAULT_PROVIDER,
         ExternalAPIKey.enabled.is_(True),
     ]
     if context_id is not None:

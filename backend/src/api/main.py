@@ -155,6 +155,15 @@ openapi_tags = [
     {"name": "resource-ingest", "description": "External data ingestion API"},
     {"name": "resource-schema", "description": "Resource schema registry"},
     {"name": "resource-indexer", "description": "Resource indexer runtime state"},
+    {
+        "name": "analyses",
+        "description": (
+            "Memory Broadlistening analysis runs. REST companion to the "
+            "5 MCP tools (analyze_context / get_analysis / list_analyses "
+            "/ get_active_analysis / get_cluster). Behind a 4-stage gate: "
+            "workspace owner + Pro tier + per-day quota + workspace allowlist."
+        ),
+    },
     # Public API
     {"name": "public-search", "description": "Public REST API for search"},
     {"name": "mcp-api", "description": "MCP server tools listing and status"},
@@ -346,6 +355,7 @@ from api.routes import (  # noqa: E402
     admin_plans,
     admin_signup_gate,  # Issue #358: admin-configurable signup gate
     admin_sleep,  # Issue #247: Manual Sleep Maintenance trigger
+    analyses,  # Issue #496: Memory Broadlistening API endpoints
     api_keys,
     attachments,  # Issue #330: File attachment support
     auth,
@@ -431,6 +441,9 @@ app.include_router(sleep_reports.router, prefix="/api/v1")
 
 # Cost Aggregation routes (Issue #472 - admin cross-workspace + workspace-scoped)
 app.include_router(cost_aggregation.router, prefix="/api/v1")
+
+# Memory Broadlistening API (Issue #496 - 4-stage gate + 6 endpoints)
+app.include_router(analyses.router, prefix="/api/v1")
 
 # Admin Sleep trigger (Issue #247 - Manual Sleep Maintenance trigger)
 app.include_router(admin_sleep.router, prefix="/api/v1")
