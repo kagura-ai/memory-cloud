@@ -289,9 +289,14 @@ class SleepReportLLMUsage(Base):
         # CHECK on phase keeps the audit trail readable even if a future
         # phase name slips in via reporter changes — same defensive pattern
         # as ``valid_sleep_report_status`` on ``sleep_reports``.
+        # ``cluster_labeling`` was added by the d07_495 migration for the
+        # broadlistening pipeline (#495); the model CHECK must list the
+        # SAME values as the migration, otherwise tests using
+        # ``Base.metadata.create_all`` (rather than alembic) build a table
+        # with the stricter old CHECK and analysis inserts fail.
         CheckConstraint(
             "phase IN ('edge_discovery', 'dedup_merge', 'importance_reeval', "
-            "'consolidation', 'reindex')",
+            "'consolidation', 'reindex', 'cluster_labeling')",
             name="valid_sleep_report_llm_usage_phase",
         ),
     )
