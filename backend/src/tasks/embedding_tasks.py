@@ -58,10 +58,28 @@ async def sweep_pending_embeddings() -> None:
 
             logger.info("sweep_pending_embeddings", count=len(pending_ids))
 
+            # Per-id try/except so one stuck embedding does not abort
+            # the sweep — the next sweep tick (30s later) would re-pick
+            # only this id, but in the meantime the OTHER pending ids
+            # would sit untouched. Caught via Copilot review on #496.
+            failed = 0
             for mid in pending_ids:
-                await process_pending_embedding(mid)
+                try:
+                    await process_pending_embedding(mid)
+                except Exception as e:  # noqa: BLE001 — we want to keep going
+                    failed += 1
+                    logger.error(
+                        "sweep_pending_embeddings_item_failed",
+                        memory_id=str(mid),
+                        error=str(e),
+                        exc_info=True,
+                    )
 
-            logger.info("sweep_pending_embeddings_done", processed=len(pending_ids))
+            logger.info(
+                "sweep_pending_embeddings_done",
+                processed=len(pending_ids) - failed,
+                failed=failed,
+            )
 
         except Exception as e:
             logger.error("sweep_pending_embeddings_failed", error=str(e), exc_info=True)

@@ -218,6 +218,38 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Memory Broadlistening allowlist (Issue #496) — kill switch.
+    # Empty (default) → feature 403 globally. Comma-separated UUIDs → only listed
+    # workspaces can run analyses. Env: ANALYSIS_ENABLED_WORKSPACE_IDS.
+    # Production deploy starts empty; ops adds the kagura-dev workspace UUID first
+    # then expands gradually. Survives the new tier+quota+BYOK gates so a single
+    # env edit can stop all runs in production. v1.5 で撤去予定.
+    analysis_enabled_workspace_ids: str = Field(
+        default="",
+        description=(
+            "Comma-separated workspace UUIDs allowed to run memory analyses. "
+            "Empty = feature OFF globally (Issue #496 kill switch). "
+            "Populated = only listed workspaces. v1.5 で撤去予定."
+        ),
+    )
+
+    @property
+    def analysis_enabled_workspace_ids_list(self) -> list[str]:
+        """Parse comma-separated UUIDs into a list of lowercase strings.
+
+        Returns empty list when the setting is empty/whitespace, which the
+        gate translates into "feature 403 globally" (kill switch active).
+        UUIDs are kept as strings here; the gate compares them against
+        ``str(workspace_id).lower()`` so neither side has to construct UUID
+        objects on the hot path. Lower-casing both sides defends against
+        ops setting upper-case UUIDs in the env var (Python's ``str(UUID)``
+        always emits lower-case hex), which would otherwise silent-fail
+        with a permanent 403.
+        """
+        return [
+            s.strip().lower() for s in self.analysis_enabled_workspace_ids.split(",") if s.strip()
+        ]
+
     # Plan Tier Overrides (environment variable customization for OSS deployments)
     plan_free_max_contexts: int | None = Field(
         default=None, description="Override FREE plan max contexts per workspace"

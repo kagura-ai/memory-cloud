@@ -1208,6 +1208,195 @@ Requires action recording (reports created before this feature have no actions t
                 },
             },
         },
+        # ====================================================================
+        # Memory Broadlistening Analysis Tools (Issue #496)
+        # ====================================================================
+        {
+            "name": "analyze_context",
+            "description": (
+                "Start a memory broadlistening analysis run on a context, "
+                "or preview the cost when ``dry_run=true``. The analysis "
+                "clusters memories into themes (kouchou-ai-style UMAP + "
+                "KMeans + LLM labeling) and exposes them via "
+                "``get_analysis`` / ``get_cluster`` / cluster-scoped recall.\n\n"
+                "Requires the workspace owner role + Pro plan + an enabled "
+                "OpenAI BYOK key + per-day quota available. v1 is daily=3 "
+                "for Pro; addon ``extra_analysis_runs`` increases the limit. "
+                "When ``dry_run=true``, the same gates apply but no row is "
+                "created.\n\n"
+                "Example:\n"
+                '  analyze_context(context_id="...", dry_run=True)  # cost preview\n'
+                '  analyze_context(context_id="...")                # 202 + run_id'
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["context_id"],
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "description": "Target context UUID (must belong to your workspace).",
+                    },
+                    "from": {
+                        "type": "string",
+                        "description": "Optional ISO-8601 lower bound on memory.created_at.",
+                    },
+                    "to": {
+                        "type": "string",
+                        "description": "Optional ISO-8601 upper bound on memory.created_at.",
+                    },
+                    "types": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of memory types to include.",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of tags to filter on.",
+                    },
+                    "min_importance": {
+                        "type": "number",
+                        "description": "Optional importance floor (0.0–1.0).",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Reserved for v1.5 query-scoped runs (ignored in v1).",
+                    },
+                    "model_id": {
+                        "type": "integer",
+                        "description": (
+                            "Optional ``llm_pricing.id`` override. v1 default = "
+                            "openai gpt-5-nano (resolved server-side)."
+                        ),
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": (
+                            "When true, return the cost estimate without "
+                            "starting a run (default: false)."
+                        ),
+                    },
+                },
+            },
+        },
+        {
+            "name": "get_analysis",
+            "readOnly": True,
+            "description": (
+                "Fetch one analysis run by id, scoped to your workspace. "
+                "Returns ``run_not_found`` for unknown ids OR runs in "
+                "another workspace (existence is not leaked).\n\n"
+                "Example:\n"
+                '  get_analysis(run_id="...")\n'
+                "  → {run_id, status, started_at, finished_at, "
+                "cost_estimated_cents, cost_actual_cents, ...}"
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["run_id"],
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "Analysis run UUID (from analyze_context).",
+                    },
+                },
+            },
+        },
+        {
+            "name": "list_analyses",
+            "readOnly": True,
+            "description": (
+                "List analysis runs for a context, sorted newest first. "
+                "Cursor-paginated — pass the previous response's "
+                "``next_cursor`` to fetch the next page. ``next_cursor=null`` "
+                "marks the last page.\n\n"
+                "Example:\n"
+                '  list_analyses(context_id="...", limit=20)\n'
+                '  → {items: [...], next_cursor: "2026-04-30T12:34:56"}'
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["context_id"],
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "description": "Target context UUID.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Page size (1-100, default 20).",
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "Opaque pagination cursor from a previous response.",
+                    },
+                },
+            },
+        },
+        {
+            "name": "get_active_analysis",
+            "readOnly": True,
+            "description": (
+                "Return the most recent ``status='succeeded'`` run for a "
+                "context, or ``no_succeeded_run`` if the context has no "
+                "completed analyses yet.\n\n"
+                "Example:\n"
+                '  get_active_analysis(context_id="...")\n'
+                '  → {run_id, status: "succeeded", finished_at, ...}'
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["context_id"],
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "description": "Target context UUID.",
+                    },
+                },
+            },
+        },
+        {
+            "name": "get_cluster",
+            "readOnly": True,
+            "description": (
+                "Drill-down view of one cluster within an analysis run. "
+                "Returns the cluster label/description/count + the top "
+                "representative memories (capped at 5) + a paginated list of "
+                "all member memories (Layer 1 + 2: summary, tags, importance).\n\n"
+                "Page size defaults to 50 (max 200). For semantic search "
+                "scoped to this cluster, call ``recall`` with "
+                '``filters={"analysis_cluster": {"run_id": ..., "cluster_index": ...}}``.\n\n'
+                "Example:\n"
+                '  get_cluster(run_id="...", cluster_index=3)\n'
+                "  → {label, description, count, representatives: [...], "
+                "memories: [...], next_cursor: ...}"
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["run_id", "cluster_index"],
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "Analysis run UUID.",
+                    },
+                    "cluster_index": {
+                        "type": "integer",
+                        "description": (
+                            "Zero-based ordinal of the cluster within the run "
+                            "(stable across calls)."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Memories per page (1-200, default 50).",
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "Opaque pagination cursor from a previous response.",
+                    },
+                },
+            },
+        },
     ]
 
 

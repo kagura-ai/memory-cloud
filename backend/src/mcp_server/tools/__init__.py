@@ -39,6 +39,8 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
         "get_resource_impact",  # Uses resource_id, not context_id
         "get_resource_schema",  # Uses resource_id, not context_id
         "list_resource_tokens",  # Uses resource_id, not context_id
+        "get_analysis",  # Issue #496: uses run_id, not context_id
+        "get_cluster",  # Issue #496: uses run_id, not context_id
     }
 )
 
@@ -54,6 +56,10 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         "get_resource_impact",  # Read-only resource stats
         "get_resource_schema",  # Read-only schema fetch
         "list_resource_tokens",  # Read-only token listing
+        "get_analysis",  # Issue #496: read-only analysis row fetch
+        "list_analyses",  # Issue #496: read-only analysis list
+        "get_active_analysis",  # Issue #496: read-only most-recent succeeded
+        "get_cluster",  # Issue #496: read-only cluster drill-down
     }
 )
 
@@ -68,6 +74,13 @@ _TOOL_REGISTRY: dict[str, Any] | None = None
 
 def _build_registry() -> dict[str, Any]:
     """Build tool name → handler mapping."""
+    from mcp_server.tools.analysis import (
+        handle_analyze_context,
+        handle_get_active_analysis,
+        handle_get_analysis,
+        handle_get_cluster,
+        handle_list_analyses,
+    )
     from mcp_server.tools.context import (
         handle_create_context,
         handle_delete_context,
@@ -124,6 +137,13 @@ def _build_registry() -> dict[str, Any]:
         "get_resource_impact": handle_get_resource_impact,
         "get_resource_schema": handle_get_resource_schema,
         "list_resource_tokens": handle_list_resource_tokens,
+        # Issue #496: Memory Broadlistening — 5 tools sharing the same
+        # 4-stage gate chain as REST /api/v1/contexts/{id}/analyses.
+        "analyze_context": handle_analyze_context,
+        "get_analysis": handle_get_analysis,
+        "list_analyses": handle_list_analyses,
+        "get_active_analysis": handle_get_active_analysis,
+        "get_cluster": handle_get_cluster,
     }
 
 

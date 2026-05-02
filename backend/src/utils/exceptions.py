@@ -137,8 +137,8 @@ class MemoryGoneError(MemoryCloudException):
 class ConflictError(MemoryCloudException):
     """Resource conflict (409)."""
 
-    def __init__(self, message: str = "Resource conflict"):
-        super().__init__(message, status_code=409, error_code="RES-002")
+    def __init__(self, message: str = "Resource conflict", **details: Any):
+        super().__init__(message, status_code=409, error_code="RES-002", **details)
 
 
 class ValidationError(MemoryCloudException):
@@ -171,8 +171,19 @@ class RateLimitError(MemoryCloudException):
 class QuotaExceededError(MemoryCloudException):
     """Quota exceeded (429)."""
 
-    def __init__(self, message: str = "Quota exceeded", quota_type: str | None = None) -> None:
-        super().__init__(message, status_code=429, error_code="QUOTA-001", quota_type=quota_type)
+    def __init__(
+        self,
+        message: str = "Quota exceeded",
+        quota_type: str | None = None,
+        **details: Any,
+    ) -> None:
+        super().__init__(
+            message,
+            status_code=429,
+            error_code="QUOTA-001",
+            quota_type=quota_type,
+            **details,
+        )
 
 
 class FeatureNotAvailableError(MemoryCloudException):

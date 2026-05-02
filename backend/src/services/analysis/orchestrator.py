@@ -49,7 +49,7 @@ from models.llm_pricing import LLMPricing
 from services.analysis import labeler as analysis_labeler
 from services.analysis.byok_resolver import assert_openai_byok_key_available
 from services.analysis.clusterer import cluster_high_dim
-from services.analysis.preview import estimate_cost
+from services.analysis.preview import DEFAULT_MODEL_ID, DEFAULT_PROVIDER, estimate_cost
 from services.analysis.projector import project_to_2d
 from services.analysis.reporter import (
     PersistInputs,
@@ -97,11 +97,11 @@ class AnalysisParams:
         }
 
 
-# Default model when params.model_id is None — v1 default is gpt-5-nano
-# (Phase 3 clarification). v1.5 will pull this from a workspace-level
-# default like ``Workspace.analysis_default_model_id``.
-_DEFAULT_PROVIDER = "openai"
-_DEFAULT_MODEL = "gpt-5-nano"
+# Default provider / model when params.model_id is None come from
+# ``services/analysis/preview.py`` (DEFAULT_PROVIDER / DEFAULT_MODEL_ID)
+# directly — used at the only call site below (_resolve_pricing_row).
+# v1.5 will replace the constants with a per-workspace
+# ``Workspace.analysis_default_model_id`` lookup.
 
 # Status / dimension constants. Use explicit string literals (NOT
 # tuple indices) so a future tuple reordering does not silently flip
@@ -181,8 +181,8 @@ async def _resolve_pricing_row(db: AsyncSession, model_id: int | None) -> tuple[
         stmt = (
             select(LLMPricing)
             .where(
-                LLMPricing.provider == _DEFAULT_PROVIDER,
-                LLMPricing.model == _DEFAULT_MODEL,
+                LLMPricing.provider == DEFAULT_PROVIDER,
+                LLMPricing.model == DEFAULT_MODEL_ID,
             )
             .order_by(
                 LLMPricing.effective_from.desc(),
@@ -196,8 +196,8 @@ async def _resolve_pricing_row(db: AsyncSession, model_id: int | None) -> tuple[
             # migration didn't run or was rolled back → server-side
             # configuration error (500), NOT a 409 conflict.
             raise ConfigurationError(
-                f"Default LLM pricing row not seeded for {_DEFAULT_PROVIDER}/"
-                f"{_DEFAULT_MODEL}. Run alembic migrations to seed `llm_pricing`."
+                f"Default LLM pricing row not seeded for {DEFAULT_PROVIDER}/"
+                f"{DEFAULT_MODEL_ID}. Run alembic migrations to seed `llm_pricing`."
             )
         primary = all_rows[0]
 
@@ -273,9 +273,13 @@ class AnalysisOrchestrator:
         )
         prior = (await self.db.execute(running_stmt)).scalar_one_or_none()
         if prior is not None:
+            # ``run_id`` lands in ConflictError.details so #496's API/MCP
+            # handlers can surface it as a structured field (not just
+            # parsed out of the message text).
             raise ConflictError(
                 f"An analysis run is already in progress "
-                f"(run_id={prior.id}). Wait for it to finish or cancel."
+                f"(run_id={prior.id}). Wait for it to finish or cancel.",
+                run_id=str(prior.id),
             )
 
         pricing, snapshot = await _resolve_pricing_row(self.db, params.model_id)
@@ -362,7 +366,7 @@ class AnalysisOrchestrator:
             snapshot_dict = dict(analysis.model_snapshot or {})
             estimate = estimate_cost(
                 memory_count=len(pull.memories),
-                model_id=str(snapshot_dict.get("model", "gpt-5-nano")),
+                model_id=str(snapshot_dict.get("model", DEFAULT_MODEL_ID)),
             )
             analysis.cost_estimated_cents = estimate.estimated_cost_cents
 

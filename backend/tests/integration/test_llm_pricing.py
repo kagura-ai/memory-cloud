@@ -228,17 +228,24 @@ async def test_lookup_invalid_unit_type_raises(db_session):
 
 @pytest.mark.asyncio
 async def test_compute_cost_usd_per_million_tokens(db_session):
-    """1M tokens at $3/1M → $3.00; 100k tokens → $0.30."""
+    """1M tokens at $3/1M → $3.00; 100k tokens → $0.30.
+
+    Uses ``effective_from=2026-04-27`` (one day before the seed
+    migration's ``2026-04-28`` row) so the INSERT does not collide
+    with the seeded ``(anthropic, claude-sonnet-4-6, input_tokens,
+    2026-04-28)`` row on ``uq_llm_pricing_lookup_key`` when the
+    integration suite runs ``test_alembic_migrations`` before this
+    test. The lookup math is unchanged because ``$3/1M`` matches
+    the seeded rate; whichever row the temporal selector picks
+    produces the same expected cost.
+    """
+    insert_effective = datetime(2026, 4, 27)
     db_session.add(
         _make_row(
             provider="anthropic",
             model="claude-sonnet-4-6",
             unit_type="input_tokens",
-            effective_from=datetime(
-                2026,
-                4,
-                28,
-            ),
+            effective_from=insert_effective,
             price_per_unit="3.00",
         )
     )
@@ -249,11 +256,7 @@ async def test_compute_cost_usd_per_million_tokens(db_session):
         provider="anthropic",
         model="claude-sonnet-4-6",
         unit_type="input_tokens",
-        started_at=datetime(
-            2026,
-            4,
-            28,
-        ),
+        started_at=insert_effective,
         units=100_000,
     )
     assert cost is not None
@@ -264,11 +267,7 @@ async def test_compute_cost_usd_per_million_tokens(db_session):
         provider="anthropic",
         model="claude-sonnet-4-6",
         unit_type="input_tokens",
-        started_at=datetime(
-            2026,
-            4,
-            28,
-        ),
+        started_at=insert_effective,
         units=1_000_000,
     )
     assert cost_full == pytest.approx(3.00)
@@ -388,13 +387,19 @@ async def test_check_constraint_negative_price(db_session):
 
 @pytest.mark.asyncio
 async def test_check_constraint_zero_unit_denominator(db_session):
-    """DB CHECK rejects unit_denominator=0 (would produce divide-by-zero in cost math)."""
+    """DB CHECK rejects unit_denominator=0 (would produce divide-by-zero in cost math).
+
+    Uses ``effective_from=2026-04-27`` (off the seed migration's
+    ``2026-04-28`` row) so the IntegrityError raised on flush is the
+    expected ``unit_denominator=0`` CHECK violation, not a coincidental
+    ``uq_llm_pricing_lookup_key`` UNIQUE violation against the seed.
+    """
     db_session.add(
         LLMPricing(
             provider="anthropic",
             model="claude-sonnet-4-6",
             unit_type="input_tokens",
-            effective_from=datetime(2026, 4, 28),
+            effective_from=datetime(2026, 4, 27),
             price_per_unit="3.00",
             unit_denominator=0,
         )

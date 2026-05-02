@@ -5,6 +5,7 @@ Issue #48 - Usage Statistics - Plan Limits & Usage Tracking
 """
 
 from datetime import timedelta
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -73,6 +74,28 @@ class PlanLimits(BaseModel):
     public_calls_per_week: int = Field(default=0, description="Public REST API weekly limit")
 
 
+class AnalysisUsage(BaseModel):
+    """Memory broadlistening daily quota usage (Issue #496).
+
+    Mirrors the response detail shape of the 429 quota-exceeded body
+    so the dashboard, the new-analysis modal (#497), and the gate
+    rejection all read the same field names.
+    """
+
+    used_today: int = Field(0, description="Analyses started today (all statuses count)")
+    limit_today: int = Field(0, description="Plan + addon daily limit")
+    addon_bonus: int = Field(0, description="Addon-supplied bonus (extra_analysis_runs)")
+    remaining_today: int = Field(0, description="max(0, limit_today - used_today)")
+    resets_at: str = Field(
+        ...,
+        description=(
+            "ISO-8601 timestamp of the next reset, in the caller's timezone "
+            "(midnight of the next day). Always populated — the builder "
+            "falls back to UTC when User.timezone is unset."
+        ),
+    )
+
+
 class CurrentUsage(BaseModel):
     """Current usage statistics."""
 
@@ -85,6 +108,13 @@ class CurrentUsage(BaseModel):
     rest_calls_this_week: int = Field(0, description="REST API calls this week (non-public)")
     public_calls_today: int = Field(0, description="Public REST API calls today")
     public_calls_this_week: int = Field(0, description="Public REST API calls this week")
+    analysis: AnalysisUsage | None = Field(
+        None,
+        description=(
+            "Memory broadlistening daily quota stats (Issue #496). "
+            "NULL when the caller has no current workspace selected."
+        ),
+    )
 
 
 class UsageStatus(BaseModel):
@@ -175,6 +205,64 @@ def calculate_usage_status(current: int | float, limit: int | float) -> UsageSta
 # ============================================================================
 # Endpoints
 # ============================================================================
+
+
+async def _build_analysis_usage(
+    db: AsyncSession,
+    user_id: str,
+    workspace_id: UUID | None,
+) -> "AnalysisUsage | None":
+    """Build the ``analysis`` field of /usage/current (Issue #496).
+
+    Returns None when no workspace is selected (analysis is workspace-
+    scoped). Delegates the count + tz-window math to
+    ``query_service.get_today_analysis_count`` so the gate and the
+    dashboard share one source of truth.
+    """
+    if not workspace_id:
+        return None
+
+    from models.auth import User, Workspace
+    from services.analysis import query_service
+    from services.analysis.query_service import day_window_utc
+    from services.effective_quota_service import EffectiveQuotaService
+
+    tz_name = (
+        await db.execute(select(User.timezone).where(User.user_id == user_id))
+    ).scalar_one_or_none() or "UTC"
+
+    used_today = await query_service.get_today_analysis_count(
+        db, workspace_id=workspace_id, user_timezone=tz_name
+    )
+    effective = await EffectiveQuotaService(db).get_effective_quotas(workspace_id)
+    limit_today = int(effective.get("analysis_runs_per_day", 0) or 0)
+    addon_bonus = int(
+        (
+            await db.execute(
+                select(Workspace.addon_analysis_bonus).where(Workspace.id == workspace_id)
+            )
+        ).scalar_one_or_none()
+        or 0
+    )
+
+    # Format ``resets_at`` in caller's tz so the dashboard's display
+    # matches the 429 body format (caller's local midnight).
+    from zoneinfo import ZoneInfo
+
+    _, day_end_utc = day_window_utc(tz_name)
+    try:
+        client_tz = ZoneInfo(tz_name)
+    except Exception:
+        client_tz = ZoneInfo("UTC")
+    resets_at = day_end_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(client_tz).isoformat()
+
+    return AnalysisUsage(
+        used_today=used_today,
+        limit_today=limit_today,
+        addon_bonus=addon_bonus,
+        remaining_today=max(0, limit_today - used_today),
+        resets_at=resets_at,
+    )
 
 
 @router.get("/current", response_model=UsageCurrentResponse)
@@ -303,6 +391,8 @@ async def get_current_usage(
         )
         rest_calls_week = rest_week_result.scalar() or 0
 
+        analysis_usage = await _build_analysis_usage(db, user_id, current_workspace_id)
+
         # Build response
         response = UsageCurrentResponse(
             plan=PlanLimits(
@@ -321,6 +411,7 @@ async def get_current_usage(
                 rest_calls_this_week=rest_calls_week,
                 public_calls_today=public_calls_today,
                 public_calls_this_week=public_calls_week,
+                analysis=analysis_usage,
             ),
             memory_usage=calculate_usage_status(memory_count, plan.memory_limit),
             daily_api_usage=calculate_usage_status(api_calls_today, plan.daily_api_limit),

@@ -48,7 +48,12 @@ from services.context_service import ContextService
 from services.embedding_service import EmbeddingService
 from services.search_service import SearchService
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import MemoryGoneError, NotFoundException, QuotaExceededError
+from utils.exceptions import (
+    MemoryGoneError,
+    NotFoundException,
+    QuotaExceededError,
+    ValidationError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -1140,10 +1145,76 @@ class MemoryService:
         if context_ids:
             search_context_id = [str(cid) for cid in context_ids]
 
+        # Issue #496: ``analysis_cluster`` filter pre-resolves the cluster's
+        # memory_ids so we can both (a) short-circuit empty clusters before
+        # paying for the embedding+search round-trip and (b) expand the
+        # candidate pool to cover the whole cluster — without this, a small
+        # cluster may end up with zero overlap with Qdrant's top-N candidates.
+        # The actual ``Memory.id IN ...`` filter is applied at the PG SELECT
+        # below alongside the existing source_uri_prefix / source_type
+        # post-filters; rerank / hybrid scoring see only cluster members.
+        cluster_memory_ids: list[UUID] | None = None
+        if request.filters and (cluster_filter := request.filters.get("analysis_cluster")):
+            from services.analysis import query_service as _analysis_query_service
+
+            # Issue #496 Copilot review fix: guard against non-dict shape so a
+            # client sending ``analysis_cluster: "abc"`` (string) or a list
+            # surfaces as a clean 422 ``ValidationError`` instead of an
+            # internal 500 ``AttributeError`` on ``.get(...)``.
+            #
+            # ``ValidationError`` (a ``MemoryCloudException`` subclass) is the
+            # right exception type — plain ``ValueError`` is NOT caught by
+            # the global ``memory_cloud_exception_handler``, so the recall
+            # route would 500 instead of returning 422 with the structured
+            # ``{error, message, details}`` envelope. Caught by Copilot
+            # review (loop 5).
+            if not isinstance(cluster_filter, dict):
+                raise ValidationError(
+                    "filters.analysis_cluster must be an object with run_id + cluster_index",
+                    field="filters.analysis_cluster",
+                )
+            run_id_raw = cluster_filter.get("run_id")
+            cluster_index_raw = cluster_filter.get("cluster_index")
+            if run_id_raw is None or cluster_index_raw is None:
+                raise ValidationError(
+                    "filters.analysis_cluster requires 'run_id' and 'cluster_index'",
+                    field="filters.analysis_cluster",
+                )
+            try:
+                cluster_run_id = UUID(str(run_id_raw))
+                cluster_index_int = int(cluster_index_raw)
+            except (ValueError, TypeError) as e:
+                raise ValidationError(
+                    "filters.analysis_cluster: 'run_id' must be a UUID and "
+                    "'cluster_index' must be an integer",
+                    field="filters.analysis_cluster",
+                ) from e
+            # Issue #496 security fix: pass current_workspace_id so a
+            # stolen ``run_id`` from a foreign workspace returns None
+            # (same shape as cluster-not-found) and the recall short-
+            # circuits to empty results without leaking existence.
+            cluster_memory_ids = await _analysis_query_service.get_memory_ids_in_cluster(
+                self.db,
+                workspace_id=current_workspace_id,
+                run_id=cluster_run_id,
+                cluster_index=cluster_index_int,
+            )
+            if not cluster_memory_ids:
+                # Cluster empty or unknown — return immediately with no candidates.
+                return RecallResponse(
+                    results=[],
+                    explore_hints=[] if request.include_explore_hints else None,
+                )
+
         # 1. Primary Retrieval: Hybrid Search (Semantic + BM25)
         # Fetch more candidates when neural is enabled for better hybrid merge
         # and to feed Hebbian learning with broader co-activation data
         candidates_k = request.k * 4 if neural_enabled else request.k
+        # When ``analysis_cluster`` filter is active, ensure the candidate
+        # pool can hold the whole cluster + a safety buffer so the post-
+        # filter does not starve a small ``k`` request.
+        if cluster_memory_ids is not None:
+            candidates_k = max(candidates_k, len(cluster_memory_ids) + 50)
         search_results = await self.search_service.hybrid_search(
             query=request.query,
             user_id=user_id,
@@ -1177,6 +1248,13 @@ class MemoryService:
                 pg_conditions.append(Memory.source_uri.like(f"{escaped}%", escape="\\"))
             if stype := request.filters.get("source_type"):
                 pg_conditions.append(Memory.source_type == stype)
+        # Issue #496: cluster-scoped recall — restrict to the
+        # cluster's member memories. ``cluster_memory_ids`` was
+        # pre-resolved above and is guaranteed non-empty by the
+        # short-circuit (empty cluster returns early without
+        # reaching this block).
+        if cluster_memory_ids is not None:
+            pg_conditions.append(Memory.id.in_(cluster_memory_ids))
         result = await self.db.execute(select(Memory).where(*pg_conditions))
         memories_list = list(result.scalars().all())
         memories = {str(m.id): m for m in memories_list}
