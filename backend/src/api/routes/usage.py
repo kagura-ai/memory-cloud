@@ -86,11 +86,12 @@ class AnalysisUsage(BaseModel):
     limit_today: int = Field(0, description="Plan + addon daily limit")
     addon_bonus: int = Field(0, description="Addon-supplied bonus (extra_analysis_runs)")
     remaining_today: int = Field(0, description="max(0, limit_today - used_today)")
-    resets_at: str | None = Field(
-        None,
+    resets_at: str = Field(
+        ...,
         description=(
             "ISO-8601 timestamp of the next reset, in the caller's timezone "
-            "(midnight of the next day). NULL only if the user has no timezone set."
+            "(midnight of the next day). Always populated — the builder "
+            "falls back to UTC when User.timezone is unset."
         ),
     )
 

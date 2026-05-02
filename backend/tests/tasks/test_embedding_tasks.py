@@ -110,22 +110,45 @@ class TestSweepPendingEmbeddings:
 
     @pytest.mark.asyncio
     async def test_exception_during_single_embedding_is_logged(self):
-        """One failing process_pending_embedding must not abort the rest."""
+        """One failing process_pending_embedding must not abort the rest.
+
+        Asserts the iteration *actually* keeps going past the first
+        failure: if the loop short-circuits on exception, ``call_count``
+        would be 1 (only the failed first id ever attempted) and the
+        test would silently pass without this assertion. Pin
+        ``call_count == len(ids)`` and explicit verification that the
+        second id was attempted, so a regression that aborts the sweep
+        on first error fails loud.
+        """
         ids = [uuid4(), uuid4()]
         mock_db = MagicMock()
         mock_result = MagicMock()
         mock_result.all.return_value = [(i,) for i in ids]
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        async def flaky_process(mid):
+        flaky_process = AsyncMock()
+
+        async def flaky_side_effect(mid):
             if mid == ids[0]:
                 raise RuntimeError("embedding failed")
 
+        flaky_process.side_effect = flaky_side_effect
+
         with (
             patch("db.base.get_db", _mock_get_db(mock_db)),
-            patch("services.memory_service.process_pending_embedding", side_effect=flaky_process),
+            patch("services.memory_service.process_pending_embedding", flaky_process),
         ):
             await sweep_pending_embeddings()
 
-        # Both should have been attempted
-        # (the second continues despite first failure)
+        # Both should have been attempted (the second continues despite
+        # first failure). Without these asserts the test silently passes
+        # even if the sweep aborts on first exception.
+        assert flaky_process.call_count == len(ids), (
+            f"Expected {len(ids)} attempts (one per id) but only "
+            f"{flaky_process.call_count} happened — sweep aborted early."
+        )
+        attempted_ids = {call.args[0] for call in flaky_process.call_args_list}
+        assert ids[1] in attempted_ids, (
+            "Second id was not attempted after first id raised — sweep "
+            "failed to recover and continue iteration."
+        )
