@@ -157,8 +157,11 @@ async def _make_memory(db_session, *, workspace_id: UUID, context_id: UUID) -> M
         context_id=context_id,
         user_id="test_user",
         summary="test memory summary",
+        content="test memory content",
+        type="note",
         importance=0.5,
         tags=["t1"],
+        client="test",
     )
     db_session.add(mem)
     await db_session.flush()
