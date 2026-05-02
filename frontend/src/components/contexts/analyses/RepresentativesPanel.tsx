@@ -149,8 +149,11 @@ export function RepresentativesPanel({
                     {rep.summary}
                   </div>
                   <div className="mt-0.5 font-mono text-xs text-gray-400">
-                    {rep.memory_id.slice(0, 8)} · {rep.type} · importance{" "}
-                    {rep.importance.toFixed(2)}
+                    {t("metaLine", {
+                      idShort: rep.memory_id.slice(0, 8),
+                      type: rep.type,
+                      importance: rep.importance.toFixed(2),
+                    })}
                   </div>
                 </div>
               </li>

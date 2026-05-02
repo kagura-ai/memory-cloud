@@ -122,9 +122,11 @@ export interface AnalysisPositionListResponse {
  * The backend accepts the same shape for both (intentional — the modal
  * submits one body twice: once to preview, once to confirm).
  *
- * ``from`` / ``to`` are ISO-8601 strings. Use ``toUtcIso`` from
- * ``lib/utils/datetime`` to normalize ``Date`` instances before
- * passing.
+ * ``from`` / ``to`` are ISO-8601 date strings (YYYY-MM-DD form for
+ * `<input type="date">`, or full datetime). Use ``formatLocalDate``
+ * from ``lib/utils/datetime`` to derive the date from a ``Date``
+ * instance without UTC-shifting (the cost dashboard uses the same
+ * helper).
  */
 export interface AnalysisFilters {
   from?: string;

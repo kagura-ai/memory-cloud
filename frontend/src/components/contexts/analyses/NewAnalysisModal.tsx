@@ -48,6 +48,7 @@ import {
   type AnalysisFilters,
   type AnalysisPreviewResponse,
 } from "@/lib/api/analyses";
+import { formatLocalDate } from "@/lib/utils/datetime";
 import { formatCostCents } from "./analysisFormatters";
 
 interface NewAnalysisModalProps {
@@ -67,14 +68,18 @@ const DEFAULT_TYPES = [
   "learning",
 ] as const;
 
+// ``toISOString().slice(0, 10)`` shifts the date for users east/west
+// of UTC (e.g. JST users at 23:30 see "tomorrow"). ``formatLocalDate``
+// uses local-tz components — the same helper the cost dashboard uses
+// for ``<input type="date">`` defaults (#473 / PR #527 convention).
 function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  return formatLocalDate(new Date());
 }
 
 function isoDaysAgo(n: number): string {
   const d = new Date();
   d.setDate(d.getDate() - n);
-  return d.toISOString().slice(0, 10);
+  return formatLocalDate(d);
 }
 
 export function NewAnalysisModal({

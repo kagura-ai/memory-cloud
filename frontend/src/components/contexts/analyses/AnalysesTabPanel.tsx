@@ -403,11 +403,13 @@ export function AnalysesTabPanel({
           value={
             state.clusters.length === 0
               ? t("kpi.qualityNoData")
-              : `conf ${formatConfidence(
-                  state.clusters
-                    .map((c) => c.label_confidence)
-                    .reduce((acc, n) => acc + n, 0) / state.clusters.length,
-                )}`
+              : t("kpi.qualityValue", {
+                  value: formatConfidence(
+                    state.clusters
+                      .map((c) => c.label_confidence)
+                      .reduce((acc, n) => acc + n, 0) / state.clusters.length,
+                  ),
+                })
           }
           tone={state.clusters.length === 0 ? "muted" : "secondary"}
         />

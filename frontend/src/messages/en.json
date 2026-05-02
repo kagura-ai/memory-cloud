@@ -3085,6 +3085,7 @@
       "memoriesSurveyed": "Memories surveyed",
       "runCost": "Run cost",
       "quality": "Quality",
+      "qualityValue": "conf {value}",
       "neverRun": "Never run",
       "qualityNoData": "no data yet"
     },
@@ -3115,7 +3116,8 @@
       "loading": "Loading representatives…",
       "empty": "No representative memories for this cluster.",
       "emptyAfterLoad": "All representative memories were removed since this run completed.",
-      "emptyNoFocus": "Click a cluster to see its representative memories."
+      "emptyNoFocus": "Click a cluster to see its representative memories.",
+      "metaLine": "{idShort} · {type} · importance {importance}"
     },
     "propertyStats": {
       "title": "Properties",

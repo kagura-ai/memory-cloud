@@ -3085,6 +3085,7 @@
       "memoriesSurveyed": "対象 memory 数",
       "runCost": "コスト",
       "quality": "品質",
+      "qualityValue": "conf {value}",
       "neverRun": "未実行",
       "qualityNoData": "データなし"
     },
@@ -3115,7 +3116,8 @@
       "loading": "代表 memory を読み込み中…",
       "empty": "このクラスタには代表 memory がありません。",
       "emptyAfterLoad": "代表 memory はこの run の完了後に全て削除されています。",
-      "emptyNoFocus": "クラスタをクリックして代表 memory を表示。"
+      "emptyNoFocus": "クラスタをクリックして代表 memory を表示。",
+      "metaLine": "{idShort} · {type} · importance {importance}"
     },
     "propertyStats": {
       "title": "Properties",

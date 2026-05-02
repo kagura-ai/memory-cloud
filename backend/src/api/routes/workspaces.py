@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.analysis_gates import check_workspace_in_allowlist
+from auth.analysis_allowlist import check_workspace_in_allowlist
 from auth.dependencies import get_current_user
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
