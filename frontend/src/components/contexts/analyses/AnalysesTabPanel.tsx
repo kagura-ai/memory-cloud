@@ -251,6 +251,7 @@ export function AnalysesTabPanel({
     onTerminal: () => {
       bootstrap();
     },
+    fallbackErrorMessage: t("running.errorFallback"),
   });
 
   const handleCancelRun = useCallback(async () => {

@@ -31,6 +31,12 @@ interface UseActiveAnalysisPollingArgs {
    * Receives the final run row.
    */
   onTerminal?: (finalRun: AnalysisRunRow) => void;
+  /**
+   * User-facing fallback message when ``getAnalysisRun`` rejects with
+   * a non-Error (no ``.message``). Caller passes the translated string
+   * so the hook stays free of next-intl coupling.
+   */
+  fallbackErrorMessage?: string;
 }
 
 interface UseActiveAnalysisPollingResult {
@@ -49,7 +55,7 @@ interface UseActiveAnalysisPollingResult {
 export function useActiveAnalysisPolling(
   args: UseActiveAnalysisPollingArgs,
 ): UseActiveAnalysisPollingResult {
-  const { contextId, runId, onTerminal } = args;
+  const { contextId, runId, onTerminal, fallbackErrorMessage } = args;
 
   const [run, setRun] = useState<AnalysisRunRow | null>(null);
   const [loading, setLoading] = useState(false);
@@ -97,11 +103,15 @@ export function useActiveAnalysisPolling(
         onTerminalRef.current?.(row);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load run.");
+      setError(
+        err instanceof Error
+          ? err.message
+          : (fallbackErrorMessage ?? "Failed to load run."),
+      );
     } finally {
       setLoading(false);
     }
-  }, [contextId, runId]);
+  }, [contextId, runId, fallbackErrorMessage]);
 
   // Reset state on (contextId, runId) change so a stale "succeeded"
   // run does not flash while the new one's first poll is in flight.

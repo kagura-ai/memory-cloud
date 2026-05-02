@@ -3179,7 +3179,8 @@
     "running": {
       "title": "Run in progress",
       "startedAt": "Started {when} — clustering and labeling memories…",
-      "cancel": "Cancel run"
+      "cancel": "Cancel run",
+      "errorFallback": "Failed to load run."
     },
     "states": {
       "loading": "Loading analyses…",
