@@ -164,7 +164,6 @@ export function AnalysesTabPanel({
       }
 
       if (activeRun) {
-        setActiveRunId(activeRun.run_id);
         const [clusterRes, positionRes] = await Promise.all([
           listRunClusters(contextId, activeRun.run_id),
           listRunPositions(contextId, activeRun.run_id),
@@ -175,6 +174,16 @@ export function AnalysesTabPanel({
 
       const historyRes = await historyPromise;
       history = historyRes.items;
+      // ``getActiveAnalysis`` only returns the most-recent SUCCEEDED
+      // run, so a run still in flight (e.g. started from another
+      // session, or the page was refreshed mid-run) would otherwise
+      // be invisible to the polling hook. Scan the history page for a
+      // running row and prefer it as the polling target so the banner
+      // + Cancel button surface even after a refresh. The succeeded
+      // run from ``activeRun`` continues to drive the scatter view
+      // (clusters / positions).
+      const inFlight = history.find((r) => r.status === "running") ?? null;
+      setActiveRunId(inFlight?.run_id ?? activeRun?.run_id ?? null);
       if (historyAllowlistDenied && !activeRun) {
         // Allowlist denied AND no active run — render the friendly
         // notEnabled empty state. (When activeRun exists from a cached

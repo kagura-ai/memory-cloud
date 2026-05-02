@@ -29,10 +29,11 @@ interface AnalysisHistoryProps {
   activeRunId: string | null;
 }
 
-function statusLabel(run: AnalysisRunRow): string {
-  if (run.cancellation_reason) return `cancelled · ${run.cancellation_reason}`;
-  return run.status;
-}
+// Translatable status labels — keyed by the canonical
+// ``ANALYSIS_STATUSES`` enum from ``lib/api/analyses``. Anything
+// outside the enum (e.g. a future ``timeout`` taxonomy) falls back
+// to the ``unknown`` key with the raw status interpolated.
+const KNOWN_STATUSES = new Set(["running", "succeeded", "failed", "cancelled"]);
 
 export function AnalysisHistory({
   runs,
@@ -87,7 +88,18 @@ export function AnalysisHistory({
                   {formatLocalDate(new Date(run.started_at))}
                 </TableCell>
                 <TableCell className="text-xs text-gray-600 dark:text-gray-400">
-                  {statusLabel(run)}
+                  {run.status === "cancelled"
+                    ? t("status.cancelled", {
+                        reason: run.cancellation_reason ?? "",
+                      })
+                    : KNOWN_STATUSES.has(run.status)
+                      ? t(
+                          `status.${run.status}` as
+                            | "status.running"
+                            | "status.succeeded"
+                            | "status.failed",
+                        )
+                      : t("status.unknown", { raw: run.status })}
                 </TableCell>
                 <TableCell className="text-right font-medium">
                   {run.input_count.toLocaleString()}

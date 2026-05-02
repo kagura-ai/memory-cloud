@@ -48,20 +48,21 @@ function aggregateStats(
     .slice(0, 8)
     .map(([tag, count]) => ({ tag, count }));
 
+  // Aggregate types by summing the underlying COUNTS, not the per-
+  // cluster ratios — ratio-of-ratios would weight a 5-memory cluster
+  // and a 500-memory cluster equally, distorting the all-clusters
+  // view. Ratios for the bar widths are computed at render time
+  // from the summed counts (see render block below).
   const typeSums = new Map<string, number>();
   for (const blob of blobs) {
     for (const ty of blob.typeDistribution) {
-      typeSums.set(ty.type, (typeSums.get(ty.type) ?? 0) + ty.ratio);
+      typeSums.set(ty.type, (typeSums.get(ty.type) ?? 0) + ty.count);
     }
   }
-  const typeTotal = [...typeSums.values()].reduce((a, b) => a + b, 0);
-  const typeDistribution =
-    typeTotal === 0
-      ? []
-      : [...typeSums.entries()]
-          .sort(([, a], [, b]) => b - a)
-          .slice(0, 6)
-          .map(([type, sum]) => ({ type, ratio: sum / typeTotal }));
+  const typeDistribution = [...typeSums.entries()]
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 6)
+    .map(([type, count]) => ({ type, count }));
 
   const bucketLen = blobs[0].importanceBuckets.length;
   const importanceBuckets =
@@ -179,31 +180,49 @@ export function PropertyStats({
         {(stats.typeDistribution.length > 0 ||
           stats.importanceBuckets.length > 0) && (
           <div>
-            {stats.typeDistribution.length > 0 && (
-              <>
-                <div className="mb-2 text-xs text-gray-500 dark:text-gray-400">
-                  {t("byType")}
-                </div>
-                <div className="space-y-1.5">
-                  {stats.typeDistribution.map((row) => (
-                    <div key={row.type} className="flex items-center gap-2">
-                      <div className="w-24 truncate text-xs text-gray-700 dark:text-gray-300">
-                        {row.type}
-                      </div>
-                      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-gray-100 dark:bg-gray-800">
-                        <div
-                          className="h-full bg-gray-700 dark:bg-gray-300"
-                          style={{ width: `${row.ratio * 100}%` }}
-                        />
-                      </div>
-                      <div className="w-8 text-right font-mono text-xs text-gray-500 dark:text-gray-400">
-                        {Math.round(row.ratio * 100)}%
-                      </div>
+            {stats.typeDistribution.length > 0 &&
+              (() => {
+                // Compute ratios from the summed counts at the render
+                // boundary so the per-cluster + all-clusters views
+                // share the same denominator math (see aggregateStats
+                // for why counts are carried instead of ratios).
+                const typeTotal = stats.typeDistribution.reduce(
+                  (acc, r) => acc + r.count,
+                  0,
+                );
+                if (typeTotal === 0) return null;
+                return (
+                  <>
+                    <div className="mb-2 text-xs text-gray-500 dark:text-gray-400">
+                      {t("byType")}
                     </div>
-                  ))}
-                </div>
-              </>
-            )}
+                    <div className="space-y-1.5">
+                      {stats.typeDistribution.map((row) => {
+                        const ratio = row.count / typeTotal;
+                        return (
+                          <div
+                            key={row.type}
+                            className="flex items-center gap-2"
+                          >
+                            <div className="w-24 truncate text-xs text-gray-700 dark:text-gray-300">
+                              {row.type}
+                            </div>
+                            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-gray-100 dark:bg-gray-800">
+                              <div
+                                className="h-full bg-gray-700 dark:bg-gray-300"
+                                style={{ width: `${ratio * 100}%` }}
+                              />
+                            </div>
+                            <div className="w-8 text-right font-mono text-xs text-gray-500 dark:text-gray-400">
+                              {Math.round(ratio * 100)}%
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                );
+              })()}
 
             {stats.importanceBuckets.length > 0 && (
               <>

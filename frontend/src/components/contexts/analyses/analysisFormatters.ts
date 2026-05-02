@@ -62,7 +62,14 @@ export function classifyQuality(
  */
 export interface NormalizedPropertyStats {
   topTags: Array<{ tag: string; count: number }>;
-  typeDistribution: Array<{ type: string; ratio: number }>;
+  /**
+   * Per-type counts. Ratios are computed at render time from the
+   * (possibly aggregated across clusters) counts so the per-cluster
+   * vs all-clusters views can share the same denominator math —
+   * carrying ratios at the per-cluster layer would size-weight
+   * incorrectly when summing across clusters of different sizes.
+   */
+  typeDistribution: Array<{ type: string; count: number }>;
   importanceBuckets: number[];
   timeSeries: Array<{ bucket: string; count: number }>;
 }
@@ -132,13 +139,10 @@ export function normalizePropertyStats(
     const entries = Object.entries(typesRaw as Record<string, unknown>).filter(
       ([, count]) => typeof count === "number" && (count as number) >= 0,
     ) as Array<[string, number]>;
-    const total = entries.reduce((acc, [, c]) => acc + c, 0);
-    if (total > 0) {
-      typeDistribution = entries
-        .sort(([, a], [, b]) => b - a)
-        .slice(0, 6)
-        .map(([type, count]) => ({ type, ratio: count / total }));
-    }
+    typeDistribution = entries
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 6)
+      .map(([type, count]) => ({ type, count }));
   }
 
   const importanceRaw = raw.importance;

@@ -3138,7 +3138,14 @@
       "headerMemories": "Memories",
       "headerCost": "Cost",
       "noRunsTitle": "No runs yet",
-      "noRunsDescription": "Run your first analysis to populate the history."
+      "noRunsDescription": "Run your first analysis to populate the history.",
+      "status": {
+        "running": "running",
+        "succeeded": "succeeded",
+        "failed": "failed",
+        "cancelled": "cancelled · {reason}",
+        "unknown": "{raw}"
+      }
     },
     "modal": {
       "title": "Analysis",
@@ -3165,7 +3172,9 @@
       "submit": "Run analysis",
       "submitting": "Starting run…",
       "errorLoadingPreview": "Could not estimate cost — check connection and try again.",
-      "errorStarting": "Could not start the run — see details below."
+      "errorStarting": "Could not start the run — see details below.",
+      "errorPreviewFallback": "preview failed",
+      "errorStartFallback": "start failed"
     },
     "running": {
       "title": "Run in progress",

@@ -139,7 +139,7 @@ export function NewAnalysisModal({
             ? err.message
             : err instanceof Error
               ? err.message
-              : "preview failed",
+              : t("errorPreviewFallback"),
         );
       } finally {
         if (!cancelled) setPreviewLoading(false);
@@ -171,7 +171,7 @@ export function NewAnalysisModal({
           ? err.message
           : err instanceof Error
             ? err.message
-            : "start failed",
+            : t("errorStartFallback"),
       );
     } finally {
       setSubmitting(false);

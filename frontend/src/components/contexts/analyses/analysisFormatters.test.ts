@@ -103,14 +103,14 @@ describe("normalizePropertyStats", () => {
       { tag: "kouchou-ai", count: 38 },
       { tag: "design", count: 12 },
     ]);
-    // dict-of-counts → list-of-ratios sorted by count desc, normalized so sum=1
-    expect(out.typeDistribution.map((r) => r.type)).toEqual([
-      "feature-design",
-      "decision",
-      "pattern",
+    // dict-of-counts → list-of-counts sorted by count desc; ratios
+    // are computed at render time from the summed counts so the
+    // per-cluster + all-clusters aggregations share denominator math.
+    expect(out.typeDistribution).toEqual([
+      { type: "feature-design", count: 71 },
+      { type: "decision", count: 18 },
+      { type: "pattern", count: 11 },
     ]);
-    expect(out.typeDistribution[0].ratio).toBeCloseTo(71 / 100, 6);
-    expect(out.typeDistribution[1].ratio).toBeCloseTo(18 / 100, 6);
     expect(out.importanceBuckets).toEqual([3, 5, 8, 7]);
     // time bucket: keep ``start`` as the rendered label for the bar chart
     expect(out.timeSeries).toEqual([
@@ -145,8 +145,8 @@ describe("normalizePropertyStats", () => {
       { tag: "kouchou-ai", count: 38 },
       { tag: "design", count: 12 },
     ]);
-    // Only ``pattern`` remained valid → 100% of the distribution.
-    expect(out.typeDistribution).toEqual([{ type: "pattern", ratio: 1 }]);
+    // Only ``pattern`` remained valid (string ``not-a-number`` filtered out).
+    expect(out.typeDistribution).toEqual([{ type: "pattern", count: 5 }]);
     expect(out.importanceBuckets).toEqual([]);
     expect(out.timeSeries).toHaveLength(2);
   });

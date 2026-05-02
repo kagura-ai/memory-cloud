@@ -3138,7 +3138,14 @@
       "headerMemories": "Memories",
       "headerCost": "Cost",
       "noRunsTitle": "まだ run がありません",
-      "noRunsDescription": "最初の分析を実行すると履歴がここに表示されます。"
+      "noRunsDescription": "最初の分析を実行すると履歴がここに表示されます。",
+      "status": {
+        "running": "実行中",
+        "succeeded": "成功",
+        "failed": "失敗",
+        "cancelled": "キャンセル · {reason}",
+        "unknown": "{raw}"
+      }
     },
     "modal": {
       "title": "分析を実行",
@@ -3165,7 +3172,9 @@
       "submit": "分析を実行",
       "submitting": "Run を起動中…",
       "errorLoadingPreview": "コスト推定に失敗しました — 接続を確認して再試行してください。",
-      "errorStarting": "Run の起動に失敗しました — 詳細は下記を確認してください。"
+      "errorStarting": "Run の起動に失敗しました — 詳細は下記を確認してください。",
+      "errorPreviewFallback": "preview に失敗しました",
+      "errorStartFallback": "起動に失敗しました"
     },
     "running": {
       "title": "Run 実行中",
