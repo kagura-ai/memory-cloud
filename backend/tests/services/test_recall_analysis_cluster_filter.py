@@ -15,8 +15,11 @@ Behavior under test:
   and the PG SELECT step adds a ``Memory.id IN (cluster_member_ids)``
   predicate. The hybrid_search ranking still applies, but only over
   cluster members.
-- Invalid filter shape → ``ValueError`` (mapped to 422 at the API layer
-  by the existing validation middleware).
+- Invalid filter shape → ``ValidationError`` (a ``MemoryCloudException``
+  subclass — the global ``memory_cloud_exception_handler`` maps it to a
+  proper 422 with the structured ``{error, message, details}`` envelope.
+  Plain ``ValueError`` would 500 because the global handler doesn't
+  match it — caught by Copilot review loop 5).
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from models.schemas import RecallRequest
+from utils.exceptions import ValidationError
 
 
 @pytest.fixture
@@ -132,7 +136,7 @@ async def test_analysis_cluster_filter_expands_candidates_k(fake_run_id, cluster
 
 @pytest.mark.asyncio
 async def test_analysis_cluster_filter_invalid_run_id_raises():
-    """``run_id`` not a UUID → ValueError."""
+    """``run_id`` not a UUID → ``ValidationError`` (mapped to 422 by global handler)."""
     svc, _db = _make_service()
     request = RecallRequest(
         query="test",
@@ -140,7 +144,7 @@ async def test_analysis_cluster_filter_invalid_run_id_raises():
         filters={"analysis_cluster": {"run_id": "not-a-uuid", "cluster_index": 3}},
     )
 
-    with pytest.raises(ValueError, match="run_id"):
+    with pytest.raises(ValidationError, match="run_id"):
         await svc.recall(
             request=request,
             user_id="test_user",
@@ -151,7 +155,7 @@ async def test_analysis_cluster_filter_invalid_run_id_raises():
 
 @pytest.mark.asyncio
 async def test_analysis_cluster_filter_missing_cluster_index_raises(fake_run_id):
-    """``cluster_index`` missing → ValueError."""
+    """``cluster_index`` missing → ``ValidationError`` (mapped to 422 by global handler)."""
     svc, _db = _make_service()
     request = RecallRequest(
         query="test",
@@ -159,10 +163,44 @@ async def test_analysis_cluster_filter_missing_cluster_index_raises(fake_run_id)
         filters={"analysis_cluster": {"run_id": str(fake_run_id)}},
     )
 
-    with pytest.raises(ValueError, match="cluster_index"):
+    with pytest.raises(ValidationError, match="cluster_index"):
         await svc.recall(
             request=request,
             user_id="test_user",
             current_context_id=uuid4(),
             current_workspace_id=uuid4(),
         )
+
+
+@pytest.mark.asyncio
+async def test_analysis_cluster_filter_validation_error_maps_to_422(fake_run_id):
+    """Regression: the validation exception MUST be ``ValidationError`` (a
+    ``MemoryCloudException`` subclass with ``status_code=422``) so the
+    global ``memory_cloud_exception_handler`` returns a clean 422.
+    Plain ``ValueError`` would 500 because the handler only catches
+    ``MemoryCloudException``. Caught by Copilot review loop 5.
+    """
+    svc, _db = _make_service()
+    request = RecallRequest(
+        query="test",
+        k=5,
+        filters={"analysis_cluster": "not-a-dict"},  # invalid shape — string instead of object
+    )
+
+    try:
+        await svc.recall(
+            request=request,
+            user_id="test_user",
+            current_context_id=uuid4(),
+            current_workspace_id=uuid4(),
+        )
+    except ValidationError as exc:
+        assert exc.status_code == 422
+        assert exc.error_code == "VAL-001"
+        assert "filters.analysis_cluster" in exc.details.get("field", "")
+    except Exception as exc:  # noqa: BLE001
+        raise AssertionError(
+            f"Expected ValidationError (→ 422), got {type(exc).__name__}: {exc}"
+        ) from exc
+    else:
+        raise AssertionError("Expected ValidationError, but recall() did not raise")

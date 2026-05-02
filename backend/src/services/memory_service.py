@@ -48,7 +48,12 @@ from services.context_service import ContextService
 from services.embedding_service import EmbeddingService
 from services.search_service import SearchService
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import MemoryGoneError, NotFoundException, QuotaExceededError
+from utils.exceptions import (
+    MemoryGoneError,
+    NotFoundException,
+    QuotaExceededError,
+    ValidationError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -1154,23 +1159,35 @@ class MemoryService:
 
             # Issue #496 Copilot review fix: guard against non-dict shape so a
             # client sending ``analysis_cluster: "abc"`` (string) or a list
-            # surfaces as a clean 422 ValidationError instead of an internal
-            # 500 AttributeError on ``.get(...)``.
+            # surfaces as a clean 422 ``ValidationError`` instead of an
+            # internal 500 ``AttributeError`` on ``.get(...)``.
+            #
+            # ``ValidationError`` (a ``MemoryCloudException`` subclass) is the
+            # right exception type — plain ``ValueError`` is NOT caught by
+            # the global ``memory_cloud_exception_handler``, so the recall
+            # route would 500 instead of returning 422 with the structured
+            # ``{error, message, details}`` envelope. Caught by Copilot
+            # review (loop 5).
             if not isinstance(cluster_filter, dict):
-                raise ValueError(
-                    "filters.analysis_cluster must be an object with run_id + cluster_index"
+                raise ValidationError(
+                    "filters.analysis_cluster must be an object with run_id + cluster_index",
+                    field="filters.analysis_cluster",
                 )
             run_id_raw = cluster_filter.get("run_id")
             cluster_index_raw = cluster_filter.get("cluster_index")
             if run_id_raw is None or cluster_index_raw is None:
-                raise ValueError("filters.analysis_cluster requires 'run_id' and 'cluster_index'")
+                raise ValidationError(
+                    "filters.analysis_cluster requires 'run_id' and 'cluster_index'",
+                    field="filters.analysis_cluster",
+                )
             try:
                 cluster_run_id = UUID(str(run_id_raw))
                 cluster_index_int = int(cluster_index_raw)
             except (ValueError, TypeError) as e:
-                raise ValueError(
+                raise ValidationError(
                     "filters.analysis_cluster: 'run_id' must be a UUID and "
-                    "'cluster_index' must be an integer"
+                    "'cluster_index' must be an integer",
+                    field="filters.analysis_cluster",
                 ) from e
             # Issue #496 security fix: pass current_workspace_id so a
             # stolen ``run_id`` from a foreign workspace returns None
