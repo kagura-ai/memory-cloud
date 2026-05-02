@@ -45,6 +45,12 @@ MEMORY_ANALYSIS_STATUSES: tuple[str, ...] = (
 )
 MEMORY_ANALYSIS_PAID_BY_VALUES: tuple[str, ...] = ("byok", "platform")
 
+# Issue #496: ``cancellation_reason`` enum-style values populated when
+# a run is soft-cancelled. Free-form for v1 (no DB CHECK), but the
+# tuple is the canonical taxonomy so route + MCP code share spelling.
+# Future taxonomy may add ``"timeout" / "admin" / "cost_cap"``.
+MEMORY_ANALYSIS_CANCELLATION_REASONS: tuple[str, ...] = ("user",)
+
 
 def _check_in_sql(column: str, values: tuple[str, ...]) -> str:
     """Render a ``column IN ('a', 'b', ...)`` CHECK clause from a tuple."""
@@ -130,6 +136,11 @@ class MemoryAnalysis(Base):
     quality = Column(JSONB, nullable=True)
     overview = Column(Text, nullable=True)
     error = Column(Text, nullable=True)
+    # Issue #496: human-readable cancellation reason when status='cancelled'.
+    # NULL for non-cancelled runs. Distinct from `error` so a future
+    # taxonomy can branch on (status='cancelled', reason='timeout' / 'admin'
+    # / 'cost_cap' / 'user') without overloading the failure column.
+    cancellation_reason = Column(Text, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
