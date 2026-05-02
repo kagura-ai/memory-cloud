@@ -35,7 +35,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.analysis_gates import AnalysisReadAccess, AnalysisWriteAccess
@@ -117,6 +117,33 @@ class AnalysisPreviewRequest(BaseModel):
     model_id: int | None = None
 
     model_config = {"populate_by_name": True}
+
+    @field_validator("from_dt", "to_dt", mode="after")
+    @classmethod
+    def _validate_iso8601(cls, v: str | None) -> str | None:
+        """Reject non-ISO-8601 ``from``/``to`` strings at the boundary.
+
+        Without this, an invalid datetime string flows through to
+        ``AnalysisOrchestrator.run`` and raises during
+        ``_params_iso_to_naive_utc`` AFTER the ``memory_analyses`` row
+        has already been INSERTed at ``status='running'``. The run
+        would stay stuck in ``running`` (until a manual cancel) AND
+        count toward the daily quota — silent UX failure. Catching at
+        Pydantic boundary returns a clean 422 BEFORE the row is
+        created, so the quota window is preserved. Issue #496 Copilot
+        review.
+        """
+        if v is None:
+            return v
+        try:
+            datetime.fromisoformat(v)
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid ISO-8601 datetime: {v!r}. "
+                "Expected forms: '2026-05-02T00:00:00Z', "
+                "'2026-05-02T09:00:00+09:00', or naive 'YYYY-MM-DDTHH:MM:SS'."
+            ) from e
+        return v
 
 
 class AnalysisPreviewResponse(BaseModel):

@@ -74,6 +74,15 @@ def day_window_utc(user_timezone: str) -> tuple[datetime, datetime]:
     back to UTC, DST transitions stay deterministic, and the
     ``replace(tzinfo=None)`` step that asyncpg requires (#489 wire-format
     convention) is applied in exactly one place.
+
+    DST handling: ``day_end_local`` is computed as ``date + 1 day`` at
+    local midnight, NOT ``day_start_local + timedelta(days=1)``. With
+    ZoneInfo timezones that observe DST, adding 24h in absolute time
+    can yield a result that is not the next local midnight (e.g. on
+    DST start the +24h would land at 01:00 local). Building from the
+    next calendar date keeps the "local calendar day" semantic intact
+    so quota counting AND ``resets_at`` align with the user's wall
+    clock. Issue #496 Copilot review.
     """
     try:
         tz = ZoneInfo(user_timezone)
@@ -84,7 +93,14 @@ def day_window_utc(user_timezone: str) -> tuple[datetime, datetime]:
 
     now_local = datetime.now(tz)
     day_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end_local = day_start_local + timedelta(days=1)
+    # Next local midnight via date arithmetic — DST-correct.
+    next_date = (day_start_local + timedelta(days=1)).date()
+    day_end_local = datetime(
+        next_date.year,
+        next_date.month,
+        next_date.day,
+        tzinfo=tz,
+    )
     day_start_utc = day_start_local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
     day_end_utc = day_end_local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
     return day_start_utc, day_end_utc
@@ -344,7 +360,19 @@ async def get_cluster(
             MemoryAnalysisAssignment,
             MemoryAnalysisAssignment.memory_id == Memory.id,
         )
-        .where(and_(*mem_conditions, Memory.deleted_at.is_(None)))
+        .where(
+            and_(
+                *mem_conditions,
+                Memory.deleted_at.is_(None),
+                # Defense-in-depth — ``memory_analysis_assignments.memory_id``
+                # FKs to ``memories.id`` only (no workspace constraint at the
+                # DB level). If a future bug ever assigns a foreign-workspace
+                # memory_id into a cluster (e.g. via direct SQL or a
+                # repair-script gone wrong), this predicate would still keep
+                # the API tenancy invariant. Issue #496 Copilot review.
+                Memory.workspace_id == workspace_id,
+            )
+        )
         .order_by(MemoryAnalysisAssignment.memory_id.asc())
         .limit(page_size + 1)
     )
@@ -373,7 +401,13 @@ async def get_cluster(
         rep_rows = (
             await db.execute(
                 select(Memory.id, Memory.summary, Memory.tags, Memory.importance).where(
-                    and_(Memory.id.in_(rep_ids), Memory.deleted_at.is_(None))
+                    and_(
+                        Memory.id.in_(rep_ids),
+                        Memory.deleted_at.is_(None),
+                        # Same defense-in-depth predicate as the page query
+                        # above — Issue #496 Copilot review.
+                        Memory.workspace_id == workspace_id,
+                    )
                 )
             )
         ).all()
