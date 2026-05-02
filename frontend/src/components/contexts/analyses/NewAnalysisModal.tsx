@@ -3,8 +3,11 @@
 /**
  * NewAnalysisModal — pre-flight + start trigger for a new run (Issue #497).
  *
- * Filters: ``period`` (from / to), ``tags`` (chip selector), ``types``
- * (single select), ``min_importance`` (range slider), ``query`` (text).
+ * Filters: ``period`` (from / to), ``types`` (single select),
+ * ``min_importance`` (range slider), ``query`` (text). The ``tags``
+ * field is supported on the API surface but the modal does not yet
+ * expose a chip selector — follow-up work, see
+ * ``analyses.modal.tags*`` i18n keys reserved for that UI.
  * Runs ``previewAnalysis`` whenever the form changes (debounced) so the
  * preflight strip shows live ``estimated_cost_cents`` and
  * ``memory_count``.

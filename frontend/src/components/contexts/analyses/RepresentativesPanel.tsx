@@ -119,7 +119,7 @@ export function RepresentativesPanel({
           </h4>
         </div>
         <span className="text-xs text-gray-500 dark:text-gray-400">
-          {t("viewAll", { count: totalCount })}
+          {t("totalInCluster", { count: totalCount })}
         </span>
       </header>
       <div className="px-5 py-4">

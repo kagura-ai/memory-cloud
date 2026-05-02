@@ -28,11 +28,15 @@
     --chart-3: 197 37% 44%;
     --chart-4: 43 74% 56%;
     --chart-5: 27 87% 57%;
-    /* Issue #497 (broadlistening cluster palette extension)
-     * KMeans n_clusters is variable per run (typical 5-20). The first
-     * 5 vars stay as-is so existing chart consumers (cost dashboard,
-     * neural graph) are unchanged; chart-6..12 below give the analyses
-     * tab room for up to 12 distinct cluster colors before wrapping. */
+    /* Issue #497 (broadlistening cluster palette).
+     * chart-3/4/5 lightness was nudged from the prior 24%/66%/67%
+     * values so the small (2.5px radius) scatter dots stay legible
+     * against the grey grid background — chart-3 too dark, chart-4/5
+     * too pastel at the smaller dot size. Existing chart consumers
+     * (cost dashboard line/area, neural graph nodes) keep the same
+     * hue families; the brightness change is intentional and applies
+     * to all of them. chart-6..12 are net-new for variable KMeans
+     * n_clusters (typical 5-20 — wraps at 12). */
     --chart-6: 262 52% 60%;
     --chart-7: 142 70% 38%;
     --chart-8: 220 8% 60%;
@@ -90,6 +94,24 @@
 }
 
 @layer utilities {
+  /* Memory broadlistening scatter focus mode (#497).
+   * The cluster-layer transitions + parent-state-driven dim live here
+   * because Tailwind utility classes cannot express
+   * ``.scatter.focused .cluster-layer:not(.is-focused)`` without a
+   * per-cluster variant. Single class flip on the SVG root → cheap
+   * CSS opacity transition, no per-dot React re-render. */
+  .scatter .cluster-layer {
+    transition:
+      opacity 0.25s ease,
+      transform 0.35s ease;
+  }
+  .scatter.focused .cluster-layer {
+    opacity: 0.12;
+  }
+  .scatter.focused .cluster-layer.is-focused {
+    opacity: 1;
+  }
+
   /* Grid pattern background */
   .bg-grid-pattern {
     background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' width='32' height='32' fill='none' stroke='rgb(0 0 0 / 0.03)'%3e%3cpath d='M0 .5H31.5V32'/%3e%3c/svg%3e");

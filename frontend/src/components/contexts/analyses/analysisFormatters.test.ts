@@ -76,51 +76,93 @@ describe("normalizePropertyStats", () => {
     expect(out.timeSeries).toEqual([]);
   });
 
-  it("filters non-conforming entries from each list", () => {
-    // Backend stores property_stats as JSONB so the runtime shape can
-    // drift if the labeler emits a malformed entry. The helper must
-    // tolerate this by dropping bad rows rather than throwing.
+  it("normalizes backend-shape payload (tags / types / importance / time)", () => {
+    // Mirror the actual ``property_stats`` JSONB written by
+    // ``backend/src/services/analysis/property_stats.py:aggregate_cluster_stats``.
     const out = normalizePropertyStats({
-      top_tags: [
+      tags: [
         { tag: "kouchou-ai", count: 38 },
-        { tag: "missing-count" }, // dropped
-        "string-not-object", // dropped
         { tag: "design", count: 12 },
       ],
-      type_distribution: [
-        { type: "feature-design", ratio: 0.71 },
-        { type: "decision" }, // dropped
-      ],
-      importance_buckets: [0.3, 0.55, 0.85, 0.7, "ignored"], // strings skipped → array rejected entirely
-      time_series: [
-        { bucket: "2026-04-21", count: 4 },
-        { bucket: "2026-04-22", count: 8 },
+      types: { "feature-design": 71, decision: 18, pattern: 11 },
+      importance: [3, 5, 8, 7],
+      time: [
+        {
+          start: "2026-04-21T00:00:00Z",
+          end: "2026-04-22T00:00:00Z",
+          count: 4,
+        },
+        {
+          start: "2026-04-22T00:00:00Z",
+          end: "2026-04-23T00:00:00Z",
+          count: 8,
+        },
       ],
     });
     expect(out.topTags).toEqual([
       { tag: "kouchou-ai", count: 38 },
       { tag: "design", count: 12 },
     ]);
-    expect(out.typeDistribution).toEqual([
-      { type: "feature-design", ratio: 0.71 },
+    // dict-of-counts → list-of-ratios sorted by count desc, normalized so sum=1
+    expect(out.typeDistribution.map((r) => r.type)).toEqual([
+      "feature-design",
+      "decision",
+      "pattern",
     ]);
-    expect(out.importanceBuckets).toEqual([]); // mixed type → all-or-nothing
+    expect(out.typeDistribution[0].ratio).toBeCloseTo(71 / 100, 6);
+    expect(out.typeDistribution[1].ratio).toBeCloseTo(18 / 100, 6);
+    expect(out.importanceBuckets).toEqual([3, 5, 8, 7]);
+    // time bucket: keep ``start`` as the rendered label for the bar chart
+    expect(out.timeSeries).toEqual([
+      { bucket: "2026-04-21T00:00:00Z", count: 4 },
+      { bucket: "2026-04-22T00:00:00Z", count: 8 },
+    ]);
+  });
+
+  it("filters non-conforming entries from each list", () => {
+    // Backend stores property_stats as JSONB so the runtime shape can
+    // drift if the labeler emits a malformed entry. The helper must
+    // tolerate this by dropping bad rows rather than throwing.
+    const out = normalizePropertyStats({
+      tags: [
+        { tag: "kouchou-ai", count: 38 },
+        { tag: "missing-count" }, // dropped — no count
+        "string-not-object", // dropped
+        { tag: "design", count: 12 },
+      ],
+      types: { decision: "not-a-number", pattern: 5 }, // string value silently dropped
+      importance: [0.3, 0.55, 0.85, 0.7, "ignored"], // mixed type → all-or-nothing
+      time: [
+        { start: "2026-04-21T00:00:00Z", count: 4 }, // ``end`` is optional
+        {
+          start: "2026-04-22T00:00:00Z",
+          end: "2026-04-23T00:00:00Z",
+          count: 8,
+        },
+      ],
+    });
+    expect(out.topTags).toEqual([
+      { tag: "kouchou-ai", count: 38 },
+      { tag: "design", count: 12 },
+    ]);
+    // Only ``pattern`` remained valid → 100% of the distribution.
+    expect(out.typeDistribution).toEqual([{ type: "pattern", ratio: 1 }]);
+    expect(out.importanceBuckets).toEqual([]);
     expect(out.timeSeries).toHaveLength(2);
   });
 
   it("caps the lists to bounded sizes", () => {
     // Defense against a runaway labeler emitting hundreds of tags.
+    const types: Record<string, number> = {};
+    for (let i = 0; i < 50; i++) types[`tp${i}`] = i;
     const out = normalizePropertyStats({
-      top_tags: Array.from({ length: 50 }, (_, i) => ({
+      tags: Array.from({ length: 50 }, (_, i) => ({
         tag: `t${i}`,
         count: i,
       })),
-      type_distribution: Array.from({ length: 50 }, (_, i) => ({
-        type: `tp${i}`,
-        ratio: i / 100,
-      })),
-      time_series: Array.from({ length: 100 }, (_, i) => ({
-        bucket: `b${i}`,
+      types,
+      time: Array.from({ length: 100 }, (_, i) => ({
+        start: `2026-04-${String(i + 1).padStart(2, "0")}T00:00:00Z`,
         count: i,
       })),
     });

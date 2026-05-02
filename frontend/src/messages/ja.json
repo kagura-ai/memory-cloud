@@ -3112,7 +3112,7 @@
     },
     "representatives": {
       "headerLabel": "Representatives",
-      "viewAll": "すべて表示 ({count}) →",
+      "totalInCluster": "クラスタ内 {count} 件",
       "loading": "代表 memory を読み込み中…",
       "empty": "このクラスタには代表 memory がありません。",
       "emptyAfterLoad": "代表 memory はこの run の完了後に全て削除されています。",

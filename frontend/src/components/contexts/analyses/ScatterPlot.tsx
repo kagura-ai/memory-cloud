@@ -169,23 +169,12 @@ export function ScatterPlot({
         </div>
       )}
 
-      {/* Focus mode dimming via CSS — one rule, applied to the SVG root.
-          Inline <style> is intentional: the rule is component-scoped and
-          tightly coupled to the SVG class names above; promoting it to
-          globals.css would orphan the rule from its single use site. */}
-      <style jsx>{`
-        :global(.scatter .cluster-layer) {
-          transition:
-            opacity 0.25s ease,
-            transform 0.35s ease;
-        }
-        :global(.scatter.focused .cluster-layer) {
-          opacity: 0.12;
-        }
-        :global(.scatter.focused .cluster-layer.is-focused) {
-          opacity: 1;
-        }
-      `}</style>
+      {/* Focus mode dimming uses three rules in ``app/globals.css``
+          (.scatter / .cluster-layer / .is-focused) — pure CSS so the
+          opacity toggle is a single class flip on the outer SVG, no
+          per-dot DOM diffing. Tailwind utility classes can't express
+          the parent-state-driven child opacity without an arbitrary
+          variant per cluster index. */}
     </div>
   );
 }

@@ -3112,7 +3112,7 @@
     },
     "representatives": {
       "headerLabel": "Representatives",
-      "viewAll": "View all {count} →",
+      "totalInCluster": "{count} memories in cluster",
       "loading": "Loading representatives…",
       "empty": "No representative memories for this cluster.",
       "emptyAfterLoad": "All representative memories were removed since this run completed.",

@@ -74,7 +74,7 @@ const EMPTY_STATS: NormalizedPropertyStats = {
   timeSeries: [],
 };
 
-function isStringNumberPair(v: unknown): v is { tag: string; count: number } {
+function isTagCountPair(v: unknown): v is { tag: string; count: number } {
   return (
     typeof v === "object" &&
     v !== null &&
@@ -83,49 +83,77 @@ function isStringNumberPair(v: unknown): v is { tag: string; count: number } {
   );
 }
 
-function isTypeRatioPair(v: unknown): v is { type: string; ratio: number } {
+function isTimeBucketRow(
+  v: unknown,
+): v is { start: string; end?: string; count: number } {
   return (
     typeof v === "object" &&
     v !== null &&
-    typeof (v as Record<string, unknown>).type === "string" &&
-    typeof (v as Record<string, unknown>).ratio === "number"
-  );
-}
-
-function isTimeSeriesPair(v: unknown): v is { bucket: string; count: number } {
-  return (
-    typeof v === "object" &&
-    v !== null &&
-    typeof (v as Record<string, unknown>).bucket === "string" &&
+    typeof (v as Record<string, unknown>).start === "string" &&
     typeof (v as Record<string, unknown>).count === "number"
   );
 }
 
+/**
+ * Convert ``backend/src/services/analysis/property_stats.py``'s
+ * persisted ``property_stats`` JSONB into the shape PropertyStats.tsx
+ * renders. Backend writes:
+ *
+ *   { tags: [{tag,count}], types: {type→count},
+ *     importance: [int,int,int,int], time: [{start,end,count}, ...] }
+ *
+ * The UI expects:
+ *
+ *   { topTags, typeDistribution: [{type,ratio}],
+ *     importanceBuckets: number[], timeSeries: [{bucket,count}] }
+ *
+ * Type counts are converted to ratios on the frontend so the bar chart
+ * always sums to 1.0 even if the persisted dict has a partial set of
+ * types. Time buckets keep ``start`` as the rendered ``bucket`` label
+ * (the SVG bar chart does not need the explicit ``end``).
+ */
 export function normalizePropertyStats(
   raw: Record<string, unknown> | null | undefined,
 ): NormalizedPropertyStats {
   if (!raw) return EMPTY_STATS;
 
-  const topTagsRaw = raw.top_tags;
-  const topTags = Array.isArray(topTagsRaw)
-    ? topTagsRaw.filter(isStringNumberPair).slice(0, 8)
+  const tagsRaw = raw.tags;
+  const topTags = Array.isArray(tagsRaw)
+    ? tagsRaw.filter(isTagCountPair).slice(0, 8)
     : [];
 
-  const typesRaw = raw.type_distribution;
-  const typeDistribution = Array.isArray(typesRaw)
-    ? typesRaw.filter(isTypeRatioPair).slice(0, 6)
-    : [];
+  const typesRaw = raw.types;
+  let typeDistribution: NormalizedPropertyStats["typeDistribution"] = [];
+  if (
+    typesRaw !== null &&
+    typeof typesRaw === "object" &&
+    !Array.isArray(typesRaw)
+  ) {
+    const entries = Object.entries(typesRaw as Record<string, unknown>).filter(
+      ([, count]) => typeof count === "number" && (count as number) >= 0,
+    ) as Array<[string, number]>;
+    const total = entries.reduce((acc, [, c]) => acc + c, 0);
+    if (total > 0) {
+      typeDistribution = entries
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, 6)
+        .map(([type, count]) => ({ type, ratio: count / total }));
+    }
+  }
 
-  const importanceRaw = raw.importance_buckets;
+  const importanceRaw = raw.importance;
   const importanceBuckets =
     Array.isArray(importanceRaw) &&
     importanceRaw.every((n) => typeof n === "number")
       ? (importanceRaw as number[]).slice(0, 4)
       : [];
 
-  const seriesRaw = raw.time_series;
+  const seriesRaw = raw.time;
   const timeSeries = Array.isArray(seriesRaw)
-    ? seriesRaw.filter(isTimeSeriesPair).slice(0, 24)
+    ? seriesRaw
+        .filter(isTimeBucketRow)
+        .slice(0, 24)
+        .map((row) => ({ bucket: row.start, count: row.count }))
     : [];
 
   return { topTags, typeDistribution, importanceBuckets, timeSeries };
