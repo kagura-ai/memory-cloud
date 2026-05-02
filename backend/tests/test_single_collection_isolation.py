@@ -16,6 +16,29 @@ from models.schemas import ExploreRequest, RecallRequest, RememberRequest
 from services.memory_service import MemoryService
 
 
+@pytest.fixture(autouse=True)
+def patch_database_url(monkeypatch):
+    """Ensure DATABASE_URL points to the test DB so background embedding tasks find rows.
+
+    process_pending_embedding creates its own DB session via get_db(), which
+    imports DATABASE_URL from config.database. That constant is set at module
+    import time, so monkeypatching os.environ alone is not enough — we must
+    also patch the module-level constant and reset the engine singleton so
+    the background task creates a fresh engine pointing at the test DB.
+    """
+    import config.database
+    import db.base
+    from tests.conftest import TEST_DATABASE_URL
+
+    monkeypatch.setattr(config.database, "DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+
+    # Reset engine singletons so get_db() recreates them with the patched URL
+    db.base.engine = None
+    db.base.async_session_factory = None
+    db.base.sync_engine = None
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def reset_redis_singleton():
     """Reset Redis singleton before each test to avoid event loop mismatch.
