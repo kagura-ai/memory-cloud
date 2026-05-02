@@ -30,6 +30,8 @@ spamming retries (matches the orchestrator's
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -58,6 +60,32 @@ _CANCEL_REASON_USER = "user"
 assert _STATUS_RUNNING in MEMORY_ANALYSIS_STATUSES
 assert _STATUS_CANCELLED in MEMORY_ANALYSIS_STATUSES
 assert _CANCEL_REASON_USER in MEMORY_ANALYSIS_CANCELLATION_REASONS
+
+# Strong-ref set for ``asyncio.create_task`` — without this, the task
+# can be garbage-collected before the event loop schedules it. Same
+# pattern as ``api/routes/admin_sleep.py:_log_background_task_result``
+# but module-scoped so multiple in-flight kick-offs are tracked.
+_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _log_background_task_result(task: asyncio.Task[Any]) -> None:
+    """Surface any exception that escaped the analysis background task.
+
+    Mirrors ``admin_sleep.py:_log_background_task_result``. Cancellation
+    is normal (run status flipped to ``cancelled`` by DELETE handler);
+    other exceptions are logged so the failure is observable in
+    monitoring even though the request response was already 202.
+    """
+    _BACKGROUND_TASKS.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "analysis_background_task_crashed",
+            error=str(exc),
+            exc_info=exc,
+        )
 
 
 router = APIRouter(
@@ -106,11 +134,20 @@ class AnalysisStartRequest(AnalysisPreviewRequest):
 
 
 class AnalysisStartResponse(TZAwareBaseModel):
-    """202 Accepted body."""
+    """202 Accepted body.
 
-    run_id: UUID
+    Constructed via ``model_validate(analysis)`` so the ORM row's
+    ``id`` column maps to ``run_id`` (matches the issue spec naming)
+    and SQLAlchemy ``Column[datetime]`` ↔ Python ``datetime`` is
+    bridged by Pydantic's ``from_attributes`` rather than manual
+    cast at every call site.
+    """
+
+    run_id: UUID = Field(validation_alias="id")
     status: str
-    started_at: object
+    started_at: datetime
+
+    model_config = {"populate_by_name": True, "from_attributes": True}
 
 
 class AnalysisRow(TZAwareBaseModel):
@@ -131,8 +168,8 @@ class AnalysisRow(TZAwareBaseModel):
     context_id: UUID
     status: str
     triggered_by: str
-    started_at: object
-    finished_at: object | None
+    started_at: datetime
+    finished_at: datetime | None
     input_count: int
     cost_estimated_cents: int | None
     cost_actual_cents: int | None
@@ -150,12 +187,18 @@ class AnalysisListResponse(BaseModel):
 
 
 class AnalysisCancelResponse(TZAwareBaseModel):
-    """DELETE /{run_id} response — confirms the soft-cancel."""
+    """DELETE /{run_id} response — confirms the soft-cancel.
 
-    run_id: UUID
+    Same ``model_validate(row)`` pattern as AnalysisStartResponse so
+    SQLAlchemy column types are bridged via Pydantic ``from_attributes``.
+    """
+
+    run_id: UUID = Field(validation_alias="id")
     status: str
     cancellation_reason: str | None
-    finished_at: object | None
+    finished_at: datetime | None
+
+    model_config = {"populate_by_name": True, "from_attributes": True}
 
 
 # ============================================================================
@@ -305,9 +348,13 @@ async def start_analysis(
 
     await db.commit()
 
-    # Background pipeline. Fire-and-forget — the task opens its own
-    # AsyncSession (see tasks/analysis_tasks.py).
-    asyncio.create_task(run_analysis_task(analysis.id))
+    # Background pipeline. The task opens its own AsyncSession (see
+    # tasks/analysis_tasks.py). Strong-ref + done callback so the task
+    # is not GC'd before the loop schedules it AND any exception is
+    # surfaced in logs.
+    task = asyncio.create_task(run_analysis_task(analysis.id))
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_log_background_task_result)
 
     logger.info(
         "analysis_run_kicked_off",
@@ -316,11 +363,7 @@ async def start_analysis(
         context_id=str(context_id),
         triggered_by=user_id,
     )
-    return AnalysisStartResponse(
-        run_id=analysis.id,
-        status=analysis.status,
-        started_at=analysis.started_at,
-    )
+    return AnalysisStartResponse.model_validate(analysis)
 
 
 # ============================================================================
@@ -473,9 +516,4 @@ async def cancel_run(
         )
     # else: already terminal → return current state without flipping anything.
 
-    return AnalysisCancelResponse(
-        run_id=row.id,
-        status=row.status,
-        cancellation_reason=row.cancellation_reason,
-        finished_at=row.finished_at,
-    )
+    return AnalysisCancelResponse.model_validate(row)

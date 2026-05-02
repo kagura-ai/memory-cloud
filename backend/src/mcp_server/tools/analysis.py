@@ -127,10 +127,14 @@ def _gate_error_response(exc: Exception) -> list[TextContent]:
             feature=exc.details.get("feature", "memory_analysis"),
         )
     if isinstance(exc, QuotaExceededError):
+        # Issue #496 Copilot review fix: forward the structured detail
+        # fields (used_today, limit_today, addon_bonus, remaining_today,
+        # resets_at) so MCP clients can render the same quota dashboard
+        # the REST 429 body supports — not just ``quota_type``.
         return _error_response(
             "quota_exceeded",
             exc.message,
-            quota_type=exc.details.get("quota_type", "memory_analysis"),
+            **{k: v for k, v in exc.details.items() if v is not None},
         )
     if isinstance(exc, ValidationError):
         return _error_response(

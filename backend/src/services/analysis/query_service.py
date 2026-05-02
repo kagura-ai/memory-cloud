@@ -7,13 +7,14 @@ endpoint (``api/routes/usage.py``) all need to share. Putting these in
 one module keeps three call sites grep-able and prevents the
 "workspace_id boundary check forgotten in one tool" class of leak.
 
-Tenancy invariant: every public method takes ``workspace_id`` and uses
+Tenancy invariant: every public method (including the recall filter
+helper ``get_memory_ids_in_cluster``) takes ``workspace_id`` and uses
 it as the first WHERE filter on ``memory_analyses``. ``run_id`` alone
 is never trusted — a stolen run UUID from another workspace returns
-None. The exception is the recall filter helper ``get_memory_ids_in_cluster``
-which is called *after* the ``recall`` route has already verified the
-caller's workspace context, so it accepts a bare ``run_id`` (still
-gated by FK CASCADE — a deleted workspace's runs cannot be queried).
+None on every code path. ``recall``'s caller passes
+``current_workspace_id`` through to ``get_memory_ids_in_cluster`` so
+the cross-workspace cluster lookup vector is closed at this layer
+even though ``recall`` has already validated workspace context once.
 
 Pagination contract for ``get_cluster``:
 

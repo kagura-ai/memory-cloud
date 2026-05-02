@@ -57,7 +57,7 @@ from config.settings import get_settings
 from db.base import get_db
 from models.auth import User
 from services.analysis.query_service import day_window_utc
-from utils.exceptions import FeatureNotAvailableError, QuotaExceededError
+from utils.exceptions import ConfigurationError, FeatureNotAvailableError, QuotaExceededError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -147,9 +147,12 @@ async def check_memory_analysis_quota(
     ).scalar_one_or_none()
     if workspace_row is None:
         # Defensive — owner gate already proved membership; this would
-        # only trigger on a deleted workspace mid-request.
-        raise QuotaExceededError(
-            f"Workspace {workspace_id} not found", quota_type="memory_analysis"
+        # only trigger on a deleted workspace mid-request. Surface as
+        # 500 ``ConfigurationError`` (CFG-001) rather than 429
+        # QuotaExceededError, since "no workspace" is a server-side
+        # anomaly, not a quota-exhausted client signal.
+        raise ConfigurationError(
+            f"Workspace {workspace_id} disappeared mid-request — gate cannot evaluate quota"
         )
 
     count_stmt = select(func.count(MemoryAnalysis.id)).where(
@@ -168,12 +171,14 @@ async def check_memory_analysis_quota(
     if used_today >= limit_today:
         # day_end_utc is naive UTC; reformat with caller tz for the
         # client-visible reset timestamp (matches ``resets_at`` in the
-        # AC's example body).
-        resets_at = (
-            day_end_utc.replace(tzinfo=ZoneInfo("UTC"))
-            .astimezone(ZoneInfo(user_timezone) if user_timezone else ZoneInfo("UTC"))
-            .isoformat()
-        )
+        # AC's example body). Defensive ``try/except`` mirrors
+        # ``day_window_utc()``: ``User.timezone`` is varchar(50)
+        # without a CHECK, so an exotic value should not 500 the gate.
+        try:
+            client_tz = ZoneInfo(user_timezone) if user_timezone else ZoneInfo("UTC")
+        except Exception:
+            client_tz = ZoneInfo("UTC")
+        resets_at = day_end_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(client_tz).isoformat()
         logger.info(
             "memory_analysis_quota_exceeded",
             workspace_id=str(workspace_id),

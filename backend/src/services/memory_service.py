@@ -1152,6 +1152,14 @@ class MemoryService:
         if request.filters and (cluster_filter := request.filters.get("analysis_cluster")):
             from services.analysis import query_service as _analysis_query_service
 
+            # Issue #496 Copilot review fix: guard against non-dict shape so a
+            # client sending ``analysis_cluster: "abc"`` (string) or a list
+            # surfaces as a clean 422 ValidationError instead of an internal
+            # 500 AttributeError on ``.get(...)``.
+            if not isinstance(cluster_filter, dict):
+                raise ValueError(
+                    "filters.analysis_cluster must be an object with run_id + cluster_index"
+                )
             run_id_raw = cluster_filter.get("run_id")
             cluster_index_raw = cluster_filter.get("cluster_index")
             if run_id_raw is None or cluster_index_raw is None:
