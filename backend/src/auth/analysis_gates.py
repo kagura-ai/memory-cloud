@@ -261,7 +261,6 @@ async def require_memory_analysis_access(
         db,
         workspace_id=workspace_id,
         user_timezone=user_timezone,
-        raise_on_exceeded=True,
     )
 
     # Gate 5: allowlist kill switch
@@ -374,7 +373,6 @@ async def check_memory_analysis_access_mcp(
             db,
             workspace_id=workspace_id,
             user_timezone=user_timezone,
-            raise_on_exceeded=True,
         )
     else:
         user_timezone = await _get_user_timezone(db, user_id)

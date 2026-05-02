@@ -226,6 +226,38 @@ async def test_no_workspace_selected_short_circuits_with_400():
 
 
 @pytest.mark.asyncio
+async def test_require_memory_analysis_access_calls_quota_with_supported_kwargs():
+    """Regression test for #496: ``require_memory_analysis_access`` must
+    invoke ``check_memory_analysis_quota`` with **only** the kwargs the
+    target function actually accepts. The other gate tests mock the
+    whole quota function so they would NOT catch a signature drift
+    between caller and callee (e.g. caller passing ``raise_on_exceeded``
+    after callee dropped that parameter — this exact bug surfaced once).
+    This test wires through to the real ``check_memory_analysis_quota``
+    via patches that only stub the *internal* DB primitives, so the
+    caller→callee kwargs contract is exercised end-to-end.
+    """
+    from inspect import signature
+
+    from auth.analysis_gates import check_memory_analysis_quota
+
+    # The function must NOT accept ``raise_on_exceeded`` — it raises
+    # unconditionally on quota exceeded. If a future refactor reintroduces
+    # the parameter, the call site contract diverges silently and gate 4
+    # 500s with TypeError. Pin the signature here so signature drift
+    # is loud at test time.
+    params = signature(check_memory_analysis_quota).parameters
+    assert "raise_on_exceeded" not in params, (
+        "raise_on_exceeded must NOT be a parameter of check_memory_analysis_quota — "
+        "the function is raise-only by design. If you need a non-raising variant, add a "
+        "separate ``check_memory_analysis_quota_status`` helper instead of overloading "
+        "this one (see auth/analysis_gates.py docstring)."
+    )
+    # Positive contract — these ARE the canonical kwargs callers must use.
+    assert set(params.keys()) >= {"db", "workspace_id", "user_timezone"}
+
+
+@pytest.mark.asyncio
 async def test_quota_exceeded_error_carries_structured_detail():
     """Regression test for #496: ``check_memory_analysis_quota`` raises
     ``QuotaExceededError`` with structured kwargs (``used_today``,

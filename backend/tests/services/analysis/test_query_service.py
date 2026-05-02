@@ -318,7 +318,9 @@ async def test_get_memory_ids_in_cluster_returns_assignments(
         )
     await db_session.flush()
 
-    ids = await query_service.get_memory_ids_in_cluster(db_session, run_id=run.id, cluster_index=3)
+    ids = await query_service.get_memory_ids_in_cluster(
+        db_session, workspace_id=fixture_workspace_id, run_id=run.id, cluster_index=3
+    )
     assert ids is not None
     assert set(ids) == {m.id for m in mems}
 
@@ -334,7 +336,9 @@ async def test_get_memory_ids_in_cluster_returns_none_for_unknown(
         pricing=fixture_pricing,
     )
     # cluster_index=99 was never created
-    ids = await query_service.get_memory_ids_in_cluster(db_session, run_id=run.id, cluster_index=99)
+    ids = await query_service.get_memory_ids_in_cluster(
+        db_session, workspace_id=fixture_workspace_id, run_id=run.id, cluster_index=99
+    )
     assert ids is None
 
 
