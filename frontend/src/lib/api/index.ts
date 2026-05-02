@@ -10,6 +10,7 @@ export { apiClient, ApiError } from "./base";
 export * from "./memory";
 export * from "./api-keys";
 export * from "./coding-sessions";
+export * from "./analyses";
 export * from "./cost-aggregation";
 export * from "./doctor";
 export * from "./oauth";

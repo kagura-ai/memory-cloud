@@ -24,6 +24,12 @@ from utils.encryption import get_encryptor
 from utils.exceptions import ConfigurationError
 from utils.logger import get_logger
 
+# Bound LLM request duration so a hung / unreachable provider cannot
+# stall the analysis pipeline indefinitely (Issue #533 silent-hang
+# mitigation; matches OpenAI SDK's `timeout=` kwarg semantics —
+# applies to each underlying HTTP request including streaming chunks).
+_LLM_REQUEST_TIMEOUT_S = 60.0
+
 logger = get_logger(__name__)
 
 
@@ -394,11 +400,12 @@ class LLMService:
             return AsyncOpenAI(
                 base_url=f"{ollama_base_url}/v1",
                 api_key="ollama",
+                timeout=_LLM_REQUEST_TIMEOUT_S,
             )
 
         # OpenAI (default)
         api_key = await self._get_user_api_key(user_id, context_id, workspace_id)
-        return AsyncOpenAI(api_key=api_key)
+        return AsyncOpenAI(api_key=api_key, timeout=_LLM_REQUEST_TIMEOUT_S)
 
     async def _get_user_api_key(
         self,

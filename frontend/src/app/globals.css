@@ -25,9 +25,21 @@
     --ring: 0 0% 3.9%;
     --chart-1: 12 76% 61%;
     --chart-2: 173 58% 39%;
-    --chart-3: 197 37% 24%;
-    --chart-4: 43 74% 66%;
-    --chart-5: 27 87% 67%;
+    --chart-3: 197 37% 44%;
+    --chart-4: 43 74% 56%;
+    --chart-5: 27 87% 57%;
+    /* Issue #497 (broadlistening cluster palette extension)
+     * KMeans n_clusters is variable per run (typical 5-20). The first
+     * 5 vars stay as-is so existing chart consumers (cost dashboard,
+     * neural graph) are unchanged; chart-6..12 below give the analyses
+     * tab room for up to 12 distinct cluster colors before wrapping. */
+    --chart-6: 262 52% 60%;
+    --chart-7: 142 70% 38%;
+    --chart-8: 220 8% 60%;
+    --chart-9: 332 70% 55%;
+    --chart-10: 95 55% 45%;
+    --chart-11: 195 80% 50%;
+    --chart-12: 38 90% 55%;
     --radius: 0.5rem
   }
   .dark {
@@ -54,7 +66,17 @@
     --chart-2: 160 60% 45%;
     --chart-3: 30 80% 55%;
     --chart-4: 280 65% 60%;
-    --chart-5: 340 75% 55%
+    --chart-5: 340 75% 55%;
+    /* Dark-mode counterparts for #497 cluster palette. Same hue order
+     * as light-mode chart-6..12 so a cluster keeps its identity when
+     * the user toggles theme. */
+    --chart-6: 262 55% 65%;
+    --chart-7: 142 60% 50%;
+    --chart-8: 220 12% 70%;
+    --chart-9: 332 65% 65%;
+    --chart-10: 95 50% 60%;
+    --chart-11: 195 75% 60%;
+    --chart-12: 38 80% 65%
   }
 }
 

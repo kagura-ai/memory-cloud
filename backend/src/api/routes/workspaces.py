@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.analysis_gates import check_workspace_in_allowlist
 from auth.dependencies import get_current_user
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
@@ -78,6 +79,7 @@ class WorkspaceResponse(BaseModel):
     context_count: int
     created_at: str
     current_user_role: str | None = None  # Current user's role in this workspace
+    analyses_enabled: bool = False  # Memory broadlistening allowlist (#497)
 
     class Config:
         from_attributes = True
@@ -362,6 +364,7 @@ async def create_workspace(
         member_count=stats["member_count"],
         context_count=stats["context_count"],
         created_at=to_utc_iso(workspace.created_at) or "",
+        analyses_enabled=check_workspace_in_allowlist(workspace.id),
     )
 
 
@@ -398,6 +401,7 @@ async def list_workspaces(
                 context_count=stats["context_count"],
                 created_at=to_utc_iso(workspace.created_at) or "",
                 current_user_role=user_role,
+                analyses_enabled=check_workspace_in_allowlist(workspace.id),
             )
         )
 
@@ -430,6 +434,7 @@ async def get_workspace(
         member_count=stats["member_count"],
         context_count=stats["context_count"],
         created_at=to_utc_iso(workspace.created_at) or "",
+        analyses_enabled=check_workspace_in_allowlist(workspace.id),
     )
 
 
@@ -470,6 +475,7 @@ async def update_workspace(
         member_count=stats["member_count"],
         context_count=stats["context_count"],
         created_at=to_utc_iso(workspace.created_at) or "",
+        analyses_enabled=check_workspace_in_allowlist(workspace.id),
     )
 
 

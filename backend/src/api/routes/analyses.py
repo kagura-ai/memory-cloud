@@ -213,6 +213,55 @@ class AnalysisListResponse(BaseModel):
     next_cursor: str | None
 
 
+class ClusterRow(BaseModel):
+    """One cluster within an analysis run.
+
+    Mirrors ``MemoryAnalysisCluster`` columns the API contract surfaces
+    (#497 frontend). Internal columns (``analysis_id``, ``parent_id``,
+    cluster ``id`` UUID PK) are omitted: the wire identifier is the
+    user-visible ``cluster_index`` ordinal, not the DB UUID.
+
+    ``representative_memory_ids`` is the raw list as stored — the
+    frontend resolves these to memory summaries via a follow-up
+    ``recall(filters={"id": [...]})`` call rather than embedding the
+    summaries in this response (keeps the cluster list payload small
+    and lets the recall layer apply its own importance / freshness
+    sorting).
+    """
+
+    cluster_index: int
+    label: str
+    description: str | None
+    count: int
+    centroid_2d: list[float]
+    representative_memory_ids: list[UUID]
+    property_stats: dict[str, Any]
+    label_confidence: float
+
+    model_config = {"from_attributes": True}
+
+
+class ClusterListResponse(BaseModel):
+    """All clusters for a run, ordered by ``cluster_index``."""
+
+    items: list[ClusterRow]
+
+
+class PositionRow(BaseModel):
+    """One ``(memory_id, x, y, cluster_index)`` row for scatter rendering."""
+
+    memory_id: UUID
+    x: float
+    y: float
+    cluster_index: int
+
+
+class PositionListResponse(BaseModel):
+    """All scatter positions for a run, ordered by ``cluster_index``."""
+
+    items: list[PositionRow]
+
+
 class AnalysisCancelResponse(TZAwareBaseModel):
     """DELETE /{run_id} response — confirms the soft-cancel.
 
@@ -485,6 +534,101 @@ async def get_run(
     if row is None or row.context_id != context_id:
         raise HTTPException(status_code=404, detail=f"Analysis run {run_id} not found")
     return AnalysisRow.model_validate(row)
+
+
+# ============================================================================
+# GET /{run_id}/clusters — flat cluster list for scatter / drill-down (#497)
+# ============================================================================
+
+
+@router.get(
+    "/{run_id}/clusters",
+    response_model=ClusterListResponse,
+    summary="List all clusters for an analysis run",
+)
+async def list_run_clusters(
+    context_id: UUID,
+    run_id: UUID,
+    access: AnalysisReadAccess,
+    db: AsyncSession = Depends(get_db),
+) -> ClusterListResponse:
+    """Returns every cluster row for the run, ordered by ``cluster_index``.
+
+    Powers the #497 frontend cluster list, scatter centroids, and the
+    per-cluster property-stats panel. Cluster count is bounded
+    server-side by ``ceil(sqrt(memory_count))`` (≈ 90 on an 8000-memory
+    run), so the endpoint returns the full set with no pagination — the
+    frontend would otherwise have to make up-to-N round-trips to render
+    the cluster list which dominates the latency budget on this page.
+
+    A run that is still ``running`` or that ``failed`` before the
+    labeler stage may have zero cluster rows; the response is then
+    ``items: []`` rather than 404 (matches the running-status semantics
+    of the run-level read).
+    """
+    _user_id, workspace_id, _tz = access
+    await _verify_context_in_workspace(db, workspace_id=workspace_id, context_id=context_id)
+
+    # Verify the run belongs to *this* context (not just this workspace).
+    # The cluster list itself is bound by analysis_id, but the URL
+    # advertises a context_id — silently returning another context's
+    # clusters when the URLs cross would violate the principle of least
+    # surprise even if no tenancy boundary was crossed.
+    row = await query_service.get_analysis(db, workspace_id=workspace_id, run_id=run_id)
+    if row is None or row.context_id != context_id:
+        raise HTTPException(status_code=404, detail=f"Analysis run {run_id} not found")
+
+    clusters = await query_service.list_clusters(db, workspace_id=workspace_id, run_id=run_id)
+    if clusters is None:
+        # Defense-in-depth: ``get_analysis`` already established the run
+        # belongs to this workspace, so list_clusters' boundary check
+        # cannot return None at this point. Treat as 404 just in case
+        # the row was deleted between the two SELECTs.
+        raise HTTPException(status_code=404, detail=f"Analysis run {run_id} not found")
+
+    return ClusterListResponse(items=[ClusterRow.model_validate(c) for c in clusters])
+
+
+# ============================================================================
+# GET /{run_id}/positions — per-memory 2D coords for scatter rendering (#497)
+# ============================================================================
+
+
+@router.get(
+    "/{run_id}/positions",
+    response_model=PositionListResponse,
+    summary="List per-memory 2D positions for an analysis run",
+)
+async def list_run_positions(
+    context_id: UUID,
+    run_id: UUID,
+    access: AnalysisReadAccess,
+    db: AsyncSession = Depends(get_db),
+) -> PositionListResponse:
+    """Returns every ``(memory_id, x, y, cluster_index)`` for the scatter dots.
+
+    Bounded by ``MemoryAnalysis.input_count`` (capped at 10k memories
+    in the orchestrator). Returns ~640 KB worst-case JSON which is
+    acceptable on an explicit page open. No pagination — splitting
+    forces the frontend to coordinate progressive renders for very
+    little user-visible benefit, and the tab is gated by 4-stage
+    auth so the audience is small.
+
+    Same context-boundary check as ``/clusters``: the URL's
+    ``context_id`` must match the run's stored ``context_id``.
+    """
+    _user_id, workspace_id, _tz = access
+    await _verify_context_in_workspace(db, workspace_id=workspace_id, context_id=context_id)
+
+    row = await query_service.get_analysis(db, workspace_id=workspace_id, run_id=run_id)
+    if row is None or row.context_id != context_id:
+        raise HTTPException(status_code=404, detail=f"Analysis run {run_id} not found")
+
+    positions = await query_service.list_positions(db, workspace_id=workspace_id, run_id=run_id)
+    if positions is None:
+        raise HTTPException(status_code=404, detail=f"Analysis run {run_id} not found")
+
+    return PositionListResponse(items=[PositionRow(**p) for p in positions])
 
 
 # ============================================================================

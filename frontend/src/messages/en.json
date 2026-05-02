@@ -3067,5 +3067,120 @@
     "message": "Your account is not on the allowlist. Contact the administrator to request access.",
     "contact": "If you believe you should have access, please reach out to the administrator.",
     "backToLogin": "Back to Login"
+  },
+  "analyses": {
+    "tabLabel": "Analyses",
+    "header": {
+      "title": "Broadlistening Analyses",
+      "subtitle": "Survey the shape of your memories with cluster overview · Owner only"
+    },
+    "actions": {
+      "newAnalysis": "Analysis",
+      "exportJson": "Export JSON",
+      "refresh": "Refresh",
+      "cancel": "Cancel"
+    },
+    "kpi": {
+      "lastRun": "Last run",
+      "memoriesSurveyed": "Memories surveyed",
+      "runCost": "Run cost",
+      "quality": "Quality",
+      "neverRun": "Never run",
+      "qualityNoData": "no data yet"
+    },
+    "scatter": {
+      "title": "Memory map",
+      "subtitle": "UMAP projection · KMeans clustering on high-dim embeddings",
+      "legendMemory": "memory",
+      "legendCentroid": "cluster centroid",
+      "legendBoundary": "cluster boundary",
+      "focusedOn": "Focused on",
+      "showAllClusters": "Show all clusters",
+      "noPositions": "No positions yet — the run did not produce a scatter projection."
+    },
+    "clusters": {
+      "title": "Clusters",
+      "subtitleZero": "0 regions",
+      "subtitle": "{count} regions · click to focus the map · sorted by size",
+      "allClusters": "All clusters",
+      "memberCount": "{count} memories",
+      "confidence": "conf {value}",
+      "noClustersTitle": "No clusters yet",
+      "noClustersDescription": "The active run has not produced clusters. Run a new analysis to see the cluster overview.",
+      "outlierLabel": "Outlier cluster"
+    },
+    "representatives": {
+      "headerLabel": "Representatives",
+      "viewAll": "View all {count} →",
+      "loading": "Loading representatives…",
+      "empty": "No representative memories for this cluster.",
+      "emptyAfterLoad": "All representative memories were removed since this run completed.",
+      "emptyNoFocus": "Click a cluster to see its representative memories."
+    },
+    "propertyStats": {
+      "title": "Properties",
+      "subtitleAll": "All clusters · full-context aggregate",
+      "subtitleCluster": "Cluster {index} · {label}",
+      "topTags": "Top tags",
+      "byType": "By type",
+      "importance": "Importance",
+      "activity": "Activity over period",
+      "empty": "No property stats available."
+    },
+    "history": {
+      "title": "Past runs",
+      "subtitle": "Last {visible} of {total}",
+      "subtitleAtMost": "Last {visible} runs",
+      "headerDate": "Date",
+      "headerStatus": "Status",
+      "headerMemories": "Memories",
+      "headerCost": "Cost",
+      "noRunsTitle": "No runs yet",
+      "noRunsDescription": "Run your first analysis to populate the history."
+    },
+    "modal": {
+      "title": "Analysis",
+      "subtitle": "{contextName} · run cluster analysis on filtered memories",
+      "period": "Period",
+      "tags": "Tags",
+      "tagsHint": "(any of, optional)",
+      "tagsAddPlaceholder": "+ add",
+      "types": "Types",
+      "typesAll": "All types",
+      "minImportance": "Min importance",
+      "narrativeQuery": "Narrative query",
+      "narrativeQueryHint": "(optional)",
+      "narrativeQueryPlaceholder": "restrict to memories matching this phrase",
+      "model": "Model",
+      "preflight": {
+        "memoriesCount": "Memories that will be analyzed",
+        "estimatedCost": "Estimated cost",
+        "quotaRemaining": "Quota",
+        "embeddingUniform": "embedding uniform",
+        "loading": "Calculating…"
+      },
+      "footerHint": "Owner only · gated by workspace allowlist",
+      "submit": "Run analysis",
+      "submitting": "Starting run…",
+      "errorLoadingPreview": "Could not estimate cost — check connection and try again.",
+      "errorStarting": "Could not start the run — see details below."
+    },
+    "running": {
+      "title": "Run in progress",
+      "startedAt": "Started {when} — clustering and labeling memories…",
+      "cancel": "Cancel run"
+    },
+    "states": {
+      "loading": "Loading analyses…",
+      "empty": {
+        "title": "No analyses yet",
+        "description": "Run your first analysis to surface the cluster overview, scatter map, and per-cluster property stats."
+      },
+      "notEnabled": {
+        "title": "Analyses are not yet enabled for this workspace",
+        "description": "Memory Broadlistening is gated to selected workspaces during the v1 rollout. Reach out if you would like access."
+      },
+      "loadFailed": "Failed to load analyses — check connection and try again."
+    }
   }
 }

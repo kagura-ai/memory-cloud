@@ -170,6 +170,13 @@ export default function ContextsPage() {
     currentWorkspace?.current_user_role,
     "admin",
   );
+  // The kebab "Analysis" entry mirrors the analyses tab gating in
+  // [id]/page.tsx: owner role AND workspace allowlist membership.
+  // Both must be true for the menu to appear (#497).
+  const canStartAnalysis =
+    hasWorkspaceRole(currentWorkspace?.current_user_role, "owner") &&
+    currentWorkspace?.analyses_enabled === true;
+  const tAnalyses = useTranslations("analyses");
 
   const fetchContexts = useCallback(async () => {
     try {
@@ -1070,6 +1077,21 @@ export default function ContextsPage() {
                               <Settings2 className="h-4 w-4 mr-2" />
                               {t("graph")}
                             </DropdownMenuItem>
+                            {/* Issue #497: owner-only entry — placed
+                                before Settings so the kebab order matches
+                                the tab order (analyses → settings). */}
+                            {canStartAnalysis && (
+                              <DropdownMenuItem
+                                onClick={() =>
+                                  router.push(
+                                    `/workspace/contexts/${context.id}?tab=analyses&new=1`,
+                                  )
+                                }
+                              >
+                                <BarChart className="h-4 w-4 mr-2" />
+                                {tAnalyses("actions.newAnalysis")}
+                              </DropdownMenuItem>
+                            )}
                             <DropdownMenuItem
                               onClick={() =>
                                 router.push(
