@@ -48,6 +48,27 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Strong-ref set for ``asyncio.create_task`` — without this the task
+# can be GC'd before the loop schedules it. Mirrors the REST-side
+# pattern in ``api/routes/analyses.py`` so MCP and REST kick-offs
+# both surface background failures via the same observability path.
+# Issue #496 Copilot review (loop 3).
+_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _log_background_task_result(task: asyncio.Task[Any]) -> None:
+    """Surface any exception that escaped the analysis background task."""
+    _BACKGROUND_TASKS.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "analysis_mcp_background_task_crashed",
+            error=str(exc),
+            exc_info=exc,
+        )
+
 
 # ============================================================================
 # Internal helpers
@@ -293,7 +314,12 @@ async def handle_analyze_context(
                 return _gate_error_response(orch_exc)
 
             await db.commit()
-            asyncio.create_task(run_analysis_task(analysis.id))
+            # Strong-ref + done callback so the task is not GC'd before
+            # the loop schedules it AND any background exception is
+            # logged. Same pattern as ``api/routes/analyses.py``.
+            task = asyncio.create_task(run_analysis_task(analysis.id))
+            _BACKGROUND_TASKS.add(task)
+            task.add_done_callback(_log_background_task_result)
 
             await _log_tool_usage(
                 db,

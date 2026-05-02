@@ -72,10 +72,12 @@ logger = get_logger(__name__)
 # the DB CHECK constraint).
 _STATUS_SUCCEEDED = "succeeded"
 _STATUS_FAILED = "failed"
+_STATUS_CANCELLED = "cancelled"
 _SOURCE_ANALYSIS = "analysis"
 _SLEEP_PAID_BY_BYOK = "byok"
 assert _STATUS_SUCCEEDED in MEMORY_ANALYSIS_STATUSES
 assert _STATUS_FAILED in MEMORY_ANALYSIS_STATUSES
+assert _STATUS_CANCELLED in MEMORY_ANALYSIS_STATUSES
 assert _SOURCE_ANALYSIS in SLEEP_REPORT_SOURCES
 assert _SLEEP_PAID_BY_BYOK in SLEEP_REPORT_PAID_BY_VALUES
 
@@ -348,6 +350,20 @@ async def persist_results(
     # 4. Update the memory_analyses row. embedding_model was set by
     #    the orchestrator before this transaction opened — we only
     #    finalize the run-level fields here.
+    #    First, refresh from DB to detect a concurrent soft-cancel
+    #    (DELETE /analyses/{run_id} flipped status to 'cancelled' in a
+    #    separate session while compute was running). Without this
+    #    guard the stale ORM instance would overwrite the cancellation
+    #    on flush — silent data loss for the cancellation_reason
+    #    audit trail. Issue #496 Copilot review.
+    await db.refresh(analysis)
+    if analysis.status == _STATUS_CANCELLED:
+        logger.info(
+            "analysis_persist_skipped_due_to_cancel",
+            analysis_id=str(analysis.id),
+            cancellation_reason=analysis.cancellation_reason,
+        )
+        return
     cost_actual_cents = _compute_actual_cost_cents(totals, dict(analysis.model_snapshot or {}))
     analysis.status = _STATUS_SUCCEEDED
     analysis.finished_at = utcnow()
@@ -408,6 +424,20 @@ async def persist_failure(
     the run row.
     """
     truncated_error = error_message[:_ERROR_FIELD_MAX_CHARS]
+    # Same cancellation-overwrite guard as ``persist_results`` — refresh
+    # from DB so a concurrent DELETE soft-cancel is not silently flipped
+    # to ``failed``. The compute exception is still recorded in the log
+    # below; we just avoid corrupting the status + cancellation_reason
+    # audit trail. Issue #496 Copilot review.
+    await db.refresh(analysis)
+    if analysis.status == _STATUS_CANCELLED:
+        logger.info(
+            "analysis_persist_failure_skipped_due_to_cancel",
+            analysis_id=str(analysis.id),
+            cancellation_reason=analysis.cancellation_reason,
+            compute_error=truncated_error,
+        )
+        return
     analysis.status = _STATUS_FAILED
     analysis.finished_at = utcnow()
     analysis.error = truncated_error

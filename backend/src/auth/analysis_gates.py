@@ -166,6 +166,13 @@ async def check_memory_analysis_quota(
 
     effective = await EffectiveQuotaService(db).get_effective_quotas(workspace_id)
     limit_today = int(effective["analysis_runs_per_day"])
+    # Refresh the workspace row AFTER ``get_effective_quotas`` runs —
+    # the service may recalculate addon bonus columns (when all are 0)
+    # and re-fetch the workspace internally. Without this refresh the
+    # 429 detail would carry the pre-recalc addon_bonus (often 0) while
+    # ``limit_today`` reflects the recalculated effective quota,
+    # producing an inconsistent body. Issue #496 Copilot review.
+    await db.refresh(workspace_row)
     addon_bonus = int(workspace_row.addon_analysis_bonus or 0)
 
     if used_today >= limit_today:
