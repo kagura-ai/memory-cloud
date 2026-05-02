@@ -37,7 +37,7 @@ from structlog.testing import capture_logs
 
 from services.analysis import byok_resolver
 from services.analysis.byok_resolver import assert_openai_byok_key_available
-from utils.exceptions import ConfigurationError
+from utils.exceptions import ValidationError
 
 # A high-entropy fixture string the test asserts must never appear in
 # any structlog output. Chosen to match a realistic OpenAI key shape
@@ -80,15 +80,17 @@ async def test_assert_passes_when_key_exists() -> None:
 
 @pytest.mark.asyncio
 async def test_assert_raises_when_no_key() -> None:
-    """Sad path: SELECT returns no row → ConfigurationError, no leak."""
+    """Sad path: SELECT returns no row → ValidationError(422), no leak."""
     db = _build_db_with_row(row=None)
     workspace_id = uuid4()
 
     with capture_logs() as logs:
-        with pytest.raises(ConfigurationError) as excinfo:
+        with pytest.raises(ValidationError) as excinfo:
             await assert_openai_byok_key_available(db, workspace_id=workspace_id)
 
     assert "API key not configured" in str(excinfo.value)
+    # Confirm 422 status (user-actionable precondition, not 500 config bug).
+    assert excinfo.value.status_code == 422
     # Even on the sad path, the resolver must not log a key-shaped string.
     for event in logs:
         for v in event.values():

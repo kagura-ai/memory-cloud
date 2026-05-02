@@ -174,10 +174,17 @@ async def pull_memories_with_vectors(
     # 2. Pull metadata rows from the SQL side. The DB is authoritative
     #    for filter semantics (importance threshold, tag ANY-match,
     #    type allow-list, date range). Qdrant only provides vectors.
+    #
+    # ``embedding_status == 'success'`` is required: rows with status
+    # 'pending' or 'failed' have NO Qdrant vector (the indexing job
+    # either has not yet run or has surfaced an error), so including
+    # them would silently drop them at Qdrant retrieve time and
+    # produce a partial analysis without any signal to the caller.
     conditions = [
         Memory.workspace_id == workspace_id,
         Memory.context_id == context_id,
         Memory.deleted_at.is_(None),
+        Memory.embedding_status == "success",
     ]
     if from_dt is not None:
         conditions.append(Memory.created_at >= from_dt)

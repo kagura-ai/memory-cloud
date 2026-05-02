@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -60,7 +60,7 @@ from services.analysis.vector_pull import (
     EmbeddingMismatchError,
     pull_memories_with_vectors,
 )
-from utils.exceptions import ConflictError
+from utils.exceptions import ConfigurationError, ConflictError, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -120,6 +120,24 @@ assert _PAID_BY_BYOK in MEMORY_ANALYSIS_PAID_BY_VALUES, (
 )
 
 
+def _params_iso_to_naive_utc(s: str | None) -> datetime | None:
+    """Parse an ISO-8601 string into a naive UTC datetime.
+
+    The API layer (#496) accepts both naive and tz-aware datetimes in
+    the params payload. Here we normalize to naive UTC so the filter
+    binds cleanly against ``Memory.created_at`` (TIMESTAMP WITHOUT
+    TIME ZONE — naive UTC by repo convention #489). Without this
+    normalization, asyncpg raises a binding error when a tz-aware
+    bound parameter is compared against a naive column.
+    """
+    if s is None:
+        return None
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(UTC).replace(tzinfo=None)
+    return dt
+
+
 async def _resolve_pricing_row(db: AsyncSession, model_id: int | None) -> tuple[LLMPricing, dict]:
     """Resolve the ``llm_pricing`` row + frozen snapshot for the run.
 
@@ -137,7 +155,13 @@ async def _resolve_pricing_row(db: AsyncSession, model_id: int | None) -> tuple[
         target_stmt = select(LLMPricing).where(LLMPricing.id == model_id)
         target = (await db.execute(target_stmt)).scalar_one_or_none()
         if target is None:
-            raise ConflictError(f"No LLM pricing row found for model_id={model_id}.")
+            # Caller-supplied model_id refers to a non-existent row →
+            # client input error (422), NOT a 409 conflict.
+            raise ValidationError(
+                f"No LLM pricing row found for model_id={model_id}.",
+                field="model_id",
+                model_id=model_id,
+            )
         rate_stmt = select(LLMPricing).where(
             LLMPricing.provider == target.provider,
             LLMPricing.model == target.model,
@@ -168,8 +192,12 @@ async def _resolve_pricing_row(db: AsyncSession, model_id: int | None) -> tuple[
         )
         all_rows = list((await db.execute(stmt)).scalars().all())
         if not all_rows:
-            raise ConflictError(
-                f"No LLM pricing row found for model_id={model_id} (or default gpt-5-nano)."
+            # Default-model fallback path: missing rows mean the seed
+            # migration didn't run or was rolled back → server-side
+            # configuration error (500), NOT a 409 conflict.
+            raise ConfigurationError(
+                f"Default LLM pricing row not seeded for {_DEFAULT_PROVIDER}/"
+                f"{_DEFAULT_MODEL}. Run alembic migrations to seed `llm_pricing`."
             )
         primary = all_rows[0]
 
@@ -302,8 +330,13 @@ class AnalysisOrchestrator:
             )
 
         params_jsonb = dict(analysis.params or {})
-        from_dt = datetime.fromisoformat(params_jsonb["from"]) if params_jsonb.get("from") else None
-        to_dt = datetime.fromisoformat(params_jsonb["to"]) if params_jsonb.get("to") else None
+        # Normalize tz-aware ISO strings to NAIVE UTC so the filter
+        # binds cleanly against ``Memory.created_at`` (TIMESTAMP WITHOUT
+        # TIME ZONE — naive UTC by repo convention #489). API callers
+        # may submit either tz-aware (e.g. "...+09:00") or naive ISO
+        # strings; both routes converge here.
+        from_dt = _params_iso_to_naive_utc(params_jsonb.get("from"))
+        to_dt = _params_iso_to_naive_utc(params_jsonb.get("to"))
 
         try:
             # Stage [C] — pull memories + their existing Qdrant vectors.

@@ -41,7 +41,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import ExternalAPIKey
-from utils.exceptions import ConfigurationError
+from utils.exceptions import ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -79,9 +79,11 @@ async def assert_openai_byok_key_available(
             ``ORDER BY context_id DESC NULLS LAST LIMIT 1`` clause).
 
     Raises:
-        ConfigurationError: No enabled OpenAI key for the workspace.
-            HTTP layer (#496) translates this into 422 with a
-            user-actionable hint pointing to the External Keys UI.
+        ValidationError: No enabled OpenAI key for the workspace.
+            Maps directly to HTTP 422 (VAL-001) — a user-actionable
+            precondition failure rather than a 500 server-config
+            problem. Per the #495/#496 contract the API layer surfaces
+            this with a hint pointing to the External Keys UI.
     """
     workspace_uuid = workspace_id if isinstance(workspace_id, UUID) else UUID(str(workspace_id))
 
@@ -109,10 +111,13 @@ async def assert_openai_byok_key_available(
     )
     result = await db.execute(stmt)
     if result.scalar_one_or_none() is None:
-        raise ConfigurationError(
-            f"OpenAI API key not configured for workspace {workspace_uuid}. "
+        raise ValidationError(
+            "OpenAI API key not configured for this workspace. "
             "Configure a workspace OpenAI key in External Keys settings "
-            "before running broadlistening analysis."
+            "before running broadlistening analysis.",
+            field="byok",
+            provider="openai",
+            workspace_id=str(workspace_uuid),
         )
 
     logger.debug(
