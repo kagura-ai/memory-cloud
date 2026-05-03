@@ -6,6 +6,7 @@ import { useTranslations, useLocale } from "next-intl";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
+import { ErrorBanner } from "@/components/common/ErrorBanner";
 import {
   LoadingState,
   TableLoadingState,
@@ -87,6 +88,7 @@ export function SleepReportsList({
   const [reports, setReports] = useState<SleepReportSummary[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedStatus, setSelectedStatus] = useState<SleepStatus | null>(
     null,
   );
@@ -96,6 +98,7 @@ export function SleepReportsList({
   const loadReports = useCallback(async () => {
     if (!ready || loadingRef.current) return;
     loadingRef.current = true;
+    setLoadError(null);
     try {
       setLoading(true);
       const data = await fetchData({
@@ -106,16 +109,12 @@ export function SleepReportsList({
       setReports(data.reports);
       setTotal(data.total);
     } catch {
-      toast({
-        title: tCommon("error"),
-        description: t("messages.loadError"),
-        variant: "destructive",
-      });
+      setLoadError(t("messages.loadError"));
     } finally {
       setLoading(false);
       loadingRef.current = false;
     }
-  }, [offset, selectedStatus, fetchData, ready, toast, t, tCommon]);
+  }, [offset, selectedStatus, fetchData, ready, t]);
 
   useEffect(() => {
     loadReports();
@@ -165,6 +164,24 @@ export function SleepReportsList({
       <PageContainer>
         <PageHeader title={title} description={description} />
         <LoadingState lines={5} />
+      </PageContainer>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <PageContainer>
+        <PageHeader title={title} description={description} />
+        <ErrorBanner error={loadError} />
+        <Button
+          onClick={loadReports}
+          variant="outline"
+          disabled={loading || running}
+          className="mt-4"
+        >
+          <RefreshCw className="h-4 w-4 mr-2" />
+          {t("actions.refresh")}
+        </Button>
       </PageContainer>
     );
   }
@@ -311,12 +328,12 @@ export function SleepReportsList({
                       {report.llm_calls_made}
                     </TableCell>
                     <TableCell className="text-right">
-                      <Link href={`${detailHrefPrefix}/${report.id}`}>
-                        <Button variant="ghost" size="sm">
+                      <Button variant="ghost" size="sm" asChild>
+                        <Link href={`${detailHrefPrefix}/${report.id}`}>
                           <Eye className="h-4 w-4 mr-1" />
                           {t("actions.viewDetail")}
-                        </Button>
-                      </Link>
+                        </Link>
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))}

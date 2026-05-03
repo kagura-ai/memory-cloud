@@ -15,8 +15,9 @@ import { PageContainer } from "@/components/common/PageContainer";
 import { LoadingState } from "@/components/common/LoadingState";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Moon } from "lucide-react";
 import Link from "next/link";
+import { EmptyState } from "@/components/ui/empty-state";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole } from "@/lib/auth/rbac";
 import { fetchWorkspaceSleepReportDetail } from "@/lib/api";
@@ -28,7 +29,7 @@ export default function WorkspaceSleepReportDetailPage() {
   const reportId = Array.isArray(params.reportId)
     ? params.reportId[0]
     : (params.reportId ?? "");
-  const t = useTranslations("workspace.sleepReports");
+  const t = useTranslations("workspace");
   const {
     currentWorkspace,
     currentWorkspaceId,
@@ -62,7 +63,7 @@ export default function WorkspaceSleepReportDetailPage() {
         if (err?.status === 404) {
           setNotFound(true);
         } else {
-          setLoadError(t("messages.loadError"));
+          setLoadError(t("sleepReports.messages.loadError"));
         }
       } finally {
         setLoading(false);
@@ -76,7 +77,7 @@ export default function WorkspaceSleepReportDetailPage() {
   if (wsLoading) {
     return (
       <PageContainer>
-        <PageHeader title={t("title")} />
+        <PageHeader title={t("sleepReports.title")} />
         <LoadingState lines={5} />
       </PageContainer>
     );
@@ -85,8 +86,8 @@ export default function WorkspaceSleepReportDetailPage() {
   if (!currentWorkspaceId) {
     return (
       <PageContainer>
-        <PageHeader title={t("title")} />
-        <ErrorBanner error={t("errors.noWorkspaceSelected")} />
+        <PageHeader title={t("sleepReports.title")} />
+        <ErrorBanner error={t("sleepReports.errors.noWorkspaceSelected")} />
       </PageContainer>
     );
   }
@@ -94,8 +95,8 @@ export default function WorkspaceSleepReportDetailPage() {
   if (!allowed) {
     return (
       <PageContainer>
-        <PageHeader title={t("title")} />
-        <ErrorBanner error={t("errors.forbiddenWorkspace")} />
+        <PageHeader title={t("sleepReports.title")} />
+        <ErrorBanner error={t("sleepReports.errors.forbiddenWorkspace")} />
       </PageContainer>
     );
   }
@@ -103,7 +104,7 @@ export default function WorkspaceSleepReportDetailPage() {
   if (loading) {
     return (
       <PageContainer>
-        <PageHeader title={t("title")} />
+        <PageHeader title={t("sleepReports.title")} />
         <LoadingState lines={5} />
       </PageContainer>
     );
@@ -112,14 +113,14 @@ export default function WorkspaceSleepReportDetailPage() {
   if (loadError) {
     return (
       <PageContainer>
-        <PageHeader title={t("title")} />
+        <PageHeader title={t("sleepReports.title")} />
         <ErrorBanner error={loadError} />
-        <Link href="/workspace/sleep-reports">
-          <Button variant="outline">
+        <Button variant="outline" asChild className="mt-4">
+          <Link href="/workspace/sleep-reports">
             <ArrowLeft className="h-4 w-4 mr-2" />
-            {t("actions.back")}
-          </Button>
-        </Link>
+            {t("sleepReports.actions.back")}
+          </Link>
+        </Button>
       </PageContainer>
     );
   }
@@ -127,16 +128,18 @@ export default function WorkspaceSleepReportDetailPage() {
   if (notFound || !detail) {
     return (
       <PageContainer>
-        <PageHeader title={t("title")} />
-        <div className="p-8 text-center text-gray-500 dark:text-gray-400">
-          {t("messages.notFound")}
-        </div>
-        <Link href="/workspace/sleep-reports">
-          <Button variant="outline">
+        <PageHeader title={t("sleepReports.title")} />
+        <EmptyState
+          icon={Moon}
+          title={t("sleepReports.messages.notFound")}
+          description=""
+        />
+        <Button variant="outline" asChild className="mt-4">
+          <Link href="/workspace/sleep-reports">
             <ArrowLeft className="h-4 w-4 mr-2" />
-            {t("actions.back")}
-          </Button>
-        </Link>
+            {t("sleepReports.actions.back")}
+          </Link>
+        </Button>
       </PageContainer>
     );
   }
@@ -145,7 +148,7 @@ export default function WorkspaceSleepReportDetailPage() {
     <SleepReportDetailView
       detail={detail}
       backHref="/workspace/sleep-reports"
-      backLabel={t("actions.back")}
+      backLabel={t("sleepReports.actions.back")}
       translationNamespace="admin.sleepReports"
     />
   );

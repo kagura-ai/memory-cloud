@@ -12,15 +12,9 @@
  */
 
 import { apiClient } from "./base";
+import { SLEEP_STATUS_OPTIONS, type SleepStatus } from "@/lib/sleep-report";
 
-export const SLEEP_STATUS_OPTIONS = [
-  "running",
-  "completed",
-  "failed",
-  "cancelled",
-  "rolled_back",
-] as const;
-export type SleepStatus = (typeof SLEEP_STATUS_OPTIONS)[number];
+export { SLEEP_STATUS_OPTIONS, type SleepStatus };
 
 export interface SleepReportSummary {
   id: string;

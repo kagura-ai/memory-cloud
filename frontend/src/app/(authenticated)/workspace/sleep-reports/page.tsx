@@ -23,7 +23,7 @@ import { hasWorkspaceRole } from "@/lib/auth/rbac";
 import { fetchWorkspaceSleepReports } from "@/lib/api";
 
 export default function WorkspaceSleepReportsPage() {
-  const t = useTranslations("workspace.sleepReports");
+  const t = useTranslations("workspace");
   const { currentWorkspace, currentWorkspaceId, loading } = useWorkspace();
 
   const allowed = hasWorkspaceRole(
@@ -40,8 +40,8 @@ export default function WorkspaceSleepReportsPage() {
   if (!loading && !currentWorkspaceId) {
     return (
       <PageContainer>
-        <PageHeader title={t("title")} />
-        <ErrorBanner error={t("errors.noWorkspaceSelected")} />
+        <PageHeader title={t("sleepReports.title")} />
+        <ErrorBanner error={t("sleepReports.errors.noWorkspaceSelected")} />
       </PageContainer>
     );
   }
@@ -49,16 +49,16 @@ export default function WorkspaceSleepReportsPage() {
   if (!loading && !allowed) {
     return (
       <PageContainer>
-        <PageHeader title={t("title")} />
-        <ErrorBanner error={t("errors.forbiddenWorkspace")} />
+        <PageHeader title={t("sleepReports.title")} />
+        <ErrorBanner error={t("sleepReports.errors.forbiddenWorkspace")} />
       </PageContainer>
     );
   }
 
   return (
     <SleepReportsList
-      title={t("title")}
-      description={t("description")}
+      title={t("sleepReports.title")}
+      description={t("sleepReports.description")}
       fetchData={fetchData}
       detailHrefPrefix="/workspace/sleep-reports"
       translationNamespace="admin.sleepReports"
