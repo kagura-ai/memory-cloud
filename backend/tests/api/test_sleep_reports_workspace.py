@@ -287,8 +287,8 @@ class TestWorkspaceGetSleepReportDetail:
         report_result.scalar_one_or_none.return_value = None
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = []
-        # asyncio.gather still fires the actions query even when report is missing
-        mock_db.execute.side_effect = [report_result, actions_result]
+        # Sequential await: only the report query runs when report is missing
+        mock_db.execute.side_effect = [report_result]
 
         _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
 
