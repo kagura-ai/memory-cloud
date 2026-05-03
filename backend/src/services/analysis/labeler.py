@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from string import Template
 
 import numpy as np
 
@@ -177,12 +178,14 @@ async def _label_one_cluster(
     rep_ids = [str(r.id) for r in reps]
 
     # Locale-aware prompt selection (Issue #542)
-    if locale == "ja":
-        system_prompt = CLUSTER_LABEL_SYSTEM_JA
-        prompt = CLUSTER_LABEL_USER_JA.format(representatives=rep_block)
-    else:
-        system_prompt = CLUSTER_LABEL_SYSTEM
-        prompt = CLUSTER_LABEL_USER.format(representatives=rep_block)
+    # Mapping table so new languages only need a prompts.py entry.
+    _PROMPT_MAP = {
+        "ja": (CLUSTER_LABEL_SYSTEM_JA, CLUSTER_LABEL_USER_JA),
+    }
+    system_prompt, user_template = _PROMPT_MAP.get(
+        locale, (CLUSTER_LABEL_SYSTEM, CLUSTER_LABEL_USER)
+    )
+    prompt = Template(user_template).substitute(representatives=rep_block)
 
     async with sem:
         # Per-task session — each LLMService gets its own AsyncSession

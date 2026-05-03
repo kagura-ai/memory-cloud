@@ -404,10 +404,10 @@ class AnalysisOrchestrator:
             # shared session. See labeler.py for the per-task pattern.
             # Issue #542: resolve user's locale for prompt language.
             user_result = await self.db.execute(
-                select(User).where(User.user_id == analysis.triggered_by)
+                select(User.locale).where(User.user_id == analysis.triggered_by)
             )
-            db_user = user_result.scalar_one_or_none()
-            label_locale = db_user.locale if db_user else "en"
+            db_locale = user_result.scalar_one_or_none()
+            label_locale = db_locale if db_locale else "en"
             cluster_label_results = await analysis_labeler.label_clusters(
                 cluster_labels=cluster_result.labels,
                 centroids=cluster_result.centroids,

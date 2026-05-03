@@ -43,7 +43,7 @@ Constraints:
 
 CLUSTER_LABEL_USER = """Cluster representatives:
 
-{representatives}
+$representatives
 
 Output the JSON object now."""
 
@@ -73,6 +73,6 @@ CLUSTER_LABEL_SYSTEM_JA = """あなたはmemoryクラスターに短い説明的
 
 CLUSTER_LABEL_USER_JA = """クラスター代表：
 
-{representatives}
+$representatives
 
 JSONオブジェクトを出力してください。"""

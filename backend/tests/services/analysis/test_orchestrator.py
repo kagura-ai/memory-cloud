@@ -346,7 +346,7 @@ class TestAnalysisOrchestratorRun:
             patch(
                 "services.analysis.orchestrator.analysis_labeler.label_clusters",
                 new=AsyncMock(return_value=[]),
-            ),
+            ) as mock_label_clusters,
             patch(
                 "services.analysis.orchestrator.persist_results",
                 new=AsyncMock(),
@@ -358,6 +358,9 @@ class TestAnalysisOrchestratorRun:
         assert analysis.embedding_model == "test-model"
         assert analysis.cost_estimated_cents == 42
         mock_persist.assert_awaited_once()
+        # Issue #542: locale fallback to "en" when no DB user
+        mock_label_clusters.assert_awaited_once()
+        assert mock_label_clusters.call_args.kwargs.get("locale") == "en"
 
     @pytest.mark.asyncio
     async def test_embedding_mismatch_marks_failed_and_reraises(self, db_session) -> None:
