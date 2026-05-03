@@ -244,7 +244,7 @@ function DevicePageInner() {
             </div>
           )}
 
-          {phase === "consent" && deviceInfo && (
+          {(phase === "consent" || phase === "submitting") && deviceInfo && (
             <div className="text-center space-y-4">
               <div>
                 <h1 className="text-xl font-semibold text-gray-900">
@@ -285,33 +285,28 @@ function DevicePageInner() {
             </div>
           )}
 
-          {(phase === "submitting" || (phase === "error" && error)) &&
-            deviceInfo && (
-              <div className="text-center space-y-4">
-                {phase === "error" && error && (
-                  <>
-                    <Alert variant="destructive">
-                      <AlertCircle className="h-4 w-4" />
-                      <AlertDescription>{error}</AlertDescription>
-                    </Alert>
-                    <div className="flex gap-3 justify-center">
-                      <Button variant="outline" onClick={resetToInput}>
-                        {t("device.backToVerify")}
-                      </Button>
-                      <Button
-                        variant="default"
-                        onClick={() => {
-                          setPhase("consent");
-                          setError(null);
-                        }}
-                      >
-                        {t("device.tryAgain")}
-                      </Button>
-                    </div>
-                  </>
-                )}
+          {phase === "error" && error && deviceInfo && (
+            <div className="text-center space-y-4">
+              <Alert variant="destructive">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+              <div className="flex gap-3 justify-center">
+                <Button variant="outline" onClick={resetToInput}>
+                  {t("device.backToVerify")}
+                </Button>
+                <Button
+                  variant="default"
+                  onClick={() => {
+                    setPhase("consent");
+                    setError(null);
+                  }}
+                >
+                  {t("device.tryAgain")}
+                </Button>
               </div>
-            )}
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>

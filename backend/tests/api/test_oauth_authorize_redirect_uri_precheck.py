@@ -344,7 +344,7 @@ class TestPostAuthorizeExceptionBranches:
             patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
             patch("api.routes.oauth.get_sync_session") as mock_sess,
             patch(
-                "api.routes.oauth._handle_authorize_sync",
+                "api.routes.oauth._run_oauth_sync",
                 side_effect=InvalidScopeError(description="bad scope"),
             ),
         ):
@@ -380,7 +380,7 @@ class TestPostAuthorizeExceptionBranches:
             patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
             patch("api.routes.oauth.get_sync_session") as mock_sess,
             patch(
-                "api.routes.oauth._handle_authorize_sync",
+                "api.routes.oauth._run_oauth_sync",
                 side_effect=RuntimeError("boom"),
             ),
         ):
