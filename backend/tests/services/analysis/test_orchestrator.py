@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
+from sqlalchemy import text
 
 from models.analysis import MemoryAnalysis
 from models.auth import Context, Workspace
@@ -23,6 +25,16 @@ from services.analysis.orchestrator import (
     _resolve_pricing_row,
 )
 from utils.exceptions import ConfigurationError, ConflictError, ValidationError
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def cleanup_llm_pricing(db_session):
+    """Reset llm_pricing so tests that assume an empty table or insert
+    default rows are deterministic regardless of execution order.
+    """
+    await db_session.execute(text("TRUNCATE TABLE llm_pricing RESTART IDENTITY CASCADE"))
+    await db_session.commit()
+    yield
 
 
 async def _seed_workspace_context(db_session, ws_id, ctx_id, owner_user_id="u1"):
