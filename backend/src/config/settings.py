@@ -37,6 +37,16 @@ class Settings(BaseSettings):
         description="Enforce PKCE (RFC 7636) at /token for public clients",
     )
 
+    # OAuth2 - Device Authorization Grant (RFC 8628, Issue #536)
+    oauth_device_code_expires_in: int = Field(
+        default=600,
+        description="Device code lifetime in seconds (default: 10 min per RFC 8628)",
+    )
+    oauth_device_polling_interval: int = Field(
+        default=5,
+        description="Minimum polling interval in seconds for device code grant",
+    )
+
     # OAuth2 - Google
     google_client_id: str = Field(default="", description="Google OAuth2 Client ID")
     google_client_secret: str = Field(default="", description="Google OAuth2 Client Secret")

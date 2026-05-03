@@ -3194,5 +3194,36 @@
       },
       "loadFailed": "Failed to load analyses — check connection and try again."
     }
+  },
+  "device": {
+    "title": "Device Authorization",
+    "description": "Enter the code displayed in your CLI to authorize this device.",
+    "codeLabel": "Device Code",
+    "codePlaceholder": "XXXX-XXXX",
+    "verify": "Verify",
+    "verifying": "Verifying...",
+    "invalidCode": "The code you entered is invalid or has expired. Check your CLI and try again.",
+    "alreadyAuthorized": "This device has already been authorized.",
+    "alreadyDenied": "This device request has already been denied.",
+    "expired": "This authorization request has expired. Start a new one from your CLI.",
+    "consentTitle": "Authorize Device",
+    "consentDescription": "Allow this application to access your Kagura Memory Cloud workspace:",
+    "scopeRead": "Read memories",
+    "scopeWrite": "Write memories",
+    "scopeDelete": "Delete memories",
+    "scopeAdmin": "Manage workspace",
+    "scopeOffline": "Offline access",
+    "unknownScope": "Unknown permission: {scope}",
+    "approve": "Approve",
+    "approving": "Approving...",
+    "deny": "Deny",
+    "denying": "Denying...",
+    "successTitle": "Device Authorized",
+    "successMessage": "Your device has been authorized. You can close this page and return to your CLI.",
+    "deniedTitle": "Authorization Denied",
+    "deniedMessage": "You have denied this device authorization request. You can close this page.",
+    "errorTitle": "Something went wrong",
+    "errorMessage": "An unexpected error occurred. Please try again.",
+    "backToVerify": "Enter a different code"
   }
 }

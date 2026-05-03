@@ -707,6 +707,83 @@ class OAuth2AuthorizationCode(Base):
         return utcnow() > self.expires_at
 
 
+def generate_user_code(length: int = 8) -> str:
+    """Generate a random user code for Device Authorization Grant.
+
+    Returns an uppercase alphanumeric string of the given length.
+    Used by the device authorization endpoint to create human-typable codes.
+
+    Args:
+        length: Code length (default 8, per RFC 8628 recommendations).
+
+    Returns:
+        Random uppercase alphanumeric string.
+    """
+    import string
+
+    alphabet = string.ascii_uppercase + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+class OAuth2DeviceCode(Base):
+    """OAuth2 Device Authorization Code model (RFC 8628, Issue #536).
+
+    Stores pending device authorization requests. Created when a CLI client
+    calls the device authorization endpoint; updated when the user approves
+    or denies via the browser consent flow.
+
+    Authlib Integration:
+        Implements the required interface for Authlib's DeviceCodeGrant:
+        - get_client_id(): Returns client_id
+        - get_user_code(): Returns user_code
+        - get_scope(): Returns scope
+        - is_expired(): Checks if device code is expired
+    """
+
+    __tablename__ = "oauth_device_codes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    device_code = Column(String(255), nullable=False, unique=True, index=True)
+    user_code = Column(String(8), nullable=False, unique=True, index=True)
+    client_id = Column(
+        String(48),
+        ForeignKey("oauth_clients.client_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id = Column(String(255), nullable=True)
+    scope = Column(String(255), nullable=True)
+
+    expires_at = Column(DateTime, nullable=False, index=True)
+    last_polled_at = Column(DateTime, nullable=True)
+    denied_at = Column(DateTime, nullable=True)
+    authorized_at = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+    client = relationship("OAuth2Client")
+
+    def __repr__(self) -> str:
+        return f"<OAuth2DeviceCode(device_code='{self.device_code[:8]}...', client='{self.client_id}')>"
+
+    # ========================================================================
+    # Authlib Interface Methods
+    # ========================================================================
+
+    def get_client_id(self) -> str:
+        return self.client_id
+
+    def get_user_code(self) -> str:
+        return self.user_code
+
+    def get_scope(self) -> str | None:
+        return self.scope
+
+    def is_expired(self) -> bool:
+        return utcnow() > self.expires_at
+
+
 class OAuth2Token(Base):
     """OAuth2 Access Token model.
 
