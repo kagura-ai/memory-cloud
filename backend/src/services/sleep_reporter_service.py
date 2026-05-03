@@ -11,7 +11,6 @@ Same two-endpoint pattern as ``CostAggregationService`` (#472):
 
 from __future__ import annotations
 
-import asyncio
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -73,11 +72,10 @@ class SleepReporterService:
             stmt = stmt.where(*conditions)
         stmt = stmt.order_by(SleepReport.started_at.desc()).limit(limit).offset(offset)
 
-        count_result, result = await asyncio.gather(
-            self.db.execute(count_stmt),
-            self.db.execute(stmt),
-        )
+        count_result = await self.db.execute(count_stmt)
         total = count_result.scalar() or 0
+
+        result = await self.db.execute(stmt)
         reports = list(result.scalars().all())
         return reports, total
 
@@ -106,10 +104,7 @@ class SleepReporterService:
             select(SleepAction).where(SleepAction.report_id == report_id).order_by(SleepAction.id)
         )
 
-        report_result, actions_result = await asyncio.gather(
-            self.db.execute(report_stmt),
-            self.db.execute(actions_stmt),
-        )
+        report_result = await self.db.execute(report_stmt)
         report = report_result.scalar_one_or_none()
         if not report:
             return None
@@ -117,6 +112,7 @@ class SleepReporterService:
         if workspace_id is not None and report.workspace_id != workspace_id:  # type: ignore[operator]
             return None
 
+        actions_result = await self.db.execute(actions_stmt)
         actions = list(actions_result.scalars().all())
         return report, actions
 

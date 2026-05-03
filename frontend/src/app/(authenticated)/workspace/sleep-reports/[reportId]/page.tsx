@@ -146,7 +146,7 @@ export default function WorkspaceSleepReportDetailPage() {
       detail={detail}
       backHref="/workspace/sleep-reports"
       backLabel={t("actions.back")}
-      translationNamespace="workspace.sleepReports"
+      translationNamespace="admin.sleepReports"
     />
   );
 }

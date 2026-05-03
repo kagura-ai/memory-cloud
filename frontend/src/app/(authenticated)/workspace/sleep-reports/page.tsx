@@ -18,7 +18,6 @@ import {
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
-import { LoadingState } from "@/components/common/LoadingState";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole } from "@/lib/auth/rbac";
 import { fetchWorkspaceSleepReports } from "@/lib/api";
@@ -62,7 +61,7 @@ export default function WorkspaceSleepReportsPage() {
       description={t("description")}
       fetchData={fetchData}
       detailHrefPrefix="/workspace/sleep-reports"
-      translationNamespace="workspace.sleepReports"
+      translationNamespace="admin.sleepReports"
       ready={!!currentWorkspaceId && allowed}
     />
   );
