@@ -378,6 +378,16 @@ class AnalysisOrchestrator:
             # ~2-20s compute window. (Per Copilot review on PR #530.)
             await self.db.commit()
 
+            # Pre-warm umap + sklearn before spawning threads. Both stage
+            # functions use lazy imports; if two OS threads race to import the
+            # same module, CPython's per-module importlib lock deadlocks
+            # (umap imports sklearn internally, cluster_high_dim also imports
+            # sklearn — circular wait, silent hang). Populating sys.modules
+            # here ensures threads hit the cached fast path, not the lock.
+            import umap as _umap_prewarm  # noqa: F401
+            from sklearn.cluster import KMeans as _kmeans_prewarm  # noqa: F401
+            from sklearn.metrics import silhouette_score as _sil_prewarm  # noqa: F401
+
             # Stages [D] and [E] are CPU-bound (sklearn KMeans + UMAP).
             # Run them concurrently in worker threads so the asyncio
             # event loop is not blocked for the combined ~2-20s of
