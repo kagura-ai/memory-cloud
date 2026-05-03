@@ -149,10 +149,10 @@ export function NewAnalysisModal({
             const d = err.details as Record<string, unknown>;
             setPreviewError(
               t("errors.QUOTA-001", {
-                used: d.used_today ?? "?",
-                limit: d.limit_today ?? "?",
-                addon: d.addon_bonus ?? 0,
-                resetsAt: d.resets_at ?? "?",
+                used: String(d.used_today ?? "?"),
+                limit: String(d.limit_today ?? "?"),
+                addon: String(d.addon_bonus ?? 0),
+                resetsAt: String(d.resets_at ?? "?"),
               }),
             );
           } else {
