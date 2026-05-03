@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { SpinnerLoading } from "@/components/common/LoadingState";
+import { ApiError } from "@/lib/api";
 import {
   verifyDeviceCode,
   confirmDevice,
@@ -98,7 +99,7 @@ function DevicePageInner() {
       setPhase(result.status === "approved" ? "success" : "denied");
     } catch (err) {
       const detail =
-        (err as { detail?: string })?.detail ?? t("device.errorMessage");
+        err instanceof ApiError ? err.message : t("device.errorMessage");
       if (detail.includes("already been authorized")) {
         setPhase("success");
       } else if (detail.includes("already been denied")) {

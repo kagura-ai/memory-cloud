@@ -14,6 +14,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 
+import { ApiError } from "@/lib/api";
 import DevicePage from "./page";
 
 // ---------- Mocks ------------------------------------------------------------
@@ -225,6 +226,68 @@ describe("DevicePage", () => {
 
     await waitFor(() => {
       expect(screen.getByText("device.successTitle")).toBeDefined();
+    });
+  });
+
+  it("transitions to success on 409 already-authorized during confirm", async () => {
+    mockVerifyDeviceCode.mockResolvedValue({
+      user_code: "ABCD1234",
+      client_name: "Test CLI",
+      scope: "memory:read",
+      expires_at: "2026-01-01T00:00:00Z",
+      is_authorized: false,
+      is_expired: false,
+    });
+    mockConfirmDevice.mockRejectedValue(
+      new ApiError({
+        message: "This code has already been authorized",
+        status: 409,
+      }),
+    );
+    render(<DevicePage />);
+
+    const input = screen.getByLabelText("device.codeLabel");
+    fireEvent.change(input, { target: { value: "ABCD1234" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(screen.getByText("device.approve")).toBeDefined();
+    });
+    fireEvent.click(screen.getByText("device.approve"));
+
+    await waitFor(() => {
+      expect(screen.getByText("device.successTitle")).toBeDefined();
+    });
+  });
+
+  it("transitions to denied on 409 already-denied during confirm", async () => {
+    mockVerifyDeviceCode.mockResolvedValue({
+      user_code: "ABCD1234",
+      client_name: "Test CLI",
+      scope: "memory:read",
+      expires_at: "2026-01-01T00:00:00Z",
+      is_authorized: false,
+      is_expired: false,
+    });
+    mockConfirmDevice.mockRejectedValue(
+      new ApiError({
+        message: "This code has already been denied",
+        status: 409,
+      }),
+    );
+    render(<DevicePage />);
+
+    const input = screen.getByLabelText("device.codeLabel");
+    fireEvent.change(input, { target: { value: "ABCD1234" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(screen.getByText("device.deny")).toBeDefined();
+    });
+    fireEvent.click(screen.getByText("device.deny"));
+
+    await waitFor(() => {
+      expect(screen.getByText("device.deniedTitle")).toBeDefined();
     });
   });
 });
