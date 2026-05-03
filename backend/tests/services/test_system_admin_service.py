@@ -27,7 +27,12 @@ async def cleanup_admin_test_data(db_session):
     await db_session.execute(text("TRUNCATE TABLE audit_logs RESTART IDENTITY CASCADE"))
     await db_session.execute(text("TRUNCATE TABLE users RESTART IDENTITY CASCADE"))
     await db_session.commit()
-    yield
+    try:
+        yield
+    finally:
+        await db_session.execute(text("TRUNCATE TABLE audit_logs RESTART IDENTITY CASCADE"))
+        await db_session.execute(text("TRUNCATE TABLE users RESTART IDENTITY CASCADE"))
+        await db_session.commit()
 
 
 @pytest_asyncio.fixture
