@@ -69,6 +69,7 @@ class QuotaBreakdown(BaseModel):
     mcp_calls_per_day: int
     max_contexts: int
     max_members: int
+    analysis_runs_per_day: int
 
 
 class AddonValues(BaseModel):
@@ -78,6 +79,7 @@ class AddonValues(BaseModel):
     mcp_quota_bonus: int = 0
     member_bonus: int = 0
     context_bonus: int = 0
+    analysis_bonus: int = 0
 
 
 class UsageValues(BaseModel):
@@ -107,6 +109,7 @@ class UpdateAddonRequest(BaseModel):
     addon_mcp_quota_bonus: int = Field(0, ge=0)
     addon_member_bonus: int = Field(0, ge=0)
     addon_context_bonus: int = Field(0, ge=0)
+    addon_analysis_bonus: int = Field(0, ge=0)
 
 
 class PlanChangeAuditEntry(BaseModel):
@@ -456,18 +459,21 @@ async def get_workspace_quotas(
                 mcp_calls_per_day=plan_tier.mcp_calls_per_day,
                 max_contexts=plan_tier.max_contexts_per_workspace,
                 max_members=plan_tier.max_members_per_workspace,
+                analysis_runs_per_day=plan_tier.analysis_runs_per_day,
             ),
             addon=AddonValues(
                 memory_bonus=workspace.addon_memory_bonus,
                 mcp_quota_bonus=workspace.addon_mcp_quota_bonus,
                 member_bonus=workspace.addon_member_bonus,
                 context_bonus=workspace.addon_context_bonus,
+                analysis_bonus=workspace.addon_analysis_bonus,
             ),
             effective=QuotaBreakdown(
                 memory_limit=effective["memory_limit"],
                 mcp_calls_per_day=effective["mcp_calls_per_day"],
                 max_contexts=effective["max_contexts"],
                 max_members=effective["max_members"],
+                analysis_runs_per_day=effective["analysis_runs_per_day"],
             ),
             usage=UsageValues(
                 memories=memory_count,
@@ -542,12 +548,14 @@ async def update_workspace_quotas(
         old_mcp_bonus = workspace.addon_mcp_quota_bonus
         old_member_bonus = workspace.addon_member_bonus
         old_context_bonus = workspace.addon_context_bonus
+        old_analysis_bonus = workspace.addon_analysis_bonus
 
         # Update addon bonuses
         workspace.addon_memory_bonus = request.addon_memory_bonus
         workspace.addon_mcp_quota_bonus = request.addon_mcp_quota_bonus
         workspace.addon_member_bonus = request.addon_member_bonus
         workspace.addon_context_bonus = request.addon_context_bonus
+        workspace.addon_analysis_bonus = request.addon_analysis_bonus
 
         await db.commit()
 
@@ -560,6 +568,7 @@ async def update_workspace_quotas(
                 "mcp_quota_bonus": f"{old_mcp_bonus} -> {request.addon_mcp_quota_bonus}",
                 "member_bonus": f"{old_member_bonus} -> {request.addon_member_bonus}",
                 "context_bonus": f"{old_context_bonus} -> {request.addon_context_bonus}",
+                "analysis_bonus": f"{old_analysis_bonus} -> {request.addon_analysis_bonus}",
             },
         )
 

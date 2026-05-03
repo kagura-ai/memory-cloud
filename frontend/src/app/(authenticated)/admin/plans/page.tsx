@@ -98,6 +98,7 @@ export default function AdminPlansPage() {
   const [addonMcp, setAddonMcp] = useState(0);
   const [addonMember, setAddonMember] = useState(0);
   const [addonContext, setAddonContext] = useState(0);
+  const [addonAnalysis, setAddonAnalysis] = useState(0);
   const { toast } = useToast();
   const [tab, setTab] = useTabParam("workspaces", "tab", PLAN_TABS);
 
@@ -183,6 +184,7 @@ export default function AdminPlansPage() {
     setAddonMcp(quotaDetail.addon.mcp_quota_bonus);
     setAddonMember(quotaDetail.addon.member_bonus);
     setAddonContext(quotaDetail.addon.context_bonus);
+    setAddonAnalysis(quotaDetail.addon.analysis_bonus);
     setAddonDialogOpen(true);
   };
 
@@ -194,6 +196,7 @@ export default function AdminPlansPage() {
         addon_mcp_quota_bonus: addonMcp,
         addon_member_bonus: addonMember,
         addon_context_bonus: addonContext,
+        addon_analysis_bonus: addonAnalysis,
       });
       toast({ title: tCommon("success"), description: "Quota addons updated" });
       setAddonDialogOpen(false);
@@ -375,7 +378,7 @@ export default function AdminPlansPage() {
                                       </div>
                                       {[
                                         {
-                                          label: "Memories",
+                                          label: t("quota.memory"),
                                           base: quotaDetail.base.memory_limit,
                                           addon: quotaDetail.addon.memory_bonus,
                                           effective:
@@ -383,7 +386,7 @@ export default function AdminPlansPage() {
                                           usage: quotaDetail.usage.memories,
                                         },
                                         {
-                                          label: "MCP Calls/day",
+                                          label: t("quota.mcp"),
                                           base: quotaDetail.base
                                             .mcp_calls_per_day,
                                           addon:
@@ -394,7 +397,7 @@ export default function AdminPlansPage() {
                                           usage: null,
                                         },
                                         {
-                                          label: "Contexts",
+                                          label: t("quota.contexts"),
                                           base: quotaDetail.base.max_contexts,
                                           addon:
                                             quotaDetail.addon.context_bonus,
@@ -403,12 +406,23 @@ export default function AdminPlansPage() {
                                           usage: quotaDetail.usage.contexts,
                                         },
                                         {
-                                          label: "Members",
+                                          label: t("quota.members"),
                                           base: quotaDetail.base.max_members,
                                           addon: quotaDetail.addon.member_bonus,
                                           effective:
                                             quotaDetail.effective.max_members,
                                           usage: quotaDetail.usage.members,
+                                        },
+                                        {
+                                          label: t("quota.analysis"),
+                                          base: quotaDetail.base
+                                            .analysis_runs_per_day,
+                                          addon:
+                                            quotaDetail.addon.analysis_bonus,
+                                          effective:
+                                            quotaDetail.effective
+                                              .analysis_runs_per_day,
+                                          usage: null,
                                         },
                                       ].map((row) => (
                                         <div
@@ -440,7 +454,7 @@ export default function AdminPlansPage() {
                                               <span className="text-muted-foreground">
                                                 {" "}
                                                 / {row.usage.toLocaleString()}{" "}
-                                                used
+                                                {t("quota.used")}
                                               </span>
                                             )}
                                           </div>
@@ -516,6 +530,14 @@ export default function AdminPlansPage() {
                     <TableCell>100</TableCell>
                     <TableCell>2,000</TableCell>
                     <TableCell>10,000</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium">
+                      {t("tiersTable.analysisRuns")}
+                    </TableCell>
+                    <TableCell>-</TableCell>
+                    <TableCell>-</TableCell>
+                    <TableCell>3</TableCell>
                   </TableRow>
                   <TableRow>
                     <TableCell className="font-medium">
@@ -691,26 +713,32 @@ export default function AdminPlansPage() {
       <Dialog open={addonDialogOpen} onOpenChange={setAddonDialogOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Edit Quota Addons</DialogTitle>
+            <DialogTitle>{t("addonDialog.title")}</DialogTitle>
             <DialogDescription>
-              Adjust addon bonuses for{" "}
+              {t("addonDialog.description")}{" "}
               <strong>{quotaDetail?.workspace_name}</strong>
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4 py-4">
             <div>
-              <Label htmlFor="addon-memory">Memory Bonus</Label>
+              <Label htmlFor="addon-memory">
+                {t("addonDialog.memory")}{" "}
+                <span className="text-xs text-muted-foreground font-normal">
+                  (+10,000 / unit)
+                </span>
+              </Label>
               <div className="flex items-center gap-2 mt-1">
                 <Input
                   id="addon-memory"
                   type="number"
                   min={0}
+                  step={10000}
                   value={addonMemory}
                   onChange={(e) => setAddonMemory(Number(e.target.value))}
                 />
                 <span className="text-xs text-muted-foreground whitespace-nowrap">
-                  Effective:{" "}
+                  {t("addonDialog.effective")}:{" "}
                   {(
                     (quotaDetail?.base.memory_limit ?? 0) + addonMemory
                   ).toLocaleString()}
@@ -719,17 +747,23 @@ export default function AdminPlansPage() {
             </div>
 
             <div>
-              <Label htmlFor="addon-mcp">MCP Calls/day Bonus</Label>
+              <Label htmlFor="addon-mcp">
+                {t("addonDialog.mcp")}{" "}
+                <span className="text-xs text-muted-foreground font-normal">
+                  (+5,000 / unit)
+                </span>
+              </Label>
               <div className="flex items-center gap-2 mt-1">
                 <Input
                   id="addon-mcp"
                   type="number"
                   min={0}
+                  step={5000}
                   value={addonMcp}
                   onChange={(e) => setAddonMcp(Number(e.target.value))}
                 />
                 <span className="text-xs text-muted-foreground whitespace-nowrap">
-                  Effective:{" "}
+                  {t("addonDialog.effective")}:{" "}
                   {(
                     (quotaDetail?.base.mcp_calls_per_day ?? 0) + addonMcp
                   ).toLocaleString()}
@@ -738,41 +772,79 @@ export default function AdminPlansPage() {
             </div>
 
             <div>
-              <Label htmlFor="addon-member">Member Bonus</Label>
+              <Label htmlFor="addon-member">
+                {t("addonDialog.members")}{" "}
+                <span className="text-xs text-muted-foreground font-normal">
+                  (+5 / unit)
+                </span>
+              </Label>
               <div className="flex items-center gap-2 mt-1">
                 <Input
                   id="addon-member"
                   type="number"
                   min={0}
+                  step={5}
                   value={addonMember}
                   onChange={(e) => setAddonMember(Number(e.target.value))}
                 />
                 <span className="text-xs text-muted-foreground whitespace-nowrap">
-                  Effective:{" "}
+                  {t("addonDialog.effective")}:{" "}
                   {(
                     (quotaDetail?.base.max_members ?? 0) + addonMember
                   ).toLocaleString()}{" "}
-                  ({quotaDetail?.usage.members ?? 0} used)
+                  ({quotaDetail?.usage.members ?? 0} {t("addonDialog.used")})
                 </span>
               </div>
             </div>
 
             <div>
-              <Label htmlFor="addon-context">Extra Contexts</Label>
+              <Label htmlFor="addon-context">
+                {t("addonDialog.contexts")}{" "}
+                <span className="text-xs text-muted-foreground font-normal">
+                  (+5 / unit)
+                </span>
+              </Label>
               <div className="flex items-center gap-2 mt-1">
                 <Input
                   id="addon-context"
                   type="number"
                   min={0}
+                  step={5}
                   value={addonContext}
                   onChange={(e) => setAddonContext(Number(e.target.value))}
                 />
                 <span className="text-xs text-muted-foreground whitespace-nowrap">
-                  Effective:{" "}
+                  {t("addonDialog.effective")}:{" "}
                   {(
                     (quotaDetail?.base.max_contexts ?? 0) + addonContext
                   ).toLocaleString()}{" "}
-                  ({quotaDetail?.usage.contexts ?? 0} used)
+                  ({quotaDetail?.usage.contexts ?? 0} {t("addonDialog.used")})
+                </span>
+              </div>
+            </div>
+
+            <div>
+              <Label htmlFor="addon-analysis">
+                {t("addonDialog.analysis")}{" "}
+                <span className="text-xs text-muted-foreground font-normal">
+                  (+1 / unit)
+                </span>
+              </Label>
+              <div className="flex items-center gap-2 mt-1">
+                <Input
+                  id="addon-analysis"
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={addonAnalysis}
+                  onChange={(e) => setAddonAnalysis(Number(e.target.value))}
+                />
+                <span className="text-xs text-muted-foreground whitespace-nowrap">
+                  {t("addonDialog.effective")}:{" "}
+                  {(
+                    (quotaDetail?.base.analysis_runs_per_day ?? 0) +
+                    addonAnalysis
+                  ).toLocaleString()}
                 </span>
               </div>
             </div>
@@ -782,10 +854,10 @@ export default function AdminPlansPage() {
                 addonContext < quotaDetail.addon.context_bonus) && (
                 <div className="bg-yellow-50 dark:bg-yellow-950 p-3 rounded-md">
                   <p className="text-sm text-yellow-800 dark:text-yellow-100">
-                    Reducing member or context addons will be rejected if
-                    current usage exceeds the new effective limit. (Members:{" "}
-                    {quotaDetail.usage.members} used, Contexts:{" "}
-                    {quotaDetail.usage.contexts} used)
+                    {t("addonDialog.reductionWarning", {
+                      members: quotaDetail.usage.members,
+                      contexts: quotaDetail.usage.contexts,
+                    })}
                   </p>
                 </div>
               )}
@@ -793,11 +865,11 @@ export default function AdminPlansPage() {
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setAddonDialogOpen(false)}>
-              Cancel
+              {tCommon("cancel")}
             </Button>
             <Button onClick={handleUpdateAddons}>
               <CheckCircle className="h-4 w-4 mr-2" />
-              Save Addons
+              {t("addonDialog.save")}
             </Button>
           </DialogFooter>
         </DialogContent>
