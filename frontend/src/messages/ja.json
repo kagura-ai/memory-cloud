@@ -3224,6 +3224,7 @@
     "deniedMessage": "デバイス認証リクエストを拒否しました。このページを閉じてください。",
     "errorTitle": "エラーが発生しました",
     "errorMessage": "予期しないエラーが発生しました。もう一度お試しください。",
-    "backToVerify": "別のコードを入力"
+    "backToVerify": "別のコードを入力",
+    "tryAgain": "再試行"
   }
 }

@@ -3224,6 +3224,7 @@
     "deniedMessage": "You have denied this device authorization request. You can close this page.",
     "errorTitle": "Something went wrong",
     "errorMessage": "An unexpected error occurred. Please try again.",
-    "backToVerify": "Enter a different code"
+    "backToVerify": "Enter a different code",
+    "tryAgain": "Try again"
   }
 }
