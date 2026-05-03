@@ -409,7 +409,11 @@
         "cta": "Get Started"
       },
       "common": {
-        "mostPopular": "Most Popular"
+        "mostPopular": "Most Popular",
+        "cancel": "Cancel",
+        "success": "Success",
+        "error": "Error",
+        "refresh": "Refresh"
       }
     },
     "features": {
@@ -811,6 +815,11 @@
     "timezone": "Timezone",
     "selectTimezone": "Select timezone",
     "timezoneDesc": "Used for displaying dates and times",
+    "locale": "Language",
+    "selectLocale": "Select language",
+    "localeDesc": "Interface display language",
+    "localeJa": "日本語",
+    "localeEn": "English",
     "systemRole": "System Role",
     "systemAdmin": "System Administrator",
     "elevatedPrivileges": "You have elevated system privileges",
@@ -2017,6 +2026,7 @@
   "admin": {
     "common": {
       "refresh": "Refresh",
+      "cancel": "Cancel",
       "loading": "Loading...",
       "noResults": "No results found",
       "noWorkspaces": "No workspaces found",
@@ -2054,10 +2064,32 @@
         "memories": "Memories",
         "storage": "Storage",
         "apiCalls": "API Calls (Daily)",
+        "analysisRuns": "Analysis Runs (Daily)",
         "reranking": "Reranking",
         "mcpAppCredentials": "MCP App Credentials (OAuth)",
         "memoryAgent": "Memory Agent",
         "unlimited": "Unlimited"
+      },
+      "quota": {
+        "memory": "Memories",
+        "mcp": "MCP Calls/day",
+        "contexts": "Contexts",
+        "members": "Members",
+        "analysis": "Analysis Runs/day",
+        "used": "used"
+      },
+      "addonDialog": {
+        "title": "Edit Addons",
+        "description": "Adjust addon bonuses for",
+        "memory": "Memory Bonus",
+        "mcp": "MCP Calls/day Bonus",
+        "members": "Member Bonus",
+        "contexts": "Extra Contexts",
+        "analysis": "Analysis Runs Bonus",
+        "effective": "Effective",
+        "used": "used",
+        "save": "Save Addons",
+        "reductionWarning": "Reducing member or context addons will be rejected if current usage exceeds the new effective limit. (Members: {members} used, Contexts: {contexts} used)"
       },
       "auditTable": {
         "title": "Change Audit Log",
@@ -3189,7 +3221,10 @@
       "errorLoadingPreview": "Could not estimate cost — check connection and try again.",
       "errorStarting": "Could not start the run — see details below.",
       "errorPreviewFallback": "preview failed",
-      "errorStartFallback": "start failed"
+      "errorStartFallback": "start failed",
+      "errors": {
+        "QUOTA-001": "Analysis daily quota exceeded: {used}/{limit} runs (addon bonus: {addon}). Resets at {resetsAt}."
+      }
     },
     "running": {
       "title": "Run in progress",

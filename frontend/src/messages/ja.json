@@ -409,7 +409,11 @@
         "cta": "今すぐ始める"
       },
       "common": {
-        "mostPopular": "最も人気"
+        "mostPopular": "最も人気",
+        "cancel": "キャンセル",
+        "success": "成功",
+        "error": "エラー",
+        "refresh": "更新"
       }
     },
     "features": {
@@ -811,6 +815,11 @@
     "timezone": "タイムゾーン",
     "selectTimezone": "タイムゾーンを選択",
     "timezoneDesc": "日時の表示に使用されます",
+    "locale": "言語",
+    "selectLocale": "言語を選択",
+    "localeDesc": "インターフェースの表示言語",
+    "localeJa": "日本語",
+    "localeEn": "English",
     "systemRole": "システムロール",
     "systemAdmin": "システム管理者",
     "elevatedPrivileges": "管理者権限を持っています",
@@ -2017,6 +2026,7 @@
   "admin": {
     "common": {
       "refresh": "更新",
+      "cancel": "キャンセル",
       "loading": "読み込み中...",
       "noResults": "結果が見つかりません",
       "noWorkspaces": "ワークスペースが見つかりません",
@@ -2054,10 +2064,32 @@
         "memories": "メモリー",
         "storage": "ストレージ",
         "apiCalls": "API呼び出し（日次）",
+        "analysisRuns": "メモリー分析回数（日次）",
         "reranking": "リランキング",
         "mcpAppCredentials": "MCPアプリ認証情報（OAuth）",
         "memoryAgent": "メモリーエージェント",
         "unlimited": "無制限"
+      },
+      "quota": {
+        "memory": "Memories",
+        "mcp": "MCP Calls/day",
+        "contexts": "Contexts",
+        "members": "Members",
+        "analysis": "Analysis Runs/day",
+        "used": "used"
+      },
+      "addonDialog": {
+        "title": "アドオン編集",
+        "description": "アドオンボーナスを調整 —",
+        "memory": "Memory Bonus",
+        "mcp": "MCP Calls/day Bonus",
+        "members": "Member Bonus",
+        "contexts": "Extra Contexts",
+        "analysis": "Analysis Runs Bonus",
+        "effective": "Effective",
+        "used": "used",
+        "save": "保存",
+        "reductionWarning": "メンバーまたはコンテキストのアドオンを減らすと、現在の使用量が新しい有効制限を超える場合は拒否されます。（メンバー: {members} 使用中、コンテキスト: {contexts} 使用中）"
       },
       "auditTable": {
         "title": "変更監査ログ",
@@ -3090,7 +3122,7 @@
       "subtitle": "クラスタ俯瞰で memory の地形を見る · Owner のみ"
     },
     "actions": {
-      "newAnalysis": "分析を実行",
+      "newAnalysis": "分析",
       "exportJson": "JSON をエクスポート",
       "refresh": "更新",
       "cancel": "キャンセル"
@@ -3189,7 +3221,10 @@
       "errorLoadingPreview": "コスト推定に失敗しました — 接続を確認して再試行してください。",
       "errorStarting": "Run の起動に失敗しました — 詳細は下記を確認してください。",
       "errorPreviewFallback": "preview に失敗しました",
-      "errorStartFallback": "起動に失敗しました"
+      "errorStartFallback": "起動に失敗しました",
+      "errors": {
+        "QUOTA-001": "分析の日次クォータを超過しました: {used}/{limit} 回（アドオン追加: {addon}）。{resetsAt}にリセットされます。"
+      }
     },
     "running": {
       "title": "実行中",

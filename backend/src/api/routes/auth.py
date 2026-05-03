@@ -729,6 +729,7 @@ async def get_current_user_info(
             "picture": user.get("picture"),
             "role": user.get("role", "user"),
             "timezone": db_user.timezone if db_user else "UTC",  # Issue #175
+            "locale": db_user.locale if db_user else "en",  # Issue #221: i18n locale
             "current_workspace_id": str(user["current_workspace_id"])
             if user.get("current_workspace_id")
             else None,

@@ -13,6 +13,7 @@ export interface User {
   picture?: string;
   role?: string;
   timezone?: string; // Issue #175: User timezone
+  locale?: string; // Issue #221: User locale
   current_workspace_id?: string;
   current_context_id?: string;
   // Issue #514: sign-in method display
