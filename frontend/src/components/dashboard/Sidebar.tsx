@@ -120,6 +120,15 @@ const navigationGroups: NavGroup[] = [
         icon: DollarSign,
         requiredWorkspaceRole: "admin",
       },
+      {
+        // Issue #526: workspace-scoped sleep reports view.
+        // Backend gates owner/admin; sidebar mirrors so member/viewer
+        // don't see a nav entry that would 403 on click.
+        nameKey: "sleepReports",
+        href: "/workspace/sleep-reports",
+        icon: Moon,
+        requiredWorkspaceRole: "admin",
+      },
     ],
   },
   {

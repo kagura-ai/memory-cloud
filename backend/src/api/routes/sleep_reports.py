@@ -1,8 +1,22 @@
-"""Sleep Reports Admin API Routes.
+"""Sleep Reports API Routes.
 
-Admin-only endpoints for inspecting Sleep Maintenance reports and actions.
+Two endpoints share one ``SleepReporterService`` instance:
+
+- ``GET /api/v1/admin/sleep-reports`` — admin-only, sees every workspace.
+- ``GET /api/v1/workspaces/{workspace_id}/sleep-reports`` —
+  workspace owner / admin scoped via
+  ``PermissionService.check_workspace_admin``. The path-bound
+  ``workspace_id`` is the only allowed scope.
+
+Both endpoints accept the same status / limit / offset / user_id /
+context_id filters; the workspace-scoped one omits ``workspace_id``
+from the query string because it comes from the path.
+
+Issue #526: workspace-scoped sleep reports view.
 Issue #179: Sleep Report admin UI (split from #104).
 """
+
+from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
@@ -10,19 +24,18 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import require_admin
+from auth.dependencies import get_current_user, require_admin
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
-from models.auth import Context
-from models.sleep import SleepAction, SleepReport
+from services.permission_service import PermissionService
+from services.sleep_reporter_service import SleepReporterService
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/admin/sleep-reports", tags=["sleep-reports"])
+router = APIRouter()
 
 
 # ============================================================================
@@ -93,16 +106,34 @@ class SleepReportDetailResponse(BaseModel):
 
 
 # ============================================================================
-# Endpoints
+# Shared validation
 # ============================================================================
-
 
 _VALID_STATUSES = {"running", "completed", "failed", "cancelled", "rolled_back"}
 
 
-@router.get("", response_model=SleepReportListResponse)
+def _validate_status(status_filter: str | None) -> None:
+    """Reject unknown status values with a 400 (not a 500)."""
+    if status_filter is not None and status_filter not in _VALID_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid status. Must be one of: {sorted(_VALID_STATUSES)}",
+        )
+
+
+# ============================================================================
+# Admin (cross-workspace) endpoints
+# ============================================================================
+
+
+@router.get(
+    "/admin/sleep-reports",
+    response_model=SleepReportListResponse,
+    summary="List Sleep Maintenance reports (admin)",
+    tags=["sleep-reports"],
+)
 async def list_sleep_reports(
-    _admin: dict = Depends(require_admin),  # noqa: ARG001 - FastAPI dep, access guard only
+    _admin: dict = Depends(require_admin),  # noqa: ARG001 - FastAPI dep
     db: AsyncSession = Depends(get_db),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -115,53 +146,22 @@ async def list_sleep_reports(
     Admin-only. Filterable by status, context_id, user_id.
     Sorted by started_at DESC.
     """
-    if status_filter is not None and status_filter not in _VALID_STATUSES:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid status. Must be one of: {sorted(_VALID_STATUSES)}",
-        )
+    _validate_status(status_filter)
 
-    conditions = []
-    if status_filter is not None:
-        conditions.append(SleepReport.status == status_filter)
-    if context_id is not None:
-        conditions.append(SleepReport.context_id == context_id)
-    if user_id is not None:
-        conditions.append(SleepReport.user_id == user_id)
-
-    count_stmt = select(func.count()).select_from(SleepReport)
-    if conditions:
-        count_stmt = count_stmt.where(*conditions)
-    count_result = await db.execute(count_stmt)
-    total = count_result.scalar() or 0
-
-    stmt = select(SleepReport)
-    if conditions:
-        stmt = stmt.where(*conditions)
-    result = await db.execute(
-        stmt.order_by(SleepReport.started_at.desc()).limit(limit).offset(offset)
+    service = SleepReporterService(db)
+    reports, total = await service.list_reports(
+        status_filter=status_filter,
+        context_id=context_id,
+        user_id=user_id,
+        limit=limit,
+        offset=offset,
     )
-    reports = list(result.scalars().all())
 
     # Batch-load referenced contexts in one query to avoid N+1.
-    # Same resolution rule as get_sleep_report_detail: display_name or name,
-    # None when deleted or missing.
-    context_ids = {r.context_id for r in reports if r.context_id}
-    ctx_map: dict[UUID, str | None] = {}
-    if context_ids:
-        ctx_result = await db.execute(
-            select(Context.id, Context.name, Context.display_name, Context.deleted_at).where(
-                Context.id.in_(context_ids)
-            )
-        )
-        for ctx_id, ctx_name, ctx_display_name, ctx_deleted_at in ctx_result.all():
-            if ctx_deleted_at is not None:
-                ctx_map[ctx_id] = None
-            else:
-                ctx_map[ctx_id] = ctx_display_name or ctx_name
-
+    context_ids = {r.context_id for r in reports if r.context_id}  # type: ignore[misc]
+    ctx_map = await service.resolve_context_names(context_ids)  # type: ignore[arg-type]
     for r in reports:
-        r.context_name = ctx_map.get(r.context_id) if r.context_id else None
+        r.context_name = ctx_map.get(r.context_id) if r.context_id else None  # type: ignore[attr-defined]
 
     return SleepReportListResponse(
         reports=[SleepReportSummary.model_validate(r, from_attributes=True) for r in reports],
@@ -171,44 +171,143 @@ async def list_sleep_reports(
     )
 
 
-@router.get("/{report_id}", response_model=SleepReportDetailResponse)
+@router.get(
+    "/admin/sleep-reports/{report_id}",
+    response_model=SleepReportDetailResponse,
+    summary="Get a single Sleep Maintenance report (admin)",
+    tags=["sleep-reports"],
+)
 async def get_sleep_report_detail(
     report_id: UUID,
-    _admin: dict = Depends(require_admin),  # noqa: ARG001 - FastAPI dep, access guard only
+    _admin: dict = Depends(require_admin),  # noqa: ARG001 - FastAPI dep
     db: AsyncSession = Depends(get_db),
 ) -> SleepReportDetailResponse:
     """Get a single Sleep Maintenance report with its full action audit log.
 
     Admin-only.
     """
-    report_result = await db.execute(select(SleepReport).where(SleepReport.id == report_id))
-    report = report_result.scalar_one_or_none()
-    if not report:
+    service = SleepReporterService(db)
+    result = await service.get_report_detail(report_id)
+    if not result:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Sleep report {report_id} not found.",
         )
 
-    context_name: str | None = None
-    context_deleted = False
-    if report.context_id is not None:
-        ctx_result = await db.execute(select(Context).where(Context.id == report.context_id))
-        ctx = ctx_result.scalar_one_or_none()
-        if ctx is None or ctx.deleted_at is not None:
-            context_deleted = True
-        else:
-            context_name = ctx.display_name or ctx.name
+    report, actions = result
 
-    actions_result = await db.execute(
-        select(SleepAction).where(SleepAction.report_id == report_id).order_by(SleepAction.id)
+    context_name, context_deleted = await service.resolve_context_name(
+        report.context_id  # type: ignore[arg-type]
     )
-    actions = list(actions_result.scalars().all())
 
-    # Inject resolved context fields onto the ORM instance before validation;
-    # the SleepReport model itself has no such columns. Localization of the
-    # deleted marker happens on the frontend via the context_deleted flag.
-    report.context_name = context_name
-    report.context_deleted = context_deleted
+    report.context_name = context_name  # type: ignore[attr-defined]
+    report.context_deleted = context_deleted  # type: ignore[attr-defined]
+    report_detail = SleepReportDetail.model_validate(report, from_attributes=True)
+
+    return SleepReportDetailResponse(
+        report=report_detail,
+        actions=[SleepActionItem.model_validate(a, from_attributes=True) for a in actions],
+        action_count=len(actions),
+    )
+
+
+# ============================================================================
+# Workspace-scoped endpoints
+# ============================================================================
+
+
+@router.get(
+    "/workspaces/{workspace_id}/sleep-reports",
+    response_model=SleepReportListResponse,
+    summary="List Sleep Maintenance reports scoped to one workspace",
+    tags=["workspaces"],
+)
+async def workspace_list_sleep_reports(
+    workspace_id: UUID,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    status_filter: str | None = Query(None, alias="status"),
+    context_id: UUID | None = Query(None),
+    user_id: str | None = Query(None),
+) -> SleepReportListResponse:
+    """List Sleep Maintenance reports for a single workspace.
+
+    Requires workspace **owner** or **admin** role.
+
+    Cross-workspace probing is impossible here: the path-bound
+    ``workspace_id`` is the only scope passed to the service, and
+    ``check_workspace_admin`` rejects callers without admin/owner
+    membership in *that specific* workspace before the query runs.
+    """
+    _validate_status(status_filter)
+
+    perm_service = PermissionService(db)
+    await perm_service.check_workspace_admin(user["user_id"], workspace_id)
+
+    service = SleepReporterService(db)
+    reports, total = await service.list_reports(
+        workspace_id=workspace_id,
+        status_filter=status_filter,
+        context_id=context_id,
+        user_id=user_id,
+        limit=limit,
+        offset=offset,
+    )
+
+    # Batch-load referenced contexts in one query to avoid N+1.
+    context_ids = {r.context_id for r in reports if r.context_id}  # type: ignore[misc]
+    ctx_map = await service.resolve_context_names(context_ids)  # type: ignore[arg-type]
+    for r in reports:
+        r.context_name = ctx_map.get(r.context_id) if r.context_id else None  # type: ignore[attr-defined]
+
+    return SleepReportListResponse(
+        reports=[SleepReportSummary.model_validate(r, from_attributes=True) for r in reports],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/workspaces/{workspace_id}/sleep-reports/{report_id}",
+    response_model=SleepReportDetailResponse,
+    summary="Get a single Sleep Maintenance report scoped to one workspace",
+    tags=["workspaces"],
+)
+async def workspace_get_sleep_report_detail(
+    workspace_id: UUID,
+    report_id: UUID,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SleepReportDetailResponse:
+    """Get a single Sleep Maintenance report with its full action audit log.
+
+    Requires workspace **owner** or **admin** role.
+
+    Returns 404 (not 403) when the report exists but belongs to a
+    different workspace — uniform disclosure policy per #389 / CWE-639.
+    """
+    perm_service = PermissionService(db)
+    await perm_service.check_workspace_admin(user["user_id"], workspace_id)
+
+    service = SleepReporterService(db)
+    result = await service.get_report_detail(report_id, workspace_id=workspace_id)
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Sleep report {report_id} not found.",
+        )
+
+    report, actions = result
+
+    context_name, context_deleted = await service.resolve_context_name(
+        report.context_id  # type: ignore[arg-type]
+    )
+
+    report.context_name = context_name  # type: ignore[attr-defined]
+    report.context_deleted = context_deleted  # type: ignore[attr-defined]
     report_detail = SleepReportDetail.model_validate(report, from_attributes=True)
 
     return SleepReportDetailResponse(

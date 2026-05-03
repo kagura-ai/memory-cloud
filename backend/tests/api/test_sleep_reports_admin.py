@@ -303,10 +303,14 @@ class TestGetSleepReportDetail:
         report_result = MagicMock()
         report_result.scalar_one_or_none.return_value = report
         ctx_result = MagicMock()
-        ctx_result.scalar_one_or_none.return_value = ctx
+        ctx_result.one_or_none.return_value = (ctx.name, ctx.display_name, ctx.deleted_at)
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = actions
-        mock_db.execute.side_effect = [report_result, ctx_result, actions_result]
+        # Order after #526 service extraction + asyncio.gather:
+        # 1. service.get_report_detail: SleepReport query → report_result
+        # 2. service.get_report_detail: SleepAction query → actions_result
+        # 3. service.resolve_context_name: Context query → ctx_result
+        mock_db.execute.side_effect = [report_result, actions_result, ctx_result]
 
         _install_overrides(mock_db)
 
@@ -331,10 +335,10 @@ class TestGetSleepReportDetail:
         report_result = MagicMock()
         report_result.scalar_one_or_none.return_value = report
         ctx_result = MagicMock()
-        ctx_result.scalar_one_or_none.return_value = ctx
+        ctx_result.one_or_none.return_value = (ctx.name, ctx.display_name, ctx.deleted_at)
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = []
-        mock_db.execute.side_effect = [report_result, ctx_result, actions_result]
+        mock_db.execute.side_effect = [report_result, actions_result, ctx_result]
 
         _install_overrides(mock_db)
 
@@ -352,10 +356,10 @@ class TestGetSleepReportDetail:
         report_result = MagicMock()
         report_result.scalar_one_or_none.return_value = report
         ctx_result = MagicMock()
-        ctx_result.scalar_one_or_none.return_value = ctx
+        ctx_result.one_or_none.return_value = (ctx.name, ctx.display_name, ctx.deleted_at)
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = []
-        mock_db.execute.side_effect = [report_result, ctx_result, actions_result]
+        mock_db.execute.side_effect = [report_result, actions_result, ctx_result]
 
         _install_overrides(mock_db)
 
@@ -372,10 +376,10 @@ class TestGetSleepReportDetail:
         report_result = MagicMock()
         report_result.scalar_one_or_none.return_value = report
         ctx_result = MagicMock()
-        ctx_result.scalar_one_or_none.return_value = None
+        ctx_result.one_or_none.return_value = None
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = []
-        mock_db.execute.side_effect = [report_result, ctx_result, actions_result]
+        mock_db.execute.side_effect = [report_result, actions_result, ctx_result]
 
         _install_overrides(mock_db)
 
@@ -408,6 +412,9 @@ class TestGetSleepReportDetail:
         mock_db = AsyncMock()
         report_result = MagicMock()
         report_result.scalar_one_or_none.return_value = None
+        actions_result = MagicMock()
+        actions_result.scalars.return_value.all.return_value = []
+        # Sequential await: only the report query runs when report is missing
         mock_db.execute.side_effect = [report_result]
 
         _install_overrides(mock_db)
@@ -431,10 +438,10 @@ class TestGetSleepReportDetail:
         report_result = MagicMock()
         report_result.scalar_one_or_none.return_value = report
         ctx_result = MagicMock()
-        ctx_result.scalar_one_or_none.return_value = ctx
+        ctx_result.one_or_none.return_value = (ctx.name, ctx.display_name, ctx.deleted_at)
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = []
-        mock_db.execute.side_effect = [report_result, ctx_result, actions_result]
+        mock_db.execute.side_effect = [report_result, actions_result, ctx_result]
 
         _install_overrides(mock_db)
 

@@ -93,8 +93,18 @@ vi.mock("@/components/common/Section", () => ({
 }));
 vi.mock("@/components/common/LoadingState", () => ({
   LoadingState: () => <div data-testid="loading-state" />,
+  TableLoadingState: () => <div data-testid="table-loading-state" />,
   InlineSpinner: () => <span data-testid="inline-spinner" />,
 }));
+
+vi.mock("@/lib/api/sleep-reports", async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import("@/lib/api/sleep-reports")>();
+  return {
+    ...original,
+    fetchAdminSleepReports: (...args: unknown[]) => mockGet(...args),
+  };
+});
 
 // ---------- Helpers ----------------------------------------------------------
 
