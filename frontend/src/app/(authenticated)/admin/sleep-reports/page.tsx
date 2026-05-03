@@ -47,24 +47,15 @@ export default function AdminSleepReportsPage() {
     } catch (err) {
       const apiErr = err instanceof ApiError ? err : null;
       if (apiErr?.status === 409) {
-        const runningReportId = apiErr.details?.running_report_id as
-          | string
-          | undefined;
-        toast({
-          title: t("messages.runConflict"),
-          description: runningReportId
-            ? t("messages.runConflictViewLink")
-            : undefined,
-          variant: "destructive",
-        });
-      } else {
-        toast({
-          title: tCommon("error"),
-          description:
-            err instanceof Error ? err.message : t("messages.runError"),
-          variant: "destructive",
-        });
+        // Re-throw so SleepReportsList can render the linked conflict toast.
+        throw err;
       }
+      toast({
+        title: tCommon("error"),
+        description:
+          err instanceof Error ? err.message : t("messages.runError"),
+        variant: "destructive",
+      });
     } finally {
       setRunning(false);
     }
