@@ -37,6 +37,14 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+# Pre-warm umap + sklearn at module level. Both project_to_2d and
+# cluster_high_dim use lazy imports; if two asyncio.to_thread workers
+# race to import the same modules concurrently, CPython's per-module
+# importlib lock deadlocks (umap imports sklearn internally,
+# cluster_high_dim also imports sklearn — circular wait).
+import umap  # noqa: F401
+from sklearn.cluster import KMeans  # noqa: F401
+from sklearn.metrics import silhouette_score  # noqa: F401
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,15 +70,6 @@ from services.analysis.vector_pull import (
 )
 from utils.exceptions import ConfigurationError, ConflictError, ValidationError
 from utils.logger import get_logger
-
-# Pre-warm umap + sklearn at module level. Both project_to_2d and
-# cluster_high_dim use lazy imports; if two asyncio.to_thread workers
-# race to import the same modules concurrently, CPython's per-module
-# importlib lock deadlocks (umap imports sklearn internally,
-# cluster_high_dim also imports sklearn — circular wait).
-import umap  # noqa: F401
-from sklearn.cluster import KMeans  # noqa: F401
-from sklearn.metrics import silhouette_score  # noqa: F401
 
 logger = get_logger(__name__)
 
