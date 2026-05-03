@@ -16,6 +16,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { SpinnerLoading } from "@/components/common/LoadingState";
 import {
   verifyDeviceCode,
   confirmDevice,
@@ -319,17 +320,7 @@ function DevicePageInner() {
 
 export default function DevicePage() {
   return (
-    <Suspense
-      fallback={
-        <div className="flex min-h-screen items-center justify-center bg-gray-50">
-          <Card className="w-full max-w-md">
-            <CardContent className="pt-8 pb-8 text-center">
-              <p className="text-sm text-gray-500">Loading...</p>
-            </CardContent>
-          </Card>
-        </div>
-      }
-    >
+    <Suspense fallback={<SpinnerLoading size="lg" />}>
       <DevicePageInner />
     </Suspense>
   );
