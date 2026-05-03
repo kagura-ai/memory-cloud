@@ -52,7 +52,12 @@ from services.analysis.llm_caller import (
     call_with_fallback,
     filter_hallucinated_ids,
 )
-from services.analysis.prompts import CLUSTER_LABEL_SYSTEM, CLUSTER_LABEL_USER
+from services.analysis.prompts import (
+    CLUSTER_LABEL_SYSTEM,
+    CLUSTER_LABEL_SYSTEM_JA,
+    CLUSTER_LABEL_USER,
+    CLUSTER_LABEL_USER_JA,
+)
 from services.analysis.vector_pull import MemoryRecord
 from services.llm_service import LLMService
 from services.sleep.reporter import LLMCallBreakdown, accumulate_llm_response
@@ -148,6 +153,7 @@ async def _label_one_cluster(
     workspace_id: str,
     context_id: str | None,
     sem: asyncio.Semaphore,
+    locale: str = "en",
 ) -> ClusterLabel:
     """Single-cluster labeling with semaphore + frozenset guard.
 
@@ -170,6 +176,14 @@ async def _label_one_cluster(
     rep_block = _format_representatives(reps)
     rep_ids = [str(r.id) for r in reps]
 
+    # Locale-aware prompt selection (Issue #542)
+    if locale == "ja":
+        system_prompt = CLUSTER_LABEL_SYSTEM_JA
+        prompt = CLUSTER_LABEL_USER_JA.format(representatives=rep_block)
+    else:
+        system_prompt = CLUSTER_LABEL_SYSTEM
+        prompt = CLUSTER_LABEL_USER.format(representatives=rep_block)
+
     async with sem:
         # Per-task session — each LLMService gets its own AsyncSession
         # so concurrent BYOK lookups don't race the orchestrator's
@@ -184,8 +198,8 @@ async def _label_one_cluster(
                     user_id=user_id,
                     workspace_id=workspace_id,
                     context_id=context_id,
-                    system_prompt=CLUSTER_LABEL_SYSTEM,
-                    prompt=CLUSTER_LABEL_USER.format(representatives=rep_block),
+                    system_prompt=system_prompt,
+                    prompt=prompt,
                     fallback_chain=OPENAI_FALLBACK_CHAIN,
                 )
             except AnalysisLLMUpstreamError as e:
@@ -243,6 +257,7 @@ async def label_clusters(
     workspace_id: str,
     context_id: str | None,
     concurrency: int = _LLM_CONCURRENCY,
+    locale: str = "en",
 ) -> list[ClusterLabel]:
     """Label every cluster in parallel (semaphore-bounded).
 
@@ -290,6 +305,7 @@ async def label_clusters(
                     workspace_id=workspace_id,
                     context_id=context_id,
                     sem=sem,
+                    locale=locale,
                 )
             )
         )

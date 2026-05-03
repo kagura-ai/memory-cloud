@@ -53,6 +53,7 @@ from models.analysis import (
     MEMORY_ANALYSIS_STATUSES,
     MemoryAnalysis,
 )
+from models.auth import User
 from models.llm_pricing import LLMPricing
 from services.analysis import labeler as analysis_labeler
 from services.analysis.byok_resolver import assert_openai_byok_key_available
@@ -401,6 +402,12 @@ class AnalysisOrchestrator:
             # cluster task opens its own ``AsyncSession`` to avoid the
             # SQLAlchemy concurrent-ops violation on the orchestrator's
             # shared session. See labeler.py for the per-task pattern.
+            # Issue #542: resolve user's locale for prompt language.
+            user_result = await self.db.execute(
+                select(User).where(User.user_id == analysis.triggered_by)
+            )
+            db_user = user_result.scalar_one_or_none()
+            label_locale = db_user.locale if db_user else "en"
             cluster_label_results = await analysis_labeler.label_clusters(
                 cluster_labels=cluster_result.labels,
                 centroids=cluster_result.centroids,
@@ -409,6 +416,7 @@ class AnalysisOrchestrator:
                 user_id=analysis.triggered_by,
                 workspace_id=str(analysis.workspace_id),
                 context_id=str(analysis.context_id),
+                locale=label_locale,
             )
 
             # Stage [J] — atomic persist. The transaction here wraps
