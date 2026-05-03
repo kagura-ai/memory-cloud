@@ -3199,7 +3199,7 @@
     "title": "デバイス認証",
     "description": "CLIに表示されたコードを入力してデバイスを認証してください。",
     "codeLabel": "デバイスコード",
-    "codePlaceholder": "XXXX-XXXX",
+    "codePlaceholder": "XXXXXXXX",
     "verify": "確認",
     "verifying": "確認中...",
     "invalidCode": "入力されたコードは無効、または期限切れです。CLIを確認して再度お試しください。",

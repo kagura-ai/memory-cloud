@@ -3199,7 +3199,7 @@
     "title": "Device Authorization",
     "description": "Enter the code displayed in your CLI to authorize this device.",
     "codeLabel": "Device Code",
-    "codePlaceholder": "XXXX-XXXX",
+    "codePlaceholder": "XXXXXXXX",
     "verify": "Verify",
     "verifying": "Verifying...",
     "invalidCode": "The code you entered is invalid or has expired. Check your CLI and try again.",
