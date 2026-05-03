@@ -63,6 +63,15 @@ from services.analysis.vector_pull import (
 from utils.exceptions import ConfigurationError, ConflictError, ValidationError
 from utils.logger import get_logger
 
+# Pre-warm umap + sklearn at module level. Both project_to_2d and
+# cluster_high_dim use lazy imports; if two asyncio.to_thread workers
+# race to import the same modules concurrently, CPython's per-module
+# importlib lock deadlocks (umap imports sklearn internally,
+# cluster_high_dim also imports sklearn — circular wait).
+import umap  # noqa: F401
+from sklearn.cluster import KMeans  # noqa: F401
+from sklearn.metrics import silhouette_score  # noqa: F401
+
 logger = get_logger(__name__)
 
 
@@ -377,16 +386,6 @@ class AnalysisOrchestrator:
             # the connection would stay checked out for the whole
             # ~2-20s compute window. (Per Copilot review on PR #530.)
             await self.db.commit()
-
-            # Pre-warm umap + sklearn before spawning threads. Both stage
-            # functions use lazy imports; if two OS threads race to import the
-            # same module, CPython's per-module importlib lock deadlocks
-            # (umap imports sklearn internally, cluster_high_dim also imports
-            # sklearn — circular wait, silent hang). Populating sys.modules
-            # here ensures threads hit the cached fast path, not the lock.
-            import umap as _umap_prewarm  # noqa: F401
-            from sklearn.cluster import KMeans as _kmeans_prewarm  # noqa: F401
-            from sklearn.metrics import silhouette_score as _sil_prewarm  # noqa: F401
 
             # Stages [D] and [E] are CPU-bound (sklearn KMeans + UMAP).
             # Run them concurrently in worker threads so the asyncio
