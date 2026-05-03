@@ -167,13 +167,13 @@ export default function ProfilePage() {
   const [name, setName] = useState(user?.name || "");
   const email = user?.email || "";
   const [timezone, setTimezone] = useState(user?.timezone || "UTC");
-  const [locale, setLocale] = useState(user?.locale || "ja");
+  const [locale, setLocale] = useState(user?.locale || "en");
 
   useEffect(() => {
     if (user) {
       setName(user.name || "");
       setTimezone(user.timezone || "UTC");
-      setLocale(user.locale || "ja");
+      setLocale(user.locale || "en");
     }
   }, [user]);
 
@@ -397,6 +397,8 @@ export default function ProfilePage() {
                     onClick={() => {
                       setIsEditMode(false);
                       setName(user.name || "");
+                      setTimezone(user.timezone || "UTC");
+                      setLocale(user.locale || "en");
                     }}
                   >
                     {tCommon("cancel")}

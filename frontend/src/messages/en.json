@@ -2118,7 +2118,8 @@
       "messages": {
         "loadError": "Failed to load workspaces",
         "changeSuccess": "Tier changed from {oldPlan} to {newPlan}",
-        "changeError": "Failed to change tier"
+        "changeError": "Failed to change tier",
+        "addonUpdateSuccess": "Quota addons updated"
       }
     },
     "users": {

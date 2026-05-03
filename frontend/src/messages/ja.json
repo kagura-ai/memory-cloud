@@ -2118,7 +2118,8 @@
       "messages": {
         "loadError": "ワークスペースの読み込みに失敗しました",
         "changeSuccess": "プランを{oldPlan}から{newPlan}に変更しました",
-        "changeError": "ティアの変更に失敗しました"
+        "changeError": "ティアの変更に失敗しました",
+        "addonUpdateSuccess": "アドオンを更新しました"
       }
     },
     "users": {

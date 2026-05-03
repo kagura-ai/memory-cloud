@@ -198,7 +198,10 @@ export default function AdminPlansPage() {
         addon_context_bonus: addonContext,
         addon_analysis_bonus: addonAnalysis,
       });
-      toast({ title: tCommon("success"), description: "Quota addons updated" });
+      toast({
+        title: tCommon("success"),
+        description: t("messages.addonUpdateSuccess"),
+      });
       setAddonDialogOpen(false);
       // Refresh detail
       const detail = await getWorkspaceQuotas(quotaDetail.workspace_id);
