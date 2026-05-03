@@ -1,15 +1,6 @@
 "use client";
 
-/**
- * Shared Sleep Report Detail View
- *
- * Issue #526: Rendered by both ``/admin/sleep-reports/{id}`` and
- * ``/workspace/sleep-reports/{id}``.  Accepts the fetched detail response
- * and renders the full report card, KPI tiles, phase results, action
- * log, and metadata.
- */
-
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useTranslations, useLocale } from "next-intl";
 import { useAuth } from "@/contexts/AuthContext";
@@ -38,7 +29,11 @@ import {
   TrendingUp,
   Sparkles,
 } from "lucide-react";
-import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
+import {
+  formatDateTime,
+  formatDuration,
+  formatRelativeTime,
+} from "@/lib/utils/datetime";
 import {
   buildHeadline,
   buildPhaseNarrative,
@@ -47,14 +42,13 @@ import {
 import { getSleepStatusColor } from "@/lib/sleep-report";
 import type { SleepReportDetailResponse } from "@/lib/api/sleep-reports";
 
-function formatDuration(startedAt: string, completedAt: string | null): string {
-  if (!completedAt) return "-";
-  const ms = new Date(completedAt).getTime() - new Date(startedAt).getTime();
-  const seconds = Math.floor(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remainSec = seconds % 60;
-  return `${minutes}m ${remainSec}s`;
+function PhaseResultJson({ result }: { result: object }): React.ReactElement {
+  const json = useMemo(() => JSON.stringify(result, null, 2), [result]);
+  return (
+    <pre className="text-xs bg-gray-50 dark:bg-gray-800 px-3 py-2 overflow-x-auto border-t border-gray-200 dark:border-gray-700">
+      {json}
+    </pre>
+  );
 }
 
 function PhaseIcon({
@@ -252,9 +246,7 @@ export function SleepReportDetailView({
                     )}
                   </summary>
                   {result ? (
-                    <pre className="text-xs bg-gray-50 dark:bg-gray-800 px-3 py-2 overflow-x-auto border-t border-gray-200 dark:border-gray-700">
-                      {JSON.stringify(result, null, 2)}
-                    </pre>
+                    <PhaseResultJson result={result} />
                   ) : (
                     <div className="text-xs text-gray-500 dark:text-gray-400 px-3 py-2 border-t border-gray-200 dark:border-gray-700">
                       {t("detail.noResults")}

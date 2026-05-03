@@ -24,13 +24,11 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import get_current_user, require_admin
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
-from models.auth import Context
 from services.permission_service import PermissionService
 from services.sleep_reporter_service import SleepReporterService
 from utils.logger import get_logger
@@ -160,8 +158,8 @@ async def list_sleep_reports(
     )
 
     # Batch-load referenced contexts in one query to avoid N+1.
-    context_ids = {r.context_id for r in reports if r.context_id}
-    ctx_map = await service.resolve_context_names(context_ids)
+    context_ids = {r.context_id for r in reports if r.context_id}  # type: ignore[misc]
+    ctx_map = await service.resolve_context_names(context_ids)  # type: ignore[arg-type]
     for r in reports:
         r.context_name = ctx_map.get(r.context_id) if r.context_id else None  # type: ignore[attr-defined]
 
@@ -198,15 +196,9 @@ async def get_sleep_report_detail(
 
     report, actions = result
 
-    context_name: str | None = None
-    context_deleted = False
-    if report.context_id is not None:
-        ctx_result = await db.execute(select(Context).where(Context.id == report.context_id))
-        ctx = ctx_result.scalar_one_or_none()
-        if ctx is None or ctx.deleted_at is not None:
-            context_deleted = True
-        else:
-            context_name = ctx.display_name or ctx.name
+    context_name, context_deleted = await service.resolve_context_name(
+        report.context_id  # type: ignore[arg-type]
+    )
 
     report.context_name = context_name  # type: ignore[attr-defined]
     report.context_deleted = context_deleted  # type: ignore[attr-defined]
@@ -265,8 +257,8 @@ async def workspace_list_sleep_reports(
     )
 
     # Batch-load referenced contexts in one query to avoid N+1.
-    context_ids = {r.context_id for r in reports if r.context_id}
-    ctx_map = await service.resolve_context_names(context_ids)
+    context_ids = {r.context_id for r in reports if r.context_id}  # type: ignore[misc]
+    ctx_map = await service.resolve_context_names(context_ids)  # type: ignore[arg-type]
     for r in reports:
         r.context_name = ctx_map.get(r.context_id) if r.context_id else None  # type: ignore[attr-defined]
 
@@ -310,15 +302,9 @@ async def workspace_get_sleep_report_detail(
 
     report, actions = result
 
-    context_name: str | None = None
-    context_deleted = False
-    if report.context_id is not None:
-        ctx_result = await db.execute(select(Context).where(Context.id == report.context_id))
-        ctx = ctx_result.scalar_one_or_none()
-        if ctx is None or ctx.deleted_at is not None:
-            context_deleted = True
-        else:
-            context_name = ctx.display_name or ctx.name
+    context_name, context_deleted = await service.resolve_context_name(
+        report.context_id  # type: ignore[arg-type]
+    )
 
     report.context_name = context_name  # type: ignore[attr-defined]
     report.context_deleted = context_deleted  # type: ignore[attr-defined]

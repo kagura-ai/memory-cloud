@@ -1,17 +1,6 @@
 "use client";
 
-/**
- * Shared Sleep Reports List Component
- *
- * Issue #526: Rendered by both ``/admin/sleep-reports`` (cross-workspace)
- * and ``/workspace/sleep-reports`` (single-workspace, owner/admin scoped).
- *
- * The two pages differ in their fetcher function and whether the "Run Now"
- * action is shown — everything else (table, filters, pagination) is
- * identical and lives here.
- */
-
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useTranslations, useLocale } from "next-intl";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -102,9 +91,11 @@ export function SleepReportsList({
     null,
   );
   const [offset, setOffset] = useState(0);
+  const loadingRef = useRef(false);
 
   const loadReports = useCallback(async () => {
-    if (!ready) return;
+    if (!ready || loadingRef.current) return;
+    loadingRef.current = true;
     try {
       setLoading(true);
       const data = await fetchData({
@@ -122,6 +113,7 @@ export function SleepReportsList({
       });
     } finally {
       setLoading(false);
+      loadingRef.current = false;
     }
   }, [offset, selectedStatus, fetchData, ready, toast, t, tCommon]);
 

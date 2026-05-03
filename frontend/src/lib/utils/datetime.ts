@@ -167,6 +167,26 @@ export function formatLocalDate(d: Date): string {
 }
 
 /**
+ * Format a duration between two ISO datetimes into a human-readable string.
+ *
+ * @example
+ * formatDuration('2026-04-06T03:00:00Z', '2026-04-06T03:03:45Z')
+ * // => "3m 45s"
+ */
+export function formatDuration(
+  startedAt: string,
+  completedAt: string | null,
+): string {
+  if (!completedAt) return "-";
+  const ms = new Date(completedAt).getTime() - new Date(startedAt).getTime();
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainSec = seconds % 60;
+  return `${minutes}m ${remainSec}s`;
+}
+
+/**
  * Common IANA timezones
  */
 export const COMMON_TIMEZONES = [

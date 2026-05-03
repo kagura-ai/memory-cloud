@@ -11,6 +11,7 @@ Same two-endpoint pattern as ``CostAggregationService`` (#472):
 
 from __future__ import annotations
 
+import asyncio
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -66,15 +67,17 @@ class SleepReporterService:
         count_stmt = select(func.count()).select_from(SleepReport)
         if conditions:
             count_stmt = count_stmt.where(*conditions)
-        count_result = await self.db.execute(count_stmt)
-        total = count_result.scalar() or 0
 
         stmt = select(SleepReport)
         if conditions:
             stmt = stmt.where(*conditions)
-        result = await self.db.execute(
-            stmt.order_by(SleepReport.started_at.desc()).limit(limit).offset(offset)
+        stmt = stmt.order_by(SleepReport.started_at.desc()).limit(limit).offset(offset)
+
+        count_result, result = await asyncio.gather(
+            self.db.execute(count_stmt),
+            self.db.execute(stmt),
         )
+        total = count_result.scalar() or 0
         reports = list(result.scalars().all())
         return reports, total
 
@@ -98,8 +101,14 @@ class SleepReporterService:
             wrong workspace.  Callers must resolve ``context_name`` and
             ``context_deleted`` themselves.
         """
-        report_result = await self.db.execute(
-            select(SleepReport).where(SleepReport.id == report_id)
+        report_stmt = select(SleepReport).where(SleepReport.id == report_id)
+        actions_stmt = (
+            select(SleepAction).where(SleepAction.report_id == report_id).order_by(SleepAction.id)
+        )
+
+        report_result, actions_result = await asyncio.gather(
+            self.db.execute(report_stmt),
+            self.db.execute(actions_stmt),
         )
         report = report_result.scalar_one_or_none()
         if not report:
@@ -108,9 +117,6 @@ class SleepReporterService:
         if workspace_id is not None and report.workspace_id != workspace_id:  # type: ignore[operator]
             return None
 
-        actions_result = await self.db.execute(
-            select(SleepAction).where(SleepAction.report_id == report_id).order_by(SleepAction.id)
-        )
         actions = list(actions_result.scalars().all())
         return report, actions
 
@@ -139,3 +145,26 @@ class SleepReporterService:
             else:
                 ctx_map[ctx_id] = ctx_display_name or ctx_name
         return ctx_map
+
+    async def resolve_context_name(self, context_id: UUID | None) -> tuple[str | None, bool]:
+        """Resolve a single context name and deleted status.
+
+        Returns:
+            (display_name | name | None, deleted).
+        """
+        if context_id is None:
+            return None, False
+
+        result = await self.db.execute(
+            select(Context.name, Context.display_name, Context.deleted_at).where(
+                Context.id == context_id
+            )
+        )
+        row = result.one_or_none()
+        if not row:
+            return None, True
+
+        ctx_name, ctx_display_name, ctx_deleted_at = row
+        if ctx_deleted_at is not None:
+            return None, True
+        return ctx_display_name or ctx_name, False
