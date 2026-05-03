@@ -2051,7 +2051,9 @@
         "storage": "Storage (MB)",
         "usage": "Usage %",
         "actions": "Actions",
-        "changePlan": "Change Tier"
+        "changePlan": "Change Tier",
+        "editAddons": "Edit Addons",
+        "owner": "Owner: {name}"
       },
       "tiersTable": {
         "title": "Tier Comparison",
@@ -2076,7 +2078,11 @@
         "contexts": "Contexts",
         "members": "Members",
         "analysis": "Analysis Runs/day",
-        "used": "used"
+        "used": "used",
+        "resource": "Resource",
+        "base": "Base",
+        "addon": "Addon",
+        "effectiveUsage": "Effective / Usage"
       },
       "addonDialog": {
         "title": "Edit Addons",

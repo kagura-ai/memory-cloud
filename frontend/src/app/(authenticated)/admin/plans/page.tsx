@@ -304,7 +304,9 @@ export default function AdminPlansPage() {
                                   </div>
                                   {workspace.owner_name && (
                                     <div className="text-xs text-muted-foreground mt-1">
-                                      Owner: {workspace.owner_name}
+                                      {t("workspacesTable.owner", {
+                                        name: workspace.owner_name,
+                                      })}
                                     </div>
                                   )}
                                 </div>
@@ -367,13 +369,16 @@ export default function AdminPlansPage() {
                                       workspace.id ? (
                                     <div className="space-y-3">
                                       <div className="grid grid-cols-4 gap-2 text-xs font-medium text-muted-foreground border-b pb-2">
-                                        <div>Resource</div>
+                                        <div>{t("quota.resource")}</div>
                                         <div className="text-right">
-                                          Base ({quotaDetail.plan_name})
+                                          {t("quota.base")} (
+                                          {quotaDetail.plan_name})
                                         </div>
-                                        <div className="text-right">Addon</div>
                                         <div className="text-right">
-                                          Effective / Usage
+                                          {t("quota.addon")}
+                                        </div>
+                                        <div className="text-right">
+                                          {t("quota.effectiveUsage")}
                                         </div>
                                       </div>
                                       {[
@@ -470,7 +475,7 @@ export default function AdminPlansPage() {
                                           }}
                                         >
                                           <Settings className="h-4 w-4 mr-1" />
-                                          Edit Addons
+                                          {t("workspacesTable.editAddons")}
                                         </Button>
                                       </div>
                                     </div>

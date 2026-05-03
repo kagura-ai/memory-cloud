@@ -2051,7 +2051,9 @@
         "storage": "ストレージ (MB)",
         "usage": "使用率 %",
         "actions": "操作",
-        "changePlan": "ティア変更"
+        "changePlan": "ティア変更",
+        "editAddons": "アドオン編集",
+        "owner": "所有者: {name}"
       },
       "tiersTable": {
         "title": "ティア比較",
@@ -2071,23 +2073,27 @@
         "unlimited": "無制限"
       },
       "quota": {
-        "memory": "Memories",
-        "mcp": "MCP Calls/day",
-        "contexts": "Contexts",
-        "members": "Members",
-        "analysis": "Analysis Runs/day",
-        "used": "used"
+        "memory": "メモリー",
+        "mcp": "MCP 呼び出し/日",
+        "contexts": "コンテキスト",
+        "members": "メンバー",
+        "analysis": "分析実行/日",
+        "used": "使用中",
+        "resource": "リソース",
+        "base": "ベース",
+        "addon": "アドオン",
+        "effectiveUsage": "有効値 / 使用量"
       },
       "addonDialog": {
         "title": "アドオン編集",
         "description": "アドオンボーナスを調整 —",
-        "memory": "Memory Bonus",
-        "mcp": "MCP Calls/day Bonus",
-        "members": "Member Bonus",
-        "contexts": "Extra Contexts",
-        "analysis": "Analysis Runs Bonus",
-        "effective": "Effective",
-        "used": "used",
+        "memory": "メモリーボーナス",
+        "mcp": "MCP 呼び出しボーナス",
+        "members": "メンバーボーナス",
+        "contexts": "追加コンテキスト",
+        "analysis": "分析実行ボーナス",
+        "effective": "有効値",
+        "used": "使用中",
         "save": "保存",
         "reductionWarning": "メンバーまたはコンテキストのアドオンを減らすと、現在の使用量が新しい有効制限を超える場合は拒否されます。（メンバー: {members} 使用中、コンテキスト: {contexts} 使用中）"
       },
