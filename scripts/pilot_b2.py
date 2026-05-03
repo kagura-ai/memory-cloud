@@ -1,7 +1,8 @@
 """Pilot script: broadlistening pipeline end-to-end run (#533).
 
-Usage (inside kagura-api container):
-    PYTHONPATH=src PYTHONUNBUFFERED=1 python -u /tmp/pilot_b2.py
+Usage (inside kagura-api container, after docker cp):
+    docker cp scripts/pilot_b2.py kagura-api:/tmp/pilot_b2.py
+    docker exec kagura-api bash -c "cd /app && PYTHONPATH=src PYTHONUNBUFFERED=1 python -u /tmp/pilot_b2.py"
 
 Env vars:
     NUMBA_DISABLE_JIT=1   — disable numba JIT to test hypothesis 3
