@@ -1073,7 +1073,22 @@
     "validationError": "Please check your input. Some fields have errors.",
     "currentlyOwning": "You currently own {count} workspace(s).",
     "deleteExistingToCreate": "To create a new workspace, you must delete an existing one.",
-    "joinedAt": "Joined"
+    "joinedAt": "Joined",
+    "sleepReports": {
+      "title": "Sleep Reports",
+      "description": "View Sleep Maintenance execution history for this workspace",
+      "actions": {
+        "back": "Back to List"
+      },
+      "errors": {
+        "noWorkspaceSelected": "No workspace selected. Please select a workspace to view sleep reports.",
+        "forbiddenWorkspace": "Owner or admin role required to view workspace sleep reports."
+      },
+      "messages": {
+        "loadError": "Failed to load sleep reports",
+        "notFound": "Sleep report not found."
+      }
+    }
   },
   "contexts": {
     "title": "Contexts",

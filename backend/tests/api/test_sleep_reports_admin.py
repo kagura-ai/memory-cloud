@@ -306,7 +306,11 @@ class TestGetSleepReportDetail:
         ctx_result.scalar_one_or_none.return_value = ctx
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = actions
-        mock_db.execute.side_effect = [report_result, ctx_result, actions_result]
+        # New order after #526 service extraction:
+        # 1. service.get_report_detail: SleepReport query → report_result
+        # 2. service.get_report_detail: SleepAction query → actions_result
+        # 3. route: Context query → ctx_result
+        mock_db.execute.side_effect = [report_result, actions_result, ctx_result]
 
         _install_overrides(mock_db)
 
@@ -334,7 +338,7 @@ class TestGetSleepReportDetail:
         ctx_result.scalar_one_or_none.return_value = ctx
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = []
-        mock_db.execute.side_effect = [report_result, ctx_result, actions_result]
+        mock_db.execute.side_effect = [report_result, actions_result, ctx_result]
 
         _install_overrides(mock_db)
 
@@ -355,7 +359,7 @@ class TestGetSleepReportDetail:
         ctx_result.scalar_one_or_none.return_value = ctx
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = []
-        mock_db.execute.side_effect = [report_result, ctx_result, actions_result]
+        mock_db.execute.side_effect = [report_result, actions_result, ctx_result]
 
         _install_overrides(mock_db)
 
@@ -375,7 +379,7 @@ class TestGetSleepReportDetail:
         ctx_result.scalar_one_or_none.return_value = None
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = []
-        mock_db.execute.side_effect = [report_result, ctx_result, actions_result]
+        mock_db.execute.side_effect = [report_result, actions_result, ctx_result]
 
         _install_overrides(mock_db)
 

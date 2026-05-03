@@ -16,4 +16,5 @@ export * from "./doctor";
 export * from "./oauth";
 export * from "./external-keys";
 export * from "./graph";
+export * from "./sleep-reports";
 export * from "./system";

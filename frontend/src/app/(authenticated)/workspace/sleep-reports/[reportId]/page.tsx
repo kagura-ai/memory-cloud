@@ -1,12 +1,10 @@
 "use client";
 
 /**
- * Admin Sleep Report Detail Page
+ * Workspace Sleep Report Detail Page
  *
- * View a single Sleep Maintenance run with phase summaries and action log.
- * Admin-only page (Issue #179).
- *
- * Issue #526: Refactored to use shared ``SleepReportDetailView`` component.
+ * Workspace owner / admin view of a single Sleep Maintenance run.
+ * Issue #526.
  */
 
 import { useEffect, useState } from "react";
@@ -19,16 +17,28 @@ import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
-import { fetchAdminSleepReportDetail } from "@/lib/api/sleep-reports";
+import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { hasWorkspaceRole } from "@/lib/auth/rbac";
+import { fetchWorkspaceSleepReportDetail } from "@/lib/api";
 import { SleepReportDetailView } from "@/components/sleep-reports/SleepReportDetailView";
 import type { SleepReportDetailResponse } from "@/lib/api/sleep-reports";
 
-export default function AdminSleepReportDetailPage() {
+export default function WorkspaceSleepReportDetailPage() {
   const params = useParams();
   const reportId = Array.isArray(params.reportId)
     ? params.reportId[0]
     : (params.reportId ?? "");
-  const t = useTranslations("admin.sleepReports");
+  const t = useTranslations("workspace.sleepReports");
+  const {
+    currentWorkspace,
+    currentWorkspaceId,
+    loading: wsLoading,
+  } = useWorkspace();
+
+  const allowed = hasWorkspaceRole(
+    currentWorkspace?.current_user_role,
+    "admin",
+  );
 
   const [detail, setDetail] = useState<SleepReportDetailResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -36,13 +46,16 @@ export default function AdminSleepReportDetailPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!reportId) return;
+    if (!currentWorkspaceId || !reportId || !allowed) return;
     const load = async () => {
       try {
         setLoading(true);
         setLoadError(null);
         setNotFound(false);
-        const data = await fetchAdminSleepReportDetail(reportId);
+        const data = await fetchWorkspaceSleepReportDetail(
+          currentWorkspaceId,
+          reportId,
+        );
         setDetail(data);
       } catch (error: unknown) {
         const err = error as { status?: number };
@@ -58,7 +71,34 @@ export default function AdminSleepReportDetailPage() {
     load();
     // t is stable across renders in next-intl
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reportId]);
+  }, [currentWorkspaceId, reportId, allowed]);
+
+  if (wsLoading) {
+    return (
+      <PageContainer>
+        <PageHeader title={t("title")} />
+        <LoadingState lines={5} />
+      </PageContainer>
+    );
+  }
+
+  if (!currentWorkspaceId) {
+    return (
+      <PageContainer>
+        <PageHeader title={t("title")} />
+        <ErrorBanner error={t("errors.noWorkspaceSelected")} />
+      </PageContainer>
+    );
+  }
+
+  if (!allowed) {
+    return (
+      <PageContainer>
+        <PageHeader title={t("title")} />
+        <ErrorBanner error={t("errors.forbiddenWorkspace")} />
+      </PageContainer>
+    );
+  }
 
   if (loading) {
     return (
@@ -74,7 +114,7 @@ export default function AdminSleepReportDetailPage() {
       <PageContainer>
         <PageHeader title={t("title")} />
         <ErrorBanner error={loadError} />
-        <Link href="/admin/sleep-reports">
+        <Link href="/workspace/sleep-reports">
           <Button variant="outline">
             <ArrowLeft className="h-4 w-4 mr-2" />
             {t("actions.back")}
@@ -91,7 +131,7 @@ export default function AdminSleepReportDetailPage() {
         <div className="p-8 text-center text-gray-500 dark:text-gray-400">
           {t("messages.notFound")}
         </div>
-        <Link href="/admin/sleep-reports">
+        <Link href="/workspace/sleep-reports">
           <Button variant="outline">
             <ArrowLeft className="h-4 w-4 mr-2" />
             {t("actions.back")}
@@ -104,8 +144,9 @@ export default function AdminSleepReportDetailPage() {
   return (
     <SleepReportDetailView
       detail={detail}
-      backHref="/admin/sleep-reports"
+      backHref="/workspace/sleep-reports"
       backLabel={t("actions.back")}
+      translationNamespace="workspace.sleepReports"
     />
   );
 }

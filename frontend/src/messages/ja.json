@@ -1073,7 +1073,22 @@
     "validationError": "入力内容に問題があります。各フィールドを確認してください。",
     "currentlyOwning": "現在{count}個のワークスペースを所有しています。",
     "deleteExistingToCreate": "新しいワークスペースを作成するには、既存のワークスペースを削除する必要があります。",
-    "joinedAt": "登録日"
+    "joinedAt": "登録日",
+    "sleepReports": {
+      "title": "Sleep レポート",
+      "description": "このワークスペースの Sleep Maintenance 実行履歴を確認します",
+      "actions": {
+        "back": "一覧に戻る"
+      },
+      "errors": {
+        "noWorkspaceSelected": "ワークスペースが選択されていません。Sleep レポートを表示するにはワークスペースを選択してください。",
+        "forbiddenWorkspace": "ワークスペースの Sleep レポートを表示するにはオーナーまたは管理者権限が必要です。"
+      },
+      "messages": {
+        "loadError": "Sleep レポートの読み込みに失敗しました",
+        "notFound": "Sleep レポートが見つかりません。"
+      }
+    }
   },
   "contexts": {
     "title": "コンテキスト",
