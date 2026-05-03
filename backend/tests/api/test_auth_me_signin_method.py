@@ -43,6 +43,7 @@ def _db_user(*, auth_method: str, auth_provider: str | None) -> SimpleNamespace:
     """
     return SimpleNamespace(
         timezone="UTC",
+        locale="en",
         auth_method=auth_method,
         auth_provider=auth_provider,
     )
