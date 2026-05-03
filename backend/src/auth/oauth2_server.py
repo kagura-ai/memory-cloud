@@ -36,14 +36,32 @@ from typing import Any
 from authlib.oauth2 import OAuth2Request
 from authlib.oauth2.rfc6749 import grants
 from authlib.oauth2.rfc7636 import CodeChallenge
+from authlib.oauth2.rfc8628 import DeviceCodeGrant as _DeviceCodeGrant
 from sqlalchemy.orm import Session
 
 from config.settings import get_settings
-from models.auth import OAuth2AuthorizationCode, OAuth2Client, OAuth2Token
+from models.auth import OAuth2AuthorizationCode, OAuth2Client, OAuth2DeviceCode, OAuth2Token
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_TOKEN_ENDPOINT_AUTH_METHODS = ["none", "client_secret_post", "client_secret_basic"]
+
+
+class _OAuthUser:
+    """Minimal user object for Authlib grant interfaces.
+
+    Provides both ``user_id`` attribute (used by ``save_token``) and
+    ``get_user_id()`` method (used by ``DeviceCodeGrant.query_user_grant``).
+    """
+
+    def __init__(self, user_id: str = "", email: str | None = None):
+        self.user_id = user_id
+        self.email = email
+
+    def get_user_id(self) -> str:
+        return self.user_id
 
 
 # ============================================================================
@@ -189,13 +207,7 @@ class AuthorizationCodeGrant(grants.AuthorizationCodeGrant):
     """
 
     # Token endpoint auth methods (Issue #157: Public Client + PKCE support)
-    TOKEN_ENDPOINT_AUTH_METHODS = [
-        "none",  # Public clients (ChatGPT/Claude) with PKCE
-        "client_secret_post",
-        "client_secret_basic",
-    ]
-
-    # Token expires in 1 hour (3600 seconds)
+    TOKEN_ENDPOINT_AUTH_METHODS = _TOKEN_ENDPOINT_AUTH_METHODS
     TOKEN_EXPIRES_IN = 3600
 
     def generate_token(
@@ -206,30 +218,11 @@ class AuthorizationCodeGrant(grants.AuthorizationCodeGrant):
         expires_in=None,
         include_refresh_token=True,
     ) -> dict[str, Any]:
-        """Generate OAuth2 token with explicit expires_in.
-
-        Authlib calls this with keyword arguments only.
-        Client is obtained from self.request.client (not passed as parameter).
-
-        Args:
-            user: User object (optional)
-            scope: Scope string (optional)
-            grant_type: Grant type (optional, uses self.GRANT_TYPE if not provided)
-            expires_in: Token expiration seconds (optional, uses self.TOKEN_EXPIRES_IN if not provided)
-            include_refresh_token: Whether to include refresh token (not used)
-
-        Returns:
-            Token dict with access_token, refresh_token, expires_in, etc.
-        """
-        # Get client from request (Authlib pattern)
         client = self.request.client
-
-        # Use class-level defaults if not provided
         if expires_in is None:
             expires_in = self.TOKEN_EXPIRES_IN
         if grant_type is None:
             grant_type = self.GRANT_TYPE
-
         return _generate_token_with_expiry(grant_type, client, expires_in, scope)
 
     def save_authorization_code(self, code: str, request: OAuth2Request) -> OAuth2AuthorizationCode:
@@ -397,12 +390,7 @@ class AuthorizationCodeGrant(grants.AuthorizationCodeGrant):
             User object (must have user_id attribute)
         """
 
-        # Return a minimal user object
-        class UserStub:
-            def __init__(self, user_id: str):
-                self.user_id = user_id
-
-        return UserStub(user_id=authorization_code.user_id)
+        return _OAuthUser(user_id=authorization_code.user_id)
 
 
 # ============================================================================
@@ -427,13 +415,7 @@ class RefreshTokenGrant(grants.RefreshTokenGrant):
     """
 
     # Token endpoint auth methods (Issue #157: Public Client + PKCE support)
-    TOKEN_ENDPOINT_AUTH_METHODS = [
-        "none",  # Public clients (ChatGPT/Claude) with PKCE
-        "client_secret_post",
-        "client_secret_basic",
-    ]
-
-    # Token expires in 1 hour (3600 seconds)
+    TOKEN_ENDPOINT_AUTH_METHODS = _TOKEN_ENDPOINT_AUTH_METHODS
     TOKEN_EXPIRES_IN = 3600
 
     def generate_token(
@@ -444,30 +426,11 @@ class RefreshTokenGrant(grants.RefreshTokenGrant):
         expires_in=None,
         include_refresh_token=True,
     ) -> dict[str, Any]:
-        """Generate OAuth2 token with explicit expires_in.
-
-        Authlib calls this with keyword arguments only.
-        Client is obtained from self.request.client (not passed as parameter).
-
-        Args:
-            user: User object (optional)
-            scope: Scope string (optional)
-            grant_type: Grant type (optional, uses self.GRANT_TYPE if not provided)
-            expires_in: Token expiration seconds (optional, uses self.TOKEN_EXPIRES_IN if not provided)
-            include_refresh_token: Whether to include refresh token (not used)
-
-        Returns:
-            Token dict with access_token, refresh_token, expires_in, etc.
-        """
-        # Get client from request (Authlib pattern)
         client = self.request.client
-
-        # Use class-level defaults if not provided
         if expires_in is None:
             expires_in = self.TOKEN_EXPIRES_IN
         if grant_type is None:
             grant_type = self.GRANT_TYPE
-
         return _generate_token_with_expiry(grant_type, client, expires_in, scope)
 
     def authenticate_refresh_token(self, refresh_token: str) -> OAuth2Token | None:
@@ -509,11 +472,7 @@ class RefreshTokenGrant(grants.RefreshTokenGrant):
             User object (must have user_id attribute)
         """
 
-        class UserStub:
-            def __init__(self, user_id: str):
-                self.user_id = user_id
-
-        return UserStub(user_id=credential.user_id)
+        return _OAuthUser(user_id=credential.user_id)
 
     def revoke_old_credential(self, credential: OAuth2Token) -> None:
         """Revoke old access and refresh tokens.
@@ -535,6 +494,52 @@ class RefreshTokenGrant(grants.RefreshTokenGrant):
             credential.client_id,
             credential.user_id,
         )
+
+
+# ============================================================================
+# Device Authorization Grant (RFC 8628, Issue #536)
+# ============================================================================
+
+
+class DeviceAuthorizationGrant(_DeviceCodeGrant):
+    """Device Authorization Grant for CLI tools (Claude Code, etc.).
+
+    Implements steps (E) and (F) of RFC 8628 — the polling loop where
+    a CLI client repeatedly asks the token endpoint whether the user
+    has completed browser-based authorization.
+    """
+
+    TOKEN_ENDPOINT_AUTH_METHODS = _TOKEN_ENDPOINT_AUTH_METHODS
+
+    def query_device_credential(self, device_code: str) -> OAuth2DeviceCode | None:
+        return (
+            self.server.db_session.query(OAuth2DeviceCode)
+            .filter_by(device_code=device_code)
+            .first()
+        )
+
+    def query_user_grant(self, user_code: str) -> tuple[Any, bool] | None:
+        device = (
+            self.server.db_session.query(OAuth2DeviceCode).filter_by(user_code=user_code).first()
+        )
+        if device is None or device.is_expired():
+            return None
+        if device.denied_at is not None:
+            return _OAuthUser(), False
+        if device.authorized_at is not None and device.user_id:
+            return _OAuthUser(user_id=device.user_id), True
+        return None
+
+    def should_slow_down(self, credential: OAuth2DeviceCode) -> bool:
+        if credential.last_polled_at is None:
+            credential.last_polled_at = utcnow()
+            self.server.db_session.commit()
+            return False
+        interval = get_settings().oauth_device_polling_interval
+        elapsed = (utcnow() - credential.last_polled_at).total_seconds()
+        credential.last_polled_at = utcnow()
+        self.server.db_session.commit()
+        return elapsed < interval
 
 
 # ============================================================================
@@ -700,9 +705,16 @@ class OAuth2AuthorizationServer:
         # Refresh Token Grant
         self.server.register_grant(RefreshTokenGrant)
 
+        # Device Authorization Grant (RFC 8628, Issue #536) — no PKCE
+        self.server.register_grant(DeviceAuthorizationGrant)
+
         logger.info(
             "oauth2_server_initialized",
-            grants=["authorization_code", "refresh_token"],
+            grants=[
+                "authorization_code",
+                "refresh_token",
+                "urn:ietf:params:oauth:grant-type:device_code",
+            ],
             pkce_required=pkce_required,
         )
 

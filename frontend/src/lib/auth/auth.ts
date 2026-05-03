@@ -175,3 +175,45 @@ export async function verifyMfa(
     { mfa_session_token: mfaSessionToken, totp_code: totpCode },
   );
 }
+
+// ============================================================================
+// Device Authorization Grant (RFC 8628 — Issue #536)
+// ============================================================================
+
+export interface DeviceVerifyResponse {
+  user_code: string;
+  client_name: string;
+  scope: string | null;
+  expires_at: string;
+  is_authorized: boolean;
+  is_expired: boolean;
+}
+
+export interface DeviceConfirmResponse {
+  status: "approved" | "denied";
+  user_code: string;
+}
+
+/**
+ * Verify a device user code and get client info for consent screen.
+ */
+export async function verifyDeviceCode(
+  userCode: string,
+): Promise<DeviceVerifyResponse> {
+  return apiClient.post<DeviceVerifyResponse>("/api/v1/oauth/device/verify", {
+    user_code: userCode,
+  });
+}
+
+/**
+ * Confirm (approve or deny) a device authorization request.
+ */
+export async function confirmDevice(
+  userCode: string,
+  approve: boolean,
+): Promise<DeviceConfirmResponse> {
+  return apiClient.post<DeviceConfirmResponse>("/api/v1/oauth/device/confirm", {
+    user_code: userCode,
+    approve,
+  });
+}

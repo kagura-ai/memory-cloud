@@ -3194,5 +3194,37 @@
       },
       "loadFailed": "Analyses の読み込みに失敗しました — 接続を確認してください。"
     }
+  },
+  "device": {
+    "title": "デバイス認証",
+    "description": "CLIに表示されたコードを入力してデバイスを認証してください。",
+    "codeLabel": "デバイスコード",
+    "codePlaceholder": "XXXXXXXX",
+    "verify": "確認",
+    "verifying": "確認中...",
+    "invalidCode": "入力されたコードは無効、または期限切れです。CLIを確認して再度お試しください。",
+    "alreadyAuthorized": "このデバイスはすでに認証済みです。",
+    "alreadyDenied": "このデバイスリクエストはすでに拒否されています。",
+    "expired": "この認証リクエストは期限切れです。CLIから新しいリクエストを開始してください。",
+    "consentTitle": "デバイスを認証",
+    "consentDescription": "このアプリケーションにKagura Memory Cloudワークスペースへのアクセスを許可しますか？",
+    "scopeRead": "メモリーの読み取り",
+    "scopeWrite": "メモリーの作成・更新",
+    "scopeDelete": "メモリーの削除",
+    "scopeAdmin": "ワークスペースの管理",
+    "scopeOffline": "オフラインアクセス",
+    "unknownScope": "不明な権限: {scope}",
+    "approve": "認証する",
+    "approving": "認証中...",
+    "deny": "拒否する",
+    "denying": "拒否中...",
+    "successTitle": "デバイス認証完了",
+    "successMessage": "デバイスの認証が完了しました。このページを閉じてCLIに戻ってください。",
+    "deniedTitle": "認証が拒否されました",
+    "deniedMessage": "デバイス認証リクエストを拒否しました。このページを閉じてください。",
+    "errorTitle": "エラーが発生しました",
+    "errorMessage": "予期しないエラーが発生しました。もう一度お試しください。",
+    "backToVerify": "別のコードを入力",
+    "tryAgain": "再試行"
   }
 }

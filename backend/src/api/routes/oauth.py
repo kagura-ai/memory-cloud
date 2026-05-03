@@ -23,6 +23,7 @@ import hashlib
 import os
 import secrets
 import unicodedata
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
@@ -33,9 +34,11 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser, require_admin
-from auth.oauth2_server import create_authorization_server
+from auth.oauth2_server import _OAuthUser, create_authorization_server
+from config.settings import get_settings
 from db.base import get_db, get_sync_session
-from models.auth import OAuth2Client, OAuth2Token, User
+from models.api_base import TZAwareBaseModel
+from models.auth import OAuth2Client, OAuth2DeviceCode, OAuth2Token, User, generate_user_code
 from models.schemas import TokenIntrospectionResponse
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
@@ -211,6 +214,60 @@ class OAuth2ProviderResponse(BaseModel):
     scopes: list[str]
     enabled: bool
     configured: bool  # Alias for enabled (frontend compatibility)
+
+
+# ============================================================================
+# Device Authorization Grant Schemas (RFC 8628, Issue #536)
+# ============================================================================
+
+
+class DeviceAuthorizationRequest(BaseModel):
+    """Device Authorization Request (RFC 8628 Section 3.1)."""
+
+    client_id: str = Field(..., description="OAuth2 client identifier")
+    scope: str | None = Field(None, description="Requested scope (space-separated)")
+
+
+class DeviceAuthorizationResponse(TZAwareBaseModel):
+    """Device Authorization Response (RFC 8628 Section 3.2)."""
+
+    device_code: str
+    user_code: str
+    verification_uri: str
+    verification_uri_complete: str
+    expires_in: int
+    interval: int
+
+
+class DeviceVerifyRequest(BaseModel):
+    """Request to look up pending device authorization by user_code."""
+
+    user_code: str = Field(..., min_length=8, max_length=8)
+
+
+class DeviceVerifyResponse(TZAwareBaseModel):
+    """Pending device authorization info returned for the consent screen."""
+
+    user_code: str
+    client_name: str
+    scope: str | None
+    expires_at: str  # ISO 8601 with Z suffix (manually formatted via to_utc_iso)
+    is_authorized: bool
+    is_expired: bool
+
+
+class DeviceConfirmRequest(BaseModel):
+    """User consent decision for a pending device authorization."""
+
+    user_code: str = Field(..., min_length=8, max_length=8)
+    approve: bool = Field(True)
+
+
+class DeviceConfirmResponse(TZAwareBaseModel):
+    """Result of user consent decision."""
+
+    status: str  # "approved" or "denied"
+    user_code: str
 
 
 # ============================================================================
@@ -1194,37 +1251,27 @@ async def list_oauth2_providers(
 
 
 # Helper function: Get current user from session
-def get_current_user_from_session(request: Request):
+def get_current_user_from_session(request: Request) -> _OAuthUser | None:
     """Get authenticated user from SessionMiddleware.
 
     Args:
         request: FastAPI request with request.state.user
 
     Returns:
-        User object
-
-    Raises:
-        HTTPException: If not authenticated
+        _OAuthUser or None if not authenticated
     """
     if not hasattr(request.state, "user") or not request.state.user:
         return None
 
-    # Get user from request.state
     user_data = request.state.user
 
-    # Create user-like object for OAuth2 server
-    class UserStub:
-        def __init__(self, user_id: str, email: str):
-            self.user_id = user_id
-            self.email = email
-
     if isinstance(user_data, dict):
-        return UserStub(
+        return _OAuthUser(
             user_id=user_data.get("user_id") or user_data.get("sub") or user_data.get("email"),
             email=user_data.get("email"),
         )
     else:
-        return UserStub(
+        return _OAuthUser(
             user_id=getattr(user_data, "user_id", None) or getattr(user_data, "email", None),
             email=getattr(user_data, "email", None),
         )
@@ -1540,18 +1587,18 @@ async def oauth_authorize_get(
         db_session.close()
 
 
-def _handle_authorize_sync(request, user_dict):
-    """Synchronous OAuth2 authorization handler.
+def _run_oauth_sync(action: str, request, **kwargs):
+    """Run an OAuth2 server operation in a synchronous session.
 
-    Runs in thread pool to avoid blocking FastAPI event loop.
-    Session is created and closed within this function.
+    Shared helper for ``_handle_authorize_sync`` and ``_handle_token_sync``.
+    Creates/closes the session internally so callers don't manage lifecycle.
     """
     db_session = get_sync_session()
     try:
         server = create_authorization_server(db_session)
-        response = server.create_authorization_response(request, grant_user=user_dict)
+        result = getattr(server, action)(request, **kwargs)
         db_session.commit()
-        return response
+        return result
     except Exception:
         db_session.rollback()
         raise
@@ -1617,7 +1664,9 @@ async def oauth_authorize_post(
 
     # Run Authlib operations in thread pool to avoid blocking event loop
     try:
-        response = await asyncio.to_thread(_handle_authorize_sync, request, user)
+        response = await asyncio.to_thread(
+            _run_oauth_sync, "create_authorization_response", request, grant_user=user
+        )
 
         # Use 303 See Other to convert POST to GET redirect
         # Claude.ai callback expects GET, not POST
@@ -1663,25 +1712,6 @@ async def oauth_authorize_post(
         return RedirectResponse(_append_query_params(redirect_uri, params), status_code=303)
 
 
-def _handle_token_sync(request):
-    """Synchronous OAuth2 token handler.
-
-    Runs in thread pool to avoid blocking FastAPI event loop.
-    Session is created and closed within this function.
-    """
-    db_session = get_sync_session()
-    try:
-        server = create_authorization_server(db_session)
-        authlib_resp = server.create_token_response(request)
-        db_session.commit()
-        return authlib_resp
-    except Exception:
-        db_session.rollback()
-        raise
-    finally:
-        db_session.close()
-
-
 @router.post("/token", include_in_schema=False)
 @router.post("/token/")
 async def oauth_token(request: Request):
@@ -1708,7 +1738,7 @@ async def oauth_token(request: Request):
     logger.info("token_request_form", form=request.state.form_data)
 
     # Run Authlib operations in thread pool to avoid blocking event loop
-    authlib_resp = await asyncio.to_thread(_handle_token_sync, request)
+    authlib_resp = await asyncio.to_thread(_run_oauth_sync, "create_token_response", request)
 
     # Extract status, body, headers from Authlib response
     if isinstance(authlib_resp, tuple) and len(authlib_resp) == 3:
@@ -1750,6 +1780,217 @@ async def oauth_token(request: Request):
         headers=headers_dict,
         media_type=headers_dict.get("content-type", "application/json"),
     )
+
+
+# ============================================================================
+# Device Authorization Grant Endpoints (RFC 8628, Issue #536)
+# ============================================================================
+
+
+@router.post("/device/authorize", response_model=DeviceAuthorizationResponse)
+async def device_authorize(body: DeviceAuthorizationRequest) -> DeviceAuthorizationResponse:
+    """Device Authorization endpoint (RFC 8628 Section 3.1).
+
+    Called by CLI clients to obtain a device_code + user_code pair.
+    No authentication required — this is a public endpoint.
+    """
+    settings = get_settings()
+    db_session = get_sync_session()
+
+    try:
+        client = db_session.query(OAuth2Client).filter_by(client_id=body.client_id).first()
+        if not client:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Unknown client_id",
+            )
+
+        device_code = secrets.token_urlsafe(32)
+        user_code = generate_user_code()
+
+        scope = client.get_allowed_scope(body.scope or "")
+
+        expires_at_val = utcnow() + timedelta(seconds=settings.oauth_device_code_expires_in)
+
+        device = OAuth2DeviceCode(
+            device_code=device_code,
+            user_code=user_code,
+            client_id=client.client_id,
+            scope=scope,
+            expires_at=expires_at_val,
+        )
+        db_session.add(device)
+        db_session.commit()
+
+        verification_uri = f"{settings.frontend_url}/device"
+        verification_uri_complete = f"{verification_uri}?user_code={user_code}"
+
+        logger.info(
+            "device_authorization_created",
+            client_id=body.client_id,
+            device_code_prefix=device_code[:8],
+        )
+
+        return DeviceAuthorizationResponse(
+            device_code=device_code,
+            user_code=user_code,
+            verification_uri=verification_uri,
+            verification_uri_complete=verification_uri_complete,
+            expires_in=settings.oauth_device_code_expires_in,
+            interval=settings.oauth_device_polling_interval,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db_session.rollback()
+        logger.error("device_authorize_failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create device authorization",
+        ) from e
+    finally:
+        db_session.close()
+
+
+@router.post("/device/verify", response_model=DeviceVerifyResponse)
+async def device_verify(body: DeviceVerifyRequest) -> DeviceVerifyResponse:
+    """Look up a pending device authorization by user_code.
+
+    Returns enough information for the browser consent screen to render
+    (client_name, scope). No authentication required — possession of the
+    user_code is the bearer token for this lookup.
+    """
+    db_session = get_sync_session()
+
+    try:
+        device = (
+            db_session.query(OAuth2DeviceCode).filter_by(user_code=body.user_code.upper()).first()
+        )
+
+        if not device:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Invalid user code",
+            )
+
+        client = db_session.query(OAuth2Client).filter_by(client_id=device.client_id).first()
+        client_name = client.client_name if client else "Unknown"
+
+        is_expired = device.is_expired()
+        is_authorized = (
+            not is_expired and device.authorized_at is not None and device.user_id is not None
+        )
+
+        return DeviceVerifyResponse(
+            user_code=device.user_code,
+            client_name=client_name,
+            scope=device.scope,
+            expires_at=to_utc_iso(device.expires_at) or "",
+            is_authorized=is_authorized,
+            is_expired=is_expired,
+        )
+
+    except HTTPException:
+        raise
+    finally:
+        db_session.close()
+
+
+def _get_user_from_session(request: Request) -> dict | None:
+    """Extract user info from session (delegates to get_current_user_from_session)."""
+    user_stub = get_current_user_from_session(request)
+    if user_stub is None:
+        return None
+    return {"user_id": user_stub.user_id, "email": user_stub.email}
+
+
+@router.post("/device/confirm", response_model=DeviceConfirmResponse)
+async def device_confirm(
+    request: Request,
+    body: DeviceConfirmRequest,
+) -> DeviceConfirmResponse:
+    """User consent endpoint for device authorization.
+
+    Requires session authentication. Sets authorized_at or denied_at on the
+    device code record so the polling CLI receives the decision.
+    """
+    user = _get_user_from_session(request)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+
+    db_session = get_sync_session()
+
+    try:
+        device = (
+            db_session.query(OAuth2DeviceCode)
+            .filter_by(user_code=body.user_code.upper())
+            .with_for_update()
+            .first()
+        )
+
+        if not device:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Invalid user code",
+            )
+
+        if device.is_expired():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="This code has expired",
+            )
+
+        if device.authorized_at is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This code has already been authorized",
+            )
+
+        if device.denied_at is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This code has already been denied",
+            )
+
+        if body.approve:
+            user_id = user.get("user_id") or user.get("sub")
+            if not user_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="User ID not found in session",
+                )
+            device.user_id = user_id
+            device.authorized_at = utcnow()
+            status_str = "approved"
+        else:
+            device.denied_at = utcnow()
+            status_str = "denied"
+
+        db_session.commit()
+
+        logger.info(
+            "device_authorization_" + status_str,
+            user_code=body.user_code,
+            user_id=device.user_id,
+        )
+
+        return DeviceConfirmResponse(status=status_str, user_code=body.user_code)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db_session.rollback()
+        logger.error("device_confirm_failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process device authorization",
+        ) from e
+    finally:
+        db_session.close()
 
 
 @router.post("/introspect", response_model=TokenIntrospectionResponse)
