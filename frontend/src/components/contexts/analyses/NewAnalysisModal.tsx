@@ -128,6 +128,7 @@ export function NewAnalysisModal({
     let cancelled = false;
     setPreviewLoading(true);
     setPreviewError(null);
+    setPreviewErrorCode(null);
     const timer = window.setTimeout(async () => {
       try {
         const result = await previewAnalysis(contextId, filters);
@@ -152,6 +153,7 @@ export function NewAnalysisModal({
             setPreviewError(err.message);
           }
         } else {
+          setPreviewErrorCode(null);
           setPreviewError(
             err instanceof Error ? err.message : t("errorPreviewFallback"),
           );
