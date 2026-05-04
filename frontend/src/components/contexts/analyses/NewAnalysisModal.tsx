@@ -137,9 +137,6 @@ export function NewAnalysisModal({
         if (cancelled) return;
         if (err instanceof ApiError) {
           setPreviewErrorCode(err.error ?? null);
-          setPreviewErrorDetails(
-            (err.details as Record<string, unknown>) ?? null,
-          );
           // Use translated message for known error codes; fallback to raw message
           if (err.error === "QUOTA-001" && err.details) {
             const d = err.details as Record<string, unknown>;
@@ -176,7 +173,6 @@ export function NewAnalysisModal({
       setSubmitError(null);
       setPreviewError(null);
       setPreviewErrorCode(null);
-      setPreviewErrorDetails(null);
     }
   }, [open]);
 
