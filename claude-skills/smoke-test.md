@@ -3,7 +3,7 @@ description: Run comprehensive smoke test of all MCP tools via live MCP connecti
 ---
 
 Verify MCP tools work correctly by executing them in sequence against temporary test contexts.
-Tests 18 of 21 memory/context tools (excludes 3 sleep tools that require a prior Sleep Maintenance run).
+Tests 33 non-resource tools (excludes `analyze_context` which requires billing, BYOK, workspace owner role, and Pro-tier feature access).
 Optionally tests 5 resource tools (6 PRO-only rows including delete_context cleanup) if the workspace has a PRO plan.
 Use this after deployments, tool description changes, or MCP server updates.
 
@@ -139,9 +139,63 @@ get_usage()
 -> Verify: returns plan, memories.used, contexts.used (no error)
 ```
 
-Note: Sleep tools (`get_sleep_history`, `get_sleep_report`, `rollback_sleep_run`) are not tested here because they require a completed Sleep Maintenance run. Verify these manually after a sleep cycle.
+### 7.6. Analysis tools
 
-### 7.5. Resource tools (PRO plan only)
+Note: `analyze_context` is **not** included because it requires workspace owner role, Pro-tier feature access, billing, a configured BYOK key, and per-day quota availability.
+
+**Pre-condition:** `list_analyses` and `get_active_analysis` require the workspace owner role and the analysis feature to be available. Valid responses include gate errors (`permission_denied`, `feature_not_available`) — the smoke test should treat these as acceptable outcomes, not failures.
+
+```
+list_analyses(context_id=...)
+-> Verify: returns items array, or gate error (`permission_denied`, `feature_not_available`) — treat all as PASS
+
+get_active_analysis(context_id=...)
+-> Verify: returns analysis run object, `no_succeeded_run`, or gate error (`permission_denied`, `feature_not_available`) — treat all as PASS
+
+get_analysis(run_id="00000000-0000-0000-0000-000000000000")
+-> Verify: returns `run_not_found` error (expected — fake run_id)
+
+get_analysis(run_id="this-is-not-a-uuid")
+-> Verify: returns error response (invalid UUID format)
+```
+
+```
+get_cluster(run_id="00000000-0000-0000-0000-000000000000", cluster_index=0)
+-> Verify: returns `cluster_not_found` error (expected — fake run_id)
+
+get_cluster(run_id="this-is-not-a-uuid", cluster_index=0)
+-> Verify: returns error response (invalid UUID format)
+```
+
+### 7.7. Sleep tools
+
+Note: `get_sleep_history` and `get_sleep_report` are read-only inspection tools. `rollback_sleep_run` is mutating — fake IDs verify error handling without side effects.
+
+```
+get_sleep_history(context_id=...)
+-> Verify: returns `{reports: [...], count: ...}` (no error; may be empty)
+
+get_sleep_history(context_id=..., limit=3)
+-> Verify: returns at most 3 reports in the `reports` array (no error)
+```
+
+```
+get_sleep_report(report_id="00000000-0000-0000-0000-000000000000")
+-> Verify: returns `report_not_found` error (expected — fake report_id)
+
+get_sleep_report(report_id="this-is-not-a-uuid")
+-> Verify: returns `invalid_report_id` error (invalid UUID format)
+```
+
+```
+rollback_sleep_run(report_id="00000000-0000-0000-0000-000000000000")
+-> Verify: returns `report_not_found` error (expected — fake report_id)
+
+rollback_sleep_run(report_id="this-is-not-a-uuid")
+-> Verify: returns `invalid_report_id` error (invalid UUID format)
+```
+
+### 7.8. Resource tools (PRO plan only)
 
 **Pre-check:** Call `get_usage()` and check the plan. If the plan is `free` or `basic`, skip this section entirely and note "Resource tools skipped — PRO plan required" in the report.
 
@@ -227,13 +281,20 @@ Print a summary table:
 | 30 | get_resource_schema | Get schema (expect not_found) (PRO only) | PASS/FAIL/SKIP |
 | 31 | list_resource_tokens | List tokens for resource (PRO only) | PASS/FAIL/SKIP |
 | 32 | delete_context | Delete resource context (PRO only) | PASS/FAIL/SKIP |
+| 33 | list_analyses | List analysis runs | PASS/FAIL |
+| 34 | get_active_analysis | Get latest succeeded analysis | PASS/FAIL |
+| 35 | get_analysis | Get analysis by run_id (fake ID, error handling) | PASS/FAIL |
+| 36 | get_cluster | Get cluster detail (fake run_id, error handling) | PASS/FAIL |
+| 37 | get_sleep_history | Get sleep maintenance history | PASS/FAIL |
+| 38 | get_sleep_report | Get sleep report (fake ID, error handling) | PASS/FAIL |
+| 39 | rollback_sleep_run | Rollback sleep run (fake ID, error handling) | PASS/FAIL |
 
-**Result: N/26 passed** (+ N/6 resource tools passed, or skipped if not PRO)
+**Result: N/33 passed** (+ N/6 resource tools passed, or skipped if not PRO)
 
 Test context: smoke-test-{timestamp} (cleaned up)
 
-Not tested (require prior Sleep Maintenance run):
-- get_sleep_history, get_sleep_report, rollback_sleep_run
+Not tested (requires billing + BYOK):
+- analyze_context
 
 Resource tools (PRO plan only):
 - If plan is free/basic: all 6 resource rows show SKIP
