@@ -254,6 +254,12 @@ class LLMService:
             api_key = await self._get_user_api_key(user_id, provider, context_id, workspace_id)
         except ConfigurationError:
             api_key = ""
+        # For Ollama, _get_user_api_key already resolves env var; also fall
+        # back to settings so the cache key matches _get_provider logic.
+        if provider == "ollama" and not api_key:
+            from config.settings import get_settings
+
+            api_key = get_settings().ollama_base_url or ""
         cache_key = (provider, _api_key_fingerprint(api_key))
 
         now = time.time()
@@ -343,9 +349,13 @@ class LLMService:
             # ExternalAPIKey first, then env var, then settings.
             base_url: str | None = None
             try:
+                # Ollama stores its base URL under provider="ollama" in
+                # ExternalAPIKey so that the UI can treat it like any other
+                # external key, even though it is a URL rather than a secret.
                 base_url = await self._get_user_api_key(user_id, "ollama", context_id, workspace_id)
             except ConfigurationError:
-                pass
+                # No DB key for Ollama — fall through to env / settings below.
+                logger.debug("ollama_base_url_not_in_db", provider=provider_name)
             if not base_url:
                 base_url = os.getenv("OLLAMA_BASE_URL") or None
             if not base_url:
@@ -378,7 +388,9 @@ class LLMService:
         Priority:
         1. Context-scoped key (context_id matches AND workspace_id matches)
         2. Workspace-scoped key (workspace_id matches AND context_id IS NULL)
-        3. Environment variable (OPENAI_API_KEY) — development fallback only
+        3. Provider-specific environment variable (e.g., OPENAI_API_KEY,
+           ANTHROPIC_API_KEY, GOOGLE_API_KEY, OLLAMA_BASE_URL, OLLAMA_API_KEY)
+           — development fallback only
 
         Args:
             user_id: Caller's user ID — logged for audit, NOT used as a filter.
@@ -441,6 +453,7 @@ class LLMService:
             "openai": "OPENAI_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
             "gemini": "GOOGLE_API_KEY",
+            "ollama": "OLLAMA_BASE_URL",
             "ollama_cloud": "OLLAMA_API_KEY",
         }
         env_var = env_var_map.get(provider, "OPENAI_API_KEY")

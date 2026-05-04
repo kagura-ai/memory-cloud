@@ -49,6 +49,7 @@ class OllamaCloudProvider(LLMProvider):
         self._client = ollama.AsyncClient(
             host="https://ollama.com",
             headers={"Authorization": f"Bearer {self._api_key}"},
+            timeout=_LLM_REQUEST_TIMEOUT_S,
         )
         return self._client
 

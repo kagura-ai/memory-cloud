@@ -1910,9 +1910,9 @@
     "description": "OpenAI、Anthropic、Google Gemini、Ollama、Cohere、Voyageなどのサービス用APIキーを管理",
     "featureGuide": {
       "title": "外部APIキーとは？",
-      "overview": "外部APIキーは、サードパーティサービスの認証情報（OpenAI、Anthropic、Google Gemini、Ollama、Cohere、Voyage）をワークスペースごとに設定できます。LLM推論、エンベディング生成、リランキング、その他のAI操作に使用されます。",
-      "useCases": "ユースケース: OpenAI / Anthropic / Gemini キーでLLM推論、OpenAI（必要に応じてOllama）でエンベディング生成、Ollamaでローカルセルフホストモデル、CohereやVoyageでリランキング設定、ワークスペース単位のキー管理でコスト追跡。",
-      "howItWorks": "プロバイダーのAPIキーを追加 → KaguraがLLM推論、OpenAI（必要に応じてOllama）によるエンベディング生成、リランキングなどに使用 → キーは暗号化して保存され、作成後は表示されません。"
+      "overview": "外部APIキーはワークスペース単位で管理され、OpenAI、Anthropic、Google Gemini、Ollama、Cohere、Voyageなどの認証情報を設定できます。LLM推論はOpenAI・Anthropic・Gemini・Ollamaで利用可能。エンベディング生成はOpenAI（必要に応じてOllama）で利用可能。リランキングはCohere・Voyageで利用可能です。",
+      "useCases": "ユースケース: OpenAIキーでエンベディング＋LLM推論、Anthropic・Gemini・OllamaキーでLLM推論、CohereやVoyageでリランキング設定、Ollamaでローカルセルフホストモデル、ワークスペース単位のキー管理でコスト追跡。",
+      "howItWorks": "プロバイダーのAPIキーを追加 → Kaguraが各プロバイダーが対応する機能のみに使用（例: LLM推論、エンベディング、リランキング） → キーは暗号化して保存され、作成後は表示されません。"
     },
     "refresh": "更新",
     "addApiKey": "APIキーを追加",

@@ -1910,9 +1910,9 @@
     "description": "Manage your API keys for OpenAI, Anthropic, Gemini, Ollama, Cohere, Voyage, and other services",
     "featureGuide": {
       "title": "What are External API Keys?",
-      "overview": "External API Keys let you configure third-party service credentials (OpenAI, Anthropic, Google Gemini, Ollama, Cohere, Voyage) per workspace. These keys are used for LLM completions, embedding generation, reranking, and other AI operations depending on provider support.",
-      "useCases": "Use cases: bring your own OpenAI / Anthropic / Gemini key for LLM completions, use OpenAI (and optionally Ollama, where supported) for embeddings, configure Ollama for local self-hosted models, set up Cohere or Voyage for reranking, and manage keys at the workspace level for shared access and cost tracking.",
-      "howItWorks": "Add an API key for a supported provider → Kagura uses it for the provider-specific operations it supports (for example, LLM completions, embeddings, or reranking) → Keys are encrypted at rest and never exposed after creation."
+      "overview": "External API Keys are workspace-scoped and let you configure third-party service credentials (OpenAI, Anthropic, Google Gemini, Ollama, Cohere, Voyage). LLM completions are supported by OpenAI, Anthropic, Gemini, and Ollama. Embedding generation is supported by OpenAI (and optionally Ollama). Reranking is supported by Cohere and Voyage.",
+      "useCases": "Use cases: bring your own OpenAI key for embeddings and LLM completions; bring Anthropic / Gemini / Ollama keys for LLM completions; configure Cohere or Voyage for reranking; use Ollama for local self-hosted models; and manage keys at the workspace level for shared access and cost tracking.",
+      "howItWorks": "Add an API key for a supported provider → Kagura uses it only for the operations that provider supports (e.g., LLM completions, embeddings, or reranking) → Keys are encrypted at rest and never exposed after creation."
     },
     "refresh": "Refresh",
     "addApiKey": "Add API Key",
