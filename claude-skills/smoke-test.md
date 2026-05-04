@@ -3,7 +3,7 @@ description: Run comprehensive smoke test of all MCP tools via live MCP connecti
 ---
 
 Verify MCP tools work correctly by executing them in sequence against temporary test contexts.
-Tests 25 of 28 memory/context/analysis tools (excludes `analyze_context` which requires billing + BYOK).
+Tests 25 of 26 non-resource tools (excludes `analyze_context` which requires billing + BYOK).
 Optionally tests 5 resource tools (6 PRO-only rows including delete_context cleanup) if the workspace has a PRO plan.
 Use this after deployments, tool description changes, or MCP server updates.
 
@@ -143,7 +143,7 @@ get_usage()
 
 Note: `analyze_context` is **not** included because it requires billing with a configured BYOK key.
 
-**Pre-condition:** The workspace must have at least one completed analysis run for `get_active_analysis` and `list_analyses`. If it doesn't, the smoke test verifies graceful handling (e.g., `no_succeeded_run` response).
+**Pre-condition:** `list_analyses` and `get_active_analysis` require the workspace owner role and the analysis feature to be available. Valid responses include gate errors (`permission_denied`, `feature_not_available`) — the smoke test should treat these as acceptable outcomes, not failures.
 
 ```
 list_analyses(context_id=...)
@@ -161,7 +161,7 @@ get_analysis(run_id="this-is-not-a-uuid")
 
 ```
 get_cluster(run_id="00000000-0000-0000-0000-000000000000", cluster_index=0)
--> Verify: returns `run_not_found` error (expected — fake run_id)
+-> Verify: returns `cluster_not_found` error (expected — fake run_id)
 
 get_cluster(run_id="this-is-not-a-uuid", cluster_index=0)
 -> Verify: returns error response (invalid UUID format)
@@ -169,7 +169,7 @@ get_cluster(run_id="this-is-not-a-uuid", cluster_index=0)
 
 ### 7.7. Sleep tools
 
-Note: Sleep tools are read-only inspection tools and do not require a completed Sleep Maintenance run. For `get_sleep_report` and `rollback_sleep_run`, fake IDs verify error handling.
+Note: `get_sleep_history` and `get_sleep_report` are read-only inspection tools. `rollback_sleep_run` is mutating — fake IDs verify error handling without side effects.
 
 ```
 get_sleep_history(context_id=...)
@@ -195,7 +195,7 @@ rollback_sleep_run(report_id="this-is-not-a-uuid")
 -> Verify: returns error response (invalid UUID format)
 ```
 
-### 7.5. Resource tools (PRO plan only)
+### 7.8. Resource tools (PRO plan only)
 
 **Pre-check:** Call `get_usage()` and check the plan. If the plan is `free` or `basic`, skip this section entirely and note "Resource tools skipped — PRO plan required" in the report.
 
