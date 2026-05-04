@@ -4,7 +4,7 @@ Issue #101: Multi-provider LLM client for Sleep Maintenance.
 Issue #546: Adapter pattern refactor.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
