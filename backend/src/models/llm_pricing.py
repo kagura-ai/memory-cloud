@@ -125,6 +125,13 @@ class LLMPricing(Base):
     # NUMERIC(14, 10) gives 4 digits before the decimal and 10 after — enough
     # for prices like 25.0000000000 (Claude Opus output, $25/1M) down to
     # 0.0000200000 (text-embedding-3-small, $0.02/1M) without rounding.
+    pricing_model = Column(
+        String(20),
+        nullable=False,
+        default="per_token",
+        server_default="per_token",
+    )
+
     price_per_unit = Column(Numeric(14, 10), nullable=False)
     currency = Column(String(3), nullable=False, default="USD")
 
@@ -154,6 +161,10 @@ class LLMPricing(Base):
             "'cache_read_tokens', 'cache_write_tokens', "
             "'embedding_tokens', 'rerank_tokens', 'rerank_search_units')",
             name="valid_llm_pricing_unit_type",
+        ),
+        CheckConstraint(
+            "pricing_model IN ('per_token', 'subscription', 'hybrid')",
+            name="valid_llm_pricing_model",
         ),
         CheckConstraint(
             "price_per_unit >= 0",
