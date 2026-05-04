@@ -3,7 +3,7 @@ description: Run comprehensive smoke test of all MCP tools via live MCP connecti
 ---
 
 Verify MCP tools work correctly by executing them in sequence against temporary test contexts.
-Tests 25 of 26 non-resource tools (excludes `analyze_context` which requires billing + BYOK).
+Tests 33 non-resource tools (excludes `analyze_context` which requires billing, BYOK, workspace owner role, and Pro-tier feature access).
 Optionally tests 5 resource tools (6 PRO-only rows including delete_context cleanup) if the workspace has a PRO plan.
 Use this after deployments, tool description changes, or MCP server updates.
 
@@ -141,16 +141,16 @@ get_usage()
 
 ### 7.6. Analysis tools
 
-Note: `analyze_context` is **not** included because it requires billing with a configured BYOK key.
+Note: `analyze_context` is **not** included because it requires workspace owner role, Pro-tier feature access, billing, a configured BYOK key, and per-day quota availability.
 
 **Pre-condition:** `list_analyses` and `get_active_analysis` require the workspace owner role and the analysis feature to be available. Valid responses include gate errors (`permission_denied`, `feature_not_available`) — the smoke test should treat these as acceptable outcomes, not failures.
 
 ```
 list_analyses(context_id=...)
--> Verify: returns items array (no error; may be empty)
+-> Verify: returns items array, or gate error (`permission_denied`, `feature_not_available`) — treat all as PASS
 
 get_active_analysis(context_id=...)
--> Verify: either returns analysis run object, or `no_succeeded_run` response (both are valid)
+-> Verify: returns analysis run object, `no_succeeded_run`, or gate error (`permission_denied`, `feature_not_available`) — treat all as PASS
 
 get_analysis(run_id="00000000-0000-0000-0000-000000000000")
 -> Verify: returns `run_not_found` error (expected — fake run_id)
@@ -173,26 +173,26 @@ Note: `get_sleep_history` and `get_sleep_report` are read-only inspection tools.
 
 ```
 get_sleep_history(context_id=...)
--> Verify: returns items array (no error; may be empty)
+-> Verify: returns `{reports: [...], count: ...}` (no error; may be empty)
 
 get_sleep_history(context_id=..., limit=3)
--> Verify: returns at most 3 items (no error)
+-> Verify: returns at most 3 reports in the `reports` array (no error)
 ```
 
 ```
 get_sleep_report(report_id="00000000-0000-0000-0000-000000000000")
--> Verify: returns error response (fake report_id)
+-> Verify: returns `report_not_found` error (expected — fake report_id)
 
 get_sleep_report(report_id="this-is-not-a-uuid")
--> Verify: returns error response (invalid UUID format)
+-> Verify: returns `invalid_report_id` error (invalid UUID format)
 ```
 
 ```
 rollback_sleep_run(report_id="00000000-0000-0000-0000-000000000000")
--> Verify: returns error response (fake report_id)
+-> Verify: returns `report_not_found` error (expected — fake report_id)
 
 rollback_sleep_run(report_id="this-is-not-a-uuid")
--> Verify: returns error response (invalid UUID format)
+-> Verify: returns `invalid_report_id` error (invalid UUID format)
 ```
 
 ### 7.8. Resource tools (PRO plan only)
