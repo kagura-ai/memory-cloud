@@ -114,6 +114,7 @@ class CostAggregationRow:
         "tokens_in",
         "tokens_out",
         "tokens_cached_in",
+        "tokens_cache_write",
         "embedding_tokens",
         "cost_usd",
         "cost_usd_byok",
@@ -134,6 +135,7 @@ class CostAggregationRow:
         self.tokens_in = 0
         self.tokens_out = 0
         self.tokens_cached_in = 0
+        self.tokens_cache_write = 0
         self.embedding_tokens = 0
         # cost_usd / cost_usd_byok are NULL ("cost unknown") if any
         # contributing SQL row had unresolved pricing. They start at 0.0
@@ -168,6 +170,7 @@ LEFT JOIN LATERAL (
       AND unit_type = '{unit_type}'
       AND effective_from <= sr.started_at
       AND context_min_tokens = 0
+      AND pricing_model != 'subscription'
     ORDER BY effective_from DESC
     LIMIT 1
 ) {alias} ON TRUE
@@ -338,15 +341,18 @@ class CostAggregationService:
                 u.input_tokens,
                 u.output_tokens,
                 u.cached_input_tokens,
+                u.cache_write_tokens,
                 CASE
-                    WHEN (u.input_tokens        > 0 AND p_in.rate    IS NULL)
-                      OR (u.output_tokens       > 0 AND p_out.rate   IS NULL)
-                      OR (u.cached_input_tokens > 0 AND p_cache.rate IS NULL)
+                    WHEN (u.input_tokens        > 0 AND p_in.rate          IS NULL)
+                      OR (u.output_tokens       > 0 AND p_out.rate         IS NULL)
+                      OR (u.cached_input_tokens > 0 AND p_cache.rate       IS NULL)
+                      OR (u.cache_write_tokens  > 0 AND p_cache_write.rate IS NULL)
                     THEN NULL::float8
                     ELSE (
-                        COALESCE(u.input_tokens        * p_in.rate,    0) +
-                        COALESCE(u.output_tokens       * p_out.rate,   0) +
-                        COALESCE(u.cached_input_tokens * p_cache.rate, 0)
+                        COALESCE(u.input_tokens        * p_in.rate,          0) +
+                        COALESCE(u.output_tokens       * p_out.rate,         0) +
+                        COALESCE(u.cached_input_tokens * p_cache.rate,       0) +
+                        COALESCE(u.cache_write_tokens  * p_cache_write.rate, 0)
                     )::float8
                 END AS row_cost
             FROM sleep_reports sr
@@ -354,6 +360,7 @@ class CostAggregationService:
             {_LLM_PRICING_LATERAL.format(unit_type="input_tokens", alias="p_in")}
             {_LLM_PRICING_LATERAL.format(unit_type="output_tokens", alias="p_out")}
             {_LLM_PRICING_LATERAL.format(unit_type="cache_read_tokens", alias="p_cache")}
+            {_LLM_PRICING_LATERAL.format(unit_type="cache_write_tokens", alias="p_cache_write")}
             WHERE {base_where}
         ),
         llm_per_model AS (
@@ -368,6 +375,7 @@ class CostAggregationService:
                 SUM(input_tokens)::bigint        AS tokens_in,
                 SUM(output_tokens)::bigint       AS tokens_out,
                 SUM(cached_input_tokens)::bigint AS tokens_cached_in,
+                SUM(cache_write_tokens)::bigint  AS tokens_cache_write,
                 CASE
                     WHEN BOOL_AND(row_cost IS NOT NULL) THEN SUM(row_cost)::float8
                     ELSE NULL::float8
@@ -416,7 +424,7 @@ class CostAggregationService:
             'llm'::text AS kind,
             period_start, workspace_id, user_id,
             model, source, paid_by,
-            calls, tokens_in, tokens_out, tokens_cached_in,
+            calls, tokens_in, tokens_out, tokens_cached_in, tokens_cache_write,
             0::bigint AS embedding_tokens,
             cost
         FROM llm_per_model
@@ -429,6 +437,7 @@ class CostAggregationService:
             0::bigint AS tokens_in,
             0::bigint AS tokens_out,
             0::bigint AS tokens_cached_in,
+            0::bigint AS tokens_cache_write,
             embedding_tokens,
             cost
         FROM emb_per_source
@@ -531,6 +540,7 @@ def _assemble_rows(raw_rows: Sequence[RowMapping]) -> list[CostAggregationRow]:
             agg.tokens_in += int(r["tokens_in"] or 0)
             agg.tokens_out += int(r["tokens_out"] or 0)
             agg.tokens_cached_in += int(r["tokens_cached_in"] or 0)
+            agg.tokens_cache_write += int(r["tokens_cache_write"] or 0)
             setattr(agg, cost_field, _add_or_null(getattr(agg, cost_field), sql_cost))
 
             model_bucket = by_model_acc[key][r["model"]]

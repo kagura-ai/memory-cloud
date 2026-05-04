@@ -105,6 +105,7 @@ class CostAggregationRowResponse(TZAwareBaseModel):
     tokens_in: int
     tokens_out: int
     tokens_cached_in: int
+    tokens_cache_write: int
     embedding_tokens: int
     cost_usd: float | None
     cost_usd_byok: float | None
