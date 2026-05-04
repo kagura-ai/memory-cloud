@@ -9,6 +9,11 @@ from services.llm_providers.base import LLMProvider, ProviderResponse, Usage
 from utils.exceptions import ConfigurationError
 from utils.logger import get_logger
 
+# Bound LLM request duration so a hung / unreachable provider cannot
+# stall the analysis pipeline indefinitely (Issue #533 silent-hang
+# mitigation).
+_LLM_REQUEST_TIMEOUT_S = 60.0
+
 logger = get_logger(__name__)
 
 
@@ -24,16 +29,23 @@ class AnthropicProvider(LLMProvider):
             api_key: Anthropic API key.
         """
         self._api_key = api_key
+        self._client = None
 
-    def _client(self):
-        """Lazy-load Anthropic async client."""
+    def _ensure_client(self):
+        """Lazy-load Anthropic async client (cached per instance)."""
+        if self._client is not None:
+            return self._client
         try:
             from anthropic import AsyncAnthropic
         except ImportError as exc:
             raise ConfigurationError(
                 "Anthropic SDK not installed. Install with: pip install anthropic"
             ) from exc
-        return AsyncAnthropic(api_key=self._api_key)
+        self._client = AsyncAnthropic(
+            api_key=self._api_key,
+            timeout=_LLM_REQUEST_TIMEOUT_S,
+        )
+        return self._client
 
     async def complete_json(
         self,
@@ -46,8 +58,6 @@ class AnthropicProvider(LLMProvider):
         **kwargs,
     ) -> ProviderResponse:
         """Call Anthropic with JSON mode."""
-        client = self._client()
-
         messages = [{"role": "user", "content": prompt}]
         request_kwargs: dict = {
             "model": model,
@@ -68,7 +78,7 @@ class AnthropicProvider(LLMProvider):
         # Anthropic does not support a ``response_format`` kwarg on
         # ``messages.create``.  JSON parsing is handled upstream by
         # ``LLMService.complete_json`` via ``json.loads``.
-        response = await client.messages.create(**request_kwargs)
+        response = await self._ensure_client().messages.create(**request_kwargs)
         content = self._extract_content(response)
         usage = self.extract_usage(response)
 

@@ -187,8 +187,8 @@ class TestAnthropicProvider:
 
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(return_value=mock_response)
-        with patch.object(provider, "_client", return_value=mock_client):
-            result = await provider.complete_json("hello", model="claude-sonnet-4-6")
+        provider._client = mock_client
+        result = await provider.complete_json("hello", model="claude-sonnet-4-6")
 
         assert result.content == '{"key": "value"}'
         assert result.usage == Usage(total=18, input=10, output=5, cached=2, cache_write=1)
@@ -234,8 +234,8 @@ class TestGeminiProvider:
 
         mock_client = MagicMock()
         mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
-        with patch.object(provider, "_client", return_value=mock_client):
-            result = await provider.complete_json("hello", model="gemini-3.1-pro")
+        provider._client = mock_client
+        result = await provider.complete_json("hello", model="gemini-3.1-pro")
 
         assert result.content == '{"key": "value"}'
         assert result.usage == Usage(total=15, input=10, output=5, cached=0)
@@ -251,10 +251,11 @@ class TestGeminiProvider:
 
         mock_client = MagicMock()
         mock_client.aio.models.list = AsyncMock(return_value=mock_list)
-        with patch.object(provider, "_client", return_value=mock_client):
-            models = await provider.list_models()
+        provider._client = mock_client
+        models = await provider.list_models()
 
-        assert models == [{"id": "models/gemini-3.1-pro", "name": "Gemini 3.1 Pro"}]
+        # IDs are normalized by stripping the "models/" prefix.
+        assert models == [{"id": "gemini-3.1-pro", "name": "Gemini 3.1 Pro"}]
 
 
 # ============================================================================

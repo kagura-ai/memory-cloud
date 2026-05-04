@@ -9,7 +9,17 @@ from services.llm_providers.base import LLMProvider, ProviderResponse, Usage
 from utils.exceptions import ConfigurationError
 from utils.logger import get_logger
 
+# Bound LLM request duration so a hung / unreachable provider cannot
+# stall the analysis pipeline indefinitely (Issue #533 silent-hang
+# mitigation).
+_LLM_REQUEST_TIMEOUT_S = 60.0
+
 logger = get_logger(__name__)
+
+
+def _strip_models_prefix(name: str) -> str:
+    """Normalize Gemini model IDs by stripping the ``models/`` prefix."""
+    return name.removeprefix("models/")
 
 
 class GeminiProvider(LLMProvider):
@@ -24,16 +34,23 @@ class GeminiProvider(LLMProvider):
             api_key: Google AI Studio API key.
         """
         self._api_key = api_key
+        self._client = None
 
-    def _client(self):
-        """Lazy-load Google GenAI client."""
+    def _ensure_client(self):
+        """Lazy-load Google GenAI client (cached per instance)."""
+        if self._client is not None:
+            return self._client
         try:
             from google import genai
         except ImportError as exc:
             raise ConfigurationError(
                 "Google GenAI SDK not installed. Install with: pip install google-genai"
             ) from exc
-        return genai.Client(api_key=self._api_key)
+        self._client = genai.Client(
+            api_key=self._api_key,
+            http_options={"timeout": _LLM_REQUEST_TIMEOUT_S},
+        )
+        return self._client
 
     async def complete_json(
         self,
@@ -46,8 +63,6 @@ class GeminiProvider(LLMProvider):
         **kwargs,
     ) -> ProviderResponse:
         """Call Gemini with JSON mode."""
-        client = self._client()
-
         contents = prompt
         config_kwargs: dict = {
             "response_mime_type": "application/json",
@@ -65,7 +80,7 @@ class GeminiProvider(LLMProvider):
             # Fallback for older SDK shapes
             config = config_kwargs
 
-        response = await client.aio.models.generate_content(
+        response = await self._ensure_client().aio.models.generate_content(
             model=model,
             contents=contents,
             config=config,
@@ -103,11 +118,13 @@ class GeminiProvider(LLMProvider):
 
     async def list_models(self) -> list[dict]:
         """List available Gemini models."""
-        client = self._client()
         try:
-            response = await client.aio.models.list()
+            response = await self._ensure_client().aio.models.list()
             return [
-                {"id": m.name, "name": m.display_name or m.name}
+                {
+                    "id": _strip_models_prefix(m.name),
+                    "name": m.display_name or _strip_models_prefix(m.name),
+                }
                 for m in response.models
                 if getattr(m, "name", None)
             ]

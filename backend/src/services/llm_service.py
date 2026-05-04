@@ -101,6 +101,8 @@ class LLMService:
             db: Database session (for API key retrieval)
         """
         self.db = db
+        self._ollama_provider: OllamaProvider | None = None
+        self._last_ollama_base_url: str | None = None
 
     # -- public API --------------------------------------------------------
 
@@ -245,17 +247,21 @@ class LLMService:
         Returns:
             List of model dicts with ``id`` and ``name`` keys.
         """
-        provider_instance = await self._get_provider(user_id, provider, context_id, workspace_id)
-
-        # Resolve cache key
+        # Resolve cache key up-front so we can skip instantiation on hit.
         try:
             api_key = await self._get_user_api_key(user_id, provider, context_id, workspace_id)
         except ConfigurationError:
             api_key = ""
         cache_key = (provider, _api_key_fingerprint(api_key))
 
-        # Check cache
         now = time.time()
+
+        # Prune stale entries to cap memory growth (Copilot review feedback).
+        stale = [k for k, (ts, _) in _MODEL_CACHE.items() if now - ts >= _MODEL_CACHE_TTL_S]
+        for k in stale:
+            del _MODEL_CACHE[k]
+
+        # Check cache
         cached = _MODEL_CACHE.get(cache_key)
         if cached:
             timestamp, models = cached
@@ -264,6 +270,7 @@ class LLMService:
                 return models
 
         # Fetch from provider
+        provider_instance = await self._get_provider(user_id, provider, context_id, workspace_id)
         try:
             models = await provider_instance.list_models()
         except Exception as e:
@@ -330,7 +337,26 @@ class LLMService:
             )
 
         if provider_name == "ollama":
-            return OllamaProvider()
+            # Ollama uses a base URL rather than an API key. Resolve from
+            # ExternalAPIKey first, then env var, then settings.
+            base_url: str | None = None
+            try:
+                base_url = await self._get_user_api_key(user_id, "ollama", context_id, workspace_id)
+            except ConfigurationError:
+                pass
+            if not base_url:
+                base_url = os.getenv("OLLAMA_BASE_URL") or None
+            if not base_url:
+                from config.settings import get_settings
+
+                base_url = get_settings().ollama_base_url or None
+
+            # Re-use the same provider instance per service so the one-time
+            # _verify() health-check does not run on every request.
+            if self._ollama_provider is None or self._last_ollama_base_url != base_url:
+                self._ollama_provider = OllamaProvider(base_url=base_url)
+                self._last_ollama_base_url = base_url
+            return self._ollama_provider
 
         api_key = await self._get_user_api_key(user_id, provider_name, context_id, workspace_id)
         return provider_cls(api_key)
