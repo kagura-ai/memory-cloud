@@ -1973,6 +1973,8 @@
       "geminiDesc": "LLM provider (Gemini)",
       "ollama": "Ollama",
       "ollamaDesc": "Local / self-hosted LLM",
+      "ollamaCloud": "Ollama Cloud",
+      "ollamaCloudDesc": "Cloud-hosted LLM via ollama.com",
       "voyage": "Voyage AI",
       "voyageDesc": "Optional reranker",
       "cohere": "Cohere",

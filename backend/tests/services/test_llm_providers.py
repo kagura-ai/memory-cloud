@@ -319,3 +319,63 @@ class TestOllamaProvider:
             models = await provider.list_models()
 
         assert models == [{"id": "llama3.1", "name": "llama3.1"}]
+
+
+# ============================================================================
+# OllamaCloudProvider
+# ============================================================================
+
+
+class TestOllamaCloudProvider:
+    def test_extract_usage_reads_counts(self):
+        from services.llm_providers.ollama_cloud_provider import OllamaCloudProvider
+
+        provider = OllamaCloudProvider(api_key="test-key")
+        raw = MagicMock()
+        raw.prompt_eval_count = 100
+        raw.eval_count = 20
+
+        usage = provider.extract_usage(raw)
+        assert usage == Usage(total=120, input=100, output=20, cached=0)
+
+    def test_extract_usage_handles_no_counts(self):
+        from services.llm_providers.ollama_cloud_provider import OllamaCloudProvider
+
+        provider = OllamaCloudProvider(api_key="test-key")
+        usage = provider.extract_usage(MagicMock(spec=[]))
+        assert usage == Usage(total=0, input=0, output=0, cached=0)
+
+    @pytest.mark.asyncio
+    async def test_complete_json_returns_provider_response(self):
+        from services.llm_providers.ollama_cloud_provider import OllamaCloudProvider
+
+        provider = OllamaCloudProvider(api_key="test-key")
+        mock_response = MagicMock()
+        mock_response.message = {"content": '{"key": "value"}'}
+        mock_response.prompt_eval_count = 10
+        mock_response.eval_count = 5
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=mock_response)
+        provider._client = mock_client
+        result = await provider.complete_json("hello", model="gpt-oss:120b-cloud")
+
+        assert result.content == '{"key": "value"}'
+        assert result.usage == Usage(total=15, input=10, output=5, cached=0)
+
+    @pytest.mark.asyncio
+    async def test_list_models_returns_models(self):
+        from services.llm_providers.ollama_cloud_provider import OllamaCloudProvider
+
+        provider = OllamaCloudProvider(api_key="test-key")
+        mock_model = MagicMock()
+        mock_model.model = "gpt-oss:120b-cloud"
+        mock_list = MagicMock()
+        mock_list.models = [mock_model]
+
+        mock_client = MagicMock()
+        mock_client.list = AsyncMock(return_value=mock_list)
+        provider._client = mock_client
+        models = await provider.list_models()
+
+        assert models == [{"id": "gpt-oss:120b-cloud", "name": "gpt-oss:120b-cloud"}]

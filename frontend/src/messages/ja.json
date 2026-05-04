@@ -1973,6 +1973,8 @@
       "geminiDesc": "LLMプロバイダー（Gemini）",
       "ollama": "Ollama",
       "ollamaDesc": "ローカル/セルフホストLLM",
+      "ollamaCloud": "Ollama Cloud",
+      "ollamaCloudDesc": "ollama.com のクラウドホストLLM",
       "voyage": "Voyage AI",
       "voyageDesc": "オプションのリランカー",
       "cohere": "Cohere",

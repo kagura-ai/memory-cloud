@@ -19,6 +19,7 @@ from models.auth import ExternalAPIKey
 from services.llm_providers import (
     AnthropicProvider,
     GeminiProvider,
+    OllamaCloudProvider,
     OllamaProvider,
     OpenAIProvider,
 )
@@ -77,6 +78,7 @@ _PROVIDERS: dict[str, type[LLMProvider]] = {
     "anthropic": AnthropicProvider,
     "gemini": GeminiProvider,
     "ollama": OllamaProvider,
+    "ollama_cloud": OllamaCloudProvider,
 }
 
 # Module-level model cache: {(provider_name, api_key_fingerprint): (timestamp, models)}
@@ -439,6 +441,7 @@ class LLMService:
             "openai": "OPENAI_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
             "gemini": "GOOGLE_API_KEY",
+            "ollama_cloud": "OLLAMA_API_KEY",
         }
         env_var = env_var_map.get(provider, "OPENAI_API_KEY")
         env_key = os.getenv(env_var)

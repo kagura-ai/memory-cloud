@@ -119,6 +119,13 @@ export default function ExternalKeysPage() {
       description: t("providers.ollamaDesc"),
     },
     {
+      value: "ollama_cloud",
+      label: t("providers.ollamaCloud"),
+      keyName: "OLLAMA_API_KEY",
+      icon: "☁️",
+      description: t("providers.ollamaCloudDesc"),
+    },
+    {
       value: "voyage",
       label: t("providers.voyage"),
       keyName: "VOYAGE_API_KEY",
