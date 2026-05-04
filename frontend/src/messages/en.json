@@ -2441,6 +2441,7 @@
       "messages": {
         "loadError": "Failed to load sleep reports",
         "noReports": "No sleep reports found.",
+        "noReportsHint": "Sleep maintenance runs automatically. Reports will appear here after the first run completes.",
         "notFound": "Sleep report not found.",
         "runStarted": "Sleep run started",
         "runStartedDesc": "Maintenance is running in the background. The list will refresh shortly.",
@@ -3126,7 +3127,7 @@
   "analyses": {
     "tabLabel": "Analyses",
     "header": {
-      "title": "Broadlistening Analyses",
+      "title": "Meta Analysis",
       "subtitle": "Survey the shape of your memories with cluster overview · Owner only"
     },
     "actions": {
@@ -3248,7 +3249,7 @@
       },
       "notEnabled": {
         "title": "Analyses are not yet enabled for this workspace",
-        "description": "Memory Broadlistening is gated to selected workspaces during the v1 rollout. Reach out if you would like access."
+        "description": "Meta analysis is gated to selected workspaces during the v1 rollout. Reach out if you would like access."
       },
       "loadFailed": "Failed to load analyses — check connection and try again."
     }
