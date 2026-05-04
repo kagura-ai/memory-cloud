@@ -59,9 +59,9 @@ class LLMResponse:
     input_tokens: int
     output_tokens: int
     cached_input_tokens: int
-    cache_write_tokens: int
     provider: str
     model: str
+    cache_write_tokens: int = 0
     tokenizer_version: str | None = None
 
     def __iter__(self):

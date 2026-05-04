@@ -195,6 +195,7 @@ def _to_response_row(row: CostAggregationRow) -> CostAggregationRowResponse:
         tokens_in=row.tokens_in,
         tokens_out=row.tokens_out,
         tokens_cached_in=row.tokens_cached_in,
+        tokens_cache_write=row.tokens_cache_write,
         embedding_tokens=row.embedding_tokens,
         cost_usd=_round(row.cost_usd),
         cost_usd_byok=_round(row.cost_usd_byok),

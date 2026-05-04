@@ -57,6 +57,7 @@ def _make_canned_row() -> CostAggregationRow:
     row.tokens_in = 18_000
     row.tokens_out = 3_000
     row.tokens_cached_in = 5_000
+    row.tokens_cache_write = 0
     row.embedding_tokens = 1_000_000
     row.cost_usd = 0.073
     row.cost_usd_byok = 0.0
