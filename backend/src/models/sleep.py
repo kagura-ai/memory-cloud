@@ -265,6 +265,7 @@ class SleepReportLLMUsage(Base):
     input_tokens = Column(Integer, nullable=False, default=0)
     output_tokens = Column(Integer, nullable=False, default=0)
     cached_input_tokens = Column(Integer, nullable=False, default=0)
+    cache_write_tokens = Column(Integer, nullable=False, default=0)
     calls = Column(Integer, nullable=False, default=0)
     tokenizer_version = Column(String(50), nullable=True)
 
