@@ -145,7 +145,7 @@ export function RepresentativesPanel({
                   aria-hidden
                 />
                 <div className="min-w-0">
-                  <div className="truncate text-gray-900 dark:text-gray-100">
+                  <div className="line-clamp-3 text-sm text-gray-900 dark:text-gray-100">
                     {rep.summary}
                   </div>
                   <div className="mt-0.5 font-mono text-xs text-gray-400">

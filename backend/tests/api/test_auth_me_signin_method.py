@@ -43,6 +43,7 @@ def _db_user(*, auth_method: str, auth_provider: str | None) -> SimpleNamespace:
     """
     return SimpleNamespace(
         timezone="UTC",
+        locale="en",
         auth_method=auth_method,
         auth_provider=auth_provider,
     )
@@ -71,6 +72,7 @@ class TestAuthMeSignInMethod:
 
         assert result["user"]["auth_method"] == "oauth"
         assert result["user"]["auth_provider"] == "google"
+        assert result["user"]["locale"] == "en"
 
     @pytest.mark.asyncio
     async def test_oauth_github_user_exposes_provider(self):
@@ -80,6 +82,7 @@ class TestAuthMeSignInMethod:
 
         assert result["user"]["auth_method"] == "oauth"
         assert result["user"]["auth_provider"] == "github"
+        assert result["user"]["locale"] == "en"
 
     @pytest.mark.asyncio
     async def test_password_user_provider_is_null(self):
@@ -95,6 +98,7 @@ class TestAuthMeSignInMethod:
 
         assert result["user"]["auth_method"] == "password"
         assert result["user"]["auth_provider"] is None
+        assert result["user"]["locale"] == "en"
 
     @pytest.mark.asyncio
     async def test_legacy_oauth_user_with_null_provider(self):
@@ -110,6 +114,7 @@ class TestAuthMeSignInMethod:
 
         assert result["user"]["auth_method"] == "oauth"
         assert result["user"]["auth_provider"] is None
+        assert result["user"]["locale"] == "en"
 
     @pytest.mark.asyncio
     async def test_db_user_missing_falls_back_to_oauth_default(self):
@@ -123,3 +128,19 @@ class TestAuthMeSignInMethod:
 
         assert result["user"]["auth_method"] == "oauth"
         assert result["user"]["auth_provider"] is None
+        assert result["user"]["locale"] == "en"
+
+    @pytest.mark.asyncio
+    async def test_oauth_user_with_ja_locale(self):
+        """Japanese locale user → locale='ja' exposed in response (Issue #542)."""
+        db = _mock_db(
+            SimpleNamespace(
+                timezone="Asia/Tokyo",
+                locale="ja",
+                auth_method="oauth",
+                auth_provider="google",
+            )
+        )
+        result = await get_current_user_info(user=_session(), db=db)
+
+        assert result["user"]["locale"] == "ja"

@@ -1084,7 +1084,7 @@ export default function ContextsPage() {
                               <DropdownMenuItem
                                 onClick={() =>
                                   router.push(
-                                    `/workspace/contexts/${context.id}?tab=analyses&new=1`,
+                                    `/workspace/contexts/${context.id}?tab=analyses`,
                                   )
                                 }
                               >

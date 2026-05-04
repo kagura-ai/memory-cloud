@@ -75,6 +75,7 @@ export interface QuotaBreakdown {
   mcp_calls_per_day: number;
   max_contexts: number;
   max_members: number;
+  analysis_runs_per_day: number;
 }
 
 export interface WorkspaceQuotaDetail {
@@ -87,6 +88,7 @@ export interface WorkspaceQuotaDetail {
     mcp_quota_bonus: number;
     member_bonus: number;
     context_bonus: number;
+    analysis_bonus: number;
   };
   effective: QuotaBreakdown;
   usage: { memories: number; contexts: number; members: number };
@@ -97,6 +99,7 @@ export interface UpdateAddonRequest {
   addon_mcp_quota_bonus: number;
   addon_member_bonus: number;
   addon_context_bonus: number;
+  addon_analysis_bonus: number;
 }
 
 /**

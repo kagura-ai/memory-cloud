@@ -106,6 +106,7 @@ export function NewAnalysisModal({
   const [preview, setPreview] = useState<AnalysisPreviewResponse | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewErrorCode, setPreviewErrorCode] = useState<string | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -127,6 +128,7 @@ export function NewAnalysisModal({
     let cancelled = false;
     setPreviewLoading(true);
     setPreviewError(null);
+    setPreviewErrorCode(null);
     const timer = window.setTimeout(async () => {
       try {
         const result = await previewAnalysis(contextId, filters);
@@ -134,13 +136,28 @@ export function NewAnalysisModal({
         setPreview(result);
       } catch (err) {
         if (cancelled) return;
-        setPreviewError(
-          err instanceof ApiError
-            ? err.message
-            : err instanceof Error
-              ? err.message
-              : t("errorPreviewFallback"),
-        );
+        if (err instanceof ApiError) {
+          setPreviewErrorCode(err.error ?? null);
+          // Use translated message for known error codes; fallback to raw message
+          if (err.error === "QUOTA-001" && err.details) {
+            const d = err.details as Record<string, unknown>;
+            setPreviewError(
+              t("errors.QUOTA-001", {
+                used: String(d.used_today ?? "?"),
+                limit: String(d.limit_today ?? "?"),
+                addon: String(d.addon_bonus ?? 0),
+                resetsAt: String(d.resets_at ?? "?"),
+              }),
+            );
+          } else {
+            setPreviewError(err.message);
+          }
+        } else {
+          setPreviewErrorCode(null);
+          setPreviewError(
+            err instanceof Error ? err.message : t("errorPreviewFallback"),
+          );
+        }
       } finally {
         if (!cancelled) setPreviewLoading(false);
       }
@@ -156,6 +173,8 @@ export function NewAnalysisModal({
     if (!open) {
       setSubmitting(false);
       setSubmitError(null);
+      setPreviewError(null);
+      setPreviewErrorCode(null);
     }
   }, [open]);
 
@@ -290,7 +309,9 @@ export function NewAnalysisModal({
           </div>
           {previewError && (
             <p className="mt-2 text-xs text-red-600 dark:text-red-400">
-              {t("errorLoadingPreview")}: {previewError}
+              {previewErrorCode === "QUOTA-001"
+                ? previewError
+                : `${t("errorLoadingPreview")}: ${previewError}`}
             </p>
           )}
         </div>

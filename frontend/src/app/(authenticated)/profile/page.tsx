@@ -167,11 +167,13 @@ export default function ProfilePage() {
   const [name, setName] = useState(user?.name || "");
   const email = user?.email || "";
   const [timezone, setTimezone] = useState(user?.timezone || "UTC");
+  const [locale, setLocale] = useState(user?.locale || "en");
 
   useEffect(() => {
     if (user) {
       setName(user.name || "");
       setTimezone(user.timezone || "UTC");
+      setLocale(user.locale || "en");
     }
   }, [user]);
 
@@ -180,6 +182,7 @@ export default function ProfilePage() {
       await apiClient.put("/api/v1/users/profile", {
         name,
         timezone,
+        locale,
       });
 
       // Refresh user data to get updated timezone
@@ -350,6 +353,24 @@ export default function ProfilePage() {
                 <p className="text-xs text-slate-500">{t("timezoneDesc")}</p>
               </div>
 
+              <div className="space-y-2">
+                <Label htmlFor="locale">{t("locale")}</Label>
+                <Select
+                  value={locale}
+                  onValueChange={setLocale}
+                  disabled={!isEditMode}
+                >
+                  <SelectTrigger id="locale">
+                    <SelectValue placeholder={t("selectLocale")} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ja">{t("localeJa")}</SelectItem>
+                    <SelectItem value="en">{t("localeEn")}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-slate-500">{t("localeDesc")}</p>
+              </div>
+
               {user.role === "admin" && (
                 <div className="space-y-2">
                   <Label htmlFor="role">{t("systemRole")}</Label>
@@ -376,6 +397,8 @@ export default function ProfilePage() {
                     onClick={() => {
                       setIsEditMode(false);
                       setName(user.name || "");
+                      setTimezone(user.timezone || "UTC");
+                      setLocale(user.locale || "en");
                     }}
                   >
                     {tCommon("cancel")}

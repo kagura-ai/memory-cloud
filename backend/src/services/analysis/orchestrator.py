@@ -53,6 +53,7 @@ from models.analysis import (
     MEMORY_ANALYSIS_STATUSES,
     MemoryAnalysis,
 )
+from models.auth import User
 from models.llm_pricing import LLMPricing
 from services.analysis import labeler as analysis_labeler
 from services.analysis.byok_resolver import assert_openai_byok_key_available
@@ -378,6 +379,16 @@ class AnalysisOrchestrator:
             )
             analysis.cost_estimated_cents = estimate.estimated_cost_cents
 
+            # Issue #542: resolve user's locale for prompt language.
+            # Fetch while we still have the read transaction open;
+            # committing immediately after releases the connection
+            # before the long-running compute stages below.
+            user_result = await self.db.execute(
+                select(User.locale).where(User.user_id == analysis.triggered_by)
+            )
+            db_locale = user_result.scalar_one_or_none()
+            label_locale = db_locale if db_locale else "en"
+
             # Commit the read + vector_pull state, releasing the
             # orchestrator's connection. Compute stages below run with
             # NO open transaction; ``persist_results`` autobegins a
@@ -409,6 +420,7 @@ class AnalysisOrchestrator:
                 user_id=analysis.triggered_by,
                 workspace_id=str(analysis.workspace_id),
                 context_id=str(analysis.context_id),
+                locale=label_locale,
             )
 
             # Stage [J] — atomic persist. The transaction here wraps
