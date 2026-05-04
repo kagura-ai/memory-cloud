@@ -282,6 +282,7 @@ class TestOllamaProvider:
     @pytest.mark.asyncio
     async def test_complete_json_returns_provider_response(self):
         provider = OllamaProvider(base_url="http://localhost:11434")
+        provider._verified = True  # skip health-check in CI where Ollama is absent
         mock_response = MagicMock()
         mock_response.choices = [MagicMock(message=MagicMock(content='{"key": "value"}'))]
         mock_response.usage = MagicMock()
