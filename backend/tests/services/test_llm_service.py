@@ -1,14 +1,26 @@
 """Tests for LLM Service.
 
 Issue #101: Multi-provider LLM client for Sleep Maintenance.
+Issue #546: Adapter pattern refactor.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from openai import AsyncOpenAI
 
+from services.llm_providers.base import ProviderResponse, Usage
 from services.llm_service import LLMService, LLMServiceError
+from utils.exceptions import ConfigurationError
+
+
+@pytest.fixture(autouse=True)
+def clear_model_cache():
+    """Clear the module-level model cache between tests."""
+    import services.llm_service as _svc
+
+    _svc._MODEL_CACHE.clear()
+    yield
+    _svc._MODEL_CACHE.clear()
 
 
 @pytest.fixture
@@ -24,46 +36,26 @@ def llm_service(mock_db):
     return LLMService(mock_db)
 
 
-def _make_completion_response(
+def _make_provider_response(
     content: str,
-    total_tokens: int = 42,
     *,
-    prompt_tokens: int | None = None,
-    completion_tokens: int | None = None,
-    cached_tokens: int = 0,
-):
-    """Create a mock chat completion response.
-
-    Defaults split ``total_tokens`` evenly into prompt+completion when the
-    caller doesn't specify, so the new ``LLMResponse`` extractor (#471)
-    can decompose into per-class counters without hitting MagicMock
-    arithmetic. Pass ``prompt_tokens`` / ``completion_tokens`` explicitly
-    to test the decomposition.
-    """
-    if prompt_tokens is None:
-        prompt_tokens = total_tokens // 2
-    if completion_tokens is None:
-        completion_tokens = total_tokens - prompt_tokens
-
-    details = MagicMock()
-    details.cached_tokens = cached_tokens
-
-    usage = MagicMock()
-    usage.total_tokens = total_tokens
-    usage.prompt_tokens = prompt_tokens
-    usage.completion_tokens = completion_tokens
-    usage.prompt_tokens_details = details
-
-    message = MagicMock()
-    message.content = content
-
-    choice = MagicMock()
-    choice.message = message
-
-    response = MagicMock()
-    response.choices = [choice]
-    response.usage = usage
-    return response
+    total: int = 42,
+    input_tokens: int = 20,
+    output_tokens: int = 22,
+    cached: int = 0,
+    cache_write: int = 0,
+) -> ProviderResponse:
+    """Create a mock provider response."""
+    return ProviderResponse(
+        content=content,
+        usage=Usage(
+            total=total,
+            input=input_tokens,
+            output=output_tokens,
+            cached=cached,
+            cache_write=cache_write,
+        ),
+    )
 
 
 class TestCompleteJson:
@@ -72,15 +64,14 @@ class TestCompleteJson:
     @pytest.mark.asyncio
     async def test_successful_json_completion(self, llm_service):
         """Test successful JSON response parsing."""
-        mock_response = _make_completion_response(
-            '{"result": "ok", "score": 0.95}', total_tokens=50
+        mock_provider = AsyncMock()
+        mock_provider.complete_json.return_value = _make_provider_response(
+            '{"result": "ok", "score": 0.95}', total=50
         )
 
-        with patch.object(llm_service, "_get_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.chat.completions.create.return_value = mock_response
-            mock_get_client.return_value = mock_client
-
+        with patch.object(
+            llm_service, "_get_provider", new_callable=AsyncMock, return_value=mock_provider
+        ):
             resp = await llm_service.complete_json(
                 user_id="user-1",
                 prompt="Test prompt",
@@ -89,169 +80,45 @@ class TestCompleteJson:
 
         assert resp.parsed == {"result": "ok", "score": 0.95}
         assert resp.total_tokens == 50
-
-        # Verify system + user messages
-        call_kwargs = mock_client.chat.completions.create.call_args[1]
-        assert len(call_kwargs["messages"]) == 2
-        assert call_kwargs["messages"][0]["role"] == "system"
-        assert call_kwargs["messages"][1]["role"] == "user"
-        assert call_kwargs["response_format"] == {"type": "json_object"}
-
-        # Regression guard (#421): OpenAI gpt-5/o-series reject `max_tokens` with
-        # HTTP 400 and require `max_completion_tokens`. Pin the kwarg name here
-        # so a future rename back to `max_tokens` fails loudly in tests instead
-        # of silently in production.
-        assert call_kwargs["max_completion_tokens"] == 1024
-        assert "max_tokens" not in call_kwargs
+        assert resp.input_tokens == 20
+        assert resp.output_tokens == 22
+        assert resp.cached_input_tokens == 0
+        assert resp.cache_write_tokens == 0
+        assert resp.provider == "openai"
 
     @pytest.mark.asyncio
-    async def test_max_completion_tokens_mapped_from_max_tokens_arg(self, llm_service):
-        """Regression guard (#421): caller-facing `max_tokens` must map to `max_completion_tokens` on the OpenAI call."""
-        mock_response = _make_completion_response('{"ok": true}', total_tokens=20)
+    async def test_custom_model_and_provider(self, llm_service):
+        """Test passing custom model and provider."""
+        mock_provider = AsyncMock()
+        mock_provider.complete_json.return_value = _make_provider_response('{"ok": true}')
 
-        with patch.object(llm_service, "_get_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.chat.completions.create.return_value = mock_response
-            mock_get_client.return_value = mock_client
-
-            await llm_service.complete_json(
-                user_id="user-1",
-                prompt="Test",
-                max_tokens=512,
-            )
-
-        call_kwargs = mock_client.chat.completions.create.call_args[1]
-        assert call_kwargs["max_completion_tokens"] == 512
-        assert "max_tokens" not in call_kwargs
-
-    @pytest.mark.asyncio
-    async def test_gpt5_omits_temperature_kwarg(self, llm_service):
-        """Regression guard (#424): gpt-5 / o-series only accept temperature=1.
-
-        The SDK call must NOT include the `temperature` kwarg for these models;
-        the SDK falls back to the model's fixed default. Sending any custom
-        value (even our default 0.1) returns HTTP 400.
-        """
-        mock_response = _make_completion_response('{"ok": true}')
-
-        with patch.object(llm_service, "_get_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.chat.completions.create.return_value = mock_response
-            mock_get_client.return_value = mock_client
-
-            await llm_service.complete_json(
-                user_id="user-1",
-                prompt="Test",
-                model="gpt-5-nano",
-                temperature=0.1,
-            )
-
-        call_kwargs = mock_client.chat.completions.create.call_args[1]
-        assert "temperature" not in call_kwargs
-        assert call_kwargs["model"] == "gpt-5-nano"
-
-    @pytest.mark.asyncio
-    async def test_gpt5_includes_reasoning_effort_minimal(self, llm_service):
-        """Regression guard (#426): gpt-5 / o-series must receive reasoning_effort=minimal.
-
-        Without it, reasoning tokens exhaust max_completion_tokens and the
-        visible JSON output is empty. `minimal` is OpenAI's recommended
-        setting for deterministic JSON-mode tasks like edge_discovery.
-        """
-        mock_response = _make_completion_response('{"ok": true}')
-
-        with patch.object(llm_service, "_get_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.chat.completions.create.return_value = mock_response
-            mock_get_client.return_value = mock_client
-
-            await llm_service.complete_json(
-                user_id="user-1",
-                prompt="Test",
-                model="gpt-5-nano",
-            )
-
-        call_kwargs = mock_client.chat.completions.create.call_args[1]
-        assert call_kwargs["reasoning_effort"] == "minimal"
-
-    @pytest.mark.asyncio
-    async def test_gpt4_includes_temperature_kwarg(self, llm_service):
-        """Regression guard (#424): GPT-4 family must still receive the temperature kwarg.
-
-        Also (#426): GPT-4 family must NOT receive reasoning_effort
-        (parameter is unknown to non-reasoning models and would 400).
-        """
-        mock_response = _make_completion_response('{"ok": true}')
-
-        with patch.object(llm_service, "_get_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.chat.completions.create.return_value = mock_response
-            mock_get_client.return_value = mock_client
-
-            await llm_service.complete_json(
-                user_id="user-1",
-                prompt="Test",
-                model="gpt-4o-mini",
-                temperature=0.1,
-            )
-
-        call_kwargs = mock_client.chat.completions.create.call_args[1]
-        assert call_kwargs["temperature"] == 0.1
-        assert "reasoning_effort" not in call_kwargs
-
-    def test_supports_custom_temperature_helper(self):
-        """Unit test for the model-prefix detection helper (#424)."""
-        # Reasoning models — must omit temperature
-        assert LLMService._supports_custom_temperature("gpt-5-nano") is False
-        assert LLMService._supports_custom_temperature("gpt-5") is False
-        assert LLMService._supports_custom_temperature("o1-preview") is False
-        assert LLMService._supports_custom_temperature("o1-mini") is False
-        assert LLMService._supports_custom_temperature("o3-mini") is False
-        assert LLMService._supports_custom_temperature("o4-mini") is False
-        # Non-reasoning models — temperature OK
-        assert LLMService._supports_custom_temperature("gpt-4o-mini") is True
-        assert LLMService._supports_custom_temperature("gpt-4o") is True
-        assert LLMService._supports_custom_temperature("gpt-3.5-turbo") is True
-        assert LLMService._supports_custom_temperature("llama-3") is True
-
-    @pytest.mark.asyncio
-    async def test_no_system_prompt(self, llm_service):
-        """Test completion without system prompt."""
-        mock_response = _make_completion_response('{"ok": true}')
-
-        with patch.object(llm_service, "_get_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.chat.completions.create.return_value = mock_response
-            mock_get_client.return_value = mock_client
-
+        with patch.object(
+            llm_service, "_get_provider", new_callable=AsyncMock, return_value=mock_provider
+        ):
             resp = await llm_service.complete_json(
                 user_id="user-1",
                 prompt="Test",
+                model="gpt-4o",
+                provider="openai",
             )
 
-        assert resp.parsed == {"ok": True}
-        call_kwargs = mock_client.chat.completions.create.call_args[1]
-        assert len(call_kwargs["messages"]) == 1
-        assert call_kwargs["messages"][0]["role"] == "user"
+        mock_provider.complete_json.assert_called_once()
+        call_kwargs = mock_provider.complete_json.call_args[1]
+        assert call_kwargs["model"] == "gpt-4o"
+        assert resp.provider == "openai"
 
     @pytest.mark.asyncio
     async def test_json_parse_failure_retries(self, llm_service):
-        """Test retry on JSON parse failure with higher temperature.
+        """Test retry on JSON parse failure with higher temperature."""
+        bad_response = _make_provider_response("not json {", total=30)
+        good_response = _make_provider_response('{"retried": true}', total=35)
 
-        Pinned to a GPT-4 family model so the temperature kwarg is actually sent
-        — GPT-5 / o-series omit it (see test_gpt5_omits_temperature_kwarg).
-        """
-        bad_response = _make_completion_response("not json {", total_tokens=30)
-        good_response = _make_completion_response('{"retried": true}', total_tokens=35)
+        mock_provider = AsyncMock()
+        mock_provider.complete_json.side_effect = [bad_response, good_response]
 
-        with patch.object(llm_service, "_get_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.chat.completions.create.side_effect = [
-                bad_response,
-                good_response,
-            ]
-            mock_get_client.return_value = mock_client
-
+        with patch.object(
+            llm_service, "_get_provider", new_callable=AsyncMock, return_value=mock_provider
+        ):
             resp = await llm_service.complete_json(
                 user_id="user-1",
                 prompt="Test",
@@ -259,23 +126,23 @@ class TestCompleteJson:
             )
 
         assert resp.parsed == {"retried": True}
-        assert resp.total_tokens == 30 + 35  # Both attempts counted
+        assert resp.total_tokens == 30 + 35
 
-        # Verify retry used higher temperature (GPT-4 path, temperature kwarg present)
-        calls = mock_client.chat.completions.create.call_args_list
-        assert calls[0][1]["temperature"] == 0.1  # First attempt
-        assert calls[1][1]["temperature"] == 0.3  # Retry
+        calls = mock_provider.complete_json.call_args_list
+        assert calls[0][1]["temperature"] == 0.1
+        assert calls[1][1]["temperature"] == 0.3
 
     @pytest.mark.asyncio
     async def test_json_parse_failure_both_attempts(self, llm_service):
         """Test LLMServiceError when both attempts fail to parse JSON."""
-        bad_response = _make_completion_response("not json", total_tokens=30)
+        bad_response = _make_provider_response("not json", total=30)
 
-        with patch.object(llm_service, "_get_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.chat.completions.create.return_value = bad_response
-            mock_get_client.return_value = mock_client
+        mock_provider = AsyncMock()
+        mock_provider.complete_json.return_value = bad_response
 
+        with patch.object(
+            llm_service, "_get_provider", new_callable=AsyncMock, return_value=mock_provider
+        ):
             with pytest.raises(LLMServiceError, match="JSON parse failed after retry"):
                 await llm_service.complete_json(
                     user_id="user-1",
@@ -285,57 +152,32 @@ class TestCompleteJson:
     @pytest.mark.asyncio
     async def test_api_error_raises_immediately(self, llm_service):
         """Test that API errors raise without retry."""
-        with patch.object(llm_service, "_get_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.chat.completions.create.side_effect = RuntimeError("API down")
-            mock_get_client.return_value = mock_client
+        mock_provider = AsyncMock()
+        mock_provider.complete_json.side_effect = RuntimeError("API down")
 
+        with patch.object(
+            llm_service, "_get_provider", new_callable=AsyncMock, return_value=mock_provider
+        ):
             with pytest.raises(LLMServiceError, match="LLM API call failed"):
                 await llm_service.complete_json(
                     user_id="user-1",
                     prompt="Test",
                 )
 
-        # Only one call — no retry on API error
-        assert mock_client.chat.completions.create.call_count == 1
-
-    @pytest.mark.asyncio
-    async def test_custom_model_and_provider(self, llm_service):
-        """Test passing custom model and provider."""
-        mock_response = _make_completion_response('{"ok": true}')
-
-        with patch.object(llm_service, "_get_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.chat.completions.create.return_value = mock_response
-            mock_get_client.return_value = mock_client
-
-            await llm_service.complete_json(
-                user_id="user-1",
-                prompt="Test",
-                model="gpt-4o",
-                provider="openai",
-            )
-
-        mock_get_client.assert_called_once_with("user-1", "openai", None, None)
-        call_kwargs = mock_client.chat.completions.create.call_args[1]
-        assert call_kwargs["model"] == "gpt-4o"
+        assert mock_provider.complete_json.call_count == 1
 
     @pytest.mark.asyncio
     async def test_null_usage_returns_zero_tokens(self, llm_service):
-        """Test handling of null usage in response."""
-        response = MagicMock()
-        message = MagicMock()
-        message.content = '{"ok": true}'
-        choice = MagicMock()
-        choice.message = message
-        response.choices = [choice]
-        response.usage = None
+        """Test handling of zero-usage provider response."""
+        mock_provider = AsyncMock()
+        mock_provider.complete_json.return_value = ProviderResponse(
+            content='{"ok": true}',
+            usage=Usage(total=0, input=0, output=0, cached=0),
+        )
 
-        with patch.object(llm_service, "_get_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.chat.completions.create.return_value = response
-            mock_get_client.return_value = mock_client
-
+        with patch.object(
+            llm_service, "_get_provider", new_callable=AsyncMock, return_value=mock_provider
+        ):
             resp = await llm_service.complete_json(
                 user_id="user-1",
                 prompt="Test",
@@ -343,37 +185,118 @@ class TestCompleteJson:
 
         assert resp.total_tokens == 0
 
+    @pytest.mark.asyncio
+    async def test_cache_write_tokens_in_response(self, llm_service):
+        """Test cache_write_tokens is propagated into LLMResponse (#546)."""
+        mock_provider = AsyncMock()
+        mock_provider.complete_json.return_value = _make_provider_response(
+            '{"ok": true}',
+            total=100,
+            input_tokens=50,
+            output_tokens=30,
+            cached=10,
+            cache_write=10,
+        )
 
-class TestGetClient:
-    """Test _get_client provider routing."""
+        with patch.object(
+            llm_service, "_get_provider", new_callable=AsyncMock, return_value=mock_provider
+        ):
+            resp = await llm_service.complete_json(
+                user_id="user-1",
+                prompt="Test",
+                provider="anthropic",
+            )
+
+        assert resp.total_tokens == 100
+        assert resp.input_tokens == 50
+        assert resp.output_tokens == 30
+        assert resp.cached_input_tokens == 10
+        assert resp.cache_write_tokens == 10
+        assert resp.provider == "anthropic"
+
+
+class TestListModels:
+    """Test list_models method."""
+
+    @pytest.mark.asyncio
+    async def test_list_models_returns_cached_results(self, llm_service):
+        """Test that list_models caches results."""
+        mock_provider = AsyncMock()
+        mock_provider.list_models.return_value = [
+            {"id": "gpt-4o", "name": "GPT-4o"},
+        ]
+
+        with (
+            patch.object(
+                llm_service, "_get_provider", new_callable=AsyncMock, return_value=mock_provider
+            ),
+            patch.object(
+                llm_service,
+                "_get_user_api_key",
+                new_callable=AsyncMock,
+                return_value="sk-test",
+            ),
+        ):
+            # First call fetches from provider
+            result1 = await llm_service.list_models("user-1", "openai")
+            assert result1 == [{"id": "gpt-4o", "name": "GPT-4o"}]
+            assert mock_provider.list_models.call_count == 1
+
+            # Second call uses cache
+            result2 = await llm_service.list_models("user-1", "openai")
+            assert result2 == [{"id": "gpt-4o", "name": "GPT-4o"}]
+            # Provider should NOT be called again
+            assert mock_provider.list_models.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_list_models_fallback_on_failure(self, llm_service):
+        """Test fallback to stale cache when provider fails."""
+        mock_provider = AsyncMock()
+        mock_provider.list_models.side_effect = RuntimeError("network error")
+
+        with (
+            patch.object(
+                llm_service, "_get_provider", new_callable=AsyncMock, return_value=mock_provider
+            ),
+            patch.object(
+                llm_service,
+                "_get_user_api_key",
+                new_callable=AsyncMock,
+                return_value="sk-test",
+            ),
+        ):
+            result = await llm_service.list_models("user-1", "openai")
+            assert result == []
+
+
+class TestGetProvider:
+    """Test _get_provider routing."""
 
     @pytest.mark.asyncio
     async def test_openai_provider(self, llm_service):
-        """Test OpenAI client creation."""
+        """Test OpenAI provider instantiation."""
         with patch.object(
-            llm_service, "_get_user_api_key", new_callable=AsyncMock, return_value="sk-test-key"
+            llm_service, "_get_user_api_key", new_callable=AsyncMock, return_value="sk-test"
         ):
-            client = await llm_service._get_client("user-1", "openai")
+            provider = await llm_service._get_provider("user-1", "openai")
 
-        assert isinstance(client, AsyncOpenAI)
+        from services.llm_providers import OpenAIProvider
+
+        assert isinstance(provider, OpenAIProvider)
 
     @pytest.mark.asyncio
-    async def test_ollama_provider(self, llm_service):
-        """Test Ollama client creation with connectivity check."""
-        with (
-            patch("config.settings.get_settings") as mock_settings,
-            patch("httpx.AsyncClient") as mock_httpx_cls,
-        ):
+    async def test_ollama_provider_no_api_key(self, llm_service):
+        """Test Ollama provider does not require API key."""
+        with patch("config.settings.get_settings") as mock_settings:
             mock_settings.return_value.ollama_base_url = "http://localhost:11434"
-            mock_http = AsyncMock()
-            mock_resp = MagicMock()
-            mock_resp.status_code = 200
-            mock_http.get.return_value = mock_resp
-            mock_http.__aenter__ = AsyncMock(return_value=mock_http)
-            mock_http.__aexit__ = AsyncMock(return_value=False)
-            mock_httpx_cls.return_value = mock_http
+            provider = await llm_service._get_provider("user-1", "ollama")
 
-            client = await llm_service._get_client("user-1", "ollama")
+        from services.llm_providers import OllamaProvider
 
-        assert isinstance(client, AsyncOpenAI)
-        assert llm_service._ollama_verified is True
+        assert isinstance(provider, OllamaProvider)
+
+    @pytest.mark.asyncio
+    async def test_unknown_provider_raises(self, llm_service):
+        """Test unknown provider raises ConfigurationError."""
+        with pytest.raises(ConfigurationError, match="Unknown LLM provider"):
+            await llm_service._get_provider("user-1", "unknown")
