@@ -1907,11 +1907,11 @@
   },
   "externalKeys": {
     "title": "External API Keys",
-    "description": "Manage your API keys for OpenAI, Cohere, Anthropic, and other services",
+    "description": "Manage your API keys for OpenAI, Anthropic, Gemini, Ollama, Cohere, Voyage, and other services",
     "featureGuide": {
       "title": "What are External API Keys?",
-      "overview": "External API Keys let you configure third-party service credentials (OpenAI, Cohere, Voyage) per user. These keys are used for embedding generation, reranking, and other AI operations.",
-      "useCases": "Use cases: bring your own OpenAI key for embeddings, configure Cohere or Voyage for reranking, manage keys per user for cost tracking.",
+      "overview": "External API Keys let you configure third-party service credentials (OpenAI, Anthropic, Google Gemini, Ollama, Cohere, Voyage) per user. These keys are used for LLM completions, embedding generation, reranking, and other AI operations.",
+      "useCases": "Use cases: bring your own OpenAI / Anthropic / Gemini key for LLM and embeddings, configure Ollama for local self-hosted models, set up Cohere or Voyage for reranking, manage keys per user for cost tracking.",
       "howItWorks": "Add your API key for a provider → Kagura uses it for embedding/reranking operations → Keys are encrypted at rest and never exposed after creation."
     },
     "refresh": "Refresh",
