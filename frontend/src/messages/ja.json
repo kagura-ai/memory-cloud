@@ -2441,6 +2441,7 @@
       "messages": {
         "loadError": "Sleep レポートの読み込みに失敗しました",
         "noReports": "Sleep レポートが見つかりません。",
+        "noReportsHint": "Sleep メンテナンスは自動的に実行されます。最初の実行が完了すると、ここにレポートが表示されます。",
         "notFound": "Sleep レポートが見つかりません。",
         "runStarted": "Sleep 実行を開始しました",
         "runStartedDesc": "バックグラウンドで Maintenance を実行中です。一覧はまもなく更新されます。",
@@ -3126,7 +3127,7 @@
   "analyses": {
     "tabLabel": "分析",
     "header": {
-      "title": "ブロードリスニング分析",
+      "title": "メタ分析",
       "subtitle": "クラスタ俯瞰で memory の地形を見る · Owner のみ"
     },
     "actions": {
@@ -3248,7 +3249,7 @@
       },
       "notEnabled": {
         "title": "この workspace では Analyses はまだ有効化されていません",
-        "description": "Memory Broadlistening は v1 ロールアウト中、選定された workspace に限定されています。アクセスをご希望の場合はお問い合わせください。"
+        "description": "メタ分析は v1 ロールアウト中、選定された workspace に限定されています。アクセスをご希望の場合はお問い合わせください。"
       },
       "loadFailed": "Analyses の読み込みに失敗しました — 接続を確認してください。"
     }
