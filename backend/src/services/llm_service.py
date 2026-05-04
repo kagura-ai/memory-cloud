@@ -277,10 +277,25 @@ class LLMService:
                 logger.debug("llm_list_models_cache_hit", provider=provider)
                 return models
 
-        # Fetch from provider
-        provider_instance = await self._get_provider(user_id, provider, context_id, workspace_id)
+        # Fetch from provider.  If no API key is configured and the provider
+        # requires one (everything except Ollama), return [] gracefully rather
+        # than letting _get_provider raise ConfigurationError.
+        if not api_key and provider != "ollama":
+            logger.debug("llm_list_models_no_key", provider=provider)
+            return []
+
         try:
+            provider_instance = await self._get_provider(
+                user_id, provider, context_id, workspace_id
+            )
             models = await provider_instance.list_models()
+        except ConfigurationError as e:
+            logger.warning(
+                "llm_list_models_provider_error",
+                provider=provider,
+                error=str(e),
+            )
+            return []
         except Exception as e:
             logger.warning(
                 "llm_list_models_failed",

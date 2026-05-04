@@ -56,7 +56,7 @@ class OllamaProvider(LLMProvider):
                     raise ConfigurationError(
                         f"Ollama not responding at {self._base_url} (HTTP {resp.status_code})"
                     )
-        except httpx.ConnectError as err:
+        except httpx.HTTPError as err:
             raise ConfigurationError(
                 f"Cannot connect to Ollama at {self._base_url}. "
                 "Is Ollama running? Start with: ollama serve"

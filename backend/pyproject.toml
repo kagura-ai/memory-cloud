@@ -110,6 +110,13 @@ dev = [
     "ruff>=0.7.0",
 ]
 
+llm_providers = [
+    # Multi-provider LLM adapters (Issue #546)
+    "anthropic>=0.49.0",
+    "google-genai>=1.0.0",
+    "ollama>=0.4.0",
+]
+
 neural = [
     # Neural Memory & Cross-encoder Reranking
     "sentence-transformers>=2.0.0",

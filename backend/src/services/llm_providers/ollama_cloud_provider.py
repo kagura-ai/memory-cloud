@@ -78,7 +78,7 @@ class OllamaCloudProvider(LLMProvider):
                 "num_predict": max_tokens,
             },
         )
-        content = getattr(response, "message", {}).get("content", "{}") or "{}"
+        content = self._extract_content(response)
         usage = self.extract_usage(response)
 
         logger.debug(
@@ -90,6 +90,19 @@ class OllamaCloudProvider(LLMProvider):
         )
         return ProviderResponse(content=content, usage=usage)
 
+    @staticmethod
+    def _extract_content(response) -> str:
+        """Pull text out of an Ollama response (dict or object)."""
+        if isinstance(response, dict):
+            message = response.get("message", {})
+            return message.get("content", "{}") or "{}"
+        message = getattr(response, "message", None)
+        if message is None:
+            return "{}"
+        if isinstance(message, dict):
+            return message.get("content", "{}") or "{}"
+        return getattr(message, "content", "{}") or "{}"
+
     def extract_usage(self, raw_response) -> Usage:
         """Read token counts from an Ollama SDK response.
 
@@ -97,8 +110,12 @@ class OllamaCloudProvider(LLMProvider):
         (output).  Cloud models do not expose cache-read / cache-write
         tokens, so both are left at 0.
         """
-        prompt = getattr(raw_response, "prompt_eval_count", 0) or 0
-        completion = getattr(raw_response, "eval_count", 0) or 0
+        if isinstance(raw_response, dict):
+            prompt = raw_response.get("prompt_eval_count", 0) or 0
+            completion = raw_response.get("eval_count", 0) or 0
+        else:
+            prompt = getattr(raw_response, "prompt_eval_count", 0) or 0
+            completion = getattr(raw_response, "eval_count", 0) or 0
         total = prompt + completion
 
         return Usage(total=total, input=prompt, output=completion, cached=0)
@@ -107,7 +124,10 @@ class OllamaCloudProvider(LLMProvider):
         """List available Ollama Cloud models."""
         try:
             response = await self._ensure_client().list()
-            models = getattr(response, "models", []) or response.get("models", [])
+            if isinstance(response, dict):
+                models = response.get("models", [])
+            else:
+                models = getattr(response, "models", []) or []
             return [{"id": m.model, "name": m.model} for m in models if getattr(m, "model", None)]
         except Exception as e:
             logger.warning("ollama_cloud_list_models_failed", error=str(e))
