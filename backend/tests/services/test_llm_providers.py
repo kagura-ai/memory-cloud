@@ -106,6 +106,39 @@ class TestOpenAIProvider:
         assert OpenAIProvider._supports_custom_temperature("gpt-5-nano") is False
         assert OpenAIProvider._supports_custom_temperature("o3-mini") is False
 
+    def test_build_create_kwargs_gpt5_omits_temperature(self):
+        """Regression guard (#424): gpt-5 / o-series must not receive temperature kwarg."""
+        kwargs = OpenAIProvider._build_create_kwargs(
+            "gpt-5-nano",
+            [{"role": "user", "content": "test"}],
+            temperature=0.1,
+            max_tokens=1024,
+        )
+        assert "temperature" not in kwargs
+        assert kwargs["model"] == "gpt-5-nano"
+
+    def test_build_create_kwargs_gpt5_includes_reasoning_effort(self):
+        """Regression guard (#426): gpt-5 / o-series must receive reasoning_effort=minimal."""
+        kwargs = OpenAIProvider._build_create_kwargs(
+            "gpt-5-nano",
+            [{"role": "user", "content": "test"}],
+            temperature=0.1,
+            max_tokens=1024,
+        )
+        assert kwargs["reasoning_effort"] == "minimal"
+
+    def test_build_create_kwargs_non_reasoning_includes_temperature(self):
+        """Non-reasoning models should pass temperature as given."""
+        kwargs = OpenAIProvider._build_create_kwargs(
+            "gpt-4o",
+            [{"role": "user", "content": "test"}],
+            temperature=0.7,
+            max_tokens=512,
+        )
+        assert kwargs["temperature"] == 0.7
+        assert "reasoning_effort" not in kwargs
+        assert kwargs["max_completion_tokens"] == 512
+
     @pytest.mark.asyncio
     async def test_list_models_returns_models(self):
         provider = OpenAIProvider(api_key="sk-test")

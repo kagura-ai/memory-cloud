@@ -65,13 +65,9 @@ class AnthropicProvider(LLMProvider):
         if not self._is_reasoning_model(model):
             request_kwargs["temperature"] = temperature
 
-        # Anthropic structured outputs (beta).  Fall back to a simple
-        # text completion + JSON parse if the feature is unavailable.
-        try:
-            request_kwargs["response_format"] = {"type": "json_object"}
-        except Exception:
-            pass
-
+        # Anthropic does not support a ``response_format`` kwarg on
+        # ``messages.create``.  JSON parsing is handled upstream by
+        # ``LLMService.complete_json`` via ``json.loads``.
         response = await client.messages.create(**request_kwargs)
         content = self._extract_content(response)
         usage = self.extract_usage(response)

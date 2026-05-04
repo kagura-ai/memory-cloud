@@ -1967,6 +1967,12 @@
     "providers": {
       "openai": "OpenAI",
       "openaiDesc": "埋め込みに必須",
+      "anthropic": "Anthropic",
+      "anthropicDesc": "LLMプロバイダー（Claude）",
+      "gemini": "Google Gemini",
+      "geminiDesc": "LLMプロバイダー（Gemini）",
+      "ollama": "Ollama",
+      "ollamaDesc": "ローカル/セルフホストLLM",
       "voyage": "Voyage AI",
       "voyageDesc": "オプションのリランカー",
       "cohere": "Cohere",

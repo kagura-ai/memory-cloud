@@ -98,6 +98,27 @@ export default function ExternalKeysPage() {
       description: t("providers.openaiDesc"),
     },
     {
+      value: "anthropic",
+      label: t("providers.anthropic"),
+      keyName: "ANTHROPIC_API_KEY",
+      icon: "🅰️",
+      description: t("providers.anthropicDesc"),
+    },
+    {
+      value: "gemini",
+      label: t("providers.gemini"),
+      keyName: "GOOGLE_API_KEY",
+      icon: "🔷",
+      description: t("providers.geminiDesc"),
+    },
+    {
+      value: "ollama",
+      label: t("providers.ollama"),
+      keyName: "OLLAMA_BASE_URL",
+      icon: "🦙",
+      description: t("providers.ollamaDesc"),
+    },
+    {
       value: "voyage",
       label: t("providers.voyage"),
       keyName: "VOYAGE_API_KEY",

@@ -1967,6 +1967,12 @@
     "providers": {
       "openai": "OpenAI",
       "openaiDesc": "Required for embeddings",
+      "anthropic": "Anthropic",
+      "anthropicDesc": "LLM provider (Claude)",
+      "gemini": "Google Gemini",
+      "geminiDesc": "LLM provider (Gemini)",
+      "ollama": "Ollama",
+      "ollamaDesc": "Local / self-hosted LLM",
       "voyage": "Voyage AI",
       "voyageDesc": "Optional reranker",
       "cohere": "Cohere",
