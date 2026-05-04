@@ -107,10 +107,6 @@ export function NewAnalysisModal({
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewErrorCode, setPreviewErrorCode] = useState<string | null>(null);
-  const [previewErrorDetails, setPreviewErrorDetails] = useState<Record<
-    string,
-    unknown
-  > | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);

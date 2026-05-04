@@ -733,7 +733,7 @@ export default function AdminPlansPage() {
               <Label htmlFor="addon-memory">
                 {t("addonDialog.memory")}{" "}
                 <span className="text-xs text-muted-foreground font-normal">
-                  (+10,000 / unit)
+                  {t("addonDialog.perUnit", { count: 10000 })}
                 </span>
               </Label>
               <div className="flex items-center gap-2 mt-1">
@@ -758,7 +758,7 @@ export default function AdminPlansPage() {
               <Label htmlFor="addon-mcp">
                 {t("addonDialog.mcp")}{" "}
                 <span className="text-xs text-muted-foreground font-normal">
-                  (+5,000 / unit)
+                  {t("addonDialog.perUnit", { count: 5000 })}
                 </span>
               </Label>
               <div className="flex items-center gap-2 mt-1">
@@ -783,7 +783,7 @@ export default function AdminPlansPage() {
               <Label htmlFor="addon-member">
                 {t("addonDialog.members")}{" "}
                 <span className="text-xs text-muted-foreground font-normal">
-                  (+5 / unit)
+                  {t("addonDialog.perUnit", { count: 5 })}
                 </span>
               </Label>
               <div className="flex items-center gap-2 mt-1">
@@ -809,7 +809,7 @@ export default function AdminPlansPage() {
               <Label htmlFor="addon-context">
                 {t("addonDialog.contexts")}{" "}
                 <span className="text-xs text-muted-foreground font-normal">
-                  (+5 / unit)
+                  {t("addonDialog.perUnit", { count: 5 })}
                 </span>
               </Label>
               <div className="flex items-center gap-2 mt-1">
@@ -835,7 +835,7 @@ export default function AdminPlansPage() {
               <Label htmlFor="addon-analysis">
                 {t("addonDialog.analysis")}{" "}
                 <span className="text-xs text-muted-foreground font-normal">
-                  (+1 / unit)
+                  {t("addonDialog.perUnit", { count: 1 })}
                 </span>
               </Label>
               <div className="flex items-center gap-2 mt-1">

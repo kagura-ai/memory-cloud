@@ -2,8 +2,8 @@
 
 Mirrors ``services/sleep/prompts.py`` style: module-level constants,
 no Python string interpolation in the constants themselves —
-templates use ``{name}`` placeholders that the labeler fills with
-``str.format(**kwargs)``.
+templates use ``$name`` placeholders that the labeler fills with
+``string.Template.substitute()``.
 
 The labeler prompt is single-shot per cluster: 5 representative
 memory summaries → one ``{label, description, label_confidence}``

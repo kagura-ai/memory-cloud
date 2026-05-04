@@ -2095,6 +2095,7 @@
         "effective": "有効値",
         "used": "使用中",
         "save": "保存",
+        "perUnit": "(+{count} / 単位)",
         "reductionWarning": "メンバーまたはコンテキストのアドオンを減らすと、現在の使用量が新しい有効制限を超える場合は拒否されます。（メンバー: {members} 使用中、コンテキスト: {contexts} 使用中）"
       },
       "auditTable": {

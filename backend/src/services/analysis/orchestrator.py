@@ -379,6 +379,16 @@ class AnalysisOrchestrator:
             )
             analysis.cost_estimated_cents = estimate.estimated_cost_cents
 
+            # Issue #542: resolve user's locale for prompt language.
+            # Fetch while we still have the read transaction open;
+            # committing immediately after releases the connection
+            # before the long-running compute stages below.
+            user_result = await self.db.execute(
+                select(User.locale).where(User.user_id == analysis.triggered_by)
+            )
+            db_locale = user_result.scalar_one_or_none()
+            label_locale = db_locale if db_locale else "en"
+
             # Commit the read + vector_pull state, releasing the
             # orchestrator's connection. Compute stages below run with
             # NO open transaction; ``persist_results`` autobegins a
@@ -402,12 +412,6 @@ class AnalysisOrchestrator:
             # cluster task opens its own ``AsyncSession`` to avoid the
             # SQLAlchemy concurrent-ops violation on the orchestrator's
             # shared session. See labeler.py for the per-task pattern.
-            # Issue #542: resolve user's locale for prompt language.
-            user_result = await self.db.execute(
-                select(User.locale).where(User.user_id == analysis.triggered_by)
-            )
-            db_locale = user_result.scalar_one_or_none()
-            label_locale = db_locale if db_locale else "en"
             cluster_label_results = await analysis_labeler.label_clusters(
                 cluster_labels=cluster_result.labels,
                 centroids=cluster_result.centroids,

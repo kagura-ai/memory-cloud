@@ -2095,6 +2095,7 @@
         "effective": "Effective",
         "used": "used",
         "save": "Save Addons",
+        "perUnit": "(+{count} / unit)",
         "reductionWarning": "Reducing member or context addons will be rejected if current usage exceeds the new effective limit. (Members: {members} used, Contexts: {contexts} used)"
       },
       "auditTable": {
