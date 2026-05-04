@@ -34,6 +34,12 @@ class OllamaCloudProvider(LLMProvider):
             api_key: Ollama Cloud API key.
         """
         self._api_key = api_key
+        self._client = None
+
+    def _ensure_client(self):
+        """Lazy-load ollama AsyncClient (cached per instance)."""
+        if self._client is not None:
+            return self._client
         try:
             import ollama
         except ImportError as exc:
@@ -42,8 +48,9 @@ class OllamaCloudProvider(LLMProvider):
             ) from exc
         self._client = ollama.AsyncClient(
             host="https://ollama.com",
-            headers={"Authorization": f"Bearer {api_key}"},
+            headers={"Authorization": f"Bearer {self._api_key}"},
         )
+        return self._client
 
     async def complete_json(
         self,
@@ -61,7 +68,7 @@ class OllamaCloudProvider(LLMProvider):
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        response = await self._client.chat(
+        response = await self._ensure_client().chat(
             model=model,
             messages=messages,
             format="json",
@@ -98,7 +105,7 @@ class OllamaCloudProvider(LLMProvider):
     async def list_models(self) -> list[dict]:
         """List available Ollama Cloud models."""
         try:
-            response = await self._client.list()
+            response = await self._ensure_client().list()
             models = getattr(response, "models", []) or response.get("models", [])
             return [{"id": m.model, "name": m.model} for m in models if getattr(m, "model", None)]
         except Exception as e:
