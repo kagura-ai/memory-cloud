@@ -1,7 +1,7 @@
 """Device Authorization Grant (RFC 8628) — oauth_device_codes table (Issue #536).
 
 Revision ID: d08_536_device_code_grant
-Revises: d08_496_analyses_cancellation
+Revises: d08_496_analyses_cancel
 """
 
 from collections.abc import Sequence
@@ -10,7 +10,7 @@ from alembic import op
 from sqlalchemy import Column, DateTime, Integer, String, text
 
 revision: str = "d08_536_device_code_grant"
-down_revision: str | Sequence[str] | None = "d08_496_analyses_cancellation"
+down_revision: str | Sequence[str] | None = "d08_496_analyses_cancel"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
