@@ -23,6 +23,7 @@ from auth.dependencies import APIKeyOrSessionUser
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from services.file_storage_service import FileStorageService
+from services.permission_service import PermissionService
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -107,6 +108,32 @@ def _to_out(file) -> FileObjectOut:
 
 
 # ---------------------------------------------------------------------------
+# Auth helper — workspace boundary enforcement
+# ---------------------------------------------------------------------------
+
+
+async def _enforce_workspace_membership(
+    db: AsyncSession,
+    user: dict,
+    workspace_id: UUID,
+) -> None:
+    """Authorize ``user`` for ``workspace_id`` (member or higher).
+
+    ``APIKeyOrSessionUser`` proves identity, not workspace membership.
+    Without this gate an authenticated user from workspace A could
+    pass workspace B's id in the request body / query and access /
+    enumerate B's files. Mirrors the pattern at
+    ``api/routes/resource_ingest.py``.
+    """
+    permissions = PermissionService(db)
+    await permissions.check_workspace_access(
+        user_id=str(user.get("user_id", "")),
+        workspace_id=workspace_id,
+        required_role="member",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -124,6 +151,7 @@ async def reserve_upload(
     same sha256 from the same workspace return 409 with the existing
     ``file_id`` (idempotent — the SDK can use the existing one).
     """
+    await _enforce_workspace_membership(db, user, body.workspace_id)
     service = FileStorageService(db)
     result = await service.reserve_upload(
         workspace_id=body.workspace_id,
@@ -153,7 +181,7 @@ async def confirm_upload(
     Idempotent: confirming an already-uploaded file with a matching
     sha256 returns the existing row unchanged.
     """
-    del user  # auth dep enforces membership; service uses workspace_id directly
+    await _enforce_workspace_membership(db, user, workspace_id)
     service = FileStorageService(db)
     file = await service.confirm_upload(
         workspace_id=workspace_id,
@@ -171,7 +199,7 @@ async def get_download_url(
     db: AsyncSession = Depends(get_db),
 ) -> FileDownloadUrlOut:
     """Return a short-lived presigned GET URL."""
-    del user
+    await _enforce_workspace_membership(db, user, workspace_id)
     service = FileStorageService(db)
     url = await service.get_presigned_download(
         workspace_id=workspace_id,
@@ -192,7 +220,7 @@ async def delete_file(
     The R2 binary lingers for 7 days (sweeper handles deletion); the
     workspace counter is decremented in the same transaction (R5).
     """
-    del user
+    await _enforce_workspace_membership(db, user, workspace_id)
     service = FileStorageService(db)
     await service.delete_file(workspace_id=workspace_id, file_id=file_id)
 
@@ -205,7 +233,7 @@ async def list_files(
     db: AsyncSession = Depends(get_db),
 ) -> list[FileObjectOut]:
     """List uploaded, non-deleted files in the workspace, newest first."""
-    del user
+    await _enforce_workspace_membership(db, user, workspace_id)
     service = FileStorageService(db)
     files = await service.list_files(workspace_id=workspace_id, limit=limit)
     return [_to_out(f) for f in files]

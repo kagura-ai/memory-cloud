@@ -24,6 +24,7 @@ from mcp_server.tools._helpers import (
     _success_response,
 )
 from services.file_storage_service import FileStorageService
+from utils.datetime import to_utc_iso
 from utils.exceptions import (
     ConflictError,
     NotFoundException,
@@ -117,7 +118,7 @@ async def handle_init_file_upload(
     return _success_response(
         file_id=str(result.file_id),
         upload_url=result.upload_url,
-        expires_at=result.expires_at.isoformat(),
+        expires_at=to_utc_iso(result.expires_at),
     )
 
 
@@ -291,8 +292,8 @@ async def handle_list_files(
                 "size_bytes": f.size_bytes,
                 "sha256": f.sha256,
                 "status": f.status,
-                "created_at": f.created_at.isoformat() if f.created_at else None,
-                "uploaded_at": f.uploaded_at.isoformat() if f.uploaded_at else None,
+                "created_at": to_utc_iso(f.created_at) if f.created_at else None,
+                "uploaded_at": to_utc_iso(f.uploaded_at) if f.uploaded_at else None,
             }
             for f in files
         ],

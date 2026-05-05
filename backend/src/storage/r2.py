@@ -12,8 +12,10 @@ from typing import Any
 
 import aioboto3
 import structlog
+from botocore.exceptions import ClientError
 
 from storage.protocol import ObjectMetadata
+from utils.exceptions import ExternalServiceError
 
 logger = structlog.get_logger(__name__)
 
@@ -78,10 +80,26 @@ class R2Storage:
         async with self._client() as client:
             try:
                 resp = await client.head_object(Bucket=self._bucket, Key=key)
-            except client.exceptions.ClientError as exc:
-                if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey"):
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code")
+                # Both shapes appear in the wild — botocore translates
+                # HTTP 404 to ``"404"`` for HEAD; ``NoSuchKey`` is the
+                # GET shape, kept for safety in case R2 differs.
+                if code in ("404", "NoSuchKey"):
                     return None
-                raise
+                # Non-404 errors (5xx, AccessDenied, throttling, …) are
+                # surfaced as a domain exception so REST/MCP layers map
+                # them to a clear 502 instead of a raw boto traceback.
+                logger.warning(
+                    "r2_head_object_error",
+                    key=key,
+                    code=code,
+                    error=str(exc),
+                )
+                raise ExternalServiceError(
+                    "R2",
+                    f"head_object failed for key={key!r}: {code}",
+                ) from exc
             return ObjectMetadata(
                 size_bytes=int(resp["ContentLength"]),
                 etag=str(resp.get("ETag", "")).strip('"'),

@@ -71,6 +71,11 @@ async def sweep_orphan_files() -> dict[str, int]:
         except RuntimeError:
             storage = None
 
+        # Two-phase: mark all rows ``failed`` first, then commit, then
+        # do the side-effects (Redis release + R2 delete). If the
+        # commit fails, no Redis release happens and the next sweeper
+        # tick re-evaluates the same rows fresh — no double-release.
+        pending_releases: list[tuple] = []  # list[(workspace_id, size_bytes, storage_key|None)]
         for file in candidates:
             # Compute orphan-ness in Python so the timezone-naive DB
             # column is compared against utcnow() directly without
@@ -84,26 +89,33 @@ async def sweep_orphan_files() -> dict[str, int]:
             file.status = "failed"
             counts["swept"] += 1
             counts["released_bytes"] += file.size_bytes
-
-            await storage_quota_service.release_storage_bytes(
-                workspace_id=file.workspace_id,
-                size_bytes=file.size_bytes,
+            pending_releases.append(
+                (file.workspace_id, file.size_bytes, file.storage_key, str(file.id))
             )
 
-            if storage is not None and file.storage_key:
+        await db.commit()
+
+        # Side effects (post-commit). A Redis or R2 failure at this
+        # point leaves the row durably ``failed`` so the partial-unique
+        # index frees the (workspace, sha256) slot — consistent with
+        # the operator's mental model of "sweeper marked these dead".
+        for workspace_id, size_bytes, storage_key, file_id in pending_releases:
+            await storage_quota_service.release_storage_bytes(
+                workspace_id=workspace_id,
+                size_bytes=size_bytes,
+            )
+            if storage is not None and storage_key:
                 try:
-                    await storage.delete_object(file.storage_key)
+                    await storage.delete_object(storage_key)
                     counts["r2_deleted"] += 1
                 except Exception as exc:  # noqa: BLE001 — best-effort
                     counts["r2_failed"] += 1
                     logger.warning(
                         "orphan_file_r2_delete_failed",
-                        file_id=str(file.id),
-                        storage_key=file.storage_key,
+                        file_id=file_id,
+                        storage_key=storage_key,
                         error=str(exc),
                     )
-
-        await db.commit()
 
     if counts["swept"] > 0:
         logger.info("orphan_files_swept", **counts)

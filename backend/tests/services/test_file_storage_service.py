@@ -325,7 +325,8 @@ class TestConfirmUpload:
         self, service, db, fake_storage, workspace_id
     ):
         """If R2 reports a smaller size than reserved, the diff must be
-        released back to the quota counter."""
+        released back to the quota counter — but only AFTER the DB
+        commit succeeds (Redis follows durable state)."""
         file = _make_file_object(workspace_id, status="reserved", size_bytes=2000)
         await fake_storage.write_object(
             file.storage_key, b"x" * 2000, file.content_type, file.sha256
@@ -345,6 +346,33 @@ class TestConfirmUpload:
         release.assert_awaited_once()
         kwargs = release.call_args.kwargs
         assert kwargs["size_bytes"] == 500
+
+    @pytest.mark.asyncio
+    async def test_oversize_upload_rejects_as_conflict(
+        self, service, db, fake_storage, workspace_id
+    ):
+        """Defence in depth: if R2 reports MORE bytes than declared,
+        reject with ConflictError. Otherwise the per-file 100 MiB cap
+        could be bypassed by PUTting a larger object than the
+        reservation accepted."""
+        file = _make_file_object(workspace_id, status="reserved", size_bytes=1000)
+        await fake_storage.write_object(
+            file.storage_key, b"x" * 1000, file.content_type, file.sha256
+        )
+        fake_storage.head_size_override = 5000  # reports more than declared
+
+        load_result = MagicMock()
+        load_result.scalar_one_or_none = MagicMock(return_value=file)
+        db.execute.return_value = load_result
+
+        with pytest.raises(ConflictError, match="malformed upload"):
+            await service.confirm_upload(
+                workspace_id=workspace_id, file_id=file.id, sha256=file.sha256
+            )
+        # The reservation is NOT released — operator should investigate
+        # the orphan R2 object explicitly. The row stays ``reserved``
+        # for the orphan sweeper to pick up.
+        assert file.status == "reserved"
 
 
 class TestDeleteFile:

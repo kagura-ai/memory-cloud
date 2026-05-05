@@ -31,6 +31,14 @@ def _mock_user() -> dict:
 
 @pytest.fixture
 def client():
+    """Test client with auth + DB + workspace-membership check stubbed.
+
+    ``_enforce_workspace_membership`` (and its internal
+    ``PermissionService.check_workspace_access``) is patched to a
+    no-op for normal tests; specific tests can override via
+    ``patch.object`` to verify the gate fires.
+    """
+
     async def fake_user():
         return _mock_user()
 
@@ -39,7 +47,11 @@ def client():
 
     app.dependency_overrides[get_user_from_api_key_or_session] = fake_user
     app.dependency_overrides[get_db] = fake_db
-    yield TestClient(app, raise_server_exceptions=False)
+    with patch(
+        "api.routes.files._enforce_workspace_membership",
+        AsyncMock(return_value=None),
+    ):
+        yield TestClient(app, raise_server_exceptions=False)
     app.dependency_overrides.clear()
 
 
@@ -232,3 +244,88 @@ class TestListFiles:
         ws = uuid4()
         r = client.get(f"/api/v1/files?workspace_id={ws}&limit=10000")
         assert r.status_code == 422
+
+
+class TestWorkspaceMembershipGate:
+    """B-7: every endpoint MUST run ``_enforce_workspace_membership``
+    before reaching the service. Otherwise an authenticated user from
+    workspace A can pass workspace B's id in the request body / query
+    and read or modify B's files.
+    """
+
+    def test_membership_check_called_for_all_endpoints(self):
+        """One test, five endpoints — each must call the gate exactly
+        once with the body/query workspace_id, before any service
+        method is invoked."""
+        from fastapi import HTTPException
+
+        from api.main import app
+        from auth.dependencies import get_user_from_api_key_or_session
+        from db.base import get_db
+
+        async def fake_user():
+            return _mock_user()
+
+        async def fake_db():
+            yield MagicMock()
+
+        app.dependency_overrides[get_user_from_api_key_or_session] = fake_user
+        app.dependency_overrides[get_db] = fake_db
+        try:
+            ws = uuid4()
+            file_id = uuid4()
+
+            # Make the gate raise — confirms it's the FIRST authorization
+            # check and that no service method is reached when it fails.
+            denial = HTTPException(status_code=403, detail="not a member")
+            with (
+                patch(
+                    "api.routes.files._enforce_workspace_membership",
+                    AsyncMock(side_effect=denial),
+                ) as gate,
+                patch(
+                    "api.routes.files.FileStorageService.reserve_upload",
+                    AsyncMock(),
+                ) as reserve_svc,
+                patch(
+                    "api.routes.files.FileStorageService.list_files",
+                    AsyncMock(),
+                ) as list_svc,
+            ):
+                tc = TestClient(app, raise_server_exceptions=False)
+
+                # POST /reserve
+                r = tc.post(
+                    "/api/v1/files/reserve",
+                    json={
+                        "workspace_id": str(ws),
+                        "filename": "x.bin",
+                        "content_type": "application/octet-stream",
+                        "size_bytes": 1024,
+                        "sha256": VALID_SHA,
+                    },
+                )
+                assert r.status_code == 403
+                # GET /
+                r = tc.get(f"/api/v1/files?workspace_id={ws}")
+                assert r.status_code == 403
+                # GET /{id}/download-url
+                r = tc.get(f"/api/v1/files/{file_id}/download-url?workspace_id={ws}")
+                assert r.status_code == 403
+                # POST /{id}/confirm
+                r = tc.post(
+                    f"/api/v1/files/{file_id}/confirm?workspace_id={ws}",
+                    json={"sha256": VALID_SHA},
+                )
+                assert r.status_code == 403
+                # DELETE /{id}
+                r = tc.delete(f"/api/v1/files/{file_id}?workspace_id={ws}")
+                assert r.status_code == 403
+
+                # Gate fired on every endpoint…
+                assert gate.await_count == 5
+                # …and no service method ran.
+                reserve_svc.assert_not_awaited()
+                list_svc.assert_not_awaited()
+        finally:
+            app.dependency_overrides.clear()

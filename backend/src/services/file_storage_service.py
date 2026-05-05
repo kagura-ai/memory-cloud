@@ -291,15 +291,25 @@ class FileStorageService:
                 "presigned PUT may have expired or never happened"
             )
             raise ConflictError(msg)
-        if meta["size_bytes"] != file.size_bytes:
-            # Truncation refund: release the difference back to the quota
-            # so the workspace isn't charged for bytes it didn't write.
-            delta = file.size_bytes - meta["size_bytes"]
-            if delta > 0:
-                await storage_quota_service.release_storage_bytes(
-                    workspace_id=workspace_id,
-                    size_bytes=delta,
-                )
+        if meta["size_bytes"] > file.size_bytes:
+            # R2 reports MORE bytes than the client declared at reservation
+            # time. This bypasses the per-file 100MB cap and over-charges
+            # quota — reject hard. Operator may need to delete the orphan
+            # R2 object manually.
+            msg = (
+                f"R2 object for file {file_id} is {meta['size_bytes']} bytes "
+                f"but reservation declared only {file.size_bytes}; rejecting "
+                "as malformed upload"
+            )
+            raise ConflictError(msg)
+
+        # Truncation refund — only the underflow case (R2 < reserved)
+        # gives bytes back to the workspace quota. ``release`` is
+        # deferred until AFTER ``db.commit`` succeeds (R5: Redis
+        # follows the durable-DB-state truth, not the other way around).
+        truncation_refund = 0
+        if meta["size_bytes"] < file.size_bytes:
+            truncation_refund = file.size_bytes - meta["size_bytes"]
             file.size_bytes = meta["size_bytes"]
 
         file.status = "uploaded"
@@ -310,6 +320,12 @@ class FileStorageService:
 
         await self.db.commit()
         await self.db.refresh(file)
+
+        if truncation_refund > 0:
+            await storage_quota_service.release_storage_bytes(
+                workspace_id=workspace_id,
+                size_bytes=truncation_refund,
+            )
 
         logger.info(
             "file_upload_confirmed",
@@ -446,6 +462,15 @@ class FileStorageService:
         await self.db.commit()
         await self.db.refresh(file)
 
+        # Bump the live Redis quota counter so concurrent ``reserve_upload``
+        # calls don't see a stale-low total until the 24h reseed expires.
+        # Wrapped in try/except — RedisError here is self-healing on next
+        # reseed and MUST NOT roll back the migrated row.
+        await storage_quota_service.bump_committed_storage_bytes(
+            workspace_id=workspace_id,
+            size_bytes=size_bytes,
+        )
+
         logger.info(
             "attachment_migrated_to_r2",
             attachment_id=str(attachment_id),
@@ -466,10 +491,15 @@ class FileStorageService:
     ) -> None:
         """Soft-delete and immediately release the quota.
 
-        R5 contract: ``deleted_at`` is set, ``workspace_storage_usage``
-        is decremented, and ``storage_quota_service.release_storage_bytes``
-        is called — all in the same DB transaction. The R2 binary stays
-        for 7 days (sweeper handles deletion in Commit 8).
+        R5 contract: ``deleted_at`` is set and ``workspace_storage_usage``
+        is decremented in one DB transaction. ``release_storage_bytes``
+        runs **after** that commit succeeds — Redis follows the durable
+        DB state, never leads it. If the commit fails, the row stays
+        ``uploaded`` and Redis is unchanged, preserving the invariant
+        that "Redis ≤ committed file_objects sum" (modulo in-flight
+        reservations) until the next reseed.
+
+        The R2 binary stays for 7 days (sweeper handles deletion).
         """
         file = await self._load_file(workspace_id, file_id)
         if file.status != "uploaded":
@@ -486,12 +516,12 @@ class FileStorageService:
             delta_bytes=-size,
             delta_files=-1,
         )
+        await self.db.commit()
+
         await storage_quota_service.release_storage_bytes(
             workspace_id=workspace_id,
             size_bytes=size,
         )
-
-        await self.db.commit()
         logger.info(
             "file_soft_deleted",
             workspace_id=str(workspace_id),

@@ -43,6 +43,12 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "get_resource_impact": _get_timeout("get_resource_impact", 10.0),
     "get_resource_schema": _get_timeout("get_resource_schema", 10.0),
     "list_resource_tokens": _get_timeout("list_resource_tokens", 10.0),
+    # Issue #485: file storage tools
+    "init_file_upload": _get_timeout("init_file_upload", 20.0),
+    "complete_file_upload": _get_timeout("complete_file_upload", 20.0),
+    "get_file_download_url": _get_timeout("get_file_download_url", 10.0),
+    "delete_file": _get_timeout("delete_file", 15.0),
+    "list_files": _get_timeout("list_files", 10.0),
 }
 DEFAULT_TOOL_TIMEOUT = float(os.getenv("MCP_TIMEOUT_DEFAULT", 60.0))
 

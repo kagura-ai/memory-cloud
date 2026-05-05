@@ -106,6 +106,34 @@ async def reserve_storage_bytes(
         return
 
 
+async def bump_committed_storage_bytes(
+    workspace_id: UUID,
+    size_bytes: int,
+) -> None:
+    """Increment the workspace's Redis counter without a quota check.
+
+    Used by ``FileStorageService.migrate_attachment`` to keep the live
+    counter in sync after committing a migrated row directly into
+    ``status='uploaded'``. Unlike ``reserve_storage_bytes`` this does
+    not check or raise on cap exceedance — migrations restore data
+    that already exists; the cap was implicitly satisfied at original
+    upload time.
+
+    Fail-open on RedisError — next reseed self-corrects from DB.
+    """
+    if size_bytes <= 0:
+        return
+    key = _build_key(workspace_id)
+    try:
+        await incrby_counter(key, size_bytes)
+    except RedisError as exc:
+        logger.warning(
+            "storage_quota_bump_redis_failed",
+            workspace_id=str(workspace_id),
+            error=str(exc),
+        )
+
+
 async def release_storage_bytes(
     workspace_id: UUID,
     size_bytes: int,
