@@ -370,6 +370,91 @@ class FileStorageService:
         )
 
     # ------------------------------------------------------------------
+    # Legacy attachment migration (Commit 9 of #485)
+    # ------------------------------------------------------------------
+
+    async def migrate_attachment(
+        self,
+        *,
+        workspace_id: UUID,
+        attachment_id: UUID,
+        filename: str,
+        content_type: str,
+        size_bytes: int,
+        data: bytes,
+        created_by: str,
+    ) -> FileObject:
+        """Copy a legacy ``attachments`` BYTEA row to R2 + ``file_objects``.
+
+        Idempotent: if a ``file_objects`` row already exists for this
+        attachment (matched by the legacy ``storage_key`` shape) the
+        existing row is returned without re-uploading.
+
+        The legacy ``Attachment`` row stays untouched — the existing
+        REST attachments route continues to serve from BYTEA until a
+        follow-up PR migrates it. This commit's job is to land the
+        bytes in R2 and the metadata in ``file_objects`` so the
+        cutover is unblocked.
+        """
+        import hashlib
+
+        sha256 = hashlib.sha256(data).hexdigest()
+        # Distinct key shape so legacy migrations are visually
+        # distinguishable from new uploads (no sha256 sub-prefix here
+        # because the attachment_id is already unique-per-workspace).
+        storage_key = f"{workspace_id}/legacy/{attachment_id}/{filename}"
+
+        existing = await self.db.execute(
+            select(FileObject).where(FileObject.storage_key == storage_key)
+        )
+        existing_row = existing.scalar_one_or_none()
+        if existing_row is not None:
+            logger.info(
+                "attachment_migration_skipped_already_done",
+                attachment_id=str(attachment_id),
+                file_id=str(existing_row.id),
+            )
+            return existing_row
+
+        await self._storage.write_object(
+            key=storage_key,
+            data=data,
+            content_type=content_type,
+            sha256=sha256,
+        )
+
+        now = utcnow()
+        file = FileObject(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            sha256=sha256,
+            size_bytes=size_bytes,
+            content_type=content_type,
+            filename=filename,
+            storage_backend="r2",
+            storage_key=storage_key,
+            inline_bytes=None,
+            status="uploaded",
+            expires_at=None,
+            created_by=created_by,
+            created_at=now,
+            uploaded_at=now,
+        )
+        self.db.add(file)
+        await self.db.flush()
+        await self._upsert_workspace_usage(workspace_id, delta_bytes=size_bytes, delta_files=1)
+        await self.db.commit()
+        await self.db.refresh(file)
+
+        logger.info(
+            "attachment_migrated_to_r2",
+            attachment_id=str(attachment_id),
+            file_id=str(file.id),
+            size_bytes=size_bytes,
+        )
+        return file
+
+    # ------------------------------------------------------------------
     # Delete (R5: immediate quota release)
     # ------------------------------------------------------------------
 
