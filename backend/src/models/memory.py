@@ -162,6 +162,20 @@ class Memory(Base):
         index=False,  # Index created in Migration 061
     )
 
+    # Issue #485: Polymorphic blob reference inside details.external_blob.
+    # Phase 1 only writes backend='platform_r2'; Phase 2 BYO adds
+    # 'byo_s3'/'byo_gcs' rows without altering this schema.
+    external_blob_backend = Column(
+        String(50),
+        Computed("details->'external_blob'->>'backend'", persisted=True),
+        index=False,  # Partial btree index created in migration e03_485
+    )
+    external_blob_ref = Column(
+        String(2048),
+        Computed("details->'external_blob'->>'ref'", persisted=True),
+        index=False,  # Partial btree index created in migration e03_485
+    )
+
     # Constraints
     __table_args__ = (
         CheckConstraint("importance BETWEEN 0 AND 1", name="valid_importance"),

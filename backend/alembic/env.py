@@ -8,24 +8,25 @@ Database URL is read from DATABASE_URL environment variable
 import asyncio
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+import models.analysis  # noqa: F401  # Issue #494: Memory Broadlistening tables
+import models.auth  # noqa: F401
+import models.config  # noqa: F401
+import models.erasure  # noqa: F401
+import models.file_objects  # noqa: F401  # Issue #485: file storage tables
+import models.hub_tag  # noqa: F401
+import models.llm_pricing  # noqa: F401  # Issue #471: cost-grade pricing master
+import models.memory  # noqa: F401
+import models.neural  # noqa: F401
+import models.resource  # noqa: F401
+import models.sleep  # noqa: F401  # Issue #471: SleepReportLLMUsage child added
+from alembic import context
 from config.database import get_database_url
 
 # Import all models so autogenerate can detect them
 from db.base import Base  # noqa: F401
-import models.auth  # noqa: F401
-import models.memory  # noqa: F401
-import models.config  # noqa: F401
-import models.resource  # noqa: F401
-import models.neural  # noqa: F401
-import models.hub_tag  # noqa: F401
-import models.erasure  # noqa: F401
-import models.sleep  # noqa: F401  # Issue #471: SleepReportLLMUsage child added
-import models.llm_pricing  # noqa: F401  # Issue #471: cost-grade pricing master
-import models.analysis  # noqa: F401  # Issue #494: Memory Broadlistening tables
 
 # Alembic Config object
 config = context.config
