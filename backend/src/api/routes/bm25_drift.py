@@ -28,6 +28,7 @@ from models.auth import AuditLog, Context
 from models.bm25_drift import Bm25IdfDriftLog
 from services.bm25_drift.orchestrator import Bm25DriftOrchestrator
 from services.bm25_drift.psi_calculator import PsiStatus
+from services.context_routing import resolve_collection_name
 from utils.exceptions import RedisError
 from utils.logger import get_logger
 from utils.sparse_vector import hash_token
@@ -506,9 +507,15 @@ async def reveal_drift_terms(
     needed: set[int] = {entry["index"] for entry in top_terms}
     hash_to_token: dict[int, str] = {}
     if needed:
+        # Resolve the per-context collection (matches what the drift writer
+        # uses in services/bm25_drift/orchestrator.py); contexts on
+        # non-default embedding configs live in `kagura_memories_<model>_<dim>`,
+        # so a default-collection scroll would find zero matching points.
+        collection_name = await resolve_collection_name(db, row.context_id)
         async for page in scroll_context_points(
             str(row.context_id),
             with_payload=[*QDRANT_TOKEN_PAYLOAD_FIELDS, "summary", "context_summary"],
+            collection_name=collection_name,
         ):
             _resolve_payload_tokens(page, needed, hash_to_token)
             if len(hash_to_token) == len(needed):

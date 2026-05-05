@@ -173,14 +173,14 @@ class TestRevealTerms:
 
     @pytest.fixture
     def patch_reveal_deps(self, monkeypatch: pytest.MonkeyPatch):
-        """Patch Qdrant scroll + Redis counter at the route module."""
+        """Patch Qdrant scroll + Redis counter + collection routing at the route module."""
         from api.routes import bm25_drift as drift_route
 
-        scroll_calls: list[str] = []
+        scroll_calls: list[tuple[str, str | None]] = []
         counter_calls: list[tuple[str, int | None]] = []
 
-        async def _scroll(context_id: str, **_: object):
-            scroll_calls.append(context_id)
+        async def _scroll(context_id: str, **kw: object):
+            scroll_calls.append((context_id, kw.get("collection_name")))  # type: ignore[arg-type]
             point = SimpleNamespace(
                 payload={
                     "summary_tokens": "alpha beta gamma",
@@ -195,8 +195,12 @@ class TestRevealTerms:
             counter_calls.append((key, ttl))
             return len(counter_calls)
 
+        async def _resolve(*_a, **_kw) -> str:
+            return "kagura_memories_qwen3_1024"
+
         monkeypatch.setattr(drift_route, "scroll_context_points", _scroll)
         monkeypatch.setattr(drift_route, "increment_counter", _increment)
+        monkeypatch.setattr(drift_route, "resolve_collection_name", _resolve)
         return scroll_calls, counter_calls
 
     def test_returns_resolved_terms_on_success(
@@ -236,6 +240,7 @@ class TestRevealTerms:
         mock_db.add = MagicMock()
         mock_db.commit = AsyncMock()
 
+        scroll_calls, _ = patch_reveal_deps
         resp = client.post(
             f"/api/v1/admin/bm25-drift/{row.id}/reveal-terms",
             json={"reason": "Investigating drift alert PSI 0.31"},
@@ -249,6 +254,9 @@ class TestRevealTerms:
         # Audit log was written and committed.
         assert mock_db.add.call_count == 1
         assert mock_db.commit.await_count == 1
+        # Scroll was called with the per-context routed collection name.
+        assert len(scroll_calls) == 1
+        assert scroll_calls[0][1] == "kagura_memories_qwen3_1024"
 
     def test_missing_row_returns_404(
         self,
