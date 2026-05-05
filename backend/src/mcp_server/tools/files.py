@@ -27,6 +27,7 @@ from services.file_storage_service import FileStorageService
 from utils.datetime import to_utc_iso
 from utils.exceptions import (
     ConflictError,
+    ExternalServiceError,
     NotFoundException,
     QuotaExceededError,
     ValidationError,
@@ -50,6 +51,12 @@ def _exc_to_error_response(exc: Exception) -> list[TextContent]:
         return _error_response("conflict", str(exc))
     if isinstance(exc, QuotaExceededError):
         return _error_response("quota_exceeded", str(exc))
+    if isinstance(exc, ExternalServiceError):
+        # R2 5xx / AccessDenied / throttling — reachable from
+        # ``confirm_upload`` and ``get_presigned_download``. Surface as a
+        # named error so clients can retry with backoff rather than
+        # treating it as an opaque 500.
+        return _error_response("service_unavailable", str(exc))
     raise exc  # unexpected — let the dispatch layer log a 500
 
 
@@ -162,7 +169,12 @@ async def handle_complete_file_upload(
                 file_id=file_id,
                 sha256=str(args["sha256"]).lower(),
             )
-        except (ValidationError, ConflictError, NotFoundException) as exc:
+        except (
+            ValidationError,
+            ConflictError,
+            NotFoundException,
+            ExternalServiceError,
+        ) as exc:
             return _exc_to_error_response(exc)
     return _success_response(
         file_id=str(file.id),
@@ -209,7 +221,7 @@ async def handle_get_file_download_url(
                 workspace_id=ws,
                 file_id=file_id,
             )
-        except (ValidationError, NotFoundException) as exc:
+        except (ValidationError, NotFoundException, ExternalServiceError) as exc:
             return _exc_to_error_response(exc)
     return _success_response(download_url=url)
 
