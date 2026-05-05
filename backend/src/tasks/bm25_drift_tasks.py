@@ -27,10 +27,11 @@ async def bm25_drift_maintenance_task() -> None:
     Bm25DriftOrchestrator per context with per-context commit/rollback —
     a failing context does not poison the rest of the cycle.
 
-    Only runs when BM25_DRIFT_CRON_ENABLED=true. The double-check inside
-    the task body (mirroring sleep_tasks.py) catches the case where the
-    scheduler somehow registered the job despite the registration-time
-    gate.
+    Only runs when settings.bm25_drift_cron_enabled is true (env var
+    BM25_DRIFT_CRON_ENABLED feeds the same setting via pydantic-settings).
+    The double-check inside the task body (mirroring sleep_tasks.py) catches
+    the case where the scheduler somehow registered the job despite the
+    registration-time gate.
     """
     logger.info("bm25_drift_task_started")
 

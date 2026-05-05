@@ -179,7 +179,7 @@ class TestRevealTerms:
         scroll_calls: list[str] = []
         counter_calls: list[tuple[str, int | None]] = []
 
-        async def _scroll(context_id: str, **_: object) -> list:
+        async def _scroll(context_id: str, **_: object):
             scroll_calls.append(context_id)
             point = SimpleNamespace(
                 payload={
@@ -189,7 +189,7 @@ class TestRevealTerms:
                     "summary_reading": "",
                 }
             )
-            return [point]
+            yield [point]
 
         async def _increment(key: str, ttl: int | None = None) -> int:
             counter_calls.append((key, ttl))
@@ -259,12 +259,17 @@ class TestRevealTerms:
         row_result = MagicMock()
         row_result.scalar_one_or_none.return_value = None
         mock_db.execute.side_effect = [row_result]
+        mock_db.add = MagicMock()
+        mock_db.commit = AsyncMock()
 
         resp = client.post(
             "/api/v1/admin/bm25-drift/9999/reveal-terms",
             json={"reason": "Investigating drift alert PSI 0.31"},
         )
         assert resp.status_code == 404
+        # 404 branch now writes a denied-attempt audit row.
+        assert mock_db.add.call_count == 1
+        assert mock_db.commit.await_count == 1
 
     def test_short_reason_returns_422(self, client: TestClient) -> None:
         resp = client.post(
@@ -290,9 +295,12 @@ class TestRevealTerms:
         row_result = MagicMock()
         row_result.scalar_one_or_none.return_value = row
         mock_db.execute.side_effect = [row_result]
+        mock_db.add = MagicMock()
+        mock_db.commit = AsyncMock()
 
         async def _scroll(*_a, **_kw):
-            return []
+            if False:
+                yield []  # pragma: no cover - never reached, still an async generator
 
         async def _over_limit(*_a, **_kw) -> int:
             # Default settings.bm25_reveal_rate_limit_per_hour = 10.
@@ -306,6 +314,9 @@ class TestRevealTerms:
             json={"reason": "Investigating drift alert PSI 0.31"},
         )
         assert resp.status_code == 429
+        # 429 branch now writes a denied-attempt audit row.
+        assert mock_db.add.call_count == 1
+        assert mock_db.commit.await_count == 1
 
     def test_non_admin_returns_403(self, mock_db: MagicMock) -> None:
         """Non-admin role is rejected by require_admin (no override here)."""

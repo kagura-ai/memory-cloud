@@ -9,6 +9,7 @@ Collection design (post Single Collection Migration, Issue #334):
 - Full-text index on summary + context_summary; keyword index on scope, type, context_id
 """
 
+from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID
 
@@ -1147,13 +1148,18 @@ async def scroll_context_points(
     with_vectors: bool = False,
     with_payload: bool | list[str] = True,
     collection_name: str = KAGURA_MEMORIES_COLLECTION,
-) -> list:
-    """Scroll all points for a context from Qdrant.
+) -> AsyncIterator[list]:
+    """Yield Qdrant point pages for a context, one page at a time.
 
     Admin-use only — deliberately skips workspace + user isolation so
     every point in the context is returned regardless of ownership.
     Used by the BM25 drift reveal-terms endpoint (#377) to rebuild the
     token → mmh3-hash mapping for reverse lookup.
+
+    Yields pages (lists of Record) instead of materializing the full
+    point set so callers can break early once they have enough data —
+    a 100K-point context yields ~500 pages of 200, but the caller
+    typically needs only a handful of points to satisfy a reverse-lookup.
 
     Args:
         context_id: Context UUID string to filter on.
@@ -1162,13 +1168,10 @@ async def scroll_context_points(
             the named keys (recommended on hot paths to cut bandwidth).
         collection_name: Qdrant collection name.
 
-    Returns:
-        List of qdrant_client.models.Record.
+    Yields:
+        Successive lists of qdrant_client.models.Record, one per scroll page.
     """
-    from qdrant_client.models import Record  # noqa: F811 - clarify return type intent
-
     client = get_qdrant_client()
-    all_points: list[Record] = []
     offset: str | int | None = None
 
     while True:
@@ -1182,9 +1185,7 @@ async def scroll_context_points(
             with_payload=with_payload,
             with_vectors=with_vectors,
         )
-        all_points.extend(points)
+        yield points
         if next_offset is None:
             break
         offset = next_offset
-
-    return all_points

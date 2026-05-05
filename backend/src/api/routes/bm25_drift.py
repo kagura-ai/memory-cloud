@@ -333,16 +333,22 @@ async def _apply_context_name(db: AsyncSession, row: Bm25IdfDriftLog) -> None:
         row.context_deleted = False
 
 
-def _resolve_payload_tokens(points: list, needed: set[int]) -> dict[int, str]:
-    """Return {hash: token} for indices in `needed`, scanning payloads with early exit.
+def _resolve_payload_tokens(
+    points: list,
+    needed: set[int],
+    found: dict[int, str] | None = None,
+) -> dict[int, str]:
+    """Accumulate {hash: token} for indices in `needed`, scanning a single page with early exit.
 
     Reads pre-tokenized fields populated by memory_service. Falls back to
     re-tokenizing summary text only for legacy points written before the
     token payload fields existed. Stops as soon as every requested index
-    has been resolved — for a context with millions of unique tokens but
-    only ~20 needed, this caps work near the first few points.
+    has been resolved. The optional `found` argument lets the caller share
+    one accumulator across multiple scroll pages (the streaming-page path
+    in reveal_drift_terms relies on this so memory stays bounded).
     """
-    found: dict[int, str] = {}
+    if found is None:
+        found = {}
 
     def _scan(tokens_str: str) -> bool:
         for tok in tokens_str.split():
@@ -370,6 +376,42 @@ def _resolve_payload_tokens(points: list, needed: set[int]) -> dict[int, str]:
     return found
 
 
+async def _write_reveal_audit(
+    db: AsyncSession,
+    admin: dict,
+    user_sub: str,
+    row_id: int,
+    *,
+    outcome: str,
+    reason: str,
+    context_id: str | None,
+    num_terms_resolved: int,
+    num_terms_total: int,
+) -> None:
+    """Persist an AuditLog row for any reveal-terms attempt (success or denied).
+
+    Called from every terminal branch that has an authenticated identity so
+    security teams have a reconstructable access trail (success / row_not_found
+    / rate_limited). Term content is never logged.
+    """
+    db.add(
+        AuditLog(
+            user_email=admin.get("email", "unknown"),
+            user_id=user_sub,
+            action="bm25_drift_reveal_terms",
+            resource=f"bm25_drift_log:{row_id}",
+            user_metadata={
+                "outcome": outcome,
+                "context_id": context_id,
+                "reason": reason,
+                "num_terms_resolved": num_terms_resolved,
+                "num_terms_total": num_terms_total,
+            },
+        )
+    )
+    await db.commit()
+
+
 @router.post("/{row_id}/reveal-terms", response_model=Bm25DriftRevealResponse)
 async def reveal_drift_terms(
     row_id: int,
@@ -384,26 +426,51 @@ async def reveal_drift_terms(
     mmh3 hashes via utils.sparse_vector.hash_token, and matches against
     the stored indices. Falls back to re-tokenizing summary text only
     for legacy points written before the token payload fields existed.
-    Rate-limited per user. Every call is audit-logged to both the DB
-    and structlog (term content is never logged).
+    Streams Qdrant pages and breaks as soon as every requested hash is
+    resolved, so memory stays bounded for million-point contexts.
+    Rate-limited per user. Every terminal branch (success / 404 /
+    rate-limited) writes an AuditLog row; term content is never logged.
     """
     settings = get_settings()
-
-    row_result = await db.execute(select(Bm25IdfDriftLog).where(Bm25IdfDriftLog.id == row_id))
-    row = row_result.scalar_one_or_none()
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Drift log {row_id} not found.",
-        )
 
     user_sub = admin.get("sub") or admin.get("user_id")
     if not user_sub:
         # require_admin guarantees an authenticated dict; missing both keys
         # is an upstream bug, not a routable identity.
         raise HTTPException(status_code=500, detail="Admin identity missing sub/user_id.")
+
+    row_result = await db.execute(select(Bm25IdfDriftLog).where(Bm25IdfDriftLog.id == row_id))
+    row = row_result.scalar_one_or_none()
+    if row is None:
+        await _write_reveal_audit(
+            db,
+            admin,
+            user_sub,
+            row_id,
+            outcome="row_not_found",
+            reason=body.reason,
+            context_id=None,
+            num_terms_resolved=0,
+            num_terms_total=0,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Drift log {row_id} not found.",
+        )
+
     count = await increment_counter(f"rate:bm25_reveal:{user_sub}", ttl=3600)
     if count > settings.bm25_reveal_rate_limit_per_hour:
+        await _write_reveal_audit(
+            db,
+            admin,
+            user_sub,
+            row_id,
+            outcome="rate_limited",
+            reason=body.reason,
+            context_id=str(row.context_id),
+            num_terms_resolved=0,
+            num_terms_total=0,
+        )
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=(
@@ -415,14 +482,15 @@ async def reveal_drift_terms(
 
     top_terms: list[dict[str, Any]] = row.top_divergent_terms or []
     needed: set[int] = {entry["index"] for entry in top_terms}
+    hash_to_token: dict[int, str] = {}
     if needed:
-        points = await scroll_context_points(
+        async for page in scroll_context_points(
             str(row.context_id),
             with_payload=[*QDRANT_TOKEN_PAYLOAD_FIELDS, "summary", "context_summary"],
-        )
-        hash_to_token = _resolve_payload_tokens(points, needed)
-    else:
-        hash_to_token = {}
+        ):
+            _resolve_payload_tokens(page, needed, hash_to_token)
+            if len(hash_to_token) == len(needed):
+                break
 
     resolved_terms = [
         ResolvedTermEntry(**entry, token=hash_to_token.get(entry["index"])) for entry in top_terms
@@ -431,20 +499,17 @@ async def reveal_drift_terms(
 
     await _apply_context_name(db, row)
 
-    audit = AuditLog(
-        user_email=admin.get("email", "unknown"),
-        user_id=user_sub,
-        action="bm25_drift_reveal_terms",
-        resource=f"bm25_drift_log:{row_id}",
-        user_metadata={
-            "context_id": str(row.context_id),
-            "reason": body.reason,
-            "num_terms_resolved": resolved_count,
-            "num_terms_total": len(top_terms),
-        },
+    await _write_reveal_audit(
+        db,
+        admin,
+        user_sub,
+        row_id,
+        outcome="success",
+        reason=body.reason,
+        context_id=str(row.context_id),
+        num_terms_resolved=resolved_count,
+        num_terms_total=len(top_terms),
     )
-    db.add(audit)
-    await db.commit()
 
     logger.info(
         "bm25_drift_terms_revealed",
