@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import AdminUser, require_admin
 from config.settings import get_settings
 from db.base import get_db
-from db.qdrant import QDRANT_TOKEN_PAYLOAD_FIELDS, scroll_context_points
+from db.qdrant import QDRANT_TOKEN_PAYLOAD_FIELDS, _admin_scroll_context_points
 from db.redis import increment_counter
 from models.api_base import TZAwareBaseModel
 from models.auth import AuditLog, Context
@@ -514,7 +514,7 @@ async def reveal_drift_terms(
         # non-default embedding configs live in `kagura_memories_<model>_<dim>`,
         # so a default-collection scroll would find zero matching points.
         collection_name = await resolve_collection_name(db, row.context_id)
-        async for page in scroll_context_points(
+        async for page in _admin_scroll_context_points(
             str(row.context_id),
             with_payload=[*QDRANT_TOKEN_PAYLOAD_FIELDS, "summary", "context_summary"],
             collection_name=collection_name,

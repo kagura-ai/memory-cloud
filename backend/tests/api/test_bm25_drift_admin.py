@@ -198,7 +198,7 @@ class TestRevealTerms:
         async def _resolve(*_a, **_kw) -> str:
             return "kagura_memories_qwen3_1024"
 
-        monkeypatch.setattr(drift_route, "scroll_context_points", _scroll)
+        monkeypatch.setattr(drift_route, "_admin_scroll_context_points", _scroll)
         monkeypatch.setattr(drift_route, "increment_counter", _increment)
         monkeypatch.setattr(drift_route, "resolve_collection_name", _resolve)
         return scroll_calls, counter_calls
@@ -209,10 +209,12 @@ class TestRevealTerms:
         mock_db: MagicMock,
         patch_reveal_deps,
     ) -> None:
-        import mmh3
+        from utils.sparse_vector import hash_token
 
+        # Use the centralized helper so the test can't drift from the
+        # producer/consumer if the hash params (seed/signed) ever change.
         ctx_id = uuid4()
-        alpha_hash = mmh3.hash("alpha", signed=False)
+        alpha_hash = hash_token("alpha")
         row = _make_drift_row(context_id=ctx_id)
         row.top_divergent_terms = [
             {
@@ -314,7 +316,7 @@ class TestRevealTerms:
             # Default settings.bm25_reveal_rate_limit_per_hour = 10.
             return 11
 
-        monkeypatch.setattr(drift_route, "scroll_context_points", _scroll)
+        monkeypatch.setattr(drift_route, "_admin_scroll_context_points", _scroll)
         monkeypatch.setattr(drift_route, "increment_counter", _over_limit)
 
         resp = client.post(

@@ -1142,17 +1142,21 @@ QDRANT_TOKEN_PAYLOAD_FIELDS: tuple[str, ...] = (
 )
 
 
-async def scroll_context_points(
+async def _admin_scroll_context_points(
     context_id: str,
     *,
     with_vectors: bool = False,
     with_payload: bool | list[str] = True,
     collection_name: str = KAGURA_MEMORIES_COLLECTION,
 ) -> AsyncIterator[list]:
-    """Yield Qdrant point pages for a context, one page at a time.
+    """Yield Qdrant point pages for a context, one page at a time. ADMIN-ONLY.
 
-    Admin-use only — deliberately skips workspace + user isolation so
-    every point in the context is returned regardless of ownership.
+    The leading underscore + `_admin_` prefix signal that this helper
+    deliberately skips workspace + user isolation so every point in the
+    context is returned regardless of ownership. New callers must opt
+    into the isolation bypass explicitly — do NOT use this from any
+    non-admin code path.
+
     Used by the BM25 drift reveal-terms endpoint (#377) to rebuild the
     token → mmh3-hash mapping for reverse lookup.
 
