@@ -1284,6 +1284,18 @@ class Workspace(Base):
         """Memory Broadlistening analysis runs/day: plan tier base + addon (Issue #494)."""
         return self._plan_tier.analysis_runs_per_day + (self.addon_analysis_bonus or 0)
 
+    @property
+    def effective_storage_limit_bytes(self) -> int:
+        """File-storage hard cap (bytes): plan tier base + addon (Issue #485).
+
+        ``addon_storage_bonus_mb`` stores the bonus in MB to align with the
+        ``ADDON_UNIT_VALUES["extra_storage"]`` unit; the conversion to bytes
+        happens here so callers always see a single unit at the boundary.
+        """
+        return (
+            self._plan_tier.storage_limit_bytes + (self.addon_storage_bonus_mb or 0) * 1024 * 1024
+        )
+
     # Stripe billing (Issue #351)
     stripe_customer_id = Column(String(255), nullable=True)
     stripe_subscription_id = Column(String(255), nullable=True)

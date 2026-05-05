@@ -298,6 +298,15 @@ class Settings(BaseSettings):
     plan_pro_mcp_calls_per_day: int | None = Field(
         default=None, description="Override PRO plan MCP calls/day"
     )
+    plan_free_storage_limit_bytes: int | None = Field(
+        default=None, description="Override FREE plan file-storage hard cap (bytes, Issue #485)"
+    )
+    plan_basic_storage_limit_bytes: int | None = Field(
+        default=None, description="Override BASIC plan file-storage hard cap (bytes, Issue #485)"
+    )
+    plan_pro_storage_limit_bytes: int | None = Field(
+        default=None, description="Override PRO plan file-storage hard cap (bytes, Issue #485)"
+    )
 
     # Plan Display Names (customizable for SaaS forks)
     plan_free_display_name: str | None = Field(
@@ -325,6 +334,25 @@ class Settings(BaseSettings):
     )
     usage_critical_threshold: float = Field(
         default=0.95, description="Usage critical threshold (0.0-1.0)"
+    )
+
+    # Object Storage / Cloudflare R2 (Issue #485)
+    r2_account_id: str = Field(default="", description="Cloudflare R2 account ID")
+    r2_access_key_id: str = Field(default="", description="R2 S3-compatible access key ID")
+    r2_secret_access_key: str = Field(default="", description="R2 S3-compatible secret access key")
+    r2_bucket: str = Field(default="", description="R2 bucket name (e.g. kagura-memory-files-dev)")
+    r2_endpoint_url: str = Field(
+        default="",
+        description="R2 S3-compatible endpoint (https://<account>.r2.cloudflarestorage.com)",
+    )
+    file_object_max_size_mb: int = Field(
+        default=100, description="Per-file size cap in MB (Issue #485 Phase 1 = 100)"
+    )
+    presign_put_ttl_seconds: int = Field(
+        default=300, description="Presigned PUT URL lifetime in seconds (Issue #485 R4)"
+    )
+    presign_get_ttl_seconds: int = Field(
+        default=300, description="Presigned GET URL lifetime in seconds"
     )
 
     @field_validator("resend_dpa_accepted_at", mode="before")
