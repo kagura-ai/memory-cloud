@@ -41,6 +41,11 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
         "list_resource_tokens",  # Uses resource_id, not context_id
         "get_analysis",  # Issue #496: uses run_id, not context_id
         "get_cluster",  # Issue #496: uses run_id, not context_id
+        "init_file_upload",  # Issue #485: uses workspace_id + sha256
+        "complete_file_upload",  # Issue #485: uses file_id
+        "get_file_download_url",  # Issue #485: uses file_id
+        "delete_file",  # Issue #485: uses file_id
+        "list_files",  # Issue #485: workspace-scoped listing
     }
 )
 
@@ -60,6 +65,8 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         "list_analyses",  # Issue #496: read-only analysis list
         "get_active_analysis",  # Issue #496: read-only most-recent succeeded
         "get_cluster",  # Issue #496: read-only cluster drill-down
+        "get_file_download_url",  # Issue #485: read-only presigned GET
+        "list_files",  # Issue #485: read-only workspace listing
     }
 )
 
@@ -94,6 +101,13 @@ def _build_registry() -> dict[str, Any]:
         handle_delete_edge,
         handle_list_edges,
         handle_update_edge,
+    )
+    from mcp_server.tools.files import (
+        handle_complete_file_upload,
+        handle_delete_file,
+        handle_get_file_download_url,
+        handle_init_file_upload,
+        handle_list_files,
     )
     from mcp_server.tools.resource import (
         handle_get_resource_impact,
@@ -144,6 +158,13 @@ def _build_registry() -> dict[str, Any]:
         "list_analyses": handle_list_analyses,
         "get_active_analysis": handle_get_active_analysis,
         "get_cluster": handle_get_cluster,
+        # Issue #485: platform-managed file storage — 5 tools sharing
+        # FileStorageService with REST /api/v1/files routes.
+        "init_file_upload": handle_init_file_upload,
+        "complete_file_upload": handle_complete_file_upload,
+        "get_file_download_url": handle_get_file_download_url,
+        "delete_file": handle_delete_file,
+        "list_files": handle_list_files,
     }
 
 
