@@ -91,13 +91,36 @@ Finalizes the `SleepReport` row with aggregated per-phase results (edges created
 
 ## `sleep_mode` Configuration
 
-Each context has a `sleep_mode` column (`Context.sleep_mode`, default `"full"`) that determines which phases run for that context:
+Each context has a `sleep_mode` column (`Context.sleep_mode`, default `"full"`) that determines which phases run for that context.
+
+### Changing `sleep_mode`
+
+End users can change the mode via the REST API or the Web UI.
+
+**API:**
+
+```bash
+curl -X PUT http://localhost:8080/api/v1/contexts/{context_id} \
+  -H "Content-Type: application/json" \
+  -H "Cookie: session=..." \
+  -d '{"sleep_mode": "skip"}'
+```
+
+Valid values: `"full"`, `"edges_only"`, `"skip"`. Changing `sleep_mode` requires **owner** access (editor will receive 403).
+
+**Web UI:**
+
+Navigate to a context's **Settings** tab → **Sleep Maintenance** card. Select the desired mode from the dropdown. Choosing `skip` shows a confirmation dialog because it stops all automated maintenance until re-enabled.
+
+### Modes
 
 | Mode          | Phases                                              | Typical use                                              |
 |---------------|-----------------------------------------------------|----------------------------------------------------------|
 | `full`        | Edge Discovery → Dedup → Importance → Consolidation → Reindex → Report | Default. Interactive memory contexts.                    |
 | `edges_only`  | Edge Discovery → Reindex → Report                   | Resource-ingested contexts (external docs, ref material). |
 | `skip`        | — (the run is aborted before any phase starts)      | Externally managed / large-scale contexts where Sleep is unwanted. |
+
+If a context's `sleep_mode` is changed while a Sleep run is in progress for that context, the in-flight run is **not** interrupted; the new mode takes effect on the next scheduled run.
 
 Mode resolution happens in `SleepOrchestrator._get_sleep_mode()`. Unknown or missing contexts fall back to `"full"`. The Reindex and Report phases themselves are not gated by `sleep_mode`; they run whenever at least one preceding phase executed and produced changes.
 

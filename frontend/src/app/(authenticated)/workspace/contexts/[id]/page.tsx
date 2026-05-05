@@ -264,6 +264,16 @@ export default function ContextDetailPage() {
             {context.is_default && (
               <Badge variant="secondary">{t("default")}</Badge>
             )}
+            {context.sleep_mode && context.sleep_mode !== "full" && (
+              <Badge variant="outline">
+                {
+                  {
+                    edges_only: t("sleepModeEdgesOnly"),
+                    skip: t("sleepModeSkip"),
+                  }[context.sleep_mode]
+                }
+              </Badge>
+            )}
           </div>
         }
       />

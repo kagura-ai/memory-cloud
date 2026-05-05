@@ -380,6 +380,7 @@ class ContextService:
         is_public: bool | None = None,  # Issue #238
         resource_id: str | None = None,  # Issue #238
         is_locked: bool | None = None,  # Issue #85
+        sleep_mode: str | None = None,
     ) -> Context:
         """Update context display_name, description, summary, usage guide, and privacy.
 
@@ -464,6 +465,15 @@ class ContextService:
                 new_value=is_locked,
             )
             context.is_locked = is_locked
+
+        if sleep_mode is not None and context.sleep_mode != sleep_mode:
+            logger.info(
+                "setting_sleep_mode",
+                context_id=str(context_id),
+                old_value=context.sleep_mode,
+                new_value=sleep_mode,
+            )
+            context.sleep_mode = sleep_mode
 
         await self.db.commit()
         await self.db.refresh(context)

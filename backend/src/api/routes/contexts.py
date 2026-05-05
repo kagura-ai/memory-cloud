@@ -11,7 +11,7 @@ Each context maps to a separate Qdrant collection for memory isolation.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -186,6 +186,10 @@ class ContextUpdate(BaseModel):
         None,
         description="When true, prevents this context from being deleted until unlocked.",
     )
+    sleep_mode: Literal["full", "edges_only", "skip"] | None = Field(
+        None,
+        description="Sleep maintenance mode: full=all phases, edges_only=edge discovery+reindex, skip=none",
+    )
 
 
 class ContextResponse(TZAwareBaseModel):
@@ -207,6 +211,7 @@ class ContextResponse(TZAwareBaseModel):
         None, description="Resource ID for public contexts"
     )  # Issue #238
     is_locked: bool = Field(False, description="When true, deletion is prevented until unlocked")
+    sleep_mode: str = Field("full", description="Sleep maintenance mode: full, edges_only, or skip")
     created_by: str | None = Field(None, description="Creator user ID")  # Issue #165
     created_by_name: str | None = Field(None, description="Creator name")
     created_at: datetime = Field(..., description="Creation timestamp")
@@ -713,6 +718,7 @@ async def update_context(
         "is_public",
         "resource_id",
         "is_locked",
+        "sleep_mode",
     ]  # Issue #238: is_public, resource_id; Issue #85: is_locked — owner-only
     is_updating_owner_fields = any(
         getattr(request, field, None) is not None for field in owner_only_fields
@@ -812,6 +818,7 @@ async def update_context(
             is_public=request.is_public,  # Issue #238
             resource_id=request.resource_id,  # Issue #238
             is_locked=request.is_locked,  # Issue #85
+            sleep_mode=request.sleep_mode,
         )
 
         logger.info(
@@ -830,6 +837,7 @@ async def update_context(
             is_default=context.is_default,
             # Issue #246: is_current removed
             is_locked=context.is_locked,
+            sleep_mode=context.sleep_mode,
             is_private=context.is_private,
             is_public=context.is_public,
             resource_id=context.resource_id,
