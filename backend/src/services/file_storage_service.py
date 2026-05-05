@@ -210,9 +210,22 @@ class FileStorageService:
             )
             self.db.add(file)
             await self.db.flush()
+            upload_url = await self._storage.generate_presigned_put(
+                key=storage_key,
+                content_type=content_type,
+                size_bytes=size_bytes,
+                ttl_seconds=settings.presign_put_ttl_seconds,
+            )
+            await self.db.commit()
         except Exception as exc:
-            # Roll the Redis reservation back — the DB insert never landed
-            # so we owe the workspace those bytes.
+            # Roll the Redis reservation back — neither the DB row nor the
+            # presigned URL are durable. Covers all three failure modes:
+            # flush() (partial-unique conflict), presign (R2 transient
+            # error), and commit() (DB consistency). Without this, the
+            # Redis counter would stay incremented until the 24h reseed
+            # — over-counting the workspace by ``size_bytes`` and
+            # potentially blocking later legitimate uploads on small
+            # plans.
             await storage_quota_service.release_storage_bytes(
                 workspace_id=workspace_id,
                 size_bytes=size_bytes,
@@ -224,15 +237,6 @@ class FileStorageService:
                 conflict = ConflictError(f"file with sha256={sha256} already exists in workspace")
                 raise conflict from exc
             raise
-
-        upload_url = await self._storage.generate_presigned_put(
-            key=storage_key,
-            content_type=content_type,
-            size_bytes=size_bytes,
-            ttl_seconds=settings.presign_put_ttl_seconds,
-        )
-
-        await self.db.commit()
 
         logger.info(
             "file_upload_reserved",
@@ -503,9 +507,33 @@ class FileStorageService:
         The R2 binary stays for 7 days (sweeper handles deletion).
         """
         file = await self._load_file(workspace_id, file_id)
+
+        # Reserved rows: ``reserve_upload`` already incremented the Redis
+        # counter, but no committed-bytes are tracked in
+        # ``workspace_storage_usage`` yet. Release the reservation here
+        # so a cancelled in-flight upload doesn't leave the workspace's
+        # quota stuck until the orphan sweeper runs (15 minutes later
+        # by default — long enough on the Free 100 MiB tier to block
+        # the next legitimate upload after a single cancelled big one).
+        if file.status == "reserved":
+            reserved_size = file.size_bytes
+            file.deleted_at = utcnow()
+            await self.db.commit()
+            await storage_quota_service.release_storage_bytes(
+                workspace_id=workspace_id,
+                size_bytes=reserved_size,
+            )
+            logger.info(
+                "file_reserved_cancelled",
+                workspace_id=str(workspace_id),
+                file_id=str(file_id),
+                size_bytes=reserved_size,
+            )
+            return
+
+        # Failed rows: orphan sweeper already released the Redis counter
+        # when the row transitioned reserved → failed. Just mark deleted.
         if file.status != "uploaded":
-            # Non-uploaded rows have no committed quota to release; just
-            # mark them deleted so retries see the latest state.
             file.deleted_at = utcnow()
             await self.db.commit()
             return

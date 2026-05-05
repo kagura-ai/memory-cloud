@@ -263,6 +263,7 @@ class TestGetFileDownloadUrl:
         get_db_patch, _ = _patch_get_db()
         with (
             get_db_patch,
+            _patch_viewer_check_pass(),
             patch(
                 "mcp_server.tools.files.FileStorageService.get_presigned_download",
                 AsyncMock(return_value="https://r2.test/get/key"),
@@ -282,6 +283,7 @@ class TestGetFileDownloadUrl:
         get_db_patch, _ = _patch_get_db()
         with (
             get_db_patch,
+            _patch_viewer_check_pass(),
             patch(
                 "mcp_server.tools.files.FileStorageService.get_presigned_download",
                 AsyncMock(side_effect=NotFoundException("missing")),
@@ -294,6 +296,43 @@ class TestGetFileDownloadUrl:
             )
         body = _payload(out)
         assert body["error"] == "not_found"
+
+    @pytest.mark.asyncio
+    async def test_workspace_id_override_requires_membership(self):
+        """Copilot finding on PR #551: an authenticated MCP caller passing
+        a foreign ``workspace_id`` MUST be blocked at the membership gate
+        before reaching the service."""
+        from utils.exceptions import AuthorizationError
+
+        foreign_ws = uuid4()
+        get_db_patch, _ = _patch_get_db()
+        with (
+            get_db_patch,
+            patch(
+                "mcp_server.tools.files._check_viewer_permission",
+                AsyncMock(
+                    return_value=[
+                        MagicMock(
+                            text='{"status":"error","error":"forbidden","message":"not a member"}'
+                        )
+                    ]
+                ),
+            ),
+            patch(
+                "mcp_server.tools.files.FileStorageService.get_presigned_download",
+                AsyncMock(),
+            ) as svc,
+        ):
+            out = await handle_get_file_download_url(
+                {"file_id": str(uuid4()), "workspace_id": str(foreign_ws)},
+                user_id=USER_ID,
+                workspace_id=uuid4(),  # caller's home workspace, different
+            )
+        # Service NEVER reached — gate fired first.
+        svc.assert_not_awaited()
+        # The mocked viewer-check error response is returned verbatim.
+        assert "forbidden" in out[0].text
+        del AuthorizationError  # silence unused-import on the test-class
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +397,7 @@ class TestListFiles:
         get_db_patch, _ = _patch_get_db()
         with (
             get_db_patch,
+            _patch_viewer_check_pass(),
             patch(
                 "mcp_server.tools.files.FileStorageService.list_files",
                 AsyncMock(return_value=[f1, f2]),
@@ -378,6 +418,7 @@ class TestListFiles:
         get_db_patch, _ = _patch_get_db()
         with (
             get_db_patch,
+            _patch_viewer_check_pass(),
             patch(
                 "mcp_server.tools.files.FileStorageService.list_files",
                 AsyncMock(side_effect=ValidationError("limit out of range")),

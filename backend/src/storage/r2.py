@@ -117,6 +117,26 @@ class R2Storage:
         size_bytes: int,
         ttl_seconds: int,
     ) -> str:
+        # SECURITY NOTE (Phase 1 limitation, tracked for Phase 1.5):
+        # The presigned PUT signs (Bucket, Key, ContentType, ContentLength)
+        # but does NOT bind the body's sha256. A malicious client can
+        # declare sha256=X at upload-init time, then PUT bytes whose
+        # actual digest is Y at the same key — the server's
+        # ``confirm_upload`` only verifies size via head_object, not
+        # the actual bytes. This breaks dedup (a later legit upload
+        # with sha256=X dedupes to the malicious bytes via the partial
+        # unique index) and lets a member poison the workspace's file
+        # cache.
+        #
+        # Mitigation Phase 1.5: switch to ``generate_presigned_post``
+        # with a POST policy that includes ``x-amz-content-sha256`` as
+        # a signed header (S3 SigV4 supports body-sha256 binding).
+        # Alternative: download bytes server-side post-PUT and compute
+        # sha256 — expensive on 100 MiB but correct. For Phase 1 the
+        # workspace-membership gate keeps the attack surface to
+        # workspace insiders, who would also be detected by the
+        # downstream BM25/embedding pipeline (different bytes → different
+        # vectors → different recall behavior, observable to ops).
         async with self._client() as client:
             url = await client.generate_presigned_url(
                 ClientMethod="put_object",

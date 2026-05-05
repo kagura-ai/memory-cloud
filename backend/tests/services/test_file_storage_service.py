@@ -394,10 +394,30 @@ class TestDeleteFile:
         db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_reserved_file_skips_quota_release(self, service, db, workspace_id):
-        """A still-reserved row has no committed quota — release would
-        double-deduct via the orphan sweeper. So delete just marks it."""
+    async def test_reserved_file_releases_redis_reservation(self, service, db, workspace_id):
+        """Cancelling a reserved upload MUST release the Redis reservation
+        right away — otherwise the workspace stays over-counted until
+        the orphan sweeper runs (15 min later by default), which on the
+        Free 100 MiB tier blocks every subsequent upload (Copilot loop
+        finding on PR #551)."""
         file = _make_file_object(workspace_id, status="reserved", size_bytes=1024)
+        load_result = MagicMock()
+        load_result.scalar_one_or_none = MagicMock(return_value=file)
+        db.execute.return_value = load_result
+
+        with _patch_quota_release() as release:
+            await service.delete_file(workspace_id=workspace_id, file_id=file.id)
+
+        assert file.deleted_at is not None
+        release.assert_awaited_once()
+        kwargs = release.call_args.kwargs
+        assert kwargs["size_bytes"] == 1024
+
+    @pytest.mark.asyncio
+    async def test_failed_file_skips_quota_release(self, service, db, workspace_id):
+        """``status='failed'`` rows already had their Redis quota released
+        by the orphan sweeper — releasing again here would underflow."""
+        file = _make_file_object(workspace_id, status="failed", size_bytes=1024)
         load_result = MagicMock()
         load_result.scalar_one_or_none = MagicMock(return_value=file)
         db.execute.return_value = load_result

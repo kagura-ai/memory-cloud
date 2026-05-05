@@ -212,9 +212,15 @@ async def handle_get_file_download_url(
     from db.base import get_db
 
     async for db in get_db():
-        # Viewer can read; no permission gate beyond workspace membership
-        # (which the auth dep enforces upstream).
-        del user_id  # not currently used; reserve for future audit logging
+        # Workspace membership MUST be enforced before reading. The
+        # auth layer only proves identity, not membership of the
+        # ``workspace_id`` the caller supplied. Without this, an
+        # authenticated MCP caller could pass another workspace's UUID
+        # via the ``workspace_id`` arg and obtain download URLs for
+        # files they shouldn't be able to read.
+        viewer_err = await _check_viewer_permission(db, user_id, ws, "download files")
+        if viewer_err is not None:
+            return viewer_err
         service = FileStorageService(db)
         try:
             url = await service.get_presigned_download(
@@ -289,7 +295,13 @@ async def handle_list_files(
     from db.base import get_db
 
     async for db in get_db():
-        del user_id  # auth enforced upstream; viewer can list
+        # Membership gate (same reasoning as handle_get_file_download_url):
+        # without this an authenticated caller could enumerate another
+        # workspace's file metadata by supplying its UUID via the
+        # ``workspace_id`` arg.
+        viewer_err = await _check_viewer_permission(db, user_id, ws, "list files")
+        if viewer_err is not None:
+            return viewer_err
         service = FileStorageService(db)
         try:
             files = await service.list_files(workspace_id=ws, limit=limit)
