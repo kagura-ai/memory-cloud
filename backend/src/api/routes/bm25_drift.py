@@ -441,6 +441,51 @@ async def reveal_drift_terms(
         # is an upstream bug, not a routable identity.
         raise HTTPException(status_code=500, detail="Admin identity missing sub/user_id.")
 
+    # Rate limit FIRST, before any DB/Qdrant work. Otherwise an attacker
+    # can probe row_ids without consuming budget and add load to the DB.
+    try:
+        count = await increment_counter(f"rate:bm25_reveal:{user_sub}", ttl=3600)
+    except RedisError:
+        # Fail-closed: rate limit is part of the threat model for this admin
+        # endpoint, so treat Redis unavailability as a deny. Audit the
+        # attempt with outcome=rate_limit_unavailable so security teams can
+        # distinguish "user was rate-limited" from "rate-limit infra broke".
+        await _write_reveal_audit(
+            db,
+            admin,
+            user_sub,
+            row_id,
+            outcome="rate_limit_unavailable",
+            reason=body.reason,
+            context_id=None,
+            num_terms_resolved=0,
+            num_terms_total=0,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Rate limit service unavailable.",
+        ) from None
+    if count > settings.bm25_reveal_rate_limit_per_hour:
+        await _write_reveal_audit(
+            db,
+            admin,
+            user_sub,
+            row_id,
+            outcome="rate_limited",
+            reason=body.reason,
+            context_id=None,
+            num_terms_resolved=0,
+            num_terms_total=0,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"BM25 reveal rate limit exceeded "
+                f"({settings.bm25_reveal_rate_limit_per_hour}/hour). "
+                f"Try again later."
+            ),
+        )
+
     row_result = await db.execute(select(Bm25IdfDriftLog).where(Bm25IdfDriftLog.id == row_id))
     row = row_result.scalar_one_or_none()
     if row is None:
@@ -458,49 +503,6 @@ async def reveal_drift_terms(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Drift log {row_id} not found.",
-        )
-
-    try:
-        count = await increment_counter(f"rate:bm25_reveal:{user_sub}", ttl=3600)
-    except RedisError:
-        # Fail-closed: rate limit is part of the threat model for this admin
-        # endpoint, so treat Redis unavailability as a deny. Audit the
-        # attempt with outcome=rate_limit_unavailable so security teams can
-        # distinguish "user was rate-limited" from "rate-limit infra broke".
-        await _write_reveal_audit(
-            db,
-            admin,
-            user_sub,
-            row_id,
-            outcome="rate_limit_unavailable",
-            reason=body.reason,
-            context_id=str(row.context_id),
-            num_terms_resolved=0,
-            num_terms_total=0,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Rate limit service unavailable.",
-        ) from None
-    if count > settings.bm25_reveal_rate_limit_per_hour:
-        await _write_reveal_audit(
-            db,
-            admin,
-            user_sub,
-            row_id,
-            outcome="rate_limited",
-            reason=body.reason,
-            context_id=str(row.context_id),
-            num_terms_resolved=0,
-            num_terms_total=0,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=(
-                f"BM25 reveal rate limit exceeded "
-                f"({settings.bm25_reveal_rate_limit_per_hour}/hour). "
-                f"Try again later."
-            ),
         )
 
     top_terms: list[dict[str, Any]] = row.top_divergent_terms or []
