@@ -35,9 +35,13 @@ router = APIRouter(prefix="/files", tags=["files"])
 # ---------------------------------------------------------------------------
 
 # Phase 1 100 MiB cap (Field constraint mirrors settings.file_object_max_size_mb;
-# the service re-validates against the runtime setting so an env-var override
-# does not get bypassed by stale schema validation).
-_MAX_PHASE1_SIZE_BYTES = 100 * 1024 * 1024
+# Pydantic only enforces ``gt=0`` here so an obvious bad input (zero or
+# negative bytes) is rejected at the boundary. The runtime per-file cap
+# comes from ``settings.file_object_max_size_mb`` and is enforced inside
+# ``FileStorageService.reserve_upload``. Encoding the cap here as a
+# ``le=...`` constant would silently diverge from MCP and from the live
+# config when an operator bumps ``FILE_OBJECT_MAX_SIZE_MB`` (Copilot
+# loop 5 finding on PR #551).
 
 
 class FileReserveRequest(BaseModel):
@@ -46,7 +50,7 @@ class FileReserveRequest(BaseModel):
     workspace_id: UUID
     filename: str = Field(min_length=1, max_length=512)
     content_type: str = Field(min_length=1, max_length=255)
-    size_bytes: int = Field(gt=0, le=_MAX_PHASE1_SIZE_BYTES)
+    size_bytes: int = Field(gt=0)
     sha256: str = Field(
         min_length=64,
         max_length=64,

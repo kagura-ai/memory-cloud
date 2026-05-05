@@ -157,13 +157,24 @@ class R2Storage:
         filename: str,
         ttl_seconds: int,
     ) -> str:
+        # Sanitize the filename before embedding into the
+        # ``Content-Disposition`` header. Without this a filename
+        # containing a literal ``"`` could break out of the quoted
+        # parameter and enable filename-spoofing for downloads;
+        # CR/LF could (in principle) corrupt the header. Mirrors
+        # ``api/routes/attachments.py:_sanitize_filename`` to keep the
+        # legacy and new file paths consistent (CSO Gate2 finding F-1
+        # + Copilot loop 5 finding on PR #551).
+        safe_filename = (
+            filename.replace('"', "_").replace("\n", "_").replace("\r", "_").replace("\x00", "_")
+        )
         async with self._client() as client:
             url = await client.generate_presigned_url(
                 ClientMethod="get_object",
                 Params={
                     "Bucket": self._bucket,
                     "Key": key,
-                    "ResponseContentDisposition": f'attachment; filename="{filename}"',
+                    "ResponseContentDisposition": f'attachment; filename="{safe_filename}"',
                 },
                 ExpiresIn=ttl_seconds,
                 HttpMethod="GET",

@@ -101,6 +101,15 @@ async def handle_init_file_upload(
     if missing:
         return _error_response("missing_fields", f"Missing required fields: {sorted(missing)}")
 
+    # Coerce size_bytes BEFORE entering the service — ``int(...)`` on a
+    # malformed input would otherwise leak as a generic 500 instead of
+    # the documented validation_error vocabulary (Copilot loop 5 finding
+    # on PR #551).
+    try:
+        size_bytes = int(args["size_bytes"])
+    except (ValueError, TypeError):
+        return _error_response("validation_error", "size_bytes must be a positive integer")
+
     ws, err = await _resolve_workspace(args.get("workspace_id"), workspace_id)
     if err is not None:
         return err
@@ -118,10 +127,16 @@ async def handle_init_file_upload(
                 created_by=user_id,
                 filename=str(args["filename"]),
                 content_type=str(args["content_type"]),
-                size_bytes=int(args["size_bytes"]),
+                size_bytes=size_bytes,
                 sha256=str(args["sha256"]).lower(),
             )
-        except (ValidationError, ConflictError, QuotaExceededError, NotFoundException) as exc:
+        except (
+            ValidationError,
+            ConflictError,
+            QuotaExceededError,
+            NotFoundException,
+            ExternalServiceError,
+        ) as exc:
             return _exc_to_error_response(exc)
     return _success_response(
         file_id=str(result.file_id),

@@ -178,11 +178,42 @@ async def release_storage_bytes(
                 new_total=new_total,
             )
     except RedisError as exc:
+        # Redis is down at release time — we cannot DECRBY now and the
+        # caller will continue without retry (release is post-commit
+        # in delete_file / sweeper / truncation refund, all best-effort).
+        # Without further action the counter would remain
+        # over-counted until either the 24h reseed TTL expires OR an
+        # operator manually drops the key. Both are slow.
+        #
+        # Mitigation: best-effort EXPIRE the key to a short TTL so the
+        # next access reseeds from the DB aggregate (which is the
+        # source of truth — committed bytes are durable). If even
+        # that EXPIRE call fails, log loudly so ops can intervene
+        # (Copilot loop 5 finding on PR #551).
         logger.error(
             "storage_quota_release_redis_failed",
             workspace_id=str(workspace_id),
             error=str(exc),
         )
+        try:
+            from db.redis import get_redis_client
+
+            client = get_redis_client()
+            # 60s TTL so the next reservation reseeds from DB instead of
+            # carrying the stale over-counted value forward. Reseeding
+            # is the existing recovery path; this just triggers it.
+            await client.expire(_build_key(workspace_id), 60)
+            logger.info(
+                "storage_quota_release_forced_reseed",
+                workspace_id=str(workspace_id),
+                expire_ttl_seconds=60,
+            )
+        except Exception as expire_exc:  # noqa: BLE001 — last-resort
+            logger.error(
+                "storage_quota_release_force_reseed_failed",
+                workspace_id=str(workspace_id),
+                error=str(expire_exc),
+            )
 
 
 async def get_current_storage_usage(
