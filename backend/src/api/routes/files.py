@@ -16,7 +16,7 @@ from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import APIKeyOrSessionUser
@@ -72,6 +72,14 @@ class FileConfirmRequest(BaseModel):
 
 
 class FileObjectOut(TZAwareBaseModel):
+    """Subset of ``FileObject`` exposed to clients.
+
+    ``from_attributes=True`` lets us pass the ORM row directly to
+    ``model_validate`` — no per-field copy needed.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
     id: UUID
     workspace_id: UUID
     filename: str
@@ -85,26 +93,6 @@ class FileObjectOut(TZAwareBaseModel):
 
 class FileDownloadUrlOut(TZAwareBaseModel):
     download_url: str
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _to_out(file) -> FileObjectOut:
-    """Convert a ``FileObject`` ORM row to the API response model."""
-    return FileObjectOut(
-        id=file.id,
-        workspace_id=file.workspace_id,
-        filename=file.filename,
-        content_type=file.content_type,
-        size_bytes=file.size_bytes,
-        sha256=file.sha256,
-        status=file.status,
-        created_at=file.created_at,
-        uploaded_at=file.uploaded_at,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +176,7 @@ async def confirm_upload(
         file_id=file_id,
         sha256=body.sha256.lower(),
     )
-    return _to_out(file)
+    return FileObjectOut.model_validate(file)
 
 
 @router.get("/{file_id}/download-url", response_model=FileDownloadUrlOut)
@@ -236,4 +224,4 @@ async def list_files(
     await _enforce_workspace_membership(db, user, workspace_id)
     service = FileStorageService(db)
     files = await service.list_files(workspace_id=workspace_id, limit=limit)
-    return [_to_out(f) for f in files]
+    return [FileObjectOut.model_validate(f) for f in files]

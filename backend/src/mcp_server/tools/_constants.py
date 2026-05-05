@@ -407,7 +407,7 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 
 ---
 
-## Available Tools (26 tools)
+## Available Tools (31 tools)
 
 | Tool | Purpose |
 |------|---------|
@@ -437,6 +437,11 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 | `get_resource_impact` | Get resource stats (tokens, memories, schema version) |
 | `get_resource_schema` | Get field definitions for a resource |
 | `list_resource_tokens` | List resource tokens for your workspace |
+| `init_file_upload` | Reserve quota + return presigned PUT URL (R2, ≤100 MiB) |
+| `complete_file_upload` | Finalize upload after PUT (idempotent on retry) |
+| `get_file_download_url` | Get short-lived presigned GET URL for a file |
+| `delete_file` | Soft-delete file + immediate quota release |
+| `list_files` | List uploaded files in the workspace, newest first |
 
 Most context-scoped tools take a single `context_id`. Exceptions:
 

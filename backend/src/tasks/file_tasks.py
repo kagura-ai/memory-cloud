@@ -23,6 +23,8 @@ orphan UX impact under one quarter-hour worst case.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import select
@@ -52,13 +54,16 @@ async def sweep_orphan_files() -> dict[str, int]:
     """
     counts = {"swept": 0, "released_bytes": 0, "r2_deleted": 0, "r2_failed": 0}
 
-    threshold = utcnow().timestamp() - _ORPHAN_GRACE_SECONDS
+    # Filter at SQL so the partial index ``idx_file_objects_reserved_expires``
+    # is used; otherwise every sweeper tick loads all in-flight rows.
+    threshold = utcnow() - timedelta(seconds=_ORPHAN_GRACE_SECONDS)
 
     async for db in get_db():
         result = await db.execute(
             select(FileObject).where(
                 FileObject.status == "reserved",
                 FileObject.expires_at.isnot(None),
+                FileObject.expires_at <= threshold,
             )
         )
         candidates = list(result.scalars().all())
@@ -77,13 +82,10 @@ async def sweep_orphan_files() -> dict[str, int]:
         # tick re-evaluates the same rows fresh — no double-release.
         pending_releases: list[tuple] = []  # list[(workspace_id, size_bytes, storage_key|None)]
         for file in candidates:
-            # Compute orphan-ness in Python so the timezone-naive DB
-            # column is compared against utcnow() directly without
-            # relying on driver-side conversion.
-            if file.expires_at is None:
-                continue
-            expiry_ts = file.expires_at.timestamp()
-            if expiry_ts > threshold:
+            # SQL-side filter already ensured ``expires_at <= threshold``,
+            # but a defensive Python re-check guards against unexpected
+            # mutations within the same transaction.
+            if file.expires_at is None or file.expires_at > threshold:
                 continue
 
             file.status = "failed"

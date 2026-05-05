@@ -102,10 +102,11 @@ class FileStorageService:
         Per-workspace prefix supports per-prefix lifecycle/ACL policies;
         sha256[:2] sub-prefix avoids R2 hot-partition on workloads that
         upload many files in quick succession.
+
+        Caller is the only public path (``reserve_upload``) and that
+        path validates ``len(sha256) == 64`` upstream — no defensive
+        re-check here.
         """
-        if len(sha256) != 64:
-            msg = f"sha256 must be 64 hex chars, got {len(sha256)}"
-            raise ValidationError(msg)
         return f"{workspace_id}/{sha256[:2]}/{sha256}"
 
     async def _load_workspace(self, workspace_id: UUID) -> Workspace:
