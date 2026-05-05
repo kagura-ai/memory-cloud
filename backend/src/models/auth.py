@@ -1209,6 +1209,7 @@ class Workspace(Base):
     addon_member_bonus = Column(Integer, nullable=False, server_default="0")
     addon_context_bonus = Column(Integer, nullable=False, server_default="0")  # Issue #15
     addon_analysis_bonus = Column(Integer, nullable=False, server_default="0")  # Issue #494
+    addon_storage_bonus_mb = Column(Integer, nullable=False, server_default="0")  # Issue #485
 
     # Issue #494: per-workspace default + quality model selection for
     # Memory Broadlistening analyses. Both nullable — analysis is gated
