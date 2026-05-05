@@ -43,6 +43,12 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "get_resource_impact": _get_timeout("get_resource_impact", 10.0),
     "get_resource_schema": _get_timeout("get_resource_schema", 10.0),
     "list_resource_tokens": _get_timeout("list_resource_tokens", 10.0),
+    # Issue #485: file storage tools
+    "init_file_upload": _get_timeout("init_file_upload", 20.0),
+    "complete_file_upload": _get_timeout("complete_file_upload", 20.0),
+    "get_file_download_url": _get_timeout("get_file_download_url", 10.0),
+    "delete_file": _get_timeout("delete_file", 15.0),
+    "list_files": _get_timeout("list_files", 10.0),
 }
 DEFAULT_TOOL_TIMEOUT = float(os.getenv("MCP_TIMEOUT_DEFAULT", 60.0))
 
@@ -401,7 +407,7 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 
 ---
 
-## Available Tools (26 tools)
+## Available Tools (31 tools)
 
 | Tool | Purpose |
 |------|---------|
@@ -431,6 +437,11 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 | `get_resource_impact` | Get resource stats (tokens, memories, schema version) |
 | `get_resource_schema` | Get field definitions for a resource |
 | `list_resource_tokens` | List resource tokens for your workspace |
+| `init_file_upload` | Reserve quota + return presigned PUT URL (R2, ≤100 MiB) |
+| `complete_file_upload` | Finalize upload after PUT (idempotent on retry) |
+| `get_file_download_url` | Get short-lived presigned GET URL for a file |
+| `delete_file` | Soft-delete file + immediate quota release |
+| `list_files` | List uploaded files in the workspace, newest first |
 
 Most context-scoped tools take a single `context_id`. Exceptions:
 

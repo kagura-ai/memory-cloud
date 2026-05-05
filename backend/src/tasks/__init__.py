@@ -13,6 +13,7 @@ from .bm25_drift_tasks import schedule_bm25_drift_tasks
 from .credentials_tasks import schedule_credentials_tasks
 from .embedding_tasks import schedule_embedding_tasks
 from .erasure_tasks import schedule_erasure_tasks
+from .file_tasks import schedule_file_tasks
 from .mcp_tasks import schedule_mcp_tasks
 from .neural_tasks import schedule_neural_tasks
 from .resource_indexer_job import schedule_resource_indexer_jobs
@@ -31,4 +32,5 @@ __all__ = [
     "schedule_resource_indexer_jobs",
     "schedule_sleep_tasks",
     "schedule_bm25_drift_tasks",
+    "schedule_file_tasks",
 ]

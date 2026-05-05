@@ -1397,6 +1397,147 @@ Requires action recording (reports created before this feature have no actions t
                 },
             },
         },
+        # ====================================================================
+        # Issue #485: Platform-managed file storage (Cloudflare R2)
+        # ====================================================================
+        {
+            "name": "init_file_upload",
+            "description": (
+                "Reserve quota and return a presigned PUT URL for a file upload "
+                "to platform-managed R2 storage. Phase 1 cap is 100 MiB per file; "
+                "the workspace's effective storage limit is enforced atomically "
+                "via Redis reservation.\n\n"
+                "Compute the sha256 ahead of time so the server can dedup against "
+                "the workspace's active set. Two calls with the same sha256 in "
+                "the same workspace return a 'conflict' error referencing the "
+                "existing file_id; clients should reuse it instead of re-uploading."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["filename", "content_type", "size_bytes", "sha256"],
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "Original filename (used for Content-Disposition on download).",
+                    },
+                    "content_type": {
+                        "type": "string",
+                        "description": "MIME type (e.g. 'application/pdf').",
+                    },
+                    "size_bytes": {
+                        "type": "integer",
+                        "description": "Total bytes the client will PUT. Phase 1 cap: 100 MiB.",
+                    },
+                    "sha256": {
+                        "type": "string",
+                        "description": "Lower-case hex sha256 of the bytes the client will PUT.",
+                    },
+                    "workspace_id": {
+                        "type": "string",
+                        "description": "Optional. Overrides the authenticated workspace_id.",
+                    },
+                },
+            },
+        },
+        {
+            "name": "complete_file_upload",
+            "description": (
+                "Finalize a file upload after the client has PUT bytes to the "
+                "presigned URL returned by init_file_upload. The server verifies "
+                "the object exists in R2 (head_object) and matches the declared "
+                "sha256 / size; on success the row transitions reserved → uploaded "
+                "and the workspace storage counter is updated atomically.\n\n"
+                "Idempotent: confirming an already-uploaded file with a matching "
+                "sha256 returns the existing row unchanged."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["file_id", "sha256"],
+                "properties": {
+                    "file_id": {
+                        "type": "string",
+                        "description": "UUID returned by init_file_upload.",
+                    },
+                    "sha256": {
+                        "type": "string",
+                        "description": "Lower-case hex sha256 of the bytes uploaded.",
+                    },
+                    "workspace_id": {
+                        "type": "string",
+                        "description": "Optional. Overrides the authenticated workspace_id.",
+                    },
+                },
+            },
+        },
+        {
+            "name": "get_file_download_url",
+            "description": (
+                "Return a short-lived presigned GET URL for a previously-uploaded "
+                "file. The URL sets Content-Disposition to the original filename "
+                "so browsers and curl preserve it on save."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["file_id"],
+                "properties": {
+                    "file_id": {
+                        "type": "string",
+                        "description": "MUST be a UUID from a prior init_file_upload + complete_file_upload pair.",
+                    },
+                    "workspace_id": {
+                        "type": "string",
+                        "description": "Optional. Overrides the authenticated workspace_id.",
+                    },
+                },
+            },
+            "readOnly": True,
+        },
+        {
+            "name": "delete_file",
+            "description": (
+                "Soft-delete a file. The workspace storage quota is released "
+                "immediately (R5 contract); the R2 binary lingers for 7 days "
+                "before the nightly sweeper removes it (no client-visible "
+                "behavior on the binary side)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["file_id"],
+                "properties": {
+                    "file_id": {
+                        "type": "string",
+                        "description": "UUID of the file to soft-delete.",
+                    },
+                    "workspace_id": {
+                        "type": "string",
+                        "description": "Optional. Overrides the authenticated workspace_id.",
+                    },
+                },
+            },
+        },
+        {
+            "name": "list_files",
+            "description": (
+                "List uploaded, non-deleted files in the workspace, newest first. "
+                "Returns up to 50 by default (max 500). Each entry includes "
+                "id, filename, content_type, size_bytes, sha256, status, "
+                "created_at, uploaded_at."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of rows to return (1-500, default 50).",
+                    },
+                    "workspace_id": {
+                        "type": "string",
+                        "description": "Optional. Overrides the authenticated workspace_id.",
+                    },
+                },
+            },
+            "readOnly": True,
+        },
     ]
 
 

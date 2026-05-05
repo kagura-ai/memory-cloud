@@ -33,6 +33,7 @@ class TestEffectiveQuotaService:
         addon_public_quota_bonus=50,
         addon_member_bonus=3,
         addon_context_bonus=5,
+        addon_storage_bonus_mb=0,
     ):
         """Create a mock workspace with addon bonuses and effective properties."""
         ws = MagicMock()
@@ -45,6 +46,7 @@ class TestEffectiveQuotaService:
         ws.addon_public_quota_bonus = addon_public_quota_bonus
         ws.addon_member_bonus = addon_member_bonus
         ws.addon_context_bonus = addon_context_bonus
+        ws.addon_storage_bonus_mb = addon_storage_bonus_mb
         from config.plan_tiers import get_plan_tier
 
         tier = get_plan_tier(plan_name)
@@ -52,6 +54,9 @@ class TestEffectiveQuotaService:
         ws.effective_mcp_calls_per_day = tier.mcp_calls_per_day + addon_mcp_quota_bonus
         ws.effective_max_contexts = tier.max_contexts_per_workspace + addon_context_bonus
         ws.effective_max_members = tier.max_members_per_workspace + addon_member_bonus
+        ws.effective_storage_limit_bytes = (
+            tier.storage_limit_bytes + addon_storage_bonus_mb * 1024 * 1024
+        )
         return ws
 
     @pytest.mark.asyncio
@@ -140,6 +145,7 @@ class TestDashboardAddonReflection:
         ws.addon_member_bonus = 3
         ws.addon_context_bonus = 5
         ws.addon_analysis_bonus = 2  # Issue #494
+        ws.addon_storage_bonus_mb = 250  # Issue #485
         from config.plan_tiers import get_plan_tier
 
         tier = get_plan_tier("pro")
@@ -153,6 +159,7 @@ class TestDashboardAddonReflection:
         ws.effective_max_contexts = tier.max_contexts_per_workspace + 5
         ws.effective_max_members = tier.max_members_per_workspace + 3
         ws.effective_analysis_runs_per_day = tier.analysis_runs_per_day + 2
+        ws.effective_storage_limit_bytes = tier.storage_limit_bytes + 250 * 1024 * 1024
 
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = ws
@@ -170,3 +177,35 @@ class TestDashboardAddonReflection:
         assert quotas["public_calls_per_week"] == tier.public_calls_per_week + 50
         # Issue #494: broadlistening analysis runs/day surfaces here too.
         assert quotas["analysis_runs_per_day"] == tier.analysis_runs_per_day + 2
+        # Issue #485: storage byte limit surfaces here too.
+        assert quotas["storage_bytes_limit"] == tier.storage_limit_bytes + 250 * 1024 * 1024
+
+
+class TestStorageQuotaSurface:
+    """Issue #485: storage_bytes_limit travels through EffectiveQuotaService."""
+
+    def test_free_tier_default_is_100mb(self):
+        """FREE plan default storage cap is 100 MiB (per #485 Phase 1 spec)."""
+        from config.plan_tiers import get_plan_tier
+
+        tier = get_plan_tier("free")
+        assert tier.storage_limit_bytes == 100 * 1024 * 1024
+
+    def test_workspace_effective_storage_property(self):
+        """``Workspace.effective_storage_limit_bytes`` =
+        ``tier.storage_limit_bytes + addon_storage_bonus_mb * 1 MiB``.
+
+        Invoke the property's ``fget`` descriptor against a MagicMock so we
+        don't need a real Workspace row — that would force every NOT NULL
+        column to be supplied just to read one derived value.
+        """
+        from config.plan_tiers import get_plan_tier
+        from models.auth import Workspace
+
+        tier = get_plan_tier("pro")
+        ws = MagicMock()
+        ws._plan_tier = tier
+        ws.addon_storage_bonus_mb = 1024  # +1 GiB
+
+        result = Workspace.effective_storage_limit_bytes.fget(ws)
+        assert result == tier.storage_limit_bytes + 1024 * 1024 * 1024

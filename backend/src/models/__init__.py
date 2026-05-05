@@ -9,9 +9,11 @@
 # ``backend/tests/conftest.py`` so production startup matches the
 # test environment's import graph (#531).
 import models.analysis  # noqa: F401
+import models.file_objects  # noqa: F401  # Issue #485: file storage
 import models.llm_pricing  # noqa: F401
 import models.sleep  # noqa: F401
 from models.config import ContextSearchConfig
+from models.file_objects import FileObject, WorkspaceStorageUsage
 from models.neural import NeuralConfig
 from models.resource import (
     IndexerState,
@@ -24,6 +26,8 @@ from models.resource import (
 __all__ = [
     "NeuralConfig",
     "ContextSearchConfig",
+    "FileObject",
+    "WorkspaceStorageUsage",
     "ResourceEvent",
     "ResourceSchema",
     "IndexerState",

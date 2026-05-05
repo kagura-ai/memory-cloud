@@ -104,6 +104,7 @@ class EffectiveQuotaService:
             "max_members": workspace.effective_max_members,
             "max_contexts": workspace.effective_max_contexts,
             "analysis_runs_per_day": workspace.effective_analysis_runs_per_day,
+            "storage_bytes_limit": workspace.effective_storage_limit_bytes,
         }
 
         logger.debug(

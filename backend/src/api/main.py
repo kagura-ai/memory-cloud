@@ -67,6 +67,7 @@ async def lifespan(app: FastAPI):
         schedule_credentials_tasks,
         schedule_embedding_tasks,
         schedule_erasure_tasks,
+        schedule_file_tasks,
         schedule_mcp_tasks,
         schedule_neural_tasks,
         schedule_resource_indexer_jobs,
@@ -83,6 +84,7 @@ async def lifespan(app: FastAPI):
     schedule_sleep_tasks(scheduler)
     schedule_bm25_drift_tasks(scheduler)
     schedule_erasure_tasks(scheduler)
+    schedule_file_tasks(scheduler)
     start_scheduler()
     logger.info("background_tasks_scheduled")
 
@@ -109,6 +111,12 @@ async def lifespan(app: FastAPI):
 
     shutdown_erasure_executor()
     logger.info("stripe_erasure_executor_stopped")
+
+    # Release blob storage (Issue #485)
+    from storage.factory import close_blob_storage
+
+    await close_blob_storage()
+    logger.info("blob_storage_closed")
 
     # Close database
     from db.base import close_db
@@ -145,6 +153,13 @@ openapi_tags = [
     {
         "name": "attachments",
         "description": "File attachments for memories (upload, download, delete)",
+    },
+    {
+        "name": "files",
+        "description": (
+            "Platform-managed file storage (Issue #485). Presigned upload to "
+            "Cloudflare R2, per-workspace quota."
+        ),
     },
     {"name": "graph", "description": "Neural Memory graph operations"},
     # Integrations
@@ -365,6 +380,7 @@ from api.routes import (  # noqa: E402
     contexts,
     cost_aggregation,  # Issue #472: cost aggregation API (admin + workspace-scoped)
     external_keys,
+    files,  # Issue #485: platform-managed R2 file storage
     graph,
     invitations,
     mcp,
@@ -456,6 +472,9 @@ app.include_router(admin_signup_gate.router, prefix="/api/v1")
 
 # BM25 IDF Drift admin (Issue #343 - cron disabled by default until v0.14.0)
 app.include_router(bm25_drift.router, prefix="/api/v1")
+
+# File storage routes (Issue #485 - platform-managed R2)
+app.include_router(files.router, prefix="/api/v1")
 
 # External API Keys routes (Issue #45 - External keys management)
 app.include_router(external_keys.router, prefix="/api/v1")

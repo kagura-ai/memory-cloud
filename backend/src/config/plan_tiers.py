@@ -67,6 +67,7 @@ class PlanTier:
     public_calls_per_day: int = 0  # Issue #238: Public REST API quota
     public_calls_per_week: int = 0  # Issue #238: Public REST API quota
     analysis_runs_per_day: int = 0  # Issue #494: Memory Broadlistening analyses/day
+    storage_limit_bytes: int = 0  # Issue #485: File-storage hard cap per workspace
     allows_shared_contexts: bool = False  # Issue #271: Shared context feature (Pro only)
     features: frozenset[str] = field(default_factory=frozenset)
 
@@ -89,6 +90,7 @@ PLAN_FREE = PlanTier(
     rest_calls_per_week=0,
     public_calls_per_day=0,  # Free plan: no public contexts
     public_calls_per_week=0,
+    storage_limit_bytes=100 * 1024 * 1024,  # Issue #485: 100 MB
     allows_shared_contexts=False,  # Issue #271: Private contexts only
     features=frozenset({"api_keys", "oauth"}),  # Free plan includes OAuth (App Credentials)
 )
@@ -111,6 +113,7 @@ PLAN_BASIC = PlanTier(
     rest_calls_per_week=5000,
     public_calls_per_day=0,  # Basic plan: no public contexts (PRO only)
     public_calls_per_week=0,
+    storage_limit_bytes=1 * 1024 * 1024 * 1024,  # Issue #485: 1 GiB
     features=frozenset({"api_keys", "reranking", "oauth"}),  # Public contexts removed (PRO only)
 )
 
@@ -133,6 +136,7 @@ PLAN_PRO = PlanTier(
     public_calls_per_day=1000,
     public_calls_per_week=5000,
     analysis_runs_per_day=3,  # Issue #494: Memory Broadlistening (Pro only; FREE/BASIC=0)
+    storage_limit_bytes=10 * 1024 * 1024 * 1024,  # Issue #485: 10 GiB
     features=frozenset(
         {
             "api_keys",
@@ -185,18 +189,21 @@ def _apply_settings_overrides() -> None:
             "max_contexts_per_workspace": settings.plan_free_max_contexts,
             "memory_limit": settings.plan_free_memory_limit,
             "mcp_calls_per_day": settings.plan_free_mcp_calls_per_day,
+            "storage_limit_bytes": settings.plan_free_storage_limit_bytes,
             "display_name": settings.plan_free_display_name,
         },
         PlanName.BASIC: {
             "max_contexts_per_workspace": settings.plan_basic_max_contexts,
             "memory_limit": settings.plan_basic_memory_limit,
             "mcp_calls_per_day": settings.plan_basic_mcp_calls_per_day,
+            "storage_limit_bytes": settings.plan_basic_storage_limit_bytes,
             "display_name": settings.plan_basic_display_name,
         },
         PlanName.PRO: {
             "max_contexts_per_workspace": settings.plan_pro_max_contexts,
             "memory_limit": settings.plan_pro_memory_limit,
             "mcp_calls_per_day": settings.plan_pro_mcp_calls_per_day,
+            "storage_limit_bytes": settings.plan_pro_storage_limit_bytes,
             "display_name": settings.plan_pro_display_name,
         },
     }
