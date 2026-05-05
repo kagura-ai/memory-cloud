@@ -110,6 +110,12 @@ async def lifespan(app: FastAPI):
     shutdown_erasure_executor()
     logger.info("stripe_erasure_executor_stopped")
 
+    # Release blob storage (Issue #485)
+    from storage.factory import close_blob_storage
+
+    await close_blob_storage()
+    logger.info("blob_storage_closed")
+
     # Close database
     from db.base import close_db
 

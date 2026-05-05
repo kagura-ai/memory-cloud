@@ -49,6 +49,9 @@ dependencies = [
     # HTTP Client
     "httpx>=0.27.0",
 
+    # Object Storage (Cloudflare R2 / S3-compatible) — Issue #485
+    "aioboto3>=13.0.0",
+
     # Billing (optional, for SaaS deployments with BILLING_ENABLED=true)
     "stripe>=11.0.0",
 
