@@ -123,6 +123,22 @@ async def run(*, dry_run: bool, batch_size: int) -> dict[str, int]:
                         attachment_id=str(att.id),
                         error=str(exc),
                     )
+                    # If the failure happened mid-transaction (e.g.
+                    # ``flush`` errored before ``commit``), the shared
+                    # ``db`` session is in a poisoned ``failed
+                    # transaction`` state and any subsequent
+                    # ``db.execute`` will raise ``InvalidStateError``,
+                    # aborting the rest of the run. Roll back so the
+                    # next iteration starts fresh (Copilot loop 4
+                    # finding on PR #551).
+                    try:
+                        await db.rollback()
+                    except Exception:  # noqa: BLE001 — best-effort
+                        # Even rollback can fail on a closed session;
+                        # log + continue, the next iteration's
+                        # ``db.execute`` will surface the underlying
+                        # state.
+                        pass
                 last_id = att.id
         break  # exit the get_db async-iterator loop after one session
 

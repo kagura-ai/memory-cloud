@@ -104,20 +104,28 @@ async def _enforce_workspace_membership(
     db: AsyncSession,
     user: dict,
     workspace_id: UUID,
+    *,
+    required_role: str = "member",
 ) -> None:
-    """Authorize ``user`` for ``workspace_id`` (member or higher).
+    """Authorize ``user`` for ``workspace_id`` at ``required_role`` or higher.
 
     ``APIKeyOrSessionUser`` proves identity, not workspace membership.
     Without this gate an authenticated user from workspace A could
     pass workspace B's id in the request body / query and access /
     enumerate B's files. Mirrors the pattern at
     ``api/routes/resource_ingest.py``.
+
+    ``required_role`` defaults to ``"member"`` for write paths
+    (reserve / confirm / delete). Read paths (download-url, list)
+    pass ``"viewer"`` so workspace viewers — who are intentionally
+    read-only members per the repo's role semantics — can read file
+    metadata and download URLs (Copilot loop 4 finding on PR #551).
     """
     permissions = PermissionService(db)
     await permissions.check_workspace_access(
         user_id=str(user.get("user_id", "")),
         workspace_id=workspace_id,
-        required_role="member",
+        required_role=required_role,
     )
 
 
@@ -187,7 +195,7 @@ async def get_download_url(
     db: AsyncSession = Depends(get_db),
 ) -> FileDownloadUrlOut:
     """Return a short-lived presigned GET URL."""
-    await _enforce_workspace_membership(db, user, workspace_id)
+    await _enforce_workspace_membership(db, user, workspace_id, required_role="viewer")
     service = FileStorageService(db)
     url = await service.get_presigned_download(
         workspace_id=workspace_id,
@@ -221,7 +229,7 @@ async def list_files(
     db: AsyncSession = Depends(get_db),
 ) -> list[FileObjectOut]:
     """List uploaded, non-deleted files in the workspace, newest first."""
-    await _enforce_workspace_membership(db, user, workspace_id)
+    await _enforce_workspace_membership(db, user, workspace_id, required_role="viewer")
     service = FileStorageService(db)
     files = await service.list_files(workspace_id=workspace_id, limit=limit)
     return [FileObjectOut.model_validate(f) for f in files]

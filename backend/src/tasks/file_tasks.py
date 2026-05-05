@@ -65,6 +65,16 @@ async def sweep_orphan_files() -> dict[str, int]:
                 FileObject.status == "reserved",
                 FileObject.expires_at.isnot(None),
                 FileObject.expires_at <= threshold,
+                # Defensive: ``delete_file`` on a reserved row already
+                # transitions ``status='failed'`` (loop 3 fix on PR #551),
+                # so under normal flow no soft-deleted reserved row
+                # reaches this query. Adding ``deleted_at IS NULL``
+                # as a SQL invariant pins down the contract — protects
+                # against future regressions where a path soft-deletes
+                # a reserved row without changing status, which would
+                # otherwise cause the sweeper to double-release Redis
+                # quota (Copilot loop 4 finding).
+                FileObject.deleted_at.is_(None),
             )
         )
         candidates = list(result.scalars().all())
