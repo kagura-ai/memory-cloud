@@ -14,10 +14,15 @@ from tasks.bm25_drift_tasks import (
 
 
 def _mock_settings(enabled: bool, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replace get_settings with a controlled instance."""
+    """Replace get_settings with a controlled instance.
+
+    `_env_file=None` keeps the mock isolated — without it, Settings() reads
+    the repo's .env and runs unrelated validators (e.g. EMAIL_PROVIDER) that
+    can fail on environments missing those keys.
+    """
     monkeypatch.setattr(
         "tasks.bm25_drift_tasks.get_settings",
-        lambda: Settings(bm25_drift_cron_enabled=enabled),
+        lambda: Settings(_env_file=None, bm25_drift_cron_enabled=enabled),
     )
 
 

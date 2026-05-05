@@ -318,6 +318,37 @@ class TestRevealTerms:
         assert mock_db.add.call_count == 1
         assert mock_db.commit.await_count == 1
 
+    def test_redis_error_returns_503_with_audit(
+        self,
+        client: TestClient,
+        mock_db: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Redis incident → fail-closed 503 + audit row with rate_limit_unavailable."""
+        from api.routes import bm25_drift as drift_route
+        from utils.exceptions import RedisError
+
+        ctx_id = uuid4()
+        row = _make_drift_row(context_id=ctx_id)
+        row_result = MagicMock()
+        row_result.scalar_one_or_none.return_value = row
+        mock_db.execute.side_effect = [row_result]
+        mock_db.add = MagicMock()
+        mock_db.commit = AsyncMock()
+
+        async def _redis_down(*_a, **_kw) -> int:
+            raise RedisError("connection refused")
+
+        monkeypatch.setattr(drift_route, "increment_counter", _redis_down)
+
+        resp = client.post(
+            "/api/v1/admin/bm25-drift/1/reveal-terms",
+            json={"reason": "Investigating drift alert PSI 0.31"},
+        )
+        assert resp.status_code == 503
+        assert mock_db.add.call_count == 1
+        assert mock_db.commit.await_count == 1
+
     def test_non_admin_returns_403(self, mock_db: MagicMock) -> None:
         """Non-admin role is rejected by require_admin (no override here)."""
         from auth.dependencies import get_current_user

@@ -90,10 +90,11 @@ async def bm25_drift_maintenance_task() -> None:
 def schedule_bm25_drift_tasks(scheduler: AsyncIOScheduler) -> None:
     """Schedule the BM25 IDF drift maintenance cron.
 
-    Only registers when BM25_DRIFT_CRON_ENABLED=true. The flag is read at
-    registration time AND inside the task body (defense in depth — a
-    misconfigured environment cannot accidentally start emitting drift
-    rows in production).
+    Only registers when settings.bm25_drift_cron_enabled is true (env var
+    BM25_DRIFT_CRON_ENABLED feeds the same setting via pydantic-settings).
+    The flag is read at registration time AND inside the task body (defense
+    in depth — a misconfigured environment cannot accidentally start
+    emitting drift rows in production).
     """
     settings = get_settings()
     if not settings.bm25_drift_cron_enabled:

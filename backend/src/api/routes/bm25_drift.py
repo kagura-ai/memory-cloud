@@ -28,6 +28,7 @@ from models.auth import AuditLog, Context
 from models.bm25_drift import Bm25IdfDriftLog
 from services.bm25_drift.orchestrator import Bm25DriftOrchestrator
 from services.bm25_drift.psi_calculator import PsiStatus
+from utils.exceptions import RedisError
 from utils.logger import get_logger
 from utils.sparse_vector import hash_token
 from utils.tokenizer import tokenize_for_search
@@ -458,7 +459,28 @@ async def reveal_drift_terms(
             detail=f"Drift log {row_id} not found.",
         )
 
-    count = await increment_counter(f"rate:bm25_reveal:{user_sub}", ttl=3600)
+    try:
+        count = await increment_counter(f"rate:bm25_reveal:{user_sub}", ttl=3600)
+    except RedisError:
+        # Fail-closed: rate limit is part of the threat model for this admin
+        # endpoint, so treat Redis unavailability as a deny. Audit the
+        # attempt with outcome=rate_limit_unavailable so security teams can
+        # distinguish "user was rate-limited" from "rate-limit infra broke".
+        await _write_reveal_audit(
+            db,
+            admin,
+            user_sub,
+            row_id,
+            outcome="rate_limit_unavailable",
+            reason=body.reason,
+            context_id=str(row.context_id),
+            num_terms_resolved=0,
+            num_terms_total=0,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Rate limit service unavailable.",
+        ) from None
     if count > settings.bm25_reveal_rate_limit_per_hour:
         await _write_reveal_audit(
             db,
