@@ -54,10 +54,31 @@ def _patch_get_db():
 
 
 def _patch_viewer_check_pass():
-    return patch(
-        "mcp_server.tools.files._check_viewer_permission",
-        AsyncMock(return_value=None),
-    )
+    """Patch BOTH gates (write-tool _check_viewer_permission and
+    read-tool _check_workspace_membership) — tests use this helper as
+    a one-stop "auth passes" override regardless of which gate the
+    handler under test is using. Read tools (get_file_download_url,
+    list_files) switched to ``_check_workspace_membership`` in
+    Copilot loop 3 (PR #551) so viewers can read; without patching
+    that helper too, those tests would skip the gate via the
+    membership-only check returning a real error."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _both():
+        with (
+            patch(
+                "mcp_server.tools.files._check_viewer_permission",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "mcp_server.tools.files._check_workspace_membership",
+                AsyncMock(return_value=None),
+            ),
+        ):
+            yield
+
+    return _both()
 
 
 def _payload(text_list) -> dict:
@@ -309,7 +330,11 @@ class TestGetFileDownloadUrl:
         with (
             get_db_patch,
             patch(
-                "mcp_server.tools.files._check_viewer_permission",
+                # Loop 3: read tools use _check_workspace_membership
+                # (membership-only); write tools still use
+                # _check_viewer_permission. This test exercises the
+                # read tool path so it patches the membership variant.
+                "mcp_server.tools.files._check_workspace_membership",
                 AsyncMock(
                     return_value=[
                         MagicMock(

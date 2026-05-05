@@ -232,9 +232,28 @@ class FileStorageService:
             )
             # Detect the partial unique violation without depending on a
             # specific dialect class — the index name surfaces in the
-            # message.
+            # message. Look up the existing row and include its file_id
+            # in the error so SDK callers can switch to it directly
+            # instead of running a separate dedup query (the docstring
+            # of this method advertises this idempotent-retry path).
             if "uq_file_objects_workspace_sha256_active" in str(exc):
-                conflict = ConflictError(f"file with sha256={sha256} already exists in workspace")
+                existing_id = None
+                try:
+                    existing = await self.db.execute(
+                        select(FileObject.id).where(
+                            FileObject.workspace_id == workspace_id,
+                            FileObject.sha256 == sha256,
+                            FileObject.deleted_at.is_(None),
+                            FileObject.status != "failed",
+                        )
+                    )
+                    existing_id = existing.scalar_one_or_none()
+                except Exception:  # noqa: BLE001 — best-effort enrichment
+                    pass
+                msg = f"file with sha256={sha256} already exists in workspace"
+                if existing_id is not None:
+                    msg += f"; reuse file_id={existing_id}"
+                conflict = ConflictError(msg)
                 raise conflict from exc
             raise
 
@@ -262,6 +281,16 @@ class FileStorageService:
 
         Idempotent on retry: if the row is already ``status='uploaded'``
         and the sha256 matches, return the existing row unchanged.
+
+        Phase 1 limitation: this method verifies (a) the R2 object
+        exists, (b) its size matches the reservation, and (c) the
+        client's claimed sha256 matches the reservation's declared
+        sha256. It does NOT recompute the sha256 from the actual bytes
+        in R2 — a workspace member can declare sha256=X at upload-init
+        and PUT bytes with digest Y, and confirm_upload will accept
+        the upload as long as the size matches. Mitigation deferred
+        to Phase 1.5; rationale documented in
+        ``backend/src/storage/r2.py:generate_presigned_put`` SECURITY NOTE.
 
         Raises:
             NotFoundException: file or its workspace not found.
@@ -515,9 +544,16 @@ class FileStorageService:
         # quota stuck until the orphan sweeper runs (15 minutes later
         # by default — long enough on the Free 100 MiB tier to block
         # the next legitimate upload after a single cancelled big one).
+        #
+        # Critically, ALSO transition the row to ``status='failed'`` so
+        # the orphan sweeper's ``WHERE status='reserved'`` filter
+        # excludes it — without this, the sweeper would later call
+        # ``release_storage_bytes`` a second time on the same row and
+        # under-count the workspace's Redis counter.
         if file.status == "reserved":
             reserved_size = file.size_bytes
             file.deleted_at = utcnow()
+            file.status = "failed"
             await self.db.commit()
             await storage_quota_service.release_storage_bytes(
                 workspace_id=workspace_id,

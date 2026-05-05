@@ -312,6 +312,52 @@ async def _get_workspace_member_role(
     return member.role if member else None
 
 
+async def _check_workspace_membership(
+    db: "AsyncSession",
+    user_id: str,
+    workspace_id: UUID | None,
+    operation: str,
+) -> list[TextContent] | None:
+    """Membership-only gate for READ-ONLY MCP tools.
+
+    Issue #485: read tools that accept an optional ``workspace_id``
+    arg (e.g. ``get_file_download_url``, ``list_files``) need to deny
+    callers who are NOT members of the target workspace, but MUST
+    allow callers whose role is ``viewer`` — viewers ARE members and
+    are entitled to read access by design.
+
+    ``_check_viewer_permission`` (below) explicitly rejects viewers
+    as part of write-tool fail-closed gating; using it on read tools
+    accidentally blocks viewer reads. This helper is the read-friendly
+    sibling: it short-circuits only when membership is missing.
+
+    Args:
+        db: Database session.
+        user_id: User ID.
+        workspace_id: Workspace ID (None = skip check).
+        operation: Operation description for error message.
+
+    Returns:
+        Error response if the caller is NOT a member of the
+        workspace, otherwise ``None``.
+    """
+    if not workspace_id:
+        return None
+    user_role = await _get_workspace_member_role(db, user_id, workspace_id)
+    if user_role is None:
+        return _error_response(
+            "permission_denied",
+            f"Cannot {operation}: workspace not accessible.",
+            your_role="not_a_member",
+            required_role="viewer",
+            help=(
+                "Verify the workspace is active and you are a member "
+                "(any role — viewer is sufficient for read access)."
+            ),
+        )
+    return None
+
+
 async def _check_viewer_permission(
     db: "AsyncSession",
     user_id: str,

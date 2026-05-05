@@ -34,6 +34,7 @@ from models.file_objects import FileObject
 from services import storage_quota_service
 from storage.factory import get_blob_storage
 from utils.datetime import utcnow
+from utils.exceptions import ExternalServiceError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -73,7 +74,12 @@ async def sweep_orphan_files() -> dict[str, int]:
         # failed and release Redis quota.
         try:
             storage = get_blob_storage()
-        except RuntimeError:
+        except ExternalServiceError:
+            # R2 not configured in dev/test — sweep the DB rows but skip
+            # the binary cleanup. Same outcome as the legacy
+            # ``RuntimeError`` branch this used to catch (the factory
+            # now raises ``ExternalServiceError`` per the Copilot loop 3
+            # fix on PR #551 so REST/MCP handlers map cleanly to 502).
             storage = None
 
         # Two-phase: mark all rows ``failed`` first, then commit, then

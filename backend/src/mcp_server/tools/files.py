@@ -20,6 +20,7 @@ from mcp.types import TextContent
 
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
+    _check_workspace_membership,
     _error_response,
     _success_response,
 )
@@ -218,9 +219,13 @@ async def handle_get_file_download_url(
         # authenticated MCP caller could pass another workspace's UUID
         # via the ``workspace_id`` arg and obtain download URLs for
         # files they shouldn't be able to read.
-        viewer_err = await _check_viewer_permission(db, user_id, ws, "download files")
-        if viewer_err is not None:
-            return viewer_err
+        #
+        # Use the membership-only variant — viewers ARE members and
+        # ``_check_viewer_permission`` would reject them on this
+        # read-only path (regression caught on PR #551 Copilot loop 3).
+        membership_err = await _check_workspace_membership(db, user_id, ws, "download files")
+        if membership_err is not None:
+            return membership_err
         service = FileStorageService(db)
         try:
             url = await service.get_presigned_download(
@@ -298,10 +303,11 @@ async def handle_list_files(
         # Membership gate (same reasoning as handle_get_file_download_url):
         # without this an authenticated caller could enumerate another
         # workspace's file metadata by supplying its UUID via the
-        # ``workspace_id`` arg.
-        viewer_err = await _check_viewer_permission(db, user_id, ws, "list files")
-        if viewer_err is not None:
-            return viewer_err
+        # ``workspace_id`` arg. Use the membership-only variant so
+        # viewers (read-only role) can list files.
+        membership_err = await _check_workspace_membership(db, user_id, ws, "list files")
+        if membership_err is not None:
+            return membership_err
         service = FileStorageService(db)
         try:
             files = await service.list_files(workspace_id=ws, limit=limit)

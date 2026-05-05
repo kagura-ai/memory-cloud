@@ -50,11 +50,14 @@ def _settings_without_r2():
 
 class TestGetBlobStorage:
     def test_raises_when_r2_endpoint_url_missing(self):
-        """``get_blob_storage`` MUST raise (not silently no-op) when R2
-        is not configured — callers should gate on
-        ``settings.r2_endpoint_url`` upstream."""
+        """``get_blob_storage`` MUST raise ``ExternalServiceError``
+        (HTTP 502) — not RuntimeError — when R2 is not configured, so
+        REST and MCP file handlers map cleanly to 502/service_unavailable
+        instead of an opaque 500 (Copilot loop 3 fix on PR #551)."""
+        from utils.exceptions import ExternalServiceError
+
         with patch("storage.factory.get_settings", return_value=_settings_without_r2()):
-            with pytest.raises(RuntimeError, match="R2 storage is not configured"):
+            with pytest.raises(ExternalServiceError, match="R2"):
                 factory.get_blob_storage()
 
     def test_returns_r2_storage_when_configured(self):

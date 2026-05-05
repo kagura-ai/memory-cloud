@@ -54,11 +54,15 @@ def _patch_storage(storage_or_none=None):
     """Patch ``get_blob_storage`` to return ``storage_or_none``.
 
     ``None`` means the storage layer is not configured (dev/test).
+    Factory now raises ``ExternalServiceError`` (HTTP 502 surface)
+    instead of ``RuntimeError`` since Copilot loop 3 fix on PR #551.
     """
     if storage_or_none is None:
+        from utils.exceptions import ExternalServiceError
+
         return patch(
             "tasks.file_tasks.get_blob_storage",
-            side_effect=RuntimeError("not configured"),
+            side_effect=ExternalServiceError("R2", "not configured"),
         )
     return patch("tasks.file_tasks.get_blob_storage", return_value=storage_or_none)
 
