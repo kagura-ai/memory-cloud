@@ -4,7 +4,7 @@ Issue #343: scheduled job that walks every active context, computes the
 IDF distribution drift via Bm25DriftOrchestrator, and persists one
 bm25_idf_drift_log row per context per cycle.
 
-DISABLED IN PRODUCTION by default (BM25_DRIFT_CRON_ENABLED=false).
+Disabled by default (bm25_drift_cron_enabled=false).
 Mirrors the sleep_enabled precedent at neural/config.py:168.
 """
 
@@ -13,6 +13,7 @@ import os
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from config.settings import get_settings
 from db.base import get_db
 from utils.logger import get_logger
 
@@ -33,7 +34,8 @@ async def bm25_drift_maintenance_task() -> None:
     """
     logger.info("bm25_drift_task_started")
 
-    if os.getenv("BM25_DRIFT_CRON_ENABLED", "false").lower() != "true":
+    settings = get_settings()
+    if not settings.bm25_drift_cron_enabled:
         logger.info("bm25_drift_task_skipped", reason="bm25_drift_disabled")
         return
 
@@ -92,10 +94,8 @@ def schedule_bm25_drift_tasks(scheduler: AsyncIOScheduler) -> None:
     misconfigured environment cannot accidentally start emitting drift
     rows in production).
     """
-    # TODO(v0.14.0): enable BM25_DRIFT_CRON_ENABLED in production
-    # Blockers: #359 (Privacy Policy), #360 (right-to-erasure), and the
-    # follow-up "enable BM25_DRIFT_CRON_ENABLED" issue scoped to v0.14.0.
-    if os.getenv("BM25_DRIFT_CRON_ENABLED", "false").lower() != "true":
+    settings = get_settings()
+    if not settings.bm25_drift_cron_enabled:
         logger.info("bm25_drift_tasks_not_scheduled", reason="bm25_drift_disabled")
         return
 

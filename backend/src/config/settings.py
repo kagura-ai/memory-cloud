@@ -260,6 +260,16 @@ class Settings(BaseSettings):
             s.strip().lower() for s in self.analysis_enabled_workspace_ids.split(",") if s.strip()
         ]
 
+    # BM25 IDF Drift (Issue #343, #378)
+    bm25_drift_cron_enabled: bool = Field(
+        default=False,
+        description="Enable BM25 IDF drift cron in production (Issue #378)",
+    )
+    bm25_reveal_rate_limit_per_hour: int = Field(
+        default=10,
+        description="Max BM25 reveal-terms calls per user per hour (Issue #377)",
+    )
+
     # Plan Tier Overrides (environment variable customization for OSS deployments)
     plan_free_max_contexts: int | None = Field(
         default=None, description="Override FREE plan max contexts per workspace"

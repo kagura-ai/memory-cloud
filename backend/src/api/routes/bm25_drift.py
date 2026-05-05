@@ -1,9 +1,8 @@
 """BM25 IDF drift admin API.
 
 Issue #343: read-only list/detail of bm25_idf_drift_log rows + manual
-trigger for dev/staging. All endpoints are admin-only and tagged
-`(preview)` because the underlying cron is disabled in production until
-v0.14.0.
+trigger for dev/staging + plaintext term reveal endpoint (#377).
+All endpoints are admin-only.
 """
 
 from __future__ import annotations
@@ -15,23 +14,29 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
+from pydantic import Field as PydanticField
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import require_admin
+from auth.dependencies import AdminUser, require_admin
+from config.settings import get_settings
 from db.base import get_db
+from db.qdrant import QDRANT_TOKEN_PAYLOAD_FIELDS, scroll_context_points
+from db.redis import increment_counter
 from models.api_base import TZAwareBaseModel
-from models.auth import Context
+from models.auth import AuditLog, Context
 from models.bm25_drift import Bm25IdfDriftLog
 from services.bm25_drift.orchestrator import Bm25DriftOrchestrator
 from services.bm25_drift.psi_calculator import PsiStatus
 from utils.logger import get_logger
+from utils.sparse_vector import hash_token
+from utils.tokenizer import tokenize_for_search
 
 logger = get_logger(__name__)
 
 router = APIRouter(
     prefix="/admin/bm25-drift",
-    tags=["bm25-drift (preview)"],
+    tags=["bm25-drift"],
 )
 
 
@@ -86,6 +91,34 @@ class Bm25DriftRunRequest(BaseModel):
 
 class Bm25DriftRunResponse(BaseModel):
     scheduled_context_count: int
+
+
+class Bm25DriftRevealRequest(BaseModel):
+    """Body for POST /admin/bm25-drift/{row_id}/reveal-terms."""
+
+    reason: str = PydanticField(
+        ...,
+        min_length=10,
+        description="Justification for viewing plaintext terms (audit-logged)",
+    )
+
+
+class ResolvedTermEntry(BaseModel):
+    """Single entry from top_divergent_terms with resolved token."""
+
+    index: int
+    df_memory: float
+    df_global: float
+    idf_memory: float
+    idf_global: float
+    delta: float
+    token: str | None = None
+
+
+class Bm25DriftRevealResponse(Bm25DriftDetail):
+    """Drift detail + resolved plaintext terms."""
+
+    resolved_terms: list[ResolvedTermEntry]
 
 
 # Single source of truth for the status enum: derive from the Literal in
@@ -179,25 +212,7 @@ async def get_drift_log_detail(
             detail=f"Drift log {row_id} not found.",
         )
 
-    ctx_result = await db.execute(
-        select(Context.id, Context.name, Context.display_name, Context.deleted_at).where(
-            Context.id == row.context_id
-        )
-    )
-    ctx_row = ctx_result.first()
-    context_deleted = False
-    if ctx_row is not None:
-        _cid, cname, cdisplay, cdeleted = ctx_row
-        if cdeleted is not None:
-            row.context_name = None
-            context_deleted = True
-        else:
-            row.context_name = cdisplay or cname
-    else:
-        row.context_name = None
-        context_deleted = True
-
-    row.context_deleted = context_deleted
+    await _apply_context_name(db, row)
 
     # Audit log — terms count only, never term content.
     logger.info(
@@ -291,3 +306,157 @@ async def _run_drift_job(context_id: UUID) -> None:
                 exc_info=True,
             )
         return
+
+
+async def _apply_context_name(db: AsyncSession, row: Bm25IdfDriftLog) -> None:
+    """Set synthetic row.context_name + row.context_deleted from the Context table.
+
+    These attributes are not mapped columns on Bm25IdfDriftLog — assigning
+    to them populates response shape without dirtying the SQLAlchemy session.
+    """
+    ctx_result = await db.execute(
+        select(Context.name, Context.display_name, Context.deleted_at).where(
+            Context.id == row.context_id
+        )
+    )
+    ctx_row = ctx_result.first()
+    if ctx_row is None:
+        row.context_name = None
+        row.context_deleted = True
+        return
+    cname, cdisplay, cdeleted = ctx_row
+    if cdeleted is not None:
+        row.context_name = None
+        row.context_deleted = True
+    else:
+        row.context_name = cdisplay or cname
+        row.context_deleted = False
+
+
+def _resolve_payload_tokens(points: list, needed: set[int]) -> dict[int, str]:
+    """Return {hash: token} for indices in `needed`, scanning payloads with early exit.
+
+    Reads pre-tokenized fields populated by memory_service. Falls back to
+    re-tokenizing summary text only for legacy points written before the
+    token payload fields existed. Stops as soon as every requested index
+    has been resolved — for a context with millions of unique tokens but
+    only ~20 needed, this caps work near the first few points.
+    """
+    found: dict[int, str] = {}
+
+    def _scan(tokens_str: str) -> bool:
+        for tok in tokens_str.split():
+            h = hash_token(tok)
+            if h in needed and h not in found:
+                found[h] = tok
+                if len(found) == len(needed):
+                    return True
+        return False
+
+    for point in points:
+        if len(found) == len(needed):
+            return found
+        payload = point.payload or {}
+        token_strs = [s for s in (payload.get(f) for f in QDRANT_TOKEN_PAYLOAD_FIELDS) if s]
+        if token_strs:
+            for s in token_strs:
+                if _scan(s):
+                    return found
+            continue
+        for text_field in ("summary", "context_summary"):
+            text = payload.get(text_field)
+            if text and _scan(tokenize_for_search(text)):
+                return found
+    return found
+
+
+@router.post("/{row_id}/reveal-terms", response_model=Bm25DriftRevealResponse)
+async def reveal_drift_terms(
+    row_id: int,
+    body: Bm25DriftRevealRequest,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_db),
+) -> Bm25DriftRevealResponse:
+    """Resolve mmh3-hashed term indices in top_divergent_terms to plaintext.
+
+    Reads pre-tokenized fields from the Qdrant payload (see
+    QDRANT_TOKEN_PAYLOAD_FIELDS) populated by memory_service, recomputes
+    mmh3 hashes via utils.sparse_vector.hash_token, and matches against
+    the stored indices. Falls back to re-tokenizing summary text only
+    for legacy points written before the token payload fields existed.
+    Rate-limited per user. Every call is audit-logged to both the DB
+    and structlog (term content is never logged).
+    """
+    settings = get_settings()
+
+    row_result = await db.execute(select(Bm25IdfDriftLog).where(Bm25IdfDriftLog.id == row_id))
+    row = row_result.scalar_one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Drift log {row_id} not found.",
+        )
+
+    user_sub = admin.get("sub") or admin.get("user_id")
+    if not user_sub:
+        # require_admin guarantees an authenticated dict; missing both keys
+        # is an upstream bug, not a routable identity.
+        raise HTTPException(status_code=500, detail="Admin identity missing sub/user_id.")
+    count = await increment_counter(f"rate:bm25_reveal:{user_sub}", ttl=3600)
+    if count > settings.bm25_reveal_rate_limit_per_hour:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"BM25 reveal rate limit exceeded "
+                f"({settings.bm25_reveal_rate_limit_per_hour}/hour). "
+                f"Try again later."
+            ),
+        )
+
+    top_terms: list[dict[str, Any]] = row.top_divergent_terms or []
+    needed: set[int] = {entry["index"] for entry in top_terms}
+    if needed:
+        points = await scroll_context_points(
+            str(row.context_id),
+            with_payload=[*QDRANT_TOKEN_PAYLOAD_FIELDS, "summary", "context_summary"],
+        )
+        hash_to_token = _resolve_payload_tokens(points, needed)
+    else:
+        hash_to_token = {}
+
+    resolved_terms = [
+        ResolvedTermEntry(**entry, token=hash_to_token.get(entry["index"])) for entry in top_terms
+    ]
+    resolved_count = sum(1 for t in resolved_terms if t.token is not None)
+
+    await _apply_context_name(db, row)
+
+    audit = AuditLog(
+        user_email=admin.get("email", "unknown"),
+        user_id=user_sub,
+        action="bm25_drift_reveal_terms",
+        resource=f"bm25_drift_log:{row_id}",
+        user_metadata={
+            "context_id": str(row.context_id),
+            "reason": body.reason,
+            "num_terms_resolved": resolved_count,
+            "num_terms_total": len(top_terms),
+        },
+    )
+    db.add(audit)
+    await db.commit()
+
+    logger.info(
+        "bm25_drift_terms_revealed",
+        row_id=row_id,
+        context_id=str(row.context_id),
+        reason=body.reason,
+        num_terms_resolved=resolved_count,
+        num_terms_total=len(top_terms),
+    )
+
+    detail = Bm25DriftDetail.model_validate(row, from_attributes=True)
+    return Bm25DriftRevealResponse(
+        **detail.model_dump(),
+        resolved_terms=resolved_terms,
+    )
