@@ -9,6 +9,7 @@ Collection design (post Single Collection Migration, Issue #334):
 - Full-text index on summary + context_summary; keyword index on scope, type, context_id
 """
 
+from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID
 
@@ -1128,3 +1129,67 @@ async def delete_user_points(user_id: str) -> dict[str, int]:
             raise QdrantError(f"Failed to delete user points from {collection_name}: {e}") from e
 
     return deleted_per_collection
+
+
+# Payload field names that memory_service writes per point (issue #16),
+# read by the BM25 drift reveal-terms endpoint (#377). Source of truth so
+# writer (services/memory_service.py) and reader cannot drift apart.
+QDRANT_TOKEN_PAYLOAD_FIELDS: tuple[str, ...] = (
+    "summary_tokens",
+    "context_summary_tokens",
+    "content_tokens",
+    "summary_reading",
+)
+
+
+async def _admin_scroll_context_points(
+    context_id: str,
+    *,
+    with_vectors: bool = False,
+    with_payload: bool | list[str] = True,
+    collection_name: str = KAGURA_MEMORIES_COLLECTION,
+) -> AsyncIterator[list]:
+    """Yield Qdrant point pages for a context, one page at a time. ADMIN-ONLY.
+
+    The leading underscore + `_admin_` prefix signal that this helper
+    deliberately skips workspace + user isolation so every point in the
+    context is returned regardless of ownership. New callers must opt
+    into the isolation bypass explicitly — do NOT use this from any
+    non-admin code path.
+
+    Used by the BM25 drift reveal-terms endpoint (#377) to rebuild the
+    token → mmh3-hash mapping for reverse lookup.
+
+    Yields pages (lists of Record) instead of materializing the full
+    point set so callers can break early once they have enough data —
+    a 100K-point context yields ~500 pages of 200, but the caller
+    typically needs only a handful of points to satisfy a reverse-lookup.
+
+    Args:
+        context_id: Context UUID string to filter on.
+        with_vectors: If True, include dense + sparse vectors in results.
+        with_payload: True for full payload, list[str] to fetch only
+            the named keys (recommended on hot paths to cut bandwidth).
+        collection_name: Qdrant collection name.
+
+    Yields:
+        Successive lists of qdrant_client.models.Record, one per scroll page.
+    """
+    client = get_qdrant_client()
+    offset: str | int | None = None
+
+    while True:
+        points, next_offset = await client.scroll(
+            collection_name=collection_name,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="context_id", match=MatchValue(value=context_id))]
+            ),
+            limit=200,
+            offset=offset,
+            with_payload=with_payload,
+            with_vectors=with_vectors,
+        )
+        yield points
+        if next_offset is None:
+            break
+        offset = next_offset

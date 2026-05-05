@@ -23,7 +23,12 @@ from db.base import get_db
 
 @pytest.fixture
 def admin_user() -> dict:
-    return {"email": "admin@example.com", "role": "admin"}
+    return {
+        "email": "admin@example.com",
+        "role": "admin",
+        "user_id": "admin-user-id",
+        "sub": "admin-sub",
+    }
 
 
 @pytest.fixture
@@ -127,7 +132,7 @@ class TestDetail:
         row_result = MagicMock()
         row_result.scalar_one_or_none.return_value = row
         ctx_result = MagicMock()
-        ctx_result.first.return_value = (ctx_id, "ctx-name", "Ctx Display", None)
+        ctx_result.first.return_value = ("ctx-name", "Ctx Display", None)
         mock_db.execute.side_effect = [row_result, ctx_result]
 
         resp = client.get("/api/v1/admin/bm25-drift/1")
@@ -153,7 +158,7 @@ class TestDetail:
         ctx_result = MagicMock()
         # deleted_at is non-null → context is treated as deleted.
         deleted_at = datetime(2026, 4, 1, tzinfo=UTC)
-        ctx_result.first.return_value = (ctx_id, "ctx", "Ctx", deleted_at)
+        ctx_result.first.return_value = ("ctx", "Ctx", deleted_at)
         mock_db.execute.side_effect = [row_result, ctx_result]
 
         resp = client.get("/api/v1/admin/bm25-drift/1")
@@ -161,6 +166,220 @@ class TestDetail:
         body = resp.json()
         assert body["row"]["context_deleted"] is True
         assert body["row"]["context_name"] is None
+
+
+class TestRevealTerms:
+    """Tests for POST /admin/bm25-drift/{row_id}/reveal-terms (#377)."""
+
+    @pytest.fixture
+    def patch_reveal_deps(self, monkeypatch: pytest.MonkeyPatch):
+        """Patch Qdrant scroll + Redis counter + collection routing at the route module."""
+        from api.routes import bm25_drift as drift_route
+
+        scroll_calls: list[tuple[str, str | None]] = []
+        counter_calls: list[tuple[str, int | None]] = []
+
+        async def _scroll(context_id: str, **kw: object):
+            scroll_calls.append((context_id, kw.get("collection_name")))  # type: ignore[arg-type]
+            point = SimpleNamespace(
+                payload={
+                    "summary_tokens": "alpha beta gamma",
+                    "context_summary_tokens": "",
+                    "content_tokens": "",
+                    "summary_reading": "",
+                }
+            )
+            yield [point]
+
+        async def _increment(key: str, ttl: int | None = None) -> int:
+            counter_calls.append((key, ttl))
+            return len(counter_calls)
+
+        async def _resolve(*_a, **_kw) -> str:
+            return "kagura_memories_qwen3_1024"
+
+        monkeypatch.setattr(drift_route, "_admin_scroll_context_points", _scroll)
+        monkeypatch.setattr(drift_route, "increment_counter", _increment)
+        monkeypatch.setattr(drift_route, "resolve_collection_name", _resolve)
+        return scroll_calls, counter_calls
+
+    def test_returns_resolved_terms_on_success(
+        self,
+        client: TestClient,
+        mock_db: MagicMock,
+        patch_reveal_deps,
+    ) -> None:
+        from utils.sparse_vector import hash_token
+
+        # Use the centralized helper so the test can't drift from the
+        # producer/consumer if the hash params (seed/signed) ever change.
+        ctx_id = uuid4()
+        alpha_hash = hash_token("alpha")
+        row = _make_drift_row(context_id=ctx_id)
+        row.top_divergent_terms = [
+            {
+                "index": alpha_hash,
+                "df_memory": 10,
+                "df_global": 50,
+                "idf_memory": 1.5,
+                "idf_global": 0.3,
+                "delta": 1.2,
+            },
+            {
+                "index": 99999999,  # unresolvable
+                "df_memory": 5,
+                "df_global": 25,
+                "idf_memory": 1.1,
+                "idf_global": 0.2,
+                "delta": 0.9,
+            },
+        ]
+        row_result = MagicMock()
+        row_result.scalar_one_or_none.return_value = row
+        ctx_result = MagicMock()
+        ctx_result.first.return_value = ("ctx", "Ctx", None)
+        mock_db.execute.side_effect = [row_result, ctx_result]
+        mock_db.add = MagicMock()
+        mock_db.commit = AsyncMock()
+
+        scroll_calls, _ = patch_reveal_deps
+        resp = client.post(
+            f"/api/v1/admin/bm25-drift/{row.id}/reveal-terms",
+            json={"reason": "Investigating drift alert PSI 0.31"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        terms = body["resolved_terms"]
+        assert len(terms) == 2
+        assert terms[0]["token"] == "alpha"
+        assert terms[1]["token"] is None
+        # Audit log was written and committed.
+        assert mock_db.add.call_count == 1
+        assert mock_db.commit.await_count == 1
+        # Scroll was called with the per-context routed collection name.
+        assert len(scroll_calls) == 1
+        assert scroll_calls[0][1] == "kagura_memories_qwen3_1024"
+
+    def test_missing_row_returns_404(
+        self,
+        client: TestClient,
+        mock_db: MagicMock,
+        patch_reveal_deps,
+    ) -> None:
+        row_result = MagicMock()
+        row_result.scalar_one_or_none.return_value = None
+        mock_db.execute.side_effect = [row_result]
+        mock_db.add = MagicMock()
+        mock_db.commit = AsyncMock()
+
+        resp = client.post(
+            "/api/v1/admin/bm25-drift/9999/reveal-terms",
+            json={"reason": "Investigating drift alert PSI 0.31"},
+        )
+        assert resp.status_code == 404
+        # 404 branch now writes a denied-attempt audit row.
+        assert mock_db.add.call_count == 1
+        assert mock_db.commit.await_count == 1
+
+    def test_short_reason_returns_422(self, client: TestClient) -> None:
+        resp = client.post(
+            "/api/v1/admin/bm25-drift/1/reveal-terms",
+            json={"reason": "too short"},  # 9 chars, min is 10
+        )
+        assert resp.status_code == 422
+
+    def test_missing_reason_returns_422(self, client: TestClient) -> None:
+        resp = client.post("/api/v1/admin/bm25-drift/1/reveal-terms", json={})
+        assert resp.status_code == 422
+
+    def test_rate_limit_returns_429(
+        self,
+        client: TestClient,
+        mock_db: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from api.routes import bm25_drift as drift_route
+
+        ctx_id = uuid4()
+        row = _make_drift_row(context_id=ctx_id)
+        row_result = MagicMock()
+        row_result.scalar_one_or_none.return_value = row
+        mock_db.execute.side_effect = [row_result]
+        mock_db.add = MagicMock()
+        mock_db.commit = AsyncMock()
+
+        async def _scroll(*_a, **_kw):
+            if False:
+                yield []  # pragma: no cover - never reached, still an async generator
+
+        async def _over_limit(*_a, **_kw) -> int:
+            # Default settings.bm25_reveal_rate_limit_per_hour = 10.
+            return 11
+
+        monkeypatch.setattr(drift_route, "_admin_scroll_context_points", _scroll)
+        monkeypatch.setattr(drift_route, "increment_counter", _over_limit)
+
+        resp = client.post(
+            "/api/v1/admin/bm25-drift/1/reveal-terms",
+            json={"reason": "Investigating drift alert PSI 0.31"},
+        )
+        assert resp.status_code == 429
+        # 429 branch now writes a denied-attempt audit row.
+        assert mock_db.add.call_count == 1
+        assert mock_db.commit.await_count == 1
+
+    def test_redis_error_returns_503_with_audit(
+        self,
+        client: TestClient,
+        mock_db: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Redis incident → fail-closed 503 + audit row with rate_limit_unavailable."""
+        from api.routes import bm25_drift as drift_route
+        from utils.exceptions import RedisError
+
+        ctx_id = uuid4()
+        row = _make_drift_row(context_id=ctx_id)
+        row_result = MagicMock()
+        row_result.scalar_one_or_none.return_value = row
+        mock_db.execute.side_effect = [row_result]
+        mock_db.add = MagicMock()
+        mock_db.commit = AsyncMock()
+
+        async def _redis_down(*_a, **_kw) -> int:
+            raise RedisError("connection refused")
+
+        monkeypatch.setattr(drift_route, "increment_counter", _redis_down)
+
+        resp = client.post(
+            "/api/v1/admin/bm25-drift/1/reveal-terms",
+            json={"reason": "Investigating drift alert PSI 0.31"},
+        )
+        assert resp.status_code == 503
+        assert mock_db.add.call_count == 1
+        assert mock_db.commit.await_count == 1
+
+    def test_non_admin_returns_403(self, mock_db: MagicMock) -> None:
+        """Non-admin role is rejected by require_admin (no override here)."""
+        from auth.dependencies import get_current_user
+
+        async def _non_admin():
+            return {"email": "user@example.com", "role": "user"}
+
+        async def _db():
+            yield mock_db
+
+        app.dependency_overrides[get_current_user] = _non_admin
+        app.dependency_overrides[get_db] = _db
+        try:
+            tc = TestClient(app, raise_server_exceptions=False)
+            resp = tc.post(
+                "/api/v1/admin/bm25-drift/1/reveal-terms",
+                json={"reason": "Investigating drift alert PSI 0.31"},
+            )
+            assert resp.status_code == 403
+        finally:
+            app.dependency_overrides.clear()
 
 
 class TestRunTrigger:

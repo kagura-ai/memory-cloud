@@ -17,6 +17,16 @@ import mmh3
 from utils.tokenizer import tokenize_for_search
 
 
+def hash_token(token: str) -> int:
+    """Token-to-sparse-index hash used by the BM25 producer + drift consumer.
+
+    Centralized so the document writer (sparse vector builder) and the
+    drift-log reverse-lookup (reveal-terms endpoint) cannot diverge on
+    `signed=False` or hash seed.
+    """
+    return mmh3.hash(token, signed=False)
+
+
 def tokens_to_sparse_vector(
     tokens_str: str,
     weight: float = 1.0,
@@ -34,7 +44,7 @@ def tokens_to_sparse_vector(
         return {}
     tokens = tokens_str.split()
     counts = Counter(tokens)
-    return {mmh3.hash(token, signed=False): count * weight for token, count in counts.items()}
+    return {hash_token(token): count * weight for token, count in counts.items()}
 
 
 def build_document_sparse_vector(
@@ -124,6 +134,6 @@ def build_query_sparse_vector(query_tokens: str) -> tuple[list[int], list[float]
     if not query_tokens:
         return [], []
     unique_tokens = sorted(set(query_tokens.split()))
-    indices = [mmh3.hash(t, signed=False) for t in unique_tokens]
+    indices = [hash_token(t) for t in unique_tokens]
     values = [1.0] * len(indices)
     return indices, values
