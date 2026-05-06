@@ -152,11 +152,18 @@ class UnsupportedMediaTypeError(MemoryCloudException):
     """Content-Type not in the platform allow-list (415).
 
     Issue #553: returned by ``FileStorageService.reserve_upload`` when the
-    declared ``content_type`` is not in ``settings.allowed_file_content_types_set``.
+    declared ``content_type`` is not in the platform allow-list. The
+    comparison normalizes the declared value before lookup: RFC 7231
+    parameters are stripped (``text/plain; charset=utf-8`` → ``text/plain``)
+    and the bare type/subtype is lowercased (RFC 6838). So this 415 fires
+    only after shape validation passes — malformed input (control chars,
+    non type/subtype shape) is reported as ``ValidationError`` (422),
+    preserving the policy-vs-shape semantic split.
+
     Distinct from ``ValidationError`` so REST callers receive HTTP 415
     (semantically correct for "I refuse to process this content_type")
-    instead of the generic 422 used for other shape/format failures, and
-    so MCP callers see a dedicated ``unsupported_media_type`` vocab.
+    instead of the generic 422 used for shape/format failures, and so MCP
+    callers see a dedicated ``unsupported_media_type`` vocab.
 
     The error_code uses the dedicated ``MEDIA-`` namespace rather than
     ``VAL-`` — this is a capability/policy rejection, not a shape/format

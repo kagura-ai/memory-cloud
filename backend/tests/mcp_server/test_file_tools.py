@@ -212,6 +212,10 @@ class TestInitFileUpload:
         body = _payload(out)
         assert body["error"] == "unsupported_media_type"
         assert "application/x-msdownload" in body["message"]
+        # Loop 2: forward exc.details so MCP clients mirror REST 415 body
+        # without parsing message text (same pattern as analysis._gate_error_response).
+        assert body["content_type"] == "application/x-msdownload"
+        assert body["allowed"] == ["application/pdf", "image/png"]
 
     @pytest.mark.asyncio
     async def test_conflict_maps_to_conflict_error(self):
