@@ -30,7 +30,6 @@ swept by the orphan task (Commit 8) — the sweeper calls
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
@@ -53,14 +52,9 @@ from utils.exceptions import (
     ValidationError,
 )
 from utils.logger import get_logger
+from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
 
 logger = get_logger(__name__)
-
-# RFC 7231 type/subtype shape: token "/" token, where token is the RFC 7230
-# tchar set (alphanumerics + a small symbol set). We compare on the lowercased
-# bare type/subtype, so the regex only needs to accept the lowercase range
-# even though RFC 7230 token is technically case-insensitive.
-_MEDIA_TYPE_RE = re.compile(r"^[a-z0-9!#$%&'*+\-.^_`|~]+/[a-z0-9!#$%&'*+\-.^_`|~]+$")
 
 
 @dataclass(frozen=True)
@@ -195,8 +189,8 @@ class FileStorageService:
         # them but the allow-list is keyed on bare type/subtype. Malformed
         # shape (no slash, empty type/subtype, garbage chars) is a 422
         # validation error — distinct from the 415 policy rejection below.
-        base_content_type = content_type.split(";", 1)[0].strip().lower()
-        if not _MEDIA_TYPE_RE.match(base_content_type):
+        base_content_type = normalize_media_type(content_type)
+        if not MEDIA_TYPE_RE.match(base_content_type):
             msg = f"content_type must be 'type/subtype' (got {content_type!r})"
             raise ValidationError(msg)
         # Empty allow-list rejects everything (fail-closed).

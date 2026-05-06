@@ -406,6 +406,32 @@ class TestReserveUpload:
                 sha256=VALID_SHA,
             )
 
+    def test_settings_rejects_malformed_allow_list_at_boot(self):
+        """Boot-time fail-fast: malformed entries crash app startup so they
+        never leak into ``UnsupportedMediaTypeError.details['allowed']``."""
+        import pydantic
+
+        from config.settings import Settings
+
+        # Valid shapes are accepted (sanity).
+        Settings(allowed_file_content_types="image/png,application/pdf")
+        # Empty / whitespace / commas-only is fail-closed, NOT malformed.
+        Settings(allowed_file_content_types="")
+        Settings(allowed_file_content_types="   ")
+        Settings(allowed_file_content_types=",,,")
+        # Parameter-laden entries normalize and pass.
+        Settings(allowed_file_content_types="text/plain; charset=utf-8, image/png")
+
+        # Malformed shapes (no slash, embedded space, etc.) fail loud.
+        with pytest.raises(pydantic.ValidationError, match="malformed entries"):
+            Settings(allowed_file_content_types="image/png,garbage")
+        with pytest.raises(pydantic.ValidationError, match="malformed entries"):
+            Settings(allowed_file_content_types="image / png")
+        with pytest.raises(pydantic.ValidationError, match="malformed entries"):
+            Settings(allowed_file_content_types="/no-type")
+        with pytest.raises(pydantic.ValidationError, match="malformed entries"):
+            Settings(allowed_file_content_types="no-subtype/")
+
     @pytest.mark.asyncio
     async def test_env_allowlist_strips_parameters_in_entries(
         self, service, db, workspace_id, monkeypatch
