@@ -30,6 +30,7 @@ swept by the orphan task (Commit 8) — the sweeper calls
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
@@ -54,6 +55,12 @@ from utils.exceptions import (
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# RFC 7231 type/subtype shape: token "/" token, where token is the RFC 7230
+# tchar set (alphanumerics + a small symbol set). We compare on the lowercased
+# bare type/subtype, so the regex only needs to accept the lowercase range
+# even though RFC 7230 token is technically case-insensitive.
+_MEDIA_TYPE_RE = re.compile(r"^[a-z0-9!#$%&'*+\-.^_`|~]+/[a-z0-9!#$%&'*+\-.^_`|~]+$")
 
 
 @dataclass(frozen=True)
@@ -176,12 +183,24 @@ class FileStorageService:
         if len(sha256) != 64:
             msg = f"sha256 must be 64 hex chars, got {len(sha256)}"
             raise ValidationError(msg)
+        # Reject control characters in the raw content_type before any further
+        # work — the value is later signed by R2 SigV4 as the ContentType
+        # header, so an embedded CR/LF/NUL is a header-injection primitive
+        # against R2 (defense-in-depth — R2 itself also validates).
+        if any(c in content_type for c in "\r\n\x00"):
+            msg = "content_type contains control characters"
+            raise ValidationError(msg)
         # Strip RFC 7231 media-type parameters ("text/plain; charset=utf-8")
-        # before compare — browsers and multipart uploads routinely attach
-        # them but the allow-list is keyed on bare type/subtype. Empty
-        # allow-list rejects everything (fail-closed).
-        allowed = settings.allowed_file_content_types_set
+        # before compare; browsers and multipart uploads routinely attach
+        # them but the allow-list is keyed on bare type/subtype. Malformed
+        # shape (no slash, empty type/subtype, garbage chars) is a 422
+        # validation error — distinct from the 415 policy rejection below.
         base_content_type = content_type.split(";", 1)[0].strip().lower()
+        if not _MEDIA_TYPE_RE.match(base_content_type):
+            msg = f"content_type must be 'type/subtype' (got {content_type!r})"
+            raise ValidationError(msg)
+        # Empty allow-list rejects everything (fail-closed).
+        allowed = settings.allowed_file_content_types_set
         if base_content_type not in allowed:
             raise UnsupportedMediaTypeError(
                 content_type=content_type,

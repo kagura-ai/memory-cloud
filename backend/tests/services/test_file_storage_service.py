@@ -356,6 +356,88 @@ class TestReserveUpload:
                 sha256=VALID_SHA,
             )
 
+    @pytest.mark.parametrize(
+        "bad_ct",
+        [
+            "image/png\r\nX-Injected: yes",  # CRLF header injection
+            "image/png\nfoo",  # bare LF
+            "image/png\rfoo",  # bare CR
+            "image/png\x00null",  # NUL byte
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_control_chars_in_content_type_raise_validation(
+        self, service, workspace_id, bad_ct
+    ):
+        """Defense in depth against R2 ContentType header injection — ValidationError (422), not 415."""
+        with pytest.raises(ValidationError, match="control characters"):
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x.png",
+                content_type=bad_ct,
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+
+    @pytest.mark.parametrize(
+        "bad_ct",
+        [
+            "no-slash",  # no separator
+            "/no-type",  # empty type
+            "no-subtype/",  # empty subtype
+            ";",  # bare param separator
+            "image/png garbage",  # space in subtype
+            "",  # empty (Pydantic blocks this at REST, but MCP coerces str(...))
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_invalid_type_subtype_shape_raises_validation(
+        self, service, workspace_id, bad_ct
+    ):
+        """Malformed type/subtype is a 422 shape error, not a 415 policy rejection."""
+        with pytest.raises(ValidationError, match="type/subtype"):
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x",
+                content_type=bad_ct,
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+
+    @pytest.mark.asyncio
+    async def test_env_allowlist_strips_parameters_in_entries(
+        self, service, db, workspace_id, monkeypatch
+    ):
+        """An operator who pastes a parameter-laden MIME into the env var
+        (``text/plain; charset=utf-8``) should still match a bare upload —
+        without parser-side stripping the entry would silently never match."""
+        from config.settings import get_settings
+
+        settings = get_settings()
+        monkeypatch.setattr(
+            settings,
+            "allowed_file_content_types",
+            "text/plain; charset=utf-8, application/pdf",
+        )
+
+        ws = _make_workspace(workspace_id)
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=ws)
+        db.execute.return_value = result
+
+        with _patch_quota_reserve(succeed=True):
+            out = await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="notes.txt",
+                content_type="text/plain",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+        assert isinstance(out, ReserveResult)
+
 
 class TestConfirmUpload:
     @pytest.mark.asyncio

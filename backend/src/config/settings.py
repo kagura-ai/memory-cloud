@@ -370,8 +370,18 @@ class Settings(BaseSettings):
 
     @property
     def allowed_file_content_types_set(self) -> set[str]:
-        """Parsed allow-list (lower-cased, whitespace-stripped). Empty = fail-closed."""
-        return {m.strip().lower() for m in self.allowed_file_content_types.split(",") if m.strip()}
+        """Parsed allow-list (bare type/subtype, lower-cased). Empty = fail-closed.
+
+        Mirrors ``FileStorageService.reserve_upload``'s parameter-stripping so
+        an operator value like ``text/plain; charset=utf-8`` in the env var
+        normalizes to ``text/plain`` and matches an upload that strips the
+        same parameters at compare time.
+        """
+        return {
+            normalized
+            for s in self.allowed_file_content_types.split(",")
+            if (normalized := s.split(";", 1)[0].strip().lower())
+        }
 
     @field_validator("resend_dpa_accepted_at", mode="before")
     @classmethod

@@ -46,9 +46,12 @@ def _exc_to_error_response(exc: Exception) -> list[TextContent]:
     same vocabulary as REST callers.
     """
     if isinstance(exc, UnsupportedMediaTypeError):
-        # Issue #553: distinct vocab from validation_error so SDKs can route
-        # MIME-rejected uploads to a friendlier UI path (the allow-list is in
-        # ``exc.details["allowed"]``) without inspecting message text.
+        # Issue #553: distinct MCP vocab so SDKs can route MIME-rejected
+        # uploads to a dedicated UI path rather than parsing the generic
+        # ``validation_error`` vocab. ``exc.details["allowed"]`` is server-
+        # side context only — extending the MCP envelope to forward
+        # structured details is out of scope here (REST already exposes
+        # ``details.allowed``; MCP envelope unification is a follow-up).
         return _error_response("unsupported_media_type", str(exc))
     if isinstance(exc, ValidationError):
         return _error_response("validation_error", str(exc))
