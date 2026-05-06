@@ -1,6 +1,20 @@
 # Architecture Overview
 
-Kagura Memory Cloud is built with a modern, scalable architecture designed for production use.
+Kagura Memory Cloud is built with a modern, scalable architecture designed for production use. It implements the **LLM Knowledge Base** pattern (Karpathy's [LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)) at team scale — see [LLM Knowledge Base — 5-Layer Mapping](#llm-knowledge-base--5-layer-mapping) below.
+
+## LLM Knowledge Base — 5-Layer Mapping
+
+Karpathy's pattern describes any "living knowledge base" as 5 layers. Kagura's implementation:
+
+| Layer | Karpathy's intent | Kagura implementation | Code location |
+|---|---|---|---|
+| **Ingest** | Raw source intake | REST `/api/v1/memory`, MCP `remember`, R2 file storage (binary blobs), resource tokens for external feeds | `backend/src/api/routes/memory.py`, `backend/src/api/routes/files.py`, `backend/src/services/resource_indexer.py` |
+| **Compile** | LLM rewrites raw → structured wiki pages | **MCP-as-compile-API**: chat agent emits structured `remember(summary, content, type, tags, importance)` per fact (continuous micro-compile). Sleep Maintenance phases (consolidation, deduplication, edge formation) handle batch consolidation. | `backend/src/mcp_server/tools/memory.py`, `backend/src/services/sleep/orchestrator.py` |
+| **Index** | Page-level TOC for navigation | **Triple-index, all auto-maintained**: BM25 (keyword) + Qdrant vector (semantic) + Hebbian graph (relational). Context-level TOC via `list_contexts` / `get_context_info`. | `backend/src/services/search_service.py`, `backend/src/services/graph_service.py`, Qdrant collection |
+| **Query** | Read pages directly, retrieve when needed | Hybrid Search (60% semantic + 40% BM25), AI Reranker (Voyage / Cohere / Ollama), `explore` graph traversal for serendipity | `backend/src/services/search_service.py`, `backend/src/services/reranker_service.py` |
+| **Enhance** | Compounding loop — answers feed back as new pages | **Hebbian learning**: every `recall()` strengthens edges between co-retrieved memories (zero LLM cost background graph evolution). Sleep Maintenance phases reorganize periodically. **Explicit write-back**: `/kagura-memory:session-summary` skill encourages user/agent to file synthesized answers as new memories — opt-in to avoid noise. | `backend/src/neural/`, `backend/src/services/sleep/`, `claude-skills/session-summary.md` |
+
+**Difference from Karpathy's pattern**: Kagura targets team/org scale (multi-tenant DB) and treats each `remember()` as a micro-compile (continuous), where the LLM Wiki pattern targets personal scale (~100 markdown pages) with batch wiki rewrites. The compile interface is schema-enforced (Pydantic `MemoryCreate`) rather than free-form prose.
 
 ## System Architecture
 

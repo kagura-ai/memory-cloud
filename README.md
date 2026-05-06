@@ -9,8 +9,9 @@
 </p>
 
 <p align="center">
-  <strong>Shared memory for AI</strong> — Self-hosted, open source.<br>
-  Adaptive memory that gets smarter every time you use it.
+  <strong>Self-hosted LLM Knowledge Base for teams</strong> — beyond RAG.<br>
+  MCP-as-compile-API + Hebbian learning + Sleep Maintenance.<br>
+  <a href="https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f">Karpathy's LLM Wiki pattern</a>, scaled for teams and persistence.
 </p>
 
 <p align="center">
@@ -32,7 +33,15 @@
 
 > **Your AI forgets everything after each conversation. Kagura fixes that — and gets smarter every time you search.**
 
-Most AI memory tools are just vector databases with a chat wrapper. Kagura is different:
+Most AI memory tools are just vector databases with a chat wrapper. Kagura is different — it implements the full **LLM Knowledge Base** pattern (Karpathy's [LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)) at team scale:
+
+| Approach | Storage | Compounding | Scale |
+|---|---|---|---|
+| Vector DB / RAG | Embedded chunks | None — retrieve-only | Any |
+| Karpathy's LLM Wiki | Markdown files | LLM rewrites pages | Personal (~100 pages) |
+| **Kagura Memory Cloud** | **PostgreSQL + Qdrant + Neural graph** | **Hebbian + Sleep Maintenance** | **Team / org** |
+
+
 
 | Feature | Description |
 |---------|-------------|
@@ -58,6 +67,21 @@ Workspace (team/org)
 │   └── ...
 └── Members (Owner/Admin/Member/Viewer)
 ```
+
+### LLM Knowledge Base — 5-Layer Implementation
+
+Karpathy's [LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) describes a 5-layer "living knowledge base" — beyond traditional RAG. Kagura implements all 5 layers at team scale:
+
+| Layer | Kagura Implementation | Difference from Karpathy's pattern |
+|---|---|---|
+| **Ingest** | REST `/api/v1/memory`, MCP `remember`, R2 file storage, resource tokens | + binary blobs, + multi-tenant |
+| **Compile** | **MCP-as-compile-API** — chat agent compiles via structured tool calls (`remember(summary, content, type, tags)`) + Sleep Maintenance for batch consolidation | Continuous micro-compile (not batch wiki rewrite) — schema-enforced output |
+| **Index** | Triple index: **BM25** (keyword) + **Qdrant** (semantic) + **Hebbian graph** (relational) — all auto-maintained | No manual `index.md` upkeep |
+| **Query** | Hybrid Search + AI Reranker + `explore` graph traversal | Beyond markdown grep — supports semantic + relational queries |
+| **Enhance** | **Hebbian learning** — every `recall()` strengthens edges between co-retrieved memories. Sleep Maintenance consolidates periodically. | Background graph evolution (zero LLM cost) vs LLM-driven page rewrites |
+
+**Compounding loop**: Currently explicit (user/agent calls `remember()` after synthesizing answers). Auto-write-back of synthesized answers is intentionally opt-in to keep noise low.
+
 
 ### Adaptive Memory: Two Search Paths
 

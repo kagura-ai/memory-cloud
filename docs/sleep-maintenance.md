@@ -1,5 +1,7 @@
 # Sleep Maintenance
 
+> **LLM Knowledge Base mapping**: Sleep Maintenance is Kagura's batch implementation of the **Compile** + **Enhance** layers from the [LLM Knowledge Base 5-layer pattern](architecture.md#llm-knowledge-base--5-layer-mapping). Where MCP `remember()` does continuous micro-compile per fact, Sleep Maintenance does periodic whole-context consolidation — the "wiki rewrite" step in Karpathy's terminology, executed as a background cron job rather than an on-demand agent task.
+
 Sleep Maintenance is Kagura Memory Cloud's background cleanup cycle: a nightly, per-context batch process that discovers missing edges, merges duplicates, re-evaluates importance, consolidates working memories, re-indexes what changed, and records the entire run for auditing and rollback.
 
 Write paths (`remember`, chunking, edge creation) optimize for ingest speed. Over time this leaves debt — near-duplicates, stale importance values, memories that should have been promoted or archived, and graph gaps between semantically related notes. Sleep is where that debt is paid down asynchronously so reads (`recall`, `explore`) stay precise.

@@ -132,6 +132,15 @@ class FileObject(Base):
             "expires_at",
             postgresql_where="status = 'reserved'",
         ),
+        # Soft-delete GC helper (Issue #552): nightly sweep of
+        # ``status='uploaded' AND deleted_at IS NOT NULL`` rows past the
+        # 7-day retention window. Partial index keeps storage proportional
+        # to actually-deleted-pending-GC rows rather than total uploads.
+        Index(
+            "idx_file_objects_soft_deleted_gc",
+            "deleted_at",
+            postgresql_where="status = 'uploaded' AND deleted_at IS NOT NULL",
+        ),
     )
 
 
