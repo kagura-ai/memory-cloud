@@ -684,7 +684,8 @@ async def update_context(
     """Update a context's display_name, description and settings.
 
     Permission (Issue #165 Phase 3):
-    - summary/usage_guide/is_private: Requires OWNER access (owner-only fields)
+    - summary/usage_guide/is_private/is_public/resource_id/is_locked/sleep_mode:
+      Requires OWNER access (owner-only fields — see ``owner_only_fields`` list)
     - display_name/description: Requires EDITOR access
 
     Args:
