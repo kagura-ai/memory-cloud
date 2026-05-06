@@ -32,13 +32,15 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Module-level cache of the registered Lua script. ``register_script``
+# Module-level cache of the registered Lua script, keyed by the
+# ``id()`` of the Redis client it was registered against. ``register_script``
 # allocates a ``Script`` wrapper and computes the SHA1 on each call, so
 # caching at first use avoids per-reservation overhead on the upload
-# hot path (Phase 6 review note + Copilot loop 2 finding). Reset to
-# ``None`` only when ``get_redis_client()`` is itself reset (tests via
-# ``close_redis()`` — production never does this).
-_reserve_quota_script: Any = None
+# hot path (Phase 6 review note + Copilot loop 2 finding). Auto-invalidates
+# when ``close_redis()`` is called (tests) and a fresh singleton is
+# constructed: ``id(client)`` differs, so the next call re-registers
+# against the new client. Production never resets the singleton.
+_reserve_quota_script: tuple[int, Any] | None = None
 
 # Sentinel returned by the atomic reserve Lua script when the requested
 # reservation would push past the quota ceiling. Any non-negative integer
@@ -98,10 +100,13 @@ async def _atomic_check_and_incr(
     the existing ``except RedisError`` branch.
     """
     global _reserve_quota_script
-    if _reserve_quota_script is None:
-        _reserve_quota_script = get_redis_client().register_script(_RESERVE_QUOTA_SCRIPT)
+    client = get_redis_client()
+    client_id = id(client)
+    if _reserve_quota_script is None or _reserve_quota_script[0] != client_id:
+        _reserve_quota_script = (client_id, client.register_script(_RESERVE_QUOTA_SCRIPT))
+    script = _reserve_quota_script[1]
     try:
-        result = await _reserve_quota_script(keys=[key], args=[size_bytes, quota_bytes])
+        result = await script(keys=[key], args=[size_bytes, quota_bytes])
         return (int(result[0]), int(result[1]))
     except asyncio.CancelledError:
         # Re-raise so graceful task cancellation (deploys, shutdown,

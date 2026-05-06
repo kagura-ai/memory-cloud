@@ -277,10 +277,14 @@ def schedule_file_tasks(scheduler: AsyncIOScheduler) -> None:
     )
     # 03:15 UTC offsets the GC from common 03:00 maintenance windows
     # (and from the orphan sweeper's 15-min cadence) so a slow GC pass
-    # doesn't pile up against unrelated batch jobs.
+    # doesn't pile up against unrelated batch jobs. Pass ``timezone``
+    # explicitly: the parent ``AsyncIOScheduler`` is constructed with
+    # ``timezone="UTC"`` so this is currently a no-op, but writing it
+    # at the trigger keeps the schedule unambiguous if the scheduler's
+    # default ever changes.
     scheduler.add_job(
         sweep_soft_deleted_files,
-        trigger=CronTrigger(hour=3, minute=15),
+        trigger=CronTrigger(hour=3, minute=15, timezone="UTC"),
         id="soft_delete_file_gc",
         name="Soft-Delete File GC (Issue #552)",
         replace_existing=True,
