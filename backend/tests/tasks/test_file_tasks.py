@@ -164,7 +164,7 @@ class TestSweepSoftDeletedFiles:
         fake_storage.delete_object = AsyncMock()
         with get_db_patch, _patch_storage(fake_storage):
             counts = await file_tasks.sweep_soft_deleted_files()
-        assert counts == {"swept": 0, "r2_deleted": 0, "r2_failed": 0, "skipped_no_r2": 0}
+        assert counts == {"swept": 0, "r2_deleted": 0, "r2_failed": 0, "hard_deleted_no_r2": 0}
         db.delete.assert_not_awaited()
         fake_storage.delete_object.assert_not_awaited()
 
@@ -179,7 +179,7 @@ class TestSweepSoftDeletedFiles:
         # ever calling get_db.
         with _patch_storage(None):
             counts = await file_tasks.sweep_soft_deleted_files()
-        assert counts == {"swept": 0, "r2_deleted": 0, "r2_failed": 0, "skipped_no_r2": 0}
+        assert counts == {"swept": 0, "r2_deleted": 0, "r2_failed": 0, "hard_deleted_no_r2": 0}
 
     @pytest.mark.asyncio
     async def test_hard_deletes_past_retention(self):
@@ -248,6 +248,9 @@ class TestSweepSoftDeletedFiles:
 
 class TestScheduling:
     def test_schedule_registers_both_jobs(self):
+        from apscheduler.triggers.cron import CronTrigger
+        from apscheduler.triggers.interval import IntervalTrigger
+
         scheduler = MagicMock()
         scheduler.add_job = MagicMock()
         file_tasks.schedule_file_tasks(scheduler)
@@ -255,17 +258,18 @@ class TestScheduling:
         # Two add_job calls: orphan sweeper + soft-delete GC.
         assert scheduler.add_job.call_count == 2
 
-        from datetime import timedelta
-
         calls_by_id = {call.kwargs["id"]: call.kwargs for call in scheduler.add_job.call_args_list}
 
         # Orphan sweeper retains the 15-minute interval.
         orphan = calls_by_id["orphan_file_sweeper"]
+        assert isinstance(orphan["trigger"], IntervalTrigger)
         assert orphan["trigger"].interval == timedelta(minutes=15)
 
-        # Soft-delete GC fires nightly at 03:15 UTC.
+        # Soft-delete GC fires nightly. ``str(CronTrigger)`` renders as
+        # ``cron[hour='3', minute='15']`` in APScheduler 3.x — checking
+        # the rendered form avoids reaching into trigger internals.
         gc = calls_by_id["soft_delete_file_gc"]
-        # CronTrigger stores fields as ``BaseField`` objects; compare
-        # ``str()`` for the salient fields.
-        assert str(gc["trigger"].fields[gc["trigger"].FIELD_NAMES.index("hour")]) == "3"
-        assert str(gc["trigger"].fields[gc["trigger"].FIELD_NAMES.index("minute")]) == "15"
+        assert isinstance(gc["trigger"], CronTrigger)
+        gc_repr = str(gc["trigger"])
+        assert "hour='3'" in gc_repr
+        assert "minute='15'" in gc_repr

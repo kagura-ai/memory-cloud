@@ -71,22 +71,26 @@ async def _atomic_check_and_incr(
 
     Returns the post-INCRBY counter value, or :data:`_CAP_EXCEEDED` when
     the reservation would exceed ``quota_bytes``. Any error from the
-    underlying ``redis-py`` library is wrapped as :class:`RedisError` so
-    the outer fail-open clause in :func:`reserve_storage_bytes` catches
-    it via the existing ``except RedisError`` branch.
+    underlying Redis client (network, server, or script-execution
+    failure, including a malformed nil result that breaks ``int()``) is
+    wrapped as :class:`RedisError` so the outer fail-open clause in
+    :func:`reserve_storage_bytes` catches it via the existing
+    ``except RedisError`` branch.
     """
-    # Local import keeps the module's top-level import surface unchanged
-    # (and avoids hard-binding to redis-py's exception namespace at the
-    # service layer for callers that don't need it).
-    import redis as redis_lib
-
     client = get_redis_client()
     script = client.register_script(_RESERVE_QUOTA_SCRIPT)
     try:
         result = await script(keys=[key], args=[size_bytes, quota_bytes])
-    except redis_lib.RedisError as exc:
+        return int(result)
+    except Exception as exc:
+        # Mirrors the wrapping discipline in ``db/redis.py``
+        # (``incrby_counter``, ``set_cache``, …): catch any underlying
+        # client exception and re-raise as the project's own
+        # ``RedisError``. Catching ``Exception`` is broad on purpose —
+        # ``ValueError`` from ``int(None)`` if the script ever returns
+        # nil must also flow through fail-open, not bubble to the HTTP
+        # handler as a 500.
         raise RedisError(f"Failed to run quota reserve script: {exc}") from exc
-    return int(result)
 
 
 async def reserve_storage_bytes(
@@ -141,6 +145,13 @@ async def reserve_storage_bytes(
         new_total = await _atomic_check_and_incr(key, size_bytes, quota_bytes)
 
         if new_total == _CAP_EXCEEDED:
+            # ``current`` is the seed-time value from step 1; the Lua's
+            # GET inside step 2 may have read a higher number due to
+            # concurrent reservations landing between the two steps.
+            # Reporting the seed-time snapshot is fine for ops logs but
+            # the field name is "current_bytes" to match the existing
+            # API; future readers should not assume it's the exact
+            # value the Lua compared against.
             logger.warning(
                 "storage_quota_exceeded",
                 workspace_id=str(workspace_id),

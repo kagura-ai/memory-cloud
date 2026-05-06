@@ -167,9 +167,9 @@ async def sweep_soft_deleted_files() -> dict[str, int]:
     binary, so we must not hard-delete the row that points at it.
 
     Returns:
-        ``{"swept": N, "r2_deleted": N, "r2_failed": N, "skipped_no_r2": N}``
+        ``{"swept": N, "r2_deleted": N, "r2_failed": N, "hard_deleted_no_r2": N}``
     """
-    counts = {"swept": 0, "r2_deleted": 0, "r2_failed": 0, "skipped_no_r2": 0}
+    counts = {"swept": 0, "r2_deleted": 0, "r2_failed": 0, "hard_deleted_no_r2": 0}
     threshold = utcnow() - timedelta(seconds=_GC_RETENTION_SECONDS)
 
     try:
@@ -182,12 +182,19 @@ async def sweep_soft_deleted_files() -> dict[str, int]:
         return counts
 
     async for db in get_db():
+        # Cap a single sweep at 500 rows so a bulk soft-delete (e.g. a
+        # workspace purging thousands of files) doesn't load all ORM
+        # objects into memory at once. Tail rolls to the next nightly
+        # tick — the partial index ``idx_file_objects_soft_deleted_gc``
+        # makes the next ``deleted_at <=`` filter cheap.
         result = await db.execute(
-            select(FileObject).where(
+            select(FileObject)
+            .where(
                 FileObject.status == "uploaded",
                 FileObject.deleted_at.isnot(None),
                 FileObject.deleted_at <= threshold,
             )
+            .limit(500)
         )
         candidates = list(result.scalars().all())
 
@@ -215,8 +222,9 @@ async def sweep_soft_deleted_files() -> dict[str, int]:
                 # transitioned them to ``failed``, so reaching here on
                 # an ``uploaded`` row is an invariant violation worth
                 # tracking — but the row is hard-deletable since there
-                # is no binary to leak.
-                counts["skipped_no_r2"] += 1
+                # is no binary to leak. Counter name reflects what
+                # actually happens (the row IS hard-deleted below).
+                counts["hard_deleted_no_r2"] += 1
 
             await db.delete(f)
             await db.commit()
