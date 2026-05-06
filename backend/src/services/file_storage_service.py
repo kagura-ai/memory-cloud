@@ -163,7 +163,13 @@ class FileStorageService:
         """Reserve quota + insert reserved row + return presigned PUT URL.
 
         Raises:
-            ValidationError: invalid size or sha256.
+            ValidationError: invalid size, sha256, or content_type — covers
+                size/sha256 length checks, oversized filename/content_type,
+                control characters in content_type, and malformed
+                type/subtype shape (no slash, garbage chars). 422 at REST.
+            UnsupportedMediaTypeError: content_type passes shape validation
+                but is not in ``settings.allowed_file_content_types_set``.
+                415 at REST; ``unsupported_media_type`` vocab at MCP.
             QuotaExceededError: workspace storage cap would be exceeded.
             ConflictError: same ``(workspace_id, sha256)`` already has an
                 active or in-flight row (partial unique violation).

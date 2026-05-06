@@ -134,6 +134,26 @@ def _patch_quota_release():
 
 
 class TestReserveUpload:
+    @pytest.fixture(autouse=True)
+    def _canonical_allowlist(self, monkeypatch):
+        """Pin the allow-list to the canonical default for every test in
+        this class so a developer with ``ALLOWED_FILE_CONTENT_TYPES``
+        overridden in their shell env does not see spurious failures.
+
+        Tests that need a different allow-list (empty fail-closed,
+        parameter-laden entries) override this via their own
+        ``monkeypatch.setattr`` — pytest stacks the undos in LIFO order
+        so the inner override applies first and unwinds before this one.
+        """
+        from config.settings import get_settings
+
+        monkeypatch.setattr(
+            get_settings(),
+            "allowed_file_content_types",
+            "image/png,image/jpeg,image/gif,application/pdf,"
+            "text/plain,text/markdown,text/csv,application/json",
+        )
+
     @pytest.mark.asyncio
     async def test_happy_path(self, service, db, workspace_id):
         ws = _make_workspace(workspace_id)
