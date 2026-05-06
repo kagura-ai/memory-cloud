@@ -1134,8 +1134,8 @@ class Context(Base):
     # Issue #101: Sleep Maintenance mode
     # 'full' = all phases (personal AI memory)
     # 'edges_only' = Edge Discovery + Reindex only (resource ingest contexts)
-    # 'skip' = no sleep maintenance (large-scale / externally managed)
-    sleep_mode = Column(String(20), nullable=False, server_default="full")
+    # 'skip' = no sleep maintenance (large-scale / externally managed; default)
+    sleep_mode = Column(String(20), nullable=False, server_default="skip")
 
     # Constraints
     __table_args__ = (

@@ -91,7 +91,7 @@ export function SettingsTabPanel({
     boolean | null
   >(null);
   const [sleepMode, setSleepMode] = useState<"full" | "edges_only" | "skip">(
-    context.sleep_mode || "full",
+    context.sleep_mode,
   );
   const [skipDialogOpen, setSkipDialogOpen] = useState(false);
 
@@ -102,7 +102,7 @@ export function SettingsTabPanel({
     setUsageGuide(data.usage_guide || "");
     setIsPrivate(data.is_private ?? true);
     setIsPublic(data.is_public ?? false);
-    setSleepMode(data.sleep_mode || "full");
+    setSleepMode(data.sleep_mode);
     setResourceId("");
   }, []);
 
@@ -149,7 +149,7 @@ export function SettingsTabPanel({
         is_public: isPublic,
         resource_id: resource_id,
       };
-      if (isOwner && sleepMode !== (context.sleep_mode || "full")) {
+      if (isOwner && sleepMode !== context.sleep_mode) {
         payload.sleep_mode = sleepMode;
       }
 

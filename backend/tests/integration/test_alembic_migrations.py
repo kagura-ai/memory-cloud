@@ -452,3 +452,135 @@ class TestB03NeuralEdgesBackfillMigration:
                 "not COALESCE-repaired into a fully-populated invariant violation"
             )
         engine.dispose()
+
+
+# Revision one step before e05_558 — the state where contexts.sleep_mode
+# still defaults to 'full', so we can seed a row at the old default and
+# then upgrade over e05_558 to verify existing rows are not rewritten.
+E04_REV = "e04_552_gc_index"
+E05_REV = "e05_558_sleep_default_skip"
+
+
+class TestE05SleepModeDefaultMigration:
+    """Seeded-state tests for e05_558_sleep_mode_default_skip (#558).
+
+    ``ALTER COLUMN ... SET DEFAULT`` is a metadata-only change in PostgreSQL —
+    it must not touch existing rows. These tests assert that contract on a
+    real DB by seeding a context at the old default ``'full'``, running the
+    e05 upgrade, and verifying:
+
+      * the seeded row's ``sleep_mode`` is still ``'full'`` (existing rows untouched)
+      * a new context inserted post-upgrade gets ``'skip'`` (new default fires)
+      * downgrading reverts the default back to ``'full'``
+    """
+
+    @staticmethod
+    def _reset_and_upgrade_to_e04():
+        test_url = os.getenv("TEST_DATABASE_URL", _DEFAULT_TEST_URL)
+        db_name = test_url.rsplit("/", 1)[-1].split("?")[0]
+        if not db_name.endswith("_test"):
+            raise RuntimeError(f"Refusing to reset non-test database: {db_name}")
+
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            conn.execute(text("DROP SCHEMA public CASCADE"))
+            conn.execute(text("CREATE SCHEMA public"))
+        engine.dispose()
+
+        with _alembic_at_test_db():
+            command.upgrade(_get_alembic_config(), E04_REV)
+
+    @staticmethod
+    def _seed_workspace_and_context(conn, name_suffix: str) -> tuple[str, str]:
+        """Insert a workspace + context (no sleep_mode → server_default fires)."""
+        owner_id = f"owner-{name_suffix}"
+        ws_id = str(uuid.uuid4())
+        ctx_id = str(uuid.uuid4())
+        conn.execute(
+            text("INSERT INTO workspaces (id, name, owner_user_id) VALUES (:id, :name, :owner)"),
+            {"id": ws_id, "name": f"ws-{name_suffix}", "owner": owner_id},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO contexts (id, workspace_id, name, created_by) "
+                "VALUES (:id, :ws, :name, :owner)"
+            ),
+            {
+                "id": ctx_id,
+                "ws": ws_id,
+                "name": f"ctx-{name_suffix}",
+                "owner": owner_id,
+            },
+        )
+        return ws_id, ctx_id
+
+    def test_existing_rows_keep_full_after_upgrade(self):
+        """Row inserted at e04 with default 'full' must NOT change after e05 upgrade."""
+        self._reset_and_upgrade_to_e04()
+
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            _, ctx_id_pre = self._seed_workspace_and_context(conn, "pre-upgrade")
+            row = conn.execute(
+                text("SELECT sleep_mode FROM contexts WHERE id = :id"),
+                {"id": ctx_id_pre},
+            ).fetchone()
+            assert row is not None and row[0] == "full", (
+                f"pre-upgrade context should default to 'full' at e04, got {row}"
+            )
+        engine.dispose()
+
+        with _alembic_at_test_db():
+            command.upgrade(_get_alembic_config(), E05_REV)
+
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT sleep_mode FROM contexts WHERE id = :id"),
+                {"id": ctx_id_pre},
+            ).fetchone()
+            assert row is not None and row[0] == "full", (
+                "existing context's sleep_mode must be unchanged after e05 upgrade"
+            )
+        engine.dispose()
+
+    def test_new_row_after_upgrade_defaults_to_skip(self):
+        """Row inserted post-e05 (no sleep_mode) must get 'skip' from new default."""
+        self._reset_and_upgrade_to_e04()
+        with _alembic_at_test_db():
+            command.upgrade(_get_alembic_config(), E05_REV)
+
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            _, ctx_id_post = self._seed_workspace_and_context(conn, "post-upgrade")
+            row = conn.execute(
+                text("SELECT sleep_mode FROM contexts WHERE id = :id"),
+                {"id": ctx_id_post},
+            ).fetchone()
+            assert row is not None and row[0] == "skip", (
+                f"new context post-e05 should default to 'skip', got {row}"
+            )
+        engine.dispose()
+
+    def test_downgrade_reverts_default_to_full(self):
+        """After downgrading e05 → e04, new INSERTs (no sleep_mode) get 'full' again."""
+        self._reset_and_upgrade_to_e04()
+        with _alembic_at_test_db():
+            command.upgrade(_get_alembic_config(), E05_REV)
+            command.downgrade(_get_alembic_config(), E04_REV)
+
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            _, ctx_id = self._seed_workspace_and_context(conn, "post-downgrade")
+            row = conn.execute(
+                text("SELECT sleep_mode FROM contexts WHERE id = :id"),
+                {"id": ctx_id},
+            ).fetchone()
+            assert row is not None and row[0] == "full", (
+                f"after downgrade to e04, new context should default to 'full', got {row}"
+            )
+        engine.dispose()
+
+        # Re-apply to leave DB at head for subsequent tests in the same session.
+        with _alembic_at_test_db():
+            command.upgrade(_get_alembic_config(), "head")

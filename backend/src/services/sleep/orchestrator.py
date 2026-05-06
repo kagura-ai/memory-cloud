@@ -226,9 +226,9 @@ class SleepOrchestrator:
             )
 
     async def _get_sleep_mode(self, context_id: str | None) -> str:
-        """Get sleep_mode for a context. Defaults to 'full' if not found."""
+        """Get sleep_mode for a context. Defaults to 'skip' if not found."""
         if not context_id:
-            return "full"
+            return "skip"
         try:
             stmt = select(Context).where(Context.id == UUID(context_id))
             result = await self.db.execute(stmt)
@@ -241,7 +241,7 @@ class SleepOrchestrator:
                 context_id=context_id,
                 error=str(e),
             )
-        return "full"
+        return "skip"
 
     async def _get_context_embedding_info(self, context_id: str | None) -> tuple[str | None, str]:
         """Get embedding model and Qdrant collection name for a context.

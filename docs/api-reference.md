@@ -439,7 +439,7 @@ List all contexts in the current workspace.
       "display_name": "My Project",
       "is_default": false,
       "is_private": true,
-      "sleep_mode": "full",
+      "sleep_mode": "skip",
       "created_at": "2025-11-22T10:00:00Z"
     }
   ],
@@ -473,7 +473,7 @@ Create a new context.
   "display_name": "My Project",
   "is_default": false,
   "is_private": true,
-  "sleep_mode": "full",
+  "sleep_mode": "skip",
   "created_at": "2025-11-22T10:00:00Z"
 }
 ```
@@ -496,7 +496,7 @@ Get a single context by ID.
   "is_private": true,
   "is_public": false,
   "is_locked": false,
-  "sleep_mode": "full",
+  "sleep_mode": "skip",
   "created_at": "2025-11-22T10:00:00Z",
   "updated_at": "2025-11-22T10:00:00Z"
 }

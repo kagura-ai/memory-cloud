@@ -127,11 +127,23 @@ class TestContextServiceUpdateSleepMode:
 class TestContextResponseSerialization:
     """ContextResponse includes sleep_mode in serialized output."""
 
-    def test_sleep_mode_defaults_to_full(self):
+    def test_sleep_mode_defaults_to_skip(self):
+        """Issue #558: ContextResponse default is 'skip' (LLM cost opt-in)."""
         response = ContextResponse(
             id=uuid4(),
             name="test",
             is_default=False,
+            created_at=datetime(2026, 5, 5, 0, 0, 0, tzinfo=UTC),
+        )
+        body = response.model_dump()
+        assert body["sleep_mode"] == "skip"
+
+    def test_sleep_mode_full(self):
+        response = ContextResponse(
+            id=uuid4(),
+            name="test",
+            is_default=False,
+            sleep_mode="full",
             created_at=datetime(2026, 5, 5, 0, 0, 0, tzinfo=UTC),
         )
         body = response.model_dump()

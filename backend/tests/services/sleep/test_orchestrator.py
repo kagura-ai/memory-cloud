@@ -81,6 +81,10 @@ class TestSleepOrchestrator:
             MockRI.return_value = reindex_instance
 
             orchestrator = SleepOrchestrator(mock_db)
+            # ctx-1 is not a valid UUID; _get_sleep_mode falls back to "skip"
+            # post-#558, which would early-return. Mock to keep the legacy
+            # "all phases run" semantics this test depends on.
+            orchestrator._get_sleep_mode = AsyncMock(return_value="full")
             await orchestrator.run("user-1", "ws-1", "ctx-1", config=config)
 
         # Verify order
@@ -152,6 +156,7 @@ class TestSleepOrchestrator:
             MockRI.return_value = ri_inst
 
             orchestrator = SleepOrchestrator(mock_db)
+            orchestrator._get_sleep_mode = AsyncMock(return_value="full")
             await orchestrator.run("user-1", "ws-1", "ctx-1", config=config)
 
         # Phase 1 failed but 2-5 still ran
@@ -223,6 +228,7 @@ class TestSleepOrchestrator:
             MockRI.return_value = ri_inst
 
             orchestrator = SleepOrchestrator(mock_db)
+            orchestrator._get_sleep_mode = AsyncMock(return_value="full")
             await orchestrator.run("user-1", "ws-1", "ctx-1", config=config)
 
         assert mem_id_1 in reindex_received
@@ -312,3 +318,32 @@ class TestSleepMode:
         assert "dedup_merge" in skipped_names
         assert "importance_reeval" in skipped_names
         assert "consolidation" in skipped_names
+
+
+class TestGetSleepModeFallback:
+    """_get_sleep_mode() returns 'skip' when context cannot be resolved (#558).
+
+    The fallback aligns with the column default flip from 'full' → 'skip':
+    if we can't determine the mode, fail safe by not running LLM phases.
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_skip_when_context_id_is_none(self, mock_db):
+        orchestrator = SleepOrchestrator(mock_db)
+        assert await orchestrator._get_sleep_mode(None) == "skip"
+
+    @pytest.mark.asyncio
+    async def test_returns_skip_when_lookup_raises(self, mock_db):
+        orchestrator = SleepOrchestrator(mock_db)
+        mock_db.execute = AsyncMock(side_effect=RuntimeError("db down"))
+        assert await orchestrator._get_sleep_mode(str(uuid4())) == "skip"
+
+    @pytest.mark.asyncio
+    async def test_returns_db_value_when_context_found(self, mock_db):
+        orchestrator = SleepOrchestrator(mock_db)
+        ctx = MagicMock()
+        ctx.sleep_mode = "edges_only"
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=ctx)
+        mock_db.execute = AsyncMock(return_value=result)
+        assert await orchestrator._get_sleep_mode(str(uuid4())) == "edges_only"
