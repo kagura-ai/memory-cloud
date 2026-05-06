@@ -20,7 +20,14 @@ from tasks import file_tasks
 from utils.datetime import utcnow
 
 
-def _make_file(*, expires_at, status="reserved", size_bytes=1024, storage_key="ws/aa/key"):
+def _make_file(
+    *,
+    expires_at=None,
+    deleted_at=None,
+    status="reserved",
+    size_bytes=1024,
+    storage_key="ws/aa/key",
+):
     file = MagicMock()
     file.id = uuid4()
     file.workspace_id = uuid4()
@@ -28,6 +35,7 @@ def _make_file(*, expires_at, status="reserved", size_bytes=1024, storage_key="w
     file.storage_key = storage_key
     file.status = status
     file.expires_at = expires_at
+    file.deleted_at = deleted_at
     return file
 
 
@@ -35,6 +43,7 @@ def _patch_get_db(rows):
     """``async for db in get_db()`` yields one mock that returns ``rows``."""
     db = MagicMock()
     db.commit = AsyncMock()
+    db.delete = AsyncMock()
 
     list_result = MagicMock()
     list_result.scalars = MagicMock(return_value=MagicMock(all=MagicMock(return_value=rows)))
@@ -146,18 +155,117 @@ class TestSweepOrphanFiles:
         release.assert_awaited_once()
 
 
+class TestSweepSoftDeletedFiles:
+    @pytest.mark.asyncio
+    async def test_no_candidates_is_noop(self):
+        rows: list = []
+        get_db_patch, db = _patch_get_db(rows)
+        fake_storage = MagicMock()
+        fake_storage.delete_object = AsyncMock()
+        with get_db_patch, _patch_storage(fake_storage):
+            counts = await file_tasks.sweep_soft_deleted_files()
+        assert counts == {"swept": 0, "r2_deleted": 0, "r2_failed": 0, "skipped_no_r2": 0}
+        db.delete.assert_not_awaited()
+        fake_storage.delete_object.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_skips_when_r2_unconfigured(self):
+        """R2 unconfigured (dev/test) → early return, no DB ops at all.
+
+        Hard-deleting a row whose binary we cannot clean up first would
+        leak bytes forever — the safe move is to defer to the next
+        sweep when R2 is configured."""
+        # No _patch_get_db here: the function MUST short-circuit before
+        # ever calling get_db.
+        with _patch_storage(None):
+            counts = await file_tasks.sweep_soft_deleted_files()
+        assert counts == {"swept": 0, "r2_deleted": 0, "r2_failed": 0, "skipped_no_r2": 0}
+
+    @pytest.mark.asyncio
+    async def test_hard_deletes_past_retention(self):
+        """deleted_at older than 7d → R2 delete + db.delete + commit per row."""
+        old = _make_file(
+            status="uploaded",
+            deleted_at=utcnow() - timedelta(days=8),
+            size_bytes=4096,
+        )
+        get_db_patch, db = _patch_get_db([old])
+
+        fake_storage = MagicMock()
+        fake_storage.delete_object = AsyncMock()
+        with get_db_patch, _patch_storage(fake_storage):
+            counts = await file_tasks.sweep_soft_deleted_files()
+
+        assert counts["swept"] == 1
+        assert counts["r2_deleted"] == 1
+        assert counts["r2_failed"] == 0
+        fake_storage.delete_object.assert_awaited_once_with("ws/aa/key")
+        db.delete.assert_awaited_once_with(old)
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_r2_failure_leaves_row_for_next_sweep(self):
+        """R2 delete throws → row NOT hard-deleted, ``r2_failed`` incremented."""
+        old = _make_file(
+            status="uploaded",
+            deleted_at=utcnow() - timedelta(days=8),
+        )
+        get_db_patch, db = _patch_get_db([old])
+
+        bad_storage = MagicMock()
+        bad_storage.delete_object = AsyncMock(side_effect=Exception("R2 down"))
+        with get_db_patch, _patch_storage(bad_storage):
+            counts = await file_tasks.sweep_soft_deleted_files()
+
+        assert counts["swept"] == 0
+        assert counts["r2_deleted"] == 0
+        assert counts["r2_failed"] == 1
+        # Critical: row is NOT db.delete'd when R2 failed — otherwise
+        # we'd lose the storage_key reference and orphan the binary.
+        db.delete.assert_not_awaited()
+        db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_does_not_call_release_storage_bytes(self):
+        """Quota was already released at soft-delete time (R5).
+
+        Calling ``release_storage_bytes`` from the GC would
+        double-decrement the workspace counter. Defense-in-depth:
+        verify the GC path never even imports the release helper for
+        these rows."""
+        old = _make_file(
+            status="uploaded",
+            deleted_at=utcnow() - timedelta(days=8),
+        )
+        get_db_patch, _ = _patch_get_db([old])
+
+        fake_storage = MagicMock()
+        fake_storage.delete_object = AsyncMock()
+        with get_db_patch, _patch_release() as release, _patch_storage(fake_storage):
+            await file_tasks.sweep_soft_deleted_files()
+        release.assert_not_awaited()
+
+
 class TestScheduling:
-    def test_schedule_registers_15min_interval_job(self):
+    def test_schedule_registers_both_jobs(self):
         scheduler = MagicMock()
         scheduler.add_job = MagicMock()
         file_tasks.schedule_file_tasks(scheduler)
 
-        scheduler.add_job.assert_called_once()
-        kwargs = scheduler.add_job.call_args.kwargs
-        assert kwargs["id"] == "orphan_file_sweeper"
-        # Trigger interval should be 15 minutes
-        trigger = kwargs["trigger"]
-        # IntervalTrigger keeps the interval as a timedelta on `.interval`.
+        # Two add_job calls: orphan sweeper + soft-delete GC.
+        assert scheduler.add_job.call_count == 2
+
         from datetime import timedelta
 
-        assert trigger.interval == timedelta(minutes=15)
+        calls_by_id = {call.kwargs["id"]: call.kwargs for call in scheduler.add_job.call_args_list}
+
+        # Orphan sweeper retains the 15-minute interval.
+        orphan = calls_by_id["orphan_file_sweeper"]
+        assert orphan["trigger"].interval == timedelta(minutes=15)
+
+        # Soft-delete GC fires nightly at 03:15 UTC.
+        gc = calls_by_id["soft_delete_file_gc"]
+        # CronTrigger stores fields as ``BaseField`` objects; compare
+        # ``str()`` for the salient fields.
+        assert str(gc["trigger"].fields[gc["trigger"].FIELD_NAMES.index("hour")]) == "3"
+        assert str(gc["trigger"].fields[gc["trigger"].FIELD_NAMES.index("minute")]) == "15"
