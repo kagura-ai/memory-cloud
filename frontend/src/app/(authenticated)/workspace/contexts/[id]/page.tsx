@@ -264,12 +264,12 @@ export default function ContextDetailPage() {
             {context.is_default && (
               <Badge variant="secondary">{t("default")}</Badge>
             )}
-            {context.sleep_mode !== "full" && (
+            {context.sleep_mode !== "skip" && (
               <Badge variant="outline">
                 {
                   {
+                    full: t("sleepModeBadgeFull"),
                     edges_only: t("sleepModeBadgeEdgesOnly"),
-                    skip: t("sleepModeBadgeSkip"),
                   }[context.sleep_mode]
                 }
               </Badge>

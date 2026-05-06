@@ -312,3 +312,32 @@ class TestSleepMode:
         assert "dedup_merge" in skipped_names
         assert "importance_reeval" in skipped_names
         assert "consolidation" in skipped_names
+
+
+class TestGetSleepModeFallback:
+    """_get_sleep_mode() returns 'skip' when context cannot be resolved (#558).
+
+    The fallback aligns with the column default flip from 'full' → 'skip':
+    if we can't determine the mode, fail safe by not running LLM phases.
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_skip_when_context_id_is_none(self, mock_db):
+        orchestrator = SleepOrchestrator(mock_db)
+        assert await orchestrator._get_sleep_mode(None) == "skip"
+
+    @pytest.mark.asyncio
+    async def test_returns_skip_when_lookup_raises(self, mock_db):
+        orchestrator = SleepOrchestrator(mock_db)
+        mock_db.execute = AsyncMock(side_effect=RuntimeError("db down"))
+        assert await orchestrator._get_sleep_mode(str(uuid4())) == "skip"
+
+    @pytest.mark.asyncio
+    async def test_returns_db_value_when_context_found(self, mock_db):
+        orchestrator = SleepOrchestrator(mock_db)
+        ctx = MagicMock()
+        ctx.sleep_mode = "edges_only"
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=ctx)
+        mock_db.execute = AsyncMock(return_value=result)
+        assert await orchestrator._get_sleep_mode(str(uuid4())) == "edges_only"

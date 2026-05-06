@@ -93,7 +93,7 @@ Finalizes the `SleepReport` row with aggregated per-phase results (edges created
 
 ## `sleep_mode` Configuration
 
-Each context has a `sleep_mode` column (`Context.sleep_mode`, default `"full"`) that determines which phases run for that context.
+Each context has a `sleep_mode` column (`Context.sleep_mode`, default `"skip"`) that determines which phases run for that context. New contexts are silent by default — Sleep Maintenance is opt-in (#558).
 
 ### Changing `sleep_mode`
 
@@ -118,9 +118,9 @@ Navigate to a context's **Settings** tab → **Sleep Maintenance** card. Select 
 
 | Mode          | Phases                                              | Typical use                                              |
 |---------------|-----------------------------------------------------|----------------------------------------------------------|
-| `full`        | Edge Discovery → Dedup → Importance → Consolidation → Reindex → Report | Default. Interactive memory contexts.                    |
+| `full`        | Edge Discovery → Dedup → Importance → Consolidation → Reindex → Report | Interactive memory contexts (opt-in via owner Settings). |
 | `edges_only`  | Edge Discovery → Reindex → Report                   | Resource-ingested contexts (external docs, ref material). |
-| `skip`        | — (the run is aborted before any phase starts)      | Externally managed / large-scale contexts where Sleep is unwanted. |
+| `skip`        | — (the run is aborted before any phase starts)      | Default for new contexts; externally managed / large-scale contexts where Sleep is unwanted. |
 
 If a context's `sleep_mode` is changed while a Sleep run is in progress for that context, the in-flight run is **not** interrupted; the new mode takes effect on the next scheduled run.
 

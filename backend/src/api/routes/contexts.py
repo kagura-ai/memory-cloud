@@ -213,7 +213,7 @@ class ContextResponse(TZAwareBaseModel):
     )  # Issue #238
     is_locked: bool = Field(False, description="When true, deletion is prevented until unlocked")
     sleep_mode: SleepMode = Field(
-        "full", description="Sleep maintenance mode: full, edges_only, or skip"
+        "skip", description="Sleep maintenance mode: full, edges_only, or skip"
     )
     created_by: str | None = Field(None, description="Creator user ID")  # Issue #165
     created_by_name: str | None = Field(None, description="Creator name")
