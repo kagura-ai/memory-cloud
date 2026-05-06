@@ -31,6 +31,7 @@ from utils.exceptions import (
     ExternalServiceError,
     NotFoundException,
     QuotaExceededError,
+    UnsupportedMediaTypeError,
     ValidationError,
 )
 from utils.logger import get_logger
@@ -44,6 +45,11 @@ def _exc_to_error_response(exc: Exception) -> list[TextContent]:
     Mirrors the global REST exception handler so MCP clients see the
     same vocabulary as REST callers.
     """
+    if isinstance(exc, UnsupportedMediaTypeError):
+        # Issue #553: distinct vocab from validation_error so SDKs can route
+        # MIME-rejected uploads to a friendlier UI path (the allow-list is in
+        # ``exc.details["allowed"]``) without inspecting message text.
+        return _error_response("unsupported_media_type", str(exc))
     if isinstance(exc, ValidationError):
         return _error_response("validation_error", str(exc))
     if isinstance(exc, NotFoundException):
@@ -131,6 +137,7 @@ async def handle_init_file_upload(
                 sha256=str(args["sha256"]).lower(),
             )
         except (
+            UnsupportedMediaTypeError,
             ValidationError,
             ConflictError,
             QuotaExceededError,

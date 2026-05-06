@@ -20,6 +20,7 @@ from utils.exceptions import (
     ConflictError,
     NotFoundException,
     QuotaExceededError,
+    UnsupportedMediaTypeError,
     ValidationError,
 )
 
@@ -145,7 +146,7 @@ class TestReserveUpload:
                 workspace_id=workspace_id,
                 created_by="user-1",
                 filename="test.bin",
-                content_type="application/octet-stream",
+                content_type="application/pdf",
                 size_bytes=1024,
                 sha256=VALID_SHA,
             )
@@ -163,7 +164,7 @@ class TestReserveUpload:
                 workspace_id=workspace_id,
                 created_by="u",
                 filename="x",
-                content_type="application/octet-stream",
+                content_type="application/pdf",
                 size_bytes=0,
                 sha256=VALID_SHA,
             )
@@ -176,7 +177,7 @@ class TestReserveUpload:
                 workspace_id=workspace_id,
                 created_by="u",
                 filename="x",
-                content_type="application/octet-stream",
+                content_type="application/pdf",
                 size_bytes=too_big,
                 sha256=VALID_SHA,
             )
@@ -188,7 +189,7 @@ class TestReserveUpload:
                 workspace_id=workspace_id,
                 created_by="u",
                 filename="x",
-                content_type="application/octet-stream",
+                content_type="application/pdf",
                 size_bytes=1024,
                 sha256="too-short",
             )
@@ -206,7 +207,7 @@ class TestReserveUpload:
                     workspace_id=workspace_id,
                     created_by="u",
                     filename="x",
-                    content_type="application/octet-stream",
+                    content_type="application/pdf",
                     size_bytes=1024,
                     sha256=VALID_SHA,
                 )
@@ -224,7 +225,7 @@ class TestReserveUpload:
                 workspace_id=workspace_id,
                 created_by="u",
                 filename="x",
-                content_type="application/octet-stream",
+                content_type="application/pdf",
                 size_bytes=1024,
                 sha256=VALID_SHA,
             )
@@ -251,11 +252,109 @@ class TestReserveUpload:
                     workspace_id=workspace_id,
                     created_by="u",
                     filename="x",
-                    content_type="application/octet-stream",
+                    content_type="application/pdf",
                     size_bytes=1024,
                     sha256=VALID_SHA,
                 )
             release.assert_awaited_once()
+
+    # content_type allow-list — service-boundary check covers both REST + MCP.
+    # Validation runs after size/sha256 and before workspace load, so rejection
+    # short-circuits without DB or Redis I/O.
+
+    @pytest.mark.asyncio
+    async def test_allowed_content_type_passes(self, service, db, workspace_id):
+        ws = _make_workspace(workspace_id)
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=ws)
+        db.execute.return_value = result
+
+        with _patch_quota_reserve(succeed=True):
+            out = await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x.png",
+                content_type="image/png",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+        assert isinstance(out, ReserveResult)
+
+    @pytest.mark.asyncio
+    async def test_disallowed_content_type_raises_415(self, service, db, workspace_id):
+        with pytest.raises(UnsupportedMediaTypeError) as exc_info:
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="malicious.exe",
+                content_type="application/x-msdownload",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+        err = exc_info.value
+        assert err.status_code == 415
+        assert err.error_code == "MEDIA-001"
+        assert err.details["content_type"] == "application/x-msdownload"
+        assert "image/png" in err.details["allowed"]
+        # Rejection happens before workspace load — no DB execute.
+        db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_case_insensitive_content_type(self, service, db, workspace_id):
+        """RFC 6838: MIME type comparison is case-insensitive."""
+        ws = _make_workspace(workspace_id)
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=ws)
+        db.execute.return_value = result
+
+        with _patch_quota_reserve(succeed=True):
+            out = await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x.png",
+                content_type="IMAGE/PNG",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+        assert isinstance(out, ReserveResult)
+
+    @pytest.mark.asyncio
+    async def test_content_type_with_parameters_accepted(self, service, db, workspace_id):
+        """RFC 7231: clients (browser fetch, multipart) commonly attach
+        ``;charset=...`` parameters; the bare type/subtype should still match."""
+        ws = _make_workspace(workspace_id)
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=ws)
+        db.execute.return_value = result
+
+        with _patch_quota_reserve(succeed=True):
+            out = await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="notes.txt",
+                content_type="text/plain; charset=utf-8",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+        assert isinstance(out, ReserveResult)
+
+    @pytest.mark.asyncio
+    async def test_empty_allowlist_rejects_all(self, service, workspace_id, monkeypatch):
+        """Empty/whitespace allow-list = fail-closed (every upload rejected)."""
+        from config.settings import get_settings
+
+        settings = get_settings()
+        monkeypatch.setattr(settings, "allowed_file_content_types", "")
+
+        with pytest.raises(UnsupportedMediaTypeError):
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x.pdf",
+                content_type="application/pdf",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
 
 
 class TestConfirmUpload:

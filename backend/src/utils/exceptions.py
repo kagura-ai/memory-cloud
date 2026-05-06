@@ -148,6 +148,36 @@ class ValidationError(MemoryCloudException):
         super().__init__(message, status_code=422, error_code="VAL-001", field=field, **details)
 
 
+class UnsupportedMediaTypeError(MemoryCloudException):
+    """Content-Type not in the platform allow-list (415).
+
+    Issue #553: returned by ``FileStorageService.reserve_upload`` when the
+    declared ``content_type`` is not in ``settings.allowed_file_content_types_set``.
+    Distinct from ``ValidationError`` so REST callers receive HTTP 415
+    (semantically correct for "I refuse to process this content_type")
+    instead of the generic 422 used for other shape/format failures, and
+    so MCP callers see a dedicated ``unsupported_media_type`` vocab.
+
+    The error_code uses the dedicated ``MEDIA-`` namespace rather than
+    ``VAL-`` — this is a capability/policy rejection, not a shape/format
+    failure, and SDKs that route on ``error_code`` should not have to
+    distinguish 415 from 422 inside the same prefix.
+
+    The ``allowed`` list is included in ``details`` so SDKs and UIs can
+    render a precise rejection message without a separate API call.
+    """
+
+    def __init__(self, content_type: str, allowed: set[str] | list[str]) -> None:
+        message = f"Content type '{content_type}' not allowed"
+        super().__init__(
+            message,
+            status_code=415,
+            error_code="MEDIA-001",
+            content_type=content_type,
+            allowed=sorted(allowed),
+        )
+
+
 # Rate Limiting & Quota Errors (429)
 
 

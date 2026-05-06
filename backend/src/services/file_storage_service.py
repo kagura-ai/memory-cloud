@@ -48,6 +48,7 @@ from utils.datetime import utcnow
 from utils.exceptions import (
     ConflictError,
     NotFoundException,
+    UnsupportedMediaTypeError,
     ValidationError,
 )
 from utils.logger import get_logger
@@ -175,6 +176,17 @@ class FileStorageService:
         if len(sha256) != 64:
             msg = f"sha256 must be 64 hex chars, got {len(sha256)}"
             raise ValidationError(msg)
+        # Strip RFC 7231 media-type parameters ("text/plain; charset=utf-8")
+        # before compare — browsers and multipart uploads routinely attach
+        # them but the allow-list is keyed on bare type/subtype. Empty
+        # allow-list rejects everything (fail-closed).
+        allowed = settings.allowed_file_content_types_set
+        base_content_type = content_type.split(";", 1)[0].strip().lower()
+        if base_content_type not in allowed:
+            raise UnsupportedMediaTypeError(
+                content_type=content_type,
+                allowed=allowed,
+            )
 
         workspace = await self._load_workspace(workspace_id)
 

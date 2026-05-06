@@ -354,6 +354,24 @@ class Settings(BaseSettings):
     presign_get_ttl_seconds: int = Field(
         default=300, description="Presigned GET URL lifetime in seconds"
     )
+    allowed_file_content_types: str = Field(
+        default=(
+            "image/png,image/jpeg,image/gif,application/pdf,"
+            "text/plain,text/markdown,text/csv,application/json"
+        ),
+        description=(
+            "Comma-separated MIME allow-list for /api/v1/files/* and the MCP "
+            "file tools (Issue #553). Comparison is case-insensitive (RFC 6838). "
+            "Empty/whitespace = deny all (fail-closed); rely on the default for "
+            "the closed-beta MIME set or override via ALLOWED_FILE_CONTENT_TYPES "
+            "to widen / narrow per deployment."
+        ),
+    )
+
+    @property
+    def allowed_file_content_types_set(self) -> set[str]:
+        """Parsed allow-list (lower-cased, whitespace-stripped). Empty = fail-closed."""
+        return {m.strip().lower() for m in self.allowed_file_content_types.split(",") if m.strip()}
 
     @field_validator("resend_dpa_accepted_at", mode="before")
     @classmethod
