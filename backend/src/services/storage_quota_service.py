@@ -48,13 +48,18 @@ _CAP_EXCEEDED = -1
 # KEYS[1]: quota counter key (``storage:bytes:{workspace_id}``)
 # ARGV[1]: size_bytes to reserve (positive integer)
 # ARGV[2]: quota_bytes ceiling (positive integer)
-# Returns: new total on success, ``-1`` if cap would be exceeded.
+# Returns: ``{result, current}`` array. ``result`` is the post-INCRBY
+# total on success, or ``-1`` if the cap would be exceeded. ``current``
+# is the value the Lua GET observed inside the atomic window, used for
+# accurate operator-facing error messages (the seed-time value that
+# Python computes outside the atomic window can be stale by the time
+# the EVAL fires under concurrent load).
 _RESERVE_QUOTA_SCRIPT = (
     "local current = tonumber(redis.call('get', KEYS[1])) or 0 "
     "local size = tonumber(ARGV[1]) "
     "local quota = tonumber(ARGV[2]) "
-    "if current + size > quota then return -1 end "
-    "return redis.call('incrby', KEYS[1], size)"
+    "if current + size > quota then return {-1, current} end "
+    "return {redis.call('incrby', KEYS[1], size), current}"
 )
 
 
@@ -66,27 +71,33 @@ async def _atomic_check_and_incr(
     key: str,
     size_bytes: int,
     quota_bytes: int,
-) -> int:
+) -> tuple[int, int]:
     """Run the atomic check-then-INCRBY Lua script.
 
-    Returns the post-INCRBY counter value, or :data:`_CAP_EXCEEDED` when
-    the reservation would exceed ``quota_bytes``. Any error from the
-    underlying Redis client (network, server, or script-execution
-    failure, including a malformed nil result that breaks ``int()``) is
-    wrapped as :class:`RedisError` so the outer fail-open clause in
-    :func:`reserve_storage_bytes` catches it via the existing
-    ``except RedisError`` branch.
+    Returns ``(result, current_at_lua)`` where ``result`` is the
+    post-INCRBY total on success or :data:`_CAP_EXCEEDED` when the
+    reservation would exceed ``quota_bytes``, and ``current_at_lua``
+    is the value the Lua GET observed inside the atomic window
+    (use this for accurate operator-facing error messages — the
+    seed-time value computed outside the atomic window may be stale
+    by the time the EVAL fires under concurrent load). Any error
+    from the underlying Redis client (network, server, or
+    script-execution failure, including a malformed result that
+    breaks ``int()``) is wrapped as :class:`RedisError` so the outer
+    fail-open clause in :func:`reserve_storage_bytes` catches it via
+    the existing ``except RedisError`` branch.
     """
     client = get_redis_client()
     script = client.register_script(_RESERVE_QUOTA_SCRIPT)
     try:
         result = await script(keys=[key], args=[size_bytes, quota_bytes])
-        return int(result)
+        return (int(result[0]), int(result[1]))
     except Exception as exc:
         # Catching ``Exception`` is broad on purpose: ``ValueError``
-        # from ``int(None)`` (if the script ever returns nil) must
-        # also flow through fail-open rather than bubble as a 500.
-        # Wrap as project ``RedisError`` to match the ``db/redis.py``
+        # from ``int(None)`` (if the script ever returns nil) and
+        # ``IndexError`` from a malformed array must also flow
+        # through fail-open rather than bubble as a 500. Wrap as
+        # project ``RedisError`` to match the ``db/redis.py``
         # helpers' discipline.
         raise RedisError(f"Failed to run quota reserve script: {exc}") from exc
 
@@ -137,38 +148,36 @@ async def reserve_storage_bytes(
         # documented as racy in ``_get_or_seed_counter``; that posture
         # is preserved (the Lua refactor only closes the TOCTOU between
         # steps 1 and 2 — it does not add a seed-time lock).
-        current = await _get_or_seed_counter(workspace_id, db, key)
+        await _get_or_seed_counter(workspace_id, db, key)
 
-        # Step 2: atomic GET → cap check → INCRBY.
-        new_total = await _atomic_check_and_incr(key, size_bytes, quota_bytes)
+        # Step 2: atomic GET → cap check → INCRBY. ``current_at_lua``
+        # is the value the Lua's own GET observed inside the atomic
+        # window — accurate for operator-facing error messages even
+        # under concurrent reservations landing between steps 1 and 2.
+        new_total, current_at_lua = await _atomic_check_and_incr(key, size_bytes, quota_bytes)
 
         if new_total == _CAP_EXCEEDED:
-            # ``current`` is the seed-time value from step 1; the Lua's
-            # GET inside step 2 may have read a higher number due to
-            # concurrent reservations landing between the two steps.
-            # Reporting the seed-time snapshot is fine for ops logs but
-            # the field name is "current_bytes" to match the existing
-            # API; future readers should not assume it's the exact
-            # value the Lua compared against.
             logger.warning(
                 "storage_quota_exceeded",
                 workspace_id=str(workspace_id),
-                current_bytes=current,
+                current_bytes=current_at_lua,
                 quota_bytes=quota_bytes,
                 requested_bytes=size_bytes,
             )
             raise QuotaExceededError(
-                message=(f"Storage quota exceeded: {current + size_bytes} / {quota_bytes} bytes"),
+                message=(
+                    f"Storage quota exceeded: {current_at_lua + size_bytes} / {quota_bytes} bytes"
+                ),
                 quota_type="storage_bytes",
                 limit=quota_bytes,
-                current=current,
+                current=current_at_lua,
                 requested=size_bytes,
             )
 
         logger.debug(
             "storage_quota_reserved",
             workspace_id=str(workspace_id),
-            previous_bytes=current,
+            previous_bytes=current_at_lua,
             reserved_bytes=size_bytes,
             new_total=new_total,
             quota_bytes=quota_bytes,

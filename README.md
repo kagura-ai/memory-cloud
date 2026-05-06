@@ -74,7 +74,7 @@ Karpathy's [LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e
 
 | Layer | Kagura Implementation | Difference from Karpathy's pattern |
 |---|---|---|
-| **Ingest** | REST `/memory`, MCP `remember`, R2 file storage, resource tokens | + binary blobs, + multi-tenant |
+| **Ingest** | REST `/api/v1/memory`, MCP `remember`, R2 file storage, resource tokens | + binary blobs, + multi-tenant |
 | **Compile** | **MCP-as-compile-API** — chat agent compiles via structured tool calls (`remember(summary, content, type, tags)`) + Sleep Maintenance for batch consolidation | Continuous micro-compile (not batch wiki rewrite) — schema-enforced output |
 | **Index** | Triple index: **BM25** (keyword) + **Qdrant** (semantic) + **Hebbian graph** (relational) — all auto-maintained | No manual `index.md` upkeep |
 | **Query** | Hybrid Search + AI Reranker + `explore` graph traversal | Beyond markdown grep — supports semantic + relational queries |

@@ -28,7 +28,7 @@ from datetime import timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from db.base import get_db
 from models.file_objects import FileObject
@@ -222,9 +222,28 @@ async def sweep_soft_deleted_files() -> dict[str, int]:
                 # since there's no binary to leak.
                 counts["hard_deleted_no_r2"] += 1
 
-            await db.delete(f)
+            # Idempotent DELETE: when multiple API replicas run the
+            # scheduler in parallel (each with its own
+            # ``max_instances=1`` AsyncIOScheduler), two replicas can
+            # pick up the same candidate row in their respective
+            # sweeps. Using ``db.delete(f)`` on an ORM instance whose
+            # row was just removed by another replica raises
+            # ``StaleDataError`` and aborts the entire batch. A
+            # ``DELETE … WHERE id=… AND deleted_at IS NOT NULL``
+            # statement treats a 0-row result as a no-op (another
+            # sweeper won the race) and continues to the next
+            # candidate. The ``deleted_at IS NOT NULL`` guard also
+            # closes the (currently theoretical) race with a future
+            # undelete API — see #563.
+            del_stmt = (
+                delete(FileObject)
+                .where(FileObject.id == f.id)
+                .where(FileObject.deleted_at.isnot(None))
+            )
+            del_result = await db.execute(del_stmt)
             await db.commit()
-            counts["swept"] += 1
+            if del_result.rowcount > 0:
+                counts["swept"] += 1
 
     if counts["swept"] > 0 or counts["r2_failed"] > 0:
         logger.info("soft_delete_gc_swept", **counts)

@@ -32,7 +32,7 @@ class TestReserveStorageBytes:
             patch.object(
                 storage_quota_service,
                 "_atomic_check_and_incr",
-                AsyncMock(return_value=1024),
+                AsyncMock(return_value=(1024, 0)),  # (new_total, current_at_lua)
             ) as atomic,
         ):
             await storage_quota_service.reserve_storage_bytes(
@@ -49,17 +49,17 @@ class TestReserveStorageBytes:
 
     @pytest.mark.asyncio
     async def test_at_ceiling_raises_quota_exceeded(self, workspace_id):
-        """Lua returns -1 sentinel → QuotaExceededError."""
+        """Lua returns (-1, current_at_lua) → QuotaExceededError uses Lua-time current."""
         db = MagicMock()
         with (
             patch.object(storage_quota_service, "get_cache", AsyncMock(return_value="9500")),
             patch.object(
                 storage_quota_service,
                 "_atomic_check_and_incr",
-                AsyncMock(return_value=-1),
+                AsyncMock(return_value=(-1, 9500)),  # (sentinel, current_at_lua)
             ) as atomic,
         ):
-            with pytest.raises(QuotaExceededError, match="Storage quota exceeded"):
+            with pytest.raises(QuotaExceededError, match="10500 / 10000") as exc_info:
                 await storage_quota_service.reserve_storage_bytes(
                     workspace_id=workspace_id,
                     size_bytes=1000,
@@ -69,6 +69,37 @@ class TestReserveStorageBytes:
             # The atomic helper was awaited (the cap check is inside the
             # Lua script now, not in Python).
             atomic.assert_awaited_once()
+            # The error payload uses the Lua-observed current value, not
+            # the seed-time value (#554 Copilot loop 1 fix).
+            assert exc_info.value.details.get("current") == 9500
+
+    @pytest.mark.asyncio
+    async def test_at_ceiling_uses_lua_current_not_seed(self, workspace_id):
+        """When concurrent reservations land between seed and Lua, the
+        error message must report the Lua-observed value, not the
+        stale seed-time snapshot. Without the tuple-return fix, the
+        operator-facing log/exception would underreport usage."""
+        db = MagicMock()
+        with (
+            # Seed read 8000 (stale by the time Lua runs).
+            patch.object(storage_quota_service, "get_cache", AsyncMock(return_value="8000")),
+            patch.object(
+                storage_quota_service,
+                "_atomic_check_and_incr",
+                # Lua actually saw 9800 (concurrent reservation landed).
+                AsyncMock(return_value=(-1, 9800)),
+            ),
+        ):
+            with pytest.raises(QuotaExceededError) as exc_info:
+                await storage_quota_service.reserve_storage_bytes(
+                    workspace_id=workspace_id,
+                    size_bytes=500,
+                    quota_bytes=10_000,
+                    db=db,
+                )
+            # Must report 9800 (Lua-time), not 8000 (seed-time).
+            assert exc_info.value.details.get("current") == 9800
+            assert "10300 / 10000" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_quota_zero_disables_check(self, workspace_id):
@@ -167,7 +198,7 @@ class TestReserveStorageBytes:
             patch.object(
                 storage_quota_service,
                 "_atomic_check_and_incr",
-                AsyncMock(return_value=3072),
+                AsyncMock(return_value=(3072, 2048)),
             ),
         ):
             await storage_quota_service.reserve_storage_bytes(
@@ -195,11 +226,11 @@ class TestReserveStorageBytes:
             "get_cache",
             AsyncMock(side_effect=["8000", "9000"]),
         ):
-            # First call: seed=8000, atomic returns 9000 (1000 reserved).
+            # First call: seed=8000, Lua observes 8000 then INCRBY → 9000.
             with patch.object(
                 storage_quota_service,
                 "_atomic_check_and_incr",
-                AsyncMock(return_value=9000),
+                AsyncMock(return_value=(9000, 8000)),
             ):
                 await storage_quota_service.reserve_storage_bytes(
                     workspace_id=workspace_id,
@@ -208,11 +239,11 @@ class TestReserveStorageBytes:
                     db=db,
                 )
 
-            # Second call: seed=9000, atomic returns -1 (cap exceeded).
+            # Second call: seed=9000, Lua observes 9000, cap-exceeded.
             with patch.object(
                 storage_quota_service,
                 "_atomic_check_and_incr",
-                AsyncMock(return_value=-1),
+                AsyncMock(return_value=(-1, 9000)),
             ):
                 with pytest.raises(QuotaExceededError):
                     await storage_quota_service.reserve_storage_bytes(

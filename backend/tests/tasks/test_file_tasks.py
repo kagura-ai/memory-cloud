@@ -39,15 +39,33 @@ def _make_file(
     return file
 
 
-def _patch_get_db(rows):
-    """``async for db in get_db()`` yields one mock that returns ``rows``."""
+def _patch_get_db(rows, *, delete_rowcount: int = 1):
+    """``async for db in get_db()`` yields one mock that returns ``rows``.
+
+    The mock ``db.execute`` is sequence-aware: the first call returns
+    the SELECT result (the candidate ``rows``); subsequent calls
+    (per-row DELETE in the GC sweep) return a result whose
+    ``rowcount`` is ``delete_rowcount``. Tests that need to simulate
+    a lost-race (another replica beat us to the row) can pass
+    ``delete_rowcount=0``.
+    """
     db = MagicMock()
     db.commit = AsyncMock()
-    db.delete = AsyncMock()
+    db.delete = AsyncMock()  # legacy compat: orphan sweeper does not use it
 
     list_result = MagicMock()
     list_result.scalars = MagicMock(return_value=MagicMock(all=MagicMock(return_value=rows)))
-    db.execute = AsyncMock(return_value=list_result)
+
+    delete_result = MagicMock()
+    delete_result.rowcount = delete_rowcount
+
+    call_state = {"n": 0}
+
+    async def _execute(*_args, **_kwargs):
+        call_state["n"] += 1
+        return list_result if call_state["n"] == 1 else delete_result
+
+    db.execute = AsyncMock(side_effect=_execute)
 
     async def _aiter():
         yield db
@@ -183,7 +201,7 @@ class TestSweepSoftDeletedFiles:
 
     @pytest.mark.asyncio
     async def test_hard_deletes_past_retention(self):
-        """deleted_at older than 7d → R2 delete + db.delete + commit per row."""
+        """deleted_at older than 7d → R2 delete + idempotent SQL DELETE."""
         old = _make_file(
             status="uploaded",
             deleted_at=utcnow() - timedelta(days=8),
@@ -200,8 +218,39 @@ class TestSweepSoftDeletedFiles:
         assert counts["r2_deleted"] == 1
         assert counts["r2_failed"] == 0
         fake_storage.delete_object.assert_awaited_once_with("ws/aa/key")
-        db.delete.assert_awaited_once_with(old)
+        # 2 db.execute calls: 1 SELECT + 1 DELETE (per-row).
+        assert db.execute.await_count == 2
         db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_lost_race_with_other_replica_is_no_op(self):
+        """Multi-replica scenario: another sweeper already deleted the
+        row. ``DELETE … WHERE id=… AND deleted_at IS NOT NULL`` returns
+        ``rowcount=0`` and we must NOT increment ``swept`` or raise.
+
+        Pre-#552 Copilot loop 1 fix the code used ``db.delete(orm)``
+        which raises ``StaleDataError`` on a stale instance and
+        aborted the entire batch."""
+        old = _make_file(
+            status="uploaded",
+            deleted_at=utcnow() - timedelta(days=8),
+            size_bytes=4096,
+        )
+        get_db_patch, db = _patch_get_db([old], delete_rowcount=0)
+
+        fake_storage = MagicMock()
+        fake_storage.delete_object = AsyncMock()
+        with get_db_patch, _patch_storage(fake_storage):
+            counts = await file_tasks.sweep_soft_deleted_files()
+
+        # R2 delete still ran (the loop didn't know about the race
+        # until DB returned rowcount=0). R2 DELETE is idempotent, so
+        # this is a no-op on R2's side too.
+        assert counts["r2_deleted"] == 1
+        # Critical: ``swept`` stays 0 — we did NOT actually hard-delete
+        # the row (another replica beat us).
+        assert counts["swept"] == 0
+        assert counts["r2_failed"] == 0
 
     @pytest.mark.asyncio
     async def test_r2_failure_leaves_row_for_next_sweep(self):
@@ -220,9 +269,10 @@ class TestSweepSoftDeletedFiles:
         assert counts["swept"] == 0
         assert counts["r2_deleted"] == 0
         assert counts["r2_failed"] == 1
-        # Critical: row is NOT db.delete'd when R2 failed — otherwise
-        # we'd lose the storage_key reference and orphan the binary.
-        db.delete.assert_not_awaited()
+        # Critical: only the SELECT runs; DELETE is NOT issued when
+        # R2 failed — otherwise we'd lose the storage_key reference
+        # and orphan the binary.
+        assert db.execute.await_count == 1
         db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
