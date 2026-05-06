@@ -38,7 +38,7 @@
 | アプローチ | ストレージ | 複利成長 (compounding) | 規模 |
 |---|---|---|---|
 | Vector DB / RAG | embedded chunks | なし — 取得専用 | 任意 |
-| Karpathy の LLM Wiki | markdown ファイル | LLM が page を書き換え | 個人 (約 100 page) |
+| Karpathy の LLM Wiki | markdown ファイル | LLM がページを書き換え | 個人 (約 100 ページ) |
 | **Kagura Memory Cloud** | **PostgreSQL + Qdrant + Neural graph** | **Hebbian + Sleep Maintenance** | **チーム / 組織** |
 
 
