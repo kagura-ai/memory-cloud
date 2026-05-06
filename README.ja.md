@@ -9,8 +9,9 @@
 </p>
 
 <p align="center">
-  <strong>AI のための、共有メモリ</strong> — セルフホスト・オープンソース。<br>
-  使うほど賢くなる、適応するメモリ。
+  <strong>チーム向けセルフホスト LLM Knowledge Base</strong> — RAG を超えて。<br>
+  MCP-as-compile-API + Hebbian 学習 + Sleep Maintenance。<br>
+  <a href="https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f">Karpathy の LLM Wiki パターン</a> をチーム規模 + 永続化対応に拡張。
 </p>
 
 <p align="center">
@@ -32,7 +33,15 @@
 
 > **AI は会話のたびに全てを忘れる。Kagura はそれを解決し、検索するたびに賢くなる。**
 
-多くの AI メモリツールはベクトル DB にチャット UI を被せただけ。Kagura は違います:
+多くの AI メモリツールはベクトル DB にチャット UI を被せただけ。Kagura は違います — Karpathy の [LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) パターンを **チーム規模で完全実装**:
+
+| アプローチ | ストレージ | 複利成長 (compounding) | 規模 |
+|---|---|---|---|
+| Vector DB / RAG | embedded chunks | なし — 取得専用 | 任意 |
+| Karpathy の LLM Wiki | markdown ファイル | LLM が page を書き換え | 個人 (約 100 page) |
+| **Kagura Memory Cloud** | **PostgreSQL + Qdrant + Neural graph** | **Hebbian + Sleep Maintenance** | **チーム / 組織** |
+
+
 
 | 機能 | 説明 |
 |------|------|
@@ -58,6 +67,21 @@ Workspace (チーム/組織)
 │   └── ...
 └── Members (Owner/Admin/Member/Viewer)
 ```
+
+### LLM Knowledge Base — 5 層実装
+
+Karpathy の [LLM Wiki パターン](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) は「生きた知識ベース」を 5 層で記述しています (RAG を超えるパターン)。Kagura はこの 5 層全てをチーム規模で実装:
+
+| Layer | Kagura の実装 | Karpathy パターンとの違い |
+|---|---|---|
+| **Ingest** | REST `/memory`、MCP `remember`、R2 ファイルストレージ、resource tokens | + バイナリ blob、+ マルチテナント |
+| **Compile** | **MCP-as-compile-API** — chat agent が構造化 tool call (`remember(summary, content, type, tags)`) で compile + Sleep Maintenance がバッチ統合 | バッチ wiki 書き換えではなく連続マイクロ compile — schema 強制 |
+| **Index** | 三重 index: **BM25** (keyword) + **Qdrant** (semantic) + **Hebbian graph** (relational) — 全自動維持 | 手動の `index.md` メンテ不要 |
+| **Query** | Hybrid Search + AI Reranker + `explore` グラフ探索 | markdown grep を超え、semantic + relational query をサポート |
+| **Enhance** | **Hebbian 学習** — `recall()` のたびに共起 memory 間の edge が強化。Sleep Maintenance が定期統合 | LLM コストゼロのバックグラウンド成長 (LLM による page 書き換えと違う) |
+
+**Compounding loop**: 現状は明示的 (user/agent が回答合成後に `remember()` を呼ぶ)。回答の自動書き戻しはノイズを抑えるため意図的に opt-in。
+
 
 ### Adaptive Memory: 2 つの検索経路
 

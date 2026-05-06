@@ -2,6 +2,8 @@
 
 This document explains the fundamental concepts of Kagura Memory Cloud.
 
+> **Mental model**: Kagura is a team-scale **LLM Knowledge Base** following the 5-layer pattern from [Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) — Ingest, Compile, Index, Query, Enhance. The concepts below map onto these layers: a Workspace owns Contexts (Index unit), each Context holds Memories (Compile unit, 3-layer schema), and the Neural Memory graph + Sleep Maintenance drive Enhance. See [Architecture](architecture.md#llm-knowledge-base--5-layer-mapping) for the full mapping.
+
 ## Workspace
 
 A **Workspace** is the top-level organizational unit — think of it as a team or organization.
