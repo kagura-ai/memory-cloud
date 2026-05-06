@@ -48,9 +48,11 @@ from utils.datetime import utcnow
 from utils.exceptions import (
     ConflictError,
     NotFoundException,
+    UnsupportedMediaTypeError,
     ValidationError,
 )
 from utils.logger import get_logger
+from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
 
 logger = get_logger(__name__)
 
@@ -161,12 +163,30 @@ class FileStorageService:
         """Reserve quota + insert reserved row + return presigned PUT URL.
 
         Raises:
-            ValidationError: invalid size or sha256.
+            ValidationError: invalid size, sha256, or content_type — covers
+                size/sha256 length checks, oversized filename/content_type,
+                control characters in content_type, and malformed
+                type/subtype shape (no slash, garbage chars). 422 at REST.
+            UnsupportedMediaTypeError: content_type passes shape validation
+                but is not in ``settings.allowed_file_content_types_set``.
+                415 at REST; ``unsupported_media_type`` vocab at MCP.
             QuotaExceededError: workspace storage cap would be exceeded.
             ConflictError: same ``(workspace_id, sha256)`` already has an
                 active or in-flight row (partial unique violation).
             NotFoundException: workspace missing.
         """
+        # Enforce DB column limits at the service boundary so REST and MCP
+        # share the same hard caps. Pydantic enforces these at REST via
+        # ``FileReserveRequest``, but MCP coerces ``args["filename"]`` /
+        # ``args["content_type"]`` with bare ``str(...)`` and would otherwise
+        # let an oversized value reach ``flush()`` / ``commit()`` and surface
+        # as an opaque 500 from a column-length DB error.
+        if len(filename) > 512:
+            msg = f"filename must be at most 512 chars, got {len(filename)}"
+            raise ValidationError(msg)
+        if len(content_type) > 255:
+            msg = f"content_type must be at most 255 chars, got {len(content_type)}"
+            raise ValidationError(msg)
         settings = get_settings()
         max_bytes = settings.file_object_max_size_mb * 1024 * 1024
         if size_bytes <= 0 or size_bytes > max_bytes:
@@ -175,6 +195,29 @@ class FileStorageService:
         if len(sha256) != 64:
             msg = f"sha256 must be 64 hex chars, got {len(sha256)}"
             raise ValidationError(msg)
+        # Reject control characters in the raw content_type before any further
+        # work — the value is later signed by R2 SigV4 as the ContentType
+        # header, so an embedded CR/LF/NUL is a header-injection primitive
+        # against R2 (defense-in-depth — R2 itself also validates).
+        if any(c in content_type for c in "\r\n\x00"):
+            msg = "content_type contains control characters"
+            raise ValidationError(msg)
+        # Strip RFC 7231 media-type parameters ("text/plain; charset=utf-8")
+        # before compare; browsers and multipart uploads routinely attach
+        # them but the allow-list is keyed on bare type/subtype. Malformed
+        # shape (no slash, empty type/subtype, garbage chars) is a 422
+        # validation error — distinct from the 415 policy rejection below.
+        base_content_type = normalize_media_type(content_type)
+        if not MEDIA_TYPE_RE.match(base_content_type):
+            msg = f"content_type must be 'type/subtype' (got {content_type!r})"
+            raise ValidationError(msg)
+        # Empty allow-list rejects everything (fail-closed).
+        allowed = settings.allowed_file_content_types_set
+        if base_content_type not in allowed:
+            raise UnsupportedMediaTypeError(
+                content_type=content_type,
+                allowed=allowed,
+            )
 
         workspace = await self._load_workspace(workspace_id)
 

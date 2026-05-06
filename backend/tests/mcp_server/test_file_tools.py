@@ -36,6 +36,7 @@ from utils.exceptions import (
     ConflictError,
     NotFoundException,
     QuotaExceededError,
+    UnsupportedMediaTypeError,
     ValidationError,
 )
 
@@ -178,6 +179,43 @@ class TestInitFileUpload:
             )
         body = _payload(out)
         assert body["error"] == "quota_exceeded"
+
+    @pytest.mark.asyncio
+    async def test_unsupported_media_type_returns_dedicated_vocab(self):
+        """Dedicated MCP vocab (``unsupported_media_type``) so SDKs can
+        route MIME-rejected uploads without inspecting message text."""
+        ws = uuid4()
+        get_db_patch, _ = _patch_get_db()
+        with (
+            get_db_patch,
+            _patch_viewer_check_pass(),
+            patch(
+                "mcp_server.tools.files.FileStorageService.reserve_upload",
+                AsyncMock(
+                    side_effect=UnsupportedMediaTypeError(
+                        content_type="application/x-msdownload",
+                        allowed=["image/png", "application/pdf"],
+                    )
+                ),
+            ),
+        ):
+            out = await handle_init_file_upload(
+                {
+                    "filename": "evil.exe",
+                    "content_type": "application/x-msdownload",
+                    "size_bytes": 1024,
+                    "sha256": VALID_SHA,
+                },
+                user_id=USER_ID,
+                workspace_id=ws,
+            )
+        body = _payload(out)
+        assert body["error"] == "unsupported_media_type"
+        assert "application/x-msdownload" in body["message"]
+        # Loop 2: forward exc.details so MCP clients mirror REST 415 body
+        # without parsing message text (same pattern as analysis._gate_error_response).
+        assert body["content_type"] == "application/x-msdownload"
+        assert body["allowed"] == ["application/pdf", "image/png"]
 
     @pytest.mark.asyncio
     async def test_conflict_maps_to_conflict_error(self):

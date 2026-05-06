@@ -20,6 +20,7 @@ from api.main import app
 from auth.dependencies import get_user_from_api_key_or_session
 from db.base import get_db
 from services.file_storage_service import ReserveResult
+from utils.exceptions import UnsupportedMediaTypeError
 
 VALID_SHA = "a" * 64
 OTHER_SHA = "b" * 64
@@ -132,6 +133,36 @@ class TestReserveUpload:
             },
         )
         assert r.status_code == 422
+
+    def test_disallowed_content_type_returns_415(self, client):
+        """``UnsupportedMediaTypeError`` → HTTP 415 with violating
+        content_type + allow-list in ``details`` (via the global handler)."""
+        with patch(
+            "api.routes.files.FileStorageService.reserve_upload",
+            AsyncMock(
+                side_effect=UnsupportedMediaTypeError(
+                    content_type="application/x-msdownload",
+                    allowed=["image/png", "application/pdf"],
+                )
+            ),
+        ):
+            r = client.post(
+                "/api/v1/files/reserve",
+                json={
+                    "workspace_id": str(uuid4()),
+                    "filename": "evil.exe",
+                    "content_type": "application/x-msdownload",
+                    "size_bytes": 1024,
+                    "sha256": VALID_SHA,
+                },
+            )
+        assert r.status_code == 415, r.text
+        body = r.json()
+        assert body["error"] == "MEDIA-001"
+        assert "application/x-msdownload" in body["message"]
+        assert body["details"]["content_type"] == "application/x-msdownload"
+        # ``allowed`` is sorted in the exception ctor for stable client UI.
+        assert body["details"]["allowed"] == ["application/pdf", "image/png"]
 
 
 # ---------------------------------------------------------------------------

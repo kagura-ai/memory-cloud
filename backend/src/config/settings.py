@@ -12,6 +12,8 @@ from typing import Any, Literal
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
+
 
 class Settings(BaseSettings):
     """Application settings."""
@@ -354,6 +356,62 @@ class Settings(BaseSettings):
     presign_get_ttl_seconds: int = Field(
         default=300, description="Presigned GET URL lifetime in seconds"
     )
+    allowed_file_content_types: str = Field(
+        default=(
+            "image/png,image/jpeg,image/gif,application/pdf,"
+            "text/plain,text/markdown,text/csv,application/json"
+        ),
+        description=(
+            "Comma-separated MIME allow-list for /api/v1/files/* and the MCP "
+            "file tools (Issue #553). Comparison is case-insensitive (RFC 6838). "
+            "Empty/whitespace = deny all (fail-closed); rely on the default for "
+            "the closed-beta MIME set or override via ALLOWED_FILE_CONTENT_TYPES "
+            "to widen / narrow per deployment."
+        ),
+    )
+
+    @property
+    def allowed_file_content_types_set(self) -> set[str]:
+        """Parsed allow-list (bare type/subtype, lower-cased). Empty = fail-closed.
+
+        Mirrors ``FileStorageService.reserve_upload``'s parameter-stripping so
+        an operator value like ``text/plain; charset=utf-8`` in the env var
+        normalizes to ``text/plain`` and matches an upload that strips the
+        same parameters at compare time. Boot-time validation
+        (``_validate_allowed_file_content_types``) rejects malformed entries
+        so this set never contains shapes that would silently never match.
+        """
+        return {
+            normalized
+            for s in self.allowed_file_content_types.split(",")
+            if (normalized := normalize_media_type(s))
+        }
+
+    @model_validator(mode="after")
+    def _validate_allowed_file_content_types(self) -> "Settings":
+        """Boot-time fail-fast on malformed ``ALLOWED_FILE_CONTENT_TYPES`` entries.
+
+        Empty / whitespace-only entries pass through (filtered out), so
+        ``ALLOWED_FILE_CONTENT_TYPES=""`` still resolves to fail-closed
+        (empty set, every upload rejected) without crashing the app.
+        Malformed shapes (no slash, empty type/subtype, garbage chars) crash
+        boot — they would otherwise leak into ``details["allowed"]`` of every
+        ``UnsupportedMediaTypeError`` response, exposing the misconfiguration
+        to clients without the operator noticing.
+        """
+        invalid: list[str] = []
+        for entry in (self.allowed_file_content_types or "").split(","):
+            if not entry.strip():
+                continue
+            normalized = normalize_media_type(entry)
+            if not normalized or not MEDIA_TYPE_RE.match(normalized):
+                invalid.append(entry.strip())
+        if invalid:
+            raise ValueError(
+                "ALLOWED_FILE_CONTENT_TYPES has malformed entries "
+                f"(must be 'type/subtype'): {invalid!r}"
+            )
+        return self
 
     @field_validator("resend_dpa_accepted_at", mode="before")
     @classmethod

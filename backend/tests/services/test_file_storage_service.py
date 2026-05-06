@@ -20,6 +20,7 @@ from utils.exceptions import (
     ConflictError,
     NotFoundException,
     QuotaExceededError,
+    UnsupportedMediaTypeError,
     ValidationError,
 )
 
@@ -133,6 +134,26 @@ def _patch_quota_release():
 
 
 class TestReserveUpload:
+    @pytest.fixture(autouse=True)
+    def _canonical_allowlist(self, monkeypatch):
+        """Pin the allow-list to the canonical default for every test in
+        this class so a developer with ``ALLOWED_FILE_CONTENT_TYPES``
+        overridden in their shell env does not see spurious failures.
+
+        Tests that need a different allow-list (empty fail-closed,
+        parameter-laden entries) override this via their own
+        ``monkeypatch.setattr`` — pytest stacks the undos in LIFO order
+        so the inner override applies first and unwinds before this one.
+        """
+        from config.settings import get_settings
+
+        monkeypatch.setattr(
+            get_settings(),
+            "allowed_file_content_types",
+            "image/png,image/jpeg,image/gif,application/pdf,"
+            "text/plain,text/markdown,text/csv,application/json",
+        )
+
     @pytest.mark.asyncio
     async def test_happy_path(self, service, db, workspace_id):
         ws = _make_workspace(workspace_id)
@@ -145,7 +166,7 @@ class TestReserveUpload:
                 workspace_id=workspace_id,
                 created_by="user-1",
                 filename="test.bin",
-                content_type="application/octet-stream",
+                content_type="application/pdf",
                 size_bytes=1024,
                 sha256=VALID_SHA,
             )
@@ -163,7 +184,7 @@ class TestReserveUpload:
                 workspace_id=workspace_id,
                 created_by="u",
                 filename="x",
-                content_type="application/octet-stream",
+                content_type="application/pdf",
                 size_bytes=0,
                 sha256=VALID_SHA,
             )
@@ -176,7 +197,7 @@ class TestReserveUpload:
                 workspace_id=workspace_id,
                 created_by="u",
                 filename="x",
-                content_type="application/octet-stream",
+                content_type="application/pdf",
                 size_bytes=too_big,
                 sha256=VALID_SHA,
             )
@@ -188,7 +209,7 @@ class TestReserveUpload:
                 workspace_id=workspace_id,
                 created_by="u",
                 filename="x",
-                content_type="application/octet-stream",
+                content_type="application/pdf",
                 size_bytes=1024,
                 sha256="too-short",
             )
@@ -206,7 +227,7 @@ class TestReserveUpload:
                     workspace_id=workspace_id,
                     created_by="u",
                     filename="x",
-                    content_type="application/octet-stream",
+                    content_type="application/pdf",
                     size_bytes=1024,
                     sha256=VALID_SHA,
                 )
@@ -224,7 +245,7 @@ class TestReserveUpload:
                 workspace_id=workspace_id,
                 created_by="u",
                 filename="x",
-                content_type="application/octet-stream",
+                content_type="application/pdf",
                 size_bytes=1024,
                 sha256=VALID_SHA,
             )
@@ -251,11 +272,246 @@ class TestReserveUpload:
                     workspace_id=workspace_id,
                     created_by="u",
                     filename="x",
-                    content_type="application/octet-stream",
+                    content_type="application/pdf",
                     size_bytes=1024,
                     sha256=VALID_SHA,
                 )
             release.assert_awaited_once()
+
+    # content_type allow-list — service-boundary check covers both REST + MCP.
+    # Validation runs after size/sha256 and before workspace load, so rejection
+    # short-circuits without DB or Redis I/O.
+
+    @pytest.mark.asyncio
+    async def test_allowed_content_type_passes(self, service, db, workspace_id):
+        ws = _make_workspace(workspace_id)
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=ws)
+        db.execute.return_value = result
+
+        with _patch_quota_reserve(succeed=True):
+            out = await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x.png",
+                content_type="image/png",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+        assert isinstance(out, ReserveResult)
+
+    @pytest.mark.asyncio
+    async def test_disallowed_content_type_raises_415(self, service, db, workspace_id):
+        with pytest.raises(UnsupportedMediaTypeError) as exc_info:
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="malicious.exe",
+                content_type="application/x-msdownload",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+        err = exc_info.value
+        assert err.status_code == 415
+        assert err.error_code == "MEDIA-001"
+        assert err.details["content_type"] == "application/x-msdownload"
+        assert "image/png" in err.details["allowed"]
+        # Rejection happens before workspace load — no DB execute.
+        db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_case_insensitive_content_type(self, service, db, workspace_id):
+        """RFC 6838: MIME type comparison is case-insensitive."""
+        ws = _make_workspace(workspace_id)
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=ws)
+        db.execute.return_value = result
+
+        with _patch_quota_reserve(succeed=True):
+            out = await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x.png",
+                content_type="IMAGE/PNG",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+        assert isinstance(out, ReserveResult)
+
+    @pytest.mark.asyncio
+    async def test_content_type_with_parameters_accepted(self, service, db, workspace_id):
+        """RFC 7231: clients (browser fetch, multipart) commonly attach
+        ``;charset=...`` parameters; the bare type/subtype should still match."""
+        ws = _make_workspace(workspace_id)
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=ws)
+        db.execute.return_value = result
+
+        with _patch_quota_reserve(succeed=True):
+            out = await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="notes.txt",
+                content_type="text/plain; charset=utf-8",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+        assert isinstance(out, ReserveResult)
+
+    @pytest.mark.asyncio
+    async def test_empty_allowlist_rejects_all(self, service, workspace_id, monkeypatch):
+        """Empty/whitespace allow-list = fail-closed (every upload rejected)."""
+        from config.settings import get_settings
+
+        settings = get_settings()
+        monkeypatch.setattr(settings, "allowed_file_content_types", "")
+
+        with pytest.raises(UnsupportedMediaTypeError):
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x.pdf",
+                content_type="application/pdf",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+
+    @pytest.mark.parametrize(
+        "bad_ct",
+        [
+            "image/png\r\nX-Injected: yes",  # CRLF header injection
+            "image/png\nfoo",  # bare LF
+            "image/png\rfoo",  # bare CR
+            "image/png\x00null",  # NUL byte
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_control_chars_in_content_type_raise_validation(
+        self, service, workspace_id, bad_ct
+    ):
+        """Defense in depth against R2 ContentType header injection — ValidationError (422), not 415."""
+        with pytest.raises(ValidationError, match="control characters"):
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x.png",
+                content_type=bad_ct,
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+
+    @pytest.mark.parametrize(
+        "bad_ct",
+        [
+            "no-slash",  # no separator
+            "/no-type",  # empty type
+            "no-subtype/",  # empty subtype
+            ";",  # bare param separator
+            "image/png garbage",  # space in subtype
+            "",  # empty (Pydantic blocks this at REST, but MCP coerces str(...))
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_invalid_type_subtype_shape_raises_validation(
+        self, service, workspace_id, bad_ct
+    ):
+        """Malformed type/subtype is a 422 shape error, not a 415 policy rejection."""
+        with pytest.raises(ValidationError, match="type/subtype"):
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x",
+                content_type=bad_ct,
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+
+    @pytest.mark.asyncio
+    async def test_oversize_filename_raises_validation(self, service, workspace_id):
+        """MCP bypasses pydantic, so the service enforces the DB column cap."""
+        with pytest.raises(ValidationError, match="filename"):
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x" * 513,  # > 512
+                content_type="application/pdf",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+
+    @pytest.mark.asyncio
+    async def test_oversize_content_type_raises_validation(self, service, workspace_id):
+        """An MCP-injected oversize ``content_type`` that would otherwise
+        normalize past the allow-list and fail at DB flush is rejected up
+        front as a 422 ValidationError, not surfaced as a 500."""
+        oversize = "application/pdf;" + "a" * 256  # 272 chars total
+        with pytest.raises(ValidationError, match="content_type"):
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x.pdf",
+                content_type=oversize,
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+
+    def test_settings_rejects_malformed_allow_list_at_boot(self):
+        """Boot-time fail-fast: malformed entries crash app startup so they
+        never leak into ``UnsupportedMediaTypeError.details['allowed']``."""
+        import pydantic
+
+        from config.settings import Settings
+
+        # Valid shapes are accepted (sanity).
+        Settings(allowed_file_content_types="image/png,application/pdf")
+        # Empty / whitespace / commas-only is fail-closed, NOT malformed.
+        Settings(allowed_file_content_types="")
+        Settings(allowed_file_content_types="   ")
+        Settings(allowed_file_content_types=",,,")
+        # Parameter-laden entries normalize and pass.
+        Settings(allowed_file_content_types="text/plain; charset=utf-8, image/png")
+
+        # Malformed shapes (no slash, embedded space, etc.) fail loud.
+        with pytest.raises(pydantic.ValidationError, match="malformed entries"):
+            Settings(allowed_file_content_types="image/png,garbage")
+        with pytest.raises(pydantic.ValidationError, match="malformed entries"):
+            Settings(allowed_file_content_types="image / png")
+        with pytest.raises(pydantic.ValidationError, match="malformed entries"):
+            Settings(allowed_file_content_types="/no-type")
+        with pytest.raises(pydantic.ValidationError, match="malformed entries"):
+            Settings(allowed_file_content_types="no-subtype/")
+
+    @pytest.mark.asyncio
+    async def test_env_allowlist_strips_parameters_in_entries(
+        self, service, db, workspace_id, monkeypatch
+    ):
+        """An operator who pastes a parameter-laden MIME into the env var
+        (``text/plain; charset=utf-8``) should still match a bare upload —
+        without parser-side stripping the entry would silently never match."""
+        from config.settings import get_settings
+
+        settings = get_settings()
+        monkeypatch.setattr(
+            settings,
+            "allowed_file_content_types",
+            "text/plain; charset=utf-8, application/pdf",
+        )
+
+        ws = _make_workspace(workspace_id)
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=ws)
+        db.execute.return_value = result
+
+        with _patch_quota_reserve(succeed=True):
+            out = await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="notes.txt",
+                content_type="text/plain",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+        assert isinstance(out, ReserveResult)
 
 
 class TestConfirmUpload:
