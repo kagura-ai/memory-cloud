@@ -3,6 +3,7 @@
 Issue #101: Sleep Maintenance Foundation — report tracking and audit log.
 """
 
+from typing import Literal
 from uuid import uuid4
 
 from sqlalchemy import (
@@ -34,6 +35,11 @@ from db.base import Base
 # the migration (raw ``op.execute(sa.text(...))`` form, see d05_523).
 SLEEP_REPORT_SOURCES: tuple[str, ...] = ("sleep", "analysis")
 SLEEP_REPORT_PAID_BY_VALUES: tuple[str, ...] = ("platform", "byok")
+
+# Issue #504: per-context sleep_mode is the source of truth for which Sleep
+# Maintenance phases run. Mirrors ``Context.sleep_mode`` column values and the
+# branches in ``services.sleep.orchestrator.SleepOrchestrator.run``.
+SleepMode = Literal["full", "edges_only", "skip"]
 
 
 class SleepReport(Base):

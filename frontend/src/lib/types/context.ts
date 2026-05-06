@@ -17,7 +17,7 @@ export interface Context {
   is_private: boolean; // Issue #165: Privacy control (shared/private)
   is_public: boolean; // Issue #238: Public context flag (external access)
   is_locked: boolean; // Issue #85: Lock flag (prevent deletion)
-  sleep_mode: "full" | "edges_only" | "skip" | null;
+  sleep_mode: "full" | "edges_only" | "skip";
   resource_id: string | null; // Issue #238: Resource-backed context
   created_by: string | null; // Issue #165: Creator user_id
   created_by_name: string | null; // Creator name

@@ -2825,8 +2825,8 @@
     "privateContext": "Private context",
     "sharedContext": "Shared context",
     "publicContext": "Public context",
-    "sleepModeEdgesOnly": "Edges Only",
-    "sleepModeSkip": "Sleep: Skip",
+    "sleepModeBadgeEdgesOnly": "Edges Only",
+    "sleepModeBadgeSkip": "Sleep: Skip",
     "tabs": {
       "overview": "Overview",
       "memories": "Memories",

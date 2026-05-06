@@ -2825,8 +2825,8 @@
     "privateContext": "プライベート",
     "sharedContext": "共有",
     "publicContext": "パブリック",
-    "sleepModeEdgesOnly": "エッジのみ",
-    "sleepModeSkip": "Sleep: スキップ",
+    "sleepModeBadgeEdgesOnly": "エッジのみ",
+    "sleepModeBadgeSkip": "Sleep: スキップ",
     "tabs": {
       "overview": "概要",
       "memories": "メモリ",

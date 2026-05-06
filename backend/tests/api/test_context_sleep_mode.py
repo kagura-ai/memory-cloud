@@ -4,7 +4,7 @@ Covers:
 1. Enum validation on ContextUpdate Pydantic schema
 2. ContextService.update_context applies sleep_mode correctly
 3. ContextResponse serialization includes sleep_mode
-4. owner_only_fields list contains sleep_mode (permission enforcement)
+4. Non-owner editor receives 403 when attempting to update sleep_mode
 """
 
 from datetime import UTC, datetime
@@ -12,8 +12,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
+from api.main import app
 from api.routes.contexts import ContextResponse, ContextUpdate
+from auth.dependencies import require_session_auth
 from services.context_service import ContextService
 
 # ============================================================================
@@ -155,25 +159,39 @@ class TestContextResponseSerialization:
 
 
 # ============================================================================
-# 4. Permission Enforcement (owner_only_fields)
+# 4. Permission Enforcement — non-owner editor cannot update sleep_mode
 # ============================================================================
 
 
 class TestContextSleepModePermission:
-    """sleep_mode must be present in owner_only_fields list."""
+    """PUT /contexts/{id} with sleep_mode requires owner role; editor → 403."""
 
-    def test_sleep_mode_in_owner_only_fields(self):
-        """Verify the route's owner_only_fields list contains sleep_mode.
+    def test_editor_cannot_update_sleep_mode(self):
+        context_id = uuid4()
+        workspace_id = uuid4()
 
-        This is a contract test: if someone removes sleep_mode from the list,
-        this test fails, reminding them that sleep_mode is owner-only by design.
-        """
-        # Extract owner_only_fields from the route source by inspecting the
-        # function's local variables (they're defined at module load time).
-        import inspect
+        async def _deny_owner(*args, **kwargs):
+            raise HTTPException(status_code=403, detail="Not context owner")
 
-        from api.routes.contexts import update_context
+        app.dependency_overrides[require_session_auth] = lambda: {
+            "user_id": "editor_user",
+            "email": "editor@test.com",
+            "role": "user",
+            "current_workspace_id": workspace_id,
+        }
+        try:
+            with (
+                patch(
+                    "services.permission_service.PermissionService.check_context_owner",
+                    _deny_owner,
+                ),
+                TestClient(app, raise_server_exceptions=False) as client,
+            ):
+                response = client.put(
+                    f"/api/v1/contexts/{context_id}",
+                    json={"sleep_mode": "skip"},
+                )
+        finally:
+            app.dependency_overrides.pop(require_session_auth, None)
 
-        source = inspect.getsource(update_context)
-        assert "owner_only_fields" in source
-        assert '"sleep_mode"' in source or "'sleep_mode'" in source
+        assert response.status_code == 403

@@ -11,7 +11,7 @@ Each context maps to a separate Qdrant collection for memory isolation.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import APIKeyOrSessionUser, SessionUser, get_current_user
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
+from models.sleep import SleepMode
 from services.context_service import ContextService
 from utils.datetime import to_utc_iso
 from utils.exceptions import NotFoundException, ValidationError
@@ -186,7 +187,7 @@ class ContextUpdate(BaseModel):
         None,
         description="When true, prevents this context from being deleted until unlocked.",
     )
-    sleep_mode: Literal["full", "edges_only", "skip"] | None = Field(
+    sleep_mode: SleepMode | None = Field(
         None,
         description="Sleep maintenance mode: full=all phases, edges_only=edge discovery+reindex, skip=none",
     )
@@ -211,7 +212,9 @@ class ContextResponse(TZAwareBaseModel):
         None, description="Resource ID for public contexts"
     )  # Issue #238
     is_locked: bool = Field(False, description="When true, deletion is prevented until unlocked")
-    sleep_mode: str = Field("full", description="Sleep maintenance mode: full, edges_only, or skip")
+    sleep_mode: SleepMode = Field(
+        "full", description="Sleep maintenance mode: full, edges_only, or skip"
+    )
     created_by: str | None = Field(None, description="Creator user ID")  # Issue #165
     created_by_name: str | None = Field(None, description="Creator name")
     created_at: datetime = Field(..., description="Creation timestamp")
