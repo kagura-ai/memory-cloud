@@ -9,6 +9,12 @@ The new partial index narrows storage to rows that are actually candidates
 for GC (the dominant ``deleted_at IS NULL AND status='uploaded'`` rows are
 excluded from the index entirely).
 
+Deploy note: ``CREATE INDEX`` (non-CONCURRENTLY) takes a SHARE lock on
+``file_objects`` while the index builds. At Phase 1 scale the partial
+predicate covers a small subset so the lock window is sub-second; if the
+table grows large in production switch to
+``postgresql_concurrently=True`` (requires running outside a transaction).
+
 Revision ID: e04_552_gc_index
 Revises: e03_485_file_objects
 """

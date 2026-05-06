@@ -83,13 +83,11 @@ async def _atomic_check_and_incr(
         result = await script(keys=[key], args=[size_bytes, quota_bytes])
         return int(result)
     except Exception as exc:
-        # Mirrors the wrapping discipline in ``db/redis.py``
-        # (``incrby_counter``, ``set_cache``, …): catch any underlying
-        # client exception and re-raise as the project's own
-        # ``RedisError``. Catching ``Exception`` is broad on purpose —
-        # ``ValueError`` from ``int(None)`` if the script ever returns
-        # nil must also flow through fail-open, not bubble to the HTTP
-        # handler as a 500.
+        # Catching ``Exception`` is broad on purpose: ``ValueError``
+        # from ``int(None)`` (if the script ever returns nil) must
+        # also flow through fail-open rather than bubble as a 500.
+        # Wrap as project ``RedisError`` to match the ``db/redis.py``
+        # helpers' discipline.
         raise RedisError(f"Failed to run quota reserve script: {exc}") from exc
 
 

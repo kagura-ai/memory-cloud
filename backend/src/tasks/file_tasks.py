@@ -216,14 +216,10 @@ async def sweep_soft_deleted_files() -> dict[str, int]:
                     )
                     continue
             else:
-                # ``storage_key IS NULL`` is normal for never-uploaded
-                # rows that were soft-deleted while still ``reserved``.
-                # In practice the orphan sweeper should have already
-                # transitioned them to ``failed``, so reaching here on
-                # an ``uploaded`` row is an invariant violation worth
-                # tracking — but the row is hard-deletable since there
-                # is no binary to leak. Counter name reflects what
-                # actually happens (the row IS hard-deleted below).
+                # ``storage_key IS NULL`` on an ``uploaded`` row is an
+                # invariant violation — the orphan sweeper should have
+                # transitioned it to ``failed`` already. Hard-deletable
+                # since there's no binary to leak.
                 counts["hard_deleted_no_r2"] += 1
 
             await db.delete(f)
