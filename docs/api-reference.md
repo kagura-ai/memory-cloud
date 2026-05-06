@@ -548,15 +548,9 @@ Update a context. All fields are optional.
 
 ### DELETE /api/v1/contexts/{context_id}
 
-Delete a context permanently.
+Soft-delete a context. The context row is marked deleted (sets `deleted_at`) so it stops appearing in listings, but the record and its memories are retained for recovery / audit purposes.
 
-**Response:**
-
-```json
-{
-  "message": "Context deleted successfully"
-}
-```
+**Response:** `204 No Content` (no response body)
 
 ---
 

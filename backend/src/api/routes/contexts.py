@@ -403,6 +403,7 @@ async def list_contexts(
                 is_public=context.is_public,  # Issue #238
                 resource_id=context.resource_id,  # Issue #238
                 is_locked=context.is_locked,  # Issue #85
+                sleep_mode=context.sleep_mode,
                 created_by=context.created_by,  # Issue #165
                 created_by_name=creator_names.get(context.created_by)
                 if context.created_by
@@ -540,6 +541,7 @@ async def create_context(
             usage_guide=context.usage_guide,
             is_default=context.is_default,
             is_private=context.is_private,
+            sleep_mode=context.sleep_mode,
             created_by=context.created_by,
             created_at=context.created_at,
             updated_at=context.updated_at,
@@ -627,6 +629,7 @@ async def get_context(
             is_public=context.is_public,
             resource_id=context.resource_id,
             is_locked=context.is_locked,
+            sleep_mode=context.sleep_mode,
             created_by=context.created_by,
             created_by_name=creator_name,
             created_at=context.created_at,
