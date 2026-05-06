@@ -181,6 +181,9 @@ class TestContextSleepModePermission:
             "role": "user",
             "current_workspace_id": workspace_id,
         }
+        # Override get_db so the test stays hermetic — the permission check
+        # raises before any DB work, but FastAPI still resolves all deps.
+        app.dependency_overrides[get_db] = lambda: AsyncMock()
         try:
             with (
                 patch(
@@ -195,6 +198,7 @@ class TestContextSleepModePermission:
                 )
         finally:
             app.dependency_overrides.pop(require_session_auth, None)
+            app.dependency_overrides.pop(get_db, None)
 
         assert response.status_code == 403
 
@@ -221,9 +225,16 @@ class TestContextSleepModeReadRoundTrip:
             "role": "user",
             "current_workspace_id": workspace_id,
         }
-        app.dependency_overrides[get_db] = lambda: AsyncMock()
+        # db.execute returns empty results so list_contexts' creator/config/
+        # member/stats queries all yield empty without needing a real DB.
+        empty_result = MagicMock()
+        empty_result.scalars.return_value.all.return_value = []
+        empty_result.all.return_value = []
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=empty_result)
+        app.dependency_overrides[get_db] = lambda: db
 
-    def _override_service_get_context(self, sleep_mode: str):
+    def _build_mock_context(self, sleep_mode: str, is_private: bool = True):
         ctx = MagicMock()
         ctx.id = uuid4()
         ctx.name = "test-ctx"
@@ -232,7 +243,7 @@ class TestContextSleepModeReadRoundTrip:
         ctx.summary = None
         ctx.usage_guide = None
         ctx.is_default = False
-        ctx.is_private = True
+        ctx.is_private = is_private
         ctx.is_public = False
         ctx.resource_id = None
         ctx.is_locked = False
@@ -240,11 +251,16 @@ class TestContextSleepModeReadRoundTrip:
         ctx.created_by = None  # skips creator-name DB lookup branch
         ctx.created_at = datetime(2026, 5, 5, 0, 0, 0, tzinfo=UTC)
         ctx.updated_at = None
-
-        service = AsyncMock(spec=ContextService)
-        service.get_context = AsyncMock(return_value=ctx)
-        app.dependency_overrides[get_context_service] = lambda: service
         return ctx
+
+    def _override_service(self, *, get_context_ctx=None, list_contexts_value=None):
+        service = AsyncMock(spec=ContextService)
+        if get_context_ctx is not None:
+            service.get_context = AsyncMock(return_value=get_context_ctx)
+        if list_contexts_value is not None:
+            service.list_contexts = AsyncMock(return_value=list_contexts_value)
+        app.dependency_overrides[get_context_service] = lambda: service
+        return service
 
     def _cleanup_overrides(self):
         for key in (require_session_auth, get_db, get_context_service):
@@ -253,7 +269,8 @@ class TestContextSleepModeReadRoundTrip:
     @pytest.mark.parametrize("mode", ["full", "edges_only", "skip"])
     def test_get_context_returns_sleep_mode(self, mode: str):
         self._override_session()
-        ctx = self._override_service_get_context(mode)
+        ctx = self._build_mock_context(mode)
+        self._override_service(get_context_ctx=ctx)
         try:
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.get(f"/api/v1/contexts/{ctx.id}")
@@ -262,3 +279,21 @@ class TestContextSleepModeReadRoundTrip:
 
         assert response.status_code == 200, response.text
         assert response.json()["sleep_mode"] == mode
+
+    @pytest.mark.parametrize("mode", ["full", "edges_only", "skip"])
+    def test_list_contexts_returns_sleep_mode(self, mode: str):
+        # is_private=False so the privacy filter (line 380) doesn't drop a
+        # context whose created_by is None for the mock owner_user.
+        self._override_session()
+        ctx = self._build_mock_context(mode, is_private=False)
+        self._override_service(list_contexts_value=[ctx])
+        try:
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.get("/api/v1/contexts")
+        finally:
+            self._cleanup_overrides()
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert len(body["contexts"]) == 1
+        assert body["contexts"][0]["sleep_mode"] == mode
