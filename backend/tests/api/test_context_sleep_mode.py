@@ -1,0 +1,299 @@
+"""Tests for per-context sleep_mode toggle (Issue #504).
+
+Covers:
+1. Enum validation on ContextUpdate Pydantic schema
+2. ContextService.update_context applies sleep_mode correctly
+3. ContextResponse serialization includes sleep_mode
+4. Non-owner editor receives 403 when attempting to update sleep_mode
+5. Read endpoints (GET /contexts/{id}, GET /contexts) propagate sleep_mode
+"""
+
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
+
+import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+
+from api.main import app
+from api.routes.contexts import ContextResponse, ContextUpdate, get_context_service
+from auth.dependencies import require_session_auth
+from db.base import get_db
+from services.context_service import ContextService
+
+# ============================================================================
+# 1. Enum Validation
+# ============================================================================
+
+
+class TestContextUpdateSleepModeValidation:
+    """Pydantic schema rejects unknown sleep_mode values."""
+
+    @pytest.mark.parametrize("mode", ["full", "edges_only", "skip"])
+    def test_valid_sleep_modes_accepted(self, mode: str):
+        update = ContextUpdate(sleep_mode=mode)  # type: ignore[literal-required]
+        assert update.sleep_mode == mode
+
+    def test_null_sleep_mode_accepted(self):
+        update = ContextUpdate()
+        assert update.sleep_mode is None
+
+    def test_invalid_sleep_mode_rejected(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ContextUpdate(sleep_mode="invalid")  # type: ignore[literal-required]
+
+
+# ============================================================================
+# 2. Service Layer
+# ============================================================================
+
+
+class TestContextServiceUpdateSleepMode:
+    """ContextService.update_context applies sleep_mode when provided."""
+
+    @pytest.fixture
+    def service(self):
+        mock_db = AsyncMock()
+        return ContextService(mock_db)
+
+    @pytest.fixture
+    def mock_context(self):
+        ctx = MagicMock()
+        ctx.id = uuid4()
+        ctx.name = "test-ctx"
+        ctx.display_name = None
+        ctx.description = None
+        ctx.summary = None
+        ctx.usage_guide = None
+        ctx.is_private = True
+        ctx.is_public = False
+        ctx.resource_id = None
+        ctx.is_locked = False
+        ctx.sleep_mode = "full"
+        return ctx
+
+    @pytest.mark.asyncio
+    async def test_update_sleep_mode_to_skip(self, service, mock_context):
+        with patch.object(
+            service, "get_context", new_callable=AsyncMock, return_value=mock_context
+        ):
+            await service.update_context(
+                user_id="test_user",
+                context_id=mock_context.id,
+                sleep_mode="skip",
+            )
+
+        assert mock_context.sleep_mode == "skip"
+        service.db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_update_sleep_mode_to_edges_only(self, service, mock_context):
+        with patch.object(
+            service, "get_context", new_callable=AsyncMock, return_value=mock_context
+        ):
+            await service.update_context(
+                user_id="test_user",
+                context_id=mock_context.id,
+                sleep_mode="edges_only",
+            )
+
+        assert mock_context.sleep_mode == "edges_only"
+        service.db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_sleep_mode_none_is_noop(self, service, mock_context):
+        """Passing sleep_mode=None should not change the existing value."""
+        with patch.object(
+            service, "get_context", new_callable=AsyncMock, return_value=mock_context
+        ):
+            await service.update_context(
+                user_id="test_user",
+                context_id=mock_context.id,
+                sleep_mode=None,
+            )
+
+        assert mock_context.sleep_mode == "full"
+        service.db.commit.assert_awaited_once()
+
+
+# ============================================================================
+# 3. Response Serialization
+# ============================================================================
+
+
+class TestContextResponseSerialization:
+    """ContextResponse includes sleep_mode in serialized output."""
+
+    def test_sleep_mode_defaults_to_full(self):
+        response = ContextResponse(
+            id=uuid4(),
+            name="test",
+            is_default=False,
+            created_at=datetime(2026, 5, 5, 0, 0, 0, tzinfo=UTC),
+        )
+        body = response.model_dump()
+        assert body["sleep_mode"] == "full"
+
+    def test_sleep_mode_edges_only(self):
+        response = ContextResponse(
+            id=uuid4(),
+            name="test",
+            is_default=False,
+            sleep_mode="edges_only",
+            created_at=datetime(2026, 5, 5, 0, 0, 0, tzinfo=UTC),
+        )
+        body = response.model_dump()
+        assert body["sleep_mode"] == "edges_only"
+
+    def test_sleep_mode_skip(self):
+        response = ContextResponse(
+            id=uuid4(),
+            name="test",
+            is_default=False,
+            sleep_mode="skip",
+            created_at=datetime(2026, 5, 5, 0, 0, 0, tzinfo=UTC),
+        )
+        body = response.model_dump()
+        assert body["sleep_mode"] == "skip"
+
+
+# ============================================================================
+# 4. Permission Enforcement — non-owner editor cannot update sleep_mode
+# ============================================================================
+
+
+class TestContextSleepModePermission:
+    """PUT /contexts/{id} with sleep_mode requires owner role; editor → 403."""
+
+    def test_editor_cannot_update_sleep_mode(self):
+        context_id = uuid4()
+        workspace_id = uuid4()
+
+        async def _deny_owner(*args, **kwargs):
+            raise HTTPException(status_code=403, detail="Not context owner")
+
+        app.dependency_overrides[require_session_auth] = lambda: {
+            "user_id": "editor_user",
+            "email": "editor@test.com",
+            "role": "user",
+            "current_workspace_id": workspace_id,
+        }
+        # Override get_db so the test stays hermetic — the permission check
+        # raises before any DB work, but FastAPI still resolves all deps.
+        app.dependency_overrides[get_db] = lambda: AsyncMock()
+        try:
+            with (
+                patch(
+                    "services.permission_service.PermissionService.check_context_owner",
+                    _deny_owner,
+                ),
+                TestClient(app, raise_server_exceptions=False) as client,
+            ):
+                response = client.put(
+                    f"/api/v1/contexts/{context_id}",
+                    json={"sleep_mode": "skip"},
+                )
+        finally:
+            app.dependency_overrides.pop(require_session_auth, None)
+            app.dependency_overrides.pop(get_db, None)
+
+        assert response.status_code == 403
+
+
+# ============================================================================
+# 5. Read endpoints propagate sleep_mode through ContextResponse
+# ============================================================================
+
+
+class TestContextSleepModeReadRoundTrip:
+    """GET /contexts/{id} and GET /contexts must surface the persisted sleep_mode.
+
+    Regression guard: every ContextResponse(...) construction site in the route
+    layer must pass sleep_mode=context.sleep_mode. Without this, a non-default
+    DB value silently appears as the schema default ('full') in the API response.
+    """
+
+    def _override_session(self, user_id: str = "owner_user", workspace_id=None):
+        if workspace_id is None:
+            workspace_id = uuid4()
+        app.dependency_overrides[require_session_auth] = lambda: {
+            "user_id": user_id,
+            "email": f"{user_id}@test.com",
+            "role": "user",
+            "current_workspace_id": workspace_id,
+        }
+        # db.execute returns empty results so list_contexts' creator/config/
+        # member/stats queries all yield empty without needing a real DB.
+        empty_result = MagicMock()
+        empty_result.scalars.return_value.all.return_value = []
+        empty_result.all.return_value = []
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=empty_result)
+        app.dependency_overrides[get_db] = lambda: db
+
+    def _build_mock_context(self, sleep_mode: str, is_private: bool = True):
+        ctx = MagicMock()
+        ctx.id = uuid4()
+        ctx.name = "test-ctx"
+        ctx.display_name = None
+        ctx.description = None
+        ctx.summary = None
+        ctx.usage_guide = None
+        ctx.is_default = False
+        ctx.is_private = is_private
+        ctx.is_public = False
+        ctx.resource_id = None
+        ctx.is_locked = False
+        ctx.sleep_mode = sleep_mode
+        ctx.created_by = None  # skips creator-name DB lookup branch
+        ctx.created_at = datetime(2026, 5, 5, 0, 0, 0, tzinfo=UTC)
+        ctx.updated_at = None
+        return ctx
+
+    def _override_service(self, *, get_context_ctx=None, list_contexts_value=None):
+        service = AsyncMock(spec=ContextService)
+        if get_context_ctx is not None:
+            service.get_context = AsyncMock(return_value=get_context_ctx)
+        if list_contexts_value is not None:
+            service.list_contexts = AsyncMock(return_value=list_contexts_value)
+        app.dependency_overrides[get_context_service] = lambda: service
+        return service
+
+    def _cleanup_overrides(self):
+        for key in (require_session_auth, get_db, get_context_service):
+            app.dependency_overrides.pop(key, None)
+
+    @pytest.mark.parametrize("mode", ["full", "edges_only", "skip"])
+    def test_get_context_returns_sleep_mode(self, mode: str):
+        self._override_session()
+        ctx = self._build_mock_context(mode)
+        self._override_service(get_context_ctx=ctx)
+        try:
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.get(f"/api/v1/contexts/{ctx.id}")
+        finally:
+            self._cleanup_overrides()
+
+        assert response.status_code == 200, response.text
+        assert response.json()["sleep_mode"] == mode
+
+    @pytest.mark.parametrize("mode", ["full", "edges_only", "skip"])
+    def test_list_contexts_returns_sleep_mode(self, mode: str):
+        # is_private=False so the privacy filter (line 380) doesn't drop a
+        # context whose created_by is None for the mock owner_user.
+        self._override_session()
+        ctx = self._build_mock_context(mode, is_private=False)
+        self._override_service(list_contexts_value=[ctx])
+        try:
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.get("/api/v1/contexts")
+        finally:
+            self._cleanup_overrides()
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert len(body["contexts"]) == 1
+        assert body["contexts"][0]["sleep_mode"] == mode

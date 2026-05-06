@@ -47,6 +47,7 @@ import {
   Lock,
   Copy,
   Info,
+  Moon,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { getContext, updateContext } from "@/lib/api/contexts";
@@ -89,6 +90,10 @@ export function SettingsTabPanel({
   const [pendingPrivacyChange, setPendingPrivacyChange] = useState<
     boolean | null
   >(null);
+  const [sleepMode, setSleepMode] = useState<"full" | "edges_only" | "skip">(
+    context.sleep_mode || "full",
+  );
+  const [skipDialogOpen, setSkipDialogOpen] = useState(false);
 
   const applyContextData = useCallback((data: Context) => {
     setDisplayName(data.display_name || "");
@@ -97,6 +102,7 @@ export function SettingsTabPanel({
     setUsageGuide(data.usage_guide || "");
     setIsPrivate(data.is_private ?? true);
     setIsPublic(data.is_public ?? false);
+    setSleepMode(data.sleep_mode || "full");
     setResourceId("");
   }, []);
 
@@ -134,7 +140,7 @@ export function SettingsTabPanel({
         resource_id = resourceId.trim();
       }
 
-      await updateContext(context.id, {
+      const payload: Parameters<typeof updateContext>[1] = {
         display_name: displayName.trim(),
         description: description.trim(),
         summary: summary.trim(),
@@ -142,7 +148,12 @@ export function SettingsTabPanel({
         is_private: isPrivate,
         is_public: isPublic,
         resource_id: resource_id,
-      });
+      };
+      if (isOwner && sleepMode !== (context.sleep_mode || "full")) {
+        payload.sleep_mode = sleepMode;
+      }
+
+      await updateContext(context.id, payload);
 
       toast({
         title: t("savedTitle"),
@@ -178,6 +189,25 @@ export function SettingsTabPanel({
     }
     setPrivacyDialogOpen(false);
     setPendingPrivacyChange(null);
+  };
+
+  const handleSleepModeChange = (value: string) => {
+    if (value === "skip") {
+      setSkipDialogOpen(true);
+    } else if (value === "full" || value === "edges_only") {
+      setSleepMode(value);
+      markDirty();
+    }
+  };
+
+  const confirmSkipModeChange = () => {
+    setSleepMode("skip");
+    markDirty();
+    setSkipDialogOpen(false);
+  };
+
+  const cancelSkipModeChange = () => {
+    setSkipDialogOpen(false);
   };
 
   const isOwner = currentWorkspace?.current_user_role === "owner";
@@ -516,6 +546,44 @@ export function SettingsTabPanel({
               ))}
           </CardContent>
         </Card>
+
+        {isOwner && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Moon className="h-5 w-5" />
+                {t("sleepModeTitle")}
+              </CardTitle>
+              <CardDescription>{t("sleepModeDesc")}</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label>{t("sleepModeLabel")}</Label>
+                <Select value={sleepMode} onValueChange={handleSleepModeChange}>
+                  <SelectTrigger>
+                    <SelectValue placeholder={t("sleepModePlaceholder")} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="full">{t("sleepModeFull")}</SelectItem>
+                    <SelectItem value="edges_only">
+                      {t("sleepModeEdgesOnly")}
+                    </SelectItem>
+                    <SelectItem value="skip">{t("sleepModeSkip")}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-sm text-muted-foreground">
+                  {
+                    {
+                      full: t("sleepModeFullDesc"),
+                      edges_only: t("sleepModeEdgesOnlyDesc"),
+                      skip: t("sleepModeSkipDesc"),
+                    }[sleepMode]
+                  }
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
       </div>
 
       {/* Privacy Change Confirmation Dialog */}
@@ -547,6 +615,33 @@ export function SettingsTabPanel({
               className="bg-yellow-600 hover:bg-yellow-700"
             >
               {t("makePrivate")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={skipDialogOpen} onOpenChange={setSkipDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("sleepModeSkipTitle")}</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <div>{t("sleepModeSkipDesc")}</div>
+                <div className="text-yellow-600 dark:text-yellow-400 font-medium">
+                  {t("sleepModeSkipWarning")}
+                </div>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={cancelSkipModeChange}>
+              {tCommon("cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmSkipModeChange}
+              className="bg-yellow-600 hover:bg-yellow-700"
+            >
+              {t("sleepModeSkipConfirm")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

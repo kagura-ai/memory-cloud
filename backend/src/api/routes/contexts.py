@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import APIKeyOrSessionUser, SessionUser, get_current_user
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
+from models.sleep import SleepMode
 from services.context_service import ContextService
 from utils.datetime import to_utc_iso
 from utils.exceptions import NotFoundException, ValidationError
@@ -186,6 +187,10 @@ class ContextUpdate(BaseModel):
         None,
         description="When true, prevents this context from being deleted until unlocked.",
     )
+    sleep_mode: SleepMode | None = Field(
+        None,
+        description="Sleep maintenance mode: full=all phases, edges_only=edge discovery+reindex, skip=none",
+    )
 
 
 class ContextResponse(TZAwareBaseModel):
@@ -207,6 +212,9 @@ class ContextResponse(TZAwareBaseModel):
         None, description="Resource ID for public contexts"
     )  # Issue #238
     is_locked: bool = Field(False, description="When true, deletion is prevented until unlocked")
+    sleep_mode: SleepMode = Field(
+        "full", description="Sleep maintenance mode: full, edges_only, or skip"
+    )
     created_by: str | None = Field(None, description="Creator user ID")  # Issue #165
     created_by_name: str | None = Field(None, description="Creator name")
     created_at: datetime = Field(..., description="Creation timestamp")
@@ -395,6 +403,7 @@ async def list_contexts(
                 is_public=context.is_public,  # Issue #238
                 resource_id=context.resource_id,  # Issue #238
                 is_locked=context.is_locked,  # Issue #85
+                sleep_mode=context.sleep_mode,
                 created_by=context.created_by,  # Issue #165
                 created_by_name=creator_names.get(context.created_by)
                 if context.created_by
@@ -532,6 +541,7 @@ async def create_context(
             usage_guide=context.usage_guide,
             is_default=context.is_default,
             is_private=context.is_private,
+            sleep_mode=context.sleep_mode,
             created_by=context.created_by,
             created_at=context.created_at,
             updated_at=context.updated_at,
@@ -619,6 +629,7 @@ async def get_context(
             is_public=context.is_public,
             resource_id=context.resource_id,
             is_locked=context.is_locked,
+            sleep_mode=context.sleep_mode,
             created_by=context.created_by,
             created_by_name=creator_name,
             created_at=context.created_at,
@@ -673,7 +684,8 @@ async def update_context(
     """Update a context's display_name, description and settings.
 
     Permission (Issue #165 Phase 3):
-    - summary/usage_guide/is_private: Requires OWNER access (owner-only fields)
+    - summary/usage_guide/is_private/is_public/resource_id/is_locked/sleep_mode:
+      Requires OWNER access (owner-only fields — see ``owner_only_fields`` list)
     - display_name/description: Requires EDITOR access
 
     Args:
@@ -713,6 +725,7 @@ async def update_context(
         "is_public",
         "resource_id",
         "is_locked",
+        "sleep_mode",
     ]  # Issue #238: is_public, resource_id; Issue #85: is_locked — owner-only
     is_updating_owner_fields = any(
         getattr(request, field, None) is not None for field in owner_only_fields
@@ -812,6 +825,7 @@ async def update_context(
             is_public=request.is_public,  # Issue #238
             resource_id=request.resource_id,  # Issue #238
             is_locked=request.is_locked,  # Issue #85
+            sleep_mode=request.sleep_mode,
         )
 
         logger.info(
@@ -830,6 +844,7 @@ async def update_context(
             is_default=context.is_default,
             # Issue #246: is_current removed
             is_locked=context.is_locked,
+            sleep_mode=context.sleep_mode,
             is_private=context.is_private,
             is_public=context.is_public,
             resource_id=context.resource_id,

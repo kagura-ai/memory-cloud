@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
 from models.auth import Context, ContextMember, User, Workspace, WorkspaceMember
+from models.sleep import SleepMode
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -380,6 +381,7 @@ class ContextService:
         is_public: bool | None = None,  # Issue #238
         resource_id: str | None = None,  # Issue #238
         is_locked: bool | None = None,  # Issue #85
+        sleep_mode: SleepMode | None = None,
     ) -> Context:
         """Update context display_name, description, summary, usage guide, and privacy.
 
@@ -399,6 +401,7 @@ class ContextService:
             is_public: New public access setting (None to leave unchanged)
             resource_id: Resource ID for public contexts (None to leave unchanged)
             is_locked: Lock status (None to leave unchanged)
+            sleep_mode: Sleep maintenance mode (None to leave unchanged).
 
         Returns:
             Updated Context instance
@@ -464,6 +467,15 @@ class ContextService:
                 new_value=is_locked,
             )
             context.is_locked = is_locked
+
+        if sleep_mode is not None and context.sleep_mode != sleep_mode:
+            logger.info(
+                "setting_sleep_mode",
+                context_id=str(context_id),
+                old_value=context.sleep_mode,
+                new_value=sleep_mode,
+            )
+            context.sleep_mode = sleep_mode
 
         await self.db.commit()
         await self.db.refresh(context)

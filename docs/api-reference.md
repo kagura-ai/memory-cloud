@@ -422,6 +422,138 @@ Discover related memories through Neural Memory graph traversal using activation
 
 ---
 
+## Context APIs
+
+### GET /api/v1/contexts
+
+List all contexts in the current workspace.
+
+**Response:**
+
+```json
+{
+  "contexts": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "name": "my-project",
+      "display_name": "My Project",
+      "is_default": false,
+      "is_private": true,
+      "sleep_mode": "full",
+      "created_at": "2025-11-22T10:00:00Z"
+    }
+  ],
+  "total": 1
+}
+```
+
+---
+
+### POST /api/v1/contexts
+
+Create a new context.
+
+**Request Body:**
+
+```json
+{
+  "name": "my-project",
+  "display_name": "My Project",
+  "description": "Personal project notes",
+  "is_private": true
+}
+```
+
+**Response:**
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "name": "my-project",
+  "display_name": "My Project",
+  "is_default": false,
+  "is_private": true,
+  "sleep_mode": "full",
+  "created_at": "2025-11-22T10:00:00Z"
+}
+```
+
+---
+
+### GET /api/v1/contexts/{context_id}
+
+Get a single context by ID.
+
+**Response:**
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "name": "my-project",
+  "display_name": "My Project",
+  "description": "Personal project notes",
+  "is_default": false,
+  "is_private": true,
+  "is_public": false,
+  "is_locked": false,
+  "sleep_mode": "full",
+  "created_at": "2025-11-22T10:00:00Z",
+  "updated_at": "2025-11-22T10:00:00Z"
+}
+```
+
+---
+
+### PUT /api/v1/contexts/{context_id}
+
+Update a context. All fields are optional.
+
+**Request Body:**
+
+```json
+{
+  "display_name": "Renamed Project",
+  "description": "Updated description",
+  "sleep_mode": "edges_only"
+}
+```
+
+**Parameters:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `display_name` | string | No | Human-readable display name |
+| `description` | string | No | Context description |
+| `summary` | string | No | LLM-oriented context summary |
+| `usage_guide` | string | No | LLM-oriented usage guidelines |
+| `is_private` | boolean | No | Privacy setting (owner-only) |
+| `is_public` | boolean | No | Public API access flag (owner-only) |
+| `resource_id` | string | No | Resource ID for public contexts (owner-only) |
+| `is_locked` | boolean | No | Lock to prevent deletion (owner-only) |
+| `sleep_mode` | string | No | Sleep maintenance mode: `full`, `edges_only`, or `skip` (owner-only) |
+
+**Response:**
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "name": "my-project",
+  "display_name": "Renamed Project",
+  "sleep_mode": "edges_only",
+  "updated_at": "2025-11-22T10:30:00Z"
+}
+```
+
+---
+
+### DELETE /api/v1/contexts/{context_id}
+
+Soft-delete a context. The context row is marked deleted (sets `deleted_at`) so it stops appearing in listings, but the record and its memories are retained for recovery / audit purposes.
+
+**Response:** `204 No Content` (no response body)
+
+---
+
 ## OAuth2 APIs
 
 ### POST /api/v1/oauth/clients
