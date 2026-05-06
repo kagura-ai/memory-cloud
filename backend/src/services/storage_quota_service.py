@@ -24,15 +24,69 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.redis import get_cache, incrby_counter, set_cache
+from db.redis import get_cache, get_redis_client, incrby_counter, set_cache
 from utils.exceptions import QuotaExceededError, RedisError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Sentinel returned by the atomic reserve Lua script when the requested
+# reservation would push past the quota ceiling. Any non-negative integer
+# returned by the script is the post-INCRBY total.
+_CAP_EXCEEDED = -1
+
+# Atomic GET → cap check → INCRBY for storage quota (Issue #554).
+#
+# The pre-#554 implementation did the three steps as separate Redis
+# round-trips, leaving a TOCTOU window where two concurrent reservations
+# could both pass the cap check before either INCRBY landed —
+# over-committing by up to one ``size_bytes`` per racing pair.
+#
+# Inline string per the existing convention in
+# ``tasks/neural_calibration.py``; this codebase has no ``lua/`` directory.
+#
+# KEYS[1]: quota counter key (``storage:bytes:{workspace_id}``)
+# ARGV[1]: size_bytes to reserve (positive integer)
+# ARGV[2]: quota_bytes ceiling (positive integer)
+# Returns: new total on success, ``-1`` if cap would be exceeded.
+_RESERVE_QUOTA_SCRIPT = (
+    "local current = tonumber(redis.call('get', KEYS[1])) or 0 "
+    "local size = tonumber(ARGV[1]) "
+    "local quota = tonumber(ARGV[2]) "
+    "if current + size > quota then return -1 end "
+    "return redis.call('incrby', KEYS[1], size)"
+)
+
 
 def _build_key(workspace_id: UUID) -> str:
     return f"storage:bytes:{workspace_id}"
+
+
+async def _atomic_check_and_incr(
+    key: str,
+    size_bytes: int,
+    quota_bytes: int,
+) -> int:
+    """Run the atomic check-then-INCRBY Lua script.
+
+    Returns the post-INCRBY counter value, or :data:`_CAP_EXCEEDED` when
+    the reservation would exceed ``quota_bytes``. Any error from the
+    underlying ``redis-py`` library is wrapped as :class:`RedisError` so
+    the outer fail-open clause in :func:`reserve_storage_bytes` catches
+    it via the existing ``except RedisError`` branch.
+    """
+    # Local import keeps the module's top-level import surface unchanged
+    # (and avoids hard-binding to redis-py's exception namespace at the
+    # service layer for callers that don't need it).
+    import redis as redis_lib
+
+    client = get_redis_client()
+    script = client.register_script(_RESERVE_QUOTA_SCRIPT)
+    try:
+        result = await script(keys=[key], args=[size_bytes, quota_bytes])
+    except redis_lib.RedisError as exc:
+        raise RedisError(f"Failed to run quota reserve script: {exc}") from exc
+    return int(result)
 
 
 async def reserve_storage_bytes(
@@ -62,6 +116,10 @@ async def reserve_storage_bytes(
 
     Fail-open: ``RedisError`` is logged and swallowed so uploads are
     not blocked. The next Redis-healthy reservation reseeds from DB.
+
+    The cap check + INCRBY run inside a single Redis Lua EVAL (Issue
+    #554), closing the TOCTOU window present in the pre-#554
+    GET → check → INCRBY sequence.
     """
     if quota_bytes <= 0:
         return
@@ -72,9 +130,17 @@ async def reserve_storage_bytes(
     key = _build_key(workspace_id)
 
     try:
+        # Step 1: ensure the counter is seeded so the Lua GET sees a
+        # value rather than nil. The seed-on-miss reseed window is
+        # documented as racy in ``_get_or_seed_counter``; that posture
+        # is preserved (the Lua refactor only closes the TOCTOU between
+        # steps 1 and 2 — it does not add a seed-time lock).
         current = await _get_or_seed_counter(workspace_id, db, key)
 
-        if current + size_bytes > quota_bytes:
+        # Step 2: atomic GET → cap check → INCRBY.
+        new_total = await _atomic_check_and_incr(key, size_bytes, quota_bytes)
+
+        if new_total == _CAP_EXCEEDED:
             logger.warning(
                 "storage_quota_exceeded",
                 workspace_id=str(workspace_id),
@@ -90,7 +156,6 @@ async def reserve_storage_bytes(
                 requested=size_bytes,
             )
 
-        new_total = await incrby_counter(key, size_bytes)
         logger.debug(
             "storage_quota_reserved",
             workspace_id=str(workspace_id),
