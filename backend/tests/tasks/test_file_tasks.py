@@ -10,6 +10,7 @@ selection + per-row decision logic.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -274,6 +275,24 @@ class TestSweepSoftDeletedFiles:
         # and orphan the binary.
         assert db.execute.await_count == 1
         db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_r2_cancelled_error_propagates(self):
+        """``asyncio.CancelledError`` from the R2 client during a sweep
+        MUST propagate so APScheduler / lifespan shutdown can cancel
+        the in-flight sweep cleanly. Pre-#552 Copilot loop 2 fix the
+        broad ``except Exception`` swallowed cancellation."""
+        old = _make_file(
+            status="uploaded",
+            deleted_at=utcnow() - timedelta(days=8),
+        )
+        get_db_patch, _ = _patch_get_db([old])
+
+        cancel_storage = MagicMock()
+        cancel_storage.delete_object = AsyncMock(side_effect=asyncio.CancelledError())
+        with get_db_patch, _patch_storage(cancel_storage):
+            with pytest.raises(asyncio.CancelledError):
+                await file_tasks.sweep_soft_deleted_files()
 
     @pytest.mark.asyncio
     async def test_does_not_call_release_storage_bytes(self):

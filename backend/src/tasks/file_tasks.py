@@ -23,6 +23,7 @@ orphan UX impact under one quarter-hour worst case.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -48,8 +49,12 @@ _ORPHAN_GRACE_SECONDS = 3600
 
 
 # Retention window for soft-deleted file_objects rows before the nightly
-# GC removes the R2 binary and hard-deletes the row. Issue #552: 7d gives
-# users a "trash undo" window before the bytes are unrecoverable.
+# GC removes the R2 binary and hard-deletes the row. Issue #552: 7d is an
+# operational safety buffer — gives operators time to recover from an
+# accidental bulk soft-delete via DB-level intervention before the bytes
+# are gone. There is currently no user-facing undelete API; if one is
+# added (#563) the retention window's framing will shift to a true
+# user-visible "trash" window with stricter race-window guarantees.
 _GC_RETENTION_SECONDS = 7 * 86400
 
 
@@ -133,6 +138,11 @@ async def sweep_orphan_files() -> dict[str, int]:
                 try:
                     await storage.delete_object(storage_key)
                     counts["r2_deleted"] += 1
+                except asyncio.CancelledError:
+                    # Same rationale as the GC sweeper below: re-raise
+                    # cancellation so deploy/SIGTERM doesn't hang on
+                    # the orphan loop.
+                    raise
                 except Exception as exc:  # noqa: BLE001 — best-effort
                     counts["r2_failed"] += 1
                     logger.warning(
@@ -206,6 +216,12 @@ async def sweep_soft_deleted_files() -> dict[str, int]:
                 try:
                     await storage.delete_object(storage_key)
                     counts["r2_deleted"] += 1
+                except asyncio.CancelledError:
+                    # Re-raise so APScheduler / lifespan shutdown can
+                    # cancel an in-flight sweep cleanly. Swallowing
+                    # cancellation under a broad ``except Exception``
+                    # would let a deploy / SIGTERM hang on the loop.
+                    raise
                 except Exception as exc:  # noqa: BLE001 — best-effort
                     counts["r2_failed"] += 1
                     logger.warning(

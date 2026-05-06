@@ -8,6 +8,7 @@ is tested elsewhere.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -158,6 +159,32 @@ class TestReserveStorageBytes:
                 db=db,
             )
             atomic.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates_not_swallowed(self, workspace_id):
+        """``asyncio.CancelledError`` MUST propagate so graceful task
+        cancellation (deploys, shutdown, request abort) is honored.
+
+        Pre-#554 Copilot loop 2 fix the broad ``except Exception``
+        wrapped CancelledError as RedisError, and the outer fail-open
+        clause then swallowed it — breaking cooperative cancellation.
+        """
+        db = MagicMock()
+        with (
+            patch.object(storage_quota_service, "get_cache", AsyncMock(return_value="0")),
+            patch.object(
+                storage_quota_service,
+                "_atomic_check_and_incr",
+                AsyncMock(side_effect=asyncio.CancelledError()),
+            ),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await storage_quota_service.reserve_storage_bytes(
+                    workspace_id=workspace_id,
+                    size_bytes=1024,
+                    quota_bytes=10_000,
+                    db=db,
+                )
 
     @pytest.mark.asyncio
     async def test_redis_error_on_atomic_script_swallowed_fail_open(self, workspace_id):

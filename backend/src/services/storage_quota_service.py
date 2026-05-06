@@ -19,6 +19,8 @@ Key format: ``storage:bytes:{workspace_id}``
 
 from __future__ import annotations
 
+import asyncio
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -29,6 +31,14 @@ from utils.exceptions import QuotaExceededError, RedisError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Module-level cache of the registered Lua script. ``register_script``
+# allocates a ``Script`` wrapper and computes the SHA1 on each call, so
+# caching at first use avoids per-reservation overhead on the upload
+# hot path (Phase 6 review note + Copilot loop 2 finding). Reset to
+# ``None`` only when ``get_redis_client()`` is itself reset (tests via
+# ``close_redis()`` — production never does this).
+_reserve_quota_script: Any = None
 
 # Sentinel returned by the atomic reserve Lua script when the requested
 # reservation would push past the quota ceiling. Any non-negative integer
@@ -87,11 +97,18 @@ async def _atomic_check_and_incr(
     fail-open clause in :func:`reserve_storage_bytes` catches it via
     the existing ``except RedisError`` branch.
     """
-    client = get_redis_client()
-    script = client.register_script(_RESERVE_QUOTA_SCRIPT)
+    global _reserve_quota_script
+    if _reserve_quota_script is None:
+        _reserve_quota_script = get_redis_client().register_script(_RESERVE_QUOTA_SCRIPT)
     try:
-        result = await script(keys=[key], args=[size_bytes, quota_bytes])
+        result = await _reserve_quota_script(keys=[key], args=[size_bytes, quota_bytes])
         return (int(result[0]), int(result[1]))
+    except asyncio.CancelledError:
+        # Re-raise so graceful task cancellation (deploys, shutdown,
+        # request abort) is honored. Wrapping CancelledError as
+        # RedisError would let the outer fail-open clause swallow it
+        # and break cooperative cancellation.
+        raise
     except Exception as exc:
         # Catching ``Exception`` is broad on purpose: ``ValueError``
         # from ``int(None)`` (if the script ever returns nil) and
