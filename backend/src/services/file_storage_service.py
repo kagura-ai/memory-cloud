@@ -169,6 +169,18 @@ class FileStorageService:
                 active or in-flight row (partial unique violation).
             NotFoundException: workspace missing.
         """
+        # Enforce DB column limits at the service boundary so REST and MCP
+        # share the same hard caps. Pydantic enforces these at REST via
+        # ``FileReserveRequest``, but MCP coerces ``args["filename"]`` /
+        # ``args["content_type"]`` with bare ``str(...)`` and would otherwise
+        # let an oversized value reach ``flush()`` / ``commit()`` and surface
+        # as an opaque 500 from a column-length DB error.
+        if len(filename) > 512:
+            msg = f"filename must be at most 512 chars, got {len(filename)}"
+            raise ValidationError(msg)
+        if len(content_type) > 255:
+            msg = f"content_type must be at most 255 chars, got {len(content_type)}"
+            raise ValidationError(msg)
         settings = get_settings()
         max_bytes = settings.file_object_max_size_mb * 1024 * 1024
         if size_bytes <= 0 or size_bytes > max_bytes:

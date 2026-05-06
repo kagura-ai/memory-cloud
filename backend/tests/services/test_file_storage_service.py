@@ -406,6 +406,35 @@ class TestReserveUpload:
                 sha256=VALID_SHA,
             )
 
+    @pytest.mark.asyncio
+    async def test_oversize_filename_raises_validation(self, service, workspace_id):
+        """MCP bypasses pydantic, so the service enforces the DB column cap."""
+        with pytest.raises(ValidationError, match="filename"):
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x" * 513,  # > 512
+                content_type="application/pdf",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+
+    @pytest.mark.asyncio
+    async def test_oversize_content_type_raises_validation(self, service, workspace_id):
+        """An MCP-injected oversize ``content_type`` that would otherwise
+        normalize past the allow-list and fail at DB flush is rejected up
+        front as a 422 ValidationError, not surfaced as a 500."""
+        oversize = "application/pdf;" + "a" * 256  # 272 chars total
+        with pytest.raises(ValidationError, match="content_type"):
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x.pdf",
+                content_type=oversize,
+                size_bytes=1024,
+                sha256=VALID_SHA,
+            )
+
     def test_settings_rejects_malformed_allow_list_at_boot(self):
         """Boot-time fail-fast: malformed entries crash app startup so they
         never leak into ``UnsupportedMediaTypeError.details['allowed']``."""
