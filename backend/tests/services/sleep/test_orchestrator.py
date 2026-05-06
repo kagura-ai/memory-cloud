@@ -81,6 +81,10 @@ class TestSleepOrchestrator:
             MockRI.return_value = reindex_instance
 
             orchestrator = SleepOrchestrator(mock_db)
+            # ctx-1 is not a valid UUID; _get_sleep_mode falls back to "skip"
+            # post-#558, which would early-return. Mock to keep the legacy
+            # "all phases run" semantics this test depends on.
+            orchestrator._get_sleep_mode = AsyncMock(return_value="full")
             await orchestrator.run("user-1", "ws-1", "ctx-1", config=config)
 
         # Verify order
@@ -152,6 +156,7 @@ class TestSleepOrchestrator:
             MockRI.return_value = ri_inst
 
             orchestrator = SleepOrchestrator(mock_db)
+            orchestrator._get_sleep_mode = AsyncMock(return_value="full")
             await orchestrator.run("user-1", "ws-1", "ctx-1", config=config)
 
         # Phase 1 failed but 2-5 still ran
@@ -223,6 +228,7 @@ class TestSleepOrchestrator:
             MockRI.return_value = ri_inst
 
             orchestrator = SleepOrchestrator(mock_db)
+            orchestrator._get_sleep_mode = AsyncMock(return_value="full")
             await orchestrator.run("user-1", "ws-1", "ctx-1", config=config)
 
         assert mem_id_1 in reindex_received
