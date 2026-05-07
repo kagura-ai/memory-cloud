@@ -152,7 +152,10 @@ openapi_tags = [
     },
     {
         "name": "attachments",
-        "description": "File attachments for memories (upload, download, delete)",
+        "description": (
+            "DEPRECATED (Issue #555): legacy file attachment routes return HTTP 410 Gone. "
+            "Use the `files` tag (`/api/v1/files/*`) instead."
+        ),
     },
     {
         "name": "files",
@@ -372,7 +375,7 @@ from api.routes import (  # noqa: E402
     admin_sleep,  # Issue #247: Manual Sleep Maintenance trigger
     analyses,  # Issue #496: Memory Broadlistening API endpoints
     api_keys,
-    attachments,  # Issue #330: File attachment support
+    attachments,  # Issue #330 → deprecated by #555 (returns HTTP 410 Gone)
     auth,
     bm25_drift,  # Issue #343: BM25 IDF drift admin (preview, cron disabled by default)
     config,
@@ -494,7 +497,7 @@ app.include_router(mcp.router, prefix="/api/v1")
 # Memory routes (Phase 2.2)
 app.include_router(memory.router, prefix="/api/v1/memory")
 
-# Attachments routes (Issue #330 - File attachments for memories)
+# Attachments routes — DEPRECATED (Issue #330 → #555); routes return HTTP 410 Gone
 app.include_router(attachments.router, prefix="/api/v1")
 
 # Resource Ingest routes (Issue #238 - Public Context incremental indexing)

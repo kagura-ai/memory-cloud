@@ -134,6 +134,13 @@ class MemoryGoneError(MemoryCloudException):
         super().__init__(message, status_code=410, error_code="RES-003")
 
 
+# RES-004 is reserved for the deprecated /api/v1/attachments/* surface (Issue #555).
+# Emitted directly as a JSONResponse from api/routes/attachments.py so the response
+# can carry RFC 8594 Sunset/Deprecation/Link headers — which the global
+# MemoryCloudException handler does not propagate. No exception subclass is defined
+# here because nothing raises it; the route returns the response inline.
+
+
 class ConflictError(MemoryCloudException):
     """Resource conflict (409)."""
 
