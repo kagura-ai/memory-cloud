@@ -239,6 +239,8 @@ async def _build_analysis_usage(
     db: AsyncSession,
     user_id: str,
     workspace_id: UUID | None,
+    *,
+    effective_quotas: dict[str, int] | None = None,
 ) -> "AnalysisUsage | None":
     """Build the ``analysis`` field of /usage/current (Issue #496).
 
@@ -246,6 +248,16 @@ async def _build_analysis_usage(
     scoped). Delegates the count + tz-window math to
     ``query_service.get_today_analysis_count`` so the gate and the
     dashboard share one source of truth.
+
+    Args:
+        effective_quotas: Pre-computed effective quotas dict (from
+            ``EffectiveQuotaService.get_effective_quotas``) if the caller
+            already has it. Passing it through avoids a duplicate
+            EffectiveQuotaService call AND avoids the second potential
+            ``AddonCalculatorService.recalculate_workspace_bonuses``
+            self-heal COMMIT (which would otherwise fire twice from a GET
+            request when both ``_build_analysis_usage`` and
+            ``_build_sleep_contexts_usage`` are called back-to-back).
     """
     if not workspace_id:
         return None
@@ -262,8 +274,9 @@ async def _build_analysis_usage(
     used_today = await query_service.get_today_analysis_count(
         db, workspace_id=workspace_id, user_timezone=tz_name
     )
-    effective = await EffectiveQuotaService(db).get_effective_quotas(workspace_id)
-    limit_today = int(effective.get("analysis_runs_per_day", 0) or 0)
+    if effective_quotas is None:
+        effective_quotas = await EffectiveQuotaService(db).get_effective_quotas(workspace_id)
+    limit_today = int(effective_quotas.get("analysis_runs_per_day", 0) or 0)
     addon_bonus = int(
         (
             await db.execute(
@@ -327,7 +340,7 @@ async def _build_sleep_contexts_usage(
     if effective_quotas is None:
         effective_quotas = await EffectiveQuotaService(db).get_effective_quotas(workspace_id)
     limit = int(effective_quotas.get("sleep_enabled_contexts_limit", 0) or 0)
-    addon_bonus = int(
+    raw_addon_bonus = int(
         (
             await db.execute(
                 select(Workspace.addon_sleep_contexts_bonus).where(Workspace.id == workspace_id)
@@ -335,6 +348,15 @@ async def _build_sleep_contexts_usage(
         ).scalar_one_or_none()
         or 0
     )
+    # Normalize: when the effective limit is 0 (FREE/BASIC tier),
+    # ``addon_sleep_contexts_bonus`` is ignored by the runtime gate
+    # (``Workspace.effective_sleep_enabled_contexts_limit`` clamps to 0
+    # regardless of the addon column — see
+    # ``backend/src/models/auth.py:effective_sleep_enabled_contexts_limit``).
+    # Surface 0 here so misconfigured rows (manual SQL insert, future
+    # Stripe SKU bug) don't make the dashboard claim "Includes +N from
+    # addon" while the addon has no effect on the cap.
+    addon_bonus = raw_addon_bonus if limit > 0 else 0
 
     # Exclude soft-deleted contexts so the dashboard usage line matches the
     # quota check in ContextService._assert_sleep_quota_or_raise (which also
@@ -486,8 +508,27 @@ async def get_current_usage(
         )
         rest_calls_week = rest_week_result.scalar() or 0
 
-        analysis_usage = await _build_analysis_usage(db, user_id, current_workspace_id)
-        sleep_contexts_usage = await _build_sleep_contexts_usage(db, current_workspace_id)
+        # Issue #560 follow-up: fetch effective quotas ONCE and pass into both
+        # helpers so we don't trigger ``EffectiveQuotaService`` twice — the
+        # service may invoke ``AddonCalculatorService.recalculate_workspace_bonuses``
+        # which COMMITS, and a GET endpoint should not commit twice.
+        from services.effective_quota_service import EffectiveQuotaService
+
+        effective_quotas_dict: dict[str, int] | None = None
+        if current_workspace_id is not None:
+            try:
+                effective_quotas_dict = await EffectiveQuotaService(db).get_effective_quotas(
+                    current_workspace_id
+                )
+            except ValueError:
+                effective_quotas_dict = None
+
+        analysis_usage = await _build_analysis_usage(
+            db, user_id, current_workspace_id, effective_quotas=effective_quotas_dict
+        )
+        sleep_contexts_usage = await _build_sleep_contexts_usage(
+            db, current_workspace_id, effective_quotas=effective_quotas_dict
+        )
 
         # Build response
         response = UsageCurrentResponse(

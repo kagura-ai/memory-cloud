@@ -120,10 +120,27 @@ export function SettingsTabPanel({
       const data = await getContext(contextId);
       applyContextData(data);
       onContextUpdated(data);
+      // Issue #560 follow-up: refetch sleep_contexts quota after save so a
+      // skip→non-skip toggle increments `used` in the displayed `X / Y`
+      // immediately. Owner-only since non-owners can't trigger the change.
+      if (currentWorkspace?.current_user_role === "owner") {
+        try {
+          const usage = await getWorkspaceUsageCurrent();
+          setSleepQuota(usage.usage.sleep_contexts ?? null);
+        } catch {
+          // Best-effort — if the refetch fails the displayed quota is
+          // slightly stale until next mount; backend remains authoritative.
+        }
+      }
     } catch {
       // Silent refresh
     }
-  }, [contextId, applyContextData, onContextUpdated]);
+  }, [
+    contextId,
+    applyContextData,
+    onContextUpdated,
+    currentWorkspace?.current_user_role,
+  ]);
 
   const handleSave = async () => {
     if (isPublic && !context.is_public && !resourceId.trim()) {

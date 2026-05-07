@@ -377,7 +377,13 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
                     className="h-2"
                   />
                   <p className="text-xs text-muted-foreground mt-2">
-                    {currentUsage.usage.sleep_contexts.addon_bonus > 0
+                    {/* Gate the "Includes +N from addon" hint on limit > 0
+                        too — backend normalizes addon_bonus to 0 for zero-base
+                        tiers (FREE/BASIC), but the explicit check makes the
+                        intent obvious to readers and survives any future
+                        backend regression. */}
+                    {currentUsage.usage.sleep_contexts.limit > 0 &&
+                    currentUsage.usage.sleep_contexts.addon_bonus > 0
                       ? t("sleepContextsWithAddon", {
                           addon: currentUsage.usage.sleep_contexts.addon_bonus,
                         })
