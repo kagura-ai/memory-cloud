@@ -55,13 +55,17 @@ def _seed_context(
     soft_deleted: bool = False,
     owner_user_id: str = "owner-test-560",
 ) -> str:
-    """Insert a context with explicit sleep_mode; return its UUID.
+    """Insert a context with an explicit ``sleep_mode`` and return its UUID.
 
-    ``sleep_mode`` is set explicitly via UPDATE rather than at INSERT time to
-    avoid coupling to the column's request-schema absence (``Context.sleep_mode``
-    is server_default-only per #558 — Pydantic does not accept it). The UPDATE
-    after INSERT is the only way to seed a non-default value at the migration
-    layer, since INSERT cannot bypass the server_default without explicit value.
+    Notes:
+    - ``sleep_mode`` is set directly on the INSERT statement (raw SQL, not
+      via the Pydantic ``ContextCreate`` schema, which deliberately omits
+      ``sleep_mode`` per #558). At the migration-test layer we are below
+      the ORM/Pydantic boundary, so passing the column value explicitly is
+      the cleanest way to seed a non-default value.
+    - ``soft_deleted=True`` performs a follow-up UPDATE to populate
+      ``deleted_at`` so the row becomes a tombstone (the migration's
+      ``deleted_at IS NULL`` filter must skip it).
     """
     ctx_id = str(uuid.uuid4())
     conn.execute(

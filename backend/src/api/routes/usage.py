@@ -107,7 +107,7 @@ class SleepContextsUsage(BaseModel):
     here's the new total"). Both surfaces share ``limit`` and ``addon_bonus``;
     the read surface adds ``remaining`` (= ``max(0, limit - used)``) for direct
     display, and the error surface adds ``requested`` (= ``current + 1``) for
-    "how many would there be." Kept distinct so neither has to cary fields it
+    "how many would there be." Kept distinct so neither has to carry fields it
     does not need.
     """
 
