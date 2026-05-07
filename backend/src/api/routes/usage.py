@@ -512,6 +512,14 @@ async def get_current_usage(
         # helpers so we don't trigger ``EffectiveQuotaService`` twice — the
         # service may invoke ``AddonCalculatorService.recalculate_workspace_bonuses``
         # which COMMITS, and a GET endpoint should not commit twice.
+        #
+        # On ``ValueError`` (workspace not found), pass an EMPTY dict (not
+        # ``None``) into the helpers. ``None`` would make the helpers fall
+        # back to fetching ``EffectiveQuotaService`` themselves — which would
+        # re-raise the same ``ValueError``, defeating the "compute once"
+        # invariant. Empty dict makes the helpers' ``.get(key, 0) or 0`` calls
+        # land on 0, surfacing a graceful "no quota data" response rather
+        # than crashing the dashboard.
         from services.effective_quota_service import EffectiveQuotaService
 
         effective_quotas_dict: dict[str, int] | None = None
@@ -521,7 +529,7 @@ async def get_current_usage(
                     current_workspace_id
                 )
             except ValueError:
-                effective_quotas_dict = None
+                effective_quotas_dict = {}
 
         analysis_usage = await _build_analysis_usage(
             db, user_id, current_workspace_id, effective_quotas=effective_quotas_dict
