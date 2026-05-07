@@ -373,7 +373,7 @@ class WorkspaceAddon(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "addon_type IN ('extra_storage', 'extra_memory', 'extra_mcp_quota', 'extra_rest_quota', 'extra_public_quota', 'extra_members', 'extra_contexts', 'extra_analysis_runs')",
+            "addon_type IN ('extra_storage', 'extra_memory', 'extra_mcp_quota', 'extra_rest_quota', 'extra_public_quota', 'extra_members', 'extra_contexts', 'extra_analysis_runs', 'extra_sleep_contexts')",
             name="check_addon_type",
         ),
         CheckConstraint("quantity > 0", name="check_quantity_positive"),
