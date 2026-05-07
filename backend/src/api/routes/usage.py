@@ -96,6 +96,20 @@ class AnalysisUsage(BaseModel):
     )
 
 
+class SleepContextsUsage(BaseModel):
+    """Sleep-enabled contexts quota usage (Issue #560).
+
+    Mirrors the response detail shape of the 429 quota-exceeded body so the
+    dashboard, the SettingsTabPanel disabled-state, and the gate rejection
+    all read the same field names.
+    """
+
+    used: int = Field(0, description="Contexts with sleep_mode != 'skip' in this workspace")
+    limit: int = Field(0, description="Plan + addon effective limit")
+    addon_bonus: int = Field(0, description="Addon-supplied bonus (extra_sleep_contexts)")
+    remaining: int = Field(0, description="max(0, limit - used)")
+
+
 class CurrentUsage(BaseModel):
     """Current usage statistics."""
 
@@ -112,6 +126,13 @@ class CurrentUsage(BaseModel):
         None,
         description=(
             "Memory broadlistening daily quota stats (Issue #496). "
+            "NULL when the caller has no current workspace selected."
+        ),
+    )
+    sleep_contexts: SleepContextsUsage | None = Field(
+        None,
+        description=(
+            "Sleep-enabled contexts quota stats (Issue #560). "
             "NULL when the caller has no current workspace selected."
         ),
     )
@@ -265,6 +286,53 @@ async def _build_analysis_usage(
     )
 
 
+async def _build_sleep_contexts_usage(
+    db: AsyncSession,
+    workspace_id: UUID | None,
+) -> "SleepContextsUsage | None":
+    """Build the ``sleep_contexts`` field of /usage/current (Issue #560).
+
+    Returns None when no workspace is selected (sleep quota is workspace-
+    scoped). Counts contexts with ``sleep_mode != 'skip'`` in the workspace
+    and reads the effective limit (plan tier + addon) from EffectiveQuotaService
+    so the dashboard and the 429 quota body share one source of truth.
+    """
+    if not workspace_id:
+        return None
+
+    from models.auth import Context, Workspace
+    from services.effective_quota_service import EffectiveQuotaService
+
+    effective = await EffectiveQuotaService(db).get_effective_quotas(workspace_id)
+    limit = int(effective.get("sleep_enabled_contexts_limit", 0) or 0)
+    addon_bonus = int(
+        (
+            await db.execute(
+                select(Workspace.addon_sleep_contexts_bonus).where(Workspace.id == workspace_id)
+            )
+        ).scalar_one_or_none()
+        or 0
+    )
+
+    used = int(
+        (
+            await db.execute(
+                select(func.count(Context.id)).where(
+                    Context.workspace_id == workspace_id,
+                    Context.sleep_mode != "skip",
+                )
+            )
+        ).scalar_one()
+    )
+
+    return SleepContextsUsage(
+        used=used,
+        limit=limit,
+        addon_bonus=addon_bonus,
+        remaining=max(0, limit - used),
+    )
+
+
 @router.get("/current", response_model=UsageCurrentResponse)
 async def get_current_usage(
     user: SessionUser,
@@ -392,6 +460,7 @@ async def get_current_usage(
         rest_calls_week = rest_week_result.scalar() or 0
 
         analysis_usage = await _build_analysis_usage(db, user_id, current_workspace_id)
+        sleep_contexts_usage = await _build_sleep_contexts_usage(db, current_workspace_id)
 
         # Build response
         response = UsageCurrentResponse(
@@ -412,6 +481,7 @@ async def get_current_usage(
                 public_calls_today=public_calls_today,
                 public_calls_this_week=public_calls_week,
                 analysis=analysis_usage,
+                sleep_contexts=sleep_contexts_usage,
             ),
             memory_usage=calculate_usage_status(memory_count, plan.memory_limit),
             daily_api_usage=calculate_usage_status(api_calls_today, plan.daily_api_limit),

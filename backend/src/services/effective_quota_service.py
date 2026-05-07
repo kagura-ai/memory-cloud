@@ -56,7 +56,9 @@ class EffectiveQuotaService:
                 "public_calls_per_week": int,
                 "max_members": int,
                 "max_contexts": int,
-                "analysis_runs_per_day": int  # Issue #494
+                "analysis_runs_per_day": int,  # Issue #494
+                "storage_bytes_limit": int,  # Issue #485
+                "sleep_enabled_contexts_limit": int  # Issue #560
             }
 
         Raises:
@@ -105,6 +107,7 @@ class EffectiveQuotaService:
             "max_contexts": workspace.effective_max_contexts,
             "analysis_runs_per_day": workspace.effective_analysis_runs_per_day,
             "storage_bytes_limit": workspace.effective_storage_limit_bytes,
+            "sleep_enabled_contexts_limit": workspace.effective_sleep_enabled_contexts_limit,
         }
 
         logger.debug(
@@ -133,7 +136,8 @@ class EffectiveQuotaService:
                 "addon_public_quota_bonus": int,
                 "addon_member_bonus": int,
                 "addon_context_bonus": int,
-                "addon_analysis_bonus": int  # Issue #494
+                "addon_analysis_bonus": int,  # Issue #494
+                "addon_sleep_contexts_bonus": int  # Issue #560
             }
         """
         result = await self.db.execute(select(Workspace).where(Workspace.id == workspace_id))
@@ -150,4 +154,5 @@ class EffectiveQuotaService:
             "addon_member_bonus": workspace.addon_member_bonus,
             "addon_context_bonus": workspace.addon_context_bonus,
             "addon_analysis_bonus": workspace.addon_analysis_bonus,
+            "addon_sleep_contexts_bonus": workspace.addon_sleep_contexts_bonus,
         }
