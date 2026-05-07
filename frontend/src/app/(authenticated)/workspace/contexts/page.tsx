@@ -115,7 +115,7 @@ export default function ContextsPage() {
   const tDetail = useTranslations("contextDetail");
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { user, refetchUser } = useAuth();
+  const { user } = useAuth();
   const locale = useLocale();
   const { currentWorkspace } = useWorkspace();
   // Current context is derived from URL via MemoryContextContext; the
@@ -269,7 +269,6 @@ export default function ContextsPage() {
       setQuickCreateDialogOpen(false);
       setQuickCreateName("");
       setIsPrivate(true); // Reset to default
-      await refetchUser();
       fetchContexts();
     } catch (err: unknown) {
       const apiError = err instanceof ApiError ? err : null;
@@ -335,7 +334,6 @@ export default function ContextsPage() {
       setNewContextSummary("");
       setNewContextUsageGuide("");
       setIsPrivate(true);
-      await refetchUser();
       fetchContexts();
     } catch (err: unknown) {
       let errorMessage =
