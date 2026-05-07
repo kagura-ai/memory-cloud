@@ -54,7 +54,7 @@ def _gone_response(request: Request, user: dict) -> JSONResponse:
     )
 
 
-@router.post("/memories/{memory_id}", deprecated=True)
+@router.post("/memories/{memory_id}", status_code=410, deprecated=True)
 async def upload_attachment_gone(
     memory_id: str,
     request: Request,
@@ -63,7 +63,7 @@ async def upload_attachment_gone(
     return _gone_response(request, user)
 
 
-@router.get("/memories/{memory_id}", deprecated=True)
+@router.get("/memories/{memory_id}", status_code=410, deprecated=True)
 async def list_attachments_gone(
     memory_id: str,
     request: Request,
@@ -72,7 +72,7 @@ async def list_attachments_gone(
     return _gone_response(request, user)
 
 
-@router.get("/{attachment_id}", deprecated=True)
+@router.get("/{attachment_id}", status_code=410, deprecated=True)
 async def download_attachment_gone(
     attachment_id: str,
     request: Request,
@@ -81,7 +81,7 @@ async def download_attachment_gone(
     return _gone_response(request, user)
 
 
-@router.delete("/{attachment_id}", deprecated=True)
+@router.delete("/{attachment_id}", status_code=410, deprecated=True)
 async def delete_attachment_gone(
     attachment_id: str,
     request: Request,

@@ -47,7 +47,13 @@ def client():
 
 @pytest.fixture
 def unauth_client():
-    """No auth override — the real dependency runs and rejects the request."""
+    """No auth override — the real dependency runs and rejects the request.
+
+    Clear ``dependency_overrides`` BEFORE yielding too, so a leaked
+    override from a prior failing test cannot mask the real auth
+    dependency and turn this fixture into a falsely-passing one.
+    """
+    app.dependency_overrides.clear()
     yield TestClient(app, raise_server_exceptions=False)
     app.dependency_overrides.clear()
 
