@@ -51,6 +51,8 @@ import {
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { getContext, updateContext } from "@/lib/api/contexts";
+import { getWorkspaceUsageCurrent } from "@/lib/api/workspaces";
+import type { SleepContextsUsage } from "@/lib/api/usage";
 import type { Context } from "@/lib/types/context";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
@@ -94,6 +96,8 @@ export function SettingsTabPanel({
     context.sleep_mode,
   );
   const [skipDialogOpen, setSkipDialogOpen] = useState(false);
+  // Issue #560: tier quota for sleep-enabled contexts
+  const [sleepQuota, setSleepQuota] = useState<SleepContextsUsage | null>(null);
 
   const applyContextData = useCallback((data: Context) => {
     setDisplayName(data.display_name || "");
@@ -214,6 +218,39 @@ export function SettingsTabPanel({
 
   const [isDirty, setIsDirty] = useState(false);
   const markDirty = useCallback(() => setIsDirty(true), []);
+
+  // Issue #560: fetch the workspace's sleep-enabled-contexts quota so we can
+  // disable full/edges_only options when adding one more would exceed the
+  // effective limit. Only owners can change sleep_mode (the section is
+  // already gated by isOwner downstream), so we only fetch when relevant.
+  useEffect(() => {
+    if (!isOwner) {
+      return;
+    }
+    let cancelled = false;
+    getWorkspaceUsageCurrent()
+      .then((response) => {
+        if (cancelled) return;
+        setSleepQuota(response.usage.sleep_contexts ?? null);
+      })
+      .catch(() => {
+        // Best-effort fetch — backend remains authoritative on quota check.
+        // Leaving sleepQuota=null hides the inline meta but keeps the Select
+        // fully enabled; the server will still reject over-quota saves.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOwner, contextId]);
+
+  // Saving the same value the server already accepted does NOT increase the
+  // count, so we only block when the *current* mode is "skip" and there is
+  // no headroom left. Lateral non-skip → non-skip and reductions are always
+  // allowed by the backend, so we don't disable options for those cases.
+  const wouldExceedSleepQuota =
+    sleepQuota !== null &&
+    context.sleep_mode === "skip" &&
+    sleepQuota.used >= sleepQuota.limit;
 
   // Reset dirty flag when context prop changes (after save/discard)
   useEffect(() => {
@@ -564,13 +601,32 @@ export function SettingsTabPanel({
                     <SelectValue placeholder={t("sleepModePlaceholder")} />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="full">{t("sleepModeFull")}</SelectItem>
-                    <SelectItem value="edges_only">
+                    <SelectItem value="full" disabled={wouldExceedSleepQuota}>
+                      {t("sleepModeFull")}
+                    </SelectItem>
+                    <SelectItem
+                      value="edges_only"
+                      disabled={wouldExceedSleepQuota}
+                    >
                       {t("sleepModeEdgesOnly")}
                     </SelectItem>
                     <SelectItem value="skip">{t("sleepModeSkip")}</SelectItem>
                   </SelectContent>
                 </Select>
+                {sleepQuota !== null && (
+                  <p className="text-xs text-muted-foreground">
+                    {t("sleepQuotaUsage", {
+                      used: sleepQuota.used,
+                      limit: sleepQuota.limit,
+                      addon: sleepQuota.addon_bonus,
+                    })}
+                  </p>
+                )}
+                {wouldExceedSleepQuota && (
+                  <p className="text-xs text-destructive">
+                    {t("sleepQuotaExceeded")}
+                  </p>
+                )}
                 <p className="text-sm text-muted-foreground">
                   {
                     {

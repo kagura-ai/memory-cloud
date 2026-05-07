@@ -19,6 +19,19 @@ export interface PlanLimits {
   public_calls_per_week: number;
 }
 
+/**
+ * Sleep-enabled contexts quota (Issue #560).
+ *
+ * Mirrors the 429 quota-exceeded body so the dashboard, the SettingsTabPanel
+ * disabled-state, and the gate rejection all read the same field names.
+ */
+export interface SleepContextsUsage {
+  used: number;
+  limit: number;
+  addon_bonus: number;
+  remaining: number;
+}
+
 export interface CurrentUsage {
   memory_count: number;
   api_calls_today: number;
@@ -29,6 +42,7 @@ export interface CurrentUsage {
   rest_calls_this_week: number;
   public_calls_today: number; // Issue #238: Public quota separation
   public_calls_this_week: number;
+  sleep_contexts: SleepContextsUsage | null; // Issue #560
 }
 
 export interface UsageStatus {
