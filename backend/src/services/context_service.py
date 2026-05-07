@@ -552,8 +552,13 @@ class ContextService:
 
         limit = workspace.effective_sleep_enabled_contexts_limit
 
+        # ``deleted_at.is_(None)`` matches the convention in
+        # ``QuotaService.check_context_creation_allowed`` — soft-deleted
+        # contexts must not inflate the active count, otherwise a workspace
+        # that deletes its way back under the limit would still be blocked.
         stmt = select(func.count(Context.id)).where(
             Context.workspace_id == workspace_id,
+            Context.deleted_at.is_(None),
             Context.sleep_mode != "skip",
         )
         if exclude_id is not None:

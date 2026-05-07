@@ -314,11 +314,16 @@ async def _build_sleep_contexts_usage(
         or 0
     )
 
+    # Exclude soft-deleted contexts so the dashboard usage line matches the
+    # quota check in ContextService._assert_sleep_quota_or_raise (which also
+    # filters Context.deleted_at IS NULL). Without this filter, deleting a
+    # sleep-enabled context would not free up its slot in the displayed count.
     used = int(
         (
             await db.execute(
                 select(func.count(Context.id)).where(
                     Context.workspace_id == workspace_id,
+                    Context.deleted_at.is_(None),
                     Context.sleep_mode != "skip",
                 )
             )
