@@ -412,7 +412,9 @@ async def get_workspace_usage_current(
                 rest_calls_this_week=rest_calls_week,
                 public_calls_today=public_calls_today,
                 public_calls_this_week=public_calls_week,
-                sleep_contexts=await _build_sleep_contexts_usage(db, workspace_id),
+                sleep_contexts=await _build_sleep_contexts_usage(
+                    db, workspace_id, effective_quotas=effective_quotas
+                ),
             ),
             memory_usage=calculate_usage_status(memory_count, effective_memory_limit),
             daily_api_usage=calculate_usage_status(api_calls_today, effective_daily_api_limit),

@@ -296,6 +296,8 @@ async def _build_analysis_usage(
 async def _build_sleep_contexts_usage(
     db: AsyncSession,
     workspace_id: UUID | None,
+    *,
+    effective_quotas: dict[str, int] | None = None,
 ) -> "SleepContextsUsage | None":
     """Build the ``sleep_contexts`` field of /usage/current (Issue #560).
 
@@ -303,6 +305,18 @@ async def _build_sleep_contexts_usage(
     scoped). Counts contexts with ``sleep_mode != 'skip'`` in the workspace
     and reads the effective limit (plan tier + addon) from EffectiveQuotaService
     so the dashboard and the 429 quota body share one source of truth.
+
+    Args:
+        effective_quotas: Pre-computed effective quotas dict from
+            ``EffectiveQuotaService.get_effective_quotas`` if the caller
+            already has it (e.g. ``workspace.py:get_workspace_usage_current``
+            calls the service for other fields). Passing the dict avoids a
+            duplicate DB roundtrip AND, more importantly, avoids re-triggering
+            ``AddonCalculatorService.recalculate_workspace_bonuses`` (which
+            ``EffectiveQuotaService`` may run as a self-heal — that helper
+            ``COMMIT`` s, so calling it twice from a GET request is a
+            request-side commit on a read endpoint). When ``None``, the
+            helper fetches fresh.
     """
     if not workspace_id:
         return None
@@ -310,8 +324,9 @@ async def _build_sleep_contexts_usage(
     from models.auth import Context, Workspace
     from services.effective_quota_service import EffectiveQuotaService
 
-    effective = await EffectiveQuotaService(db).get_effective_quotas(workspace_id)
-    limit = int(effective.get("sleep_enabled_contexts_limit", 0) or 0)
+    if effective_quotas is None:
+        effective_quotas = await EffectiveQuotaService(db).get_effective_quotas(workspace_id)
+    limit = int(effective_quotas.get("sleep_enabled_contexts_limit", 0) or 0)
     addon_bonus = int(
         (
             await db.execute(

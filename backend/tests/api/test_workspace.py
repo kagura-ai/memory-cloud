@@ -518,10 +518,14 @@ class TestWorkspaceUsageCurrent:
         """Build mock execute results for the queries in get_workspace_usage_current.
 
         Issue #65 baseline: 3 queries (workspace fetch + memory count + usage aggregation).
-        Issue #560 added 2 more via _build_sleep_contexts_usage (workspace addon select +
-        contexts count). Total: 5 queries. The Issue #65 invariant ("no member_ids IN-list,
-        no per-endpoint usage queries") still holds — sleep_contexts queries are scoped
-        per-workspace and necessary for the new dashboard card, not duplicated work.
+        Issue #560 added 2 queries via _build_sleep_contexts_usage (workspace addon select
+        + contexts count). The handler passes its already-computed ``effective_quotas``
+        dict into the helper so EffectiveQuotaService is NOT re-invoked from inside the
+        helper — important because that service may COMMIT via AddonCalculatorService's
+        self-heal path (a request-side COMMIT on a GET endpoint).
+
+        Total: 5 queries. The Issue #65 invariant ("no member_ids IN-list, no
+        per-endpoint usage queries") still holds.
         """
         # Query 1: workspace fetch
         workspace_result = MagicMock(scalar_one_or_none=MagicMock(return_value=mock_workspace))
