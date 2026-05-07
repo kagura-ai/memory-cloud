@@ -69,12 +69,17 @@ def upgrade() -> None:
 
     # 3. Force-skip data migration for FREE/BASIC workspaces.
     #    PRO is left alone (grandfather). Plan names use lowercase strings per
-    #    workspaces.valid_plan_name CHECK constraint.
+    #    workspaces.valid_plan_name CHECK constraint. ``deleted_at IS NULL``
+    #    matches the runtime filter in ``_assert_sleep_quota_or_raise`` and
+    #    ``_build_sleep_contexts_usage`` — soft-deleted rows are tombstones
+    #    that no orchestrator path consults, so writing to them only churns
+    #    ``updated_at`` for no observable behavior.
     op.execute(
         """
         UPDATE contexts
         SET sleep_mode = 'skip'
         WHERE sleep_mode != 'skip'
+          AND deleted_at IS NULL
           AND workspace_id IN (
               SELECT id FROM workspaces WHERE plan_name IN ('free', 'basic')
           )

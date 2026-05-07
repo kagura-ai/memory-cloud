@@ -67,9 +67,7 @@ def _patch_workspace_and_count(
 
 
 class TestAssertSleepQuotaOrRaise:
-    @pytest.fixture
-    def service(self):
-        return ContextService(AsyncMock())
+    # Uses the module-level ``service`` fixture defined below.
 
     @pytest.mark.asyncio
     async def test_under_limit_passes(self, service):
@@ -278,5 +276,9 @@ class TestUpdateContextSleepModeQuotaWiring:
                     sleep_mode="full",
                 )
 
-        # Must NOT have applied the new mode when the quota check rejected
+        # Must NOT have applied the new mode when the quota check rejected,
+        # AND must not have committed (otherwise a regression that flipped
+        # the assignment ahead of the quota helper would still pass the
+        # in-memory assertion above).
         assert ctx.sleep_mode == "skip"
+        service.db.commit.assert_not_awaited()
