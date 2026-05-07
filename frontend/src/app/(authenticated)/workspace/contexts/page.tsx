@@ -15,6 +15,10 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations, useLocale } from "next-intl";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useMemoryContext } from "@/contexts/MemoryContextContext";
+import { SleepModeBadge } from "@/components/contexts/SleepModeBadge";
+import { CurrentContextBadge } from "@/components/contexts/CurrentContextBadge";
+import { SetCurrentContextButton } from "@/components/contexts/SetCurrentContextButton";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import {
   Plus,
@@ -75,7 +79,8 @@ import {
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { SpinnerLoading } from "@/components/common/LoadingState";
-import { cn, typography, colors } from "@/styles/design-tokens";
+import { cn } from "@/lib/utils";
+import { typography, colors } from "@/styles/design-tokens";
 import {
   getContexts,
   createContext,
@@ -110,9 +115,13 @@ export default function ContextsPage() {
   const tDetail = useTranslations("contextDetail");
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { user, refetchUser } = useAuth();
+  const { user } = useAuth();
   const locale = useLocale();
   const { currentWorkspace } = useWorkspace();
+  // Current context is derived from URL via MemoryContextContext; the
+  // server-side current_context_id was removed when contexts became
+  // URL-driven, so this hook is the only source of truth.
+  const { contextId: currentContextId } = useMemoryContext();
   const [contexts, setContexts] = useState<Context[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -260,7 +269,6 @@ export default function ContextsPage() {
       setQuickCreateDialogOpen(false);
       setQuickCreateName("");
       setIsPrivate(true); // Reset to default
-      await refetchUser();
       fetchContexts();
     } catch (err: unknown) {
       const apiError = err instanceof ApiError ? err : null;
@@ -326,8 +334,6 @@ export default function ContextsPage() {
       setNewContextSummary("");
       setNewContextUsageGuide("");
       setIsPrivate(true);
-      // Refresh user data to get updated current_context_id
-      await refetchUser();
       fetchContexts();
     } catch (err: unknown) {
       let errorMessage =
@@ -924,191 +930,209 @@ export default function ContextsPage() {
                   {t("visibility")}
                 </th>
                 <th className="px-4 py-3 text-center font-medium text-gray-600 dark:text-gray-300">
+                  {t("sleepModeBadgeHeader")}
+                </th>
+                <th className="px-4 py-3 text-center font-medium text-gray-600 dark:text-gray-300">
                   {tCommon("actions")}
                 </th>
               </tr>
             </thead>
             <tbody>
-              {contexts.map((context) => (
-                <tr
-                  key={context.id}
-                  className={cn(
-                    "border-b border-gray-100 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800/30",
-                    context.id === user?.current_context_id &&
-                      "bg-brand-green-50 dark:bg-brand-green-900/10",
-                  )}
-                >
-                  {/* Name + inline badges */}
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-2">
-                      <Brain className="h-4 w-4 text-brand-green-600 flex-shrink-0" />
-                      <div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-medium text-gray-900 dark:text-gray-100">
-                            {context.display_name || context.name}
-                          </span>
-                          {context.is_default && (
-                            <Badge
-                              variant="outline"
-                              className="text-[10px] px-1 py-0 bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700"
-                            >
-                              {t("default")}
-                            </Badge>
-                          )}
-                          {context.is_locked && (
-                            <span title={t("locked")} aria-label={t("locked")}>
-                              <ShieldCheck className="h-3 w-3 text-amber-500" />
+              {contexts.map((context) => {
+                const isCurrent = context.id === currentContextId;
+                return (
+                  <tr
+                    key={context.id}
+                    aria-current={isCurrent ? "true" : undefined}
+                    className={cn(
+                      "border-b border-gray-100 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800/30",
+                      isCurrent &&
+                        "bg-brand-green-50 dark:bg-brand-green-900/10",
+                    )}
+                  >
+                    {/* Name + inline badges */}
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <Brain className="h-4 w-4 text-brand-green-600 flex-shrink-0" />
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-medium text-gray-900 dark:text-gray-100">
+                              {context.display_name || context.name}
                             </span>
+                            {isCurrent && <CurrentContextBadge />}
+                            {context.is_default && (
+                              <Badge
+                                variant="outline"
+                                className="text-[10px] px-1 py-0 bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700"
+                              >
+                                {t("default")}
+                              </Badge>
+                            )}
+                            {context.is_locked && (
+                              <span
+                                title={t("locked")}
+                                aria-label={t("locked")}
+                              >
+                                <ShieldCheck className="h-3 w-3 text-amber-500" />
+                              </span>
+                            )}
+                          </div>
+                          {context.description && (
+                            <div
+                              className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[300px]"
+                              title={context.description}
+                            >
+                              {context.description}
+                            </div>
                           )}
                         </div>
-                        {context.description && (
-                          <div
-                            className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[300px]"
-                            title={context.description}
-                          >
-                            {context.description}
-                          </div>
-                        )}
                       </div>
-                    </div>
-                  </td>
+                    </td>
 
-                  {/* Memories count */}
-                  <td className="px-4 py-3 text-right">
-                    <div className="flex items-center justify-end gap-1">
-                      <Database className="h-3 w-3 text-gray-400" />
-                      <span className="text-sm tabular-nums text-gray-700 dark:text-gray-300">
-                        {context.memory_count.toLocaleString()}
-                      </span>
-                    </div>
-                  </td>
+                    {/* Memories count */}
+                    <td className="px-4 py-3 text-right">
+                      <div className="flex items-center justify-end gap-1">
+                        <Database className="h-3 w-3 text-gray-400" />
+                        <span className="text-sm tabular-nums text-gray-700 dark:text-gray-300">
+                          {context.memory_count.toLocaleString()}
+                        </span>
+                      </div>
+                    </td>
 
-                  {/* Last Activity */}
-                  <td className="px-4 py-3 text-center text-xs text-gray-500 dark:text-gray-400">
-                    {context.last_activity_at ? (
-                      <span
-                        title={formatDateTime(
-                          context.last_activity_at,
-                          user?.timezone,
-                          locale,
+                    {/* Last Activity */}
+                    <td className="px-4 py-3 text-center text-xs text-gray-500 dark:text-gray-400">
+                      {context.last_activity_at ? (
+                        <span
+                          title={formatDateTime(
+                            context.last_activity_at,
+                            user?.timezone,
+                            locale,
+                          )}
+                        >
+                          {formatRelativeTime(context.last_activity_at, locale)}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+
+                    {/* Visibility */}
+                    <td className="px-4 py-3 text-center">
+                      {context.is_public ? (
+                        <span className="inline-flex items-center gap-1 text-xs text-purple-600 dark:text-purple-400">
+                          <Globe className="h-3 w-3" />
+                          {t("publicLabel")}
+                        </span>
+                      ) : context.is_private ? (
+                        <span className="inline-flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400">
+                          <Lock className="h-3 w-3" />
+                          {t("privateOption")}
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-xs text-green-600 dark:text-green-400">
+                          <Users className="h-3 w-3" />
+                          {t("sharedOption")}
+                        </span>
+                      )}
+                    </td>
+
+                    <td className="px-4 py-3 text-center">
+                      <SleepModeBadge mode={context.sleep_mode} />
+                    </td>
+
+                    {/* Actions */}
+                    <td className="px-4 py-3">
+                      <div className="flex items-center justify-center gap-1">
+                        {!isCurrent && (
+                          <SetCurrentContextButton contextId={context.id} />
                         )}
-                      >
-                        {formatRelativeTime(context.last_activity_at, locale)}
-                      </span>
-                    ) : (
-                      "—"
-                    )}
-                  </td>
-
-                  {/* Visibility */}
-                  <td className="px-4 py-3 text-center">
-                    {context.is_public ? (
-                      <span className="inline-flex items-center gap-1 text-xs text-purple-600 dark:text-purple-400">
-                        <Globe className="h-3 w-3" />
-                        {t("publicLabel")}
-                      </span>
-                    ) : context.is_private ? (
-                      <span className="inline-flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400">
-                        <Lock className="h-3 w-3" />
-                        {t("privateOption")}
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 text-xs text-green-600 dark:text-green-400">
-                        <Users className="h-3 w-3" />
-                        {t("sharedOption")}
-                      </span>
-                    )}
-                  </td>
-
-                  {/* Actions */}
-                  <td className="px-4 py-3">
-                    <div className="flex items-center justify-center gap-1">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 w-7 p-0"
-                        onClick={() => handleViewStats(context)}
-                        title={t("viewUsage")}
-                      >
-                        <BarChart className="h-3.5 w-3.5" />
-                      </Button>
-                      {/* Issue #398: kebab navigates to admin-only tabs;
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 w-7 p-0"
+                          onClick={() => handleViewStats(context)}
+                          title={t("viewUsage")}
+                        >
+                          <BarChart className="h-3.5 w-3.5" />
+                        </Button>
+                        {/* Issue #398: kebab navigates to admin-only tabs;
                           hide entirely for member/viewer (overview reachable
                           via the BarChart button above). */}
-                      {canManageContexts && (
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-7 w-7 p-0"
-                            >
-                              <MoreVertical className="h-3.5 w-3.5" />
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            <DropdownMenuItem
-                              onClick={() =>
-                                router.push(
-                                  `/workspace/contexts/${context.id}?tab=memories`,
-                                )
-                              }
-                            >
-                              <Settings2 className="h-4 w-4 mr-2" />
-                              {tDetail("tabs.memories")}
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              onClick={() =>
-                                router.push(
-                                  `/workspace/contexts/${context.id}?tab=connections`,
-                                )
-                              }
-                            >
-                              <Settings2 className="h-4 w-4 mr-2" />
-                              {t("connections")}
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              onClick={() =>
-                                router.push(
-                                  `/workspace/contexts/${context.id}?tab=graph`,
-                                )
-                              }
-                            >
-                              <Settings2 className="h-4 w-4 mr-2" />
-                              {t("graph")}
-                            </DropdownMenuItem>
-                            {/* Issue #497: owner-only entry — placed
-                                before Settings so the kebab order matches
-                                the tab order (analyses → settings). */}
-                            {canStartAnalysis && (
+                        {canManageContexts && (
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 w-7 p-0"
+                              >
+                                <MoreVertical className="h-3.5 w-3.5" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
                               <DropdownMenuItem
                                 onClick={() =>
                                   router.push(
-                                    `/workspace/contexts/${context.id}?tab=analyses`,
+                                    `/workspace/contexts/${context.id}?tab=memories`,
                                   )
                                 }
                               >
-                                <BarChart className="h-4 w-4 mr-2" />
-                                {tAnalyses("actions.newAnalysis")}
+                                <Settings2 className="h-4 w-4 mr-2" />
+                                {tDetail("tabs.memories")}
                               </DropdownMenuItem>
-                            )}
-                            <DropdownMenuItem
-                              onClick={() =>
-                                router.push(
-                                  `/workspace/contexts/${context.id}?tab=settings`,
-                                )
-                              }
-                            >
-                              <Settings2 className="h-4 w-4 mr-2" />
-                              {tCommon("settings")}
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
+                              <DropdownMenuItem
+                                onClick={() =>
+                                  router.push(
+                                    `/workspace/contexts/${context.id}?tab=connections`,
+                                  )
+                                }
+                              >
+                                <Settings2 className="h-4 w-4 mr-2" />
+                                {t("connections")}
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onClick={() =>
+                                  router.push(
+                                    `/workspace/contexts/${context.id}?tab=graph`,
+                                  )
+                                }
+                              >
+                                <Settings2 className="h-4 w-4 mr-2" />
+                                {t("graph")}
+                              </DropdownMenuItem>
+                              {/* Issue #497: owner-only entry — placed
+                                before Settings so the kebab order matches
+                                the tab order (analyses → settings). */}
+                              {canStartAnalysis && (
+                                <DropdownMenuItem
+                                  onClick={() =>
+                                    router.push(
+                                      `/workspace/contexts/${context.id}?tab=analyses`,
+                                    )
+                                  }
+                                >
+                                  <BarChart className="h-4 w-4 mr-2" />
+                                  {tAnalyses("actions.newAnalysis")}
+                                </DropdownMenuItem>
+                              )}
+                              <DropdownMenuItem
+                                onClick={() =>
+                                  router.push(
+                                    `/workspace/contexts/${context.id}?tab=settings`,
+                                  )
+                                }
+                              >
+                                <Settings2 className="h-4 w-4 mr-2" />
+                                {tCommon("settings")}
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

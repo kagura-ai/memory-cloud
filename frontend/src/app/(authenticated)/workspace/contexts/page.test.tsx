@@ -42,6 +42,7 @@ const mockReplace = vi.fn();
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockPush, replace: mockReplace }),
   useSearchParams: () => new URLSearchParams(),
+  usePathname: () => "/workspace/contexts",
 }));
 
 // Stable translator — passing `createFirstContextNonAdmin` through as-is so
@@ -59,6 +60,11 @@ vi.mock("@/contexts/AuthContext", () => ({
 const mockUseWorkspace = vi.fn();
 vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => mockUseWorkspace(),
+}));
+
+const mockUseMemoryContext = vi.fn();
+vi.mock("@/contexts/MemoryContextContext", () => ({
+  useMemoryContext: () => mockUseMemoryContext(),
 }));
 
 const mockToast = vi.fn();
@@ -95,6 +101,15 @@ function setupWithRole(role: Role) {
 beforeEach(() => {
   mockUseAuth.mockReset();
   mockUseWorkspace.mockReset();
+  mockUseMemoryContext.mockReset();
+  mockUseMemoryContext.mockReturnValue({
+    currentContext: null,
+    contextId: null,
+    contextName: null,
+    isLoading: false,
+    error: null,
+    refresh: vi.fn(),
+  });
   mockGetContexts.mockReset();
   mockCheckOpenAIKeyStatus.mockReset();
   mockGetEmbeddingModels.mockReset();
@@ -265,6 +280,7 @@ function setupWithRoleAndOneContext(role: Role) {
         is_locked: false,
         is_private: true,
         is_public: false,
+        sleep_mode: "skip",
         embedding_model: "small",
         resource_id: null,
       },
@@ -341,4 +357,170 @@ describe("ContextsPage per-row kebab menu (#398)", () => {
       ).not.toBeNull();
     },
   );
+});
+
+// ---------- Issue #559 + #561: sleep_mode badge + current marker/switch ----
+
+function setupWithThreeContextsAndCurrent(currentId: string | null) {
+  mockUseAuth.mockReturnValue({
+    user: { current_workspace_id: WORKSPACE_ID },
+    refetchUser: vi.fn(),
+  });
+  mockUseWorkspace.mockReturnValue({
+    currentWorkspace: {
+      id: WORKSPACE_ID,
+      plan_name: "pro",
+      current_user_role: "owner",
+    },
+  });
+  mockUseMemoryContext.mockReturnValue({
+    currentContext: null,
+    contextId: currentId,
+    contextName: null,
+    isLoading: false,
+    error: null,
+    refresh: vi.fn(),
+  });
+  mockCheckOpenAIKeyStatus.mockResolvedValue({ has_key: true });
+  mockGetEmbeddingModels.mockResolvedValue({
+    models: [],
+    default_model: "small",
+  });
+  const baseFields = {
+    description: "",
+    memory_count: 0,
+    last_activity_at: null,
+    is_default: false,
+    is_locked: false,
+    is_private: true,
+    is_public: false,
+    embedding_model: "small",
+    resource_id: null,
+  };
+  mockGetContexts.mockResolvedValue({
+    contexts: [
+      {
+        ...baseFields,
+        id: "ctx-full",
+        name: "ctx-full",
+        display_name: "Full Context",
+        sleep_mode: "full",
+      },
+      {
+        ...baseFields,
+        id: "ctx-edges",
+        name: "ctx-edges",
+        display_name: "Edges Context",
+        sleep_mode: "edges_only",
+      },
+      {
+        ...baseFields,
+        id: "ctx-skip",
+        name: "ctx-skip",
+        display_name: "Skip Context",
+        sleep_mode: "skip",
+      },
+    ],
+  });
+}
+
+describe("ContextsPage sleep_mode badge (#559)", () => {
+  it("renders one SleepModeBadge per row covering all three modes", async () => {
+    setupWithThreeContextsAndCurrent(null);
+    render(<ContextsPage />);
+
+    await waitFor(() =>
+      expect(screen.getByText("Full Context")).toBeInTheDocument(),
+    );
+
+    // Each row carries the i18n key for its sleep_mode badge label.
+    expect(screen.getByLabelText("sleepModeBadgeFull")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("sleepModeBadgeEdgesOnly"),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("sleepModeBadgeSkip")).toBeInTheDocument();
+  });
+
+  it("renders the Sleep column header in the table", async () => {
+    setupWithThreeContextsAndCurrent(null);
+    render(<ContextsPage />);
+
+    await waitFor(() =>
+      expect(screen.getByText("Full Context")).toBeInTheDocument(),
+    );
+
+    expect(screen.getByText("sleepModeBadgeHeader")).toBeInTheDocument();
+  });
+});
+
+describe("ContextsPage current marker + Set as current (#561)", () => {
+  it("marks only the current context row with aria-current and CurrentContextBadge", async () => {
+    setupWithThreeContextsAndCurrent("ctx-edges");
+    const { container } = render(<ContextsPage />);
+
+    await waitFor(() =>
+      expect(screen.getByText("Edges Context")).toBeInTheDocument(),
+    );
+
+    const currentRows = container.querySelectorAll('tr[aria-current="true"]');
+    expect(currentRows.length).toBe(1);
+
+    // CurrentContextBadge uses the "current" key as its aria-label and text.
+    // Multiple matches are possible since the i18n key passes through verbatim,
+    // but exactly one Current badge should be inside an aria-current row.
+    const badge = currentRows[0].querySelector('[aria-label="current"]');
+    expect(badge).not.toBeNull();
+  });
+
+  it("renders Set as current button on non-current rows only", async () => {
+    setupWithThreeContextsAndCurrent("ctx-edges");
+    const { container } = render(<ContextsPage />);
+
+    await waitFor(() =>
+      expect(screen.getByText("Edges Context")).toBeInTheDocument(),
+    );
+
+    // 3 rows total, 1 is current → 2 Set-as-current buttons.
+    const switchButtons = container.querySelectorAll(
+      'button[aria-label="setAsCurrent"]',
+    );
+    expect(switchButtons.length).toBe(2);
+  });
+
+  it("renders Set as current button on every row when no context is current", async () => {
+    setupWithThreeContextsAndCurrent(null);
+    const { container } = render(<ContextsPage />);
+
+    await waitFor(() =>
+      expect(screen.getByText("Full Context")).toBeInTheDocument(),
+    );
+
+    const switchButtons = container.querySelectorAll(
+      'button[aria-label="setAsCurrent"]',
+    );
+    expect(switchButtons.length).toBe(3);
+  });
+
+  it("calling Set as current navigates with ?context=<id>", async () => {
+    setupWithThreeContextsAndCurrent(null);
+    const { container } = render(<ContextsPage />);
+
+    await waitFor(() =>
+      expect(screen.getByText("Skip Context")).toBeInTheDocument(),
+    );
+
+    // Click the Set-as-current button inside the "ctx-skip" row.
+    const skipRow = Array.from(container.querySelectorAll("tr")).find((r) =>
+      r.textContent?.includes("Skip Context"),
+    );
+    expect(skipRow).toBeDefined();
+    const switchBtn = skipRow!.querySelector(
+      'button[aria-label="setAsCurrent"]',
+    ) as HTMLButtonElement | null;
+    expect(switchBtn).not.toBeNull();
+    switchBtn!.click();
+
+    expect(mockReplace).toHaveBeenCalledTimes(1);
+    expect(mockReplace.mock.calls[0][0]).toContain("context=ctx-skip");
+  });
 });

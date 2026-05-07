@@ -4,6 +4,8 @@
  * Issue #82: Context-based Multi-Collection Support
  */
 
+export type SleepMode = "full" | "edges_only" | "skip";
+
 export interface Context {
   id: string;
   name: string;
@@ -17,7 +19,7 @@ export interface Context {
   is_private: boolean; // Issue #165: Privacy control (shared/private)
   is_public: boolean; // Issue #238: Public context flag (external access)
   is_locked: boolean; // Issue #85: Lock flag (prevent deletion)
-  sleep_mode: "full" | "edges_only" | "skip";
+  sleep_mode: SleepMode;
   resource_id: string | null; // Issue #238: Resource-backed context
   created_by: string | null; // Issue #165: Creator user_id
   created_by_name: string | null; // Creator name
@@ -70,5 +72,5 @@ export interface UpdateContextRequest {
   is_public?: boolean; // Issue #238: Public context flag (external access)
   resource_id?: string; // Issue #238: Resource ID (auto-generated: prefix_contextId)
   is_locked?: boolean; // Issue #85: Lock flag (prevent deletion)
-  sleep_mode?: "full" | "edges_only" | "skip";
+  sleep_mode?: SleepMode;
 }
