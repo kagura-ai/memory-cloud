@@ -21,7 +21,6 @@ import pytest
 from services.context_service import ContextService
 from utils.exceptions import QuotaExceededError
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
