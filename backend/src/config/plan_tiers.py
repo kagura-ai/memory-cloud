@@ -68,6 +68,7 @@ class PlanTier:
     public_calls_per_week: int = 0  # Issue #238: Public REST API quota
     analysis_runs_per_day: int = 0  # Issue #494: Memory Broadlistening analyses/day
     storage_limit_bytes: int = 0  # Issue #485: File-storage hard cap per workspace
+    sleep_enabled_contexts_limit: int = 0  # Issue #560: Sleep-mode contexts cap (PRO-only)
     allows_shared_contexts: bool = False  # Issue #271: Shared context feature (Pro only)
     features: frozenset[str] = field(default_factory=frozenset)
 
@@ -137,6 +138,7 @@ PLAN_PRO = PlanTier(
     public_calls_per_week=5000,
     analysis_runs_per_day=3,  # Issue #494: Memory Broadlistening (Pro only; FREE/BASIC=0)
     storage_limit_bytes=10 * 1024 * 1024 * 1024,  # Issue #485: 10 GiB
+    sleep_enabled_contexts_limit=3,  # Issue #560: Sleep mode (Pro only; FREE/BASIC=0)
     features=frozenset(
         {
             "api_keys",
@@ -190,6 +192,7 @@ def _apply_settings_overrides() -> None:
             "memory_limit": settings.plan_free_memory_limit,
             "mcp_calls_per_day": settings.plan_free_mcp_calls_per_day,
             "storage_limit_bytes": settings.plan_free_storage_limit_bytes,
+            "sleep_enabled_contexts_limit": settings.plan_free_sleep_enabled_contexts_limit,
             "display_name": settings.plan_free_display_name,
         },
         PlanName.BASIC: {
@@ -197,6 +200,7 @@ def _apply_settings_overrides() -> None:
             "memory_limit": settings.plan_basic_memory_limit,
             "mcp_calls_per_day": settings.plan_basic_mcp_calls_per_day,
             "storage_limit_bytes": settings.plan_basic_storage_limit_bytes,
+            "sleep_enabled_contexts_limit": settings.plan_basic_sleep_enabled_contexts_limit,
             "display_name": settings.plan_basic_display_name,
         },
         PlanName.PRO: {
@@ -204,6 +208,7 @@ def _apply_settings_overrides() -> None:
             "memory_limit": settings.plan_pro_memory_limit,
             "mcp_calls_per_day": settings.plan_pro_mcp_calls_per_day,
             "storage_limit_bytes": settings.plan_pro_storage_limit_bytes,
+            "sleep_enabled_contexts_limit": settings.plan_pro_sleep_enabled_contexts_limit,
             "display_name": settings.plan_pro_display_name,
         },
     }
