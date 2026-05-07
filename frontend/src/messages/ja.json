@@ -1732,7 +1732,10 @@
     "noUsageData": "使用データがまだありません",
     "endpointDetails": "エンドポイント詳細",
     "requestCountByEndpoint": "エンドポイント別リクエスト数",
-    "otherEndpointsLabel": "その他 ({count})"
+    "otherEndpointsLabel": "その他 ({count})",
+    "sleepEnabledContexts": "Sleep 有効コンテキスト",
+    "sleepContextsWithAddon": "extra_sleep_contexts アドオンによる +{addon} を含む",
+    "sleepContextsTier": "プラン基本上限 (Sleep メンテナンスは PRO 専用機能)"
   },
   "memoryOverview": {
     "failedToLoad": "メモリー概要の読み込みに失敗しました",
@@ -3017,6 +3020,8 @@
     "sleepModeSkipTitle": "Sleep メンテナンスを無効化しますか？",
     "sleepModeSkipWarning": "再有効化まですべての自動メンテナンスが停止します。既存データは保持されますが、新しいエッジ探索・重複排除・重要度更新は実行されません。",
     "sleepModeSkipConfirm": "Sleep を無効化",
+    "sleepQuotaUsage": "Sleep 有効コンテキスト数: {used} / {limit} (アドオン: {addon})",
+    "sleepQuotaExceeded": "上限に達しました。PRO へのアップグレード、または extra_sleep_contexts アドオンを購入することで Sleep 対象コンテキストを追加できます。",
     "unsavedChanges": "未保存の変更があります",
     "discard": "破棄",
     "saveChanges": "変更を保存",

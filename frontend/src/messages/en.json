@@ -1732,7 +1732,10 @@
     "noUsageData": "No usage data yet",
     "endpointDetails": "Endpoint Details",
     "requestCountByEndpoint": "Request count by endpoint",
-    "otherEndpointsLabel": "Other ({count})"
+    "otherEndpointsLabel": "Other ({count})",
+    "sleepEnabledContexts": "Sleep-enabled Contexts",
+    "sleepContextsWithAddon": "Includes +{addon} from extra_sleep_contexts addon",
+    "sleepContextsTier": "Plan-tier limit (PRO required to enable Sleep Maintenance)"
   },
   "memoryOverview": {
     "failedToLoad": "Failed to load memory overview",
@@ -3017,6 +3020,8 @@
     "sleepModeSkipTitle": "Disable Sleep Maintenance?",
     "sleepModeSkipWarning": "This will stop all automated maintenance until re-enabled. Existing data is preserved, but no new edges, deduplication, or importance updates will run.",
     "sleepModeSkipConfirm": "Disable Sleep",
+    "sleepQuotaUsage": "Sleep-enabled contexts: {used} / {limit} (addon: {addon})",
+    "sleepQuotaExceeded": "Quota reached — upgrade to PRO or purchase the extra_sleep_contexts addon to enable Sleep Maintenance for additional contexts.",
     "unsavedChanges": "You have unsaved changes",
     "discard": "Discard",
     "saveChanges": "Save Changes",
