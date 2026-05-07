@@ -9,6 +9,7 @@ auth gate (auth must fire BEFORE the 410 so the warn log can record
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -16,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from api.main import app
 from auth.dependencies import get_user_from_api_key_or_session
+from db.base import get_db
 
 # Stable IDs across all parametrized tests — pytest IDs use the readable
 # verb labels below, not these UUIDs, so collisions or content don't matter.
@@ -47,13 +49,24 @@ def client():
 
 @pytest.fixture
 def unauth_client():
-    """No auth override — the real dependency runs and rejects the request.
+    """No auth override — the real auth dependency runs and rejects the request.
 
-    Clear ``dependency_overrides`` BEFORE yielding too, so a leaked
-    override from a prior failing test cannot mask the real auth
-    dependency and turn this fixture into a falsely-passing one.
+    Clear ``dependency_overrides`` BEFORE yielding so a leaked override from
+    a prior failing test cannot mask the real auth dependency and turn this
+    fixture into a falsely-passing one.
+
+    ``get_db`` IS stubbed because FastAPI resolves the entire dependency
+    chain (including transitive deps) before calling the dependency
+    function, so without this stub each unauthenticated test would borrow a
+    real DB connection from the pool, raise 401, then return it — wasting
+    pool capacity per test and making the suite flakier under parallel runs.
     """
     app.dependency_overrides.clear()
+
+    async def fake_db():
+        yield MagicMock()
+
+    app.dependency_overrides[get_db] = fake_db
     yield TestClient(app, raise_server_exceptions=False)
     app.dependency_overrides.clear()
 
