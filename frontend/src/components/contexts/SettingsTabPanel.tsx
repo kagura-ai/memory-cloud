@@ -624,7 +624,9 @@ export function SettingsTabPanel({
                 )}
                 {wouldExceedSleepQuota && (
                   <p className="text-xs text-destructive">
-                    {t("sleepQuotaExceeded")}
+                    {sleepQuota && sleepQuota.limit === 0
+                      ? t("sleepQuotaTierBlocked")
+                      : t("sleepQuotaExceeded")}
                   </p>
                 )}
                 <p className="text-sm text-muted-foreground">

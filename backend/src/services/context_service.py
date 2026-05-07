@@ -567,14 +567,30 @@ class ContextService:
 
         if current + 1 > limit:
             addon_bonus = workspace.addon_sleep_contexts_bonus or 0
-            raise QuotaExceededError(
-                (
+            # When the effective limit is 0 (FREE/BASIC tier), addon_bonus is
+            # IRRELEVANT to the cap — `effective_sleep_enabled_contexts_limit`
+            # returns 0 regardless of any addon rows on the workspace, per the
+            # zero-base-tier defense-in-depth rule. Surface the right message
+            # for each case so clients can render an actionable hint:
+            # - limit == 0: tier-blocked, upgrade required (addon won't help)
+            # - limit > 0:  PRO at-or-above cap, can buy more addons
+            if limit == 0:
+                message = (
+                    "Sleep Maintenance is a PRO-tier feature; "
+                    "upgrade your plan to enable sleep_mode on contexts."
+                )
+            else:
+                # ``limit - addon_bonus`` is non-negative on PRO because the
+                # zero-base check above filtered out the only path where
+                # addon_bonus could exceed the effective limit.
+                message = (
                     f"Sleep-enabled contexts quota exceeded: "
                     f"{current + 1}/{limit} in use (plan limit "
                     f"{limit - addon_bonus} + addon bonus {addon_bonus}). "
-                    f"Sleep Maintenance is a PRO-tier feature; add the "
-                    f"'extra_sleep_contexts' addon to raise the cap."
-                ),
+                    f"Add the 'extra_sleep_contexts' addon to raise the cap."
+                )
+            raise QuotaExceededError(
+                message,
                 quota_type="sleep_enabled_contexts",
                 limit=limit,
                 current=current,
