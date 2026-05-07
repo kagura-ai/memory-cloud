@@ -19,7 +19,7 @@ from uuid import uuid4
 import pytest
 
 from services.context_service import ContextService
-from utils.exceptions import QuotaExceededError
+from utils.exceptions import FeatureNotAvailableError, QuotaExceededError
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -90,15 +90,24 @@ class TestAssertSleepQuotaOrRaise:
         assert exc_info.value.details["requested"] == 4
 
     @pytest.mark.asyncio
-    async def test_basic_zero_limit_blocks_first_attempt(self, service):
-        """FREE/BASIC tier (limit=0) rejects even the first sleep-enable."""
+    async def test_basic_zero_limit_raises_feature_not_available(self, service):
+        """FREE/BASIC tier (limit=0) raises FeatureNotAvailableError (403), NOT QuotaExceededError (429).
+
+        The distinction matters: 429 implies "you're over a limit, try again
+        later or buy more". 403 with feature flag is the correct semantic for
+        "this feature is not on your plan; upgrade to enable". Loop 9 review
+        on PR #568 raised this; previously the helper raised QuotaExceededError
+        (429) for both cases, conflating tier-block with rate-limit.
+        """
         ws = _make_workspace(limit=0)
         _patch_workspace_and_count(service, workspace=ws, count=0)
 
-        with pytest.raises(QuotaExceededError) as exc_info:
+        with pytest.raises(FeatureNotAvailableError) as exc_info:
             await service._assert_sleep_quota_or_raise(workspace_id=uuid4())
 
-        assert exc_info.value.details["limit"] == 0
+        assert exc_info.value.details["feature"] == "sleep_mode"
+        # FeatureNotAvailableError uses status_code=403 globally.
+        assert exc_info.value.status_code == 403
 
     @pytest.mark.asyncio
     async def test_addon_extends_limit(self, service):
@@ -258,7 +267,12 @@ class TestUpdateContextSleepModeQuotaWiring:
 
     @pytest.mark.asyncio
     async def test_quota_exceeded_propagates(self, service):
-        """When the helper raises, update_context surfaces the exception."""
+        """When the helper raises QuotaExceededError, update_context surfaces it.
+
+        Same atomicity contract for both QuotaExceededError (429, PRO at-cap)
+        and FeatureNotAvailableError (403, FREE/BASIC tier-block) — both flow
+        through the same exception-bubbling path before commit.
+        """
         ctx = _make_context(current_mode="skip")
         with (
             patch.object(service, "get_context", new_callable=AsyncMock, return_value=ctx),
@@ -280,5 +294,30 @@ class TestUpdateContextSleepModeQuotaWiring:
         # AND must not have committed (otherwise a regression that flipped
         # the assignment ahead of the quota helper would still pass the
         # in-memory assertion above).
+        assert ctx.sleep_mode == "skip"
+        service.db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_feature_not_available_propagates(self, service):
+        """FREE/BASIC tier-block (FeatureNotAvailableError) propagates the same as quota."""
+        ctx = _make_context(current_mode="skip")
+        with (
+            patch.object(service, "get_context", new_callable=AsyncMock, return_value=ctx),
+            patch.object(
+                service,
+                "_assert_sleep_quota_or_raise",
+                new_callable=AsyncMock,
+                side_effect=FeatureNotAvailableError(
+                    "Sleep Maintenance is a PRO-tier feature", feature="sleep_mode"
+                ),
+            ),
+        ):
+            with pytest.raises(FeatureNotAvailableError):
+                await service.update_context(
+                    user_id="u",
+                    context_id=ctx.id,
+                    sleep_mode="full",
+                )
+
         assert ctx.sleep_mode == "skip"
         service.db.commit.assert_not_awaited()

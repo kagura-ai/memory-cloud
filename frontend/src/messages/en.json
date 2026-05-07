@@ -3021,7 +3021,7 @@
     "sleepModeSkipWarning": "This will stop all automated maintenance until re-enabled. Existing data is preserved, but no new edges, deduplication, or importance updates will run.",
     "sleepModeSkipConfirm": "Disable Sleep",
     "sleepQuotaUsage": "Sleep-enabled contexts: {used} / {limit} (addon: {addon})",
-    "sleepQuotaExceeded": "Quota reached — purchase the extra_sleep_contexts addon to enable Sleep Maintenance for additional contexts.",
+    "sleepQuotaExceeded": "Quota reached — contact your workspace admin to request a higher Sleep Maintenance cap.",
     "sleepQuotaTierBlocked": "Sleep Maintenance is a PRO-tier feature — upgrade your plan to enable it on this context.",
     "unsavedChanges": "You have unsaved changes",
     "discard": "Discard",

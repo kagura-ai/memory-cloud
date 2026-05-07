@@ -20,6 +20,7 @@ from models.sleep import SleepMode
 from utils.datetime import utcnow
 from utils.exceptions import (
     ConflictError,
+    FeatureNotAvailableError,
     NotFoundException,
     QuotaExceededError,
     ValidationError,
@@ -567,30 +568,36 @@ class ContextService:
 
         if current + 1 > limit:
             addon_bonus = workspace.addon_sleep_contexts_bonus or 0
-            # When the effective limit is 0 (FREE/BASIC tier), addon_bonus is
-            # IRRELEVANT to the cap — `effective_sleep_enabled_contexts_limit`
-            # returns 0 regardless of any addon rows on the workspace, per the
-            # zero-base-tier defense-in-depth rule. Surface the right message
-            # for each case so clients can render an actionable hint:
-            # - limit == 0: tier-blocked, upgrade required (addon won't help)
-            # - limit > 0:  PRO at-or-above cap, can buy more addons
+            # Two distinct rejection cases — surface them as distinct HTTP
+            # status codes so clients can render the right action:
+            #
+            # - ``limit == 0`` (FREE/BASIC tier): true feature gate, the
+            #   user's plan does not include this feature at all. Use
+            #   ``FeatureNotAvailableError`` → 403. addon_bonus is
+            #   irrelevant here because the zero-base-tier defense-in-depth
+            #   rule clamps the effective limit to 0 regardless of addon.
+            # - ``limit > 0`` (PRO at-or-above cap): true quota — the
+            #   feature IS available, the user has just hit the cap.
+            #   ``QuotaExceededError`` → 429.
+            #
+            # The Stripe SKU for ``extra_sleep_contexts`` is a Phase 2
+            # follow-up (CHANGELOG ### Notes), so the over-cap message
+            # currently directs the user to contact their workspace admin
+            # rather than offering a self-serve purchase CTA. Update both
+            # the message and the i18n keys when the SKU ships.
             if limit == 0:
-                message = (
+                raise FeatureNotAvailableError(
                     "Sleep Maintenance is a PRO-tier feature; "
-                    "upgrade your plan to enable sleep_mode on contexts."
+                    "upgrade your plan to enable sleep_mode on contexts.",
+                    feature="sleep_mode",
                 )
-            else:
-                # ``limit - addon_bonus`` is non-negative on PRO because the
-                # zero-base check above filtered out the only path where
-                # addon_bonus could exceed the effective limit.
-                message = (
+            raise QuotaExceededError(
+                (
                     f"Sleep-enabled contexts quota exceeded: "
                     f"{current + 1}/{limit} in use (plan limit "
                     f"{limit - addon_bonus} + addon bonus {addon_bonus}). "
-                    f"Add the 'extra_sleep_contexts' addon to raise the cap."
-                )
-            raise QuotaExceededError(
-                message,
+                    f"Contact your workspace admin to request a higher cap."
+                ),
                 quota_type="sleep_enabled_contexts",
                 limit=limit,
                 current=current,

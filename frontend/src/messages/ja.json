@@ -3021,7 +3021,7 @@
     "sleepModeSkipWarning": "再有効化まですべての自動メンテナンスが停止します。既存データは保持されますが、新しいエッジ探索・重複排除・重要度更新は実行されません。",
     "sleepModeSkipConfirm": "Sleep を無効化",
     "sleepQuotaUsage": "Sleep 有効コンテキスト数: {used} / {limit} (アドオン: {addon})",
-    "sleepQuotaExceeded": "上限に達しました。extra_sleep_contexts アドオンを購入することで Sleep 対象コンテキストを追加できます。",
+    "sleepQuotaExceeded": "上限に達しました。Sleep 対象コンテキストの上限引き上げはワークスペース管理者にご相談ください。",
     "sleepQuotaTierBlocked": "Sleep Maintenance は PRO 限定機能です。プランをアップグレードしてご利用ください。",
     "unsavedChanges": "未保存の変更があります",
     "discard": "破棄",
