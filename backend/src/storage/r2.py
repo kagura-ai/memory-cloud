@@ -161,10 +161,8 @@ class R2Storage:
         # ``Content-Disposition`` header. Without this a filename
         # containing a literal ``"`` could break out of the quoted
         # parameter and enable filename-spoofing for downloads;
-        # CR/LF could (in principle) corrupt the header. Mirrors
-        # ``api/routes/attachments.py:_sanitize_filename`` to keep the
-        # legacy and new file paths consistent (CSO Gate2 finding F-1
-        # + Copilot loop 5 finding on PR #551).
+        # CR/LF could (in principle) corrupt the header
+        # (CSO Gate2 finding F-1 + Copilot loop 5 finding on PR #551).
         safe_filename = (
             filename.replace('"', "_").replace("\n", "_").replace("\r", "_").replace("\x00", "_")
         )
