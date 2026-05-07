@@ -20,10 +20,16 @@ export interface PlanLimits {
 }
 
 /**
- * Sleep-enabled contexts quota (Issue #560).
+ * Sleep-enabled contexts quota usage (Issue #560).
  *
- * Mirrors the 429 quota-exceeded body so the dashboard, the SettingsTabPanel
- * disabled-state, and the gate rejection all read the same field names.
+ * This is the dashboard READ shape — `used` / `limit` / `remaining` for
+ * showing "X / Y" in the UI. The 429 quota-exceeded body raised by
+ * `_assert_sleep_quota_or_raise` uses a parallel-but-distinct shape
+ * (`current` / `requested` / `limit` / `addon_bonus`) optimized for the
+ * action-rejection case ("you tried to enable one more, here's the new total").
+ * Both surfaces share `limit` and `addon_bonus`; the read surface adds
+ * `remaining` (= max(0, limit - used)) for direct display, and the error
+ * surface adds `requested` (= current + 1) for "how many would there be."
  */
 export interface SleepContextsUsage {
   used: number;

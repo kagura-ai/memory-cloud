@@ -225,11 +225,15 @@ class TestE06SleepQuotaAddonMigration:
             with engine.begin() as conn:
                 ws_id = _seed_workspace(conn, plan_name="pro")
                 try:
+                    # ``created_by`` is required (NOT NULL) — supplying it
+                    # ensures the IntegrityError below comes from the restored
+                    # CHECK constraint, not from a NOT NULL violation that
+                    # would mask a missing-CHECK regression.
                     conn.execute(
                         text(
                             "INSERT INTO workspace_addons "
-                            "(workspace_id, addon_type, quantity, active_from) "
-                            "VALUES (:ws, 'extra_sleep_contexts', 1, NOW())"
+                            "(workspace_id, addon_type, quantity, active_from, created_by) "
+                            "VALUES (:ws, 'extra_sleep_contexts', 1, NOW(), 'test-560-downgrade')"
                         ),
                         {"ws": ws_id},
                     )
