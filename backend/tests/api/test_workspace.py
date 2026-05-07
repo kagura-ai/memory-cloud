@@ -484,14 +484,17 @@ class TestWorkspaceUsageCurrent:
             )
             await get_workspace_usage_current(user=mock_user, db=mock_db)
 
-        # 3 queries: workspace, memory count, usage aggregation (no member_ids query)
-        assert call_count == 3
+        # Issue #65 baseline: 3 queries (workspace, memory count, usage aggregation —
+        # the IN-list member_ids query is eliminated, that's the optimization).
+        # Issue #560 adds 2 more queries via _build_sleep_contexts_usage (addon select +
+        # contexts count). Total 5; the Issue #65 invariant on the IN-list still holds.
+        assert call_count == 5
 
     @staticmethod
     def _make_effective_quotas():
         """Mock EffectiveQuotaService.get_effective_quotas() return value.
 
-        Mirrors the full 9-key contract documented in
+        Mirrors the full key contract documented in
         services.effective_quota_service.EffectiveQuotaService.get_effective_quotas
         so that adding a key to the service signals here in one place.
         """
@@ -505,11 +508,25 @@ class TestWorkspaceUsageCurrent:
             "public_calls_per_week": 550,
             "max_members": 5,
             "max_contexts": 50,
+            "analysis_runs_per_day": 3,
+            "storage_bytes_limit": 10 * 1024 * 1024 * 1024,
+            "sleep_enabled_contexts_limit": 3,  # Issue #560
         }
 
     @staticmethod
     def _build_execute_side_effects(mock_workspace):
-        """Build mock execute results for the 3 queries in get_workspace_usage_current."""
+        """Build mock execute results for the queries in get_workspace_usage_current.
+
+        Issue #65 baseline: 3 queries (workspace fetch + memory count + usage aggregation).
+        Issue #560 added 2 queries via _build_sleep_contexts_usage (workspace addon select
+        + contexts count). The handler passes its already-computed ``effective_quotas``
+        dict into the helper so EffectiveQuotaService is NOT re-invoked from inside the
+        helper — important because that service may COMMIT via AddonCalculatorService's
+        self-heal path (a request-side COMMIT on a GET endpoint).
+
+        Total: 5 queries. The Issue #65 invariant ("no member_ids IN-list, no
+        per-endpoint usage queries") still holds.
+        """
         # Query 1: workspace fetch
         workspace_result = MagicMock(scalar_one_or_none=MagicMock(return_value=mock_workspace))
 
@@ -528,4 +545,10 @@ class TestWorkspaceUsageCurrent:
         usage_row.rest_week = 120
         usage_result = MagicMock(one=MagicMock(return_value=usage_row))
 
-        return [workspace_result, memory_result, usage_result]
+        # Query 4: addon_sleep_contexts_bonus standalone select (Issue #560)
+        addon_result = MagicMock(scalar_one_or_none=MagicMock(return_value=0))
+
+        # Query 5: count contexts with sleep_mode != 'skip' (Issue #560)
+        count_result = MagicMock(scalar_one=MagicMock(return_value=0))
+
+        return [workspace_result, memory_result, usage_result, addon_result, count_result]

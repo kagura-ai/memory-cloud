@@ -18,7 +18,13 @@ from config.settings import get_settings
 from models.auth import Context, ContextMember, User, Workspace, WorkspaceMember
 from models.sleep import SleepMode
 from utils.datetime import utcnow
-from utils.exceptions import ConflictError, NotFoundException, ValidationError
+from utils.exceptions import (
+    ConflictError,
+    FeatureNotAvailableError,
+    NotFoundException,
+    QuotaExceededError,
+    ValidationError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -469,6 +475,16 @@ class ContextService:
             context.is_locked = is_locked
 
         if sleep_mode is not None and context.sleep_mode != sleep_mode:
+            # Issue #560: Tier quota check — only block "increase-only" transitions
+            # (skip -> full/edges_only). Reductions (full/edges_only -> skip) are
+            # always allowed so PRO workspaces grandfathered above the limit can
+            # naturally taper down. The helper acquires SELECT FOR UPDATE on the
+            # workspace row, closing the TOCTOU window between concurrent toggles.
+            if context.sleep_mode == "skip" and sleep_mode != "skip":
+                await self._assert_sleep_quota_or_raise(
+                    workspace_id=context.workspace_id,
+                    exclude_id=context.id,
+                )
             logger.info(
                 "setting_sleep_mode",
                 context_id=str(context_id),
@@ -495,6 +511,99 @@ class ContextService:
         )
 
         return context
+
+    async def _assert_sleep_quota_or_raise(
+        self,
+        workspace_id: UUID,
+        exclude_id: UUID | None = None,
+    ) -> None:
+        """Assert that enabling sleep_mode for one more context fits the quota.
+
+        Issue #560: Sleep Maintenance is a PRO-only, LLM-cost-bearing feature
+        capped per workspace. The helper takes a row-level lock on the
+        ``workspaces`` row so two concurrent ``update_context`` calls cannot
+        both pass a ``count + 1 <= limit`` check before either commits — the
+        lock is held until the calling transaction commits or rolls back.
+
+        Reused as a service-layer helper so future admin bulk-override scripts
+        can call it directly. ``create_context`` does NOT call this helper —
+        ``Context.sleep_mode`` defaults to ``"skip"`` at the column level
+        (Issue #558) and the request schema does not accept ``sleep_mode``,
+        so a freshly-created context never contributes to the count.
+
+        Args:
+            workspace_id: Workspace owning the context being toggled.
+            exclude_id: Context UUID to exclude from the count when its old
+                ``sleep_mode`` is already non-skip (e.g. an admin script
+                toggling between ``full`` and ``edges_only``). For the normal
+                ``update_context`` path the caller has verified the old mode
+                is ``skip`` before invoking, so passing the context's own id
+                here is safe — it is already excluded by the
+                ``sleep_mode != 'skip'`` filter.
+
+        Raises:
+            QuotaExceededError: Adding one more sleep-enabled context would
+                exceed the workspace's effective limit (plan tier + addon).
+        """
+        workspace = (
+            await self.db.execute(
+                select(Workspace).where(Workspace.id == workspace_id).with_for_update()
+            )
+        ).scalar_one()
+
+        limit = workspace.effective_sleep_enabled_contexts_limit
+
+        # ``deleted_at.is_(None)`` matches the convention in
+        # ``QuotaService.check_context_creation_allowed`` — soft-deleted
+        # contexts must not inflate the active count, otherwise a workspace
+        # that deletes its way back under the limit would still be blocked.
+        stmt = select(func.count(Context.id)).where(
+            Context.workspace_id == workspace_id,
+            Context.deleted_at.is_(None),
+            Context.sleep_mode != "skip",
+        )
+        if exclude_id is not None:
+            stmt = stmt.where(Context.id != exclude_id)
+        current = (await self.db.execute(stmt)).scalar_one()
+
+        if current + 1 > limit:
+            addon_bonus = workspace.addon_sleep_contexts_bonus or 0
+            # Two distinct rejection cases — surface them as distinct HTTP
+            # status codes so clients can render the right action:
+            #
+            # - ``limit == 0`` (FREE/BASIC tier): true feature gate, the
+            #   user's plan does not include this feature at all. Use
+            #   ``FeatureNotAvailableError`` → 403. addon_bonus is
+            #   irrelevant here because the zero-base-tier defense-in-depth
+            #   rule clamps the effective limit to 0 regardless of addon.
+            # - ``limit > 0`` (PRO at-or-above cap): true quota — the
+            #   feature IS available, the user has just hit the cap.
+            #   ``QuotaExceededError`` → 429.
+            #
+            # The Stripe SKU for ``extra_sleep_contexts`` is a Phase 2
+            # follow-up (CHANGELOG ### Notes), so the over-cap message
+            # currently directs the user to contact their workspace admin
+            # rather than offering a self-serve purchase CTA. Update both
+            # the message and the i18n keys when the SKU ships.
+            if limit == 0:
+                raise FeatureNotAvailableError(
+                    "Sleep Maintenance is a PRO-tier feature; "
+                    "upgrade your plan to enable sleep_mode on contexts.",
+                    feature="sleep_mode",
+                )
+            raise QuotaExceededError(
+                (
+                    f"Sleep-enabled contexts quota exceeded: "
+                    f"{current + 1}/{limit} in use (plan limit "
+                    f"{limit - addon_bonus} + addon bonus {addon_bonus}). "
+                    f"Contact your workspace admin to request a higher cap."
+                ),
+                quota_type="sleep_enabled_contexts",
+                limit=limit,
+                current=current,
+                addon_bonus=addon_bonus,
+                requested=current + 1,
+            )
 
     async def _handle_privacy_transition(
         self, context: Context, new_is_private: bool, owner_id: str

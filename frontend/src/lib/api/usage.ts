@@ -19,6 +19,25 @@ export interface PlanLimits {
   public_calls_per_week: number;
 }
 
+/**
+ * Sleep-enabled contexts quota usage (Issue #560).
+ *
+ * This is the dashboard READ shape — `used` / `limit` / `remaining` for
+ * showing "X / Y" in the UI. The 429 quota-exceeded body raised by
+ * `_assert_sleep_quota_or_raise` uses a parallel-but-distinct shape
+ * (`current` / `requested` / `limit` / `addon_bonus`) optimized for the
+ * action-rejection case ("you tried to enable one more, here's the new total").
+ * Both surfaces share `limit` and `addon_bonus`; the read surface adds
+ * `remaining` (= max(0, limit - used)) for direct display, and the error
+ * surface adds `requested` (= current + 1) for "how many would there be."
+ */
+export interface SleepContextsUsage {
+  used: number;
+  limit: number;
+  addon_bonus: number;
+  remaining: number;
+}
+
 export interface CurrentUsage {
   memory_count: number;
   api_calls_today: number;
@@ -29,6 +48,7 @@ export interface CurrentUsage {
   rest_calls_this_week: number;
   public_calls_today: number; // Issue #238: Public quota separation
   public_calls_this_week: number;
+  sleep_contexts: SleepContextsUsage | null; // Issue #560
 }
 
 export interface UsageStatus {

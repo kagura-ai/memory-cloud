@@ -309,6 +309,18 @@ class Settings(BaseSettings):
     plan_pro_storage_limit_bytes: int | None = Field(
         default=None, description="Override PRO plan file-storage hard cap (bytes, Issue #485)"
     )
+    plan_free_sleep_enabled_contexts_limit: int | None = Field(
+        default=None,
+        description="Override FREE plan sleep-enabled contexts cap (Issue #560; default 0)",
+    )
+    plan_basic_sleep_enabled_contexts_limit: int | None = Field(
+        default=None,
+        description="Override BASIC plan sleep-enabled contexts cap (Issue #560; default 0)",
+    )
+    plan_pro_sleep_enabled_contexts_limit: int | None = Field(
+        default=None,
+        description="Override PRO plan sleep-enabled contexts cap (Issue #560; default 3)",
+    )
 
     # Plan Display Names (customizable for SaaS forks)
     plan_free_display_name: str | None = Field(

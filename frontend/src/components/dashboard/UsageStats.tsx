@@ -34,9 +34,9 @@ import {
   YAxis,
   CartesianGrid,
 } from "recharts";
-import { Brain, Zap, TrendingUp, XCircle } from "lucide-react";
+import { Brain, Zap, TrendingUp, XCircle, Moon } from "lucide-react";
 import { apiClient } from "@/lib/api";
-import type { PlanLimits } from "@/lib/api/usage";
+import type { PlanLimits, SleepContextsUsage } from "@/lib/api/usage";
 import {
   getWorkspaceUsageCurrent,
   getWorkspaceUsageHistory,
@@ -58,6 +58,7 @@ interface CurrentUsage {
   rest_calls_this_week: number; // Issue #238
   public_calls_today: number; // Issue #238
   public_calls_this_week: number; // Issue #238
+  sleep_contexts: SleepContextsUsage | null; // Issue #560
 }
 
 interface UsageStatus {
@@ -345,6 +346,52 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
                 </p>
               </CardContent>
             </Card>
+
+            {/* Sleep-enabled Contexts (Issue #560) — only rendered when the
+                backend included the field. Workspace-scoped only; user-scoped
+                /usage/current returns null when no workspace is selected. */}
+            {currentUsage.usage.sleep_contexts && (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm font-medium flex items-center gap-2">
+                    <Moon className="h-4 w-4" />
+                    {t("sleepEnabledContexts")}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="text-2xl font-bold mb-2">
+                    {currentUsage.usage.sleep_contexts.used} /{" "}
+                    {currentUsage.usage.sleep_contexts.limit}
+                  </div>
+                  <Progress
+                    value={
+                      currentUsage.usage.sleep_contexts.limit > 0
+                        ? Math.min(
+                            (currentUsage.usage.sleep_contexts.used /
+                              currentUsage.usage.sleep_contexts.limit) *
+                              100,
+                            100,
+                          )
+                        : 0
+                    }
+                    className="h-2"
+                  />
+                  <p className="text-xs text-muted-foreground mt-2">
+                    {/* Gate the "Includes +N from addon" hint on limit > 0
+                        too — backend normalizes addon_bonus to 0 for zero-base
+                        tiers (FREE/BASIC), but the explicit check makes the
+                        intent obvious to readers and survives any future
+                        backend regression. */}
+                    {currentUsage.usage.sleep_contexts.limit > 0 &&
+                    currentUsage.usage.sleep_contexts.addon_bonus > 0
+                      ? t("sleepContextsWithAddon", {
+                          addon: currentUsage.usage.sleep_contexts.addon_bonus,
+                        })
+                      : t("sleepContextsTier")}
+                  </p>
+                </CardContent>
+              </Card>
+            )}
           </div>
 
           {/* API Breakdown - Issue #238: MCP/REST/Public separation,

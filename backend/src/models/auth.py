@@ -1210,6 +1210,9 @@ class Workspace(Base):
     addon_context_bonus = Column(Integer, nullable=False, server_default="0")  # Issue #15
     addon_analysis_bonus = Column(Integer, nullable=False, server_default="0")  # Issue #494
     addon_storage_bonus_mb = Column(Integer, nullable=False, server_default="0")  # Issue #485
+    addon_sleep_contexts_bonus = Column(
+        Integer, nullable=False, server_default="0"
+    )  # Issue #560: Sleep-enabled contexts addon (PRO-only)
 
     # Issue #494: per-workspace default + quality model selection for
     # Memory Broadlistening analyses. Both nullable — analysis is gated
@@ -1295,6 +1298,28 @@ class Workspace(Base):
         return (
             self._plan_tier.storage_limit_bytes + (self.addon_storage_bonus_mb or 0) * 1024 * 1024
         )
+
+    @property
+    def effective_sleep_enabled_contexts_limit(self) -> int:
+        """Sleep-enabled contexts cap: plan tier base + addon (Issue #560).
+
+        FREE/BASIC are ``0 + 0 = 0`` — sleep_mode cannot be set to anything
+        other than ``skip`` for these tiers. PRO is ``3 + N`` where N comes
+        from the ``extra_sleep_contexts`` addon, sold per-unit and accumulated
+        into ``addon_sleep_contexts_bonus`` by ``AddonCalculatorService``.
+
+        Defense-in-depth: when the plan tier base is ``0`` (FREE/BASIC), we
+        return ``0`` unconditionally — addon rows on a zero-base tier would
+        otherwise let a misconfigured Stripe SKU or a manual ``WorkspaceAddon``
+        INSERT bypass the tier gate. The rule "zero-base tiers do not stack
+        addons" is encoded in the data (``sleep_enabled_contexts_limit == 0``)
+        rather than by hard-coding plan names so a future paid tier with
+        ``sleep_enabled_contexts_limit > 0`` automatically gets addon stacking.
+        """
+        base = self._plan_tier.sleep_enabled_contexts_limit
+        if base == 0:
+            return 0
+        return base + (self.addon_sleep_contexts_bonus or 0)
 
     # Stripe billing (Issue #351)
     stripe_customer_id = Column(String(255), nullable=True)
