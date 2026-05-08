@@ -210,31 +210,38 @@ class TestGeneratePresignedPut:
         sha_x = _hex_sha256(bytes_x)
         key = f"{run_prefix}/D2_mismatch.bin"
 
-        # ``size_bytes`` is what the caller declared at reservation time —
-        # decoupled from the body length so a refactor that breaks the
-        # equal-length invariant won't silently switch the failure mode.
-        url = await storage.generate_presigned_put(
-            key=key,
-            content_type="application/octet-stream",
-            size_bytes=len(bytes_x),
-            ttl_seconds=300,
-            sha256=sha_x,
-        )
-
-        async with httpx.AsyncClient(timeout=30.0) as http:
-            resp = await http.put(
-                url,
-                content=bytes_y,
-                headers={
-                    "Content-Type": "application/octet-stream",
-                    "x-amz-checksum-sha256": _b64(sha_x),
-                },
+        # try/finally + unconditional delete is defense-in-depth: if R2
+        # behavior drifts and silently accepts the mismatched body (the
+        # exact gap this test exists to catch), the object would leak
+        # under the run prefix without it.
+        try:
+            # ``size_bytes`` is what the caller declared at reservation time —
+            # decoupled from the body length so a refactor that breaks the
+            # equal-length invariant won't silently switch the failure mode.
+            url = await storage.generate_presigned_put(
+                key=key,
+                content_type="application/octet-stream",
+                size_bytes=len(bytes_x),
+                ttl_seconds=300,
+                sha256=sha_x,
             )
-        assert resp.status_code == 400, resp.text
-        assert "BadDigest" in resp.text
 
-        # The object MUST NOT have been persisted on rejection.
-        assert await storage.head_object(key) is None
+            async with httpx.AsyncClient(timeout=30.0) as http:
+                resp = await http.put(
+                    url,
+                    content=bytes_y,
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "x-amz-checksum-sha256": _b64(sha_x),
+                    },
+                )
+            assert resp.status_code == 400, resp.text
+            assert "BadDigest" in resp.text
+
+            # The object MUST NOT have been persisted on rejection.
+            assert await storage.head_object(key) is None
+        finally:
+            await storage.delete_object(key)
 
     @pytest.mark.asyncio
     async def test_tampered_header_rejected_with_signature_mismatch(
@@ -254,32 +261,36 @@ class TestGeneratePresignedPut:
         sha_y = _hex_sha256(bytes_y)
         key = f"{run_prefix}/D3_tampered.bin"
 
-        url = await storage.generate_presigned_put(
-            key=key,
-            content_type="application/octet-stream",
-            size_bytes=len(bytes_x),
-            ttl_seconds=300,
-            sha256=sha_x,
-        )
-
-        async with httpx.AsyncClient(timeout=30.0) as http:
-            resp = await http.put(
-                url,
-                content=bytes_y,
-                headers={
-                    "Content-Type": "application/octet-stream",
-                    "x-amz-checksum-sha256": _b64(sha_y),
-                },
+        try:
+            url = await storage.generate_presigned_put(
+                key=key,
+                content_type="application/octet-stream",
+                size_bytes=len(bytes_x),
+                ttl_seconds=300,
+                sha256=sha_x,
             )
-        # R2 validates the SigV4 signature before evaluating body integrity,
-        # so a mismatched ``x-amz-checksum-sha256`` header invalidates the
-        # signature → 403 (not 400 BadDigest). If R2 ever flips the
-        # evaluation order this assertion would start seeing 400 — investigate
-        # before loosening, since that would mean the body was at least
-        # partially read by R2 before the auth check.
-        assert resp.status_code == 403, resp.text
-        assert "SignatureDoesNotMatch" in resp.text
-        assert await storage.head_object(key) is None
+
+            async with httpx.AsyncClient(timeout=30.0) as http:
+                resp = await http.put(
+                    url,
+                    content=bytes_y,
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "x-amz-checksum-sha256": _b64(sha_y),
+                    },
+                )
+            # R2 validates the SigV4 signature before evaluating body integrity,
+            # so a mismatched ``x-amz-checksum-sha256`` header invalidates the
+            # signature → 403 (not 400 BadDigest). If R2 ever flips the
+            # evaluation order this assertion would start seeing 400 — investigate
+            # before loosening, since that would mean the body was at least
+            # partially read by R2 before the auth check.
+            assert resp.status_code == 403, resp.text
+            assert "SignatureDoesNotMatch" in resp.text
+            assert await storage.head_object(key) is None
+        finally:
+            # Defense-in-depth — same rationale as D2.
+            await storage.delete_object(key)
 
 
 class TestGeneratePresignedGet:
