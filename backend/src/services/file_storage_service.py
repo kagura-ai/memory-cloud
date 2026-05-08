@@ -205,6 +205,14 @@ class FileStorageService:
         if not _SHA256_HEX_RE.fullmatch(sha256):
             msg = f"sha256 must be 64 hex chars, got non-hex characters in {sha256!r}"
             raise ValidationError(msg)
+        # Normalize to lowercase before any downstream use. Postgres TEXT
+        # comparison is case-sensitive, so without normalization an upper-
+        # case "AB…" and lower-case "ab…" of the same digest would land in
+        # separate rows under the partial unique index — defeating dedup
+        # and breaking ``confirm_upload``'s sha-equality check on retry.
+        # MCP already lowercases at the boundary (mcp_server/tools/files.py);
+        # this is the canonical normalization point for the REST path too.
+        sha256 = sha256.lower()
         # Reject control characters in the raw content_type before any further
         # work — the value is later signed by R2 SigV4 as the ContentType
         # header, so an embedded CR/LF/NUL is a header-injection primitive
@@ -349,6 +357,12 @@ class FileStorageService:
             ConflictError: ``head_object`` says the binary is missing.
         """
         file = await self._load_file(workspace_id, file_id)
+
+        # Normalize caller sha256 to lowercase for symmetry with reserve_upload's
+        # canonicalization (Copilot review #574 finding). Without this, an SDK
+        # that uppercases its claim would falsely trip the sha-mismatch guard
+        # against the lowercase-stored reservation.
+        sha256 = sha256.lower()
 
         # Idempotent retry path
         if file.status == "uploaded":

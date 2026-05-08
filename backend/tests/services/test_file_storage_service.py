@@ -216,6 +216,34 @@ class TestReserveUpload:
                 sha256="too-short",
             )
 
+    @pytest.mark.asyncio
+    async def test_uppercase_sha256_normalized_to_lowercase(self, service, db, workspace_id):
+        """Postgres TEXT comparison is case-sensitive — without normalization,
+        the same digest as 'AB...' and 'ab...' would land in separate rows
+        under the partial unique index, defeating per-workspace dedup
+        (Copilot review #574 finding). Normalization happens after regex
+        validation so the db.add receives the lowercase form."""
+        ws = _make_workspace(workspace_id)
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=ws)
+        db.execute.return_value = result
+
+        with _patch_quota_reserve(succeed=True):
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x.pdf",
+                content_type="application/pdf",
+                size_bytes=1024,
+                sha256="A" * 64,  # all uppercase — must be normalized
+            )
+
+        db.add.assert_called_once()
+        added = db.add.call_args.args[0]
+        assert added.sha256 == "a" * 64
+        # storage_key is also derived from the lowercase form
+        assert added.storage_key.endswith("a" * 64)
+
     @pytest.mark.parametrize(
         "bad_sha256",
         [

@@ -11,8 +11,9 @@ import hashlib
 import hmac
 
 # Single source of truth for the on-wire sha256 hex shape — used by Pydantic
-# Field(pattern=...) on the REST request models and (indirectly, via
-# bytes.fromhex) by the service-layer validation.
+# Field(pattern=...) on the REST request models and by the service-layer
+# regex check in FileStorageService.reserve_upload (which precompiles this
+# pattern and rejects any input that doesn't fullmatch).
 SHA256_HEX_PATTERN = r"^[0-9a-fA-F]{64}$"
 
 
