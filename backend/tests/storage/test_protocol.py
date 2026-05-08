@@ -39,9 +39,9 @@ class _InMemoryStorage:
         self.objects.pop(key, None)
 
     async def generate_presigned_put(
-        self, key: str, content_type: str, size_bytes: int, ttl_seconds: int
+        self, key: str, content_type: str, size_bytes: int, ttl_seconds: int, sha256: str
     ) -> str:
-        return f"https://test.local/put/{key}?ttl={ttl_seconds}"
+        return f"https://test.local/put/{key}?ttl={ttl_seconds}&sha256={sha256[:8]}"
 
     async def generate_presigned_get(self, key: str, filename: str, ttl_seconds: int) -> str:
         return f"https://test.local/get/{key}?file={filename}&ttl={ttl_seconds}"
@@ -100,7 +100,14 @@ class TestInMemoryStorageRoundtrip:
     @pytest.mark.asyncio
     async def test_presigned_urls_include_key_and_ttl(self):
         storage = _InMemoryStorage()
-        put_url = await storage.generate_presigned_put("ws/abc/y.pdf", "application/pdf", 1024, 300)
+        # Use a realistic 64-char hex digest so the fake's signature
+        # matches the real on-wire contract — passing "0xdead" here would
+        # make this test pass against a fake whose validation has drifted
+        # away from the production protocol shape.
+        sha256 = "a" * 64
+        put_url = await storage.generate_presigned_put(
+            "ws/abc/y.pdf", "application/pdf", 1024, 300, sha256
+        )
         assert "ws/abc/y.pdf" in put_url
         assert "ttl=300" in put_url
 

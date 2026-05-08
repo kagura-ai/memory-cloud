@@ -8,6 +8,7 @@ pool, so there is no per-request socket setup cost.
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 import aioboto3
@@ -36,6 +37,7 @@ class R2Storage:
         secret_access_key: str,
         bucket: str,
         endpoint_url: str,
+        enable_checksum_binding: bool = False,
     ) -> None:
         if not (account_id and access_key_id and secret_access_key and bucket and endpoint_url):
             raise ValueError(
@@ -44,6 +46,7 @@ class R2Storage:
             )
         self._bucket = bucket
         self._endpoint_url = endpoint_url
+        self._enable_checksum_binding = enable_checksum_binding
         self._session = aioboto3.Session(
             aws_access_key_id=access_key_id,
             aws_secret_access_key=secret_access_key,
@@ -116,36 +119,26 @@ class R2Storage:
         content_type: str,
         size_bytes: int,
         ttl_seconds: int,
+        sha256: str,
     ) -> str:
-        # SECURITY NOTE (Phase 1 limitation, tracked for Phase 1.5):
-        # The presigned PUT signs (Bucket, Key, ContentType, ContentLength)
-        # but does NOT bind the body's sha256. A malicious client can
-        # declare sha256=X at upload-init time, then PUT bytes whose
-        # actual digest is Y at the same key — the server's
-        # ``confirm_upload`` only verifies size via head_object, not
-        # the actual bytes. This breaks dedup (a later legit upload
-        # with sha256=X dedupes to the malicious bytes via the partial
-        # unique index) and lets a member poison the workspace's file
-        # cache.
-        #
-        # Mitigation Phase 1.5: switch to ``generate_presigned_post``
-        # with a POST policy that includes ``x-amz-content-sha256`` as
-        # a signed header (S3 SigV4 supports body-sha256 binding).
-        # Alternative: download bytes server-side post-PUT and compute
-        # sha256 — expensive on 100 MiB but correct. For Phase 1 the
-        # workspace-membership gate keeps the attack surface to
-        # workspace insiders, who would also be detected by the
-        # downstream BM25/embedding pipeline (different bytes → different
-        # vectors → different recall behavior, observable to ops).
+        # Issue #556 originally proposed presigned POST (signs body sha256
+        # via policy condition); R2 returns 501 NotImplemented for POST.
+        # We sign ``ChecksumSHA256`` on PUT instead — see the live spike
+        # at backend/tests/integration/test_r2_live.py for the contract.
+        # The flag is gated by ``r2_checksum_binding_enabled`` (default
+        # False) so backend can deploy ahead of SDK rollout.
+        params: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Key": key,
+            "ContentType": content_type,
+            "ContentLength": size_bytes,
+        }
+        if self._enable_checksum_binding:
+            params["ChecksumSHA256"] = base64.b64encode(bytes.fromhex(sha256)).decode()
         async with self._client() as client:
             url = await client.generate_presigned_url(
                 ClientMethod="put_object",
-                Params={
-                    "Bucket": self._bucket,
-                    "Key": key,
-                    "ContentType": content_type,
-                    "ContentLength": size_bytes,
-                },
+                Params=params,
                 ExpiresIn=ttl_seconds,
                 HttpMethod="PUT",
             )

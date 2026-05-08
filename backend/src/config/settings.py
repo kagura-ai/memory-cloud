@@ -368,6 +368,20 @@ class Settings(BaseSettings):
     presign_get_ttl_seconds: int = Field(
         default=300, description="Presigned GET URL lifetime in seconds"
     )
+    r2_checksum_binding_enabled: bool = Field(
+        default=False,
+        description=(
+            "Bind body sha256 to presigned PUT via S3 ChecksumSHA256 (Issue #556). "
+            "When True, R2 verifies the body sha256 server-side and rejects "
+            "mismatched bytes with HTTP 400 BadDigest — closes the per-workspace "
+            "dedup-poisoning gap from #485 Phase 1. REQUIRES the SDK to send the "
+            "x-amz-checksum-sha256 header (kagura-memory-python-sdk >= 0.4.0); "
+            "older SDKs will fail with 403 SignatureDoesNotMatch. "
+            "Default False keeps the Phase 1 behavior so backend can deploy "
+            "ahead of SDK rollout — operators flip to True after their tenants "
+            "have updated. Plan to default True once SDK adoption stabilizes."
+        ),
+    )
     allowed_file_content_types: str = Field(
         default=(
             "image/png,image/jpeg,image/gif,application/pdf,"

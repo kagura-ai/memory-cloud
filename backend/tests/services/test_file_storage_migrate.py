@@ -31,7 +31,7 @@ class _FakeBlobStorage:
     async def delete_object(self, key):
         self.objects.pop(key, None)
 
-    async def generate_presigned_put(self, key, content_type, size_bytes, ttl_seconds):
+    async def generate_presigned_put(self, key, content_type, size_bytes, ttl_seconds, sha256):
         return f"put://{key}"
 
     async def generate_presigned_get(self, key, filename, ttl_seconds):

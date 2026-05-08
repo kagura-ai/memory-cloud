@@ -39,6 +39,9 @@ def _settings_with_r2(**overrides):
     s.r2_secret_access_key = "secret"
     s.r2_bucket = "kagura-files-test"
     s.r2_endpoint_url = "https://acct.r2.cloudflarestorage.com"
+    # Explicit bool — bare MagicMock attribute access would return a truthy
+    # child and silently flip the ChecksumSHA256 binding on (#556).
+    s.r2_checksum_binding_enabled = False
     for k, v in overrides.items():
         setattr(s, k, v)
     return s
@@ -71,6 +74,29 @@ class TestGetBlobStorage:
             first = factory.get_blob_storage()
             second = factory.get_blob_storage()
             assert first is second
+
+    def test_checksum_binding_flag_wires_through_to_r2_storage(self):
+        """Issue #556: the factory MUST forward
+        ``settings.r2_checksum_binding_enabled`` into the constructed
+        ``R2Storage`` instance. Without this wiring, the entire feature
+        gate is silently dead even after operators flip the env var."""
+        with patch(
+            "storage.factory.get_settings",
+            return_value=_settings_with_r2(r2_checksum_binding_enabled=True),
+        ):
+            storage = factory.get_blob_storage()
+            assert isinstance(storage, R2Storage)
+            assert storage._enable_checksum_binding is True
+
+    def test_checksum_binding_flag_default_off_wires_through(self):
+        """Default-off path is the deploy-day behavior; pin it explicitly
+        so a future refactor that accidentally hardcodes ``True`` here
+        would fail this test instead of silently breaking the staged
+        rollout."""
+        with patch("storage.factory.get_settings", return_value=_settings_with_r2()):
+            storage = factory.get_blob_storage()
+            assert isinstance(storage, R2Storage)
+            assert storage._enable_checksum_binding is False
 
 
 class TestCloseBlobStorage:

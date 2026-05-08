@@ -67,13 +67,25 @@ class BlobStorageProtocol(Protocol):
         content_type: str,
         size_bytes: int,
         ttl_seconds: int,
+        sha256: str,
     ) -> str:
         """Return a short-lived presigned PUT URL clients can upload to.
 
+        ``sha256`` is the hex-encoded sha256 of the bytes the client
+        intends to upload. Implementations SHOULD sign the URL such that
+        the storage backend rejects bytes whose actual digest differs
+        from this value (S3 Object Integrity / `x-amz-checksum-sha256`).
+        This closes the per-workspace dedup-poisoning gap from #485
+        Phase 1 — the platform no longer trusts the caller's
+        ``confirm_upload`` sha256 claim, the storage layer enforces it.
+
+        Implementations MAY make this enforcement opt-in via a deploy
+        flag (R2 does so via ``r2_checksum_binding_enabled``) so a
+        backend can roll forward ahead of the SDK release that sends
+        the matching ``x-amz-checksum-sha256`` header.
+
         ``size_bytes`` is reflected as a `Content-Length` constraint
-        when the backend supports it; R2 currently does not enforce
-        this server-side, so the platform must validate via
-        ``head_object`` after the upload.
+        when the backend supports it.
         """
         ...
 
