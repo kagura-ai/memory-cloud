@@ -56,7 +56,11 @@ class FileReserveRequest(BaseModel):
         min_length=64,
         max_length=64,
         pattern=SHA256_HEX_PATTERN,
-        description="Lower-case hex sha256 of the bytes the client will PUT",
+        description=(
+            "Hex sha256 of the bytes the client will PUT. Accepts upper- "
+            "or lower-case; the service canonicalizes to lowercase before "
+            "any storage / dedup / signing use."
+        ),
     )
 
 

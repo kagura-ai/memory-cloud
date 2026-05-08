@@ -250,7 +250,7 @@ class TestReserveUpload:
             "g" * 64,  # all non-hex
             "abcdef" * 10 + "    ",  # 64 chars but trailing whitespace
             "ab cd ef" * 8,  # 64 chars with internal whitespace — bytes.fromhex would silently
-            #                 decode this to 26 bytes, producing a malformed signed URL
+            #                 decode the 48 hex chars to 24 bytes, producing a malformed signed URL
             "Z" + "a" * 63,  # one bad char
         ],
         ids=["all-non-hex", "trailing-spaces", "internal-spaces", "leading-bad-char"],

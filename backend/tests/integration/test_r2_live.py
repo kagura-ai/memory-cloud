@@ -2,7 +2,8 @@
 
 Exercises the full ``BlobStorageProtocol`` surface against a real
 Cloudflare R2 bucket. Skipped by default — set ``R2_LIVE_TEST=1`` and
-export the four R2_* env vars to opt in:
+export the five R2_* env vars (``R2_ACCOUNT_ID``, ``R2_ACCESS_KEY_ID``,
+``R2_SECRET_ACCESS_KEY``, ``R2_BUCKET``, ``R2_ENDPOINT_URL``) to opt in:
 
     R2_LIVE_TEST=1 \
     R2_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... \

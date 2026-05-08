@@ -58,7 +58,8 @@ from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
 
 # Strict char-by-char match for the on-wire sha256 shape — distinct from
 # ``bytes.fromhex`` which silently skips internal whitespace and would
-# accept e.g. "ab cd …" (64 chars total) decoded into 26 bytes.
+# accept a 64-char input with embedded whitespace, decoding to fewer
+# than 32 bytes (exact length depends on how many non-hex chars are present).
 _SHA256_HEX_RE = re.compile(SHA256_HEX_PATTERN)
 
 logger = get_logger(__name__)

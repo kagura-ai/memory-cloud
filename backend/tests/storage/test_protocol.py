@@ -100,8 +100,13 @@ class TestInMemoryStorageRoundtrip:
     @pytest.mark.asyncio
     async def test_presigned_urls_include_key_and_ttl(self):
         storage = _InMemoryStorage()
+        # Use a realistic 64-char hex digest so the fake's signature
+        # matches the real on-wire contract — passing "0xdead" here would
+        # make this test pass against a fake whose validation has drifted
+        # away from the production protocol shape.
+        sha256 = "a" * 64
         put_url = await storage.generate_presigned_put(
-            "ws/abc/y.pdf", "application/pdf", 1024, 300, "0xdead"
+            "ws/abc/y.pdf", "application/pdf", 1024, 300, sha256
         )
         assert "ws/abc/y.pdf" in put_url
         assert "ttl=300" in put_url
