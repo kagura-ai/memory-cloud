@@ -24,6 +24,7 @@ from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from services.file_storage_service import FileStorageService
 from services.permission_service import PermissionService
+from utils.hashing import SHA256_HEX_PATTERN
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -54,7 +55,7 @@ class FileReserveRequest(BaseModel):
     sha256: str = Field(
         min_length=64,
         max_length=64,
-        pattern=r"^[0-9a-fA-F]{64}$",
+        pattern=SHA256_HEX_PATTERN,
         description="Lower-case hex sha256 of the bytes the client will PUT",
     )
 
@@ -71,7 +72,7 @@ class FileConfirmRequest(BaseModel):
     sha256: str = Field(
         min_length=64,
         max_length=64,
-        pattern=r"^[0-9a-fA-F]{64}$",
+        pattern=SHA256_HEX_PATTERN,
     )
 
 

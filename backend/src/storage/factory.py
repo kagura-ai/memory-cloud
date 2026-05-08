@@ -59,6 +59,7 @@ def get_blob_storage() -> BlobStorageProtocol:
                 secret_access_key=settings.r2_secret_access_key,
                 bucket=settings.r2_bucket,
                 endpoint_url=settings.r2_endpoint_url,
+                enable_checksum_binding=settings.r2_checksum_binding_enabled,
             )
         except ValueError as exc:
             raise ExternalServiceError(

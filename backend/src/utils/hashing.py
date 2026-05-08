@@ -10,6 +10,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 
+# Single source of truth for the on-wire sha256 hex shape — used by Pydantic
+# Field(pattern=...) on the REST request models and (indirectly, via
+# bytes.fromhex) by the service-layer validation.
+SHA256_HEX_PATTERN = r"^[0-9a-fA-F]{64}$"
+
 
 def sha256_hex(value: str, *, salt: str = "") -> str:
     """Return the SHA256 hex digest of ``value``, optionally salted.

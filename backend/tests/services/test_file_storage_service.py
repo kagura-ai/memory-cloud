@@ -45,8 +45,10 @@ class _FakeBlobStorage:
     async def delete_object(self, key):
         self.objects.pop(key, None)
 
-    async def generate_presigned_put(self, key, content_type, size_bytes, ttl_seconds):
-        return f"https://test.local/put/{key}?size={size_bytes}&ttl={ttl_seconds}"
+    async def generate_presigned_put(self, key, content_type, size_bytes, ttl_seconds, sha256):
+        return (
+            f"https://test.local/put/{key}?size={size_bytes}&ttl={ttl_seconds}&sha256={sha256[:8]}"
+        )
 
     async def generate_presigned_get(self, key, filename, ttl_seconds):
         return f"https://test.local/get/{key}?file={filename}&ttl={ttl_seconds}"
@@ -212,6 +214,36 @@ class TestReserveUpload:
                 content_type="application/pdf",
                 size_bytes=1024,
                 sha256="too-short",
+            )
+
+    @pytest.mark.parametrize(
+        "bad_sha256",
+        [
+            "g" * 64,  # all non-hex
+            "abcdef" * 10 + "    ",  # 64 chars but trailing whitespace
+            "ab cd ef" * 8,  # 64 chars with internal whitespace — bytes.fromhex would silently
+            #                 decode this to 26 bytes, producing a malformed signed URL
+            "Z" + "a" * 63,  # one bad char
+        ],
+        ids=["all-non-hex", "trailing-spaces", "internal-spaces", "leading-bad-char"],
+    )
+    @pytest.mark.asyncio
+    async def test_non_hex_sha256_raises_validation(self, service, workspace_id, bad_sha256):
+        """64-char strings with any non-hex chars must be rejected at the
+        service boundary (#556). REST has a Pydantic regex; MCP coerces
+        with bare ``str(...)`` so this is the safety net for both paths.
+        Internal-whitespace input is the load-bearing case — ``bytes.fromhex``
+        permissively decodes it (skipping spaces) and would silently produce
+        a short base64 ChecksumSHA256 → 403 SignatureDoesNotMatch from R2
+        when the flag is on."""
+        with pytest.raises(ValidationError, match="non-hex"):
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x",
+                content_type="application/pdf",
+                size_bytes=1024,
+                sha256=bad_sha256,
             )
 
     @pytest.mark.asyncio

@@ -30,6 +30,7 @@ swept by the orphan task (Commit 8) — the sweeper calls
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
@@ -51,8 +52,14 @@ from utils.exceptions import (
     UnsupportedMediaTypeError,
     ValidationError,
 )
+from utils.hashing import SHA256_HEX_PATTERN
 from utils.logger import get_logger
 from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
+
+# Strict char-by-char match for the on-wire sha256 shape — distinct from
+# ``bytes.fromhex`` which silently skips internal whitespace and would
+# accept e.g. "ab cd …" (64 chars total) decoded into 26 bytes.
+_SHA256_HEX_RE = re.compile(SHA256_HEX_PATTERN)
 
 logger = get_logger(__name__)
 
@@ -195,6 +202,9 @@ class FileStorageService:
         if len(sha256) != 64:
             msg = f"sha256 must be 64 hex chars, got {len(sha256)}"
             raise ValidationError(msg)
+        if not _SHA256_HEX_RE.fullmatch(sha256):
+            msg = f"sha256 must be 64 hex chars, got non-hex characters in {sha256!r}"
+            raise ValidationError(msg)
         # Reject control characters in the raw content_type before any further
         # work — the value is later signed by R2 SigV4 as the ContentType
         # header, so an embedded CR/LF/NUL is a header-injection primitive
@@ -258,6 +268,7 @@ class FileStorageService:
                 content_type=content_type,
                 size_bytes=size_bytes,
                 ttl_seconds=settings.presign_put_ttl_seconds,
+                sha256=sha256,
             )
             await self.db.commit()
         except Exception as exc:
@@ -325,19 +336,16 @@ class FileStorageService:
         Idempotent on retry: if the row is already ``status='uploaded'``
         and the sha256 matches, return the existing row unchanged.
 
-        Phase 1 limitation: this method verifies (a) the R2 object
-        exists, (b) its size matches the reservation, and (c) the
-        client's claimed sha256 matches the reservation's declared
-        sha256. It does NOT recompute the sha256 from the actual bytes
-        in R2 — a workspace member can declare sha256=X at upload-init
-        and PUT bytes with digest Y, and confirm_upload will accept
-        the upload as long as the size matches. Mitigation deferred
-        to Phase 1.5; rationale documented in
-        ``backend/src/storage/r2.py:generate_presigned_put`` SECURITY NOTE.
+        The caller's claimed-sha256 check below is a defense-in-depth
+        guard for caller-side drift between reservation and confirm —
+        it runs regardless of whether ``r2_checksum_binding_enabled``
+        is True (#556). When the flag is on, the storage-side sha256
+        binding in ``generate_presigned_put`` is the primary integrity
+        gate (R2 rejects mismatched bytes at PUT time).
 
         Raises:
             NotFoundException: file or its workspace not found.
-            ValidationError: sha256 mismatch (tamper / wrong upload).
+            ValidationError: sha256 mismatch (caller / row-state drift).
             ConflictError: ``head_object`` says the binary is missing.
         """
         file = await self._load_file(workspace_id, file_id)
