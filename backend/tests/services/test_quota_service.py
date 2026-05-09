@@ -35,18 +35,19 @@ class TestQuotaServiceMemberQuota:
     def _make_workspace(self, workspace_id, plan_name, **kwargs):
         """Build a workspace mock with addon bonuses pre-set.
 
-        addon_memory_bonus is set to 1 by default so that
-        EffectiveQuotaService skips the addon-recalc branch
-        (which fires only when ALL bonus columns are 0), keeping the
-        total db.execute call count at exactly 4 per check_member_quota
-        invocation.  addon_member_bonus stays 0 so the plan's native
-        max_members limit is used unchanged.
+        Issue #570 made ``EffectiveQuotaService.get_effective_quotas`` pure-read,
+        so the historical "skip the addon-recalc branch by setting one bonus
+        non-zero" trick is no longer load-bearing — the branch is gone.
+        ``addon_member_bonus`` stays 0 so the plan's native ``max_members`` limit
+        is used unchanged. The 4-execute call count for ``check_member_quota``
+        below is still correct because there is no recalc-driven extra SELECT
+        either before or after #570.
         """
         workspace = MagicMock()
         workspace.id = workspace_id
         workspace.plan_name = plan_name
         workspace.memory_limit = kwargs.get("memory_limit", 1000)
-        workspace.addon_memory_bonus = 1  # non-zero: skips recalc branch
+        workspace.addon_memory_bonus = 1
         workspace.addon_mcp_quota_bonus = 0
         workspace.addon_rest_quota_bonus = 0
         workspace.addon_public_quota_bonus = 0

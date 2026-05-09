@@ -122,3 +122,43 @@ class TestAddonCalculatorStorageBonus:
         assert bonuses["addon_storage_bonus_mb"] == 200  # 2 × 100 MB
         assert workspace.addon_storage_bonus_mb == 200
         assert bonuses["addon_memory_bonus"] == 5 * ADDON_UNIT_VALUES["extra_memory"]
+
+    @pytest.mark.asyncio
+    async def test_recalculate_is_idempotent(self, service, mock_db, workspace_id):
+        """Issue #570 invariant: ``recalculate_workspace_bonuses`` is idempotent.
+
+        Calling the method twice with the same active-addon snapshot must
+        produce the same bonus dict and the same persisted column values
+        (no accumulation, no drift). This pins the SUM-from-source aggregate
+        contract documented on ``AddonCalculatorService``'s class docstring,
+        which is the safety basis for replacing the GET-time self-heal with
+        explicit write-path invalidation. Concurrent recalcs (same source
+        snapshot, different orderings) converge on the same final state.
+        """
+        addons = [
+            _make_addon("extra_storage", quantity=4),
+            _make_addon("extra_memory", quantity=2),
+            _make_addon("extra_sleep_contexts", quantity=3),
+        ]
+        # Each call performs 2 execute()s (addons + workspace), so wire up
+        # 4 results for two consecutive calls. The same workspace mock is
+        # returned on the second pass — that's the shared cache row whose
+        # idempotency we're proving.
+        workspace = _make_workspace(workspace_id)
+        mock_db.execute.side_effect = _make_side_effects(addons, workspace) + _make_side_effects(
+            addons, workspace
+        )
+
+        first = await service.recalculate_workspace_bonuses(workspace_id)
+        second = await service.recalculate_workspace_bonuses(workspace_id)
+
+        assert first == second, "Bonus dict drifted between identical recalcs"
+        assert workspace.addon_storage_bonus_mb == first["addon_storage_bonus_mb"]
+        assert workspace.addon_memory_bonus == first["addon_memory_bonus"]
+        assert workspace.addon_sleep_contexts_bonus == first["addon_sleep_contexts_bonus"]
+        # SUM-from-source means the value equals the per-addon contribution
+        # exactly — not a multiple of it from accidental accumulation.
+        assert first["addon_storage_bonus_mb"] == 4 * ADDON_UNIT_VALUES["extra_storage"]
+        assert first["addon_memory_bonus"] == 2 * ADDON_UNIT_VALUES["extra_memory"]
+        assert first["addon_sleep_contexts_bonus"] == 3 * ADDON_UNIT_VALUES["extra_sleep_contexts"]
+        assert mock_db.commit.await_count == 2

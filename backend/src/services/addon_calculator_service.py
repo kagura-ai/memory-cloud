@@ -37,7 +37,44 @@ ADDON_UNIT_VALUES = {
 
 
 class AddonCalculatorService:
-    """Service for calculating workspace addon bonuses."""
+    """Service for calculating workspace addon bonuses.
+
+    Cache-invalidation contract (Issue #570):
+        ``Workspace.addon_*_bonus`` columns cache the SUM of active
+        ``WorkspaceAddon`` rows. They are read by
+        ``EffectiveQuotaService.get_effective_quotas`` on every quota
+        check and exposed via ``Workspace.effective_*`` properties.
+
+        Any code that mutates ``WorkspaceAddon`` rows
+        (INSERT / UPDATE active_until / DELETE / future Stripe webhook
+        handlers / admin scripts) **MUST** call
+        ``recalculate_workspace_bonuses(workspace_id)`` after staging
+        the mutation in the session (``db.add(...)`` / ``db.delete(...)``).
+        Skipping the call leaves the cache stale and every downstream
+        quota check returns wrong numbers until something else
+        triggers a recalc.
+
+        Commit semantics: ``recalculate_workspace_bonuses`` calls
+        ``db.commit()`` internally, which flushes BOTH the caller's
+        staged ``WorkspaceAddon`` mutation AND the recomputed
+        ``addon_*_bonus`` columns in a single transaction. After
+        the method returns, the session has no pending writes — so
+        any subsequent commit, whether explicit or implicit (e.g.
+        FastAPI's ``get_db`` dependency commits at request-end,
+        ``db/base.py``), is a harmless no-op. The constraint this
+        places on callers is composability: do not call this method
+        from inside a larger explicit transaction you intend to
+        commit or roll back as a unit, because the internal commit
+        will finalize the addon write before the outer block has
+        a chance to roll back. This atomic-on-recalc pairing is the
+        safety basis for replacing the old GET-time self-heal with
+        explicit write-path invalidation.
+
+        ``recalculate_workspace_bonuses`` is idempotent: it computes
+        each bonus column as a SUM-from-source aggregate and writes
+        the absolute value, so concurrent recalcs converge on the
+        same final state regardless of ordering.
+    """
 
     def __init__(self, db: AsyncSession):
         """Initialize addon calculator service.
