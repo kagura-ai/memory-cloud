@@ -253,11 +253,10 @@ async def _build_analysis_usage(
         effective_quotas: Pre-computed effective quotas dict (from
             ``EffectiveQuotaService.get_effective_quotas``) if the caller
             already has it. Passing it through avoids a duplicate
-            EffectiveQuotaService call AND avoids the second potential
-            ``AddonCalculatorService.recalculate_workspace_bonuses``
-            self-heal COMMIT (which would otherwise fire twice from a GET
-            request when both ``_build_analysis_usage`` and
-            ``_build_sleep_contexts_usage`` are called back-to-back).
+            EffectiveQuotaService call from the same request. Issue #570
+            removed the GET-time self-heal COMMIT, so the kwarg is now
+            purely a DB-roundtrip optimization rather than a correctness
+            requirement.
     """
     if not workspace_id:
         return None
@@ -324,12 +323,11 @@ async def _build_sleep_contexts_usage(
             ``EffectiveQuotaService.get_effective_quotas`` if the caller
             already has it (e.g. ``workspace.py:get_workspace_usage_current``
             calls the service for other fields). Passing the dict avoids a
-            duplicate DB roundtrip AND, more importantly, avoids re-triggering
-            ``AddonCalculatorService.recalculate_workspace_bonuses`` (which
-            ``EffectiveQuotaService`` may run as a self-heal — that helper
-            ``COMMIT`` s, so calling it twice from a GET request is a
-            request-side commit on a read endpoint). When ``None``, the
-            helper fetches fresh.
+            duplicate DB roundtrip from the same request. Issue #570 removed
+            the GET-time self-heal COMMIT in EffectiveQuotaService, so the
+            kwarg is now a DB-roundtrip optimization rather than a
+            correctness requirement. When ``None``, the helper fetches
+            fresh.
     """
     if not workspace_id:
         return None
@@ -508,10 +506,11 @@ async def get_current_usage(
         )
         rest_calls_week = rest_week_result.scalar() or 0
 
-        # Issue #560 follow-up: fetch effective quotas ONCE and pass into both
-        # helpers so we don't trigger ``EffectiveQuotaService`` twice — the
-        # service may invoke ``AddonCalculatorService.recalculate_workspace_bonuses``
-        # which COMMITS, and a GET endpoint should not commit twice.
+        # Fetch effective quotas ONCE and pass into both helpers so we don't
+        # trigger ``EffectiveQuotaService`` twice. Issue #570 removed the
+        # GET-time self-heal COMMIT, so this is now a DB-roundtrip optimization
+        # rather than a correctness requirement; the kwarg plumbing is kept
+        # because both helpers still need the same dict.
         #
         # On ``ValueError`` (workspace not found), pass an EMPTY dict (not
         # ``None``) into the helpers. ``None`` would make the helpers fall

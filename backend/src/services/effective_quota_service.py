@@ -64,33 +64,17 @@ class EffectiveQuotaService:
         Raises:
             ValueError: If workspace not found
         """
-        # Get workspace with addon bonuses
+        # Pure read: SELECT the workspace and compute effective quotas from
+        # cached `addon_*_bonus` columns. Issue #570: removed the lazy
+        # self-heal recalc that COMMITted from this GET path. Any code that
+        # mutates `WorkspaceAddon` rows must call
+        # `AddonCalculatorService.recalculate_workspace_bonuses(workspace_id)`
+        # post-mutation to keep the cache consistent.
         result = await self.db.execute(select(Workspace).where(Workspace.id == workspace_id))
         workspace = result.scalar_one_or_none()
 
         if not workspace:
             raise ValueError(f"Workspace {workspace_id} not found")
-
-        # Check if addon bonuses need to be calculated
-        # If all bonuses are 0, recalculate from active addons
-        if (
-            workspace.addon_memory_bonus == 0
-            and workspace.addon_mcp_quota_bonus == 0
-            and workspace.addon_rest_quota_bonus == 0
-            and workspace.addon_public_quota_bonus == 0
-            and workspace.addon_member_bonus == 0
-            and workspace.addon_context_bonus == 0
-            and workspace.addon_analysis_bonus == 0
-        ):
-            # Import here to avoid circular dependency
-            from services.addon_calculator_service import AddonCalculatorService
-
-            calculator = AddonCalculatorService(self.db)
-            await calculator.recalculate_workspace_bonuses(workspace_id)
-
-            # Re-fetch workspace with updated bonuses
-            result = await self.db.execute(select(Workspace).where(Workspace.id == workspace_id))
-            workspace = result.scalar_one_or_none()
 
         # Calculate effective quotas via model properties
         # Issue #198 (Bug C): include weekly fields so callers don't need to fall

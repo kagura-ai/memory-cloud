@@ -81,10 +81,42 @@ class TestEffectiveQuotaService:
         quotas = await service.get_effective_quotas(uuid4())
         assert quotas["mcp_calls_per_day"] > 200  # base + 200
 
-    @pytest.mark.skip(reason="Zero-bonus path triggers AddonCalculatorService which needs real DB")
     @pytest.mark.asyncio
-    async def test_no_addons_returns_base(self, service, mock_db):
-        """With zero addon bonuses, recalculation is triggered (needs integration test)."""
+    async def test_no_addons_returns_base_no_recalc(self, service, mock_db):
+        """Issue #570: with all bonus columns at 0, the service is pure-read.
+
+        Pre-#570 the zero-bonus path triggered ``AddonCalculatorService.recalculate_workspace_bonuses``
+        which COMMITted from this GET path. The refactor makes the service trust the cached
+        column values; ``recalculate_workspace_bonuses`` is now caller responsibility on the
+        write path. This test pins the new contract.
+        """
+        ws = self._mock_workspace(
+            addon_memory_bonus=0,
+            addon_mcp_quota_bonus=0,
+            addon_rest_quota_bonus=0,
+            addon_public_quota_bonus=0,
+            addon_member_bonus=0,
+            addon_context_bonus=0,
+            addon_storage_bonus_mb=0,
+        )
+        ws.addon_analysis_bonus = 0
+        ws.addon_sleep_contexts_bonus = 0
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = ws
+        mock_db.execute = AsyncMock(return_value=mock_result)
+        # Catch a stray COMMIT — the service must not write on read.
+        mock_db.commit = AsyncMock()
+        mock_db.flush = AsyncMock()
+
+        quotas = await service.get_effective_quotas(uuid4())
+
+        # Pure read: exactly one SELECT, no COMMIT, no FLUSH.
+        assert mock_db.execute.await_count == 1
+        mock_db.commit.assert_not_awaited()
+        mock_db.flush.assert_not_awaited()
+        # Effective quotas equal tier base (since all addon bonuses are 0).
+        assert quotas["memory_limit"] == ws.effective_memory_limit
+        assert quotas["mcp_calls_per_day"] == ws.effective_mcp_calls_per_day
 
     @pytest.mark.asyncio
     async def test_workspace_not_found(self, service, mock_db):
