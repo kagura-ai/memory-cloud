@@ -48,10 +48,21 @@ class AddonCalculatorService:
         Any code that mutates ``WorkspaceAddon`` rows
         (INSERT / UPDATE active_until / DELETE / future Stripe webhook
         handlers / admin scripts) **MUST** call
-        ``recalculate_workspace_bonuses(workspace_id)`` post-mutation
-        and commit. Skipping the call leaves the cache stale and
-        every downstream quota check returns wrong numbers until
-        something else triggers a recalc.
+        ``recalculate_workspace_bonuses(workspace_id)`` after staging
+        the mutation in the session (``db.add(...)`` / ``db.delete(...)``).
+        Skipping the call leaves the cache stale and every downstream
+        quota check returns wrong numbers until something else
+        triggers a recalc.
+
+        Commit semantics: ``recalculate_workspace_bonuses`` calls
+        ``db.commit()`` internally, which flushes BOTH the caller's
+        staged ``WorkspaceAddon`` mutation AND the recomputed
+        ``addon_*_bonus`` columns in a single transaction. **Callers
+        must not commit separately** — staging via ``db.add`` /
+        ``db.delete`` is enough; the recalc method finalizes the
+        transaction. This atomic pairing is the safety basis for
+        replacing the old GET-time self-heal with explicit
+        write-path invalidation.
 
         ``recalculate_workspace_bonuses`` is idempotent: it computes
         each bonus column as a SUM-from-source aggregate and writes
