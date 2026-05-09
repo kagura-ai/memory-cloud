@@ -453,7 +453,7 @@ describe("ContextsPage sleep_mode badge (#559)", () => {
   });
 });
 
-describe("ContextsPage current marker + Set as current (#561)", () => {
+describe("ContextsPage current marker (#561)", () => {
   it("marks only the current context row with aria-current and CurrentContextBadge", async () => {
     setupWithThreeContextsAndCurrent("ctx-edges");
     const { container } = render(<ContextsPage />);
@@ -470,57 +470,5 @@ describe("ContextsPage current marker + Set as current (#561)", () => {
     // but exactly one Current badge should be inside an aria-current row.
     const badge = currentRows[0].querySelector('[aria-label="current"]');
     expect(badge).not.toBeNull();
-  });
-
-  it("renders Set as current button on non-current rows only", async () => {
-    setupWithThreeContextsAndCurrent("ctx-edges");
-    const { container } = render(<ContextsPage />);
-
-    await waitFor(() =>
-      expect(screen.getByText("Edges Context")).toBeInTheDocument(),
-    );
-
-    // 3 rows total, 1 is current → 2 Set-as-current buttons.
-    const switchButtons = container.querySelectorAll(
-      'button[aria-label="setAsCurrent"]',
-    );
-    expect(switchButtons.length).toBe(2);
-  });
-
-  it("renders Set as current button on every row when no context is current", async () => {
-    setupWithThreeContextsAndCurrent(null);
-    const { container } = render(<ContextsPage />);
-
-    await waitFor(() =>
-      expect(screen.getByText("Full Context")).toBeInTheDocument(),
-    );
-
-    const switchButtons = container.querySelectorAll(
-      'button[aria-label="setAsCurrent"]',
-    );
-    expect(switchButtons.length).toBe(3);
-  });
-
-  it("calling Set as current navigates with ?context=<id>", async () => {
-    setupWithThreeContextsAndCurrent(null);
-    const { container } = render(<ContextsPage />);
-
-    await waitFor(() =>
-      expect(screen.getByText("Skip Context")).toBeInTheDocument(),
-    );
-
-    // Click the Set-as-current button inside the "ctx-skip" row.
-    const skipRow = Array.from(container.querySelectorAll("tr")).find((r) =>
-      r.textContent?.includes("Skip Context"),
-    );
-    expect(skipRow).toBeDefined();
-    const switchBtn = skipRow!.querySelector(
-      'button[aria-label="setAsCurrent"]',
-    ) as HTMLButtonElement | null;
-    expect(switchBtn).not.toBeNull();
-    switchBtn!.click();
-
-    expect(mockReplace).toHaveBeenCalledTimes(1);
-    expect(mockReplace.mock.calls[0][0]).toContain("context=ctx-skip");
   });
 });

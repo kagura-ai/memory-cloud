@@ -18,7 +18,6 @@ import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useMemoryContext } from "@/contexts/MemoryContextContext";
 import { SleepModeBadge } from "@/components/contexts/SleepModeBadge";
 import { CurrentContextBadge } from "@/components/contexts/CurrentContextBadge";
-import { SetCurrentContextButton } from "@/components/contexts/SetCurrentContextButton";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import {
   Plus,
@@ -1043,9 +1042,6 @@ export default function ContextsPage() {
                     {/* Actions */}
                     <td className="px-4 py-3">
                       <div className="flex items-center justify-center gap-1">
-                        {!isCurrent && (
-                          <SetCurrentContextButton contextId={context.id} />
-                        )}
                         <Button
                           variant="ghost"
                           size="sm"
