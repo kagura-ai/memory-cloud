@@ -74,5 +74,8 @@
     "tailwindcss": "^3.4.1",
     "typescript": "^5",
     "vitest": "^4.1.2"
+  },
+  "overrides": {
+    "aria-query": "5.3.2"
   }
 }
