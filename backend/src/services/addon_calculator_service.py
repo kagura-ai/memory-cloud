@@ -57,12 +57,18 @@ class AddonCalculatorService:
         Commit semantics: ``recalculate_workspace_bonuses`` calls
         ``db.commit()`` internally, which flushes BOTH the caller's
         staged ``WorkspaceAddon`` mutation AND the recomputed
-        ``addon_*_bonus`` columns in a single transaction. **Callers
-        must not commit separately** — staging via ``db.add`` /
-        ``db.delete`` is enough; the recalc method finalizes the
-        transaction. This atomic pairing is the safety basis for
-        replacing the old GET-time self-heal with explicit
-        write-path invalidation.
+        ``addon_*_bonus`` columns in a single transaction. After
+        the method returns, the session has no pending writes — so
+        any subsequent commit, whether explicit or implicit (e.g.
+        FastAPI's ``get_db`` dependency commits at request-end,
+        ``db/base.py``), is a harmless no-op. The constraint this
+        places on callers is composability: do not call this method
+        from inside a larger explicit transaction you intend to
+        commit or roll back as a unit, because the internal commit
+        will finalize the addon write before the outer block has
+        a chance to roll back. This atomic-on-recalc pairing is the
+        safety basis for replacing the old GET-time self-heal with
+        explicit write-path invalidation.
 
         ``recalculate_workspace_bonuses`` is idempotent: it computes
         each bonus column as a SUM-from-source aggregate and writes

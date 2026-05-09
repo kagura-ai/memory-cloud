@@ -77,7 +77,7 @@ class TestEffectiveQuotaService:
             tier.storage_limit_bytes + addon_storage_bonus_mb * 1024 * 1024
         )
         ws.effective_sleep_enabled_contexts_limit = (
-            getattr(tier, "sleep_enabled_contexts_per_workspace", 0) + addon_sleep_contexts_bonus
+            tier.sleep_enabled_contexts_limit + addon_sleep_contexts_bonus
         )
         return ws
 
@@ -159,12 +159,16 @@ class TestEffectiveQuotaService:
         assert set(quotas.keys()) == expected_keys
         for key, value in quotas.items():
             assert isinstance(value, int), f"{key}={value!r} is not int"
-        # Spot-check three independent dimensions to ensure mock wiring
+        # Spot-check four independent dimensions to ensure mock wiring
         # actually returns tier-base values (not stray MagicMocks that pass
-        # the int instance check via __index__-able sentinels).
+        # the int instance check via __index__-able sentinels). The
+        # sleep_enabled_contexts_limit assertion specifically catches the
+        # PRO=3 base value and would have caught the typo Copilot's
+        # second-loop review flagged in _mock_workspace.
         assert quotas["memory_limit"] == ws.effective_memory_limit
         assert quotas["mcp_calls_per_day"] == ws.effective_mcp_calls_per_day
         assert quotas["storage_bytes_limit"] == ws.effective_storage_limit_bytes
+        assert quotas["sleep_enabled_contexts_limit"] == ws.effective_sleep_enabled_contexts_limit
 
     @pytest.mark.asyncio
     async def test_workspace_not_found(self, service, mock_db):
