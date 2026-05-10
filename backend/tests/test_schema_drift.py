@@ -64,6 +64,7 @@ Acceptance for #587 mapped to this file:
 from __future__ import annotations
 
 import ast
+import importlib
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -73,24 +74,35 @@ from sqlalchemy import CheckConstraint as SACheckConstraint
 
 from db.base import Base
 
-# Side-effect imports: ensure every model module registers its tables with
+# Side-effect "imports": ensure every model module registers its tables with
 # ``Base.metadata`` before we enumerate them. ``conftest.py`` already imports
-# a subset (auth/memory/llm_pricing/sleep/analysis); we add the rest so this
-# file is robust to conftest changes and to running it via
+# a subset (auth/memory/llm_pricing/sleep/analysis); the list below is the
+# full set so this file is robust to conftest changes and to running it via
 # ``pytest backend/tests/test_schema_drift.py`` in isolation.
-import models.analysis  # noqa: F401  isort: skip
-import models.auth  # noqa: F401  isort: skip
-import models.bm25_drift  # noqa: F401  isort: skip
-import models.config  # noqa: F401  isort: skip
-import models.erasure  # noqa: F401  isort: skip
-import models.file_objects  # noqa: F401  isort: skip
-import models.hub_tag  # noqa: F401  isort: skip
-import models.llm_pricing  # noqa: F401  isort: skip
-import models.memory  # noqa: F401  isort: skip
-import models.neural  # noqa: F401  isort: skip
-import models.resource  # noqa: F401  isort: skip
-import models.signup_gate  # noqa: F401  isort: skip
-import models.sleep  # noqa: F401  isort: skip
+#
+# Done via ``importlib.import_module`` rather than ``import models.X`` so
+# static analyzers (``F401``-aware linters like ruff respect ``# noqa: F401``,
+# but the github-code-quality "unused import" check does not) don't flag
+# each line — the imports ARE used (their import-time side effect populates
+# ``Base.metadata``) but no attribute on the imported module is dereferenced
+# by name in this file.
+_MODEL_MODULES: tuple[str, ...] = (
+    "models.analysis",
+    "models.auth",
+    "models.bm25_drift",
+    "models.config",
+    "models.erasure",
+    "models.file_objects",
+    "models.hub_tag",
+    "models.llm_pricing",
+    "models.memory",
+    "models.neural",
+    "models.resource",
+    "models.signup_gate",
+    "models.sleep",
+)
+for _model_module_name in _MODEL_MODULES:
+    importlib.import_module(_model_module_name)
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "alembic" / "versions"
 
