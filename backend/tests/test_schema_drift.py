@@ -357,6 +357,29 @@ class _MigrationCheckExtractor:
         return (name, sql)
 
 
+def _orm_check_sqltext_raw(constraint: SACheckConstraint) -> str:
+    """Read a CheckConstraint's SQL as the **raw string** the model file
+    declared, NOT the dialect-compiled form.
+
+    For constraints constructed with a string literal (the only form this
+    codebase uses), ``constraint.sqltext`` is a :class:`sqlalchemy.sql.elements.TextClause`
+    whose ``.text`` attribute is exactly that literal — stable across
+    SQLAlchemy versions and dialects. ``str(constraint.sqltext)`` instead
+    routes through SQLAlchemy's expression compiler, which can rewrite
+    quoting, spacing, or operator forms across major SA upgrades and
+    produce false-positive drift failures.
+
+    Falls back to ``str(...)`` for the rare case of a programmatically
+    constructed ColumnElement (no ``.text`` attribute). Currently zero
+    project CHECKs use that form; the fallback exists so a future addition
+    doesn't trip the detector at import time.
+    """
+    raw = getattr(constraint.sqltext, "text", None)
+    if isinstance(raw, str):
+        return raw
+    return str(constraint.sqltext)
+
+
 def _enumerate_orm_check_constraints() -> list[tuple[str, str, str]]:
     """Return every named ``CheckConstraint`` on ``Base.metadata`` as
     ``(table_name, constraint_name, normalized_sql)`` tuples, sorted for
@@ -375,7 +398,13 @@ def _enumerate_orm_check_constraints() -> list[tuple[str, str, str]]:
             if key in seen:
                 continue
             seen.add(key)
-            rows.append((table.name, constraint.name, _normalize(str(constraint.sqltext))))
+            rows.append(
+                (
+                    table.name,
+                    constraint.name,
+                    _normalize(_orm_check_sqltext_raw(constraint)),
+                )
+            )
     return rows
 
 
