@@ -1043,6 +1043,25 @@ class UserPlan(Base):
 
     __table_args__ = (Index("idx_user_plans_plan_name", "plan_name"),)
 
+    @classmethod
+    def default_for_user(cls, user_id: str, settings) -> "UserPlan":
+        """Construct the default 'free' plan from settings defaults.
+
+        Shared between two callers so a future column add can't drift
+        them apart (Issue #586):
+        - ``auth.roles.RoleManager._ensure_user_postgres`` writes this
+          row on user creation.
+        - ``api.routes.usage.get_current_usage`` builds an in-memory
+          instance on the fallback path (no persistence).
+        """
+        return cls(
+            user_id=user_id,
+            plan_name="free",
+            memory_limit=settings.default_plan_memory_limit,
+            daily_api_limit=settings.default_plan_daily_api_limit,
+            weekly_api_limit=settings.default_plan_weekly_api_limit,
+        )
+
 
 # ============================================================================
 # Context-based Multi-Collection (Issue #82 → #160: renamed from Project)

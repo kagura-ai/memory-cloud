@@ -402,21 +402,16 @@ async def get_current_usage(
 
         settings = get_settings()
 
-        # Get user plan (or default to free)
+        # The default UserPlan row is created at user-creation time in
+        # auth.roles.RoleManager._ensure_user_postgres (#586). The fallback
+        # below covers (a) the race window between user creation and the
+        # first /usage/current call and (b) test fixtures that bypass the
+        # signup flow.
         result = await db.execute(select(UserPlan).where(UserPlan.user_id == user_id))
         plan = result.scalar_one_or_none()
 
         if not plan:
-            # Create default free plan from environment variables
-            plan = UserPlan(
-                user_id=user_id,
-                plan_name="free",
-                memory_limit=settings.default_plan_memory_limit,
-                daily_api_limit=settings.default_plan_daily_api_limit,
-                weekly_api_limit=settings.default_plan_weekly_api_limit,
-            )
-            db.add(plan)
-            await db.commit()
+            plan = UserPlan.default_for_user(user_id, settings)
 
         # Get current memory count.
         # Issue #198 (Bug D): exclude soft-deleted rows so this matches the
