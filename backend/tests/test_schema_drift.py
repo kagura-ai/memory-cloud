@@ -12,10 +12,15 @@ The detector:
 
 1. Enumerates every named :class:`~sqlalchemy.schema.CheckConstraint` on
    ``Base.metadata`` (across all imported model modules).
-2. Walks ``backend/alembic/versions/*.py`` in filename order. For each file
-   it parses the AST of ``upgrade()`` (no code execution — :func:`ast.parse`
-   only) and extracts CHECK clauses from any of the four call shapes used
-   in this project:
+2. Walks ``backend/alembic/versions/*.py`` in **alembic dependency order**
+   (a Kahn-style topological walk over the ``revision`` /
+   ``down_revision`` graph extracted via AST — see
+   :func:`_migrations_in_dependency_order`). Filename sort is **not** used,
+   because lexicographic order disagrees with the revision chain in this
+   repo (``a120_*`` has ``down_revision="a90_*"`` yet sorts before
+   ``a51_*``). For each file it parses the AST of ``upgrade()`` (no code
+   execution — :func:`ast.parse` only) and extracts CHECK clauses from any
+   of the four call shapes used in this project:
 
       a. ``sa.CheckConstraint("…", name="…")`` inside ``op.create_table(…)``
       b. ``op.create_check_constraint(name, table, condition)``
@@ -23,9 +28,9 @@ The detector:
       d. ``op.execute(sa.text("ALTER TABLE … ADD CONSTRAINT … CHECK (…)"))``
 
 3. Asserts the ORM and the latest-migration SQL match after whitespace
-   normalization. The latest migration wins (filename-sorted), which matches
-   alembic's own dependency ordering convention used in this project
-   (``a51_…``, ``a76_…``, …, ``e06_…``).
+   normalization. "Latest" is determined by alembic dependency order
+   (the migration whose ``revision`` is reachable last from the root via
+   the ``down_revision`` chain), not by filename sort.
 
 **Constant resolution**: only string-literal AST nodes (and module-level
 constants assigned directly from such literals) are resolved. Constants
@@ -44,9 +49,14 @@ Acceptance for #587 mapped to this file:
   this file up because it lives at ``backend/tests/test_schema_drift.py``,
   not under ``tests/integration`` which CI excludes).
 - "Step fails on disagreement" → ``assert orm_sql == migration_sql``.
-- "Documented escape hatch" → ``pytest.mark.skip(reason="known drift, follow-up #N")``
-  on the parametrize id is the documented (and only) escape hatch. There is
-  no in-source pragma — we want skips to surface in test reports.
+- "Documented escape hatch" → wrap the offending case in
+  ``pytest.param(<table>, <constraint>, <orm_sql>,
+  marks=pytest.mark.skip(reason="known drift, follow-up #N"),
+  id="<table>.<constraint>")`` inside the parametrize call (or, for a
+  conditional skip, ``pytest.skip(reason="…")`` inside the test body
+  itself). The ``marks=`` form is the only way to attach a skip to a
+  specific parametrize case. There is no in-source pragma on the
+  ``CheckConstraint`` — we want skips to surface in test reports.
 - "WorkspaceAddon.addon_type covered" → covered by the parametrized loop AND
   by a named regression test below.
 """
