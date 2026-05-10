@@ -326,9 +326,23 @@ class RoleManager:
                 last_login_at=utcnow(),
                 auth_provider=auth_provider,
             )
+            # Pre-check for an orphan UserPlan row before adding a fresh
+            # one in the same tx. The orphan case (UserPlan exists for
+            # this user_id without its User row, e.g. from a prior
+            # partial account_erasure failure) is rare but otherwise
+            # surfaces as a 500 that permanently blocks first-login,
+            # because the IntegrityError handler below only recognizes
+            # users.user_id races and users.email collisions — a
+            # user_plans.user_id PK violation falls through and re-raises.
+            # Doing the SELECT before db.add(new_user) avoids any
+            # autoflush surprise (Issue #586, Copilot review).
+            existing_plan_id = (
+                await db.execute(select(UserPlan.user_id).where(UserPlan.user_id == user_id))
+            ).scalar_one_or_none()
             db.add(new_user)
             # Default UserPlan in the same tx — keeps GET /usage/current pure-read (#586).
-            db.add(UserPlan.default_for_user(user_id, get_settings()))
+            if existing_plan_id is None:
+                db.add(UserPlan.default_for_user(user_id, get_settings()))
             try:
                 await db.commit()
                 return role

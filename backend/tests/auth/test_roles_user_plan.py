@@ -30,29 +30,30 @@ from auth.roles import RoleManager
 from models.auth import User, UserPlan
 
 
-@pytest.fixture
-def patched_get_db(monkeypatch):
-    """Patch ``auth.roles.get_db`` (referenced via local import) so
-    ``_ensure_user_postgres`` yields a single MagicMock session under
-    test control.
+def _build_patched_get_db(monkeypatch, *, orphan_plan_user_id: str | None = None):
+    """Patch ``db.base.get_db`` to yield a controlled MagicMock session.
 
-    The local-import shape inside ``_ensure_user_postgres`` means we
-    need to patch ``db.base.get_db`` (the canonical name) rather than a
-    re-export, because the function does
-    ``from db.base import get_db`` at call time.
+    The new-user path issues three SELECTs in order:
+    1. User lookup by user_id.
+    2. User row count (to decide ADMIN vs USER).
+    3. UserPlan pre-check for orphan rows (Issue #586, Copilot review).
+
+    ``orphan_plan_user_id`` toggles the third SELECT's return value:
+    - ``None`` (default): no orphan row → handler will add a fresh UserPlan.
+    - ``"<user_id>"``: orphan row exists → handler must skip the UserPlan add.
     """
     from db import base as db_base
 
     captured_db = MagicMock()
 
-    # First execute() call: User lookup → no existing user.
-    # Second execute() call: User count → 1 (so the new user is USER, not ADMIN).
     user_lookup = MagicMock()
     user_lookup.scalar_one_or_none.return_value = None
     count_result = MagicMock()
     count_result.scalar.return_value = 1
+    plan_precheck = MagicMock()
+    plan_precheck.scalar_one_or_none.return_value = orphan_plan_user_id
 
-    captured_db.execute = AsyncMock(side_effect=[user_lookup, count_result])
+    captured_db.execute = AsyncMock(side_effect=[user_lookup, count_result, plan_precheck])
     captured_db.add = MagicMock()
     captured_db.commit = AsyncMock()
     captured_db.rollback = AsyncMock()
@@ -63,6 +64,12 @@ def patched_get_db(monkeypatch):
 
     monkeypatch.setattr(db_base, "get_db", _fake_get_db)
     return captured_db
+
+
+@pytest.fixture
+def patched_get_db(monkeypatch):
+    """Default scenario: no orphan UserPlan row exists for the new user."""
+    return _build_patched_get_db(monkeypatch, orphan_plan_user_id=None)
 
 
 class TestEnsureUserCreatesDefaultPlan:
@@ -94,6 +101,45 @@ class TestEnsureUserCreatesDefaultPlan:
         assert user_plans[0].user_id == "oauth-sub-new"
         # Both adds must precede the commit (atomic transaction).
         patched_get_db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_orphan_user_plan_row_skipped_to_avoid_pk_violation(self, monkeypatch):
+        """Orphan UserPlan path: a pre-existing UserPlan row without its
+        User row (e.g. from a partial account_erasure failure) must NOT
+        cause first-login to bubble a 500.
+
+        Without the pre-check in `_ensure_user_postgres`, the UserPlan
+        INSERT would PK-violate at commit time and the IntegrityError
+        handler would re-raise (it only recognizes users.user_id races
+        and users.email collisions). Copilot review on PR #589 flagged
+        this; the fix is to SELECT for an existing UserPlan row first
+        and skip the add when it exists.
+        """
+        captured_db = _build_patched_get_db(monkeypatch, orphan_plan_user_id="oauth-sub-orphan")
+
+        rm = RoleManager(use_postgres=True)
+        await rm._ensure_user_postgres(
+            email="orphan@example.com",
+            user_id="oauth-sub-orphan",
+            name=None,
+            auth_provider="google",
+            email_verified=True,
+            ip_address=None,
+            user_agent=None,
+        )
+
+        added = [call.args[0] for call in captured_db.add.call_args_list]
+        users = [obj for obj in added if isinstance(obj, User)]
+        user_plans = [obj for obj in added if isinstance(obj, UserPlan)]
+
+        # User row IS added (this is still a fresh user creation).
+        assert len(users) == 1
+        # UserPlan add is SKIPPED — the orphan row already occupies the PK.
+        assert user_plans == [], (
+            f"expected zero UserPlan adds when an orphan row exists, got {len(user_plans)}"
+        )
+        # Commit still runs so the User row is persisted, reusing the orphan plan.
+        captured_db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_user_plan_uses_settings_defaults(self, patched_get_db, monkeypatch):
