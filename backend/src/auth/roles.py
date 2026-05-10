@@ -292,7 +292,7 @@ class RoleManager:
         from sqlalchemy.exc import IntegrityError
 
         from db.base import get_db
-        from models.auth import User
+        from models.auth import User, UserPlan
 
         async for db in get_db():
             # Lookup key: user_id (oauth_sub), not email — email is mutable.
@@ -327,6 +327,8 @@ class RoleManager:
                 auth_provider=auth_provider,
             )
             db.add(new_user)
+            # Default UserPlan in the same tx — keeps GET /usage/current pure-read (#586).
+            db.add(UserPlan.default_for_user(user_id, get_settings()))
             try:
                 await db.commit()
                 return role
