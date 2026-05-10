@@ -409,26 +409,37 @@ def _orm_check_sqltext_raw(constraint: SACheckConstraint) -> str:
 
 def _enumerate_orm_check_constraints() -> list[tuple[str, str, str]]:
     """Return every named ``CheckConstraint`` on ``Base.metadata`` as
-    ``(table_name, constraint_name, normalized_sql)`` tuples, sorted for
-    deterministic test ordering."""
+    ``(table_name, constraint_name, normalized_sql)`` tuples, fully sorted
+    for deterministic test ordering.
+
+    Both axes are sorted explicitly: tables by ``name``, and within each
+    table, constraints by ``name``. ``Table.constraints`` is a set-like
+    collection in SQLAlchemy — its iteration order depends on hash seed
+    and SQLAlchemy internals, so without the inner sort the parametrize
+    ids would vary between runs (and CI re-runs could shuffle, masking
+    flakes).
+    """
     seen: set[tuple[str, str]] = set()
     rows: list[tuple[str, str, str]] = []
     for table in sorted(Base.metadata.tables.values(), key=lambda t: t.name):
-        for constraint in table.constraints:
-            if not isinstance(constraint, SACheckConstraint):
-                continue
-            if not constraint.name:
-                # Anonymous CHECKs are out of scope: the migration side
-                # identifies CHECKs by name.
-                continue
-            key = (table.name, constraint.name)
+        # Build (constraint, name_str) pairs so the sort key is a guaranteed
+        # str — SQLAlchemy types `Constraint.name` as `str | _NoneName`, and
+        # `_NoneName` does not implement `__lt__`, so passing the attribute
+        # directly to `sorted` trips a pyright reportArgumentType.
+        named_checks: list[tuple[SACheckConstraint, str]] = [
+            (c, c.name)
+            for c in table.constraints
+            if isinstance(c, SACheckConstraint) and isinstance(c.name, str) and c.name
+        ]
+        for constraint, name in sorted(named_checks, key=lambda pair: pair[1]):
+            key = (table.name, name)
             if key in seen:
                 continue
             seen.add(key)
             rows.append(
                 (
                     table.name,
-                    constraint.name,
+                    name,
                     _normalize(_orm_check_sqltext_raw(constraint)),
                 )
             )
@@ -567,13 +578,26 @@ _ORM_CHECKS: list[tuple[str, str, str]] = _enumerate_orm_check_constraints()
 _MIGRATION_CHECKS: dict[tuple[str, str], str] = _build_latest_migration_check_map()
 
 
+# Each case is a ``pytest.param`` with the id baked in, NOT a bare tuple
+# plus a separate ``ids=[...]`` comprehension. The bare-tuple form would
+# break the documented ``pytest.param(..., marks=pytest.mark.skip(...),
+# id=...)`` escape hatch the moment a single case is wrapped — the ids
+# comprehension would then fail to unpack ``pytest.param`` into
+# ``(t, n, _)``. Building param objects up front means swapping one entry
+# in for a skipped case is a one-line change with no parallel-list
+# bookkeeping.
+_ORM_CHECK_CASES = [
+    pytest.param(table_name, constraint_name, orm_sql, id=f"{table_name}.{constraint_name}")
+    for table_name, constraint_name, orm_sql in _ORM_CHECKS
+]
+
+
 # ---------------------------------------------------------------------------
 # The main parametrized drift test.
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "table_name, constraint_name, orm_sql",
-    _ORM_CHECKS,
-    ids=[f"{t}.{n}" for t, n, _ in _ORM_CHECKS],
+    _ORM_CHECK_CASES,
 )
 def test_orm_check_constraint_matches_latest_migration(
     table_name: str, constraint_name: str, orm_sql: str
