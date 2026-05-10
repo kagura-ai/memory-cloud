@@ -1,0 +1,571 @@
+"""ORM ``__table_args__`` CHECK constraint vs alembic migration drift detector.
+
+Caught at PR #568 review loop 1: ``extra_sleep_contexts`` was added to the
+``WorkspaceAddon.__table_args__`` ``CheckConstraint`` string AND to a new
+alembic migration, but earlier work paths that used
+``Base.metadata.create_all(...)`` instead of running migrations would
+silently use a stale ORM CHECK string and reject the new addon type. Issue
+#587 (deferred from #570 acceptance) asks for a CI-level lint covering this
+class of bug for every named ``CheckConstraint`` in the ORM.
+
+The detector:
+
+1. Enumerates every named :class:`~sqlalchemy.schema.CheckConstraint` on
+   ``Base.metadata`` (across all imported model modules).
+2. Walks ``backend/alembic/versions/*.py`` in filename order. For each file
+   it parses the AST of ``upgrade()`` (no code execution — :func:`ast.parse`
+   only) and extracts CHECK clauses from any of the four call shapes used
+   in this project:
+
+      a. ``sa.CheckConstraint("…", name="…")`` inside ``op.create_table(…)``
+      b. ``op.create_check_constraint(name, table, condition)``
+      c. ``op.execute("ALTER TABLE … ADD CONSTRAINT … CHECK (…)")``
+      d. ``op.execute(sa.text("ALTER TABLE … ADD CONSTRAINT … CHECK (…)"))``
+
+3. Asserts the ORM and the latest-migration SQL match after whitespace
+   normalization. The latest migration wins (filename-sorted), which matches
+   alembic's own dependency ordering convention used in this project
+   (``a51_…``, ``a76_…``, …, ``e06_…``).
+
+**Constant resolution**: only string-literal AST nodes (and module-level
+constants assigned directly from such literals) are resolved. Constants
+computed via function calls (e.g. ``_FOO = _build_sql(_TYPES)``) are not
+resolved — running such code would require executing the migration module,
+which we avoid for safety. In the current codebase every constraint's
+*latest* migration uses literal SQL, so this limitation does not affect
+detection. If a future migration introduces a function-computed constant as
+the latest definition of a constraint, this test will fail with "ORM
+defines CHECK '…' but no migration creates it", pointing the implementer
+at the resolver gap.
+
+Acceptance for #587 mapped to this file:
+
+- "CI step on every PR" → runs in the ``backend-unit`` job (``pytest`` picks
+  this file up because it lives at ``backend/tests/test_schema_drift.py``,
+  not under ``tests/integration`` which CI excludes).
+- "Step fails on disagreement" → ``assert orm_sql == migration_sql``.
+- "Documented escape hatch" → ``pytest.mark.skip(reason="known drift, follow-up #N")``
+  on the parametrize id is the documented (and only) escape hatch. There is
+  no in-source pragma — we want skips to surface in test reports.
+- "WorkspaceAddon.addon_type covered" → covered by the parametrized loop AND
+  by a named regression test below.
+"""
+
+from __future__ import annotations
+
+import ast
+import re
+from pathlib import Path
+
+import pytest
+from sqlalchemy import CheckConstraint as SACheckConstraint
+
+from db.base import Base
+
+# Side-effect imports: ensure every model module registers its tables with
+# ``Base.metadata`` before we enumerate them. ``conftest.py`` already imports
+# a subset (auth/memory/llm_pricing/sleep/analysis); we add the rest so this
+# file is robust to conftest changes and to running it via
+# ``pytest backend/tests/test_schema_drift.py`` in isolation.
+import models.analysis  # noqa: F401  isort: skip
+import models.auth  # noqa: F401  isort: skip
+import models.bm25_drift  # noqa: F401  isort: skip
+import models.config  # noqa: F401  isort: skip
+import models.erasure  # noqa: F401  isort: skip
+import models.file_objects  # noqa: F401  isort: skip
+import models.hub_tag  # noqa: F401  isort: skip
+import models.llm_pricing  # noqa: F401  isort: skip
+import models.memory  # noqa: F401  isort: skip
+import models.neural  # noqa: F401  isort: skip
+import models.resource  # noqa: F401  isort: skip
+import models.signup_gate  # noqa: F401  isort: skip
+import models.sleep  # noqa: F401  isort: skip
+
+MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "alembic" / "versions"
+
+# Match ``ALTER TABLE <table>`` so we can pair each subsequent
+# ``ADD CONSTRAINT … CHECK (…)`` with the most recently named table
+# (handles the compound ``ALTER TABLE t DROP CONSTRAINT …, ADD CONSTRAINT
+# … CHECK (…)`` form used in the zero-downtime migration pattern).
+_ALTER_TABLE_RE = re.compile(r"ALTER\s+TABLE\s+(\w+)", re.IGNORECASE)
+_ADD_CONSTRAINT_CHECK_RE = re.compile(
+    r"ADD\s+CONSTRAINT\s+(\w+)\s+CHECK\s*\(",
+    re.IGNORECASE,
+)
+# Match ``<col> IN (<literals>)`` so we can sort the literal list and
+# absorb harmless reorderings (an unordered IN list is set-equal regardless
+# of textual order). Anchored to the whole CHECK so we do not partially
+# rewrite compound clauses like ``a IN (…) AND b > 0``. The ``[^()]+`` body
+# (rather than non-greedy ``.+?``) is load-bearing: with ``.+?`` and the
+# ``\Z`` end-anchor the regex would over-match a compound CHECK with two
+# IN-lists (``a IN ('x') AND b IN ('y')``) by greedily consuming through
+# the inner ``)``, mangling the literal list. ``[^()]+`` constrains the
+# match to plain IN-lists with no nested parens, so compound clauses fall
+# through to whitespace-only normalization untouched.
+_IN_LIST_RE = re.compile(
+    r"\A\s*(\S+)\s+IN\s*\(\s*([^()]+?)\s*\)\s*\Z",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _normalize_whitespace(sql: str) -> str:
+    """Collapse whitespace and strip trailing punctuation."""
+    return re.sub(r"\s+", " ", sql.strip()).rstrip(";").strip()
+
+
+def _normalize(sql: str) -> str:
+    """Whitespace-normalize, then apply IN-list literal sorting if the
+    CHECK is the simple ``<col> IN (<literals>)`` shape. Compound CHECKs
+    fall through unchanged."""
+    sql = _normalize_whitespace(sql)
+    match = _IN_LIST_RE.match(sql)
+    if not match:
+        return sql
+    col, literals = match.group(1), match.group(2)
+    items = sorted(item.strip() for item in literals.split(","))
+    return f"{col} IN ({', '.join(items)})"
+
+
+def _string_from_ast(node: ast.AST | None, constants: dict[str, str] | None = None) -> str | None:
+    """Return the ``str`` value of an AST node iff the node is a string
+    constant, an implicit-concatenation chain of constants, or an f-string
+    whose interpolated parts are simple ``{NAME}`` references to known
+    string constants. Returns ``None`` for anything that would require
+    code execution (function calls, expressions inside ``{…}``, etc.)."""
+    if node is None:
+        return None
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for piece in node.values:
+            if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
+                parts.append(piece.value)
+                continue
+            if (
+                isinstance(piece, ast.FormattedValue)
+                and constants is not None
+                and isinstance(piece.value, ast.Name)
+                and piece.value.id in constants
+            ):
+                parts.append(constants[piece.value.id])
+                continue
+            return None
+        return "".join(parts)
+    return None
+
+
+def _find_check_clauses_in_sql(sql: str) -> list[tuple[str, str, str]]:
+    """Scan ``sql`` for every ``ALTER TABLE <t> … ADD CONSTRAINT <n> CHECK
+    (<inner>) [NOT VALID]`` shape and return ``(table, name, inner)`` per
+    clause. Pairs each ADD with the most recent preceding ALTER TABLE so
+    compound ``ALTER TABLE t DROP …, ADD …`` statements work correctly."""
+    table_positions = [(m.start(), m.group(1)) for m in _ALTER_TABLE_RE.finditer(sql)]
+    found: list[tuple[str, str, str]] = []
+    for add_match in _ADD_CONSTRAINT_CHECK_RE.finditer(sql):
+        table: str | None = None
+        for pos, tname in table_positions:
+            if pos < add_match.start():
+                table = tname
+            else:
+                break
+        if not table:
+            continue
+        # Walk balanced parens starting just after the regex-consumed ``(``.
+        i = add_match.end()
+        depth = 1
+        while i < len(sql) and depth > 0:
+            ch = sql[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            continue
+        inner = sql[add_match.end() : i - 1]
+        found.append((table, add_match.group(1), inner))
+    return found
+
+
+class _MigrationCheckExtractor:
+    """AST-only walker. Discovers CHECK constraint definitions inside a
+    migration's ``upgrade()`` function without executing any code.
+
+    Attributes
+    ----------
+    checks
+        ``[(table_name, constraint_name, normalized_sql), …]`` in source
+        order. The caller decides ordering across files.
+    """
+
+    def __init__(self, source: str, path: Path) -> None:
+        self.path = path
+        self.checks: list[tuple[str, str, str]] = []
+        try:
+            self._tree = ast.parse(source, filename=str(path))
+        except SyntaxError as exc:  # pragma: no cover — migrations should always parse
+            raise AssertionError(f"Migration {path.name} failed to parse: {exc}") from exc
+        self._constants: dict[str, str] = {}
+        self._collect_module_constants()
+        self._scan_upgrade()
+
+    def _collect_module_constants(self) -> None:
+        """Record every module-level ``NAME = literal_string`` assignment.
+
+        Function-call right-hand sides are deliberately skipped — see the
+        module docstring for the rationale.
+        """
+        # Iterate body in source order so an f-string constant can resolve
+        # interpolations against earlier-defined constants in the same file
+        # (e.g. ``_OLD = "..."`` then ``_NEW = f"... {_OLD} ..."``).
+        for node in self._tree.body:
+            target_node: ast.Name | None = None
+            value_node: ast.AST | None = None
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+            ):
+                target_node = node.targets[0]
+                value_node = node.value
+            elif (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.value is not None
+            ):
+                target_node = node.target
+                value_node = node.value
+            if target_node is None or value_node is None:
+                continue
+            val = _string_from_ast(value_node, self._constants)
+            if val is not None:
+                self._constants[target_node.id] = val
+
+    def _resolve_str(self, node: ast.AST) -> str | None:
+        """Resolve an AST node to a Python ``str`` if possible.
+
+        Handles three shapes:
+
+        1. ``"literal"`` (``ast.Constant``)
+        2. ``CONST_NAME`` referring to a module-level string constant
+        3. ``sa.text("literal")`` — unwrap the wrapper
+        """
+        direct = _string_from_ast(node, self._constants)
+        if direct is not None:
+            return direct
+        if isinstance(node, ast.Name):
+            return self._constants.get(node.id)
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr == "text" and node.args:
+                return self._resolve_str(node.args[0])
+        return None
+
+    def _resolve_call_arg(self, call: ast.Call, position: int, kwarg_name: str) -> str | None:
+        """Resolve a string-valued argument either positionally or by
+        keyword. Alembic's ``op.create_check_constraint`` accepts
+        ``(constraint_name, table_name, condition)`` either way; without
+        kwarg fallback the detector silently skips kwarg-style migrations
+        and leaves a hole in coverage."""
+        if position < len(call.args):
+            return self._resolve_str(call.args[position])
+        for kw in call.keywords:
+            if kw.arg == kwarg_name:
+                return self._resolve_str(kw.value)
+        return None
+
+    def _scan_upgrade(self) -> None:
+        upgrade = next(
+            (n for n in self._tree.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade"),
+            None,
+        )
+        if upgrade is None:
+            return
+        for node in ast.walk(upgrade):
+            if isinstance(node, ast.Call):
+                self._process_call(node)
+
+    def _process_call(self, node: ast.Call) -> None:
+        func = node.func
+        if not isinstance(func, ast.Attribute):
+            return
+        if not (isinstance(func.value, ast.Name) and func.value.id == "op"):
+            return
+        method = func.attr
+
+        if method == "execute" and node.args:
+            sql = self._resolve_str(node.args[0])
+            if sql:
+                # A single ``op.execute(...)`` may contain multiple CHECK
+                # additions (the compound ``DROP …, ADD …`` form), so iterate
+                # all matches rather than taking the first.
+                for table, name, inner in _find_check_clauses_in_sql(sql):
+                    self.checks.append((table, name, _normalize(inner)))
+
+        elif method == "create_check_constraint":
+            # Each of (constraint_name, table_name, condition) may be passed
+            # positionally or by keyword. Currently every project migration
+            # uses positional, but supporting kwargs prevents a future
+            # contributor's switch to keyword form from silently dropping
+            # coverage.
+            name = self._resolve_call_arg(node, 0, "constraint_name")
+            table = self._resolve_call_arg(node, 1, "table_name")
+            cond = self._resolve_call_arg(node, 2, "condition")
+            if name and table and cond:
+                self.checks.append((table, name, _normalize(cond)))
+
+        elif method == "create_table" and node.args:
+            table = self._resolve_str(node.args[0])
+            if not table:
+                return
+            for arg in node.args[1:]:
+                pair = self._extract_sa_check_constraint(arg)
+                if pair is not None:
+                    self.checks.append((table, pair[0], _normalize(pair[1])))
+
+    def _extract_sa_check_constraint(self, node: ast.AST) -> tuple[str, str] | None:
+        """If ``node`` is ``sa.CheckConstraint("…", name="…")`` return
+        ``(name, sql)``. Returns ``None`` for any other shape."""
+        if not isinstance(node, ast.Call):
+            return None
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "CheckConstraint"):
+            return None
+        if not node.args:
+            return None
+        sql = self._resolve_str(node.args[0])
+        if sql is None:
+            return None
+        name: str | None = None
+        for kw in node.keywords:
+            if kw.arg == "name":
+                name = self._resolve_str(kw.value)
+                break
+        if name is None:
+            return None
+        return (name, sql)
+
+
+def _enumerate_orm_check_constraints() -> list[tuple[str, str, str]]:
+    """Return every named ``CheckConstraint`` on ``Base.metadata`` as
+    ``(table_name, constraint_name, normalized_sql)`` tuples, sorted for
+    deterministic test ordering."""
+    seen: set[tuple[str, str]] = set()
+    rows: list[tuple[str, str, str]] = []
+    for table in sorted(Base.metadata.tables.values(), key=lambda t: t.name):
+        for constraint in table.constraints:
+            if not isinstance(constraint, SACheckConstraint):
+                continue
+            if not constraint.name:
+                # Anonymous CHECKs are out of scope: the migration side
+                # identifies CHECKs by name.
+                continue
+            key = (table.name, constraint.name)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append((table.name, constraint.name, _normalize(str(constraint.sqltext))))
+    return rows
+
+
+def _build_latest_migration_check_map() -> dict[tuple[str, str], str]:
+    """Walk migrations in filename order; the last definition for each
+    ``(table, name)`` wins."""
+    latest: dict[tuple[str, str], str] = {}
+    for path in sorted(MIGRATIONS_DIR.glob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        extractor = _MigrationCheckExtractor(path.read_text(), path)
+        for table, name, sql in extractor.checks:
+            latest[(table, name)] = sql
+    return latest
+
+
+# Computed once at module import. ~14 model modules + ~30 migrations: cheap.
+_ORM_CHECKS: list[tuple[str, str, str]] = _enumerate_orm_check_constraints()
+_MIGRATION_CHECKS: dict[tuple[str, str], str] = _build_latest_migration_check_map()
+
+
+# ---------------------------------------------------------------------------
+# The main parametrized drift test.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "table_name, constraint_name, orm_sql",
+    _ORM_CHECKS,
+    ids=[f"{t}.{n}" for t, n, _ in _ORM_CHECKS],
+)
+def test_orm_check_constraint_matches_latest_migration(
+    table_name: str, constraint_name: str, orm_sql: str
+) -> None:
+    """Each ORM CHECK constraint must match the latest migration's CHECK.
+
+    Failure modes this catches:
+
+    - ORM was updated, no migration shipped → production schema rejects new
+      values (the #568 case before the migration landed).
+    - Migration was shipped, ORM not updated → ``Base.metadata.create_all``
+      tests reject values that production accepts (the #568 case after the
+      migration landed but before the ORM follow-up).
+    - Subtle whitespace / quoting drift between the two strings (caught
+      after normalization, so this only fires on real semantic drift).
+    """
+    migration_sql = _MIGRATION_CHECKS.get((table_name, constraint_name))
+    assert migration_sql is not None, (
+        f"ORM defines CHECK '{constraint_name}' on '{table_name}' but no "
+        f"alembic migration creates it. Add a migration with "
+        f"op.create_check_constraint(...) or "
+        f'op.execute("ALTER TABLE {table_name} ADD CONSTRAINT '
+        f'{constraint_name} CHECK (...)").'
+    )
+    assert orm_sql == migration_sql, (
+        f"Drift detected on {table_name}.{constraint_name}:\n"
+        f"  ORM      : {orm_sql!r}\n"
+        f"  Migration: {migration_sql!r}\n"
+        f"Update either backend/src/models/<file>.py __table_args__ or add "
+        f"an alembic migration that re-defines the CHECK to match."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Named regression: PR #568 / extra_sleep_contexts.
+# Lives separately from the parametrized loop so the bug class has a
+# permanent, grep-able test name even if the parametrize ids change.
+# ---------------------------------------------------------------------------
+def test_regression_extra_sleep_contexts_in_addon_check() -> None:
+    """PR #568 review loop 1 caught ``extra_sleep_contexts`` missing from
+    the ORM CHECK. This test guarantees it stays present on both sides."""
+    target = next(
+        (
+            (table, name, sql)
+            for table, name, sql in _ORM_CHECKS
+            if table == "workspace_addons" and name == "check_addon_type"
+        ),
+        None,
+    )
+    assert target is not None, (
+        "WorkspaceAddon.check_addon_type is missing from Base.metadata — "
+        "the constraint may have been renamed or dropped."
+    )
+    _, _, orm_sql = target
+    assert "extra_sleep_contexts" in orm_sql, (
+        "extra_sleep_contexts (added in PR #568) is missing from the ORM "
+        "WorkspaceAddon.__table_args__ CHECK clause."
+    )
+    migration_sql = _MIGRATION_CHECKS.get(("workspace_addons", "check_addon_type"))
+    assert migration_sql is not None, (
+        "No alembic migration defines workspace_addons.check_addon_type."
+    )
+    assert "extra_sleep_contexts" in migration_sql, (
+        "extra_sleep_contexts is missing from the latest alembic migration "
+        "that defines workspace_addons.check_addon_type."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Meta-tests: detector helpers must work on representative inputs.
+# ---------------------------------------------------------------------------
+def test_normalize_collapses_whitespace_and_trailing_punctuation() -> None:
+    assert _normalize("a IN ('x', 'y')") == "a IN ('x', 'y')"
+    assert _normalize("a IN ('x',\n  'y')") == "a IN ('x', 'y')"
+    assert _normalize("  a IN ('x')  ;") == "a IN ('x')"
+    assert _normalize("a   IN\n('x')") == "a IN ('x')"
+
+
+def test_find_check_clauses_handles_multiline_separate_alter_table() -> None:
+    sql = (
+        "ALTER TABLE workspace_addons ADD CONSTRAINT check_addon_type\n"
+        "        CHECK (addon_type IN ('a', 'b', 'c'))"
+    )
+    clauses = _find_check_clauses_in_sql(sql)
+    assert clauses == [("workspace_addons", "check_addon_type", "addon_type IN ('a', 'b', 'c')")]
+
+
+def test_find_check_clauses_handles_compound_drop_add() -> None:
+    """Compound ``ALTER TABLE t DROP CONSTRAINT …, ADD CONSTRAINT … CHECK
+    (…)`` is the zero-downtime DDL pattern in d05_523/d07_495. The ADD
+    must pair with the same single ``ALTER TABLE`` even though a DROP sits
+    between them."""
+    sql = (
+        "ALTER TABLE sleep_report_llm_usage "
+        "DROP CONSTRAINT IF EXISTS valid_phase, "
+        "ADD CONSTRAINT valid_phase CHECK (phase IN ('a', 'b')) NOT VALID"
+    )
+    clauses = _find_check_clauses_in_sql(sql)
+    assert clauses == [("sleep_report_llm_usage", "valid_phase", "phase IN ('a', 'b')")]
+
+
+def test_find_check_clauses_handles_nested_parens() -> None:
+    """A CHECK whose body itself contains parens (e.g. ``IN (…)``) must be
+    extracted with paren-balanced matching, not naive non-greedy regex."""
+    sql = "ALTER TABLE t ADD CONSTRAINT c CHECK ((a = 1 AND b IN ('x', 'y')) OR c IS NULL)"
+    clauses = _find_check_clauses_in_sql(sql)
+    assert clauses == [("t", "c", "(a = 1 AND b IN ('x', 'y')) OR c IS NULL")]
+
+
+def test_normalize_sorts_in_list_literals() -> None:
+    """Two CHECKs with the same set of IN-list literals but different
+    textual order must normalize equal — order is not semantically
+    meaningful for SQL ``IN``."""
+    a = _normalize("status IN ('cancelled', 'pending', 'in_progress')")
+    b = _normalize("status IN ('pending', 'in_progress', 'cancelled')")
+    assert a == b
+    # Different sets must NOT normalize equal.
+    c = _normalize("status IN ('pending', 'in_progress')")
+    assert a != c
+
+
+def test_normalize_does_not_mangle_compound_in_clauses() -> None:
+    """A CHECK with two IN clauses (``a IN (…) AND b IN (…)``) must NOT
+    match the IN-list rewrite path — earlier the non-greedy ``.+?`` would
+    consume across the inner ``)`` and produce a corrupted literal split.
+    Compound clauses fall through to whitespace-only normalization."""
+    sql = "a IN ('x', 'y') AND b IN ('z')"
+    out = _normalize(sql)
+    assert out == sql
+    # Sanity: the simple form still gets sorted.
+    assert _normalize("a IN ('y', 'x')") == "a IN ('x', 'y')"
+
+
+def test_extractor_handles_kwargs_create_check_constraint() -> None:
+    """``op.create_check_constraint`` accepts its three string arguments
+    either positionally or by keyword. The detector must capture both
+    forms or it silently drops coverage on kwarg-style migrations."""
+    source = (
+        "from alembic import op\n"
+        "def upgrade():\n"
+        "    op.create_check_constraint(\n"
+        '        constraint_name="valid_kw",\n'
+        '        table_name="t",\n'
+        "        condition=\"x IN ('a', 'b')\",\n"
+        "    )\n"
+    )
+    extractor = _MigrationCheckExtractor(source, Path("synthetic.py"))
+    assert extractor.checks == [("t", "valid_kw", "x IN ('a', 'b')")]
+
+
+def test_string_from_ast_resolves_fstring_with_constant() -> None:
+    """An f-string with a ``{NAME}`` reference to a known module-level
+    string constant resolves; with an unknown name it returns ``None``."""
+    tree = ast.parse('FOO = "hello"\nBAR = f"prefix {FOO} suffix"\n')
+    constants = {"FOO": "hello"}
+    fstring_node = tree.body[1].value  # type: ignore[attr-defined]
+    assert _string_from_ast(fstring_node, constants) == "prefix hello suffix"
+    # Unknown name → None
+    assert _string_from_ast(fstring_node, {}) is None
+
+
+def test_detector_discovers_at_least_one_check_per_known_constraint() -> None:
+    """Sanity check: the migration sweep must find the canonical CHECKs we
+    know exist. If this fails, the AST extractor is silently dropping
+    something and the parametrized test would give false confidence."""
+    assert ("workspace_addons", "check_addon_type") in _MIGRATION_CHECKS, (
+        "Migration sweep did not find workspace_addons.check_addon_type — "
+        "AST extractor may be broken."
+    )
+    assert ("workspaces", "valid_plan_name") in _MIGRATION_CHECKS, (
+        "Migration sweep did not find workspaces.valid_plan_name."
+    )
+    assert ("users", "valid_role") in _MIGRATION_CHECKS, (
+        "Migration sweep did not find users.valid_role."
+    )
