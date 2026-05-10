@@ -14,28 +14,7 @@ from uuid import uuid4
 import pytest
 
 from services.file_storage_service import FileStorageService
-
-
-class _FakeBlobStorage:
-    def __init__(self) -> None:
-        self.objects: dict[str, tuple[bytes, str, str]] = {}
-
-    async def write_object(self, key, data, content_type, sha256):
-        self.objects[key] = (data, content_type, sha256)
-
-    async def head_object(self, key):
-        if key not in self.objects:
-            return None
-        return {"size_bytes": len(self.objects[key][0]), "etag": self.objects[key][2]}
-
-    async def delete_object(self, key):
-        self.objects.pop(key, None)
-
-    async def generate_presigned_put(self, key, content_type, size_bytes, ttl_seconds, sha256):
-        return f"put://{key}"
-
-    async def generate_presigned_get(self, key, filename, ttl_seconds):
-        return f"get://{key}"
+from tests.storage._fakes import FakeBlobStorage
 
 
 @pytest.fixture
@@ -50,7 +29,7 @@ def attachment_id():
 
 @pytest.fixture
 def fake_storage():
-    return _FakeBlobStorage()
+    return FakeBlobStorage()
 
 
 @pytest.fixture

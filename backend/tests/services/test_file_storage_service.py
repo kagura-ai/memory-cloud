@@ -1,8 +1,8 @@
 """Unit tests for ``FileStorageService`` (Issue #485).
 
-Mocks the DB session and uses the in-memory ``BlobStorageProtocol``
-fake from ``tests.storage.test_protocol`` so this file does not depend
-on aioboto3 or a real Redis. SQL constraint behaviour (partial unique
+Mocks the DB session and uses the shared in-memory ``BlobStorageProtocol``
+fake from ``tests.storage._fakes`` so this file does not depend on
+aioboto3 or a real Redis. SQL constraint behaviour (partial unique
 violations, CHECK constraints, computed columns) is covered by the
 integration suite gated on ``make test-integration``.
 """
@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from services.file_storage_service import FileStorageService, ReserveResult
+from tests.storage._fakes import FakeBlobStorage
 from utils.exceptions import (
     ConflictError,
     NotFoundException,
@@ -23,36 +24,6 @@ from utils.exceptions import (
     UnsupportedMediaTypeError,
     ValidationError,
 )
-
-
-# Reusable in-memory blob storage matching BlobStorageProtocol
-class _FakeBlobStorage:
-    def __init__(self) -> None:
-        self.objects: dict[str, tuple[bytes, str, str]] = {}
-        self.head_size_override: int | None = None
-
-    async def write_object(self, key, data, content_type, sha256):
-        self.objects[key] = (data, content_type, sha256)
-
-    async def head_object(self, key):
-        if key not in self.objects:
-            return None
-        size = self.head_size_override
-        if size is None:
-            size = len(self.objects[key][0])
-        return {"size_bytes": size, "etag": self.objects[key][2]}
-
-    async def delete_object(self, key):
-        self.objects.pop(key, None)
-
-    async def generate_presigned_put(self, key, content_type, size_bytes, ttl_seconds, sha256):
-        return (
-            f"https://test.local/put/{key}?size={size_bytes}&ttl={ttl_seconds}&sha256={sha256[:8]}"
-        )
-
-    async def generate_presigned_get(self, key, filename, ttl_seconds):
-        return f"https://test.local/get/{key}?file={filename}&ttl={ttl_seconds}"
-
 
 VALID_SHA = "a" * 64
 
@@ -97,7 +68,7 @@ def workspace_id():
 
 @pytest.fixture
 def fake_storage():
-    return _FakeBlobStorage()
+    return FakeBlobStorage()
 
 
 @pytest.fixture
