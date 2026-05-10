@@ -369,13 +369,127 @@ def _enumerate_orm_check_constraints() -> list[tuple[str, str, str]]:
     return rows
 
 
-def _build_latest_migration_check_map() -> dict[tuple[str, str], str]:
-    """Walk migrations in filename order; the last definition for each
-    ``(table, name)`` wins."""
-    latest: dict[tuple[str, str], str] = {}
+def _migration_revision_metadata(path: Path) -> tuple[str | None, list[str]]:
+    """AST-parse a migration file and extract ``(revision, [down_revision_ids])``.
+
+    Returns ``(None, [])`` if the file cannot be parsed or its revision
+    metadata is absent. ``down_revision`` may be ``None`` (root), a single
+    string (linear chain), or a tuple of strings (a merge migration); all
+    three forms are flattened into a list for uniform graph construction.
+    """
+    try:
+        tree = ast.parse(path.read_text(), filename=str(path))
+    except SyntaxError:
+        return (None, [])
+    rev: str | None = None
+    down_ids: list[str] = []
+    for node in tree.body:
+        target_name: str | None = None
+        value_node: ast.AST | None = None
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+        ):
+            target_name = node.target.id
+            value_node = node.value
+        elif (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            target_name = node.targets[0].id
+            value_node = node.value
+        if target_name is None or value_node is None:
+            continue
+        if target_name == "revision":
+            rev = _string_from_ast(value_node)
+        elif target_name == "down_revision":
+            if isinstance(value_node, ast.Constant) and value_node.value is None:
+                down_ids = []
+            elif isinstance(value_node, ast.Tuple):
+                for elt in value_node.elts:
+                    s = _string_from_ast(elt)
+                    if s:
+                        down_ids.append(s)
+            else:
+                s = _string_from_ast(value_node)
+                if s:
+                    down_ids = [s]
+    return (rev, down_ids)
+
+
+def _migrations_in_dependency_order() -> list[Path]:
+    """Return migration file paths in alembic dependency order (oldest first).
+
+    Filename-sort is **not** a substitute for dependency order: alembic's
+    ``down_revision`` chain can — and in this repo does — disagree with
+    filename sort (``a120_*`` has ``down_revision="a90_*"`` yet sorts
+    before ``a51_*`` lexicographically). Picking the wrong "latest"
+    definition would silently mismatch the production schema.
+
+    Builds a forward graph (``down_revision → [revisions]``) by AST-parsing
+    each migration's revision metadata, then performs a Kahn-style
+    topological walk from the root(s). Migrations whose metadata can't be
+    parsed are appended at the end (filename-sorted) so they still get
+    scanned even if their position is unknown.
+    """
+    rev_to_path: dict[str, Path] = {}
+    rev_to_downs: dict[str, list[str]] = {}
+    unparseable: list[Path] = []
     for path in sorted(MIGRATIONS_DIR.glob("*.py")):
         if path.name == "__init__.py":
             continue
+        rev, downs = _migration_revision_metadata(path)
+        if rev is None:
+            unparseable.append(path)
+            continue
+        rev_to_path[rev] = path
+        rev_to_downs[rev] = downs
+
+    # Forward graph: down_revision → [revisions that point to it]. Roots use
+    # the ``None`` key (down_revision is empty list).
+    forward: dict[str | None, list[str]] = {}
+    indegree: dict[str, int] = {}
+    for rev, downs in rev_to_downs.items():
+        indegree[rev] = len(downs)
+        if not downs:
+            forward.setdefault(None, []).append(rev)
+        else:
+            for d in downs:
+                forward.setdefault(d, []).append(rev)
+
+    # Kahn's algorithm: start from indegree-0 (roots).
+    ordered: list[Path] = []
+    queue: list[str] = [r for r, d in indegree.items() if d == 0]
+    queue.sort()  # deterministic root ordering when there are multiple
+    while queue:
+        rev = queue.pop(0)
+        ordered.append(rev_to_path[rev])
+        for child in sorted(forward.get(rev, [])):
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                queue.append(child)
+
+    # Any leftover revisions (cycles or unreachable) — shouldn't happen with
+    # a valid alembic chain, but append deterministically so we don't drop
+    # CHECK definitions silently.
+    seen_paths = set(ordered)
+    for path in rev_to_path.values():
+        if path not in seen_paths:
+            ordered.append(path)
+            seen_paths.add(path)
+    for path in unparseable:
+        if path not in seen_paths:
+            ordered.append(path)
+    return ordered
+
+
+def _build_latest_migration_check_map() -> dict[tuple[str, str], str]:
+    """Walk migrations in alembic dependency order; the last definition for
+    each ``(table, name)`` wins."""
+    latest: dict[tuple[str, str], str] = {}
+    for path in _migrations_in_dependency_order():
         extractor = _MigrationCheckExtractor(path.read_text(), path)
         for table, name, sql in extractor.checks:
             latest[(table, name)] = sql
@@ -553,6 +667,43 @@ def test_string_from_ast_resolves_fstring_with_constant() -> None:
     assert _string_from_ast(fstring_node, constants) == "prefix hello suffix"
     # Unknown name → None
     assert _string_from_ast(fstring_node, {}) is None
+
+
+def test_migration_revision_metadata_extracts_revision_chain() -> None:
+    """``_migration_revision_metadata`` must extract ``revision`` and
+    ``down_revision`` strings from real migration files. Pinning a known
+    case — ``a120_add_neural_gating_config.py`` revises ``a90_*`` per its
+    ``down_revision`` — guards the AST extractor from regressing on the
+    revision chain (Copilot loop 1)."""
+    a120 = MIGRATIONS_DIR / "a120_add_neural_gating_config.py"
+    assert a120.exists(), "a120 migration is missing — sentinel needs updating"
+    rev, downs = _migration_revision_metadata(a120)
+    assert rev == "a120_neural_gating"
+    assert downs == ["a90_ollama_reranker"]
+
+
+def test_migrations_in_dependency_order_respects_alembic_chain() -> None:
+    """Filename sort and dependency order disagree in this repo:
+    ``a120_*`` filename-sorts BEFORE ``a51_*`` (lexicographic ``a1`` < ``a5``)
+    but its ``down_revision`` is ``a90_*``. The dependency walk must place
+    ``a120_*`` AFTER ``a90_*`` in the returned path list (Copilot loop 1)."""
+    paths = _migrations_in_dependency_order()
+    names = [p.name for p in paths]
+    a90_idx = next(
+        (i for i, n in enumerate(names) if n == "a90_add_ollama_reranker_provider.py"),
+        None,
+    )
+    a120_idx = next(
+        (i for i, n in enumerate(names) if n == "a120_add_neural_gating_config.py"),
+        None,
+    )
+    assert a90_idx is not None and a120_idx is not None, (
+        "a90 / a120 sentinel migrations missing — update the test"
+    )
+    assert a120_idx > a90_idx, (
+        f"dependency walk placed a120 before a90 (a90={a90_idx}, a120={a120_idx}) — "
+        f"filename sort is leaking through"
+    )
 
 
 def test_detector_discovers_at_least_one_check_per_known_constraint() -> None:
