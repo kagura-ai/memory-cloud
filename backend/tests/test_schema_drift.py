@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -292,9 +293,23 @@ class _MigrationCheckExtractor:
         )
         if upgrade is None:
             return
-        for node in ast.walk(upgrade):
-            if isinstance(node, ast.Call):
-                self._process_call(node)
+        # DFS preorder, NOT ast.walk: ast.walk is breadth-first by depth,
+        # which yields a sibling top-level call BEFORE a source-earlier call
+        # nested inside an if/with/for body. _build_latest_migration_check_map
+        # relies on iteration order for "last definition wins" semantics, so
+        # a migration that DROP+ADD-CONSTRAINTs the same CHECK across a
+        # control-flow boundary would be resolved incorrectly with BFS.
+        for call in self._iter_calls_preorder(upgrade):
+            self._process_call(call)
+
+    @staticmethod
+    def _iter_calls_preorder(node: ast.AST) -> Iterator[ast.Call]:
+        """Yield every ``Call`` descended from ``node`` in DFS preorder
+        (source order). Replacement for ``ast.walk`` — see ``_scan_upgrade``."""
+        if isinstance(node, ast.Call):
+            yield node
+        for child in ast.iter_child_nodes(node):
+            yield from _MigrationCheckExtractor._iter_calls_preorder(child)
 
     def _process_call(self, node: ast.Call) -> None:
         func = node.func
@@ -706,6 +721,30 @@ def test_string_from_ast_resolves_fstring_with_constant() -> None:
     assert _string_from_ast(fstring_node, constants) == "prefix hello suffix"
     # Unknown name → None
     assert _string_from_ast(fstring_node, {}) is None
+
+
+def test_extractor_walks_calls_in_source_order_across_control_flow() -> None:
+    """Within a single migration, ``upgrade()`` must be walked in source
+    order (DFS preorder), NOT ``ast.walk`` BFS-by-depth. If a CHECK is
+    redefined twice across a control-flow boundary (e.g. inside an ``if``),
+    the LAST source-order definition must win — BFS would report the
+    later-source call first because the nested call sits one level deeper.
+    Copilot loop 4 finding."""
+    source = (
+        "from alembic import op\n"
+        "def upgrade():\n"
+        "    if True:\n"
+        '        op.create_check_constraint("c", "t", "x IN (\'a\', \'b\')")\n'
+        "    op.create_check_constraint(\"c\", \"t\", \"x IN ('a', 'b', 'c')\")\n"
+    )
+    extractor = _MigrationCheckExtractor(source, Path("synthetic.py"))
+    # Source order: nested-call first (inside the if), then top-level. The
+    # last entry — the top-level call — is the post-if-branch definition
+    # and must win in _build_latest_migration_check_map.
+    assert extractor.checks == [
+        ("t", "c", "x IN ('a', 'b')"),
+        ("t", "c", "x IN ('a', 'b', 'c')"),
+    ]
 
 
 def test_migration_revision_metadata_extracts_revision_chain() -> None:
