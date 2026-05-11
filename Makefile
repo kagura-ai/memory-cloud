@@ -190,10 +190,41 @@ test-watch:
 	cd $(BACKEND_DIR) && pytest-watch
 
 .PHONY: lint
-lint:
+lint: lint-models-no-column
 	@echo "Running linter..."
 	cd $(BACKEND_DIR) && ruff check src/ tests/
 	@echo "Lint complete."
+
+# Guard against drift back to the legacy SQLAlchemy 1.x Column() pattern in
+# model files (#596 / epic #370). The regex accepts both forms the half-
+# migration trap produces:
+#
+#   - bare:        `name = Column(...)`
+#   - annotated:   `id: int = Column(...)`  ← pyright accepts but SA 2.0 does
+#                                              NOT recognize as a Mapped attr
+#
+# POSIX character classes ([[:space:]] / [[:alnum:]_]) are used instead of
+# the GNU \s / \w shorthand so the guard is portable across GNU grep
+# (Linux CI) and BSD grep (macOS dev). The shorthand would be treated as
+# literal `s` / `w` on BSD and silently let regressions through.
+#
+# Negative-case smoke test lives at backend/tests/test_models_no_column_guard.py.
+.PHONY: lint-models-no-column
+lint-models-no-column:
+	@if grep -rnE '^[[:space:]]+[[:alnum:]_]+(:[[:space:]]*[^=]+)?[[:space:]]*=[[:space:]]*Column\(' $(BACKEND_DIR)/src/models/; then \
+	  echo ""; \
+	  echo "ERROR: legacy 'Column(...)' usage detected in $(BACKEND_DIR)/src/models/."; \
+	  echo "Use 'Mapped[T] = mapped_column(...)' instead. The annotated half-migration"; \
+	  echo "form 'id: int = Column(...)' is also rejected because SQLAlchemy 2.0 does"; \
+	  echo "not recognize it as a Mapped attribute (it silently fails type-resolution)."; \
+	  exit 1; \
+	else \
+	  EC=$$?; \
+	  if [ "$$EC" -ne 1 ]; then \
+	    echo "ERROR: grep failed with exit $$EC scanning $(BACKEND_DIR)/src/models/ (likely missing directory, permission issue, or grep not installed)." >&2; \
+	    exit 1; \
+	  fi; \
+	fi
 
 .PHONY: format
 format:

@@ -12,12 +12,14 @@ Cost rows are NOT in this module — analysis runs emit a
 through the cost-grade plumbing introduced by #523.
 """
 
+import uuid
+from datetime import datetime
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
-    Column,
     DateTime,
     Float,
     ForeignKey,
@@ -29,6 +31,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
 
@@ -83,64 +86,66 @@ class MemoryAnalysis(Base):
 
     __tablename__ = "memory_analyses"
 
-    id = Column(
+    id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         primary_key=True,
         default=uuid4,
         server_default=text("gen_random_uuid()"),
     )
-    workspace_id = Column(
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
     )
-    context_id = Column(
+    context_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("contexts.id", ondelete="CASCADE"),
         nullable=False,
     )
 
-    started_at = Column(DateTime, nullable=False, server_default=func.now())
-    finished_at = Column(DateTime, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Dual default (Python + server) so flush() reads ``running`` without
     # a refresh AND raw INSERT paths satisfy NOT NULL.
-    status = Column(
+    status: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
         default="running",
         server_default=text("'running'"),
     )
-    triggered_by = Column(String(255), nullable=False)
+    triggered_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    model_id = Column(
+    model_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("llm_pricing.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    model_snapshot = Column(JSONB, nullable=False)
-    embedding_model = Column(String(100), nullable=False)
-    params = Column(JSONB, nullable=False)
-    input_count = Column(Integer, nullable=False)
+    model_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    embedding_model: Mapped[str] = mapped_column(String(100), nullable=False)
+    params: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    input_count: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    cost_estimated_cents = Column(Integer, nullable=True)
-    cost_actual_cents = Column(Integer, nullable=True)
+    cost_estimated_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_actual_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # ``platform`` reserved for v2 platform-paid mode; all v1 runs are BYOK.
-    paid_by = Column(
+    paid_by: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
         default="byok",
         server_default=text("'byok'"),
     )
 
-    quality = Column(JSONB, nullable=True)
-    overview = Column(Text, nullable=True)
-    error = Column(Text, nullable=True)
+    quality: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    overview: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Issue #496: human-readable cancellation reason when status='cancelled'.
     # NULL for non-cancelled runs. Distinct from `error` so a future
     # taxonomy can branch on (status='cancelled', reason='timeout' / 'admin'
     # / 'cost_cap' / 'user') without overloading the failure column.
-    cancellation_reason = Column(Text, nullable=True)
+    cancellation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -192,37 +197,37 @@ class MemoryAnalysisCluster(Base):
 
     __tablename__ = "memory_analysis_clusters"
 
-    id = Column(
+    id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         primary_key=True,
         default=uuid4,
         server_default=text("gen_random_uuid()"),
     )
-    analysis_id = Column(
+    analysis_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("memory_analyses.id", ondelete="CASCADE"),
         nullable=False,
     )
-    parent_id = Column(
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("memory_analysis_clusters.id", ondelete="CASCADE"),
         nullable=True,
     )
-    cluster_index = Column(Integer, nullable=False)
-    label = Column(Text, nullable=False)
-    description = Column(Text, nullable=True)
-    count = Column(Integer, nullable=False)
-    centroid_2d = Column(ARRAY(Float), nullable=False)
+    cluster_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    count: Mapped[int] = mapped_column(Integer, nullable=False)
+    centroid_2d: Mapped[list[float]] = mapped_column(ARRAY(Float), nullable=False)
     # NOTE: PostgreSQL cannot enforce FK on array elements, so a memory
     # deleted after a run lands here as a stale UUID. Read paths
     # (#496 API / #497 frontend) MUST LEFT JOIN against ``memories`` and
     # filter out NULLs rather than trusting every ID resolves.
-    representative_memory_ids = Column(
+    representative_memory_ids: Mapped[list[uuid.UUID]] = mapped_column(
         ARRAY(UUID(as_uuid=True)),
         nullable=False,
     )
-    property_stats = Column(JSONB, nullable=False)
-    label_confidence = Column(Float, nullable=False)
+    property_stats: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    label_confidence: Mapped[float] = mapped_column(Float, nullable=False)
 
     __table_args__ = (
         CheckConstraint(
@@ -258,23 +263,23 @@ class MemoryAnalysisAssignment(Base):
 
     __tablename__ = "memory_analysis_assignments"
 
-    analysis_id = Column(
+    analysis_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("memory_analyses.id", ondelete="CASCADE"),
         primary_key=True,
     )
-    memory_id = Column(
+    memory_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("memories.id", ondelete="CASCADE"),
         primary_key=True,
     )
-    cluster_id = Column(
+    cluster_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("memory_analysis_clusters.id", ondelete="CASCADE"),
         nullable=False,
     )
-    x = Column(Float, nullable=False)
-    y = Column(Float, nullable=False)
+    x: Mapped[float] = mapped_column(Float, nullable=False)
+    y: Mapped[float] = mapped_column(Float, nullable=False)
 
     __table_args__ = (
         Index(

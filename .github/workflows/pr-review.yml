@@ -219,6 +219,12 @@ jobs:
           ruff format --check src/
         continue-on-error: true  # Allow existing formatting issues
 
+      # 8b. Models no-Column guard (#596 / epic #370)
+      - name: Models no-Column guard
+        if: steps.check.outputs.authorized == 'true'
+        id: no_column_guard
+        run: make lint-models-no-column
+
       # 9. Type check
       - name: Type Check (pyright)
         if: steps.check.outputs.authorized == 'true'

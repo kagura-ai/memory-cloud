@@ -7,6 +7,9 @@ Provides ORM models for:
 - graph_memory table (NetworkX graph JSON storage)
 """
 
+import uuid
+from datetime import datetime
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import (
@@ -15,7 +18,6 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
-    Column,
     Computed,  # Migration 061: For generated columns
     DateTime,
     Float,
@@ -29,6 +31,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
 
@@ -74,12 +77,14 @@ class Memory(Base):
     __tablename__ = "memories"
 
     # 基本情報
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    user_id = Column(String(255), nullable=False, index=True)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
     # Migration 063: 3-level isolation (workspace, context, user)
-    workspace_id = Column(UUID(as_uuid=True), nullable=True, index=True)
-    context_id = Column(
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
+    context_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("contexts.id", ondelete="CASCADE"),
         nullable=True,
@@ -87,73 +92,80 @@ class Memory(Base):
     )
 
     # Layer 1: 検索用サマリー
-    summary = Column(Text, nullable=False)
-    summary_embedding_id = Column(UUID(as_uuid=True), nullable=True)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    summary_embedding_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
 
     # Issue #122: Embedding status tracking for transaction integrity
     # Values: 'pending', 'success', 'failed'
-    embedding_status = Column(String(20), nullable=False, default="pending")
-    embedding_error = Column(Text, nullable=True)
+    embedding_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    embedding_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Layer 2: 文脈説明
-    context_summary = Column(Text, nullable=True)
+    context_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Layer 3: 完全詳細
-    content = Column(Text, nullable=False)
-    details = Column(JSON, nullable=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    details: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     # メタデータ（LLM判断）
-    type = Column(String(50), nullable=False, index=True)
-    importance = Column(Float, nullable=False, default=0.5)
-    confidence = Column(Float, nullable=False, default=1.0)
-    tags = Column(ARRAY(String), nullable=True)
-    context = Column(JSON, nullable=True)
+    type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    importance: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    tags: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
+    context: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     # Working/Persistent メモリ
-    scope = Column(String(20), nullable=False, default="working", index=True)
-    long_term = Column(Boolean, nullable=False, default=False)
-    promoted_at = Column(DateTime, nullable=True)
+    scope: Mapped[str] = mapped_column(String(20), nullable=False, default="working", index=True)
+    long_term: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    promoted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # 利用統計（Consolidation判定用）
-    use_count = Column(Integer, nullable=False, default=0)
-    last_used_at = Column(DateTime, nullable=True)
-    accessed_by_clients = Column(ARRAY(String), nullable=True)
-    access_count = Column(Integer, nullable=False, default=0)
+    use_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    accessed_by_clients: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
+    access_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # システム情報
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=True, onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, onupdate=func.now()
+    )
 
     # Logical Delete (Issue #46 Phase 4)
-    deleted_at = Column(DateTime, nullable=True)
-    deleted_by = Column(String(255), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deleted_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # クライアント情報
-    client = Column(String(100), nullable=False)
-    client_version = Column(String(50), nullable=True)
+    client: Mapped[str] = mapped_column(String(100), nullable=False)
+    client_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     # Issue #262: Track memory creation source
     # P2-7: Remove index=True (index created in migration 057)
-    source = Column(String(50), nullable=False, default="mcp_remember")
+    source: Mapped[str] = mapped_column(String(50), nullable=False, default="mcp_remember")
 
     # Issue #213: Origin URI for external integration (Obsidian, code ingestion, web clipping)
     # Partial index idx_memories_source_uri created in migration a95
-    source_uri = Column(String(2048), nullable=True)
-    source_type = Column(String(20), nullable=True)  # file, url, vault, api, manual
+    source_uri: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    source_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # source_type: file, url, vault, api, manual
 
     # Migration 061: Generated columns for efficient resource memory lookups
     # These columns are automatically computed from details JSONB field
-    resource_id = Column(
+    resource_id: Mapped[str | None] = mapped_column(
         String(255),
         Computed("details->>'resource_id'", persisted=True),
         index=False,  # Index created in Migration 061
     )
-    resource_doc_id = Column(
+    resource_doc_id: Mapped[str | None] = mapped_column(
         String(255),
         Computed("details->>'doc_id'", persisted=True),
         index=False,  # Index created in Migration 061
     )
-    resource_version = Column(
+    resource_version: Mapped[int | None] = mapped_column(
         Integer,
         Computed(
             "CASE WHEN details->>'version' ~ '^[0-9]+$' THEN (details->>'version')::INTEGER ELSE NULL END",
@@ -165,12 +177,12 @@ class Memory(Base):
     # Issue #485: Polymorphic blob reference inside details.external_blob.
     # Phase 1 only writes backend='platform_r2'; Phase 2 BYO adds
     # 'byo_s3'/'byo_gcs' rows without altering this schema.
-    external_blob_backend = Column(
+    external_blob_backend: Mapped[str | None] = mapped_column(
         String(50),
         Computed("details->'external_blob'->>'backend'", persisted=True),
         index=False,  # Partial btree index created in migration e03_485
     )
-    external_blob_ref = Column(
+    external_blob_ref: Mapped[str | None] = mapped_column(
         String(2048),
         Computed("details->'external_blob'->>'ref'", persisted=True),
         index=False,  # Partial btree index created in migration e03_485
@@ -208,18 +220,20 @@ class Attachment(Base):
 
     __tablename__ = "attachments"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    memory_id = Column(
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    memory_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("memories.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
-    filename = Column(String(255), nullable=False)
-    content_type = Column(String(100), nullable=False)
-    size_bytes = Column(Integer, nullable=False)
-    data = Column(LargeBinary, nullable=False)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
 
     __table_args__ = (
         CheckConstraint("size_bytes > 0 AND size_bytes <= 5242880", name="attachment_size_limit"),
@@ -253,25 +267,29 @@ class GraphMemory(Base):
 
     __tablename__ = "graph_memory"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(String(255), nullable=False, unique=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
 
     # NetworkX グラフ全体（node_link_data形式）
-    graph_data = Column(JSON, nullable=False)
+    graph_data: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
     # 統計情報（キャッシュ・監視用）
-    total_nodes = Column(Integer, nullable=False, default=0)
-    total_edges = Column(Integer, nullable=False, default=0)
-    avg_edge_weight = Column(Float, nullable=False, default=0.0)
-    max_edge_weight = Column(Float, nullable=False, default=0.0)
+    total_nodes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_edges: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    avg_edge_weight: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    max_edge_weight: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
     # タイムスタンプ
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
 
     # パフォーマンス監視
-    last_decay_at = Column(DateTime, nullable=True)
-    last_consolidation_at = Column(DateTime, nullable=True)
+    last_decay_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_consolidation_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     def __repr__(self) -> str:
         return f"<GraphMemory(user='{self.user_id}', nodes={self.total_nodes}, edges={self.total_edges})>"
@@ -323,19 +341,19 @@ class NeuralMemoryEdge(Base):
     __tablename__ = "neural_memory_edges"
 
     # Primary key
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
 
     # Graph structure
-    user_id = Column(String(255), nullable=False, index=True)
-    src_id = Column(UUID(as_uuid=True), nullable=False, index=True)
-    dst_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    src_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    dst_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
 
     # Migration 062 added these as nullable; b03_396 backfilled NULL rows
     # from endpoint memories and enforced NOT NULL via CHECK constraint +
     # SET NOT NULL so the context_id FK's ON DELETE CASCADE cannot be
     # bypassed (prior NULL rows were a GDPR right-to-erasure death zone).
-    workspace_id = Column(UUID(as_uuid=True), nullable=False, index=True)
-    context_id = Column(
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    context_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("contexts.id", ondelete="CASCADE"),
         nullable=False,
@@ -343,17 +361,23 @@ class NeuralMemoryEdge(Base):
     )
 
     # Edge properties
-    edge_type = Column(String(50), nullable=False, default=EDGE_TYPE_NEURAL_ASSOCIATION)
-    weight = Column(Float, nullable=False, default=0.0)
-    confidence = Column(Float, nullable=False, default=1.0)
+    edge_type: Mapped[str] = mapped_column(
+        String(50), nullable=False, default=EDGE_TYPE_NEURAL_ASSOCIATION
+    )
+    weight: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
 
     # Metadata (flexible JSONB for future extensions)
     # Note: 'metadata' is reserved in SQLAlchemy, use edge_metadata
-    edge_metadata = Column("metadata", JSON, nullable=True)
+    edge_metadata: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSON, nullable=True)
 
     # Timestamps
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    last_updated = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    last_updated: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
 
     # Table constraints
     __table_args__ = (

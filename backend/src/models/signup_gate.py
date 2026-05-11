@@ -9,10 +9,12 @@ Sponsors-related columns on ``SignupGateConfig`` are reserved in Phase 1 and
 populated by Phase 2's GraphQL sync + webhook flow.
 """
 
+import uuid
+from datetime import datetime
+
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
-    Column,
     DateTime,
     Integer,
     String,
@@ -20,6 +22,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from db.base import Base
@@ -35,20 +38,28 @@ class SignupGateConfig(Base):
 
     __tablename__ = "signup_gate_config"
 
-    id = Column(Integer, primary_key=True)
-    enabled = Column(Boolean, nullable=False, server_default="false")
-    mode = Column(String(20), nullable=False, server_default="manual")
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    mode: Mapped[str] = mapped_column(String(20), nullable=False, server_default="manual")
 
     # --- Phase 2 (reserved — unused in Phase 1) ---
-    github_sponsors_account = Column(String(255), nullable=True)
-    github_sponsors_token_encrypted = Column(Text, nullable=True)
-    github_sponsors_webhook_secret_encrypted = Column(Text, nullable=True)
-    github_sponsors_min_tier_cents = Column(Integer, nullable=True)
-    github_sponsors_grace_period_days = Column(Integer, nullable=False, server_default="30")
-    last_sync_at = Column(DateTime, nullable=True)
+    github_sponsors_account: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    github_sponsors_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    github_sponsors_webhook_secret_encrypted: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    github_sponsors_min_tier_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    github_sponsors_grace_period_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="30"
+    )
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -69,24 +80,28 @@ class SignupAllowlistEntry(Base):
 
     __tablename__ = "signup_allowlist"
 
-    id = Column(
+    id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    github_user_id = Column(String(64), nullable=False, index=True)
-    github_username = Column(String(255), nullable=False)
-    source = Column(String(32), nullable=False, server_default="manual")
-    state = Column(String(16), nullable=False, server_default="active")
-    added_by_user_id = Column(String(255), nullable=True)
+    github_user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    github_username: Mapped[str] = mapped_column(String(255), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, server_default="manual")
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
+    added_by_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # --- Phase 2 (reserved — populated by Sponsors sync later) ---
-    sponsor_tier_cents = Column(Integer, nullable=True)
-    revoked_at = Column(DateTime, nullable=True)
-    grace_until = Column(DateTime, nullable=True)
+    sponsor_tier_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    grace_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
 
     __table_args__ = (
         CheckConstraint(

@@ -39,11 +39,14 @@ Phase C+ cleanup once all external API contracts have migrated to
 UUID-based identifiers.
 """
 
+import uuid
+from datetime import datetime
+from typing import Any
+
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
-    Column,
     DateTime,
     Float,  # Issue #262: For importance column
     ForeignKey,
@@ -58,6 +61,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
 from db.constraint_names import RESOURCE_EVENTS_UPSERT_UNIQUE
@@ -87,21 +91,23 @@ class Resource(Base):
 
     __tablename__ = "resources"
 
-    id = Column(
+    id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    workspace_id = Column(
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
-    resource_id = Column(String(255), nullable=False, index=True)
-    name = Column(Text, nullable=True)
-    created_by = Column(String(255), nullable=True)
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    resource_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -135,24 +141,34 @@ class ResourceEvent(Base):
 
     __tablename__ = "resource_events"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
-    resource_pk = Column(
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    resource_pk: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("resources.id", ondelete="CASCADE"),
         nullable=True,  # Phase 1 shadow column — tightened in #325
         index=True,
     )
-    resource_id = Column(String(255), nullable=False, index=True)
-    op = Column(String(10), nullable=False)  # 'upsert' or 'delete'
-    doc_id = Column(String(255), nullable=False)
-    version = Column(Integer, nullable=True)  # Issue #262: NULL = delete all versions
-    payload = Column(JSONB, nullable=True)  # NULL for delete operations
-    idempotency_key = Column(String(255), unique=True, nullable=True)
-    created_at = Column(DateTime, nullable=False, server_default=func.now(), index=True)
-    event_metadata = Column(JSONB, default={}, server_default="{}")
+    resource_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    op: Mapped[str] = mapped_column(String(10), nullable=False)  # 'upsert' or 'delete'
+    doc_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    version: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )  # Issue #262: NULL = delete all versions
+    payload: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True
+    )  # NULL for delete operations
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), index=True
+    )
+    event_metadata: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, default=dict, server_default="{}", nullable=True
+    )
     # Issue #262: Importance for Memory creation
     # P2-8: NOT NULL with DEFAULT 0.6 (Migration 059)
-    importance = Column(Float, nullable=False, default=0.6, server_default="0.6")
+    importance: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.6, server_default="0.6"
+    )
 
     __table_args__ = (
         CheckConstraint("op IN ('upsert', 'delete')", name="check_op_type"),
@@ -191,18 +207,22 @@ class ResourceSchema(Base):
 
     __tablename__ = "resource_schemas"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    resource_pk = Column(
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    resource_pk: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("resources.id", ondelete="CASCADE"),
         nullable=True,  # Phase 1 shadow column — tightened in #325
         index=True,
     )
-    resource_id = Column(String(255), nullable=False, index=True)
-    schema_version = Column(Integer, nullable=False, default=1)
-    field_definitions = Column(JSONB, nullable=False)
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+    resource_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    field_definitions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
 
     __table_args__ = (
         # Issue #323: partial UNIQUE(resource_pk, schema_version) created
@@ -243,28 +263,34 @@ class IndexerState(Base):
 
     __tablename__ = "indexer_state"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    resource_pk = Column(
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    resource_pk: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("resources.id", ondelete="CASCADE"),
         nullable=True,  # Phase 1 shadow column — tightened in #325
         index=True,
     )
-    resource_id = Column(String(255), nullable=False, index=True)
-    context_id = Column(
+    resource_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    context_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("contexts.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
-    last_offset = Column(BigInteger, nullable=False, default=0)
-    last_run_at = Column(DateTime, nullable=True)
-    next_run_at = Column(DateTime, nullable=True, index=True)
-    active_version = Column(Integer, nullable=False, default=1)
-    job_status = Column(String(20), nullable=False, default="idle")
-    metrics = Column(JSONB, default={}, server_default="{}")
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+    last_offset: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    active_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    job_status: Mapped[str] = mapped_column(String(20), nullable=False, default="idle")
+    metrics: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, default=dict, server_default="{}", nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -312,27 +338,29 @@ class ResourceToken(Base):
 
     __tablename__ = "resource_tokens"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    resource_pk = Column(
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    resource_pk: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("resources.id", ondelete="CASCADE"),
         nullable=True,  # Phase 1 shadow column — tightened in #325
         index=True,
     )
-    resource_id = Column(String(255), nullable=False, index=True)
-    workspace_id = Column(
+    resource_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=True,  # Phase 1 shadow column — tightened in #325
         index=True,
     )
-    token_hash = Column(String(255), nullable=False, unique=True)
-    description = Column(Text, nullable=True)
-    quota_events_per_hour = Column(Integer, nullable=False, default=1000)
-    created_by = Column(String(255), nullable=True)
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    last_used_at = Column(DateTime, nullable=True)
-    is_active = Column(Boolean, nullable=False, default=True)
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quota_events_per_hour: Mapped[int] = mapped_column(Integer, nullable=False, default=1000)
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
 class WorkspaceAddon(Base):
@@ -355,21 +383,27 @@ class WorkspaceAddon(Base):
 
     __tablename__ = "workspace_addons"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    workspace_id = Column(
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
-    addon_type = Column(String(50), nullable=False)
-    quantity = Column(Integer, nullable=False, default=1)
-    purchase_price_cents = Column(Integer, nullable=True)
-    stripe_product_id = Column(String(100), nullable=True)
-    active_from = Column(DateTime, nullable=False, server_default=func.now())
-    active_until = Column(DateTime, nullable=True)  # NULL = permanent/subscription
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    created_by = Column(String(255), nullable=False)
+    addon_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    purchase_price_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stripe_product_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    active_from: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    active_until: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )  # NULL = permanent/subscription
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
     __table_args__ = (
         CheckConstraint(

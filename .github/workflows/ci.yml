@@ -28,6 +28,9 @@ jobs:
       - name: Format check
         run: cd backend && ruff format --check src/ tests/
 
+      - name: Models no-Column guard
+        run: make lint-models-no-column
+
   backend-unit:
     runs-on: ubuntu-latest
     services:

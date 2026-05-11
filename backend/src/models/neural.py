@@ -4,11 +4,11 @@ Issue #107: Move neural config from env vars to database
 Issue #406: Add EmbeddingCalibration for knn_seed percentile calibration
 """
 
+import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import (
     CheckConstraint,
-    Column,
     DateTime,
     Float,
     ForeignKey,
@@ -19,6 +19,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import expression
 
 from db.base import Base
@@ -45,22 +46,26 @@ class NeuralConfig(Base):
 
     __tablename__ = "neural_config"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     # Configuration key-value
-    key = Column(String(64), nullable=False, unique=True, index=True)
-    value = Column(String(255), nullable=False)
-    value_type = Column(String(16), nullable=False, default="float")
-    category = Column(String(32), nullable=False, default="general", index=True)
+    key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    value: Mapped[str] = mapped_column(String(255), nullable=False)
+    value_type: Mapped[str] = mapped_column(String(16), nullable=False, default="float")
+    category: Mapped[str] = mapped_column(String(32), nullable=False, default="general", index=True)
 
     # Metadata
-    description = Column(Text, nullable=True)  # TEXT to match migration
-    min_value = Column(Float, nullable=True)
-    max_value = Column(Float, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)  # TEXT to match migration
+    min_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_value: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Timestamps
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
 
     def __repr__(self) -> str:
         return f"<NeuralConfig(key='{self.key}', value='{self.value}')>"
@@ -147,32 +152,34 @@ class EmbeddingCalibration(Base):
 
     __tablename__ = "embedding_calibrations"
 
-    id = Column(
+    id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         primary_key=True,
         server_default=expression.text("gen_random_uuid()"),
     )
-    model_name = Column(String(100), nullable=False)
-    dimensions = Column(Integer, nullable=False)
+    model_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
     # FK to contexts.id with ON DELETE CASCADE so per-context calibration
     # rows (v2) get cleaned up automatically when a context is deleted.
     # Nullable because model-global rows use NULL here (v1 runtime path).
-    context_id = Column(
+    context_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("contexts.id", ondelete="CASCADE"),
         nullable=True,
     )
 
-    p25 = Column(Float, nullable=False)
-    p50 = Column(Float, nullable=False)
-    p75 = Column(Float, nullable=False)
-    p90 = Column(Float, nullable=False)
-    p95 = Column(Float, nullable=False)
-    p99 = Column(Float, nullable=False)
+    p25: Mapped[float] = mapped_column(Float, nullable=False)
+    p50: Mapped[float] = mapped_column(Float, nullable=False)
+    p75: Mapped[float] = mapped_column(Float, nullable=False)
+    p90: Mapped[float] = mapped_column(Float, nullable=False)
+    p95: Mapped[float] = mapped_column(Float, nullable=False)
+    p99: Mapped[float] = mapped_column(Float, nullable=False)
 
-    sample_size = Column(Integer, nullable=False)
-    sampled_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    valid_until = Column(DateTime(timezone=True), nullable=False)
+    sample_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sampled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    valid_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
         CheckConstraint(
