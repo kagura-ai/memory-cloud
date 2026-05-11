@@ -8,12 +8,12 @@ Manages access control at workspace and context levels.
 from typing import NewType
 from uuid import UUID
 
-from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import Context, ContextMember, WorkspaceMember
 from services.workspace_service import WorkspaceService
+from utils.exceptions import AuthorizationError, NotFoundException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -88,7 +88,13 @@ class PermissionService:
             Workspace membership
 
         Raises:
-            HTTPException: 403 if user doesn't have required access or workspace is deleted
+            AuthorizationError: 403 if user doesn't have required access or
+                workspace is deleted. The fixed ``"Insufficient permissions"``
+                message uniformly hides which sub-reason fired (CWE-639
+                workspace enumeration defense). ``exc.details["reason"]``
+                carries one of ``"workspace_deleted"`` / ``"not_a_member"`` /
+                ``"role_too_low"`` for structured-log classification — never
+                surface this to clients.
         """
         # Issue #276: Verify workspace exists and is not deleted
         from sqlalchemy import select
@@ -104,9 +110,9 @@ class PermissionService:
         workspace = workspace_result.scalar_one_or_none()
 
         if not workspace:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Workspace {workspace_id} not found or has been deleted",
+            raise AuthorizationError(
+                "Insufficient permissions",
+                reason="workspace_deleted",
             )
 
         # Get membership
@@ -117,9 +123,9 @@ class PermissionService:
         )
 
         if not member:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Not a member of workspace {workspace_id}",
+            raise AuthorizationError(
+                "Insufficient permissions",
+                reason="not_a_member",
             )
 
         # Check role hierarchy
@@ -127,9 +133,9 @@ class PermissionService:
         required_weight = ORG_ROLE_WEIGHTS.get(required_role, 0)
 
         if user_weight < required_weight:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Requires '{required_role}' role or higher",
+            raise AuthorizationError(
+                "Insufficient permissions",
+                reason="role_too_low",
             )
 
         return member
@@ -184,8 +190,10 @@ class PermissionService:
             has access to.
 
         Raises:
-            HTTPException(404): slug does not exist, or exists only in
-                workspaces the caller cannot access.
+            NotFoundException: slug does not exist, or exists only in
+                workspaces the caller cannot access. The message is the
+                uniform ``"Resource not found"`` to keep the surface
+                indistinguishable from a completely unknown slug.
         """
         candidates = (
             (
@@ -208,13 +216,13 @@ class PermissionService:
                     required_role=required_role,
                 )
                 return ctx
-            except HTTPException:
+            except (AuthorizationError, NotFoundException):
                 # Not this one — keep looking. Under a96's global UNIQUE there
                 # will be at most one live candidate, but we loop defensively
                 # in case the index is ever dropped for an operational reason.
                 continue
 
-        raise HTTPException(status_code=404, detail="Resource not found")
+        raise NotFoundException("Resource")
 
     async def resolve_context_for_workspace_read(
         self,
@@ -252,8 +260,10 @@ class PermissionService:
             required workspace role.
 
         Raises:
-            HTTPException(404): context does not exist, or the caller is not
+            NotFoundException: context does not exist, or the caller is not
                 a member of its owning workspace with the required role.
+                The uniform 404 hides whether the context exists in another
+                workspace (CWE-639 / OWASP A01).
         """
         context_result = await self.db.execute(
             select(Context).where(
@@ -269,7 +279,7 @@ class PermissionService:
                 context_id=str(context_id),
                 user_id=user_id,
             )
-            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+            raise NotFoundException("Context", str(context_id))
 
         # Private context: creator-only. Enforce here so graph / other
         # UUID-addressed read endpoints match ``can_access_memory`` semantics
@@ -284,7 +294,7 @@ class PermissionService:
                 context_workspace_id=str(context.workspace_id),
                 user_id=user_id,
             )
-            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+            raise NotFoundException("Context", str(context_id))
 
         try:
             workspace_member = await self.check_workspace_access(
@@ -292,20 +302,13 @@ class PermissionService:
                 workspace_id=context.workspace_id,
                 required_role=required_role,
             )
-        except HTTPException as exc:
-            # Classify the deny reason by the detail string so observability
-            # distinguishes cross-tenant probes (enumeration signal worth
-            # alerting on) from routine role-too-low / workspace-deleted paths.
-            # External 404 stays uniform regardless (CWE-639 / OWASP A01).
-            detail = str(exc.detail or "")
-            if "deleted" in detail:
-                reason = "workspace_deleted"
-            elif detail.startswith("Not a member"):
-                reason = "not_a_member"
-            elif "role" in detail.lower():
-                reason = "role_too_low"
-            else:
-                reason = "workspace_access_denied"
+        except AuthorizationError as exc:
+            # Classify the deny reason via the structured ``reason`` carried
+            # in ``AuthorizationError.details`` so observability distinguishes
+            # cross-tenant probes (enumeration signal worth alerting on) from
+            # routine role-too-low / workspace-deleted paths. External 404
+            # stays uniform regardless (CWE-639 / OWASP A01).
+            reason = exc.details.get("reason", "workspace_access_denied")
             logger.warning(
                 "context_read_denied",
                 reason=reason,
@@ -313,7 +316,7 @@ class PermissionService:
                 context_workspace_id=str(context.workspace_id),
                 user_id=user_id,
             )
-            raise HTTPException(status_code=404, detail=f"Context {context_id} not found") from None
+            raise NotFoundException("Context", str(context_id)) from None
 
         # Apply the same allowed_context_ids semantics that get_accessible_contexts
         # and check_context_access enforce for the lower-privilege roles. Without
@@ -334,7 +337,7 @@ class PermissionService:
                 context_workspace_id=str(context.workspace_id),
                 user_id=user_id,
             )
-            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+            raise NotFoundException("Context", str(context_id))
 
         if (
             workspace_member.role in ("member", "viewer")
@@ -348,7 +351,7 @@ class PermissionService:
                 context_workspace_id=str(context.workspace_id),
                 user_id=user_id,
             )
-            raise HTTPException(status_code=404, detail=f"Context {context_id} not found")
+            raise NotFoundException("Context", str(context_id))
 
         return context
 
@@ -363,7 +366,8 @@ class PermissionService:
             Workspace membership
 
         Raises:
-            HTTPException: 403 if not owner
+            AuthorizationError: 403 if not owner (see ``check_workspace_access``
+                for the structured ``details["reason"]`` payload).
         """
         return await self.check_workspace_access(user_id, workspace_id, required_role="owner")
 
@@ -378,7 +382,9 @@ class PermissionService:
             Workspace membership
 
         Raises:
-            HTTPException: 403 if not admin/owner
+            AuthorizationError: 403 if not admin/owner (see
+                ``check_workspace_access`` for the structured
+                ``details["reason"]`` payload).
         """
         return await self.check_workspace_access(user_id, workspace_id, required_role="admin")
 
@@ -425,7 +431,12 @@ class PermissionService:
             Tuple of (Context, effective_role)
 
         Raises:
-            HTTPException: 403 if user doesn't have required access
+            NotFoundException: 404 if the context does not exist.
+            AuthorizationError: 403 if user doesn't have required access.
+                Message is the uniform ``"Insufficient permissions"`` —
+                per-deny-path messages were intentionally stripped to remove
+                a CWE-639 enumeration vector. Use structured logs / sentry
+                breadcrumbs for the deny reason.
         """
         from sqlalchemy import select
 
@@ -438,7 +449,7 @@ class PermissionService:
         context = result.scalar_one_or_none()
 
         if not context:
-            raise HTTPException(status_code=404, detail="Context not found")
+            raise NotFoundException("Context")
 
         # Issue #165: Private context check (creator-only access)
         if context.is_private:
@@ -447,10 +458,7 @@ class PermissionService:
                 return context, "owner"
             else:
                 # Others cannot access private contexts
-                raise HTTPException(
-                    status_code=403,
-                    detail="This is a private context (creator only)",
-                )
+                raise AuthorizationError("Insufficient permissions")
 
         # Shared context: Check workspace membership
         workspace_member = await self.workspace_service.get_member(
@@ -460,10 +468,7 @@ class PermissionService:
         )
 
         if not workspace_member:
-            raise HTTPException(
-                status_code=403,
-                detail="Not a member of context's workspace",
-            )
+            raise AuthorizationError("Insufficient permissions")
 
         # Workspace owner/admin → bypass context checks (full access)
         # Note: allowed_context_ids is ignored for owner/admin
@@ -474,19 +479,13 @@ class PermissionService:
         # Issue #234: Check allowed_context_ids whitelist for member/viewer
         if workspace_member.allowed_context_ids is not None:
             if context_id not in workspace_member.allowed_context_ids:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Access to this context is not permitted",
-                )
+                raise AuthorizationError("Insufficient permissions")
 
         # Workspace viewer → read-only access (bypass context checks)
         if workspace_member.role == "viewer":
             # Check if viewer role meets requirement
             if required_role != "viewer":
-                raise HTTPException(
-                    status_code=403,
-                    detail="Workspace viewers have read-only access",
-                )
+                raise AuthorizationError("Insufficient permissions")
             return context, "viewer"
 
         # Workspace member → requires explicit context membership
@@ -498,20 +497,14 @@ class PermissionService:
         context_member = result.scalar_one_or_none()
 
         if not context_member:
-            raise HTTPException(
-                status_code=403,
-                detail="Not a member of this context",
-            )
+            raise AuthorizationError("Insufficient permissions")
 
         # Check context role hierarchy
         user_weight = CONTEXT_ROLE_WEIGHTS.get(context_member.role, 0)
         required_weight = CONTEXT_ROLE_WEIGHTS.get(required_role, 0)
 
         if user_weight < required_weight:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Requires '{required_role}' context role or higher",
-            )
+            raise AuthorizationError("Insufficient permissions")
 
         return context, context_member.role
 
@@ -526,7 +519,8 @@ class PermissionService:
             Context
 
         Raises:
-            HTTPException: 403 if no write access
+            NotFoundException: 404 if the context does not exist.
+            AuthorizationError: 403 if no write access.
         """
         context, role = await self.check_context_access(
             user_id,
@@ -546,7 +540,8 @@ class PermissionService:
             Context
 
         Raises:
-            HTTPException: 403 if not context owner
+            NotFoundException: 404 if the context does not exist.
+            AuthorizationError: 403 if not context owner.
         """
         context, role = await self.check_context_access(
             user_id,
@@ -711,7 +706,7 @@ class PermissionService:
         try:
             await self.check_context_owner(user_id, context_id)
             return True
-        except HTTPException:
+        except (AuthorizationError, NotFoundException):
             return False
 
     async def can_write_context(self, user_id: str, context_id: UUID) -> bool:
@@ -727,7 +722,7 @@ class PermissionService:
         try:
             await self.check_context_write(user_id, context_id)
             return True
-        except HTTPException:
+        except (AuthorizationError, NotFoundException):
             return False
 
     # ========================================================================
