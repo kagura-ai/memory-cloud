@@ -5,7 +5,7 @@ Issue #115 Phase B-2: Workspace-level Multi-tenancy
 Manages access control at workspace and context levels.
 """
 
-from typing import NewType
+from typing import Literal, NewType
 from uuid import UUID
 
 from sqlalchemy import select
@@ -23,6 +23,19 @@ logger = get_logger(__name__)
 # Mint at authz function boundaries; do not leak these into repository layers.
 CallerId = NewType("CallerId", str)
 MemoryAuthorId = NewType("MemoryAuthorId", str)
+
+# Structured deny-reason payload for ``AuthorizationError.details["reason"]``
+# raised by ``check_workspace_access``. Consumed by
+# ``resolve_context_for_workspace_read`` and ``resource_ingest`` for
+# enumeration-alert classification (CWE-639 observability — never surfaced
+# to clients). The fallback ``"workspace_access_denied"`` covers future
+# code paths that raise ``AuthorizationError`` without a structured reason.
+DenyReason = Literal[
+    "workspace_deleted",
+    "not_a_member",
+    "role_too_low",
+    "workspace_access_denied",
+]
 
 # Role hierarchy weights (higher = more privilege)
 ORG_ROLE_WEIGHTS = {
