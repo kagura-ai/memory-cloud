@@ -33,7 +33,7 @@ from services.permission_service import PermissionService
 from services.resource_lookup import resolve_resource_pk
 from services.resource_quota_service import check_event_quota
 from utils.datetime import utcnow
-from utils.exceptions import AuthorizationError, ConflictError, NotFoundException, ValidationError
+from utils.exceptions import AuthorizationError, ConflictError, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -186,12 +186,7 @@ async def _enforce_workspace_membership(
             workspace_id=context.workspace_id,
             required_role="member",
         )
-    except (NotFoundException, AuthorizationError) as auth_error:
-        # `reason` captures the underlying cause (workspace deleted /
-        # non-member / role-too-low) for forensics without re-leaking the
-        # detail to the caller. The "not_found" sentinel is the defensive
-        # fallback — NotFoundException is in the catch tuple for future-proofing
-        # but check_workspace_access only raises AuthorizationError today.
+    except AuthorizationError as auth_error:
         logger.warning(
             "cross_tenant_ingest_attempt",
             resource_id=context.resource_id,
@@ -199,7 +194,7 @@ async def _enforce_workspace_membership(
             target_workspace_id=str(context.workspace_id),
             token_creator=token_record.created_by,
             client_ip=request.client.host if request.client else None,
-            reason=auth_error.details.get("reason") or "not_found",
+            reason=auth_error.details.get("reason", "workspace_access_denied"),
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

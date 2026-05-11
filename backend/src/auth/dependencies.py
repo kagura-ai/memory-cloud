@@ -414,16 +414,16 @@ async def require_workspace_owner(
         await perm_service.check_workspace_owner(user_id, workspace_id)
     except (NotFoundException, AuthorizationError) as exc:
         # WARN on deny so audit pipelines can surface workspace-owner violations
-        # (audit / incident-response concern flagged by #389 gate1 review).
-        # status_code + sanitized message let downstream consumers distinguish
-        # a pure role violation (403) from other deny paths (e.g. 404 if the
-        # workspace was deleted mid-session), reducing false positives.
+        # (#389 gate1 review). The structured ``reason`` (workspace_deleted /
+        # not_a_member / role_too_low) is the actionable classification —
+        # exc.message is the uniform "Insufficient permissions" string by
+        # CWE-639 design, so logging it adds no signal.
         logger.warning(
             "workspace_owner_denied",
             user_id=user_id,
             workspace_id=str(workspace_id),
             status_code=exc.status_code,
-            detail=exc.message,
+            reason=exc.details.get("reason"),
         )
         raise
 
@@ -475,7 +475,7 @@ async def require_workspace_admin_session(
             user_id=user_id,
             workspace_id=str(workspace_id),
             status_code=exc.status_code,
-            detail=exc.message,
+            reason=exc.details.get("reason"),
         )
         raise
 
@@ -530,7 +530,7 @@ async def require_workspace_admin(
             user_id=user_id,
             workspace_id=str(workspace_id),
             status_code=exc.status_code,
-            detail=exc.message,
+            reason=exc.details.get("reason"),
         )
         raise
 
