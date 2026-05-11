@@ -45,10 +45,12 @@ PostgreSQL ENUM) — the rest of this codebase uses the same pattern
 PG ENUMs are painful to ALTER and don't play nicely with alembic.
 """
 
+from datetime import datetime
+from decimal import Decimal
+
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
-    Column,
     DateTime,
     Integer,
     Numeric,
@@ -56,6 +58,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
 
@@ -103,44 +106,46 @@ class LLMPricing(Base):
 
     __tablename__ = "llm_pricing"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
-    provider = Column(String(50), nullable=False)
-    model = Column(String(100), nullable=False)
-    unit_type = Column(String(30), nullable=False)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    unit_type: Mapped[str] = mapped_column(String(30), nullable=False)
     # Naive ``DateTime`` to match the codebase convention (everything stored
     # in UTC; see ``sleep_reports.started_at`` and the rest of
     # ``backend/src/models/``). Mixing tz-aware and tz-naive datetimes in
     # SQLAlchemy comparisons raises TypeError at the Python layer, so the
     # column type must agree with the join target. Callers pass naive UTC
     # datetimes (e.g. ``utils.datetime.utcnow()``).
-    effective_from = Column(DateTime, nullable=False)
+    effective_from: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
     # Tier breakpoint columns. ``context_min_tokens`` defaults to 0 (no
     # lower bound). ``context_max_tokens`` is nullable for "no upper bound";
     # most rows have NULL here. Gemini 2.5 Pro is the canonical multi-tier
     # case in the 2026-04-28 seed.
-    context_min_tokens = Column(Integer, nullable=False, default=0)
-    context_max_tokens = Column(Integer, nullable=True)
+    context_min_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    context_max_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # NUMERIC(14, 10) gives 4 digits before the decimal and 10 after — enough
     # for prices like 25.0000000000 (Claude Opus output, $25/1M) down to
     # 0.0000200000 (text-embedding-3-small, $0.02/1M) without rounding.
-    pricing_model = Column(
+    pricing_model: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
         default="per_token",
         server_default="per_token",
     )
 
-    price_per_unit = Column(Numeric(14, 10), nullable=False)
-    currency = Column(String(3), nullable=False, default="USD")
+    price_per_unit: Mapped[Decimal] = mapped_column(Numeric(14, 10), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
 
     # Bridges per-1M-tokens (1_000_000) and per-1k-search-units (1_000)
     # so both fit the same row shape. Default 1_000_000 matches the
     # majority-case (token-based providers).
-    unit_denominator = Column(BigInteger, nullable=False, default=1_000_000)
+    unit_denominator: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1_000_000)
 
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
 
     __table_args__ = (
         # Composite uniqueness — multiple rows for the same
