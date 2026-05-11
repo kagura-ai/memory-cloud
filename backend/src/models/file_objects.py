@@ -21,8 +21,8 @@ with ``backend='byo_*'`` and ``ref=<bucket URI>``.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
-from uuid import UUID, uuid4
 
 from sqlalchemy import (
     BigInteger,
@@ -34,8 +34,7 @@ from sqlalchemy import (
     String,
     func,
 )
-from sqlalchemy.dialects.postgresql import BYTEA
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import BYTEA, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
@@ -58,9 +57,9 @@ class FileObject(Base):
 
     __tablename__ = "file_objects"
 
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    workspace_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
@@ -157,8 +156,8 @@ class WorkspaceStorageUsage(Base):
 
     __tablename__ = "workspace_storage_usage"
 
-    workspace_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         primary_key=True,
     )
