@@ -66,7 +66,6 @@ from utils.exceptions import (
     AuthorizationError,
     ConfigurationError,
     FeatureNotAvailableError,
-    NotFoundException,
     QuotaExceededError,
 )
 from utils.logger import get_logger
@@ -235,7 +234,7 @@ async def require_memory_analysis_access(
     perm = PermissionService(db)
     try:
         await perm.check_workspace_owner(user_id, workspace_id)
-    except (NotFoundException, AuthorizationError) as exc:
+    except AuthorizationError as exc:
         logger.warning(
             "memory_analysis_owner_denied",
             user_id=user_id,
@@ -304,7 +303,7 @@ async def require_memory_analysis_read(
     perm = PermissionService(db)
     try:
         await perm.check_workspace_owner(user_id, workspace_id)
-    except (NotFoundException, AuthorizationError) as exc:
+    except AuthorizationError as exc:
         logger.warning(
             "memory_analysis_read_denied",
             user_id=user_id,
@@ -348,9 +347,9 @@ async def check_memory_analysis_access_mcp(
 
     Returns the caller's ``user_timezone`` for downstream formatting.
 
-    Raises ``AuthorizationError`` / ``NotFoundException`` /
-    ``FeatureNotAvailableError`` / ``QuotaExceededError`` so the caller
-    can map to the MCP error envelope at one place.
+    Raises ``AuthorizationError`` / ``FeatureNotAvailableError`` /
+    ``QuotaExceededError`` so the caller can map to the MCP error envelope
+    at one place.
     """
     from services.permission_service import PermissionService
 

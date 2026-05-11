@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.base import get_db
 from models.auth import User
-from utils.exceptions import AuthorizationError, NotFoundException
+from utils.exceptions import AuthorizationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -412,7 +412,7 @@ async def require_workspace_owner(
     perm_service = PermissionService(db)
     try:
         await perm_service.check_workspace_owner(user_id, workspace_id)
-    except (NotFoundException, AuthorizationError) as exc:
+    except AuthorizationError as exc:
         # WARN on deny so audit pipelines can surface workspace-owner violations
         # (#389 gate1 review). The structured ``reason`` (workspace_deleted /
         # not_a_member / role_too_low) is the actionable classification —
@@ -469,7 +469,7 @@ async def require_workspace_admin_session(
     perm_service = PermissionService(db)
     try:
         await perm_service.check_workspace_admin(user_id, workspace_id)
-    except (NotFoundException, AuthorizationError) as exc:
+    except AuthorizationError as exc:
         logger.warning(
             "workspace_admin_session_denied",
             user_id=user_id,
@@ -522,7 +522,7 @@ async def require_workspace_admin(
     perm_service = PermissionService(db)
     try:
         await perm_service.check_workspace_admin(user_id, workspace_id)
-    except (NotFoundException, AuthorizationError) as exc:
+    except AuthorizationError as exc:
         # WARN on deny so audit pipelines can surface workspace-admin violations
         # (same audit-log pattern as require_workspace_owner — Issue #389 gate1).
         logger.warning(

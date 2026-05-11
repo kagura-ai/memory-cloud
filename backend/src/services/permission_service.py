@@ -91,10 +91,10 @@ class PermissionService:
             AuthorizationError: 403 if user doesn't have required access or
                 workspace is deleted. The fixed ``"Insufficient permissions"``
                 message uniformly hides which sub-reason fired (CWE-639
-                workspace enumeration defense). ``exc.details["reason"]``
-                carries one of ``"workspace_deleted"`` / ``"not_a_member"`` /
-                ``"role_too_low"`` for structured-log classification — never
-                surface this to clients.
+                workspace enumeration defense). ``exc.reason`` (private
+                attribute, never serialized to clients) carries one of
+                ``"workspace_deleted"`` / ``"not_a_member"`` / ``"role_too_low"``
+                for structured-log classification.
         """
         # Issue #276: Verify workspace exists and is not deleted
         from sqlalchemy import select
