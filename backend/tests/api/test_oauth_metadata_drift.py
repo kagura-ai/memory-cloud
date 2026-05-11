@@ -1,19 +1,6 @@
-"""Drift guard for OAuth metadata scope advertisements (#592).
-
-Issue #592 surfaced a 4-way drift between OAuth metadata sources that broke
-the Claude Code MCP DCR flow: ``oauth-authorization-server``,
-``oauth-protected-resource``, ``openid-configuration``, and the DCR
-``POST /oauth/register`` fallback each advertised a different
-``scopes_supported`` set, and the SDK's scope-mismatch check correctly
-invalidated all credentials when the union didn't match what was issued.
-
-The fix consolidates the canonical set in :mod:`auth.mcp_scopes`. This test
-file is the property test that PINS that contract — if any of the four
-sources drift again, one of these tests fails before production does.
-
-The tests are intentionally narrow: they assert set equality on
-``scopes_supported`` only. Other metadata fields (issuer, endpoints,
-PKCE methods) are covered by ``tests/smoke/test_well_known.py``.
+"""Property test pinning the canonical OAuth scope set across all four
+sources (three metadata endpoints + DCR fallback). Set equality only —
+other metadata fields are covered by ``tests/smoke/test_well_known.py``.
 """
 
 import sys
@@ -72,17 +59,13 @@ class TestMetadataScopesNoDrift:
 class TestDcrFallbackScopeNoDrift:
     """DCR fallback scope (``POST /oauth/register`` with no ``scope``) matches
     the canonical set, so a fresh DCR client holds every advertised scope.
-
-    Before #592, this fell back to ``memory:read memory:write offline_access``
-    while the well-known endpoints advertised ``memory:admin`` too — the
-    union/issued mismatch was what tripped the Claude Code SDK's scope check.
     """
 
     def _patched_dcr_session(self):
-        """Mock the DCR success path: rate-limit counter + sync DB session +
-        encryptor. Same shape as ``test_oauth_dcr._patch_dcr_dependencies``
-        but inlined to keep this file independent — drift guards should not
-        couple to other tests' fixtures.
+        """Same shape as ``test_oauth_dcr._patch_dcr_dependencies``, inlined
+        intentionally — a drift guard must not couple to fixtures owned by
+        other test files, or its contract becomes hostage to unrelated test
+        churn.
         """
         rate_limit = AsyncMock(return_value=1)
         fake_session = MagicMock()
@@ -131,25 +114,17 @@ class TestDcrFallbackScopeNoDrift:
         the contents AND the encoding (space-separated, RFC 6749 §3.3).
         """
         assert set(DCR_DEFAULT_SCOPE.split()) == set(ALL_ADVERTISED_SCOPES)
-        # space-separated, no leading/trailing whitespace, no double spaces
         assert DCR_DEFAULT_SCOPE == " ".join(ALL_ADVERTISED_SCOPES)
 
 
 class TestMcpAuthChallengeIncludesResourceMetadata:
-    """RFC 9728 §5.1: the ``WWW-Authenticate`` header on 401 responses from a
-    protected resource SHOULD include a ``resource_metadata`` attribute
-    pointing at the protected-resource metadata document. Before #592, the
-    Claude Code MCP SDK had to guess this URL by convention; making it
-    explicit closes the discovery hole.
-
-    This is a smoke test, not a full RFC 9728 audit — it asserts the header
-    is present and well-formed when MCP auth fails. End-to-end behavior with
-    a real Claude Code client is verified manually post-deploy.
+    """RFC 9728 §5.1: ``WWW-Authenticate`` on a 401 from a protected resource
+    SHOULD include a ``resource_metadata`` attribute pointing at the
+    protected-resource metadata document. Smoke test only — end-to-end
+    behavior with a real Claude Code client is verified manually.
     """
 
     def test_mcp_401_includes_resource_metadata_attr(self, client: TestClient) -> None:
-        # Unauthenticated GET to /mcp/ — auth should fail and emit RFC 6750 +
-        # RFC 9728 challenge.
         response = client.get("/mcp/")
         if response.status_code != 401:
             pytest.skip(

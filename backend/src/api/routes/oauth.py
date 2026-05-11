@@ -146,9 +146,6 @@ class OAuth2ClientCreateRequest(BaseModel):
     )
     response_types: list[str] = Field(default=["code"], description="Allowed response types")
     scope: str = Field(
-        # Canonical set lives in auth.mcp_scopes — #592 drift fix. Previously
-        # this default was "memory:read memory:write offline_access" which
-        # silently omitted memory:admin, causing scope drift vs metadata.
         default=DCR_DEFAULT_SCOPE,
         description="Space-separated scopes",
     )
@@ -729,10 +726,6 @@ async def dynamic_client_registration(
         plaintext_secret_encrypted = get_encryptor().encrypt(client_secret)
         visibility_expires_at = utcnow() + timedelta(minutes=10)
 
-        # For DCR: fall back to canonical advertised scope set if client did
-        # not request one. Defense in depth — the Pydantic default also points
-        # at DCR_DEFAULT_SCOPE, so this branch is only reachable if a future
-        # change widens the field type to Optional.
         scope = data.scope if data.scope else DCR_DEFAULT_SCOPE
 
         # Create OAuth2Client (DCR: owner_id=None, workspace_id=None, auth_method=none)

@@ -445,11 +445,6 @@ class OAuth2Client(Base):
     scope: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
-        # Canonical set lives in auth.mcp_scopes — #592 drift fix. Previously
-        # this default was "memory:read memory:write offline_access" which
-        # silently omitted memory:admin and drifted from the well-known
-        # metadata endpoints. Existing rows are migrated by Alembic
-        # e08_592_oauth_scope_canonicalize.
         default=DCR_DEFAULT_SCOPE,
     )
     token_endpoint_auth_method: Mapped[str] = mapped_column(
