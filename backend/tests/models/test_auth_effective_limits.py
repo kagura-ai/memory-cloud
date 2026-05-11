@@ -111,8 +111,12 @@ class TestZeroBaseBypassClosed:
         ids=[p[0] for p in EFFECTIVE_PROPERTIES],
     )
     def test_none_addon_treated_as_zero(self, prop_name, tier_attr, addon_attr, addon_scale):
-        """Fresh ``WorkspaceAddon``-less workspaces have ``NULL`` bonus
-        columns. Must not raise ``TypeError`` on ``None + int``.
+        """The ``addon_*_bonus`` columns are ``nullable=False`` with
+        ``server_default="0"`` so the DB never serves ``None``. This case
+        covers transient ORM objects (unflushed instances where the
+        attribute is still unset) and the defensive ``or 0`` coalescing
+        in ``_zero_floor`` — the helper must not raise ``TypeError`` if
+        it ever sees ``None``.
         """
         tier = MagicMock()
         setattr(tier, tier_attr, 100)
