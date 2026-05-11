@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.base import get_db
 from models.auth import User
+from utils.exceptions import AuthorizationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -411,18 +412,18 @@ async def require_workspace_owner(
     perm_service = PermissionService(db)
     try:
         await perm_service.check_workspace_owner(user_id, workspace_id)
-    except HTTPException as exc:
+    except AuthorizationError as exc:
         # WARN on deny so audit pipelines can surface workspace-owner violations
-        # (audit / incident-response concern flagged by #389 gate1 review).
-        # status_code + sanitized detail let downstream consumers distinguish
-        # a pure role violation (403) from other deny paths (e.g. 404 if the
-        # workspace was deleted mid-session), reducing false positives.
+        # (#389 gate1 review). The structured ``reason`` (workspace_deleted /
+        # not_a_member / role_too_low) is the actionable classification —
+        # exc.message is the uniform "Insufficient permissions" string by
+        # CWE-639 design, so logging it adds no signal.
         logger.warning(
             "workspace_owner_denied",
             user_id=user_id,
             workspace_id=str(workspace_id),
             status_code=exc.status_code,
-            detail=exc.detail if isinstance(exc.detail, str) else None,
+            reason=exc.reason,
         )
         raise
 
@@ -468,13 +469,13 @@ async def require_workspace_admin_session(
     perm_service = PermissionService(db)
     try:
         await perm_service.check_workspace_admin(user_id, workspace_id)
-    except HTTPException as exc:
+    except AuthorizationError as exc:
         logger.warning(
             "workspace_admin_session_denied",
             user_id=user_id,
             workspace_id=str(workspace_id),
             status_code=exc.status_code,
-            detail=exc.detail if isinstance(exc.detail, str) else None,
+            reason=exc.reason,
         )
         raise
 
@@ -521,7 +522,7 @@ async def require_workspace_admin(
     perm_service = PermissionService(db)
     try:
         await perm_service.check_workspace_admin(user_id, workspace_id)
-    except HTTPException as exc:
+    except AuthorizationError as exc:
         # WARN on deny so audit pipelines can surface workspace-admin violations
         # (same audit-log pattern as require_workspace_owner — Issue #389 gate1).
         logger.warning(
@@ -529,7 +530,7 @@ async def require_workspace_admin(
             user_id=user_id,
             workspace_id=str(workspace_id),
             status_code=exc.status_code,
-            detail=exc.detail if isinstance(exc.detail, str) else None,
+            reason=exc.reason,
         )
         raise
 

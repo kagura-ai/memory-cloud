@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
 
 from services.permission_service import (
     CONTEXT_ROLE_WEIGHTS,
@@ -13,6 +12,7 @@ from services.permission_service import (
     MemoryAuthorId,
     PermissionService,
 )
+from utils.exceptions import AuthorizationError, NotFoundException
 
 
 class TestRoleWeights:
@@ -66,9 +66,10 @@ class TestWorkspaceAccess:
         mock_member = MagicMock(role="viewer")
         service.workspace_service.get_member = AsyncMock(return_value=mock_member)
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(AuthorizationError) as exc_info:
             await service.check_workspace_access("user1", ws_id, required_role="admin")
         assert exc_info.value.status_code == 403
+        assert exc_info.value.reason == "role_too_low"
 
     @pytest.mark.asyncio
     async def test_check_workspace_access_not_member(self, service):
@@ -76,9 +77,10 @@ class TestWorkspaceAccess:
         ws_id = uuid4()
         service.workspace_service.get_member = AsyncMock(return_value=None)
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(AuthorizationError) as exc_info:
             await service.check_workspace_access("user1", ws_id)
         assert exc_info.value.status_code == 403
+        assert exc_info.value.reason == "not_a_member"
 
     @pytest.mark.asyncio
     async def test_check_workspace_access_deleted_workspace(self, service, mock_db):
@@ -87,9 +89,10 @@ class TestWorkspaceAccess:
         mock_result.scalar_one_or_none.return_value = None  # workspace deleted
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(AuthorizationError) as exc_info:
             await service.check_workspace_access("user1", uuid4())
         assert exc_info.value.status_code == 403
+        assert exc_info.value.reason == "workspace_deleted"
 
     @pytest.mark.asyncio
     async def test_is_workspace_member_true(self, service):
@@ -163,7 +166,7 @@ class TestContextAccess:
         mock_result.scalar_one_or_none.return_value = mock_ctx
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(AuthorizationError) as exc_info:
             await service.check_context_access("user1", ctx_id)
         assert exc_info.value.status_code == 403
 
@@ -174,7 +177,7 @@ class TestContextAccess:
         mock_result.scalar_one_or_none.return_value = None
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(NotFoundException) as exc_info:
             await service.check_context_access("user1", uuid4())
         assert exc_info.value.status_code == 404
 
@@ -322,7 +325,7 @@ class TestGetAccessibleContextsForViewer:
         result = await service_with_viewer.get_accessible_contexts("viewer-user", uuid4())
         assert result == ["ctx-a", "ctx-b"], (
             "viewer should reach the per-role branch and receive shared "
-            "contexts; receiving an empty list (or HTTPException) means "
+            "contexts; receiving an empty list (or AuthorizationError) means "
             "the membership gate rejected viewer before the branch ran"
         )
 
@@ -377,7 +380,7 @@ class TestResolveContextWhitelistEnforcement:
         member.allowed_context_ids = [uuid4()]  # whitelist excludes ctx_id
         service = self._service_with_member(member, ctx)
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(NotFoundException) as exc_info:
             await service.resolve_context_for_workspace_read("user1", ctx_id)
         assert exc_info.value.status_code == 404
 
@@ -390,7 +393,7 @@ class TestResolveContextWhitelistEnforcement:
         viewer.allowed_context_ids = []  # explicit empty whitelist
         service = self._service_with_member(viewer, ctx)
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(NotFoundException) as exc_info:
             await service.resolve_context_for_workspace_read("user1", ctx_id)
         assert exc_info.value.status_code == 404
 
@@ -433,7 +436,7 @@ class TestResolveContextWhitelistEnforcement:
         suspended_member.allowed_context_ids = None  # suspended
         service = self._service_with_member(suspended_member, ctx)
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(NotFoundException) as exc_info:
             await service.resolve_context_for_workspace_read("user1", ctx_id)
         assert exc_info.value.status_code == 404
 

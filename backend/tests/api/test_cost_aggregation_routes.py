@@ -22,7 +22,6 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from api.main import app
@@ -34,6 +33,7 @@ from services.cost_aggregation_service import (
     CostBreakdownBySource,
 )
 from services.permission_service import PermissionService
+from utils.exceptions import AuthorizationError
 
 _WORKSPACE_ID = uuid4()
 
@@ -118,7 +118,7 @@ def _install_workspace_overrides(
     canned_rows: list[CostAggregationRow],
     *,
     user: dict,
-    permission_raises: HTTPException | None = None,
+    permission_raises: AuthorizationError | None = None,
 ) -> AsyncMock:
     """Wire mocks for the workspace route.
 
@@ -301,10 +301,7 @@ class TestWorkspaceRoute:
             client,
             [],
             user=_regular_user(),
-            permission_raises=HTTPException(
-                status_code=403,
-                detail="Requires 'admin' role or higher",
-            ),
+            permission_raises=AuthorizationError("Insufficient permissions"),
         )
         response = client.get(
             f"/api/v1/workspaces/{_WORKSPACE_ID}/cost-aggregation"
@@ -321,10 +318,7 @@ class TestWorkspaceRoute:
             client,
             [_make_canned_row()],  # would leak if route ran the query
             user=_regular_user(),
-            permission_raises=HTTPException(
-                status_code=403,
-                detail="Not a member of workspace",
-            ),
+            permission_raises=AuthorizationError("Insufficient permissions"),
         )
         other_workspace_id = uuid4()
         response = client.get(

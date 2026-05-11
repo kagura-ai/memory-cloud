@@ -26,7 +26,7 @@ from db.constraint_names import (
 from models.auth import Context
 from models.resource import ResourceEvent, ResourceToken
 from models.schemas import ResourceEventRequest
-from utils.exceptions import ConflictError
+from utils.exceptions import AuthorizationError, ConflictError
 
 
 def _make_integrity_error(
@@ -408,13 +408,10 @@ class TestResourceIngestWorkspaceBoundary:
         self, mock_request, mock_token, mock_context
     ):
         """Attacker token (non-member) must be rejected with audit warning.
-        The log's `reason` kwarg carries the underlying auth failure detail
-        for forensics."""
+        The log's `reason` kwarg carries the AuthorizationError deny
+        classification (private exc.reason) for forensics."""
         db = MagicMock()
-        auth_error = HTTPException(
-            status_code=403,
-            detail="Not a member of workspace " + str(mock_context.workspace_id),
-        )
+        auth_error = AuthorizationError("Insufficient permissions", reason="not_a_member")
         with (
             patch(
                 "services.permission_service.PermissionService.check_workspace_access",
@@ -433,7 +430,7 @@ class TestResourceIngestWorkspaceBoundary:
                 target_workspace_id=str(mock_context.workspace_id),
                 token_creator=mock_token.created_by,
                 client_ip="203.0.113.7",
-                reason=auth_error.detail,
+                reason="not_a_member",
             )
 
     @pytest.mark.asyncio
@@ -441,11 +438,11 @@ class TestResourceIngestWorkspaceBoundary:
         self, mock_request, mock_token, mock_context
     ):
         """Soft-deleted workspace must deny ingest — the prior is_workspace_member
-        check silently allowed this. `check_workspace_access` now catches it."""
+        check silently allowed this. `check_workspace_access` now catches it
+        and raises AuthorizationError(reason="workspace_deleted")."""
         db = MagicMock()
-        soft_deleted_error = HTTPException(
-            status_code=403,
-            detail=f"Workspace {mock_context.workspace_id} not found or has been deleted",
+        soft_deleted_error = AuthorizationError(
+            "Insufficient permissions", reason="workspace_deleted"
         )
         with (
             patch(
@@ -459,7 +456,7 @@ class TestResourceIngestWorkspaceBoundary:
 
             assert exc.value.status_code == 403
             call_kwargs = mock_logger.warning.call_args.kwargs
-            assert "deleted" in call_kwargs["reason"]
+            assert call_kwargs["reason"] == "workspace_deleted"
 
     @pytest.mark.asyncio
     async def test_membership_denied_without_request_client(self, mock_token, mock_context):
@@ -467,7 +464,7 @@ class TestResourceIngestWorkspaceBoundary:
         req = MagicMock()
         req.client = None
         db = MagicMock()
-        auth_error = HTTPException(status_code=403, detail="Not a member")
+        auth_error = AuthorizationError("Insufficient permissions", reason="not_a_member")
         with (
             patch(
                 "services.permission_service.PermissionService.check_workspace_access",

@@ -76,6 +76,25 @@ class TestAuthErrors:
         exc = AuthorizationError("Access denied")
         assert exc.status_code == 403
 
+    def test_authorization_error_reason_is_private(self):
+        """CWE-639: ``reason`` lives on ``exc.reason`` (private), not in
+        ``exc.details`` — the global handler serializes ``details`` to the
+        response body, so leaking ``reason`` would re-introduce the
+        workspace-enumeration vector that the uniform "Insufficient
+        permissions" message is designed to close. See #401 gate2 CSO.
+        """
+        exc = AuthorizationError("Insufficient permissions", reason="workspace_deleted")
+        assert exc.reason == "workspace_deleted"
+        assert "reason" not in exc.details
+        assert exc.details == {}
+
+    def test_authorization_error_default_reason_none(self):
+        """``reason`` defaults to ``None`` when not provided, so existing
+        AuthorizationError raises without a reason kwarg are unaffected."""
+        exc = AuthorizationError("Insufficient permissions")
+        assert exc.reason is None
+        assert exc.details == {}
+
     def test_api_key_error(self):
         exc = APIKeyError()
         assert exc.status_code == 401

@@ -11,7 +11,6 @@ Implements:
 from typing import Any
 from uuid import UUID
 
-from fastapi import HTTPException
 from sqlalchemy import and_, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,7 +24,7 @@ from models.auth import (
     WorkspaceMember,
 )
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import ValidationError
+from utils.exceptions import AuthorizationError, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -160,7 +159,7 @@ class MemberCredentialsService:
             }
 
         Raises:
-            HTTPException: If requester doesn't have permission
+            AuthorizationError: If requester doesn't have permission (403)
         """
         # Permission check: Can view credentials?
         await self._check_can_view(requester_id, workspace_id, user_id)
@@ -250,7 +249,7 @@ class MemberCredentialsService:
             target_user_id: Target user ID
 
         Raises:
-            HTTPException: If not allowed
+            AuthorizationError: If not allowed (403)
         """
         # Self: always allowed
         if requester_id == target_user_id:
@@ -260,10 +259,7 @@ class MemberCredentialsService:
         requester_role = await self.get_workspace_role(requester_id, workspace_id)
 
         if requester_role not in ["owner", "admin"]:
-            raise HTTPException(
-                status_code=403,
-                detail="Only workspace owner/admin can view other members' credentials",
-            )
+            raise AuthorizationError("Insufficient permissions")
 
     async def get_workspace_role(self, user_id: str, workspace_id: UUID) -> str | None:
         """Get user's role in workspace.

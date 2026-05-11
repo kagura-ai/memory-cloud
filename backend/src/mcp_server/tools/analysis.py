@@ -39,8 +39,10 @@ from mcp_server.tools._helpers import (
     _success_response,
 )
 from utils.exceptions import (
+    AuthorizationError,
     ConflictError,
     FeatureNotAvailableError,
+    NotFoundException,
     QuotaExceededError,
     ValidationError,
 )
@@ -134,8 +136,13 @@ def _gate_error_response(exc: Exception) -> list[TextContent]:
     FastAPI's global ``MemoryCloudException`` handler — this function
     is the MCP equivalent.
     """
+    if isinstance(exc, (AuthorizationError, NotFoundException)):
+        return _error_response(
+            "permission_denied",
+            exc.message,
+            status_code=exc.status_code,
+        )
     if isinstance(exc, HTTPException):
-        # 403 from PermissionService.check_workspace_owner
         return _error_response(
             "permission_denied",
             str(exc.detail) if exc.detail else "Access denied.",

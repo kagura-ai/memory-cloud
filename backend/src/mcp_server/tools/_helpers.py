@@ -188,33 +188,28 @@ async def _resolve_context_for_read(
     """Resolve a context_id to a Context the caller can read, MCP-flavored.
 
     Thin wrapper around ``PermissionService.resolve_context_for_workspace_read``
-    that translates the HTTP-flavored ``HTTPException(404)`` into the MCP-native
-    ``_ContextNotFoundError`` so every MCP read tool surfaces the same uniform
-    context_not_found shape (CWE-639 / OWASP A01 uniform disclosure) regardless
-    of the underlying deny reason (not found, private non-creator, not a
-    workspace member, member-suspended, whitelist miss).
+    that translates the domain-flavored ``NotFoundException`` into the
+    MCP-native ``_ContextNotFoundError`` so every MCP read tool surfaces the
+    same uniform context_not_found shape (CWE-639 / OWASP A01 uniform
+    disclosure) regardless of the underlying deny reason (not found, private
+    non-creator, not a workspace member, member-suspended, whitelist miss).
 
     The ``required_role="viewer"`` default matches the HTTP ``/graph/*`` and
     ``/memory/stats`` reference implementations — writers should pass ``admin``
     or ``owner``.
     """
-    # Local fastapi import keeps the HTTP layer leak contained to this helper;
-    # callers only need to catch _ContextNotFoundError. See the parent docstring.
-    from fastapi import HTTPException
-
     from services.permission_service import PermissionService
+    from utils.exceptions import NotFoundException
 
     try:
         return await PermissionService(db).resolve_context_for_workspace_read(
             user_id=user_id, context_id=context_id, required_role=required_role
         )
-    except HTTPException as exc:
-        if exc.status_code == 404:
-            raise _ContextNotFoundError(
-                context_id,
-                "Context not found or you don't have access to it.",
-            ) from exc
-        raise
+    except NotFoundException as exc:
+        raise _ContextNotFoundError(
+            context_id,
+            "Context not found or you don't have access to it.",
+        ) from exc
 
 
 def _resolve_context_id(arg_context_id: str) -> UUID:

@@ -14,6 +14,7 @@ from db.base import get_db
 from models.schemas import ContextSearchConfigResponse, ContextSearchConfigUpdate
 from repositories.config_repository import ContextSearchConfigRepository
 from services.permission_service import PermissionService
+from utils.exceptions import MemoryCloudException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -63,6 +64,8 @@ async def get_context_search_config(
 
         return ContextSearchConfigResponse.model_validate(config)
 
+    except (HTTPException, MemoryCloudException):
+        raise
     except Exception as e:
         logger.error(
             "get_search_config_failed",
@@ -72,7 +75,7 @@ async def get_context_search_config(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve search configuration: {str(e)}",
+            detail="Failed to retrieve search configuration",
         ) from e
 
 
@@ -130,7 +133,7 @@ async def update_context_search_config(
 
         return ContextSearchConfigResponse.model_validate(config)
 
-    except HTTPException:
+    except (HTTPException, MemoryCloudException):
         raise
     except ValueError as e:
         logger.error(
@@ -149,7 +152,7 @@ async def update_context_search_config(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update search configuration: {str(e)}",
+            detail="Failed to update search configuration",
         ) from e
 
 
@@ -195,6 +198,8 @@ async def reset_context_search_config(
 
         return ContextSearchConfigResponse.model_validate(config)
 
+    except (HTTPException, MemoryCloudException):
+        raise
     except ValueError as e:
         logger.error(
             "reset_search_config_not_found",
@@ -212,5 +217,5 @@ async def reset_context_search_config(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to reset search configuration: {str(e)}",
+            detail="Failed to reset search configuration",
         ) from e
