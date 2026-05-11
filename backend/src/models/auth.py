@@ -1156,49 +1156,63 @@ class Context(Base):
 
     __tablename__ = "contexts"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
-    workspace_id = Column(
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
-    name = Column(String(100), nullable=False)
-    display_name = Column(String(200), nullable=True)  # Human-readable display name
-    description = Column(Text, nullable=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(
+        String(200), nullable=True
+    )  # Human-readable display name
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Issue #160: LLM-oriented fields for get_context_info
-    summary = Column(Text, nullable=True)  # 200-500 chars context overview
-    usage_guide = Column(Text, nullable=True)  # Memory usage guidelines for AI
+    summary: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # 200-500 chars context overview
+    usage_guide: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # Memory usage guidelines for AI
 
-    created_by = Column(String(255), nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Timestamps
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=True, onupdate=func.now())
-    deleted_at = Column(DateTime, nullable=True)
-    deleted_by = Column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, onupdate=func.now()
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deleted_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Issue #169: Last used timestamp for recent usage sorting in MCP
-    last_used_at = Column(DateTime(timezone=True), nullable=True, server_default=func.now())
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, server_default=func.now()
+    )
 
     # Issue #165: Privacy control (private vs shared contexts)
-    is_private = Column(Boolean, nullable=False, server_default="true")
+    is_private: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
 
     # Issue #238: Public REST API access flag
-    is_public = Column(Boolean, nullable=False, server_default="false")
+    is_public: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
     # Issue #238: Resource linkage for public contexts
-    resource_id = Column(String(255), nullable=True)
+    resource_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Issue #85: Context lock to prevent accidental deletion
-    is_locked = Column(Boolean, nullable=False, server_default="false")
+    is_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
     # Issue #101: Sleep Maintenance mode
     # 'full' = all phases (personal AI memory)
     # 'edges_only' = Edge Discovery + Reindex only (resource ingest contexts)
     # 'skip' = no sleep maintenance (large-scale / externally managed; default)
-    sleep_mode = Column(String(20), nullable=False, server_default="skip")
+    sleep_mode: Mapped[str] = mapped_column(String(20), nullable=False, server_default="skip")
 
     # Constraints
     __table_args__ = (
@@ -1271,28 +1285,38 @@ class Workspace(Base):
 
     __tablename__ = "workspaces"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
     # Issue #276: slug removed - not used for routing, caused UX issues
-    name = Column(String(255), nullable=False)
-    description = Column(Text, nullable=True)
-    owner_user_id = Column(String(255), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    owner_user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
     # Billing & Plan
-    plan_name = Column(String(50), nullable=False, server_default="free")
-    memory_limit = Column(Integer, nullable=False, server_default="1000")
-    daily_api_limit = Column(Integer, nullable=False, server_default="1000")
-    weekly_api_limit = Column(Integer, nullable=False, server_default="5000")
+    plan_name: Mapped[str] = mapped_column(String(50), nullable=False, server_default="free")
+    memory_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1000")
+    daily_api_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1000")
+    weekly_api_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default="5000")
 
     # Issue #238: Addon bonus columns (Migration 048)
-    addon_memory_bonus = Column(Integer, nullable=False, server_default="0")
-    addon_mcp_quota_bonus = Column(Integer, nullable=False, server_default="0")
-    addon_rest_quota_bonus = Column(Integer, nullable=False, server_default="0")
-    addon_public_quota_bonus = Column(Integer, nullable=False, server_default="0")
-    addon_member_bonus = Column(Integer, nullable=False, server_default="0")
-    addon_context_bonus = Column(Integer, nullable=False, server_default="0")  # Issue #15
-    addon_analysis_bonus = Column(Integer, nullable=False, server_default="0")  # Issue #494
-    addon_storage_bonus_mb = Column(Integer, nullable=False, server_default="0")  # Issue #485
-    addon_sleep_contexts_bonus = Column(
+    addon_memory_bonus: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    addon_mcp_quota_bonus: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    addon_rest_quota_bonus: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    addon_public_quota_bonus: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    addon_member_bonus: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    addon_context_bonus: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )  # Issue #15
+    addon_analysis_bonus: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )  # Issue #494
+    addon_storage_bonus_mb: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )  # Issue #485
+    addon_sleep_contexts_bonus: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )  # Issue #560: Sleep-enabled contexts addon (PRO-only)
 
@@ -1301,12 +1325,12 @@ class Workspace(Base):
     # by a separate allowlist; until a workspace is opted-in there's no
     # need for a model choice. SET NULL on llm_pricing delete so a
     # pricing row removal does not cascade into the workspace.
-    analysis_default_model_id = Column(
+    analysis_default_model_id: Mapped[int | None] = mapped_column(
         BigInteger,
         ForeignKey("llm_pricing.id", ondelete="SET NULL"),
         nullable=True,
     )
-    analysis_quality_model_id = Column(
+    analysis_quality_model_id: Mapped[int | None] = mapped_column(
         BigInteger,
         ForeignKey("llm_pricing.id", ondelete="SET NULL"),
         nullable=True,
@@ -1435,13 +1459,17 @@ class Workspace(Base):
         )
 
     # Stripe billing (Issue #351)
-    stripe_customer_id = Column(String(255), nullable=True)
-    stripe_subscription_id = Column(String(255), nullable=True)
+    stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    stripe_subscription_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Timestamps
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=True, onupdate=func.now())
-    deleted_at = Column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, onupdate=func.now()
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Constraints
     __table_args__ = (
@@ -1493,29 +1521,35 @@ class WorkspaceMember(Base):
 
     __tablename__ = "workspace_members"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    workspace_id = Column(
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
-    user_id = Column(String(255), nullable=False, index=True)
-    role = Column(String(50), nullable=False, server_default="member")
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(50), nullable=False, server_default="member")
 
     # Context access restriction (Issue #234)
     # NULL = no restriction, [] = no access, [uuid, ...] = whitelist
     # Only applies to member/viewer roles (owner/admin always have full access)
-    allowed_context_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=True, default=None)
+    allowed_context_ids: Mapped[list[uuid.UUID] | None] = mapped_column(
+        ARRAY(UUID(as_uuid=True)), nullable=True, default=None
+    )
 
     # Invitation tracking
-    invited_by = Column(String(255), nullable=True)
-    invited_at = Column(DateTime, nullable=True)
-    joined_at = Column(DateTime, nullable=True)
+    invited_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    invited_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    joined_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Timestamps
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=True, onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, onupdate=func.now()
+    )
 
     # Constraints
     __table_args__ = (
@@ -1569,24 +1603,30 @@ class WorkspaceInvitation(Base):
 
     __tablename__ = "workspace_invitations"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    workspace_id = Column(
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
-    token = Column(String(100), nullable=False, unique=True, index=True)
-    email = Column(String(255), nullable=True, index=True)
-    role = Column(String(50), nullable=False, server_default="member")
-    invited_by = Column(String(255), nullable=False)
-    expires_at = Column(DateTime, nullable=True, index=True)
-    accepted_at = Column(DateTime, nullable=True)
-    accepted_by = Column(String(255), nullable=True)
+    token: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    role: Mapped[str] = mapped_column(String(50), nullable=False, server_default="member")
+    invited_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    accepted_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Migration 042: Context access selection on invitation
-    allowed_context_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=True, default=None)
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=True, onupdate=func.now())
+    allowed_context_ids: Mapped[list[uuid.UUID] | None] = mapped_column(
+        ARRAY(UUID(as_uuid=True)), nullable=True, default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, onupdate=func.now()
+    )
 
     # Constraints
     __table_args__ = (
@@ -1656,23 +1696,27 @@ class ContextMember(Base):
 
     __tablename__ = "context_members"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    context_id = Column(
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    context_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("contexts.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
-    user_id = Column(String(255), nullable=False, index=True)
-    role = Column(String(50), nullable=False, server_default="editor")
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(50), nullable=False, server_default="editor")
 
     # Invitation tracking
-    invited_by = Column(String(255), nullable=True)
-    invited_at = Column(DateTime, nullable=True)
+    invited_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    invited_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Timestamps
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=True, onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, onupdate=func.now()
+    )
 
     # Constraints
     __table_args__ = (
