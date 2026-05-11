@@ -27,7 +27,9 @@ from pathlib import Path
 import pytest
 
 # Must match the regex in the Makefile lint-models-no-column target exactly.
-GUARD_REGEX = r"^\s+\w+(:\s*[^=]+)?\s*=\s*Column\("
+# POSIX character classes ([[:space:]] / [[:alnum:]_]) are used instead of
+# GNU shorthand (\s / \w) so the guard is portable to BSD grep (macOS dev).
+GUARD_REGEX = r"^[[:space:]]+[[:alnum:]_]+(:[[:space:]]*[^=]+)?[[:space:]]*=[[:space:]]*Column\("
 
 
 def _grep_returncode(content: str, tmp_path: Path) -> int:
