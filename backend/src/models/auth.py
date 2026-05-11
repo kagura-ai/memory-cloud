@@ -1176,6 +1176,25 @@ class Context(Base):
         return self.name == "default"
 
 
+def _zero_floor(base: int, addon: int | None) -> int:
+    """Defense-in-depth quota helper (#569).
+
+    A plan-tier ``base`` of 0 means the feature is excluded from the tier —
+    no addon row can raise the effective limit above 0. Encoded in the data
+    (``base == 0``) rather than by plan name so a future paid tier with
+    ``base > 0`` automatically gets addon stacking (mirrors the rule from
+    PR #568 / #560 for ``sleep_enabled_contexts_limit``).
+
+    Callers that scale the addon to a different unit before stacking
+    (e.g. ``effective_storage_limit_bytes`` converts MB→bytes) must pass
+    the **scaled** value as ``addon`` so the zero-floor check happens on
+    the final unit.
+    """
+    if base == 0:
+        return 0
+    return base + (addon or 0)
+
+
 class Workspace(Base):
     """Workspace model for multi-user team management.
 
@@ -1334,11 +1353,14 @@ class Workspace(Base):
         addons" is encoded in the data (``sleep_enabled_contexts_limit == 0``)
         rather than by hard-coding plan names so a future paid tier with
         ``sleep_enabled_contexts_limit > 0`` automatically gets addon stacking.
+
+        Now routed through ``_zero_floor`` to share the rule with every other
+        ``effective_*_limit`` property (#569).
         """
-        base = self._plan_tier.sleep_enabled_contexts_limit
-        if base == 0:
-            return 0
-        return base + (self.addon_sleep_contexts_bonus or 0)
+        return _zero_floor(
+            self._plan_tier.sleep_enabled_contexts_limit,
+            self.addon_sleep_contexts_bonus,
+        )
 
     # Stripe billing (Issue #351)
     stripe_customer_id = Column(String(255), nullable=True)
