@@ -96,18 +96,57 @@ def _assert_alembic_target_is_test_db() -> None:
         conn.close()
 
 
+def _reset_alembic_state() -> None:
+    """Drop the public schema so ``alembic upgrade head`` starts clean.
+
+    Mirrors the helper of the same name in
+    ``tests/integration/test_oauth_dcr_integration.py``. Needed when another
+    fixture (e.g. ``tests/conftest.py``'s session-scoped ``async_engine``
+    that does ``Base.metadata.create_all``) has already created tables
+    in the test DB but did not stamp ``alembic_version`` — running
+    ``command.upgrade()`` then fails because migrations attempt to
+    create tables that already exist.
+
+    Safety guard: refuses to drop a non-test database;
+    ``_assert_alembic_target_is_test_db`` above must already have passed
+    before this is invoked.
+    """
+    from sqlalchemy import create_engine
+
+    sync_url = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
+    db_name = sync_url.rsplit("/", 1)[-1].split("?")[0]
+    if not db_name.endswith("_test"):
+        raise RuntimeError(
+            f"Refusing to DROP SCHEMA on non-test database '{db_name}'. "
+            f"Set TEST_DATABASE_URL to a *_test database."
+        )
+
+    engine = create_engine(sync_url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DROP SCHEMA public CASCADE"))
+            conn.execute(text("CREATE SCHEMA public"))
+    finally:
+        engine.dispose()
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _ensure_oauth_tables_schema():
     """Apply alembic migrations so oauth_clients/oauth_tokens exist in the test DB.
 
     Mirrors the ``_ensure_oauth_clients_schema`` fixture in
-    ``test_oauth_dcr_integration.py``. If the test DB schema is partial
-    (some other test created tables via ``create_all`` without stamping
-    ``alembic_version``), bring it to ``head`` so the FK ``ondelete="CASCADE"``
-    on ``oauth_tokens.client_id`` is the actual migration-produced
-    constraint, not an ORM-recreated one.
+    ``test_oauth_dcr_integration.py``. The drop-and-recreate via
+    ``_reset_alembic_state()`` is necessary for mixed-suite runs:
+    if a sibling fixture (e.g. ``tests/conftest.py``'s session-scoped
+    ``async_engine`` doing ``Base.metadata.create_all``) has already
+    created tables without stamping ``alembic_version``, the bare
+    ``command.upgrade()`` would fail with "table already exists". Reset
+    first, then upgrade head, so the FK ``ondelete="CASCADE"`` on
+    ``oauth_tokens.client_id`` is the actual migration-produced constraint,
+    not an ORM-recreated one.
     """
     _assert_alembic_target_is_test_db()
+    _reset_alembic_state()
     backend_dir = Path(__file__).resolve().parents[2]
     config = Config(str(backend_dir / "alembic.ini"))
     command.upgrade(config, "head")
