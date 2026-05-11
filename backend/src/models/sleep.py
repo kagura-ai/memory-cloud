@@ -94,7 +94,7 @@ class SleepReport(Base):
         String(20),
         nullable=False,
         default="running",
-        server_default=text("'running'"),
+        server_default="running",
     )
 
     # Per-phase results (JSON)
@@ -111,13 +111,13 @@ class SleepReport(Base):
     # any reader that selects them directly (legacy dashboards, log analyzers,
     # MCP tools) continues to work without change.
     llm_calls_made: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, server_default=text("0")
+        Integer, nullable=False, default=0, server_default="0"
     )
     llm_tokens_used: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, server_default=text("0")
+        Integer, nullable=False, default=0, server_default="0"
     )
     embedding_calls_made: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, server_default=text("0")
+        Integer, nullable=False, default=0, server_default="0"
     )
 
     # Embedding cost-grade columns (#471). Embedding is instance-global per
@@ -132,7 +132,7 @@ class SleepReport(Base):
     embedding_provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
     embedding_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     embedding_tokens: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, server_default=text("0")
+        Integer, nullable=False, default=0, server_default="0"
     )
 
     # Cost-grade dimensions (#523). Both columns carry a Python-side
@@ -154,19 +154,19 @@ class SleepReport(Base):
 
     # Activity counters
     memories_processed: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, server_default=text("0")
+        Integer, nullable=False, default=0, server_default="0"
     )
     edges_created: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, server_default=text("0")
+        Integer, nullable=False, default=0, server_default="0"
     )
     memories_merged: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, server_default=text("0")
+        Integer, nullable=False, default=0, server_default="0"
     )
     memories_promoted: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, server_default=text("0")
+        Integer, nullable=False, default=0, server_default="0"
     )
     memories_flagged: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, server_default=text("0")
+        Integer, nullable=False, default=0, server_default="0"
     )
 
     # Error tracking
