@@ -1,4 +1,7 @@
-"""Negative-case smoke test for the `lint-models-no-column` CI guard (#596).
+"""Smoke tests for the `lint-models-no-column` CI guard (#596).
+
+Covers both positive cases (forms the guard must catch) and negative cases
+(forms it must NOT trigger on).
 
 The guard's purpose is to prevent regression to the legacy SQLAlchemy 1.x
 ``Column()`` pattern after the #370 migration to ``Mapped[T] = mapped_column()``
@@ -41,7 +44,7 @@ def _grep_returncode(content: str, tmp_path: Path) -> int:
     """
     models_dir = tmp_path / "models"
     models_dir.mkdir()
-    (models_dir / "fake_model.py").write_text(content)
+    (models_dir / "fake_model.py").write_text(content, encoding="utf-8")
     # ``grep -rnE`` is what the Makefile target invokes. We use the same
     # flags for parity, even though for a single file ``-r`` is redundant.
     result = subprocess.run(

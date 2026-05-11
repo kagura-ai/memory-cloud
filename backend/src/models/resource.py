@@ -162,7 +162,7 @@ class ResourceEvent(Base):
         DateTime, nullable=False, server_default=func.now(), index=True
     )
     event_metadata: Mapped[dict[str, Any] | None] = mapped_column(
-        JSONB, default={}, server_default="{}", nullable=True
+        JSONB, default=dict, server_default="{}", nullable=True
     )
     # Issue #262: Importance for Memory creation
     # P2-8: NOT NULL with DEFAULT 0.6 (Migration 059)
@@ -283,7 +283,7 @@ class IndexerState(Base):
     active_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     job_status: Mapped[str] = mapped_column(String(20), nullable=False, default="idle")
     metrics: Mapped[dict[str, Any] | None] = mapped_column(
-        JSONB, default={}, server_default="{}", nullable=True
+        JSONB, default=dict, server_default="{}", nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
