@@ -357,6 +357,7 @@ async def handle_update_context(
             from uuid import UUID as _UUID
 
             from services.permission_service import PermissionService
+            from utils.exceptions import AuthorizationError, NotFoundException
 
             ctx_uuid = _UUID(args["context_id"])
 
@@ -382,7 +383,8 @@ async def handle_update_context(
                     "No fields to update. Provide at least one of: summary, usage_guide, display_name, description, resource_id, is_public, is_locked.",
                 )
 
-            # Permission check using PermissionService (same as REST API)
+            # Mirrors handle_delete_context. Uses exc.message (not str(exc))
+            # so AuthorizationError's CWE-639 uniform-message contract holds.
             try:
                 if requested_fields & owner_fields:
                     # Owner-only fields → require context owner
@@ -392,10 +394,17 @@ async def handle_update_context(
                     context, _ = await perm_service.check_context_access(
                         user_id, ctx_uuid, required_role="editor"
                     )
-            except Exception as perm_err:
+            except NotFoundException:
+                await db.rollback()
+                return _error_response(
+                    "context_not_found",
+                    f"Context {ctx_uuid} not found or access denied.",
+                )
+            except AuthorizationError as perm_err:
+                await db.rollback()
                 return _error_response(
                     "permission_denied",
-                    str(perm_err),
+                    perm_err.message,
                     help="You need owner access for summary/usage_guide/resource_id/is_public/is_locked, or editor access for display_name/description.",
                 )
 
