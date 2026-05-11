@@ -16,8 +16,10 @@ Provides ORM models for:
 """
 
 import secrets
+import uuid
 from datetime import datetime
 from functools import cached_property
+from typing import Any
 
 from sqlalchemy import (
     JSON,
@@ -36,7 +38,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db.base import Base
 from utils.datetime import utcnow
@@ -73,28 +75,30 @@ class User(Base):
 
     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     # OAuth2 Identity
-    email = Column(String(255), nullable=False, unique=True, index=True)
-    user_id = Column(String(255), nullable=False, unique=True, index=True)
-    name = Column(String(255), nullable=True)
-    picture = Column(String(512), nullable=True)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    picture: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     # Issue #175: User Preferences
-    timezone = Column(String(50), nullable=False, default="UTC", index=True)
+    timezone: Mapped[str] = mapped_column(String(50), nullable=False, default="UTC", index=True)
 
     # Issue #221: i18n support
-    locale = Column(String(10), nullable=False, default="en", index=True)
+    locale: Mapped[str] = mapped_column(String(10), nullable=False, default="en", index=True)
 
     # Role & Permissions
-    role = Column(String(50), nullable=False, default="user", index=True)
+    role: Mapped[str] = mapped_column(String(50), nullable=False, default="user", index=True)
 
     # Issue #166: System Admin Protection
-    is_initial_admin = Column(Boolean, nullable=False, default=False, index=True)
+    is_initial_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, index=True
+    )
 
     # Workspace (Issue #115 Phase B)
-    current_workspace_id = Column(
+    current_workspace_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="SET NULL"),
         nullable=True,
@@ -104,20 +108,32 @@ class User(Base):
     # Issue #246: current_context_id removed (context always explicit from Frontend/API)
 
     # Issue #51: Password + MFA authentication
-    login_id = Column(String(255), nullable=True, unique=True, index=True)
-    password_hash = Column(String(255), nullable=True)
-    auth_method = Column(String(20), nullable=False, default="oauth", index=True)
-    totp_secret = Column(String(255), nullable=True)  # Fernet-encrypted
-    totp_enabled = Column(Boolean, nullable=False, default=False)
+    login_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, unique=True, index=True
+    )
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    auth_method: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="oauth", index=True
+    )
+    totp_secret: Mapped[str | None] = mapped_column(String(255), nullable=True)  # Fernet-encrypted
+    totp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     # Timestamps
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=True, onupdate=func.now())
-    last_login_at = Column(DateTime, nullable=True)
-    auth_provider = Column(String(20), nullable=True)  # Issue #361: google, github
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, onupdate=func.now()
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    auth_provider: Mapped[str | None] = mapped_column(
+        String(20), nullable=True
+    )  # Issue #361: google, github
 
     # Relationships
-    current_workspace = relationship("Workspace", foreign_keys=[current_workspace_id])
+    current_workspace: Mapped["Workspace | None"] = relationship(
+        "Workspace", foreign_keys=[current_workspace_id]
+    )
 
     # Constraints
     __table_args__ = (
@@ -151,27 +167,29 @@ class AuditLog(Base):
 
     __tablename__ = "audit_logs"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     # Who
-    user_email = Column(String(255), nullable=False, index=True)
-    user_id = Column(String(255), nullable=False)
+    user_email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False)
 
     # What
-    action = Column(String(100), nullable=False, index=True)
-    resource = Column(String(255), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    resource: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
     # Details (SHA256 hashes, NOT plaintext!)
-    old_value_hash = Column(String(64), nullable=True)
-    new_value_hash = Column(String(64), nullable=True)
-    user_metadata = Column(JSON, nullable=True)
+    old_value_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    new_value_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     # Context
-    ip_address = Column(String(45), nullable=True)
-    user_agent = Column(String, nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # Timestamp
-    created_at = Column(DateTime, nullable=False, server_default=func.now(), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), index=True
+    )
 
     def __repr__(self) -> str:
         return f"<AuditLog(action='{self.action}', resource='{self.resource}')>"
@@ -199,17 +217,17 @@ class APIKey(Base):
 
     __tablename__ = "api_keys"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     # API Key Data
-    key_hash = Column(String(64), nullable=False, unique=True, index=True)
-    key_prefix = Column(String(16), nullable=False)
-    name = Column(String(100), nullable=False)
-    user_id = Column(String(255), nullable=False, index=True)
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    key_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
     # Issue #169: Workspace-scoped API keys (access all contexts in workspace)
     # Migration 034: context_id removed (deprecated)
-    workspace_id = Column(
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=True,
@@ -217,17 +235,19 @@ class APIKey(Base):
     )
 
     # Timestamps
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    last_used_at = Column(DateTime, nullable=True)
-    revoked_at = Column(DateTime, nullable=True)
-    expires_at = Column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Migration 034: Visibility control (Zero-knowledge model)
-    hidden_at = Column(DateTime, nullable=True)
-    visibility_expires_at = Column(DateTime, nullable=True)
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    visibility_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Migration 035: Encrypted plaintext for display until hidden
-    plaintext_encrypted = Column(String, nullable=True)
+    plaintext_encrypted: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # Indexes
     __table_args__ = (
@@ -263,20 +283,20 @@ class ExternalAPIKey(Base):
 
     __tablename__ = "external_api_keys"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     # API Key Identity
-    key_name = Column(String(100), nullable=False, index=True)
-    provider = Column(String(50), nullable=False, index=True)
+    key_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
 
     # Encrypted Value (Fernet)
-    encrypted_value = Column(String, nullable=False)
+    encrypted_value: Mapped[str] = mapped_column(String, nullable=False)
 
     # Owner
-    user_id = Column(String(255), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
     # Issue #82 → #160: Context-scoped external keys (renamed from project)
-    context_id = Column(
+    context_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("contexts.id", ondelete="CASCADE"),
         nullable=True,
@@ -284,7 +304,7 @@ class ExternalAPIKey(Base):
 
     # Issue #146: Workspace-scoped external keys
     # Issue #385: NOT NULL — every external API key belongs to exactly one workspace.
-    workspace_id = Column(
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
@@ -292,12 +312,18 @@ class ExternalAPIKey(Base):
     )
 
     # Issue #105: Enable/disable state
-    enabled = Column(Boolean, nullable=False, default=True, server_default="true")
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
 
     # Audit Trail
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
-    updated_by = Column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+    updated_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Indexes
     __table_args__ = (
