@@ -211,8 +211,20 @@ lint: lint-models-no-column
 # Negative-case smoke test lives at backend/tests/test_models_no_column_guard.py.
 .PHONY: lint-models-no-column
 lint-models-no-column:
-	@! grep -rnE '^[[:space:]]+[[:alnum:]_]+(:[[:space:]]*[^=]+)?[[:space:]]*=[[:space:]]*Column\(' $(BACKEND_DIR)/src/models/ \
-	  || (echo "ERROR: legacy 'Column(...)' usage detected in $(BACKEND_DIR)/src/models/. Use 'Mapped[T] = mapped_column(...)' instead. The annotated half-migration form 'id: int = Column(...)' is also rejected because SQLAlchemy 2.0 does not recognize it as a Mapped attribute (it silently fails type-resolution)."; exit 1)
+	@if grep -rnE '^[[:space:]]+[[:alnum:]_]+(:[[:space:]]*[^=]+)?[[:space:]]*=[[:space:]]*Column\(' $(BACKEND_DIR)/src/models/; then \
+	  echo ""; \
+	  echo "ERROR: legacy 'Column(...)' usage detected in $(BACKEND_DIR)/src/models/."; \
+	  echo "Use 'Mapped[T] = mapped_column(...)' instead. The annotated half-migration"; \
+	  echo "form 'id: int = Column(...)' is also rejected because SQLAlchemy 2.0 does"; \
+	  echo "not recognize it as a Mapped attribute (it silently fails type-resolution)."; \
+	  exit 1; \
+	else \
+	  EC=$$?; \
+	  if [ "$$EC" -ne 1 ]; then \
+	    echo "ERROR: grep failed with exit $$EC scanning $(BACKEND_DIR)/src/models/ (likely missing directory, permission issue, or grep not installed)." >&2; \
+	    exit 1; \
+	  fi; \
+	fi
 
 .PHONY: format
 format:
