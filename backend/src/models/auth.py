@@ -1309,10 +1309,15 @@ class Workspace(Base):
     def effective_public_calls_per_day(self) -> int:
         """Public REST API calls/day: plan tier base + addon (Issue #238).
 
-        FREE and BASIC have ``public_calls_per_day == 0``. Access is also
-        gated by the ``public_contexts`` feature flag (``plan_tiers.py``
-        ``FEATURE_MIN_PLANS``); the zero-base guard here is defense-in-depth
-        in case the feature gate is ever bypassed (#569).
+        FREE and BASIC have ``public_calls_per_day == 0``. There is **no other
+        runtime tier gate** on the public REST routes — ``api/routes/public_search.py``
+        rejects non-public contexts via ``context.is_public``, but does not check
+        the owner's plan tier. The ``public_contexts`` entry in
+        ``plan_tiers.py:FEATURE_MIN_PLANS`` is declared but never consumed at
+        runtime (``check_feature_access`` is only called for ``memory_analysis``
+        and ``reranking`` today), so the zero-base guard here is the **primary**
+        protection against a stray ``WorkspaceAddon`` row granting public-API
+        access to a tier that excludes it (#569).
         """
         return _zero_floor(self._plan_tier.public_calls_per_day, self.addon_public_quota_bonus)
 
