@@ -5,18 +5,22 @@ Issue #160: Renamed from Project to Context
 Issue #363: Config value storage in database
 """
 
+import uuid
+from datetime import datetime
+from decimal import Decimal
+
 from sqlalchemy import (
     DECIMAL,
     TIMESTAMP,
     Boolean,
     CheckConstraint,
-    Column,
     DateTime,
     ForeignKey,
     Integer,
     String,
 )
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from db.base import Base
@@ -31,11 +35,13 @@ class ConfigOverride(Base):
 
     __tablename__ = "config_overrides"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    key = Column(String(255), unique=True, nullable=False, index=True)
-    value = Column(String(2000), nullable=False)
-    updated_by = Column(String(255), nullable=True)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    value: Mapped[str] = mapped_column(String(2000), nullable=False)
+    updated_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
 
 
 class ContextSearchConfig(Base):
@@ -65,8 +71,8 @@ class ContextSearchConfig(Base):
 
     __tablename__ = "context_search_configs"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    context_id = Column(
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    context_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("contexts.id", ondelete="CASCADE"),
         unique=True,
@@ -75,24 +81,28 @@ class ContextSearchConfig(Base):
     )
 
     # Hybrid Search weights
-    semantic_weight = Column(DECIMAL(3, 2), nullable=False, default=0.60)
-    bm25_weight = Column(DECIMAL(3, 2), nullable=False, default=0.40)
+    semantic_weight: Mapped[Decimal] = mapped_column(DECIMAL(3, 2), nullable=False, default=0.60)
+    bm25_weight: Mapped[Decimal] = mapped_column(DECIMAL(3, 2), nullable=False, default=0.40)
 
     # Fetch factor
-    fetch_factor = Column(Integer, nullable=False, default=3)
+    fetch_factor: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
 
     # Reranker settings
-    use_rerank = Column(Boolean, nullable=False, default=False)
-    reranker_provider = Column(String(20), default="voyage")
-    reranker_model = Column(String(50), default="rerank-2")
+    use_rerank: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    reranker_provider: Mapped[str | None] = mapped_column(String(20), default="voyage")
+    reranker_model: Mapped[str | None] = mapped_column(String(50), default="rerank-2")
 
     # Embedding configuration (Issue #146: Immutable after context creation)
-    embedding_model = Column(String(100), nullable=False, default="text-embedding-3-small")
-    embedding_dimensions = Column(Integer, nullable=False, default=512)
+    embedding_model: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="text-embedding-3-small"
+    )
+    embedding_dimensions: Mapped[int] = mapped_column(Integer, nullable=False, default=512)
 
     # Timestamps
-    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 

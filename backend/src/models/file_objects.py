@@ -21,13 +21,12 @@ with ``backend='byo_*'`` and ``ref=<bucket URI>``.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
-from uuid import UUID, uuid4
 
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
-    Column,
     DateTime,
     ForeignKey,
     Index,
@@ -35,8 +34,8 @@ from sqlalchemy import (
     String,
     func,
 )
-from sqlalchemy.dialects.postgresql import BYTEA
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import BYTEA, UUID
+from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
 
@@ -58,39 +57,41 @@ class FileObject(Base):
 
     __tablename__ = "file_objects"
 
-    id: Column[UUID] = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    workspace_id: Column[UUID] = Column(
-        PG_UUID(as_uuid=True),
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
-    sha256 = Column(String(64), nullable=False)
-    size_bytes = Column(BigInteger, nullable=False)
-    content_type = Column(String(255), nullable=False)
-    filename = Column(String(512), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    filename: Mapped[str] = mapped_column(String(512), nullable=False)
 
-    storage_backend = Column(
+    storage_backend: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
         server_default="r2",
         comment="'r2' (Phase 1), 'pg_inline' (reserved Phase 1.5)",
     )
-    storage_key = Column(String(1024), nullable=True)
-    inline_bytes = Column(BYTEA, nullable=True)
+    storage_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    inline_bytes: Mapped[bytes | None] = mapped_column(BYTEA, nullable=True)
 
-    status = Column(
+    status: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
         server_default="reserved",
         comment="'reserved' | 'uploaded' | 'failed'",
     )
-    expires_at: Column[datetime] = Column(DateTime, nullable=True)
-    created_by = Column(String(255), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    created_at: Column[datetime] = Column(DateTime, nullable=False, server_default=func.now())
-    uploaded_at: Column[datetime] = Column(DateTime, nullable=True)
-    deleted_at: Column[datetime] = Column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    uploaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -155,14 +156,14 @@ class WorkspaceStorageUsage(Base):
 
     __tablename__ = "workspace_storage_usage"
 
-    workspace_id: Column[UUID] = Column(
-        PG_UUID(as_uuid=True),
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         primary_key=True,
     )
-    used_bytes = Column(BigInteger, nullable=False, server_default="0")
-    file_count = Column(Integer, nullable=False, server_default="0")
-    updated_at: Column[datetime] = Column(
+    used_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    file_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
     )
 

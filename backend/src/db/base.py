@@ -11,15 +11,18 @@ from collections.abc import AsyncGenerator
 
 from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import Session, declarative_base, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from utils.logger import get_logger
 from utils.url_redact import redact_db_url
 
 logger = get_logger(__name__)
 
+
 # SQLAlchemy Base for models
-Base = declarative_base()
+class Base(DeclarativeBase):
+    pass
+
 
 # Lazy initialization (to avoid import-time errors)
 engine = None

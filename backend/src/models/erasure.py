@@ -12,10 +12,13 @@ service deletes the user row itself; readers must therefore not assume
 ``erasure_requests.user_id`` joins to a live ``users.user_id``.
 """
 
+import uuid
+from datetime import datetime
+from typing import Any
+
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
-    Column,
     DateTime,
     Index,
     String,
@@ -24,6 +27,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
 
@@ -81,43 +85,47 @@ class ErasureRequest(Base):
 
     __tablename__ = "erasure_requests"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
 
     # Subject of the erasure (OAuth2 sub). Not a FK — repo convention.
     # Indexed via the explicit Index() entry in __table_args__ below so the
     # index has a deterministic name and matches the migration shape.
-    user_id = Column(String(255), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False)
 
     # SHA256 of the user's email at request time. Plaintext email never on disk.
-    user_email_hash = Column(String(64), nullable=False)
+    user_email_hash: Mapped[str] = mapped_column(String(64), nullable=False)
 
     # Self user_id (self-service) or admin user_id (admin force-erase).
-    initiated_by = Column(String(255), nullable=False)
+    initiated_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    is_self_service = Column(Boolean, nullable=False, default=False)
+    is_self_service: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
-    reason_code = Column(String(50), nullable=False)
-    reason_detail = Column(Text, nullable=True)
+    reason_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    reason_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    status = Column(String(20), nullable=False, default=STATUS_PENDING)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default=STATUS_PENDING)
 
     # SHA256 of the one-time token; raw token in Redis only. Size is
     # exact (SHA256 hex = 64 chars) so the column does not imply a
     # different hash encoding.
-    confirm_token_hash = Column(String(64), nullable=True)
+    confirm_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
-    requested_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    confirmed_at = Column(DateTime(timezone=True), nullable=True)
-    scheduled_for = Column(DateTime(timezone=True), nullable=True)
-    started_at = Column(DateTime(timezone=True), nullable=True)
-    completed_at = Column(DateTime(timezone=True), nullable=True)
-    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    failure_reason = Column(Text, nullable=True)
-    deleted_data_summary = Column(JSONB, nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deleted_data_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
-    ip_address = Column(String(45), nullable=True)
-    user_agent = Column(String(255), nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Source the CHECK constraints from VALID_STATUSES / VALID_REASON_CODES
     # so adding a new state value never requires editing two places. The

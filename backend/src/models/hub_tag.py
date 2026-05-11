@@ -15,10 +15,12 @@ Design:
       computed state.
 """
 
+import uuid
+from datetime import datetime
+
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
-    Column,
     DateTime,
     Float,
     ForeignKey,
@@ -29,6 +31,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
 
@@ -54,17 +57,19 @@ class HubTagCache(Base):
 
     __tablename__ = "hub_tag_cache"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
-    workspace_id = Column(UUID(as_uuid=True), nullable=False)
-    context_id = Column(
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    context_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("contexts.id", ondelete="CASCADE"),
         nullable=False,
     )
-    hub_tags = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
-    memory_count = Column(Integer, nullable=False)
-    threshold_used = Column(Float, nullable=False)
-    computed_at = Column(
+    hub_tags: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    memory_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    threshold_used: Mapped[float] = mapped_column(Float, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
