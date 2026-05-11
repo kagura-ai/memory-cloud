@@ -1,0 +1,246 @@
+"""Cascade-delete integration test for OAuth2Client → OAuth2Token.
+
+Issue #595 (gate1 acceptance follow-up): pin the cascade-delete behavior
+that keeps OAuth2 tokens from outliving their parent client. PR-B's
+SQLAlchemy 2.0 migration preserves the kwargs verbatim, but kwarg
+preservation is not the same as behavior verification — this test is
+the behavior verification.
+
+Two protections are exercised independently:
+
+1. **ORM-driven cascade**: ``OAuth2Client.tokens`` declares
+   ``cascade="all, delete"``. Deleting the parent via
+   ``session.delete(client)`` must remove the child tokens through the
+   ORM unit-of-work.
+
+2. **DB-level cascade**: ``OAuth2Token.client_id`` has a FK with
+   ``ondelete="CASCADE"``. A raw SQL ``DELETE FROM oauth_clients``
+   that bypasses the ORM must also remove the child tokens at the
+   DB layer (defense in depth — if a future refactor drops the ORM
+   cascade kwarg, this layer still holds).
+
+If either path silently regresses (a cascade kwarg dropped, an FK
+relaxed by a migration), one of the assertions here will fire.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import uuid
+from pathlib import Path
+
+# Match the sys.path layout the rest of the backend integration tests use.
+_BACKEND_SRC = Path(__file__).resolve().parents[2] / "src"
+if str(_BACKEND_SRC) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_SRC))
+
+import pytest  # noqa: E402
+from alembic.config import Config  # noqa: E402
+from sqlalchemy import text  # noqa: E402
+
+from alembic import command  # noqa: E402
+from db.base import get_sync_session  # noqa: E402
+from models.auth import OAuth2Client, OAuth2Token  # noqa: E402
+from utils.datetime import utcnow  # noqa: E402
+
+
+def _check_db_available() -> bool:
+    try:
+        import psycopg2
+
+        url = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
+        conn = psycopg2.connect(url, connect_timeout=3)
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _check_db_available(),
+    reason="Test database not available (set TEST_DATABASE_URL)",
+)
+
+
+def _assert_test_db(session) -> None:
+    db_name = session.execute(text("SELECT current_database()")).scalar()
+    assert db_name and db_name.endswith("_test"), (
+        f"Refusing to run cascade integration test cleanup against non-test database "
+        f"'{db_name}'. Set TEST_DATABASE_URL to a *_test database."
+    )
+
+
+def _assert_alembic_target_is_test_db() -> None:
+    """Refuse to run ``alembic upgrade head`` against a non-test database.
+
+    Mirrors the safety guard in ``test_oauth_dcr_integration.py``. A
+    misconfigured ``TEST_DATABASE_URL`` (despite the conftest steering)
+    must not be able to migrate a dev or prod DB during fixture setup.
+    """
+    import psycopg2
+
+    sync_url = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
+    conn = psycopg2.connect(sync_url, connect_timeout=3)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT current_database()")
+            row = cur.fetchone()
+            db_name = row[0] if row else None
+            assert db_name and db_name.endswith("_test"), (
+                f"Refusing to run 'alembic upgrade head' against non-test "
+                f"database '{db_name}'. Set TEST_DATABASE_URL to a *_test database."
+            )
+    finally:
+        conn.close()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _ensure_oauth_tables_schema():
+    """Apply alembic migrations so oauth_clients/oauth_tokens exist in the test DB.
+
+    Mirrors the ``_ensure_oauth_clients_schema`` fixture in
+    ``test_oauth_dcr_integration.py``. If the test DB schema is partial
+    (some other test created tables via ``create_all`` without stamping
+    ``alembic_version``), bring it to ``head`` so the FK ``ondelete="CASCADE"``
+    on ``oauth_tokens.client_id`` is the actual migration-produced
+    constraint, not an ORM-recreated one.
+    """
+    _assert_alembic_target_is_test_db()
+    backend_dir = Path(__file__).resolve().parents[2]
+    config = Config(str(backend_dir / "alembic.ini"))
+    command.upgrade(config, "head")
+    yield
+
+
+_TEST_CLIENT_NAME_ORM = "CascadeTest ORM Path"
+_TEST_CLIENT_NAME_DB = "CascadeTest DB Path"
+
+
+@pytest.fixture
+def sync_db():
+    """Yield a real sync DB session bound to the test database.
+
+    Cleanup removes any oauth_clients rows this test created. The
+    cascade itself is the behavior under test, so the cleanup uses a
+    name-filter that survives partial test failures.
+    """
+    session = get_sync_session()
+    _assert_test_db(session)
+    try:
+        yield session
+    finally:
+        # If the test left the session in a failed-flush state
+        # (PendingRollbackError), clear it before attempting cleanup so the
+        # name-filter DELETE can still run on a fresh transaction.
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        _assert_test_db(session)
+        session.execute(
+            text("DELETE FROM oauth_clients WHERE client_name IN (:n1, :n2)"),
+            {"n1": _TEST_CLIENT_NAME_ORM, "n2": _TEST_CLIENT_NAME_DB},
+        )
+        session.commit()
+        session.close()
+
+
+def _make_client(client_name: str) -> OAuth2Client:
+    """Build an OAuth2Client with the minimal required columns.
+
+    ``owner_id`` is set to a non-null sentinel because some test DB schemas
+    may pre-date migration ``d04_519_oauth_owner_nullable`` (#519). The
+    cascade behavior under test is independent of owner_id nullability.
+    """
+    return OAuth2Client(
+        client_id=f"cascadetest_{uuid.uuid4().hex[:16]}",
+        client_secret_hash="0" * 64,  # SHA256 hash placeholder; not validated here
+        client_name=client_name,
+        owner_id="cascadetest_owner",
+        redirect_uris=["http://localhost:9999/callback"],
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+    )
+
+
+def _make_token(client_id: str, *, label: str) -> OAuth2Token:
+    """Build an OAuth2Token for the given client_id."""
+    return OAuth2Token(
+        client_id=client_id,
+        user_id=f"cascadetest_user_{label}",
+        access_token=f"cascadetest_at_{uuid.uuid4().hex}",
+        refresh_token=f"cascadetest_rt_{uuid.uuid4().hex}",
+        issued_at=utcnow(),
+        expires_in=3600,
+    )
+
+
+def _count_tokens_for_client(session, client_id: str) -> int:
+    return session.execute(
+        text("SELECT COUNT(*) FROM oauth_tokens WHERE client_id = :cid"),
+        {"cid": client_id},
+    ).scalar_one()
+
+
+class TestOAuth2ClientTokenCascade:
+    """Issue #595: pin the OAuth2Client → OAuth2Token cascade-delete behavior."""
+
+    def test_orm_session_delete_cascades_tokens(self, sync_db):
+        """``session.delete(client)`` removes child tokens via cascade="all, delete"."""
+        client = _make_client(_TEST_CLIENT_NAME_ORM)
+        sync_db.add(client)
+        sync_db.flush()  # populate client.client_id without committing
+
+        token_1 = _make_token(client.client_id, label="orm_1")
+        token_2 = _make_token(client.client_id, label="orm_2")
+        token_3 = _make_token(client.client_id, label="orm_3")
+        sync_db.add_all([token_1, token_2, token_3])
+        sync_db.commit()
+
+        assert _count_tokens_for_client(sync_db, client.client_id) == 3, (
+            "precondition: 3 tokens should be persisted before cascade"
+        )
+
+        sync_db.delete(client)
+        sync_db.commit()
+
+        assert _count_tokens_for_client(sync_db, client.client_id) == 0, (
+            "OAuth2Client.tokens cascade='all, delete' should have removed all child "
+            "tokens via the ORM unit-of-work"
+        )
+
+    def test_raw_sql_delete_cascades_tokens_via_fk(self, sync_db):
+        """Raw ``DELETE FROM oauth_clients`` cascades via FK ondelete="CASCADE".
+
+        This bypasses the ORM cascade and exercises the DB-level FK
+        constraint independently. If a future migration drops the FK
+        ondelete clause, this assertion fires even if the ORM cascade
+        kwarg is still in place.
+        """
+        client = _make_client(_TEST_CLIENT_NAME_DB)
+        sync_db.add(client)
+        sync_db.flush()
+        captured_client_id = client.client_id
+
+        token = _make_token(captured_client_id, label="fk")
+        sync_db.add(token)
+        sync_db.commit()
+
+        assert _count_tokens_for_client(sync_db, captured_client_id) == 1, (
+            "precondition: 1 token should be persisted before raw DELETE"
+        )
+
+        # Bypass the ORM unit-of-work entirely. The FK ondelete="CASCADE"
+        # on OAuth2Token.client_id must remove the token at the DB layer.
+        sync_db.execute(
+            text("DELETE FROM oauth_clients WHERE client_id = :cid"),
+            {"cid": captured_client_id},
+        )
+        sync_db.commit()
+
+        assert _count_tokens_for_client(sync_db, captured_client_id) == 0, (
+            "OAuth2Token.client_id FK ondelete='CASCADE' should have removed the "
+            "child token at the DB layer when the parent OAuth2Client row was "
+            "deleted via raw SQL"
+        )
