@@ -190,10 +190,24 @@ test-watch:
 	cd $(BACKEND_DIR) && pytest-watch
 
 .PHONY: lint
-lint:
+lint: lint-models-no-column
 	@echo "Running linter..."
 	cd $(BACKEND_DIR) && ruff check src/ tests/
 	@echo "Lint complete."
+
+# Guard against drift back to the legacy SQLAlchemy 1.x Column() pattern in
+# model files (#596 / epic #370). The regex accepts both forms the half-
+# migration trap produces:
+#
+#   - bare:        `name = Column(...)`
+#   - annotated:   `id: int = Column(...)`  ← pyright accepts but SA 2.0 does
+#                                              NOT recognize as a Mapped attr
+#
+# Negative-case smoke test lives at backend/tests/test_models_no_column_guard.py.
+.PHONY: lint-models-no-column
+lint-models-no-column:
+	@! grep -rnE '^\s+\w+(:\s*[^=]+)?\s*=\s*Column\(' $(BACKEND_DIR)/src/models/ \
+	  || (echo "ERROR: legacy 'Column(...)' usage detected in $(BACKEND_DIR)/src/models/. Use 'Mapped[T] = mapped_column(...)' instead. The annotated half-migration form 'id: int = Column(...)' is also rejected because SQLAlchemy 2.0 does not recognize it as a Mapped attribute (it silently fails type-resolution). See PR #596 / epic #370."; exit 1)
 
 .PHONY: format
 format:

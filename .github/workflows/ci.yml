@@ -28,6 +28,13 @@ jobs:
       - name: Format check
         run: cd backend && ruff format --check src/ tests/
 
+      # #596 / epic #370 — guard against drift back to legacy SQLAlchemy 1.x
+      # Column() in model files. Catches both `name = Column(...)` and the
+      # annotated half-migration form `id: int = Column(...)` (pyright-OK,
+      # SA-2.0-broken). The Makefile target lives at repo root.
+      - name: Models no-Column guard
+        run: make lint-models-no-column
+
   backend-unit:
     runs-on: ubuntu-latest
     services:
