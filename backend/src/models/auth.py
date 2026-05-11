@@ -409,22 +409,24 @@ class OAuth2Client(Base):
 
     __tablename__ = "oauth_clients"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     # Client Identity
-    client_id = Column(String(48), nullable=False, unique=True, index=True)
-    client_secret_hash = Column(String(64), nullable=False)  # SHA256 hash (always required)
-    client_name = Column(String(100), nullable=False)
+    client_id: Mapped[str] = mapped_column(String(48), nullable=False, unique=True, index=True)
+    client_secret_hash: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )  # SHA256 hash (always required)
+    client_name: Mapped[str] = mapped_column(String(100), nullable=False)
     # Issue #519 (#513 follow-up): DCR-registered clients (RFC 7591) have no
     # human owner — ``dynamic_client_registration`` creates them with
     # ``owner_id=None``. Admin-managed clients still record the creating
     # user's id. Migration revision ``d04_519_oauth_owner_nullable`` drops
     # the corresponding NOT NULL DB constraint.
-    owner_id = Column(String(255), nullable=True, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
 
     # Issue #169: Workspace-scoped OAuth clients (access all contexts in workspace)
     # Migration 034: context_id removed (deprecated)
-    workspace_id = Column(
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=True,
@@ -432,32 +434,44 @@ class OAuth2Client(Base):
     )
 
     # OAuth2 Configuration
-    redirect_uris = Column(JSON, nullable=False)  # ["https://example.com/callback"]
-    grant_types = Column(JSON, nullable=False, default=["authorization_code", "refresh_token"])
-    response_types = Column(JSON, nullable=False, default=["code"])
-    scope = Column(
+    redirect_uris: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False
+    )  # ["https://example.com/callback"]
+    grant_types: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, default=["authorization_code", "refresh_token"]
+    )
+    response_types: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=["code"])
+    scope: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
         default="memory:read memory:write offline_access",  # Issue #132: offline_access for refresh token
     )
-    token_endpoint_auth_method = Column(String(50), nullable=False, default="client_secret_post")
+    token_endpoint_auth_method: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="client_secret_post"
+    )
 
     # Timestamps
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=True, onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, onupdate=func.now()
+    )
 
     # Migration 034: Visibility control (Zero-knowledge model)
-    hidden_at = Column(DateTime, nullable=True)
-    visibility_expires_at = Column(DateTime, nullable=True)
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    visibility_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Migration 035: Encrypted plaintext secret for display until hidden
-    plaintext_secret_encrypted = Column(String, nullable=True)
+    plaintext_secret_encrypted: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # Migration 036: Provider type (claude, chatgpt, custom)
-    provider = Column(String(50), nullable=False, server_default="custom")
+    provider: Mapped[str] = mapped_column(String(50), nullable=False, server_default="custom")
 
     # Relationships
-    tokens = relationship("OAuth2Token", back_populates="client", cascade="all, delete")
+    tokens: Mapped[list["OAuth2Token"]] = relationship(
+        "OAuth2Token", back_populates="client", cascade="all, delete"
+    )
 
     def __repr__(self) -> str:
         """String representation."""
@@ -636,27 +650,27 @@ class OAuth2AuthorizationCode(Base):
 
     __tablename__ = "oauth_authorization_codes"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     # Authorization Code Data
-    code = Column(String(120), nullable=False, unique=True, index=True)
-    client_id = Column(String(48), nullable=False, index=True)
-    user_id = Column(String(255), nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(120), nullable=False, unique=True, index=True)
+    client_id: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
     # OAuth2 Flow Data
-    redirect_uri = Column(String(512), nullable=False)
-    scope = Column(String(255), nullable=True)
+    redirect_uri: Mapped[str] = mapped_column(String(512), nullable=False)
+    scope: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # PKCE Support (RFC 7636 - not enforced but kept for future)
-    code_challenge = Column(String(128), nullable=True)
-    code_challenge_method = Column(String(10), nullable=True)
+    code_challenge: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    code_challenge_method: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
     # RFC 8707 Resource Indicators (Issue #157)
-    resource = Column(String(512), nullable=True)  # Audience for token
+    resource: Mapped[str | None] = mapped_column(String(512), nullable=True)  # Audience for token
 
     # Timestamps
-    auth_time = Column(DateTime, nullable=False, server_default=func.now())
-    expires_at = Column(DateTime, nullable=False, index=True)
+    auth_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
 
     # Indexes
     __table_args__ = (
@@ -768,27 +782,29 @@ class OAuth2DeviceCode(Base):
 
     __tablename__ = "oauth_device_codes"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
-    device_code = Column(String(255), nullable=False, unique=True, index=True)
-    user_code = Column(String(8), nullable=False, unique=True, index=True)
-    client_id = Column(
+    device_code: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    user_code: Mapped[str] = mapped_column(String(8), nullable=False, unique=True, index=True)
+    client_id: Mapped[str] = mapped_column(
         String(48),
         ForeignKey("oauth_clients.client_id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
-    user_id = Column(String(255), nullable=True)
-    scope = Column(String(255), nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    scope: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
-    expires_at = Column(DateTime, nullable=False, index=True)
-    last_polled_at = Column(DateTime, nullable=True)
-    denied_at = Column(DateTime, nullable=True)
-    authorized_at = Column(DateTime, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    denied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    authorized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
 
-    client = relationship("OAuth2Client")
+    client: Mapped["OAuth2Client"] = relationship("OAuth2Client")
 
     def __repr__(self) -> str:
         return f"<OAuth2DeviceCode(device_code='{self.device_code[:8]}...', client='{self.client_id}')>"
@@ -842,39 +858,41 @@ class OAuth2Token(Base):
 
     __tablename__ = "oauth_tokens"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     # Token Owner
-    client_id = Column(
+    client_id: Mapped[str] = mapped_column(
         String(48),
         ForeignKey("oauth_clients.client_id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
-    user_id = Column(String(255), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
     # Token Data
-    token_type = Column(String(20), nullable=False, default="Bearer")
-    access_token = Column(String(255), nullable=False, unique=True, index=True)
-    refresh_token = Column(String(255), nullable=True, unique=True, index=True)
-    scope = Column(String(255), nullable=True)
+    token_type: Mapped[str] = mapped_column(String(20), nullable=False, default="Bearer")
+    access_token: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    refresh_token: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, unique=True, index=True
+    )
+    scope: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Status
-    revoked = Column(Boolean, nullable=False, default=False, index=True)
+    revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
 
     # Timestamps
-    issued_at = Column(DateTime, nullable=False, server_default=func.now())
-    access_token_revoked_at = Column(DateTime, nullable=True)
-    refresh_token_revoked_at = Column(DateTime, nullable=True)
+    issued_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    access_token_revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    refresh_token_revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Expiration
-    expires_in = Column(Integer, nullable=False, default=3600)  # 1 hour
+    expires_in: Mapped[int] = mapped_column(Integer, nullable=False, default=3600)  # 1 hour
 
     # RFC 8707 Resource Indicators (Issue #157)
-    resource = Column(String(512), nullable=True)  # Audience claim (aud)
+    resource: Mapped[str | None] = mapped_column(String(512), nullable=True)  # Audience claim (aud)
 
     # Relationships
-    client = relationship("OAuth2Client", back_populates="tokens")
+    client: Mapped["OAuth2Client"] = relationship("OAuth2Client", back_populates="tokens")
 
     # Indexes
     __table_args__ = (
