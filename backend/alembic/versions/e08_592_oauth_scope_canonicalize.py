@@ -6,14 +6,13 @@ Issue #592 surfaced a 4-way drift between the OAuth metadata sources:
   ``{memory:read, memory:write, memory:admin, offline_access}``.
 - ``GET /.well-known/oauth-protected-resource`` advertised
   ``{memory:read, memory:write, memory:delete, memory:admin}``
-  (with a fictional ``memory:delete`` that nothing enforced, and missing
-  ``offline_access``).
+  (missing ``offline_access``).
 - ``GET /.well-known/openid-configuration`` advertised
-  ``{openid, memory:read, memory:write, memory:admin, offline_access}``
-  (with a fictional ``openid`` — the server does not issue ``id_token``).
+  ``{openid, memory:read, memory:write, memory:admin, offline_access}``.
 - ``POST /api/v1/oauth/register`` (DCR) fell back to
   ``{memory:read, memory:write, offline_access}`` when the client did
-  not specify a scope, silently omitting ``memory:admin``.
+  not specify a scope, silently omitting ``memory:admin`` and other
+  scopes advertised by the metadata.
 
 The Claude Code MCP SDK's scope-drift check (``Invalidated credentials
 (scope: all)``) was tripping because the authorization URL combined the
@@ -21,10 +20,12 @@ union of advertised scopes while the DCR-issued client only held a
 subset.
 
 The application-level fix consolidates all four sources behind
-``auth.mcp_scopes.ALL_ADVERTISED_SCOPES``. This migration normalises any
-existing DCR-registered ``oauth_clients`` rows that still carry the
-narrow pre-fix default so a refresh after deploy does not re-trip the
-SDK's scope-drift cache eviction.
+``auth.mcp_scopes.ALL_ADVERTISED_SCOPES`` — which is the UNION of every
+scope previously advertised by any source, so no external client sees a
+removed scope. This migration normalises any existing DCR-registered
+``oauth_clients`` rows that still carry the narrow pre-fix default so a
+refresh after deploy does not re-trip the SDK's scope-drift cache
+eviction.
 
 Scope of the data fix:
 
@@ -36,7 +37,9 @@ Scope of the data fix:
   admin-managed clients that were created without an explicit
   ``scope=`` override (the admin Pydantic schema also defaulted to the
   pre-fix narrow string before #592). Widening them is benign because
-  the added ``memory:admin`` scope is not enforced on any route yet.
+  the added scopes (``memory:admin``, ``memory:delete``, ``openid``) are
+  not enforced on any route yet — they are advertised solely to keep the
+  four metadata sources self-consistent. #608 tracks paired enforcement.
 - The canonical default is a single space-separated string matching
   ``auth.mcp_scopes.DCR_DEFAULT_SCOPE``.
 
@@ -62,7 +65,7 @@ depends_on = None
 # whatever the canonical set happens to be the day someone runs ``alembic
 # upgrade head`` years later, which is the opposite of what migrations are for.
 _PRE_FIX_DEFAULT = "memory:read memory:write offline_access"
-_CANONICAL_AT_E08 = "memory:read memory:write memory:admin offline_access"
+_CANONICAL_AT_E08 = "openid memory:read memory:write memory:admin memory:delete offline_access"
 
 
 def upgrade() -> None:

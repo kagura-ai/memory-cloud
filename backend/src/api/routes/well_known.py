@@ -93,9 +93,6 @@ async def openid_configuration(request: Request):
         "registration_endpoint": f"{base_url}/api/v1/oauth/register",  # DCR endpoint (RFC 7591)
         # PKCE required by MCP (CRITICAL - clients will refuse if absent)
         "code_challenge_methods_supported": ["S256"],
-        # "openid" intentionally omitted: this server does not issue id_token
-        # (no OIDC subject path). Clients that strictly require OIDC
-        # compliance will fail discovery; MCP clients only need PKCE + scopes.
         "scopes_supported": list(ALL_ADVERTISED_SCOPES),
         # Response types
         "response_types_supported": ["code"],
