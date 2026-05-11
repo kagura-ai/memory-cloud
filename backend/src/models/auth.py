@@ -1176,6 +1176,25 @@ class Context(Base):
         return self.name == "default"
 
 
+def _zero_floor(base: int, addon: int | None) -> int:
+    """Defense-in-depth quota helper (#569).
+
+    A plan-tier ``base`` of 0 means the feature is excluded from the tier —
+    no addon row can raise the effective limit above 0. Encoded in the data
+    (``base == 0``) rather than by plan name so a future paid tier with
+    ``base > 0`` automatically gets addon stacking (mirrors the rule from
+    PR #568 / #560 for ``sleep_enabled_contexts_limit``).
+
+    Callers that scale the addon to a different unit before stacking
+    (e.g. ``effective_storage_limit_bytes`` converts MB→bytes) must pass
+    the **scaled** value as ``addon`` so the zero-floor check happens on
+    the final unit.
+    """
+    if base == 0:
+        return 0
+    return base + (addon or 0)
+
+
 class Workspace(Base):
     """Workspace model for multi-user team management.
 
@@ -1259,52 +1278,75 @@ class Workspace(Base):
     @property
     def effective_memory_limit(self) -> int:
         """Memory limit including addon bonus."""
-        return self._plan_tier.memory_limit + (self.addon_memory_bonus or 0)
+        return _zero_floor(self._plan_tier.memory_limit, self.addon_memory_bonus)
 
     @property
     def effective_mcp_calls_per_day(self) -> int:
-        """MCP API calls/day: plan tier base + addon."""
-        return self._plan_tier.mcp_calls_per_day + (self.addon_mcp_quota_bonus or 0)
+        """MCP API calls/day: plan tier base + addon (Issue #238)."""
+        return _zero_floor(self._plan_tier.mcp_calls_per_day, self.addon_mcp_quota_bonus)
 
     @property
     def effective_mcp_calls_per_week(self) -> int:
-        """Weekly MCP API call limit: plan tier base + addon."""
-        return self._plan_tier.mcp_calls_per_week + (self.addon_mcp_quota_bonus or 0)
+        """Weekly MCP API call limit: plan tier base + addon (Issue #238)."""
+        return _zero_floor(self._plan_tier.mcp_calls_per_week, self.addon_mcp_quota_bonus)
 
     @property
     def effective_rest_calls_per_day(self) -> int:
-        """REST API calls/day: plan tier base + addon."""
-        return self._plan_tier.rest_calls_per_day + (self.addon_rest_quota_bonus or 0)
+        """REST API calls/day: plan tier base + addon (Issue #238).
+
+        FREE has ``rest_calls_per_day == 0`` — the zero-base guard in
+        ``_zero_floor`` ensures a manual addon row cannot grant REST access
+        to a tier that excludes it (#569).
+        """
+        return _zero_floor(self._plan_tier.rest_calls_per_day, self.addon_rest_quota_bonus)
 
     @property
     def effective_rest_calls_per_week(self) -> int:
-        """Weekly REST API call limit: plan tier base + addon."""
-        return self._plan_tier.rest_calls_per_week + (self.addon_rest_quota_bonus or 0)
+        """Weekly REST API call limit: plan tier base + addon (Issue #238)."""
+        return _zero_floor(self._plan_tier.rest_calls_per_week, self.addon_rest_quota_bonus)
 
     @property
     def effective_public_calls_per_day(self) -> int:
-        """Public REST API calls/day: plan tier base + addon."""
-        return self._plan_tier.public_calls_per_day + (self.addon_public_quota_bonus or 0)
+        """Public REST API calls/day: plan tier base + addon (Issue #238).
+
+        FREE and BASIC have ``public_calls_per_day == 0``. There is **no other
+        runtime tier gate** on the public REST routes — ``api/routes/public_search.py``
+        rejects non-public contexts via ``context.is_public``, but does not check
+        the owner's plan tier. The ``public_contexts`` entry in
+        ``plan_tiers.py:FEATURE_MIN_PLANS`` is declared but never consumed at
+        runtime (``check_feature_access`` is only called for ``memory_analysis``
+        and ``reranking`` today), so the zero-base guard here is the **primary**
+        protection against a stray ``WorkspaceAddon`` row granting public-API
+        access to a tier that excludes it (#569).
+        """
+        return _zero_floor(self._plan_tier.public_calls_per_day, self.addon_public_quota_bonus)
 
     @property
     def effective_public_calls_per_week(self) -> int:
-        """Weekly Public REST API call limit: plan tier base + addon."""
-        return self._plan_tier.public_calls_per_week + (self.addon_public_quota_bonus or 0)
+        """Weekly Public REST API call limit: plan tier base + addon (Issue #238)."""
+        return _zero_floor(self._plan_tier.public_calls_per_week, self.addon_public_quota_bonus)
 
     @property
     def effective_max_contexts(self) -> int:
         """Max contexts: plan tier base + addon."""
-        return self._plan_tier.max_contexts_per_workspace + (self.addon_context_bonus or 0)
+        return _zero_floor(self._plan_tier.max_contexts_per_workspace, self.addon_context_bonus)
 
     @property
     def effective_max_members(self) -> int:
-        """Max members: plan tier base + addon."""
-        return self._plan_tier.max_members_per_workspace + (self.addon_member_bonus or 0)
+        """Max members: plan tier base + addon (Issue #229)."""
+        return _zero_floor(self._plan_tier.max_members_per_workspace, self.addon_member_bonus)
 
     @property
     def effective_analysis_runs_per_day(self) -> int:
-        """Memory Broadlistening analysis runs/day: plan tier base + addon (Issue #494)."""
-        return self._plan_tier.analysis_runs_per_day + (self.addon_analysis_bonus or 0)
+        """Memory Broadlistening analysis runs/day: plan tier base + addon (Issue #494).
+
+        FREE and BASIC have ``analysis_runs_per_day == 0``. Access is also
+        gated by ``auth.analysis_gates.require_pro_tier`` which checks the
+        ``memory_analysis`` feature flag (``plan_tiers.py`` ``FEATURE_MIN_PLANS``);
+        the zero-base guard here is defense-in-depth in case that feature
+        gate is ever bypassed (#569).
+        """
+        return _zero_floor(self._plan_tier.analysis_runs_per_day, self.addon_analysis_bonus)
 
     @property
     def effective_storage_limit_bytes(self) -> int:
@@ -1313,10 +1355,15 @@ class Workspace(Base):
         ``addon_storage_bonus_mb`` stores the bonus in MB to align with the
         ``ADDON_UNIT_VALUES["extra_storage"]`` unit; the conversion to bytes
         happens here so callers always see a single unit at the boundary.
+
+        Defense-in-depth: addon bytes are computed first, then passed through
+        ``_zero_floor`` (#569). If a future tier sets ``storage_limit_bytes == 0``
+        — and ``api/routes/files.py:reserve_upload`` does not currently have a
+        tier-feature gate ahead of the limit check — the zero-floor here is
+        what stops a stray ``WorkspaceAddon`` row from granting storage access.
         """
-        return (
-            self._plan_tier.storage_limit_bytes + (self.addon_storage_bonus_mb or 0) * 1024 * 1024
-        )
+        addon_bytes = (self.addon_storage_bonus_mb or 0) * 1024 * 1024
+        return _zero_floor(self._plan_tier.storage_limit_bytes, addon_bytes)
 
     @property
     def effective_sleep_enabled_contexts_limit(self) -> int:
@@ -1334,11 +1381,14 @@ class Workspace(Base):
         addons" is encoded in the data (``sleep_enabled_contexts_limit == 0``)
         rather than by hard-coding plan names so a future paid tier with
         ``sleep_enabled_contexts_limit > 0`` automatically gets addon stacking.
+
+        Now routed through ``_zero_floor`` to share the rule with every other
+        ``effective_*_limit`` property (#569).
         """
-        base = self._plan_tier.sleep_enabled_contexts_limit
-        if base == 0:
-            return 0
-        return base + (self.addon_sleep_contexts_bonus or 0)
+        return _zero_floor(
+            self._plan_tier.sleep_enabled_contexts_limit,
+            self.addon_sleep_contexts_bonus,
+        )
 
     # Stripe billing (Issue #351)
     stripe_customer_id = Column(String(255), nullable=True)
