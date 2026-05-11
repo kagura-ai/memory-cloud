@@ -14,6 +14,7 @@ from db.base import get_db
 from models.schemas import ContextSearchConfigResponse, ContextSearchConfigUpdate
 from repositories.config_repository import ContextSearchConfigRepository
 from services.permission_service import PermissionService
+from utils.exceptions import MemoryCloudException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -130,7 +131,7 @@ async def update_context_search_config(
 
         return ContextSearchConfigResponse.model_validate(config)
 
-    except HTTPException:
+    except (HTTPException, MemoryCloudException):
         raise
     except ValueError as e:
         logger.error(

@@ -33,6 +33,7 @@ from services.context_service import ContextService
 from services.memory_service import MemoryService
 from services.permission_service import PermissionService
 from utils.datetime import to_utc_iso, utcnow
+from utils.exceptions import MemoryCloudException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -635,7 +636,11 @@ async def list_memories(
 
         return MemoryListResponse(memories=memory_items, total=total, has_more=has_more)
 
-    except HTTPException:
+    except (HTTPException, MemoryCloudException):
+        # Propagate structured errors (HTTPException from route body /
+        # FastAPI deps, MemoryCloudException from PermissionService's
+        # resolve_context_for_workspace_read 404 / ContextService 404 etc.)
+        # to the global handler. Anything else falls through to the 500 path.
         raise
     except Exception as e:
         logger.error("list_memories_failed", error=str(e))
