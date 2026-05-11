@@ -3,14 +3,15 @@
 Issue #101: Sleep Maintenance Foundation — report tracking and audit log.
 """
 
-from typing import Literal
+import uuid
+from datetime import datetime
+from typing import Any, Literal
 from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
     BigInteger,
     CheckConstraint,
-    Column,
     DateTime,
     ForeignKey,
     Index,
@@ -21,6 +22,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
 
@@ -74,10 +76,10 @@ class SleepReport(Base):
 
     __tablename__ = "sleep_reports"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    user_id = Column(String(255), nullable=False, index=True)
-    workspace_id = Column(UUID(as_uuid=True), nullable=True)
-    context_id = Column(
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    context_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("contexts.id", ondelete="CASCADE"),
         nullable=True,
@@ -85,16 +87,18 @@ class SleepReport(Base):
     )
 
     # Execution timing
-    started_at = Column(DateTime, nullable=False, server_default=func.now())
-    completed_at = Column(DateTime, nullable=True)
-    status = Column(String(20), nullable=False, default="running")
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
 
     # Per-phase results (JSON)
-    edge_discovery_result = Column(JSON, nullable=True)
-    dedup_result = Column(JSON, nullable=True)
-    importance_result = Column(JSON, nullable=True)
-    consolidation_result = Column(JSON, nullable=True)
-    reindex_result = Column(JSON, nullable=True)
+    edge_discovery_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    dedup_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    importance_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    consolidation_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    reindex_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     # Cost tracking — legacy roll-up totals (#101).
     # Issue #471 split per-(phase, provider, model) LLM usage into the
@@ -102,9 +106,9 @@ class SleepReport(Base):
     # remain populated by the reporter as a sum of child rows for back-compat:
     # any reader that selects them directly (legacy dashboards, log analyzers,
     # MCP tools) continues to work without change.
-    llm_calls_made = Column(Integer, nullable=False, default=0)
-    llm_tokens_used = Column(Integer, nullable=False, default=0)
-    embedding_calls_made = Column(Integer, nullable=False, default=0)
+    llm_calls_made: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    llm_tokens_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    embedding_calls_made: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # Embedding cost-grade columns (#471). Embedding is instance-global per
     # ``backend/src/config/settings.py`` (one EMBEDDING_PROVIDER /
@@ -115,21 +119,21 @@ class SleepReport(Base):
     # API calls today, mirroring the existing ``embedding_calls_made``
     # behavior. Sleep phases 1 (edge_discovery) and 2 (dedup_merge) also call
     # the embedding API but don't increment any counter; #475 closes that gap.
-    embedding_provider = Column(String(50), nullable=True)
-    embedding_model = Column(String(100), nullable=True)
-    embedding_tokens = Column(Integer, nullable=False, default=0)
+    embedding_provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    embedding_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    embedding_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # Cost-grade dimensions (#523). Both columns carry a Python-side
     # ``default`` (in-memory ORM objects readable after flush without
     # refresh) AND a ``server_default`` (raw INSERT paths that bypass the
     # ORM still satisfy NOT NULL). #472 aggregates by these axes.
-    source = Column(
+    source: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
         default="sleep",
         server_default=text("'sleep'"),
     )
-    paid_by = Column(
+    paid_by: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
         default="platform",
@@ -137,14 +141,14 @@ class SleepReport(Base):
     )
 
     # Activity counters
-    memories_processed = Column(Integer, nullable=False, default=0)
-    edges_created = Column(Integer, nullable=False, default=0)
-    memories_merged = Column(Integer, nullable=False, default=0)
-    memories_promoted = Column(Integer, nullable=False, default=0)
-    memories_flagged = Column(Integer, nullable=False, default=0)
+    memories_processed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    edges_created: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    memories_merged: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    memories_promoted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    memories_flagged: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # Error tracking
-    error_message = Column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -199,21 +203,23 @@ class SleepAction(Base):
 
     __tablename__ = "sleep_actions"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
-    report_id = Column(
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    report_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("sleep_reports.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
 
-    phase = Column(String(30), nullable=False)
-    action_type = Column(String(30), nullable=False)
-    memory_id = Column(UUID(as_uuid=True), nullable=True)
-    target_id = Column(UUID(as_uuid=True), nullable=True)
-    details = Column(JSON, nullable=True)
+    phase: Mapped[str] = mapped_column(String(30), nullable=False)
+    action_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    memory_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    target_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    details: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
 
     __table_args__ = (Index("idx_sleep_actions_report_phase", "report_id", "phase"),)
 
@@ -251,31 +257,33 @@ class SleepReportLLMUsage(Base):
 
     __tablename__ = "sleep_report_llm_usage"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     # report_id has an explicit ``Index`` in __table_args__ below to match
     # the migration's ``idx_sleep_report_llm_usage_report_id`` name.
     # ``index=True`` here would create an auto-named index
     # (``ix_sleep_report_llm_usage_report_id``) and cause schema-drift
     # noise on alembic autogenerate or duplicate indexes when
     # Base.metadata.create_all is used in tests.
-    report_id = Column(
+    report_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("sleep_reports.id", ondelete="CASCADE"),
         nullable=False,
     )
 
-    phase = Column(String(30), nullable=False)
-    provider = Column(String(50), nullable=False)
-    model = Column(String(100), nullable=False)
+    phase: Mapped[str] = mapped_column(String(30), nullable=False)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
 
-    input_tokens = Column(Integer, nullable=False, default=0)
-    output_tokens = Column(Integer, nullable=False, default=0)
-    cached_input_tokens = Column(Integer, nullable=False, default=0)
-    cache_write_tokens = Column(Integer, nullable=False, default=0)
-    calls = Column(Integer, nullable=False, default=0)
-    tokenizer_version = Column(String(50), nullable=True)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cached_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tokenizer_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
 
     __table_args__ = (
         # Single-column index on report_id (FK join key). PostgreSQL does
