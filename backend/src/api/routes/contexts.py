@@ -305,7 +305,10 @@ async def list_contexts(
         stmt = select(User).where(User.user_id.in_(creator_ids))
         result = await db.execute(stmt)
         users = result.scalars().all()
-        creator_names: dict[str, str] = {u.user_id: u.name for u in users}
+        # User.name is nullable (str | None); the downstream consumer at
+        # `creator_names.get(context.created_by)` already handles the optional
+        # value, so the dict value type matches the underlying column.
+        creator_names: dict[str, str | None] = {u.user_id: u.name for u in users}
 
     # Issue #217: Get search configs for all contexts (single query)
     context_ids = [c.id for c in contexts_list]
@@ -356,7 +359,11 @@ async def list_contexts(
         stats_stmt = (
             select(
                 Memory.context_id,
-                func.count(Memory.id).label("count"),
+                # Label is "memory_count" (not "count") to avoid clashing with
+                # tuple.count, which pyright resolves first when the label is
+                # accessed as ``row.count`` and then complains the int() cast
+                # below has a method-typed argument.
+                func.count(Memory.id).label("memory_count"),
                 func.max(func.coalesce(Memory.updated_at, Memory.created_at)).label(
                     "last_activity"
                 ),
@@ -369,7 +376,7 @@ async def list_contexts(
         )
         stats_result = await db.execute(stats_stmt)
         memory_stats = {
-            row.context_id: (row.count, row.last_activity) for row in stats_result.all()
+            row.context_id: (int(row.memory_count), row.last_activity) for row in stats_result.all()
         }
 
     context_responses = []

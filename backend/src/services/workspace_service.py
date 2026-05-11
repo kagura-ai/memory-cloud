@@ -571,6 +571,10 @@ class WorkspaceService:
         self.validate_role(new_role)
 
         member = await self.get_member(workspace_id, user_id)
+        # get_member raises by default when not found, so this branch is
+        # defense-in-depth for any future call site that flips the default.
+        if member is None:
+            raise NotFoundException(f"Member not found: {user_id} in workspace {workspace_id}")
 
         # Validate single owner constraint (Issue #165)
         if new_role == "owner" and member.role != "owner":
@@ -634,6 +638,10 @@ class WorkspaceService:
             owner/admin roles always have full access (this setting is ignored).
         """
         member = await self.get_member(workspace_id, user_id)
+        # get_member raises by default when not found, so this branch is
+        # defense-in-depth for any future call site that flips the default.
+        if member is None:
+            raise NotFoundException(f"Member not found: {user_id} in workspace {workspace_id}")
 
         # Warn if setting on owner/admin (no effect)
         if member.role in ("owner", "admin") and allowed_context_ids is not None:
