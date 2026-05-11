@@ -24,6 +24,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_challenge_attr_value(value: str) -> str:
+    """Sanitize a string before interpolating it into an RFC 6750
+    ``WWW-Authenticate: Bearer ...`` quoted-attribute value.
+
+    The ``error_description`` attribute can echo back malformed-token bytes,
+    and a stray ``"`` or CR/LF would close the quoted attribute early or
+    split the response (CWE-93 / response splitting). Strip the three
+    characters that would break the header — leaving the JSON body to carry
+    the unsanitized description for client logging.
+    """
+    return value.replace("\r", " ").replace("\n", " ").replace('"', "'")
+
+
 async def _get_user_workspace_id(user_id: str) -> "UUID | None":
     """Get user's current workspace ID.
 
@@ -516,13 +529,7 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
             error_code = getattr(auth_error, "error_code", "invalid_token")
             error_description = getattr(auth_error, "error_description", str(auth_error))
 
-        # Strip control characters and quotes from the description before it
-        # lands in the WWW-Authenticate header value. ``str(auth_error)`` and
-        # ``error_description`` attributes can echo back parts of the
-        # malformed token, and a ``"`` or CR/LF in the header would close the
-        # quoted attribute early or split the response. The JSON body still
-        # carries the original description for the client to log.
-        safe_description = error_description.replace("\r", " ").replace("\n", " ").replace('"', "'")
+        safe_description = _sanitize_challenge_attr_value(error_description)
 
         # RFC 6750 + RFC 9728 §5.1 challenge. resource_metadata is anchored
         # to frontend_url so a reverse-proxied deployment produces the same
