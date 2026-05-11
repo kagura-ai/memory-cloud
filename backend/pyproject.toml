@@ -194,13 +194,6 @@ reportMissingTypeStubs = false
 #   D     reportOptionalMemberAccess          ?             deferred
 #   D     reportIndexIssue                    ?             deferred
 #   D     reportOptionalOperand               ?             deferred
-#
-# Tier A re-enable (#599 + #600 cleanup pair) — caller-side fixes:
-#   - api/routes/contexts.py: dict value-type narrowing + label rename
-#   - services/workspace_service.py: explicit None-narrowing after get_member
-#   - auth/roles.py: missing return path on async-for fall-through
-#   - auth/oauth2.py: cast(Credentials, ...) on Flow.credentials
-#   - db/qdrant.py: switch offset to qdrant-client's PointId | None
 reportArgumentType = false
 reportAttributeAccessIssue = false
 reportGeneralTypeIssues = false

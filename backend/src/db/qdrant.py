@@ -1176,10 +1176,8 @@ async def _admin_scroll_context_points(
         Successive lists of qdrant_client.models.Record, one per scroll page.
     """
     client = get_qdrant_client()
-    # Use qdrant-client's own PointId union for the cursor, matching scroll's
-    # declared parameter type. Importing locally (vs at module top) keeps the
-    # qdrant_client.conversions.common_types path scoped to this generator —
-    # no other call site in this file consumes the cursor.
+    # qdrant-client's PointId union (int | str | UUID) matches scroll's
+    # declared offset parameter and the next_offset return value.
     from qdrant_client.conversions.common_types import PointId
 
     offset: PointId | None = None
