@@ -15,12 +15,6 @@ Without explicit coverage for the annotated form, a reviewer would assume
 "pyright is green, must be fine" and miss the latent bug. These tests run as
 part of the normal unit suite so the contract is verified on every CI run,
 not only when someone manually invokes ``make lint-models-no-column``.
-
-The guard itself is a single ``grep -rnE`` invocation in the repo-root
-``Makefile``. We run it via ``subprocess`` against synthetic content in
-a tmpdir, so the test is hermetic: it does not depend on the actual model
-files (which may evolve over time), and it does not require GNU grep
-extensions beyond what ``grep -E`` provides on every CI runner.
 """
 
 from __future__ import annotations
@@ -32,10 +26,7 @@ from pathlib import Path
 
 import pytest
 
-# The exact regex used by ``make lint-models-no-column`` in the repo-root
-# Makefile. Keep this constant in sync with the Makefile target — duplicating
-# the source-of-truth is intentional: a stale Makefile + a stale test is
-# noisier than a silent regex divergence.
+# Must match the regex in the Makefile lint-models-no-column target exactly.
 GUARD_REGEX = r"^\s+\w+(:\s*[^=]+)?\s*=\s*Column\("
 
 
@@ -110,9 +101,8 @@ def test_annotated_half_migration_form_is_caught(tmp_path: Path, grep_available:
     )
     assert _grep_returncode(content, tmp_path) == 0, (
         "Guard regex did not match the annotated 'id: int = Column(...)' "
-        "half-migration form. This is the latent bug pattern (memory "
-        "fcc7cf87) the guard exists to catch — the regex must be wide "
-        "enough that pyright-clean half-migrations cannot slip through."
+        "half-migration form. The regex must be wide enough that "
+        "pyright-clean half-migrations cannot slip through."
     )
 
 

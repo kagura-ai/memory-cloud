@@ -207,7 +207,7 @@ lint: lint-models-no-column
 .PHONY: lint-models-no-column
 lint-models-no-column:
 	@! grep -rnE '^\s+\w+(:\s*[^=]+)?\s*=\s*Column\(' $(BACKEND_DIR)/src/models/ \
-	  || (echo "ERROR: legacy 'Column(...)' usage detected in $(BACKEND_DIR)/src/models/. Use 'Mapped[T] = mapped_column(...)' instead. The annotated half-migration form 'id: int = Column(...)' is also rejected because SQLAlchemy 2.0 does not recognize it as a Mapped attribute (it silently fails type-resolution). See PR #596 / epic #370."; exit 1)
+	  || (echo "ERROR: legacy 'Column(...)' usage detected in $(BACKEND_DIR)/src/models/. Use 'Mapped[T] = mapped_column(...)' instead. The annotated half-migration form 'id: int = Column(...)' is also rejected because SQLAlchemy 2.0 does not recognize it as a Mapped attribute (it silently fails type-resolution)."; exit 1)
 
 .PHONY: format
 format:
