@@ -158,6 +158,7 @@ class TestHandleUpdateContextErrorSurface:
         not ``str(exc)`` which could vary across str-coercion edge cases.
         """
         mock_db = AsyncMock()
+        mock_db.rollback = AsyncMock()
 
         async def mock_get_db():
             yield mock_db
@@ -185,6 +186,7 @@ class TestHandleUpdateContextErrorSurface:
         assert payload["status"] == "error"
         assert payload["error"] == "permission_denied"
         assert payload["message"] == "Insufficient permissions"
+        mock_db.rollback.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_not_found_exception_returns_context_not_found(
@@ -197,6 +199,7 @@ class TestHandleUpdateContextErrorSurface:
         it, the MCP surface emits ``context_not_found``.
         """
         mock_db = AsyncMock()
+        mock_db.rollback = AsyncMock()
 
         async def mock_get_db():
             yield mock_db
@@ -223,3 +226,4 @@ class TestHandleUpdateContextErrorSurface:
         payload = json.loads(result[0].text)
         assert payload["status"] == "error"
         assert payload["error"] == "context_not_found"
+        mock_db.rollback.assert_awaited()

@@ -395,11 +395,13 @@ async def handle_update_context(
                         user_id, ctx_uuid, required_role="editor"
                     )
             except NotFoundException:
+                await db.rollback()
                 return _error_response(
                     "context_not_found",
                     f"Context {ctx_uuid} not found or access denied.",
                 )
             except AuthorizationError as perm_err:
+                await db.rollback()
                 return _error_response(
                     "permission_denied",
                     perm_err.message,
