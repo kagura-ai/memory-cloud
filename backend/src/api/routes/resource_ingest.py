@@ -194,7 +194,7 @@ async def _enforce_workspace_membership(
             target_workspace_id=str(context.workspace_id),
             token_creator=token_record.created_by,
             client_ip=request.client.host if request.client else None,
-            reason=auth_error.details.get("reason", "workspace_access_denied"),
+            reason=auth_error.reason or "workspace_access_denied",
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

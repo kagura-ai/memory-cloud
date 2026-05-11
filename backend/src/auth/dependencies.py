@@ -423,7 +423,7 @@ async def require_workspace_owner(
             user_id=user_id,
             workspace_id=str(workspace_id),
             status_code=exc.status_code,
-            reason=exc.details.get("reason"),
+            reason=exc.reason,
         )
         raise
 
@@ -475,7 +475,7 @@ async def require_workspace_admin_session(
             user_id=user_id,
             workspace_id=str(workspace_id),
             status_code=exc.status_code,
-            reason=exc.details.get("reason"),
+            reason=exc.reason,
         )
         raise
 
@@ -530,7 +530,7 @@ async def require_workspace_admin(
             user_id=user_id,
             workspace_id=str(workspace_id),
             status_code=exc.status_code,
-            reason=exc.details.get("reason"),
+            reason=exc.reason,
         )
         raise
 

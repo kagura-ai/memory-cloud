@@ -303,7 +303,7 @@ class PermissionService:
                 required_role=required_role,
             )
         except AuthorizationError as exc:
-            reason = exc.details.get("reason", "workspace_access_denied")
+            reason = exc.reason or "workspace_access_denied"
             logger.warning(
                 "context_read_denied",
                 reason=reason,

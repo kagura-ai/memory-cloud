@@ -69,7 +69,7 @@ class TestWorkspaceAccess:
         with pytest.raises(AuthorizationError) as exc_info:
             await service.check_workspace_access("user1", ws_id, required_role="admin")
         assert exc_info.value.status_code == 403
-        assert exc_info.value.details.get("reason") == "role_too_low"
+        assert exc_info.value.reason == "role_too_low"
 
     @pytest.mark.asyncio
     async def test_check_workspace_access_not_member(self, service):
@@ -80,7 +80,7 @@ class TestWorkspaceAccess:
         with pytest.raises(AuthorizationError) as exc_info:
             await service.check_workspace_access("user1", ws_id)
         assert exc_info.value.status_code == 403
-        assert exc_info.value.details.get("reason") == "not_a_member"
+        assert exc_info.value.reason == "not_a_member"
 
     @pytest.mark.asyncio
     async def test_check_workspace_access_deleted_workspace(self, service, mock_db):
@@ -92,7 +92,7 @@ class TestWorkspaceAccess:
         with pytest.raises(AuthorizationError) as exc_info:
             await service.check_workspace_access("user1", uuid4())
         assert exc_info.value.status_code == 403
-        assert exc_info.value.details.get("reason") == "workspace_deleted"
+        assert exc_info.value.reason == "workspace_deleted"
 
     @pytest.mark.asyncio
     async def test_is_workspace_member_true(self, service):

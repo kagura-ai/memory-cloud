@@ -72,10 +72,25 @@ class TokenExpiredError(AuthenticationError):
 
 
 class AuthorizationError(MemoryCloudException):
-    """Authorization failed - insufficient permissions (403)."""
+    """Authorization failed - insufficient permissions (403).
 
-    def __init__(self, message: str = "Insufficient permissions", **details: Any):
+    ``reason`` is a private classification for structured logging — never
+    serialized to clients. By CWE-639 design the response carries a uniform
+    ``"Insufficient permissions"`` message; exposing the deny sub-reason
+    (workspace_deleted / not_a_member / role_too_low / ...) would
+    re-introduce the workspace-enumeration vector that this exception type
+    is meant to close (#401 gate2 CSO finding).
+    """
+
+    def __init__(
+        self,
+        message: str = "Insufficient permissions",
+        *,
+        reason: str | None = None,
+        **details: Any,
+    ) -> None:
         super().__init__(message, status_code=403, error_code="AUTH-101", **details)
+        self.reason = reason
 
 
 class APIKeyError(MemoryCloudException):
