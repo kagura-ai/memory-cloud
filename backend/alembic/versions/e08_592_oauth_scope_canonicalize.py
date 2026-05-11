@@ -28,11 +28,17 @@ SDK's scope-drift cache eviction.
 
 Scope of the data fix:
 
-- Only rows whose ``scope`` exactly equals the pre-fix default are
-  updated. Manually-managed or workspace-scoped clients (whose scope
-  may legitimately be narrower than the canonical set) are NOT touched.
-- The new canonical default is written as a single space-separated
-  string matching ``auth.mcp_scopes.DCR_DEFAULT_SCOPE``.
+- Rows whose ``scope`` differs from the exact pre-fix default string are
+  left untouched. This preserves any explicitly-narrower client scope
+  (e.g. ``memory:read`` only).
+- Rows with the exact pre-fix default string are widened to canonical
+  regardless of how they were registered. This intentionally includes
+  admin-managed clients that were created without an explicit
+  ``scope=`` override (the admin Pydantic schema also defaulted to the
+  pre-fix narrow string before #592). Widening them is benign because
+  the added ``memory:admin`` scope is not enforced on any route yet.
+- The canonical default is a single space-separated string matching
+  ``auth.mcp_scopes.DCR_DEFAULT_SCOPE``.
 
 Downgrade restores the narrow scope on rows we widened. We can identify
 them precisely because the canonical and pre-fix strings differ.

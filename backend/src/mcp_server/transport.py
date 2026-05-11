@@ -516,6 +516,14 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
             error_code = getattr(auth_error, "error_code", "invalid_token")
             error_description = getattr(auth_error, "error_description", str(auth_error))
 
+        # Strip control characters and quotes from the description before it
+        # lands in the WWW-Authenticate header value. ``str(auth_error)`` and
+        # ``error_description`` attributes can echo back parts of the
+        # malformed token, and a ``"`` or CR/LF in the header would close the
+        # quoted attribute early or split the response. The JSON body still
+        # carries the original description for the client to log.
+        safe_description = error_description.replace("\r", " ").replace("\n", " ").replace('"', "'")
+
         # RFC 6750 + RFC 9728 §5.1 challenge. resource_metadata is anchored
         # to frontend_url so a reverse-proxied deployment produces the same
         # absolute URL the well-known endpoints publish.
@@ -524,7 +532,7 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         www_authenticate = (
             f'Bearer realm="Kagura Memory Cloud", '
             f'error="{error_code}", '
-            f'error_description="{error_description}", '
+            f'error_description="{safe_description}", '
             f'resource_metadata="{resource_metadata_url}"'
         )
 
