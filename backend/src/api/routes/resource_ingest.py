@@ -189,9 +189,9 @@ async def _enforce_workspace_membership(
     except (NotFoundException, AuthorizationError) as auth_error:
         # `reason` captures the underlying cause (workspace deleted /
         # non-member / role-too-low) for forensics without re-leaking the
-        # detail to the caller. AuthorizationError carries the classification
-        # in details["reason"]; fall back to the message string for any other
-        # domain exception type.
+        # detail to the caller. The "not_found" sentinel is the defensive
+        # fallback — NotFoundException is in the catch tuple for future-proofing
+        # but check_workspace_access only raises AuthorizationError today.
         logger.warning(
             "cross_tenant_ingest_attempt",
             resource_id=context.resource_id,
@@ -199,7 +199,7 @@ async def _enforce_workspace_membership(
             target_workspace_id=str(context.workspace_id),
             token_creator=token_record.created_by,
             client_ip=request.client.host if request.client else None,
-            reason=auth_error.details.get("reason") or auth_error.message,
+            reason=auth_error.details.get("reason") or "not_found",
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

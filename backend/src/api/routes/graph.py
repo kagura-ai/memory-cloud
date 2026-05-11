@@ -220,10 +220,6 @@ async def get_graph_stats(
         )
 
     except (HTTPException, MemoryCloudException):
-        # Propagate structured errors (HTTPException raised by this route or
-        # downstream FastAPI deps, MemoryCloudException raised by services
-        # like PermissionService.resolve_context_for_workspace_read). Anything
-        # else falls through to the 500 path below.
         raise
     except Exception as e:
         logger.error("graph_stats_failed", error=str(e))
@@ -414,7 +410,6 @@ async def get_graph_data(
         )
 
     except (HTTPException, MemoryCloudException):
-        # Same propagation contract as get_graph_stats above.
         raise
     except Exception as e:
         logger.error("graph_data_failed", error=str(e), user_id=user.get("user_id"))

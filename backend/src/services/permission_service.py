@@ -303,11 +303,6 @@ class PermissionService:
                 required_role=required_role,
             )
         except AuthorizationError as exc:
-            # Classify the deny reason via the structured ``reason`` carried
-            # in ``AuthorizationError.details`` so observability distinguishes
-            # cross-tenant probes (enumeration signal worth alerting on) from
-            # routine role-too-low / workspace-deleted paths. External 404
-            # stays uniform regardless (CWE-639 / OWASP A01).
             reason = exc.details.get("reason", "workspace_access_denied")
             logger.warning(
                 "context_read_denied",
@@ -366,8 +361,7 @@ class PermissionService:
             Workspace membership
 
         Raises:
-            AuthorizationError: 403 if not owner (see ``check_workspace_access``
-                for the structured ``details["reason"]`` payload).
+            AuthorizationError: 403 if not owner
         """
         return await self.check_workspace_access(user_id, workspace_id, required_role="owner")
 
@@ -382,9 +376,7 @@ class PermissionService:
             Workspace membership
 
         Raises:
-            AuthorizationError: 403 if not admin/owner (see
-                ``check_workspace_access`` for the structured
-                ``details["reason"]`` payload).
+            AuthorizationError: 403 if not admin/owner
         """
         return await self.check_workspace_access(user_id, workspace_id, required_role="admin")
 

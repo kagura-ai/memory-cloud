@@ -137,21 +137,12 @@ def _gate_error_response(exc: Exception) -> list[TextContent]:
     is the MCP equivalent.
     """
     if isinstance(exc, (AuthorizationError, NotFoundException)):
-        # 403/404 from PermissionService.check_workspace_owner (and other
-        # PermissionService methods composed by analysis_gates). The uniform
-        # ``"Insufficient permissions"`` / ``"<resource> not found"`` messages
-        # come straight from the domain exception; the per-deny-path
-        # classification (workspace_deleted / role_too_low / etc.) lives in
-        # AuthorizationError.details["reason"] for structured logs, not for
-        # MCP clients.
         return _error_response(
             "permission_denied",
             exc.message,
             status_code=exc.status_code,
         )
     if isinstance(exc, HTTPException):
-        # Defensive fall-through for any non-PermissionService HTTPException
-        # that might propagate from FastAPI deps in this composition.
         return _error_response(
             "permission_denied",
             str(exc.detail) if exc.detail else "Access denied.",
