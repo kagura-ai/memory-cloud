@@ -88,3 +88,5 @@ class TestCheckCanView:
         with pytest.raises(AuthorizationError) as exc_info:
             await service._check_can_view("outsider", workspace_id, "target_user")
         assert exc_info.value.status_code == 403
+        assert exc_info.value.message == "Insufficient permissions"
+        assert exc_info.value.reason is None

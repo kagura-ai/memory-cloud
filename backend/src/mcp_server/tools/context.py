@@ -383,14 +383,8 @@ async def handle_update_context(
                     "No fields to update. Provide at least one of: summary, usage_guide, display_name, description, resource_id, is_public, is_locked.",
                 )
 
-            # Permission check using PermissionService (same as REST API).
-            # Mirrors handle_delete_context: NotFoundException → uniform 404
-            # envelope (CWE-639 — don't disclose whether the context exists in
-            # another workspace), AuthorizationError → permission_denied with
-            # exc.message (the AuthorizationError class enforces the uniform
-            # "Insufficient permissions" message — passing exc.message instead
-            # of str(exc) keeps the response body aligned with the
-            # global memory_cloud_exception_handler contract).
+            # Mirrors handle_delete_context. Uses exc.message (not str(exc))
+            # so AuthorizationError's CWE-639 uniform-message contract holds.
             try:
                 if requested_fields & owner_fields:
                     # Owner-only fields → require context owner

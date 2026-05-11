@@ -129,16 +129,10 @@ class TestHandleDeleteContextErrorSurface:
 
 
 class TestHandleUpdateContextErrorSurface:
-    """Pins the same domain-exception envelope contract for
-    ``handle_update_context`` (Issue #604, follow-up to #401 / PR #602).
-
-    Pre-#604 the handler caught all permission failures via a generic
-    ``except Exception as perm_err`` and collapsed both 404-class (context
-    doesn't exist or access denied) and 403-class (caller lacks permission)
-    into a single ``permission_denied`` envelope. After #604 the catch is
-    split to mirror ``handle_delete_context`` — and the message field uses
-    ``exc.message`` instead of ``str(exc)`` so the CWE-639 uniform-disclosure
-    contract enforced by ``AuthorizationError`` is honored verbatim.
+    """Pins the domain-exception envelope contract for handle_update_context
+    (mirror of handle_delete_context). AuthorizationError → permission_denied
+    with exc.message (CWE-639 uniform string). NotFoundException →
+    context_not_found.
     """
 
     @pytest.fixture
