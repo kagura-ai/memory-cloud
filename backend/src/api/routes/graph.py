@@ -6,7 +6,7 @@ Issue #46 Phase 5 - Rich Memory Overview
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +17,7 @@ from models.memory import Memory
 from services.graph_service import GraphService
 from services.permission_service import PermissionService
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import MemoryCloudException
+from utils.exceptions import InternalError, MemoryCloudException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -223,10 +223,7 @@ async def get_graph_stats(
         raise
     except Exception as e:
         logger.error("graph_stats_failed", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve graph statistics",
-        ) from e
+        raise InternalError("Failed to retrieve graph statistics") from e
 
 
 @router.get("/data", response_model=GraphDataResponse)
@@ -413,7 +410,4 @@ async def get_graph_data(
         raise
     except Exception as e:
         logger.error("graph_data_failed", error=str(e), user_id=user.get("user_id"))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve graph data",
-        ) from e
+        raise InternalError("Failed to retrieve graph data") from e
