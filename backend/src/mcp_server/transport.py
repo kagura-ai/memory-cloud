@@ -7,6 +7,7 @@ Issue #248: SSE transport removed (deprecated in MCP spec 2025-03-26).
 import asyncio
 import json
 import logging
+import os
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -515,11 +516,20 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
             error_code = getattr(auth_error, "error_code", "invalid_token")
             error_description = getattr(auth_error, "error_description", str(auth_error))
 
-        # Build RFC 6750 compliant WWW-Authenticate header
+        # Build RFC 6750 + RFC 9728 compliant WWW-Authenticate header.
+        # The resource_metadata attribute (RFC 9728 §5.1) tells MCP clients
+        # where to fetch the protected-resource metadata document — before
+        # #592, clients had to guess the URL by convention, and any drift in
+        # the well-known endpoint location silently broke discovery. Anchored
+        # to FRONTEND_URL (same env the well-known endpoints use) so reverse-
+        # proxied deployments produce the correct absolute URL.
+        base_url = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+        resource_metadata_url = f"{base_url}/.well-known/oauth-protected-resource"
         www_authenticate = (
             f'Bearer realm="Kagura Memory Cloud", '
             f'error="{error_code}", '
-            f'error_description="{error_description}"'
+            f'error_description="{error_description}", '
+            f'resource_metadata="{resource_metadata_url}"'
         )
 
         error_response = json.dumps(
