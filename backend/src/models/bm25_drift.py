@@ -4,10 +4,14 @@ Issue #343: One row per context per cron cycle, capturing the PSI score
 between memory-only and collection-global IDF distributions.
 """
 
+import uuid
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
+
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
-    Column,
     DateTime,
     ForeignKey,
     Index,
@@ -18,6 +22,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
 
@@ -40,23 +45,23 @@ class Bm25IdfDriftLog(Base):
 
     __tablename__ = "bm25_idf_drift_log"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
-    context_id = Column(
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    context_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("contexts.id", ondelete="CASCADE"),
         nullable=False,
     )
-    measured_at = Column(
+    measured_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
     )
-    psi = Column(Numeric(10, 6), nullable=True)
-    psi_status = Column(String(30), nullable=False)
-    m_memory_points = Column(Integer, nullable=False)
-    r_resource_points = Column(Integer, nullable=False)
-    num_terms = Column(Integer, nullable=False)
-    top_divergent_terms = Column(JSONB, nullable=True)
+    psi: Mapped[Decimal | None] = mapped_column(Numeric(10, 6), nullable=True)
+    psi_status: Mapped[str] = mapped_column(String(30), nullable=False)
+    m_memory_points: Mapped[int] = mapped_column(Integer, nullable=False)
+    r_resource_points: Mapped[int] = mapped_column(Integer, nullable=False)
+    num_terms: Mapped[int] = mapped_column(Integer, nullable=False)
+    top_divergent_terms: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
