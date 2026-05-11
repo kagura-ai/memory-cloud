@@ -26,13 +26,13 @@ Policy notes:
 - ``offline_access`` (RFC 6749 §1.3.5 / §6) requests a refresh token.
 """
 
-ALL_ADVERTISED_SCOPES: list[str] = [
+ALL_ADVERTISED_SCOPES: tuple[str, ...] = (
     "openid",
     "memory:read",
     "memory:write",
     "memory:admin",
     "memory:delete",
     "offline_access",
-]
+)
 
 DCR_DEFAULT_SCOPE: str = " ".join(ALL_ADVERTISED_SCOPES)

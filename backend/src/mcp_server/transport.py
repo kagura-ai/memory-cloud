@@ -529,18 +529,25 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
             error_code = getattr(auth_error, "error_code", "invalid_token")
             error_description = getattr(auth_error, "error_description", str(auth_error))
 
+        # Sanitize every interpolated value, not just error_description.
+        # Settings.frontend_url is server-side config but a typo or stale
+        # value with a stray quote / CR / LF would corrupt the header just
+        # as effectively as user-controlled token bytes. Defense in depth.
+        safe_code = _sanitize_challenge_attr_value(error_code)
         safe_description = _sanitize_challenge_attr_value(error_description)
 
         # RFC 6750 + RFC 9728 §5.1 challenge. resource_metadata is anchored
         # to frontend_url so a reverse-proxied deployment produces the same
         # absolute URL the well-known endpoints publish.
-        base_url = get_settings().frontend_url.rstrip("/")
-        resource_metadata_url = f"{base_url}/.well-known/oauth-protected-resource"
+        base_url = get_settings().frontend_url.strip().rstrip("/")
+        safe_resource_metadata_url = _sanitize_challenge_attr_value(
+            f"{base_url}/.well-known/oauth-protected-resource"
+        )
         www_authenticate = (
             f'Bearer realm="Kagura Memory Cloud", '
-            f'error="{error_code}", '
+            f'error="{safe_code}", '
             f'error_description="{safe_description}", '
-            f'resource_metadata="{resource_metadata_url}"'
+            f'resource_metadata="{safe_resource_metadata_url}"'
         )
 
         error_response = json.dumps(
