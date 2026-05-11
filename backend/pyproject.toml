@@ -194,6 +194,10 @@ reportMissingTypeStubs = false
 #   D     reportOptionalMemberAccess          ?             deferred
 #   D     reportIndexIssue                    ?             deferred
 #   D     reportOptionalOperand               ?             deferred
+# Tier A — explicitly enabled (robust against future typeCheckingMode shifts):
+reportAssignmentType = true
+reportReturnType = true
+# Tiers B/C/D — explicitly disabled:
 reportArgumentType = false
 reportAttributeAccessIssue = false
 reportGeneralTypeIssues = false
