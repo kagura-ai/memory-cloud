@@ -18,7 +18,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.constants import APP_VERSION
 from config.settings import get_settings
-from utils.exceptions import AuthorizationError, DatabaseConnectionError, MemoryCloudException
+from utils.exceptions import (
+    AdminProtectionError,
+    AuthorizationError,
+    DatabaseConnectionError,
+    MemoryCloudException,
+)
 from utils.logger import get_logger, setup_logger
 
 # Setup logger first
@@ -289,13 +294,11 @@ async def memory_cloud_exception_handler(
         path=request.url.path,
     )
 
-    # CWE-639 defense in depth: AuthorizationError is designed with a uniform
-    # client-facing message. Any forensics payload that leaks into ``details``
-    # (e.g. a future contributor adding `**details` kwargs) would re-introduce
-    # the workspace-enumeration vector. Strip ``details`` to ``{}`` for this
-    # type — the structured ``reason`` lives on ``exc.reason`` (private) for
-    # log/observability use only, never serialized to the response body.
-    details = {} if isinstance(exc, AuthorizationError) else exc.details
+    # CWE-639 defense in depth: deny-class exceptions carry log-only
+    # ``reason`` on a private attribute and must never leak forensics
+    # through ``details``. Strip uniformly so future ``**details`` drift
+    # on either type cannot reopen the workspace-enumeration vector.
+    details = {} if isinstance(exc, (AuthorizationError, AdminProtectionError)) else exc.details
 
     return JSONResponse(
         status_code=exc.status_code,

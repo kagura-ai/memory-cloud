@@ -23,6 +23,7 @@ from fastapi import Request
 
 from api.main import memory_cloud_exception_handler
 from utils.exceptions import (
+    AdminProtectionError,
     AuthorizationError,
     NotFoundException,
     RateLimitError,
@@ -64,6 +65,50 @@ class TestAuthorizationErrorFilter:
         assert body["error"] == "AUTH-101"
         assert body["message"] == "Insufficient permissions"
         assert response.status_code == 403
+
+
+class TestAdminProtectionErrorFilter:
+    """CWE-639 defense in depth — AdminProtectionError NEVER leaks details.
+
+    Mirrors the AuthorizationError contract one tier down: the exception
+    type is constructed with no ``**details`` passthrough today, but the
+    handler still strips ``details`` so a future contributor cannot quietly
+    add a forensics field by routing through ``exc.details`` directly.
+    """
+
+    @pytest.mark.asyncio
+    async def test_strips_smuggled_details_keys(self):
+        exc = AdminProtectionError(
+            "Cannot demote the initial system administrator.",
+            reason="initial_admin",
+        )
+        # Simulate a future contributor poking at ``details`` directly
+        # (bypassing the constructor's keyword-only signature).
+        exc.details["smuggled_key"] = "leak_me"
+        assert exc.details == {"smuggled_key": "leak_me"}
+
+        response = await memory_cloud_exception_handler(_request_mock(), exc)
+        body = json.loads(response.body)
+        assert body["details"] == {}, (
+            "AdminProtectionError MUST emit details={} regardless of what the "
+            "exception carries. Defense in depth against future kwarg drift."
+        )
+        assert body["error"] == "ADMIN-001"
+        assert body["message"] == "Cannot demote the initial system administrator."
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_reason_never_serialized(self):
+        """``exc.reason`` is structured-log nomenclature only — confirm it
+        never appears in the response body even when set."""
+        exc = AdminProtectionError(
+            "Cannot demote the last remaining system administrator.",
+            reason="last_admin",
+        )
+        response = await memory_cloud_exception_handler(_request_mock(), exc)
+        body = json.loads(response.body)
+        assert "reason" not in body
+        assert "reason" not in body.get("details", {})
 
 
 class TestOtherExceptionDetailsPreserved:
