@@ -4,7 +4,7 @@ Covers the new ``context_id`` query-param filter:
   - Omitted: legacy behavior, no PermissionService call.
   - Provided: PermissionService.resolve_context_for_workspace_read enforces
     access and ``Memory.context_id`` is added to both data and count queries.
-  - Provided but context denied / not found: HTTPException 404 propagates.
+  - Provided but context denied / not found: NotFoundException 404 propagates.
 """
 
 from datetime import datetime
@@ -12,9 +12,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
 
 from api.routes.memory import list_memories
+from utils.exceptions import NotFoundException
 
 MOCK_USER = {"user_id": "test_user_123"}
 
@@ -241,17 +241,17 @@ class TestListMemoriesContextFilter:
 
     @pytest.mark.asyncio
     async def test_context_id_denied_propagates_404(self):
-        """PermissionService 404 on forbidden/missing context propagates as HTTPException."""
+        """PermissionService 404 on forbidden/missing context propagates as NotFoundException."""
         mock_db = AsyncMock()  # must not reach .execute()
         context_id = uuid4()
 
         mock_perm_instance = MagicMock()
         mock_perm_instance.resolve_context_for_workspace_read = AsyncMock(
-            side_effect=HTTPException(status_code=404, detail=f"Context {context_id} not found")
+            side_effect=NotFoundException("Context", str(context_id))
         )
 
         with patch("api.routes.memory.PermissionService", return_value=mock_perm_instance):
-            with pytest.raises(HTTPException) as exc:
+            with pytest.raises(NotFoundException) as exc:
                 await list_memories(
                     user=MOCK_USER,
                     db=mock_db,

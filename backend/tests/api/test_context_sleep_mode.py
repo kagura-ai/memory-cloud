@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from api.main import app
@@ -21,6 +20,7 @@ from api.routes.contexts import ContextResponse, ContextUpdate, get_context_serv
 from auth.dependencies import require_session_auth
 from db.base import get_db
 from services.context_service import ContextService
+from utils.exceptions import AuthorizationError
 
 # ============================================================================
 # 1. Enum Validation
@@ -185,7 +185,7 @@ class TestContextSleepModePermission:
         workspace_id = uuid4()
 
         async def _deny_owner(*args, **kwargs):
-            raise HTTPException(status_code=403, detail="Not context owner")
+            raise AuthorizationError("Insufficient permissions")
 
         app.dependency_overrides[require_session_auth] = lambda: {
             "user_id": "editor_user",

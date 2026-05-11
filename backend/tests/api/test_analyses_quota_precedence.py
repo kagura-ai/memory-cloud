@@ -3,7 +3,7 @@
 The 4-stage gate chain in ``auth.analysis_gates.require_memory_analysis_access``
 must fail fast at the FIRST applicable gate, in this order:
 
-    Gate 2 (workspace owner)          → 403 (HTTPException)
+    Gate 2 (workspace owner)          → 403 (AuthorizationError)
     Gate 3 (Pro tier feature flag)    → 403 (FeatureNotAvailableError)
     Gate 4 (daily quota)              → 429 (QuotaExceededError)
     Gate 5 (allowlist kill switch)    → 403 (FeatureNotAvailableError)
@@ -29,7 +29,11 @@ import pytest
 from fastapi import HTTPException
 
 from auth.analysis_gates import require_memory_analysis_access
-from utils.exceptions import FeatureNotAvailableError, QuotaExceededError
+from utils.exceptions import (
+    AuthorizationError,
+    FeatureNotAvailableError,
+    QuotaExceededError,
+)
 
 
 def _user_dict(workspace_id: UUID) -> dict:
@@ -38,14 +42,14 @@ def _user_dict(workspace_id: UUID) -> dict:
 
 @pytest.mark.asyncio
 async def test_gate2_owner_failure_short_circuits():
-    """Owner check fails → HTTPException 403, gates 3-5 never run."""
+    """Owner check fails → AuthorizationError 403, gates 3-5 never run."""
     workspace_id = uuid4()
     user = _user_dict(workspace_id)
     db = AsyncMock()
 
     perm_mock = MagicMock()
     perm_mock.check_workspace_owner = AsyncMock(
-        side_effect=HTTPException(status_code=403, detail="not owner")
+        side_effect=AuthorizationError("Insufficient permissions")
     )
 
     quota_check_mock = AsyncMock()
@@ -65,7 +69,7 @@ async def test_gate2_owner_failure_short_circuits():
         ),
     ):
         quota_cls.return_value.check_feature_access = quota_check_mock
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(AuthorizationError) as exc:
             await require_memory_analysis_access(user=user, db=db)
         assert exc.value.status_code == 403
 

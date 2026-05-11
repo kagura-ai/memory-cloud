@@ -18,10 +18,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from api.main import app
+from utils.exceptions import AuthorizationError
 
 WORKSPACE_ID = uuid4()
 CONTEXT_ID = uuid4()
@@ -66,7 +66,7 @@ def _owner_denies():
     """PermissionService.check_context_owner stub that raises 403."""
 
     async def _raise(*args, **kwargs):
-        raise HTTPException(status_code=403, detail="Not context owner")
+        raise AuthorizationError("Insufficient permissions")
 
     return _raise
 
@@ -397,7 +397,7 @@ class TestMutationEndpointsRequireContextOwner:
 class TestListRequiresViewerAccess:
     def test_non_member_gets_403(self, client):
         async def _raise(*args, **kwargs):
-            raise HTTPException(status_code=403, detail="Not a member")
+            raise AuthorizationError("Insufficient permissions")
 
         with (
             patch(

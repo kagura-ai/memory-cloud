@@ -14,13 +14,13 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from api.main import app
 from auth.dependencies import get_current_user
 from db.base import get_db
 from services.permission_service import PermissionService
+from utils.exceptions import AuthorizationError
 
 _WORKSPACE_ID = uuid4()
 _OTHER_WORKSPACE_ID = uuid4()
@@ -99,7 +99,7 @@ def _install_workspace_overrides(
     *,
     user: dict,
     db_mock=None,
-    permission_raises: HTTPException | None = None,
+    permission_raises: AuthorizationError | None = None,
 ):
     """Wire mocks for the workspace route."""
 
@@ -168,10 +168,7 @@ class TestWorkspaceListSleepReports:
         _install_workspace_overrides(
             client,
             user=_regular_user(),
-            permission_raises=HTTPException(
-                status_code=403,
-                detail="Requires 'admin' role or higher",
-            ),
+            permission_raises=AuthorizationError("Insufficient permissions"),
         )
 
         response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports")
@@ -182,10 +179,7 @@ class TestWorkspaceListSleepReports:
         _install_workspace_overrides(
             client,
             user=_regular_user(),
-            permission_raises=HTTPException(
-                status_code=403,
-                detail="Not a member of workspace",
-            ),
+            permission_raises=AuthorizationError("Insufficient permissions"),
         )
 
         response = client.get(f"/api/v1/workspaces/{_OTHER_WORKSPACE_ID}/sleep-reports")
@@ -299,10 +293,7 @@ class TestWorkspaceGetSleepReportDetail:
         _install_workspace_overrides(
             client,
             user=_regular_user(),
-            permission_raises=HTTPException(
-                status_code=403,
-                detail="Requires 'admin' role or higher",
-            ),
+            permission_raises=AuthorizationError("Insufficient permissions"),
         )
 
         response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports/{uuid4()}")
