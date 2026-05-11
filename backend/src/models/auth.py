@@ -1760,21 +1760,21 @@ class PlanChange(Base):
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
     )
-    old_plan: Mapped[str | None] = mapped_column(String(20))
+    old_plan: Mapped[str | None] = mapped_column(String(20), nullable=True)
     new_plan: Mapped[str] = mapped_column(String(20), nullable=False)
     changed_by: Mapped[str] = mapped_column(String(255), nullable=False)
     changed_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
-    reason: Mapped[str | None] = mapped_column(Text)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Old limits (for audit)
-    old_memory_limit: Mapped[int | None] = mapped_column(Integer)
-    old_daily_api_limit: Mapped[int | None] = mapped_column(Integer)
-    old_weekly_api_limit: Mapped[int | None] = mapped_column(Integer)
+    old_memory_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    old_daily_api_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    old_weekly_api_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # New limits (for audit)
-    new_memory_limit: Mapped[int | None] = mapped_column(Integer)
-    new_daily_api_limit: Mapped[int | None] = mapped_column(Integer)
-    new_weekly_api_limit: Mapped[int | None] = mapped_column(Integer)
+    new_memory_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    new_daily_api_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    new_weekly_api_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     __table_args__ = (
         Index("idx_plan_changes_workspace", "workspace_id"),
