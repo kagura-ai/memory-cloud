@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import sys
 import uuid
+import warnings
 from pathlib import Path
 
 # Match the sys.path layout the rest of the backend integration tests use.
@@ -132,11 +133,17 @@ def sync_db():
     finally:
         # If the test left the session in a failed-flush state
         # (PendingRollbackError), clear it before attempting cleanup so the
-        # name-filter DELETE can still run on a fresh transaction.
+        # name-filter DELETE can still run on a fresh transaction. Surface
+        # rollback failures as a warning so a regression in session lifecycle
+        # is diagnosable instead of silently swallowed.
         try:
             session.rollback()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+            warnings.warn(
+                f"session.rollback() failed during cascade-test teardown: {exc!r}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         _assert_test_db(session)
         session.execute(
             text("DELETE FROM oauth_clients WHERE client_name IN (:n1, :n2)"),
@@ -184,10 +191,54 @@ def _count_tokens_for_client(session, client_id: str) -> int:
 
 
 class TestOAuth2ClientTokenCascade:
-    """Issue #595: pin the OAuth2Client → OAuth2Token cascade-delete behavior."""
+    """Issue #595: pin the OAuth2Client → OAuth2Token cascade-delete behavior.
 
-    def test_orm_session_delete_cascades_tokens(self, sync_db):
-        """``session.delete(client)`` removes child tokens via cascade="all, delete"."""
+    Three independent assertions:
+
+    1. ORM relationship metadata: ``OAuth2Client.tokens.property.cascade.delete``
+       is configured. This isolates the ORM ``cascade="all, delete"`` kwarg
+       from the DB-level FK — config introspection cannot pass via FK fallback.
+    2. End-to-end ORM API: ``session.delete(client)`` followed by commit
+       removes child tokens. Both layers contribute here (ORM cascade fires
+       first, FK cascade is the safety net) — this test verifies the
+       composite behavior the application code actually relies on.
+    3. DB-level FK: raw SQL ``DELETE FROM oauth_clients`` cascades via
+       ``ondelete="CASCADE"`` on ``OAuth2Token.client_id``, exercising the
+       FK layer in isolation by bypassing the ORM entirely.
+    """
+
+    def test_orm_relationship_has_delete_cascade_configured(self):
+        """The ORM ``cascade="all, delete"`` kwarg is present on the relationship.
+
+        Pure metadata check — does not exercise the DB. Pins the kwarg
+        independently of the FK ``ondelete``, so a regression that drops
+        the ORM cascade (but leaves the FK in place) is still caught here
+        even though the end-to-end ORM behavior test (below) would still
+        pass via FK fallback.
+
+        Addresses copilot-pull-request-reviewer feedback on the original
+        test name "test_orm_session_delete_cascades_tokens" — that name
+        implied the test isolated the ORM cascade layer, which it could
+        not while the FK ``ondelete="CASCADE"`` is also active.
+        """
+        cascade = OAuth2Client.tokens.property.cascade
+        assert cascade.delete is True, (
+            f"OAuth2Client.tokens must have cascade='all, delete' (or equivalent "
+            f"including 'delete'); got cascade options: {cascade!r}"
+        )
+
+    def test_orm_session_delete_removes_tokens_end_to_end(self, sync_db):
+        """``session.delete(client)`` removes child tokens (ORM API end-to-end).
+
+        Verifies the application-facing behavior: code that calls
+        ``session.delete(oauth_client)`` will see related tokens deleted
+        on commit. Both the ORM ``cascade="all, delete"`` and the FK
+        ``ondelete="CASCADE"`` can contribute to this outcome — they are
+        layered defenses. The dedicated config-introspection test above
+        isolates the ORM layer; the dedicated raw-SQL test below isolates
+        the FK layer; this test pins the composite behavior callers rely
+        on.
+        """
         client = _make_client(_TEST_CLIENT_NAME_ORM)
         sync_db.add(client)
         sync_db.flush()  # populate client.client_id without committing
@@ -206,8 +257,8 @@ class TestOAuth2ClientTokenCascade:
         sync_db.commit()
 
         assert _count_tokens_for_client(sync_db, client.client_id) == 0, (
-            "OAuth2Client.tokens cascade='all, delete' should have removed all child "
-            "tokens via the ORM unit-of-work"
+            "session.delete(client) + commit should have removed all child tokens "
+            "via the layered ORM-cascade + FK-cascade defense"
         )
 
     def test_raw_sql_delete_cascades_tokens_via_fk(self, sync_db):
