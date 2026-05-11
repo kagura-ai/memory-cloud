@@ -17,6 +17,7 @@ Provides ORM models for:
 
 import secrets
 import uuid
+from datetime import date as date_type
 from datetime import datetime
 from functools import cached_property
 from typing import Any
@@ -26,7 +27,6 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
-    Column,
     Date,
     DateTime,
     ForeignKey,
@@ -1031,21 +1031,21 @@ class UsageStats(Base):
 
     __tablename__ = "usage_stats"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(String(255), nullable=False, index=True)
-    endpoint = Column(String(255), nullable=False)
-    method = Column(String(10), nullable=False)
-    status_code = Column(Integer, nullable=False)
-    response_time_ms = Column(Integer, nullable=True)
-    created_at = Column(DateTime, nullable=False, default=func.now())
-    date = Column(Date, nullable=False, index=True)
-    context_id = Column(
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    endpoint: Mapped[str] = mapped_column(String(255), nullable=False)
+    method: Mapped[str] = mapped_column(String(10), nullable=False)
+    status_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    response_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=func.now())
+    date: Mapped[date_type] = mapped_column(Date, nullable=False, index=True)
+    context_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("contexts.id", ondelete="SET NULL"), nullable=True
     )
-    workspace_id = Column(
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True
     )
-    project_id = Column(
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
     )  # Deprecated, kept for backward compatibility
 
@@ -1077,13 +1077,15 @@ class UserPlan(Base):
 
     __tablename__ = "user_plans"
 
-    user_id = Column(String(255), primary_key=True)
-    plan_name = Column(String(50), nullable=False, default="free")
-    memory_limit = Column(Integer, nullable=False, default=1000)
-    daily_api_limit = Column(Integer, nullable=False, default=1000)
-    weekly_api_limit = Column(Integer, nullable=False, default=5000)
-    created_at = Column(DateTime, nullable=False, default=func.now())
-    updated_at = Column(DateTime, nullable=False, default=func.now(), onupdate=func.now())
+    user_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    plan_name: Mapped[str] = mapped_column(String(50), nullable=False, default="free")
+    memory_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=1000)
+    daily_api_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=1000)
+    weekly_api_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=5000)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=func.now(), onupdate=func.now()
+    )
 
     __table_args__ = (Index("idx_user_plans_plan_name", "plan_name"),)
 
@@ -1754,25 +1756,25 @@ class PlanChange(Base):
 
     __tablename__ = "plan_changes"
 
-    id: int = Column(Integer, primary_key=True, autoincrement=True)
-    workspace_id: UUID = Column(
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
     )
-    old_plan: str | None = Column(String(20))
-    new_plan: str = Column(String(20), nullable=False)
-    changed_by: str = Column(String(255), nullable=False)
-    changed_at: datetime = Column(DateTime, default=func.now(), nullable=False)
-    reason: str | None = Column(Text)
+    old_plan: Mapped[str | None] = mapped_column(String(20))
+    new_plan: Mapped[str] = mapped_column(String(20), nullable=False)
+    changed_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
 
     # Old limits (for audit)
-    old_memory_limit: int | None = Column(Integer)
-    old_daily_api_limit: int | None = Column(Integer)
-    old_weekly_api_limit: int | None = Column(Integer)
+    old_memory_limit: Mapped[int | None] = mapped_column(Integer)
+    old_daily_api_limit: Mapped[int | None] = mapped_column(Integer)
+    old_weekly_api_limit: Mapped[int | None] = mapped_column(Integer)
 
     # New limits (for audit)
-    new_memory_limit: int | None = Column(Integer)
-    new_daily_api_limit: int | None = Column(Integer)
-    new_weekly_api_limit: int | None = Column(Integer)
+    new_memory_limit: Mapped[int | None] = mapped_column(Integer)
+    new_daily_api_limit: Mapped[int | None] = mapped_column(Integer)
+    new_weekly_api_limit: Mapped[int | None] = mapped_column(Integer)
 
     __table_args__ = (
         Index("idx_plan_changes_workspace", "workspace_id"),
@@ -1813,14 +1815,18 @@ class MCPToolDescription(Base):
 
     __tablename__ = "mcp_tool_descriptions"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    tool_name = Column(String(50), nullable=False, index=True)
-    locale = Column(String(10), nullable=False, server_default="en")
-    description = Column(Text, nullable=False)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tool_name: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    locale: Mapped[str] = mapped_column(String(10), nullable=False, server_default="en")
+    description: Mapped[str] = mapped_column(Text, nullable=False)
 
     # Timestamps
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=True, onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, onupdate=func.now()
+    )
 
     # Constraints
     __table_args__ = (
