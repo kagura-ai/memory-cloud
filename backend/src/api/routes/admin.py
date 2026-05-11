@@ -27,6 +27,7 @@ from models.auth import (
 from models.memory import Memory
 from utils import db_transaction, get_user_id
 from utils.datetime import to_utc_iso
+from utils.exceptions import AuthorizationError, NotFoundException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -430,7 +431,7 @@ async def get_user_detail(
                     all_contexts.append(ctx)
                     context_workspace_map[ctx.id] = (workspace, member.role)
                     workspace_role_map[ctx.id] = member.role
-            except HTTPException:
+            except (NotFoundException, AuthorizationError):
                 # Skip if no access
                 pass
 
