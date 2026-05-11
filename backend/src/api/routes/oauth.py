@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser, require_admin
+from auth.mcp_scopes import DCR_DEFAULT_SCOPE
 from auth.oauth2_server import _OAuthUser, create_authorization_server
 from config.settings import get_settings
 from db.base import get_db, get_sync_session
@@ -145,7 +146,10 @@ class OAuth2ClientCreateRequest(BaseModel):
     )
     response_types: list[str] = Field(default=["code"], description="Allowed response types")
     scope: str = Field(
-        default="memory:read memory:write offline_access",  # Issue #132: offline_access for refresh token
+        # Canonical set lives in auth.mcp_scopes — #592 drift fix. Previously
+        # this default was "memory:read memory:write offline_access" which
+        # silently omitted memory:admin, causing scope drift vs metadata.
+        default=DCR_DEFAULT_SCOPE,
         description="Space-separated scopes",
     )
     token_endpoint_auth_method: str = Field(
@@ -725,8 +729,11 @@ async def dynamic_client_registration(
         plaintext_secret_encrypted = get_encryptor().encrypt(client_secret)
         visibility_expires_at = utcnow() + timedelta(minutes=10)
 
-        # For DCR: auto-set scope if not provided
-        scope = data.scope if data.scope else "memory:read memory:write offline_access"
+        # For DCR: fall back to canonical advertised scope set if client did
+        # not request one. Defense in depth — the Pydantic default also points
+        # at DCR_DEFAULT_SCOPE, so this branch is only reachable if a future
+        # change widens the field type to Optional.
+        scope = data.scope if data.scope else DCR_DEFAULT_SCOPE
 
         # Create OAuth2Client (DCR: owner_id=None, workspace_id=None, auth_method=none)
         client = OAuth2Client(

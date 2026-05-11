@@ -8,6 +8,8 @@ import os
 
 from fastapi import APIRouter, Request
 
+from auth.mcp_scopes import ALL_ADVERTISED_SCOPES
+
 router = APIRouter(tags=["well-known"])
 
 
@@ -43,12 +45,8 @@ async def oauth_protected_resource():
     return {
         "resource": mcp_base,  # Must match MCP server URL exactly (RFC 9728)
         "authorization_servers": [base_url],
-        "scopes_supported": [
-            "memory:read",
-            "memory:write",
-            "memory:delete",
-            "memory:admin",
-        ],
+        # Canonical set lives in auth.mcp_scopes — #592 drift fix
+        "scopes_supported": list(ALL_ADVERTISED_SCOPES),
         "bearer_methods_supported": ["header"],
         "resource_signing_alg_values_supported": ["RS256", "HS256"],
         "resource_documentation": f"{base_url}/redoc",
@@ -96,14 +94,12 @@ async def openid_configuration(request: Request):
         "registration_endpoint": f"{base_url}/api/v1/oauth/register",  # DCR endpoint (RFC 7591)
         # PKCE required by MCP (CRITICAL - clients will refuse if absent)
         "code_challenge_methods_supported": ["S256"],
-        # Scopes (OpenID Connect requires "openid" scope)
-        "scopes_supported": [
-            "openid",  # Required for OIDC compliance
-            "memory:read",
-            "memory:write",
-            "memory:admin",
-            "offline_access",  # For refresh token support
-        ],
+        # Canonical set lives in auth.mcp_scopes — #592 drift fix.
+        # Note: "openid" was previously advertised here but the server does NOT
+        # issue id_token (no OIDC subject path). Removed to stop the dishonest
+        # OIDC claim; clients that strictly require OIDC compliance will fail
+        # discovery (intentional), but MCP clients only need PKCE + scopes.
+        "scopes_supported": list(ALL_ADVERTISED_SCOPES),
         # Response types
         "response_types_supported": ["code"],
         # Grant types
@@ -153,12 +149,8 @@ async def oauth_authorization_server(request: Request):
         "revocation_endpoint": f"{base_url}/api/v1/oauth/revoke",
         "introspection_endpoint": f"{base_url}/api/v1/oauth/introspect",  # RFC 7662 (Issue #157)
         "registration_endpoint": f"{base_url}/api/v1/oauth/register",  # DCR endpoint (RFC 7591)
-        "scopes_supported": [
-            "memory:read",
-            "memory:write",
-            "memory:admin",
-            "offline_access",  # Issue #132: Required for refresh token support
-        ],
+        # Canonical set lives in auth.mcp_scopes — #592 drift fix
+        "scopes_supported": list(ALL_ADVERTISED_SCOPES),
         "response_types_supported": ["code"],
         "grant_types_supported": [
             "authorization_code",

@@ -40,6 +40,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from auth.mcp_scopes import DCR_DEFAULT_SCOPE
 from db.base import Base
 from utils.datetime import utcnow
 from utils.redirect_uri import any_redirect_uri_matches
@@ -444,7 +445,12 @@ class OAuth2Client(Base):
     scope: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
-        default="memory:read memory:write offline_access",  # Issue #132: offline_access for refresh token
+        # Canonical set lives in auth.mcp_scopes — #592 drift fix. Previously
+        # this default was "memory:read memory:write offline_access" which
+        # silently omitted memory:admin and drifted from the well-known
+        # metadata endpoints. Existing rows are migrated by Alembic
+        # e08_592_oauth_scope_canonicalize.
+        default=DCR_DEFAULT_SCOPE,
     )
     token_endpoint_auth_method: Mapped[str] = mapped_column(
         String(50), nullable=False, default="client_secret_post"
