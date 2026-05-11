@@ -13,11 +13,11 @@ Protection Rules:
 - Cannot delete/demote if last remaining admin
 """
 
-from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import AuditLog, User
+from utils.exceptions import AdminProtectionError, BadRequestError, NotFoundException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -81,7 +81,8 @@ class SystemAdminService:
             Updated user object
 
         Raises:
-            HTTPException: 404 if user not found, 400 if already admin
+            NotFoundException: 404 if user not found.
+            BadRequestError: 400 (``ADMIN-101``) if user is already a system admin.
 
         Example:
             >>> user = await service.promote_to_system_admin(
@@ -99,13 +100,16 @@ class SystemAdminService:
             logger.warning(
                 "promote_to_system_admin_failed", user_id=user_id, reason="user_not_found"
             )
-            raise HTTPException(status_code=404, detail="User not found")
+            raise NotFoundException("User")
 
         if user.role == "admin":
             logger.warning(
                 "promote_to_system_admin_failed", user_email=user.email, reason="already_admin"
             )
-            raise HTTPException(status_code=400, detail="User is already a system admin")
+            raise BadRequestError(
+                "User is already a system admin",
+                error_code="ADMIN-101",
+            )
 
         # Update role
         old_role = user.role
@@ -152,7 +156,10 @@ class SystemAdminService:
             Updated user object
 
         Raises:
-            HTTPException: 404 if not found, 403 if protected
+            NotFoundException: 404 if user not found.
+            BadRequestError: 400 (``ADMIN-102``) if user is not a system admin.
+            AdminProtectionError: 403 if the target is the initial admin or
+                the last remaining admin.
 
         Example:
             >>> user = await service.demote_system_admin(
@@ -168,11 +175,14 @@ class SystemAdminService:
 
         if not user:
             logger.warning("demote_system_admin_failed", user_id=user_id, reason="user_not_found")
-            raise HTTPException(status_code=404, detail="User not found")
+            raise NotFoundException("User")
 
         if user.role != "admin":
             logger.warning("demote_system_admin_failed", user_email=user.email, reason="not_admin")
-            raise HTTPException(status_code=400, detail="User is not a system admin")
+            raise BadRequestError(
+                "User is not a system admin",
+                error_code="ADMIN-102",
+            )
 
         # Protection 1: Cannot demote initial admin
         if user.is_initial_admin:
@@ -181,9 +191,9 @@ class SystemAdminService:
                 user_email=user.email,
                 reason="initial_admin_protected",
             )
-            raise HTTPException(
-                status_code=403,
-                detail="Cannot demote the initial system administrator. This is a protected account.",
+            raise AdminProtectionError(
+                "Cannot demote the initial system administrator. This is a protected account.",
+                reason="initial_admin",
             )
 
         # Protection 2: Cannot demote last remaining admin
@@ -198,9 +208,9 @@ class SystemAdminService:
                 reason="last_admin_protected",
                 admin_count=admin_count,
             )
-            raise HTTPException(
-                status_code=403,
-                detail="Cannot demote the last remaining system administrator. At least one admin must exist.",
+            raise AdminProtectionError(
+                "Cannot demote the last remaining system administrator. At least one admin must exist.",
+                reason="last_admin",
             )
 
         # Demote to user

@@ -1,11 +1,15 @@
 """Tests for custom exceptions."""
 
+import pytest
+
 from utils.exceptions import (
+    AdminProtectionError,
     APIKeyError,
     APIKeyExpiredError,
     APIKeyRevokedError,
     AuthenticationError,
     AuthorizationError,
+    BadRequestError,
     CohereError,
     ConfigurationError,
     ConflictError,
@@ -95,6 +99,37 @@ class TestAuthErrors:
         assert exc.reason is None
         assert exc.details == {}
 
+    def test_admin_protection_error_defaults(self):
+        exc = AdminProtectionError("Cannot demote the initial system administrator.")
+        assert exc.status_code == 403
+        assert exc.error_code == "ADMIN-001"
+        assert exc.reason is None
+        assert exc.details == {}
+
+    def test_admin_protection_error_carries_reason_privately(self):
+        """Mirrors AuthorizationError: ``reason`` lives on ``exc.reason``
+        (private), never in ``exc.details``. The handler additionally
+        strips ``details`` for AdminProtectionError so any future
+        ``**details`` smuggling cannot leak into the response body."""
+        exc = AdminProtectionError(
+            "Cannot demote the initial system administrator.",
+            reason="initial_admin",
+        )
+        assert exc.reason == "initial_admin"
+        assert "reason" not in exc.details
+        assert exc.details == {}
+
+    def test_admin_protection_error_rejects_unknown_kwargs(self):
+        """Constructor signature is keyword-only on ``reason`` with no
+        ``**details`` passthrough — a contributor adding a forensics kwarg
+        like ``user_email="..."`` gets a TypeError at construction time
+        instead of silently leaking into the response body."""
+        with pytest.raises(TypeError):
+            AdminProtectionError(  # type: ignore[call-arg]
+                "msg",
+                user_email="leak@example.com",
+            )
+
     def test_api_key_error(self):
         exc = APIKeyError()
         assert exc.status_code == 401
@@ -141,6 +176,26 @@ class TestResourceErrors:
         exc = ValidationError("Bad input", field="email")
         assert exc.status_code == 422
         assert exc.details["field"] == "email"
+
+    def test_bad_request_error_default_code(self):
+        exc = BadRequestError("User is already a system admin")
+        assert exc.status_code == 400
+        assert exc.error_code == "REQ-001"
+        assert exc.message == "User is already a system admin"
+
+    def test_bad_request_error_custom_code(self):
+        """Call sites override ``error_code`` so SDKs can route on a stable
+        identifier without parsing the free-form message."""
+        exc = BadRequestError("User is already a system admin", error_code="ADMIN-101")
+        assert exc.status_code == 400
+        assert exc.error_code == "ADMIN-101"
+
+    def test_bad_request_error_details_passthrough(self):
+        """Unlike AdminProtectionError, BadRequestError forwards ``**details``
+        because 400 state-precondition errors do not carry the CWE-639
+        enumeration risk that motivated the deny-class strip."""
+        exc = BadRequestError("bad state", error_code="X-001", field="role")
+        assert exc.details == {"field": "role"}
 
 
 class TestRateLimitErrors:

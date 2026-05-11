@@ -93,6 +93,31 @@ class AuthorizationError(MemoryCloudException):
         self.reason = reason
 
 
+class AdminProtectionError(MemoryCloudException):
+    """System-admin invariant blocks this operation (403).
+
+    Distinct from ``AuthorizationError``: the caller IS authorized to
+    perform admin actions in general — the request is blocked by a
+    per-invariant protection rule (initial-admin sanctity, last-admin
+    existence) that exists to prevent the platform from being left
+    without any administrator. Surfaces 403 because the caller cannot
+    retry their way through it; the block is structural, not credential.
+
+    Mirroring ``AuthorizationError``'s CWE-639 pattern, ``reason`` is a
+    private classification (``"initial_admin"`` / ``"last_admin"``) for
+    structured-log breadcrumbs only — kept off the response body so
+    future ``**details`` kwargs cannot quietly create a leak path. The
+    user-facing ``message`` already names the specific protection
+    (admin governance is documented platform behavior), so the
+    workspace-enumeration concern that motivated AuthorizationError's
+    uniform message does not apply here.
+    """
+
+    def __init__(self, message: str, *, reason: str | None = None) -> None:
+        super().__init__(message, status_code=403, error_code="ADMIN-001")
+        self.reason = reason
+
+
 class APIKeyError(MemoryCloudException):
     """API key related error (401)."""
 
@@ -168,6 +193,31 @@ class ValidationError(MemoryCloudException):
 
     def __init__(self, message: str, field: str | None = None, **details: Any):
         super().__init__(message, status_code=422, error_code="VAL-001", field=field, **details)
+
+
+class BadRequestError(MemoryCloudException):
+    """Request violates a state precondition (400).
+
+    Generic 400 for service-layer state-precondition failures (e.g.
+    "user is already an admin", "user is not an admin"). Each call site
+    supplies a use-case-specific message and overrides ``error_code`` so
+    SDK consumers can route on a stable identifier rather than parsing
+    the free-form message.
+
+    Distinct from ``ValidationError`` (422): this is a state mismatch
+    against the *current* server-side state, not a shape/format failure
+    in the request body. The request is well-formed; the world is not in
+    the state the caller assumed.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str = "REQ-001",
+        **details: Any,
+    ) -> None:
+        super().__init__(message, status_code=400, error_code=error_code, **details)
 
 
 class UnsupportedMediaTypeError(MemoryCloudException):

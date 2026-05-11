@@ -10,11 +10,11 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from fastapi import HTTPException
 from sqlalchemy import select, text
 
 from models.auth import AuditLog, User
 from services.system_admin_service import SystemAdminService
+from utils.exceptions import AdminProtectionError, BadRequestError, NotFoundException
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -162,18 +162,20 @@ class TestPromoteToSystemAdmin:
     @pytest.mark.asyncio
     async def test_promote_user_not_found_raises_404(self, db_session):
         service = SystemAdminService(db_session)
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(NotFoundException) as exc:
             await service.promote_to_system_admin("nonexistent", "promoter@example.com")
         assert exc.value.status_code == 404
-        assert "User not found" in exc.value.detail
+        assert exc.value.error_code == "RES-001"
+        assert "User not found" in exc.value.message
 
     @pytest.mark.asyncio
     async def test_promote_already_admin_raises_400(self, db_session, fixture_admin):
         service = SystemAdminService(db_session)
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(BadRequestError) as exc:
             await service.promote_to_system_admin(fixture_admin.user_id, "promoter@example.com")
         assert exc.value.status_code == 400
-        assert "already a system admin" in exc.value.detail
+        assert exc.value.error_code == "ADMIN-101"
+        assert "already a system admin" in exc.value.message
 
 
 class TestDemoteSystemAdmin:
@@ -206,25 +208,29 @@ class TestDemoteSystemAdmin:
     @pytest.mark.asyncio
     async def test_demote_user_not_found_raises_404(self, db_session):
         service = SystemAdminService(db_session)
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(NotFoundException) as exc:
             await service.demote_system_admin("nonexistent", "demoter@example.com")
         assert exc.value.status_code == 404
+        assert exc.value.error_code == "RES-001"
 
     @pytest.mark.asyncio
     async def test_demote_not_admin_raises_400(self, db_session, fixture_regular):
         service = SystemAdminService(db_session)
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(BadRequestError) as exc:
             await service.demote_system_admin(fixture_regular.user_id, "demoter@example.com")
         assert exc.value.status_code == 400
-        assert "not a system admin" in exc.value.detail
+        assert exc.value.error_code == "ADMIN-102"
+        assert "not a system admin" in exc.value.message
 
     @pytest.mark.asyncio
     async def test_demote_initial_admin_raises_403(self, db_session, fixture_admin):
         service = SystemAdminService(db_session)
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(AdminProtectionError) as exc:
             await service.demote_system_admin(fixture_admin.user_id, "demoter@example.com")
         assert exc.value.status_code == 403
-        assert "initial" in exc.value.detail.lower()
+        assert exc.value.error_code == "ADMIN-001"
+        assert exc.value.reason == "initial_admin"
+        assert "initial" in exc.value.message.lower()
 
     @pytest.mark.asyncio
     async def test_demote_last_admin_raises_403(self, db_session):
@@ -240,10 +246,12 @@ class TestDemoteSystemAdmin:
         await db_session.flush()
 
         service = SystemAdminService(db_session)
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(AdminProtectionError) as exc:
             await service.demote_system_admin(lone_admin.user_id, "demoter@example.com")
         assert exc.value.status_code == 403
-        assert "last" in exc.value.detail.lower()
+        assert exc.value.error_code == "ADMIN-001"
+        assert exc.value.reason == "last_admin"
+        assert "last" in exc.value.message.lower()
 
 
 class TestCanDeleteAdmin:
