@@ -1278,52 +1278,70 @@ class Workspace(Base):
     @property
     def effective_memory_limit(self) -> int:
         """Memory limit including addon bonus."""
-        return self._plan_tier.memory_limit + (self.addon_memory_bonus or 0)
+        return _zero_floor(self._plan_tier.memory_limit, self.addon_memory_bonus)
 
     @property
     def effective_mcp_calls_per_day(self) -> int:
-        """MCP API calls/day: plan tier base + addon."""
-        return self._plan_tier.mcp_calls_per_day + (self.addon_mcp_quota_bonus or 0)
+        """MCP API calls/day: plan tier base + addon (Issue #238)."""
+        return _zero_floor(self._plan_tier.mcp_calls_per_day, self.addon_mcp_quota_bonus)
 
     @property
     def effective_mcp_calls_per_week(self) -> int:
-        """Weekly MCP API call limit: plan tier base + addon."""
-        return self._plan_tier.mcp_calls_per_week + (self.addon_mcp_quota_bonus or 0)
+        """Weekly MCP API call limit: plan tier base + addon (Issue #238)."""
+        return _zero_floor(self._plan_tier.mcp_calls_per_week, self.addon_mcp_quota_bonus)
 
     @property
     def effective_rest_calls_per_day(self) -> int:
-        """REST API calls/day: plan tier base + addon."""
-        return self._plan_tier.rest_calls_per_day + (self.addon_rest_quota_bonus or 0)
+        """REST API calls/day: plan tier base + addon (Issue #238).
+
+        FREE has ``rest_calls_per_day == 0`` — the zero-base guard in
+        ``_zero_floor`` ensures a manual addon row cannot grant REST access
+        to a tier that excludes it (#569).
+        """
+        return _zero_floor(self._plan_tier.rest_calls_per_day, self.addon_rest_quota_bonus)
 
     @property
     def effective_rest_calls_per_week(self) -> int:
-        """Weekly REST API call limit: plan tier base + addon."""
-        return self._plan_tier.rest_calls_per_week + (self.addon_rest_quota_bonus or 0)
+        """Weekly REST API call limit: plan tier base + addon (Issue #238)."""
+        return _zero_floor(self._plan_tier.rest_calls_per_week, self.addon_rest_quota_bonus)
 
     @property
     def effective_public_calls_per_day(self) -> int:
-        """Public REST API calls/day: plan tier base + addon."""
-        return self._plan_tier.public_calls_per_day + (self.addon_public_quota_bonus or 0)
+        """Public REST API calls/day: plan tier base + addon (Issue #238).
+
+        FREE and BASIC have ``public_calls_per_day == 0``. Access is also
+        gated by the ``public_contexts`` feature flag (``plan_tiers.py``
+        ``FEATURE_MIN_PLANS``); the zero-base guard here is defense-in-depth
+        in case the feature gate is ever bypassed (#569).
+        """
+        return _zero_floor(self._plan_tier.public_calls_per_day, self.addon_public_quota_bonus)
 
     @property
     def effective_public_calls_per_week(self) -> int:
-        """Weekly Public REST API call limit: plan tier base + addon."""
-        return self._plan_tier.public_calls_per_week + (self.addon_public_quota_bonus or 0)
+        """Weekly Public REST API call limit: plan tier base + addon (Issue #238)."""
+        return _zero_floor(self._plan_tier.public_calls_per_week, self.addon_public_quota_bonus)
 
     @property
     def effective_max_contexts(self) -> int:
         """Max contexts: plan tier base + addon."""
-        return self._plan_tier.max_contexts_per_workspace + (self.addon_context_bonus or 0)
+        return _zero_floor(self._plan_tier.max_contexts_per_workspace, self.addon_context_bonus)
 
     @property
     def effective_max_members(self) -> int:
-        """Max members: plan tier base + addon."""
-        return self._plan_tier.max_members_per_workspace + (self.addon_member_bonus or 0)
+        """Max members: plan tier base + addon (Issue #229)."""
+        return _zero_floor(self._plan_tier.max_members_per_workspace, self.addon_member_bonus)
 
     @property
     def effective_analysis_runs_per_day(self) -> int:
-        """Memory Broadlistening analysis runs/day: plan tier base + addon (Issue #494)."""
-        return self._plan_tier.analysis_runs_per_day + (self.addon_analysis_bonus or 0)
+        """Memory Broadlistening analysis runs/day: plan tier base + addon (Issue #494).
+
+        FREE and BASIC have ``analysis_runs_per_day == 0``. Access is also
+        gated by ``auth.analysis_gates.require_pro_tier`` which checks the
+        ``memory_analysis`` feature flag (``plan_tiers.py`` ``FEATURE_MIN_PLANS``);
+        the zero-base guard here is defense-in-depth in case that feature
+        gate is ever bypassed (#569).
+        """
+        return _zero_floor(self._plan_tier.analysis_runs_per_day, self.addon_analysis_bonus)
 
     @property
     def effective_storage_limit_bytes(self) -> int:
@@ -1332,10 +1350,15 @@ class Workspace(Base):
         ``addon_storage_bonus_mb`` stores the bonus in MB to align with the
         ``ADDON_UNIT_VALUES["extra_storage"]`` unit; the conversion to bytes
         happens here so callers always see a single unit at the boundary.
+
+        Defense-in-depth: addon bytes are computed first, then passed through
+        ``_zero_floor`` (#569). If a future tier sets ``storage_limit_bytes == 0``
+        — and ``api/routes/files.py:reserve_upload`` does not currently have a
+        tier-feature gate ahead of the limit check — the zero-floor here is
+        what stops a stray ``WorkspaceAddon`` row from granting storage access.
         """
-        return (
-            self._plan_tier.storage_limit_bytes + (self.addon_storage_bonus_mb or 0) * 1024 * 1024
-        )
+        addon_bytes = (self.addon_storage_bonus_mb or 0) * 1024 * 1024
+        return _zero_floor(self._plan_tier.storage_limit_bytes, addon_bytes)
 
     @property
     def effective_sleep_enabled_contexts_limit(self) -> int:
