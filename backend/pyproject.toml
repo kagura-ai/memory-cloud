@@ -178,7 +178,35 @@ pythonVersion = "3.11"
 typeCheckingMode = "basic"
 reportMissingImports = true
 reportMissingTypeStubs = false
-# SQLAlchemy Column type issues (Column[str] vs str) — not real bugs
+# Post-#596 (Mapped[T] migration epic #370 complete) pyright re-enablement
+# audit. Each rule was tested individually after Part 1 by flipping it to
+# `true`, running `pyright src/`, and counting residual errors. The
+# Column[T]-vs-T mismatches the original suppressions were hiding are now
+# gone (the migration removes them), but each rule still surfaces unrelated
+# caller-side type-narrowing issues that fall outside the model-layer scope
+# of #596. Per the #596 acceptance plan, rules with < 20 residual errors are
+# re-enable candidates, but for all 5 SA-related rules the residuals are
+# caller-side fixes that belong in a follow-up issue (model-layer typing is
+# the scope; narrowing in services/routes is not).
+#
+# Audit results (one rule re-enabled at a time vs the all-disabled baseline
+# of 1 error in db/base.py unresolvable-import):
+#
+#   reportArgumentType            163 errors  — caller-side: many
+#   reportAttributeAccessIssue     36 errors  — caller-side: many
+#   reportAssignmentType            4 errors  — caller-side: contexts.py x2,
+#                                              workspace_service.py x2 (None
+#                                              vs WorkspaceMember narrowing)
+#   reportReturnType                5 errors  — caller-side: roles.py missing-
+#                                              return-path, oauth2.py Google
+#                                              creds union, qdrant.py PointId
+#                                              narrowing
+#   reportCallIssue                22 errors  — caller-side
+#
+# Follow-up: #599 will narrow these one-by-one and re-enable the rules. The
+# Column[T]-related suppression rationale is no longer load-bearing on any
+# of them — the only thing keeping them disabled is the caller-side fix
+# backlog tracked in that issue.
 reportArgumentType = false
 reportAttributeAccessIssue = false
 reportGeneralTypeIssues = false
