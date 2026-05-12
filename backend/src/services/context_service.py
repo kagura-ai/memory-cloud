@@ -9,7 +9,7 @@ Contexts are owned by workspaces, not individual users.
 """
 
 import re
-from typing import Literal
+from typing import Literal, get_args
 from uuid import UUID
 
 from sqlalchemy import and_, delete, func, select
@@ -1081,7 +1081,9 @@ class ContextService:
             )
             raise
 
-    _LIST_TAGS_SORT_MODES = ("count", "recent", "alpha")
+    # Single source of truth — derived from TagSortMode so adding a new mode
+    # requires only updating the Literal type.
+    _LIST_TAGS_SORT_MODES = get_args(TagSortMode)
 
     async def aggregate_tags(
         self,
@@ -1107,11 +1109,11 @@ class ContextService:
         Args:
             user_id: Caller's user ID for access check.
             context_id: Target context UUID.
-            limit: Maximum tags to return (1-500). REST Query enforces bounds;
-                callers passing through trust those bounds.
+            limit: Maximum tags to return (1-500). Validated here so future
+                internal callers can't slip through unbounded values.
             min_count: Minimum memory count per tag (default 1, i.e. include
                 one-off tags so tag-drift typos are visible by default — see
-                Issue #614 DX review).
+                Issue #614 DX review). Range 1-10000.
             sort: One of ``"count"`` / ``"recent"`` / ``"alpha"``.
             prefix: Case-insensitive prefix filter for autocomplete. ``%`` /
                 ``_`` / ``#`` are escaped to literal characters via
@@ -1138,6 +1140,10 @@ class ContextService:
                 f"Invalid sort mode '{sort}'. Must be one of: "
                 f"{', '.join(self._LIST_TAGS_SORT_MODES)}."
             )
+        if type(limit) is not int or not (1 <= limit <= 500):
+            raise ValidationError(f"limit must be an integer in [1, 500]; got {limit!r}.")
+        if type(min_count) is not int or not (1 <= min_count <= 10_000):
+            raise ValidationError(f"min_count must be an integer in [1, 10000]; got {min_count!r}.")
 
         # Uniform 404 disclosure: not-found and access-denied are indistinguishable
         # (CWE-639) — get_context conflates both into NotFoundException by design.

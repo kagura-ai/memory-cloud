@@ -165,40 +165,62 @@ class TestAggregateTagsCTE:
         tags = {r["tag"] for r in rows}
         assert tags == {"live"}
 
-    async def test_cross_workspace_does_not_leak(self, db_session, now):
-        """Two workspaces, same caller in workspace A — only ws A's tags appear."""
-        user_id = f"u_xws_{uuid4().hex[:6]}"
-        other_user = f"u_other_{uuid4().hex[:6]}"
-        ws_a, ctx_a = await _seed_workspace_context(db_session, user_id=user_id)
-        ws_b, ctx_b = await _seed_workspace_context(db_session, user_id=other_user)
+    async def test_workspace_id_filter_blocks_cross_workspace_leak(self, db_session, now):
+        """The ``workspace_id`` predicate must reject a memory rooted in another
+        workspace, even when its ``context_id`` matches the caller's context.
 
-        # Same fake context_id reuse is impossible (uuid4), but we still
-        # cross-check that workspace_id filter holds. Seed each with distinct
-        # tags so leakage would be obvious.
+        ``memories`` has no compound FK tying ``workspace_id`` to
+        ``contexts.workspace_id`` — a row with mismatched (ws, ctx) is
+        representable at the schema level. The CTE's
+        ``WHERE workspace_id = :workspace_id`` is what prevents leakage.
+
+        Setup: caller in ws_a queries ctx_a. We seed:
+          (1) a legitimate memory in (ws_a, ctx_a) tagged 'legit'
+          (2) a "leaked" memory in (ws_b, ctx_a) tagged 'leaked'
+          (3) an unrelated memory in (ws_b, ctx_b) tagged 'unrelated'
+        Only 'legit' should be returned.
+        """
+        user_a = f"u_wsfilt_a_{uuid4().hex[:6]}"
+        user_b = f"u_wsfilt_b_{uuid4().hex[:6]}"
+        ws_a, ctx_a = await _seed_workspace_context(db_session, user_id=user_a)
+        ws_b, ctx_b = await _seed_workspace_context(db_session, user_id=user_b)
+
         db_session.add_all(
             [
                 _memory(
                     ws_id=ws_a.id,
                     ctx_id=ctx_a.id,
-                    user_id=user_id,
-                    tags=["alpha"],
+                    user_id=user_a,
+                    tags=["legit"],
+                    created_at=now,
+                ),
+                # Cross-rooted: ws_b but context_id=ctx_a.id. The schema's FK only
+                # requires ``contexts.id`` to exist; (ws, ctx) consistency is a
+                # runtime invariant, not a DB constraint.
+                _memory(
+                    ws_id=ws_b.id,
+                    ctx_id=ctx_a.id,
+                    user_id=user_b,
+                    tags=["leaked"],
                     created_at=now,
                 ),
                 _memory(
                     ws_id=ws_b.id,
                     ctx_id=ctx_b.id,
-                    user_id=other_user,
-                    tags=["beta"],
+                    user_id=user_b,
+                    tags=["unrelated"],
                     created_at=now,
                 ),
             ]
         )
         await db_session.flush()
 
-        rows = await _agg_rows(db_session, user_id, ctx_a.id)
+        rows = await _agg_rows(db_session, user_a, ctx_a.id)
 
         tags = {r["tag"] for r in rows}
-        assert tags == {"alpha"}
+        assert tags == {"legit"}, (
+            "workspace_id filter failed — 'leaked' or 'unrelated' appeared in caller's view"
+        )
 
     async def test_min_count_filter(self, db_session, now):
         user_id = f"u_minc_{uuid4().hex[:6]}"

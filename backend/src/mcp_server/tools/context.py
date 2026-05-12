@@ -828,11 +828,12 @@ async def handle_list_tags(
     except ValueError as e:
         return _error_response("invalid_context_id_format", str(e))
 
-    # Bound checks for limits the service doesn't validate. ``sort`` is
-    # validated by the service itself (single source of truth); a bad value
-    # surfaces here via ``ValidationError`` below.
+    # ``type(x) is T`` (not ``isinstance``) so bool — which subclasses int — is
+    # rejected here. Service validates the same bounds defensively; the handler
+    # check stays so the MCP error code is ``invalid_argument`` rather than
+    # the generic 422-equivalent path. ``sort`` is service-validated.
     limit = args.get("limit", 50)
-    if not isinstance(limit, int) or limit < 1 or limit > 500:
+    if type(limit) is not int or limit < 1 or limit > 500:
         return _error_response(
             "invalid_argument",
             "limit must be an integer between 1 and 500.",
@@ -840,16 +841,19 @@ async def handle_list_tags(
         )
 
     min_count = args.get("min_count", 1)
-    if not isinstance(min_count, int) or min_count < 1 or min_count > 10_000:
+    if type(min_count) is not int or min_count < 1 or min_count > 10_000:
         return _error_response(
             "invalid_argument",
             "min_count must be an integer between 1 and 10000.",
             received=min_count,
         )
 
-    # Treat missing / None / "" identically; non-strings are caught by the isinstance guard below.
-    prefix = args.get("prefix") or ""
-    if not isinstance(prefix, str) or len(prefix) > 200:
+    # Treat absent / None as empty; reject any non-string up-front (without the
+    # ``or ""`` shorthand, which would silently coerce 0 / False to "").
+    prefix = args.get("prefix")
+    if prefix is None:
+        prefix = ""
+    if type(prefix) is not str or len(prefix) > 200:
         return _error_response(
             "invalid_argument",
             "prefix must be a string up to 200 characters.",

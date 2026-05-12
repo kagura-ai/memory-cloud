@@ -221,10 +221,14 @@ class TestHandleListTagsErrorSurface:
             {"limit": 0},
             {"limit": 501},
             {"limit": "fifty"},
+            {"limit": True},  # bool subclasses int but type(x) is int rejects it
             {"min_count": 0},
             {"min_count": -1},
             {"min_count": 10_001},
+            {"min_count": False},  # bool — must be rejected by type() check
             {"prefix": "x" * 201},
+            {"prefix": 0},  # falsy non-string; `or ""` shorthand would coerce silently
+            {"prefix": False},  # ditto
         ],
     )
     async def test_bad_args_short_circuit_without_db(
