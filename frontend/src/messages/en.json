@@ -1518,7 +1518,16 @@
     "createSuccess": "API key created successfully",
     "deleteSuccess": "API key deleted successfully",
     "regenerateSuccess": "API key regenerated successfully",
-    "errorCreateKey": "Failed to create API key. Please try again."
+    "errorCreateKey": "Failed to create API key. Please try again.",
+    "publicBindToggleLabel": "Bind this key to one public context (optional)",
+    "publicBindContextLabel": "Public context to attribute",
+    "publicBindContextPlaceholder": "Select a public context…",
+    "publicBindContextRequired": "Please select a public context to bind this key to.",
+    "publicBindNoContextsAvailable": "No public contexts available. Set is_public=true on a context first.",
+    "publicBindWarning": "Anyone with this key can read the bound context publicly. The binding is immutable — revoke and create a new key to change it.",
+    "publicBindBadge": "Public-bound",
+    "publicBindBadgeTitle": "This key is attributed to one is_public=true context (per-key rate limit + audit).",
+    "publicBindRevoke": "Revoke this public-bound key"
   },
   "customApps": {
     "title": "App Authentication",

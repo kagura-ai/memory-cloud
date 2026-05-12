@@ -11,6 +11,7 @@ from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.api_keys import VerifiedKey
 from db.base import get_db
 from models.auth import User
 from utils.exceptions import AuthorizationError
@@ -155,10 +156,11 @@ async def get_api_key(authorization: str | None = Header(None)) -> str | None:
     return authorization[7:]  # Remove "Bearer " prefix
 
 
-async def verify_api_key(api_key: str) -> tuple[str, UUID | None] | None:
-    """Verify API key and return (user_id, workspace_id).
+async def verify_api_key(api_key: str) -> VerifiedKey | None:
+    """Verify API key and return a ``VerifiedKey`` view.
 
-    Issue #169: Returns workspace_id for workspace-scoped API keys.
+    Issue #169: ``workspace_id`` for workspace-scoped API keys.
+    Issue #626: ``bound_context_id`` for public-bound API keys.
     Migration 034: Removed context_id (deprecated).
 
     Standalone function for MCP authentication (non-FastAPI context).
@@ -169,15 +171,13 @@ async def verify_api_key(api_key: str) -> tuple[str, UUID | None] | None:
         api_key: API key to verify (e.g., "kagura_...")
 
     Returns:
-        (user_id, workspace_id) tuple if valid, None if invalid/revoked/expired.
-        - For workspace-scoped keys: workspace_id=<UUID>
-        - For global keys: workspace_id=None
+        ``VerifiedKey`` if valid, None if invalid/revoked/expired.
 
     Example:
         result = await verify_api_key("kagura_1234567890abcdef...")
         if result:
-            user_id, workspace_id = result
             # API key is valid
+            user_id = result.user_id
             ...
     """
     from auth.api_keys import APIKeyManager
@@ -186,17 +186,18 @@ async def verify_api_key(api_key: str) -> tuple[str, UUID | None] | None:
     try:
         async for db in get_db():
             manager = APIKeyManager(db)
-            result = await manager.verify_key(api_key)  # Returns 3-tuple
-            return result
+            return await manager.verify_key(api_key)
     except Exception:
         # Silent failure - return None on any error
         return None
+    return None
 
 
 async def _build_api_key_user_dict(
     user_id: str,
     api_key_workspace_id: UUID | None,
     db: AsyncSession,
+    bound_context_id: UUID | None = None,
 ) -> dict:
     """Build user info dict from verified API key data.
 
@@ -206,6 +207,10 @@ async def _build_api_key_user_dict(
         user_id: Authenticated user ID
         api_key_workspace_id: Workspace UUID from API key scope (None for global keys)
         db: Database session
+        bound_context_id: Issue #626 — public-context attribution (None
+            unless the key was created with a binding). Surfaced in the
+            principal dict so the public read endpoint can enforce the
+            CWE-639 (IDOR) match without re-querying the api_keys table.
 
     Returns:
         User info dict compatible with get_current_user format
@@ -218,7 +223,8 @@ async def _build_api_key_user_dict(
     logger.info(
         "api_key_authenticated",
         user_id=user_id,
-        workspace_id=str(current_workspace_id),
+        workspace_id=str(current_workspace_id) if current_workspace_id else None,
+        bound_context_id=str(bound_context_id) if bound_context_id else None,
     )
 
     return {
@@ -228,6 +234,7 @@ async def _build_api_key_user_dict(
         "current_context_id": None,  # Issue #246: always None, must be explicit
         "current_workspace_id": current_workspace_id,
         "api_key_workspace_id": api_key_workspace_id,
+        "bound_context_id": bound_context_id,  # Issue #626
     }
 
 
@@ -254,8 +261,9 @@ async def verify_api_key_user(
         logger.warning("invalid_api_key_attempt", key_prefix=api_key[:16] if api_key else None)
         raise HTTPException(status_code=401, detail="Invalid or expired API key")
 
-    user_id, api_key_workspace_id = result
-    return await _build_api_key_user_dict(user_id, api_key_workspace_id, db)
+    return await _build_api_key_user_dict(
+        result.user_id, result.workspace_id, db, result.bound_context_id
+    )
 
 
 async def require_session_auth(
@@ -353,8 +361,9 @@ async def get_user_from_api_key_or_session(
         result = await manager.verify_key(api_key)
 
         if result:
-            user_id, api_key_workspace_id = result
-            return await _build_api_key_user_dict(user_id, api_key_workspace_id, db)
+            return await _build_api_key_user_dict(
+                result.user_id, result.workspace_id, db, result.bound_context_id
+            )
 
         logger.warning("invalid_api_key_attempt", key_prefix=api_key[:16])
         raise HTTPException(status_code=401, detail="Invalid or expired API key")

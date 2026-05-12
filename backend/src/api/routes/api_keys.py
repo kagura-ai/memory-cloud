@@ -203,23 +203,11 @@ async def create_api_key(
         # Issue #246: current_context_id removed
         # current_context_id = user.get("current_context_id")
 
-        api_key = await manager.create_key(
+        api_key, created_key = await manager.create_key(
             name=data.name,
             user_id=user_id,
             expires_days=data.expires_days,
         )
-
-        # Retrieve metadata
-        keys = await manager.list_keys(
-            user_id=user_id,
-        )
-        created_key = next((k for k in keys if k.name == data.name), None)
-
-        if not created_key:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to retrieve created key",
-            )
 
         response_data = _format_key_response(created_key)
         return APIKeyCreateResponse(**response_data.model_dump(), api_key=api_key)
@@ -368,7 +356,6 @@ async def regenerate_api_key(
 
         # Store old key info
         key_name = old_key.name
-        key_context_id = old_key.context_id
         key_workspace_id = old_key.workspace_id
         key_expires_at = old_key.expires_at
 
@@ -384,25 +371,14 @@ async def regenerate_api_key(
         await db.flush()
 
         # Create new key with same name
-        new_api_key = await manager.create_key(
+        new_api_key, new_key = await manager.create_key(
             name=key_name,
             user_id=user_id,
             expires_days=expires_days,
-            context_id=key_context_id,
             workspace_id=key_workspace_id,
         )
 
         await db.commit()
-
-        # Retrieve new key metadata
-        keys = await manager.list_keys(user_id=user_id)
-        new_key = next((k for k in keys if k.name == key_name and k.revoked_at is None), None)
-
-        if not new_key:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to retrieve regenerated key",
-            )
 
         logger.info(f"api_key_regenerated: old_id={key_id}, new_id={new_key.id}, user={user_id}")
 

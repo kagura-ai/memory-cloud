@@ -248,27 +248,12 @@ async def regenerate_api_key(
 
     # Create new key
     manager = APIKeyManager(db)
-    new_plaintext_key = await manager.create_key(
+    new_plaintext_key, new_key = await manager.create_key(
         name=old_key.name,
         user_id=user_id,
         workspace_id=workspace_id,
         auto_hide_minutes=10,
     )
-
-    # Get new key record (most recently created)
-    result = await db.execute(
-        select(APIKey)
-        .where(
-            and_(
-                APIKey.user_id == user_id,
-                APIKey.workspace_id == workspace_id,
-                APIKey.revoked_at.is_(None),
-            )
-        )
-        .order_by(APIKey.created_at.desc())
-        .limit(1)
-    )
-    new_key = result.scalar_one()
 
     await db.commit()
 
@@ -298,10 +283,17 @@ async def create_api_key(
 ) -> dict:
     """Create new API key (Owner only).
 
+    Issue #626: If ``data.bound_context_id`` is supplied, the key is stored
+    as a public-bound key (``api_keys.workspace_id`` is left NULL) and is
+    attributed to that one ``is_public=true`` context for the rate-limit /
+    audit / revoke surface on ``/api/v1/public/{ctx}/*``. The binding is
+    immutable — to change it, revoke this key and create a new one.
+
     Args:
-        workspace_id: Workspace ID
+        workspace_id: Workspace ID (from URL — used as permission scope; also
+            assigned to ``api_keys.workspace_id`` unless a bound context is set)
         user_id: Target user ID
-        data: API key creation data (name, auto_hide_minutes)
+        data: API key creation data (name, auto_hide_minutes, bound_context_id)
         user: Current user (from auth)
         db: Database session
 
@@ -309,45 +301,122 @@ async def create_api_key(
         Created API key with plaintext (shown once)
 
     Raises:
-        HTTPException: If not owner or name already exists
+        HTTPException: If not owner, name already exists, tier gate fails,
+            or the bound context is missing / not public / not in this workspace.
     """
     # Permission check: only owner can create their own keys
     if user["user_id"] != user_id:
         raise HTTPException(status_code=403, detail="Only owner can create API keys")
 
+    # Issue #626: Public-bound key creation gating + scope decision.
+    # When ``bound_context_id`` is supplied, the key is public-bound and the
+    # ``api_keys.workspace_id`` column is left NULL (mutually exclusive per
+    # the DB CHECK constraint). The URL ``workspace_id`` continues to scope
+    # permission (the workspace must own the context, the plan must include
+    # ``public_contexts``) but does NOT scope the key itself.
+    bound_context_uuid: UUID | None = None
+    key_scope_workspace_id: UUID | None = workspace_id
+    if data.bound_context_id is not None:
+        try:
+            bound_context_uuid = UUID(data.bound_context_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail="bound_context_id must be a valid UUID"
+            ) from exc
+
+        # Verify the context exists, is public, and belongs to this workspace.
+        from sqlalchemy import select as _select
+
+        from models.auth import Context
+
+        ctx_row = await db.execute(_select(Context).where(Context.id == bound_context_uuid))
+        ctx = ctx_row.scalar_one_or_none()
+        if ctx is None:
+            raise HTTPException(status_code=404, detail="bound_context_id: context not found")
+        if ctx.workspace_id != workspace_id:
+            raise HTTPException(
+                status_code=403,
+                detail="bound_context_id: context does not belong to this workspace",
+            )
+        if ctx.is_public is not True:
+            raise HTTPException(
+                status_code=422,
+                detail="bound_context_id: context is not public (set is_public=true first)",
+            )
+        # Ownership gate: only the context creator can mint a public-bound key
+        # against it. In a multi-member PRO workspace this prevents a non-admin
+        # member from minting per-key buckets (and an audit-trail footprint)
+        # against another member's public context. Workspace owner/admin gets
+        # this implicitly by creating their own context to bind.
+        if ctx.created_by is not None and ctx.created_by != user_id:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "bound_context_id: only the context creator can mint a "
+                    "public-bound key against this context"
+                ),
+            )
+
+        # Tier gate: workspace plan must include the ``public_contexts`` feature.
+        from sqlalchemy import select as _select_ws
+
+        from config.plan_tiers import has_feature
+        from models.auth import Workspace
+
+        ws_row = await db.execute(_select_ws(Workspace).where(Workspace.id == workspace_id))
+        ws = ws_row.scalar_one_or_none()
+        plan_name = ws.plan_name if ws is not None else "free"
+        if not has_feature(plan_name, "public_contexts"):
+            raise HTTPException(
+                status_code=403,
+                detail="Workspace plan does not include the public_contexts feature",
+            )
+
+        # Mutual exclusion with workspace scope (#169).
+        key_scope_workspace_id = None
+
     manager = APIKeyManager(db)
 
     try:
-        plaintext_key = await manager.create_key(
+        plaintext_key, new_key = await manager.create_key(
             name=data.name,
             user_id=user_id,
-            workspace_id=workspace_id,
+            workspace_id=key_scope_workspace_id,
+            bound_context_id=bound_context_uuid,
             auto_hide_minutes=data.auto_hide_minutes,
         )
 
-        # Get the created key
-        from sqlalchemy import and_, select
+        # Issue #626: audit log entry for public-bound key creation. Other
+        # key types are intentionally not audited here — the codebase does
+        # not write AuditLog for owner/workspace key creation today, and
+        # adding it for public-bound only matches the heightened scrutiny
+        # of credentials that grant public access.
+        if bound_context_uuid is not None:
+            from models.auth import AuditLog
 
-        from models.auth import APIKey
-
-        result = await db.execute(
-            select(APIKey)
-            .where(
-                and_(
-                    APIKey.user_id == user_id,
-                    APIKey.workspace_id == workspace_id,
-                    APIKey.name == data.name,
-                    APIKey.revoked_at.is_(None),
+            db.add(
+                AuditLog(
+                    user_email=user.get("email") or f"{user_id}@api",
+                    user_id=user_id,
+                    action="public_bound_api_key_created",
+                    resource=f"api_key:{new_key.id}",
+                    user_metadata={
+                        "bound_context_id": str(bound_context_uuid),
+                        "workspace_id": str(workspace_id),
+                        "key_name": data.name,
+                    },
                 )
             )
-            .order_by(APIKey.created_at.desc())
-            .limit(1)
-        )
-        new_key = result.scalar_one()
 
         await db.commit()
 
-        logger.info("api_key_created", key_id=new_key.id, user_id=user_id, name=data.name)
+        logger.info(
+            "api_key_created",
+            key_id=new_key.id,
+            user_id=user_id,
+            name=data.name,
+            bound_context_id=str(bound_context_uuid) if bound_context_uuid else None,
+        )
 
         # Return with plaintext (shown once)
         return {
@@ -359,6 +428,9 @@ async def create_api_key(
             "visibility_expires_at": to_utc_iso(new_key.visibility_expires_at),
             "created_at": to_utc_iso(new_key.created_at),
             "revoked_at": None,
+            "bound_context_id": (
+                str(new_key.bound_context_id) if new_key.bound_context_id else None
+            ),
         }
 
     except ValueError as e:
@@ -429,6 +501,116 @@ async def delete_api_key(
     logger.info("api_key_deleted", key_id=api_key.id, user_id=user_id)
 
     return {"status": "deleted", "key_id": api_key.id}
+
+
+@router.delete("/{user_id}/credentials/api-keys/{key_id}")
+async def delete_api_key_by_id(
+    workspace_id: UUID,
+    user_id: str,
+    key_id: int,
+    user: SessionUser,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Delete a specific API key by ID (owner only).
+
+    Issue #626: Required for revoking public-bound keys, which have
+    ``workspace_id IS NULL`` and so are invisible to the legacy singleton
+    DELETE endpoint above. This per-id endpoint accepts both regular
+    workspace-scoped keys and public-bound keys belonging to this user;
+    the ``workspace_id`` in the URL is the permission scope (the caller
+    must be the owner) and not a filter on ``api_keys.workspace_id``.
+
+    Args:
+        workspace_id: Workspace ID (permission scope, from URL)
+        user_id: Target user ID (must match the key's ``user_id``)
+        key_id: API key integer ID
+        user: Current user (from auth)
+        db: Database session
+
+    Returns:
+        Status message
+
+    Raises:
+        HTTPException: 403 if not owner, 404 if key not found.
+    """
+    if user["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Only owner can delete API keys")
+
+    from sqlalchemy import and_, select
+
+    from models.auth import APIKey, Context
+
+    result = await db.execute(
+        select(APIKey).where(and_(APIKey.id == key_id, APIKey.user_id == user_id))
+    )
+    api_key = result.scalar_one_or_none()
+    if api_key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    # Verify the URL ``workspace_id`` matches the key's real scope.
+    # Without this, an authenticated user could pass an arbitrary
+    # ``workspace_id`` in the path and the AuditLog row would record a
+    # workspace that has nothing to do with the deleted key. Owner-only
+    # enforcement above prevents privilege escalation, but auditing
+    # integrity matters: the workspace in the audit trail must reflect
+    # where the key was actually scoped.
+    if api_key.workspace_id is not None:
+        # Workspace-scoped key (#169) — URL workspace must match the column.
+        if api_key.workspace_id != workspace_id:
+            raise HTTPException(
+                status_code=403,
+                detail="API key does not belong to this workspace",
+            )
+    elif api_key.bound_context_id is not None:
+        # Public-bound key (#626) — the binding's workspace must match.
+        ctx_row = await db.execute(select(Context).where(Context.id == api_key.bound_context_id))
+        bound_ctx = ctx_row.scalar_one_or_none()
+        # If the bound context was deleted (SET NULL would have already
+        # nulled bound_context_id, but in-flight requests may race), the
+        # key has no anchoring workspace — fall through to delete without
+        # the workspace-match assertion.
+        if bound_ctx is not None and bound_ctx.workspace_id != workspace_id:
+            raise HTTPException(
+                status_code=403,
+                detail="API key is bound to a context in a different workspace",
+            )
+    # else: global / owner-scoped key (both columns NULL) — workspace_id in
+    # the URL is purely permission scope; the owner-only check above is
+    # the only gate that applies.
+
+    # Capture binding info before delete — the audit-log entry below
+    # needs the original ``bound_context_id`` and the row is about to go.
+    bound_ctx_id = api_key.bound_context_id
+
+    await db.delete(api_key)
+
+    # Issue #626: audit log entry for public-bound key revocation.
+    if bound_ctx_id is not None:
+        from models.auth import AuditLog
+
+        db.add(
+            AuditLog(
+                user_email=user.get("email") or f"{user_id}@api",
+                user_id=user_id,
+                action="public_bound_api_key_revoked",
+                resource=f"api_key:{key_id}",
+                user_metadata={
+                    "bound_context_id": str(bound_ctx_id),
+                    "workspace_id": str(workspace_id),
+                },
+            )
+        )
+
+    await db.commit()
+
+    logger.info(
+        "api_key_deleted",
+        key_id=key_id,
+        user_id=user_id,
+        bound_context_id=str(bound_ctx_id) if bound_ctx_id is not None else None,
+    )
+
+    return {"status": "deleted", "key_id": key_id}
 
 
 # ============================================================================

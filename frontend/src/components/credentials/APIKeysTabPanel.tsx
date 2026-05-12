@@ -21,9 +21,12 @@ import {
   hideAPIKey,
   regenerateAPIKey,
   deleteWorkspaceMemberAPIKey,
+  deleteWorkspaceMemberAPIKeyById,
   createAPIKey,
   MemberCredentials,
 } from "@/lib/api/member-credentials";
+import { getContexts } from "@/lib/api/contexts";
+import type { Context } from "@/lib/types/context";
 import {
   Copy,
   Check,
@@ -97,6 +100,13 @@ export function APIKeysTabPanel() {
   const [showCreateKeyDialog, setShowCreateKeyDialog] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
   const [createKeyError, setCreateKeyError] = useState<string | null>(null);
+  // Issue #626: public-context binding picker state. Both fields reset on
+  // dialog open/close so the operator never carries a stale selection into
+  // a fresh create flow.
+  const [bindToPublicContext, setBindToPublicContext] = useState(false);
+  const [boundContextId, setBoundContextId] = useState<string>("");
+  const [publicContexts, setPublicContexts] = useState<Context[]>([]);
+  const [loadingPublicContexts, setLoadingPublicContexts] = useState(false);
   const [showHideApiKeyDialog, setShowHideApiKeyDialog] = useState(false);
   const [showRegenerateApiKeyDialog, setShowRegenerateApiKeyDialog] =
     useState(false);
@@ -263,6 +273,38 @@ export function APIKeysTabPanel() {
     }
   };
 
+  // Issue #626: load is_public=true contexts for the binding picker when
+  // the operator toggles the "bind to public context" option. Fetched on
+  // demand rather than eagerly so the credentials page stays cheap when
+  // the operator only wants regular keys.
+  const loadPublicContexts = useCallback(async () => {
+    if (publicContexts.length > 0 || loadingPublicContexts) return;
+    setLoadingPublicContexts(true);
+    try {
+      const resp = await getContexts();
+      // Filter to public contexts only — the binding constraint requires
+      // is_public=true at create time on the backend, but surfacing only
+      // those in the picker avoids a confusing 422.
+      const publics = resp.contexts.filter((c) => c.is_public);
+      setPublicContexts(publics);
+    } catch {
+      // Picker silently empty on fetch failure; the dialog already has a
+      // gating message ("no public contexts available") that covers the
+      // empty-list case and the actual save attempt will surface any
+      // backend error via the inline message inside the dialog.
+    } finally {
+      setLoadingPublicContexts(false);
+    }
+  }, [publicContexts.length, loadingPublicContexts]);
+
+  const resetCreateDialog = () => {
+    setShowCreateKeyDialog(false);
+    setNewKeyName("");
+    setCreateKeyError(null);
+    setBindToPublicContext(false);
+    setBoundContextId("");
+  };
+
   const handleCreateAPIKey = async () => {
     if (!currentWorkspaceId || !userId) return;
 
@@ -274,10 +316,21 @@ export function APIKeysTabPanel() {
         return;
       }
 
-      await createAPIKey(currentWorkspaceId, userId, { name: newKeyName });
+      // Issue #626: when bind mode is on, the context selection is required
+      // — submitting with no selection is a form-level validation failure.
+      if (bindToPublicContext && !boundContextId) {
+        setCreateKeyError(t("publicBindContextRequired"));
+        return;
+      }
+
+      await createAPIKey(currentWorkspaceId, userId, {
+        name: newKeyName,
+        ...(bindToPublicContext && boundContextId
+          ? { bound_context_id: boundContextId }
+          : {}),
+      });
       await loadCredentials();
-      setShowCreateKeyDialog(false);
-      setNewKeyName("");
+      resetCreateDialog();
 
       toast({
         title: tCommon("success"),
@@ -295,6 +348,31 @@ export function APIKeysTabPanel() {
           ? err.message
           : t("errorCreateKey"),
       );
+    }
+  };
+
+  // Issue #626: per-id delete for bound keys. The legacy singleton DELETE
+  // endpoint filters on workspace_id and so cannot see bound keys (which
+  // have workspace_id IS NULL). Routes the delete through the new per-id
+  // endpoint when the key has a binding.
+  const handleConfirmDeleteBoundKey = async (keyId: number) => {
+    if (!currentWorkspaceId || !userId) return;
+    try {
+      setDeleting(true);
+      await deleteWorkspaceMemberAPIKeyById(currentWorkspaceId, userId, keyId);
+      await loadCredentials();
+      toast({
+        title: tCommon("success"),
+        description: t("deleteSuccess"),
+      });
+    } catch (err: unknown) {
+      toast({
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -450,14 +528,43 @@ export function APIKeysTabPanel() {
               >
                 {/* Key Name */}
                 <div className="flex items-center justify-between">
-                  <h4 className="font-semibold text-gray-900 dark:text-gray-100">
-                    {apiKey.name}
-                  </h4>
-                  {apiKey.revoked_at && (
-                    <span className="text-xs text-red-600 dark:text-red-400 bg-red-100 dark:bg-red-900/20 px-2 py-1 rounded">
-                      {t("revoked")}
-                    </span>
-                  )}
+                  <div className="flex items-center gap-2">
+                    <h4 className="font-semibold text-gray-900 dark:text-gray-100">
+                      {apiKey.name}
+                    </h4>
+                    {/* Issue #626: badge for public-bound keys so the list
+                        view makes attribution visible at a glance. The badge
+                        is its own non-revocation status — keys can be active
+                        AND public-bound, or revoked AND public-bound. */}
+                    {apiKey.bound_context_id && (
+                      <span
+                        className="text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 px-2 py-0.5 rounded border border-amber-200 dark:border-amber-800"
+                        title={t("publicBindBadgeTitle")}
+                      >
+                        {t("publicBindBadge")}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {apiKey.revoked_at && (
+                      <span className="text-xs text-red-600 dark:text-red-400 bg-red-100 dark:bg-red-900/20 px-2 py-1 rounded">
+                        {t("revoked")}
+                      </span>
+                    )}
+                    {apiKey.bound_context_id && !apiKey.revoked_at && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleConfirmDeleteBoundKey(apiKey.id)}
+                        disabled={deleting}
+                        title={t("publicBindRevoke")}
+                        aria-label={t("publicBindRevoke")}
+                      >
+                        <Trash2 className="w-4 h-4 text-red-600" />
+                      </Button>
+                    )}
+                  </div>
                 </div>
 
                 {/* Key Display */}
@@ -601,6 +708,71 @@ export function APIKeysTabPanel() {
                 placeholder={t("keyNamePlaceholder")}
               />
             </div>
+
+            {/* Issue #626: public-bound key creation. Toggle off by default
+                so the existing self-service flow is unchanged for users who
+                are just minting a regular workspace-scoped key. */}
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={bindToPublicContext}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setBindToPublicContext(checked);
+                    setBoundContextId("");
+                    setCreateKeyError(null);
+                    if (checked) {
+                      void loadPublicContexts();
+                    }
+                  }}
+                  className="h-4 w-4"
+                />
+                <span>{t("publicBindToggleLabel")}</span>
+              </label>
+              {bindToPublicContext && (
+                <div className="space-y-2 pl-6">
+                  {loadingPublicContexts ? (
+                    <p className="text-xs text-muted-foreground">
+                      {tCommon("loading")}
+                    </p>
+                  ) : publicContexts.length === 0 ? (
+                    <div className="rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-2 text-xs text-amber-800 dark:text-amber-200">
+                      {t("publicBindNoContextsAvailable")}
+                    </div>
+                  ) : (
+                    <>
+                      <label
+                        htmlFor="create-api-key-bound-context"
+                        className="block text-xs font-medium"
+                      >
+                        {t("publicBindContextLabel")}
+                      </label>
+                      <select
+                        id="create-api-key-bound-context"
+                        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                        value={boundContextId}
+                        onChange={(e) => setBoundContextId(e.target.value)}
+                      >
+                        <option value="">
+                          {t("publicBindContextPlaceholder")}
+                        </option>
+                        {publicContexts.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {(c.display_name || c.name) +
+                              (c.resource_id ? ` (${c.resource_id})` : "")}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-2 text-xs text-amber-800 dark:text-amber-200">
+                        {t("publicBindWarning")}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
             {createKeyError && (
               <p className="text-sm text-red-600 dark:text-red-400">
                 {createKeyError}
@@ -611,13 +783,7 @@ export function APIKeysTabPanel() {
             </p>
           </div>
           <AlertDialogFooter>
-            <AlertDialogCancel
-              onClick={() => {
-                setShowCreateKeyDialog(false);
-                setNewKeyName("");
-                setCreateKeyError(null);
-              }}
-            >
+            <AlertDialogCancel onClick={resetCreateDialog}>
               {tCommon("cancel")}
             </AlertDialogCancel>
             <AlertDialogAction onClick={handleCreateAPIKey}>

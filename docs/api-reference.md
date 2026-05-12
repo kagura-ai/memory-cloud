@@ -19,6 +19,16 @@ curl -H "Authorization: Bearer kagura_xxxxxxxxxxxx" \
   http://localhost:8080/api/v1/memory/recall
 ```
 
+API keys come in three scoping shapes:
+
+| Scope | Created via | Access | Issue |
+|---|---|---|---|
+| Owner-scoped | `POST /api/v1/config/api-keys` | All of the owner's contexts (current workspace) | — |
+| Workspace-scoped | `POST /api/v1/workspaces/{wsid}/members/{uid}/credentials/api-keys` | All contexts in one workspace | #169 |
+| Public-bound | Same as workspace-scoped, with `bound_context_id` in the body | One `is_public=true` context only — for attributed access to `/api/v1/public/{ctx}/*` (per-key rate limit, audit, independent revocation) | #626 |
+
+Public-bound keys are immutable: to change which context a key attributes to, revoke the key and create a new one. They cannot also be workspace-scoped (DB CHECK constraint).
+
 ### 2. OAuth2 Access Token
 
 ```bash
@@ -551,6 +561,50 @@ Update a context. All fields are optional.
 Soft-delete a context. The context row is marked deleted (sets `deleted_at`) so it stops appearing in listings, but the record and its memories are retained for recovery / audit purposes.
 
 **Response:** `204 No Content` (no response body)
+
+---
+
+## Public Read API
+
+`POST /api/v1/public/{context_id}/search` and `GET /api/v1/public/{context_id}/info` expose `is_public=true` contexts to anonymous and attributed callers (Issue #238, extended by Issue #626).
+
+### Anonymous access (no Authorization header)
+
+```bash
+curl -X POST https://memory.kagura-ai.com/api/v1/public/CTX_UUID/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is Hebbian learning", "limit": 3}'
+```
+
+Rate-limited to **50 requests/minute per context**, shared across all anonymous callers. The bucket is `public_search:{ctx}:minute` in Redis. The shared quota means a single noisy client can saturate the bucket — that's the gap public-bound API keys fill.
+
+### Attributed access (with public-bound API key)
+
+```bash
+curl -X POST https://memory.kagura-ai.com/api/v1/public/CTX_UUID/search \
+  -H "Authorization: Bearer kagura_xxxxxxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is Hebbian learning", "limit": 3}'
+```
+
+When the bound key matches the URL context (CWE-639 IDOR guard fires otherwise with `403`), the request gets:
+
+- **Per-key rate-limit bucket** (`public_bound_key:{key_id}:minute`) sized by the workspace plan's `bound_public_calls_per_minute` (PRO default: 100/min).
+- **Per-key audit attribution** in `usage_stats` (`api_key_id` populated alongside `context_id` and `workspace_id`).
+- **Independent revocation** — the key can be deleted without flipping `is_public=false` on the context.
+
+The bound key MUST be created with `bound_context_id` set (see API Keys Management); a regular owner-scoped or workspace-scoped key passed here is rejected with `403`.
+
+### Error matrix
+
+| Condition | Status |
+|---|---|
+| Context not found | `404` |
+| Context is not public | `403` |
+| API key supplied but invalid / expired | `401` |
+| API key is not public-bound | `403` |
+| API key is bound to a different context (CWE-639) | `403` |
+| Per-key / shared rate limit exhausted | `429` |
 
 ---
 

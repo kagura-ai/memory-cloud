@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import secrets
 from datetime import timedelta
+from typing import NamedTuple
 from uuid import UUID
 
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.auth import APIKey
+from models.auth import APIKey, Context
 from utils.datetime import utcnow
 from utils.hashing import sha256_hex
 from utils.logger import get_logger
@@ -22,6 +23,33 @@ logger = get_logger(__name__)
 
 # API Key prefix for easy identification
 API_KEY_PREFIX = "kagura_"
+
+
+class VerifiedKey(NamedTuple):
+    """Result of a successful API key verification.
+
+    Issue #626 — extended from a plain ``(user_id, workspace_id)`` 2-tuple
+    so that public-bound keys (#626) and workspace-scoped keys (#169) can
+    coexist without further breaking changes when more attribution shapes
+    appear. Adding a field is a non-breaking change for callers that read
+    by attribute name; positional unpacking remains backward-compatible
+    for the first two positions only.
+
+    Attributes:
+        id: ``api_keys.id`` integer primary key — surfaced here so the
+            public endpoint can populate per-key rate-limit buckets and
+            ``usage_stats.api_key_id`` without a second SELECT.
+        user_id: Owner OAuth2 sub.
+        workspace_id: Workspace scope (Issue #169). None for global and
+            for public-bound keys (mutually exclusive with bound_context_id).
+        bound_context_id: Public-context attribution (Issue #626). None
+            unless the key was created with a binding.
+    """
+
+    id: int
+    user_id: str
+    workspace_id: UUID | None
+    bound_context_id: UUID | None
 
 
 class APIKeyManager:
@@ -59,11 +87,16 @@ class APIKeyManager:
         user_id: str,
         expires_days: int | None = None,
         workspace_id: UUID | None = None,
+        bound_context_id: UUID | None = None,
         auto_hide_minutes: int = 10,
-    ) -> str:
+    ) -> tuple[str, APIKey]:
         """Create a new API key.
 
         Issue #169: Workspace-scoped API keys (access all contexts in workspace).
+        Issue #626: Public-bound API keys (attributed to one is_public=true context).
+            Returning the freshly-flushed ``APIKey`` row alongside the plaintext
+            saves callers a second SELECT just to read back ``id`` / ``created_at``
+            for the one-time-reveal response.
         Migration 034: Added auto_hide for visibility control (Zero-knowledge model).
         Migration 034: Removed context_id parameter (deprecated).
 
@@ -71,15 +104,45 @@ class APIKeyManager:
             name: Friendly name for the key
             user_id: User ID that owns this key
             expires_days: Optional expiration in days
-            workspace_id: Optional workspace ID for workspace-scoped access (Issue #169)
+            workspace_id: Optional workspace ID for workspace-scoped access (Issue #169).
+                Mutually exclusive with ``bound_context_id``.
+            bound_context_id: Optional context ID for public-bound attribution
+                (Issue #626). The context must satisfy ``is_public=True`` at
+                creation time. Mutually exclusive with ``workspace_id``.
             auto_hide_minutes: Minutes until key is auto-hidden (default: 10)
 
         Returns:
-            Plaintext API key (only shown once)
+            ``(plaintext_key, new_api_key_row)`` — the plaintext is only ever
+            available in this return value (encrypted-at-rest beyond that);
+            the row carries the assigned ``id`` and ``created_at``.
 
         Raises:
-            ValueError: If name already exists for user
+            ValueError: If name already exists for user, if both scoping
+                params are supplied, or if the bound context is not public.
         """
+        if workspace_id is not None and bound_context_id is not None:
+            raise ValueError(
+                "workspace_id and bound_context_id are mutually exclusive — "
+                "a key cannot be both workspace-scoped and public-bound"
+            )
+
+        # Validate the bound context exists and is public at creation time.
+        # Subsequent flips of context.is_public are handled at request time
+        # by the public endpoint (the binding row stays; access is denied
+        # while is_public is false).
+        if bound_context_id is not None:
+            ctx_result = await self.db.execute(
+                select(Context).where(Context.id == bound_context_id)
+            )
+            ctx = ctx_result.scalar_one_or_none()
+            if ctx is None:
+                raise ValueError(f"Context {bound_context_id} not found")
+            if ctx.is_public is not True:
+                raise ValueError(
+                    "Cannot bind API key to a non-public context — "
+                    "set is_public=true on the context first"
+                )
+
         # Check if name already exists in current workspace (Issue #169)
         conditions = [
             APIKey.name == name,
@@ -120,6 +183,7 @@ class APIKeyManager:
             name=name,
             user_id=user_id,
             workspace_id=workspace_id,  # Issue #169
+            bound_context_id=bound_context_id,  # Issue #626
             expires_at=expires_at,
             visibility_expires_at=visibility_expires_at,  # Migration 034
             plaintext_encrypted=plaintext_encrypted,  # Migration 035
@@ -133,23 +197,29 @@ class APIKeyManager:
             name=name,
             user_id=user_id,
             workspace_id=str(workspace_id) if workspace_id else None,
+            bound_context_id=str(bound_context_id) if bound_context_id else None,
         )
 
-        return api_key
+        return api_key, new_key
 
-    async def verify_key(self, api_key: str) -> tuple[str, UUID | None] | None:
-        """Verify API key and return (user_id, workspace_id).
+    async def verify_key(self, api_key: str) -> VerifiedKey | None:
+        """Verify API key and return a ``VerifiedKey`` view.
 
         Issue #169: Returns workspace_id for workspace-scoped API keys.
+        Issue #626: Returns bound_context_id for public-bound API keys.
         Migration 034: Removed context_id (deprecated).
 
         Args:
             api_key: Plaintext API key to verify
 
         Returns:
-            (user_id, workspace_id) tuple if valid, None otherwise.
-            - For workspace-scoped keys: workspace_id=<UUID>
-            - For global keys: workspace_id=None
+            ``VerifiedKey`` if valid, None if not found / revoked / expired.
+
+            - Owner-scoped (global) keys: workspace_id=None, bound_context_id=None
+            - Workspace-scoped keys (#169): workspace_id=<UUID>, bound_context_id=None
+            - Public-bound keys (#626): workspace_id=None, bound_context_id=<UUID>
+
+            The two non-null scopings are mutually exclusive (DB CHECK constraint).
         """
         key_hash = self._hash_key(api_key)
 
@@ -172,7 +242,12 @@ class APIKeyManager:
         key_record.last_used_at = utcnow()
         await self.db.flush()
 
-        return (key_record.user_id, key_record.workspace_id)
+        return VerifiedKey(
+            id=key_record.id,
+            user_id=key_record.user_id,
+            workspace_id=key_record.workspace_id,
+            bound_context_id=key_record.bound_context_id,
+        )
 
     async def list_keys(
         self,

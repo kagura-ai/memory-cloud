@@ -47,6 +47,11 @@ class PlanTier:
         rest_calls_per_week: REST API calls per week (Issue #238)
         public_calls_per_day: Public REST API calls per day (Issue #238)
         public_calls_per_week: Public REST API calls per week (Issue #238)
+        bound_public_calls_per_minute: Per-minute quota for each public-bound
+            API key (Issue #626). Anonymous public access keeps its existing
+            shared 50/min/context bucket; bound keys get their own per-key
+            bucket sized by this field. 0 disables bound-key creation for
+            the plan.
         allows_shared_contexts: Whether plan allows shared (non-private) contexts (Issue #271)
         features: Set of enabled features
     """
@@ -66,6 +71,7 @@ class PlanTier:
     rest_calls_per_week: int = 0  # Issue #238: REST API quota
     public_calls_per_day: int = 0  # Issue #238: Public REST API quota
     public_calls_per_week: int = 0  # Issue #238: Public REST API quota
+    bound_public_calls_per_minute: int = 0  # Issue #626: per-key bucket for bound public keys
     analysis_runs_per_day: int = 0  # Issue #494: Memory Broadlistening analyses/day
     storage_limit_bytes: int = 0  # Issue #485: File-storage hard cap per workspace
     sleep_enabled_contexts_limit: int = 0  # Issue #560: Sleep-mode contexts cap (PRO-only)
@@ -136,6 +142,7 @@ PLAN_PRO = PlanTier(
     rest_calls_per_week=25000,
     public_calls_per_day=1000,
     public_calls_per_week=5000,
+    bound_public_calls_per_minute=100,  # Issue #626: per-key bucket (PRO only)
     analysis_runs_per_day=3,  # Issue #494: Memory Broadlistening (Pro only; FREE/BASIC=0)
     storage_limit_bytes=10 * 1024 * 1024 * 1024,  # Issue #485: 10 GiB
     sleep_enabled_contexts_limit=3,  # Issue #560: Sleep mode (Pro only; FREE/BASIC=0)

@@ -104,8 +104,13 @@ async def authenticate_mcp_request(
 async def _verify_api_key(api_key: str) -> tuple[str, "UUID | None", "UUID | None"] | None:
     """Verify API key.
 
-    Migration 034: verify_api_key() returns (user_id, workspace_id) 2-tuple.
-    Issue #245: context_id is now required in tool args, not from auth.
+    Migration 034: verify_api_key() returned a 2-tuple of (user_id, workspace_id).
+    Issue #626: verify_api_key() now returns ``VerifiedKey`` — we read attributes
+    by name. The MCP auth surface remains a 3-tuple ``(user_id, context_id,
+    workspace_id)`` for backward compatibility with MCP tool args (Issue #245).
+    ``bound_context_id`` is **not** propagated into the MCP context_id slot:
+    MCP read tools enforce binding separately in ``list_my_bindings`` /
+    ``describe_binding`` rather than re-using the principal's MCP context_id.
 
     Args:
         api_key: API key value
@@ -121,7 +126,8 @@ async def _verify_api_key(api_key: str) -> tuple[str, "UUID | None", "UUID | Non
         result = await verify_api_key(api_key)
 
         if result:
-            user_id, workspace_id = result
+            user_id = result.user_id
+            workspace_id = result.workspace_id
             context_id = None  # Issue #245: context_id is now in tool args
             logger.debug(f"API key valid: user={user_id}, workspace={workspace_id}")
             return (user_id, context_id, workspace_id)

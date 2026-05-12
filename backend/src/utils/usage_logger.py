@@ -23,6 +23,7 @@ async def log_usage(
     response_time_ms: int | None = None,
     context_id: str | None = None,  # Bugfix: Add context_id for stats tracking
     workspace_id: str | None = None,  # Bugfix: Add workspace_id for stats tracking
+    api_key_id: int | None = None,  # Issue #626: per-key attribution
 ) -> None:
     """Log API or MCP tool usage to usage_stats table.
 
@@ -39,6 +40,9 @@ async def log_usage(
         response_time_ms: Response time in milliseconds (optional)
         context_id: Context UUID (optional, for context-specific stats)
         workspace_id: Workspace UUID (optional, for workspace-specific stats)
+        api_key_id: API key integer ID (Issue #626). Set on public endpoint
+            access attributed to a public-bound key. Soft reference — survives
+            key deletion.
 
     Example usage:
         # HTTP API (from middleware)
@@ -62,6 +66,7 @@ async def log_usage(
                 date=now.date(),
                 context_id=context_id,  # Bugfix: Add context_id
                 workspace_id=workspace_id,  # Bugfix: Add workspace_id
+                api_key_id=api_key_id,  # Issue #626
             )
         )
         await db.commit()

@@ -235,6 +235,15 @@ class APIKey(Base):
         index=True,
     )
 
+    # Issue #626: Public-bound API key — attribution to one is_public=true
+    # context for per-key rate-limit, audit, and revoke. Mutually exclusive
+    # with workspace_id (CHECK constraint at the DB level).
+    bound_context_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("contexts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
@@ -255,6 +264,11 @@ class APIKey(Base):
         Index("idx_user_name", "user_id", "name"),
         Index("idx_revoked", "revoked_at"),
         Index("idx_expires", "expires_at"),
+        Index("idx_api_keys_bound_context_id", "bound_context_id"),
+        CheckConstraint(
+            "bound_context_id IS NULL OR workspace_id IS NULL",
+            name="ck_api_keys_binding_workspace_exclusion",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -1050,6 +1064,11 @@ class UsageStats(Base):
         UUID(as_uuid=True), nullable=True
     )  # Deprecated, kept for backward compatibility
 
+    # Issue #626: Soft reference to api_keys.id for per-key attribution on
+    # public endpoints. Not an FK — attribution rows must survive key
+    # deletion so billing/audit reports stay readable.
+    api_key_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     __table_args__ = (
         Index("idx_usage_stats_user_date", "user_id", "date"),
         Index("idx_usage_stats_user_endpoint", "user_id", "endpoint", "date"),
@@ -1057,6 +1076,7 @@ class UsageStats(Base):
         Index("idx_usage_stats_context_date", "context_id", "date"),
         Index("idx_usage_stats_workspace_date", "workspace_id", "date"),
         Index("idx_usage_stats_project_date", "project_id", "date"),
+        Index("idx_usage_stats_api_key_id", "api_key_id"),
     )
 
 

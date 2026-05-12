@@ -954,6 +954,7 @@ class MemberAPIKeyResponse(BaseModel):
     """Response for member's API key (Zero-knowledge model).
 
     Migration 034: Member-scoped credentials.
+    Issue #626: Optional public-context binding.
     """
 
     id: int
@@ -964,6 +965,7 @@ class MemberAPIKeyResponse(BaseModel):
     visibility_expires_at: str | None
     created_at: str
     revoked_at: str | None
+    bound_context_id: str | None = None  # Issue #626: public attribution
 
 
 class MemberOAuthAppResponse(BaseModel):
@@ -994,10 +996,18 @@ class MemberCredentialsResponse(BaseModel):
 
 
 class CreateAPIKeyRequest(BaseModel):
-    """Request for creating a new API key."""
+    """Request for creating a new API key.
+
+    Issue #626: ``bound_context_id`` makes this a public-bound key that is
+    attributed to one ``is_public=true`` context (immutable binding —
+    revoke and re-create to change). Mutually exclusive with the
+    workspace-scoping derived from the URL: when supplied, the key is
+    stored with ``workspace_id=NULL``.
+    """
 
     name: str
     auto_hide_minutes: int = 10  # Auto-hide after 10 minutes (default)
+    bound_context_id: str | None = None  # Issue #626
 
 
 class RegenerateAPIKeyResponse(BaseModel):
