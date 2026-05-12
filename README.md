@@ -49,7 +49,7 @@ Most AI memory tools are just vector databases with a chat wrapper. Kagura is di
 | **Hybrid Search** | Semantic (OpenAI/Ollama) + BM25 keyword — 96% top-1 accuracy |
 | **AI Reranking** | Ollama (local, free), Voyage AI, or Cohere — cross-encoder reranking for precision |
 | **Neural Memory Graph** | Hebbian learning builds a knowledge graph in the background. `explore()` traverses it for serendipitous discovery. |
-| **14 MCP Tools** | remember, recall, forget, reference, explore, merge_contexts, and 8 more |
+| **37 MCP Tools** | Memory, Neural edges, Contexts, Tags, Files (R2), Analyses (broadlistening), Resources, Sleep Maintenance, Usage |
 | **Multi-Provider** | OpenAI or Ollama (local, private, zero cost) for embeddings |
 | **Team Ready** | Workspaces, RBAC, context isolation, shared memory |
 | **Web UI** | Next.js dashboard — contexts, search settings, member management |
@@ -392,6 +392,10 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 
 ## MCP Tools
 
+37 tools across 9 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
+
+### Memory (6)
+
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `remember` | Store a new memory (summary + content + type) | Member+ |
@@ -400,10 +404,20 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `update_memory` | Update an existing memory in-place or upsert by external ID | Member+ |
 | `forget` | Soft-delete a memory (30-day retention) | Member+ |
 | `explore` | Discover related memories via Neural Memory graph | Viewer+ |
+
+### Neural Edges (4)
+
+| Tool | Description | Required Role |
+|------|------------|---------------|
 | `list_edges` | List edges connected to a memory | Viewer+ |
 | `create_edge` | Create an edge between two memories | Member+ |
 | `update_edge` | Update edge weight or type | Member+ |
 | `delete_edge` | Delete an edge between two memories | Member+ |
+
+### Contexts (7)
+
+| Tool | Description | Required Role |
+|------|------------|---------------|
 | `get_context_info` | Get context metadata and guidelines | Viewer+ |
 | `list_contexts` | List available contexts in workspace | Viewer+ |
 | `create_context` | Create a new context | Owner/Admin |
@@ -412,7 +426,59 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `merge_contexts` | Merge memories from source context into target context | Owner/Admin |
 | `update_search_config` | Tune hybrid search weights and reranker settings per context | Editor+ |
 
-Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
+### Tags (1)
+
+| Tool | Description | Required Role |
+|------|------------|---------------|
+| `list_tags` | List tag vocabulary in a context (call before remember/recall to align tagging) | Viewer+ |
+
+### Files / R2 Attachments (5)
+
+| Tool | Description | Required Role |
+|------|------------|---------------|
+| `init_file_upload` | Reserve quota + return presigned PUT URL (R2, ≤100 MiB) | Member+ |
+| `complete_file_upload` | Finalize upload after R2 PUT, verify sha256, mark as uploaded | Member+ |
+| `list_files` | List uploaded, non-deleted files in the workspace (newest first) | Viewer+ |
+| `get_file_download_url` | Issue presigned GET URL for a file | Viewer+ |
+| `delete_file` | Soft-delete a file object | Member+ |
+
+### Analyses — Broadlistening (5)
+
+Cluster memories into themes (kouchou-ai-style UMAP + KMeans + LLM labeling) for large-scale qualitative analysis.
+
+| Tool | Description | Required Role |
+|------|------------|---------------|
+| `analyze_context` | Start an analysis run (or preview cost with `dry_run=true`) | Owner + Pro plan + BYOK + quota |
+| `list_analyses` | List past analysis runs for a context | Owner |
+| `get_analysis` | Get a completed analysis (clusters, labels, stats) | Owner |
+| `get_active_analysis` | Get the in-flight analysis for a context (if any) | Owner |
+| `get_cluster` | Drill into a single cluster's member memories | Owner |
+
+### Resources — External Data Ingestion (5)
+
+| Tool | Description | Required Role |
+|------|------------|---------------|
+| `setup_resource` | Create public context + issue resource token | Owner/Admin + Pro plan |
+| `list_resource_tokens` | List active resource tokens for your workspace | Owner/Admin |
+| `ingest_events` | Batch upsert/delete events into a resource (max 100 events; session-auth MCP variant) | Member+ |
+| `get_resource_impact` | Resource stats (tokens, memories, schema version) | Viewer+ |
+| `get_resource_schema` | Field definitions for a resource | Viewer+ |
+
+### Sleep Maintenance (3)
+
+Background consolidation of memories (decay, edge pruning, theme summarization).
+
+| Tool | Description | Required Role |
+|------|------------|---------------|
+| `get_sleep_history` | List past sleep runs | Viewer+ |
+| `get_sleep_report` | Detailed sleep report with all actions | Viewer+ |
+| `rollback_sleep_run` | Rollback all actions from a completed sleep run | Member+ (report owner only) |
+
+### Usage (1)
+
+| Tool | Description | Required Role |
+|------|------------|---------------|
+| `get_usage` | Get current workspace usage (memories, contexts, members, MCP calls/day) | Viewer+ |
 
 ## REST API
 

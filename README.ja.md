@@ -49,7 +49,7 @@
 | **Hybrid Search** | Semantic (OpenAI/Ollama) + BM25 キーワード — top-1 精度 96% |
 | **AI Reranking** | Ollama (ローカル・無料)、Voyage AI、Cohere — cross-encoder reranker で精度向上 |
 | **Neural Memory Graph** | Hebbian 学習がバックグラウンドで知識グラフを構築。`explore()` がそれを辿り偶発的発見を提供 |
-| **14 の MCP ツール** | remember, recall, forget, reference, explore, merge_contexts ほか |
+| **37 の MCP ツール** | Memory、Neural edges、Contexts、Tags、Files (R2)、Analyses (broadlistening)、Resources、Sleep Maintenance、Usage |
 | **マルチプロバイダ** | 埋め込みに OpenAI か Ollama (ローカル・非公開・コストゼロ) |
 | **チーム対応** | Workspace、RBAC、context 分離、共有メモリ |
 | **Web UI** | Next.js ダッシュボード — context、検索設定、メンバー管理 |
@@ -281,6 +281,10 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 
 ## MCP ツール
 
+9 カテゴリ・全 37 ツール。Workspace ロール: **Owner** > Admin > Member > **Viewer** (read-only)。Context ロール: **Owner** > Editor > Viewer。Private context は作成者のみ閲覧可。Member を特定 context に allowlist で制限可能。
+
+### Memory (6)
+
 | ツール | 説明 | 必要ロール |
 |--------|------|------------|
 | `remember` | 新規メモリ保存 (summary + content + type) | Member+ |
@@ -289,10 +293,20 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `update_memory` | メモリ更新 / 外部 ID で upsert | Member+ |
 | `forget` | ソフト削除 (30 日保持) | Member+ |
 | `explore` | Neural Memory graph で関連メモリ発見 | Viewer+ |
+
+### Neural Edges (4)
+
+| ツール | 説明 | 必要ロール |
+|--------|------|------------|
 | `list_edges` | メモリに接続された edge 一覧 | Viewer+ |
 | `create_edge` | 2 メモリ間に edge 作成 | Member+ |
 | `update_edge` | edge の weight / type 更新 | Member+ |
 | `delete_edge` | 2 メモリ間の edge 削除 | Member+ |
+
+### Contexts (7)
+
+| ツール | 説明 | 必要ロール |
+|--------|------|------------|
 | `get_context_info` | context メタデータとガイドライン取得 | Viewer+ |
 | `list_contexts` | workspace 内の context 一覧 | Viewer+ |
 | `create_context` | context 新規作成 | Owner/Admin |
@@ -301,7 +315,59 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 | `merge_contexts` | source context から target context へメモリを統合 | Owner/Admin |
 | `update_search_config` | context 単位で hybrid search 重みと reranker 設定を調整 | Editor+ |
 
-Workspace ロール: **Owner** > Admin > Member > **Viewer** (read-only)。Context ロール: **Owner** > Editor > Viewer。Private context は作成者のみ閲覧可。Member を特定 context に allowlist で制限可能。
+### Tags (1)
+
+| ツール | 説明 | 必要ロール |
+|--------|------|------------|
+| `list_tags` | context 内の tag 語彙一覧 (remember/recall 前に呼んで揃える用途) | Viewer+ |
+
+### Files / R2 添付ファイル (5)
+
+| ツール | 説明 | 必要ロール |
+|--------|------|------------|
+| `init_file_upload` | quota 予約 + presigned PUT URL 発行 (R2、≤100 MiB) | Member+ |
+| `complete_file_upload` | R2 PUT 後にアップロード確定、sha256 検証、status=uploaded に遷移 | Member+ |
+| `list_files` | workspace 内のアップロード済み (非削除) ファイル一覧 (新しい順) | Viewer+ |
+| `get_file_download_url` | ファイルへの presigned GET URL 発行 | Viewer+ |
+| `delete_file` | ファイルオブジェクトのソフト削除 | Member+ |
+
+### Analyses — Broadlistening (5)
+
+メモリを UMAP + KMeans + LLM ラベリング (kouchou-ai 方式) で大規模クラスタリング。質的分析用途。
+
+| ツール | 説明 | 必要ロール |
+|--------|------|------------|
+| `analyze_context` | 分析 run 開始 (`dry_run=true` でコスト試算のみ可) | Owner + Pro プラン + BYOK + quota |
+| `list_analyses` | context の過去分析 run 一覧 | Owner |
+| `get_analysis` | 完了済み分析 (クラスタ、ラベル、統計) 取得 | Owner |
+| `get_active_analysis` | 実行中分析の取得 (あれば) | Owner |
+| `get_cluster` | 単一クラスタの所属メモリを drilldown | Owner |
+
+### Resources — 外部データ取り込み (5)
+
+| ツール | 説明 | 必要ロール |
+|--------|------|------------|
+| `setup_resource` | public context 作成 + resource token 発行 | Owner/Admin + Pro プラン |
+| `list_resource_tokens` | workspace の有効 resource token 一覧 | Owner/Admin |
+| `ingest_events` | resource に batch upsert/delete events (最大 100 events、session-auth MCP 経路) | Member+ |
+| `get_resource_impact` | resource 統計 (token 数、memory 数、schema version) | Viewer+ |
+| `get_resource_schema` | resource のフィールド定義取得 | Viewer+ |
+
+### Sleep Maintenance (3)
+
+バックグラウンドでメモリ統合 (decay、edge pruning、テーマ要約) を実行。
+
+| ツール | 説明 | 必要ロール |
+|--------|------|------------|
+| `get_sleep_history` | 過去 sleep run 一覧 | Viewer+ |
+| `get_sleep_report` | sleep run の詳細レポート (全 action 込み) | Viewer+ |
+| `rollback_sleep_run` | 完了済み sleep run の全 action をロールバック | Member+ (report 作成者のみ) |
+
+### Usage (1)
+
+| ツール | 説明 | 必要ロール |
+|--------|------|------------|
+| `get_usage` | workspace の現在使用量 (memory / context / member / MCP 呼出/日) | Viewer+ |
 
 ## REST API
 
