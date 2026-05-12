@@ -20,8 +20,12 @@ Three classes of invariant are pinned:
 3. **SQL invariants** — the upgrade SQL uses ``ON CONFLICT (client_id)
    DO NOTHING`` (idempotency), sets ``owner_id``/``workspace_id`` to
    ``NULL``, sets ``token_endpoint_auth_method='none'`` and
-   ``client_secret_hash=''`` (public client). The downgrade is a
-   no-op — deleting the row would orphan previously-issued tokens.
+   ``client_secret_hash=''`` (public client). The downgrade DELETEs
+   the seed row by ``client_id`` so the alembic chain stays reversible
+   (``d04_519_oauth_owner_nullable.downgrade()`` would otherwise fail
+   with ``owner_id=NULL`` still present); dependent tokens are
+   cleaned up via existing ``ON DELETE CASCADE`` FKs on
+   ``oauth_tokens`` and ``oauth_device_codes``.
 
 The scope-string relationship test (gate1 #3, scaled-down) is also
 covered here: ``memory:admin`` MUST NOT appear in the seeded scope.

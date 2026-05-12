@@ -653,7 +653,7 @@ The `kagura-cli` row is seeded by alembic migration
 | `client_id` | `kagura-cli` |
 | `client_name` | `Kagura Memory CLI` (shown on the `/device` consent page) |
 | `token_endpoint_auth_method` | `none` (public client — no secret) |
-| `grant_types` | `device_code`, `refresh_token` only |
+| `grant_types` | `urn:ietf:params:oauth:grant-type:device_code`, `refresh_token` only |
 | `scope` | `memory:read memory:write` |
 | `redirect_uris` | `urn:ietf:wg:oauth:2.0:oob` (OOB sentinel for device-flow), `http://127.0.0.1:0/` (loopback wildcard reserved for future PKCE fallback) |
 
