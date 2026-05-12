@@ -371,7 +371,10 @@ async def create_api_key(
 
         ws_row = await db.execute(_select_ws(Workspace).where(Workspace.id == workspace_id))
         ws = ws_row.scalar_one_or_none()
-        plan_name = ws.plan_name if ws is not None else "free"
+        # ``ws.plan_name`` itself is nullable for legacy rows that
+        # pre-date the plan_name backfill — coerce to "free" so
+        # ``has_feature`` / ``get_plan_tier`` don't see ``None`` and 500.
+        plan_name = (ws.plan_name if ws is not None else None) or "free"
         if not has_feature(plan_name, "public_contexts"):
             raise HTTPException(
                 status_code=403,

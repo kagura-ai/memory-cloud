@@ -105,22 +105,28 @@ async def _verify_api_key(api_key: str) -> tuple[str, "UUID | None", "UUID | Non
     """Verify API key.
 
     Migration 034: verify_api_key() returned a 2-tuple of (user_id, workspace_id).
-    Issue #626: verify_api_key() now returns ``VerifiedKey`` — we read attributes
+    Issue #626: verify_api_key() now returns ``VerifiedKey``; we read attributes
     by name. The MCP auth surface remains a 3-tuple ``(user_id, context_id,
     workspace_id)`` for backward compatibility with MCP tool args (Issue #245).
-    ``bound_context_id`` is intentionally **ignored** in the MCP auth path: MCP
-    does not currently expose any public-bound-key-aware tools, so a request
-    that arrives with a #626 bound key reaches MCP as a generic owner-scoped
-    request (workspace_id from the row, context_id=None as required by Issue
-    #245). Public-bound key attribution lives entirely on the REST public
-    endpoint (`/api/v1/public/{ctx}/*`). Read-only MCP introspection of
-    bindings is tracked as a follow-up.
+
+    **Public-bound key rejection (#626)**: ``auth.dependencies.verify_api_key``
+    (the standalone wrapper called below) returns ``None`` for any key with
+    ``bound_context_id != None``. That treats a public-bound key as
+    "invalid" on the MCP surface — preventing the privilege escalation
+    where a key intended for one public context would otherwise inherit
+    the owner's workspace_id and grant full account access on MCP tools.
+    Bound keys are only honored on the REST public endpoint
+    (``/api/v1/public/{ctx}/*`` via
+    ``api.routes.public_search._resolve_public_attribution``, which
+    reaches ``APIKeyManager.verify_key`` directly and bypasses this
+    wrapper). MCP introspection of bindings is a separate follow-up.
 
     Args:
         api_key: API key value
 
     Returns:
-        (user_id, context_id, workspace_id) tuple if key is valid, None otherwise.
+        (user_id, context_id, workspace_id) tuple if key is valid AND not
+        public-bound; None otherwise (invalid / revoked / expired / bound).
         - context_id is always None (now required in tool arguments)
         - workspace_id is from the API key scope (workspace-scoped keys)
     """

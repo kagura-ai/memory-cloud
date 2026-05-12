@@ -490,9 +490,13 @@ async def public_search(
             context_id=context_id,
             error=str(e),
         )
+        # Do not leak the raw exception message to the (potentially
+        # anonymous) client — DB / provider / library errors can carry
+        # column names, connection strings, file paths, etc. The full
+        # message is in the logger.error above for operator triage.
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Search failed: {str(e)}",
+            detail="Internal search error",
         ) from e
 
 
