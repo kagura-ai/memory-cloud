@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from datetime import UTC
-from typing import Any
+from typing import Any, cast
 
 from cryptography.fernet import Fernet
 from google.auth.transport.requests import Request
@@ -366,7 +366,10 @@ class OAuth2Manager:
 
             flow.fetch_token(code=code)
             logger.info("Code exchange successful")
-            return flow.credentials
+            # Flow.credentials is typed as Credentials | OAuth2Token, but the
+            # web flow always populates Credentials after a successful
+            # fetch_token. Cast to satisfy the declared return type.
+            return cast(Credentials, flow.credentials)
 
         except Exception as e:
             logger.error(f"Code exchange failed: {e}")

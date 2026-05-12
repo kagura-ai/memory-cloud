@@ -15,7 +15,6 @@ through the cost-grade plumbing introduced by #523.
 import uuid
 from datetime import datetime
 from typing import Any
-from uuid import uuid4
 
 from sqlalchemy import (
     BigInteger,
@@ -89,7 +88,7 @@ class MemoryAnalysis(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         primary_key=True,
-        default=uuid4,
+        default=uuid.uuid4,
         server_default=text("gen_random_uuid()"),
     )
     workspace_id: Mapped[uuid.UUID] = mapped_column(
@@ -200,7 +199,7 @@ class MemoryAnalysisCluster(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         primary_key=True,
-        default=uuid4,
+        default=uuid.uuid4,
         server_default=text("gen_random_uuid()"),
     )
     analysis_id: Mapped[uuid.UUID] = mapped_column(

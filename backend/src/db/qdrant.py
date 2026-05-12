@@ -1176,7 +1176,11 @@ async def _admin_scroll_context_points(
         Successive lists of qdrant_client.models.Record, one per scroll page.
     """
     client = get_qdrant_client()
-    offset: str | int | None = None
+    # qdrant-client's PointId union (int | str | UUID) matches scroll's
+    # declared offset parameter and the next_offset return value.
+    from qdrant_client.conversions.common_types import PointId
+
+    offset: PointId | None = None
 
     while True:
         points, next_offset = await client.scroll(

@@ -10,10 +10,8 @@ Provides ORM models for:
 import uuid
 from datetime import datetime
 from typing import Any
-from uuid import uuid4
 
 from sqlalchemy import (
-    ARRAY,
     JSON,
     BigInteger,
     Boolean,
@@ -30,7 +28,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
@@ -77,7 +75,7 @@ class Memory(Base):
     __tablename__ = "memories"
 
     # 基本情報
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
     # Migration 063: 3-level isolation (workspace, context, user)
@@ -220,7 +218,7 @@ class Attachment(Base):
 
     __tablename__ = "attachments"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     memory_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("memories.id", ondelete="CASCADE"),
@@ -232,7 +230,7 @@ class Attachment(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), nullable=False
+        DateTime, nullable=False, server_default=func.now()
     )
 
     __table_args__ = (

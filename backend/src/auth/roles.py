@@ -601,6 +601,10 @@ class RoleManager:
                     )
                     for u in db_users
                 ]
+            # async for over get_db() always yields at least one session
+            # in practice, but the type system can't see that — return [] so
+            # the function has an explicit list[UserRole] in every code path.
+            return []
         else:
             return []
 

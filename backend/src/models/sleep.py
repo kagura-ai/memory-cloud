@@ -6,7 +6,6 @@ Issue #101: Sleep Maintenance Foundation — report tracking and audit log.
 import uuid
 from datetime import datetime
 from typing import Any, Literal
-from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
@@ -76,7 +75,12 @@ class SleepReport(Base):
 
     __tablename__ = "sleep_reports"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
     user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     workspace_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     context_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -91,7 +95,12 @@ class SleepReport(Base):
         DateTime, nullable=False, server_default=func.now()
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="running",
+        server_default="running",
+    )
 
     # Per-phase results (JSON)
     edge_discovery_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -106,9 +115,15 @@ class SleepReport(Base):
     # remain populated by the reporter as a sum of child rows for back-compat:
     # any reader that selects them directly (legacy dashboards, log analyzers,
     # MCP tools) continues to work without change.
-    llm_calls_made: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    llm_tokens_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    embedding_calls_made: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    llm_calls_made: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    llm_tokens_used: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    embedding_calls_made: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
     # Embedding cost-grade columns (#471). Embedding is instance-global per
     # ``backend/src/config/settings.py`` (one EMBEDDING_PROVIDER /
@@ -121,7 +136,9 @@ class SleepReport(Base):
     # the embedding API but don't increment any counter; #475 closes that gap.
     embedding_provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
     embedding_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    embedding_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    embedding_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
     # Cost-grade dimensions (#523). Both columns carry a Python-side
     # ``default`` (in-memory ORM objects readable after flush without
@@ -141,11 +158,21 @@ class SleepReport(Base):
     )
 
     # Activity counters
-    memories_processed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    edges_created: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    memories_merged: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    memories_promoted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    memories_flagged: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    memories_processed: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    edges_created: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    memories_merged: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    memories_promoted: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    memories_flagged: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
     # Error tracking
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -274,11 +301,19 @@ class SleepReportLLMUsage(Base):
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
     model: Mapped[str] = mapped_column(String(100), nullable=False)
 
-    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    cached_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    cache_write_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    input_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    output_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    cached_input_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    cache_write_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     tokenizer_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
