@@ -357,10 +357,16 @@ async def create_api_key(
                 ),
             )
 
-        # Tier gate: workspace plan must include the ``public_contexts`` feature.
+        # Tier gate: workspace plan must include the ``public_contexts`` feature
+        # AND have a non-zero per-key minute quota. The two checks defend in
+        # depth: the feature-flag check is the primary intent (PRO+), but a
+        # custom plan / env override that left ``bound_public_calls_per_minute``
+        # at 0 would otherwise mint a key that 429s on every public-endpoint
+        # call. Refuse creation up-front so the operator sees the
+        # misconfiguration immediately, not after distributing a dead key.
         from sqlalchemy import select as _select_ws
 
-        from config.plan_tiers import has_feature
+        from config.plan_tiers import get_plan_tier, has_feature
         from models.auth import Workspace
 
         ws_row = await db.execute(_select_ws(Workspace).where(Workspace.id == workspace_id))
@@ -370,6 +376,14 @@ async def create_api_key(
             raise HTTPException(
                 status_code=403,
                 detail="Workspace plan does not include the public_contexts feature",
+            )
+        if get_plan_tier(plan_name).bound_public_calls_per_minute <= 0:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Workspace plan does not provision a per-key quota for "
+                    "public-bound API keys (bound_public_calls_per_minute=0)"
+                ),
             )
 
         # Mutual exclusion with workspace scope (#169).

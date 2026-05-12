@@ -108,9 +108,13 @@ async def _verify_api_key(api_key: str) -> tuple[str, "UUID | None", "UUID | Non
     Issue #626: verify_api_key() now returns ``VerifiedKey`` — we read attributes
     by name. The MCP auth surface remains a 3-tuple ``(user_id, context_id,
     workspace_id)`` for backward compatibility with MCP tool args (Issue #245).
-    ``bound_context_id`` is **not** propagated into the MCP context_id slot:
-    MCP read tools enforce binding separately in ``list_my_bindings`` /
-    ``describe_binding`` rather than re-using the principal's MCP context_id.
+    ``bound_context_id`` is intentionally **ignored** in the MCP auth path: MCP
+    does not currently expose any public-bound-key-aware tools, so a request
+    that arrives with a #626 bound key reaches MCP as a generic owner-scoped
+    request (workspace_id from the row, context_id=None as required by Issue
+    #245). Public-bound key attribution lives entirely on the REST public
+    endpoint (`/api/v1/public/{ctx}/*`). Read-only MCP introspection of
+    bindings is tracked as a follow-up.
 
     Args:
         api_key: API key value

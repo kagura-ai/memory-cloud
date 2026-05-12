@@ -110,6 +110,13 @@ export function APIKeysTabPanel() {
   const [boundContextId, setBoundContextId] = useState<string>("");
   const [publicContexts, setPublicContexts] = useState<Context[]>([]);
   const [loadingPublicContexts, setLoadingPublicContexts] = useState(false);
+  // Issue #626: distinguish "fetch failed" from "fetched, list is empty".
+  // Without this, a network/auth failure on getContexts() rendered the same
+  // "no public contexts available" notice as a successful-but-empty fetch,
+  // misleading the operator about the real cause.
+  const [publicContextsError, setPublicContextsError] = useState<string | null>(
+    null,
+  );
   const [showHideApiKeyDialog, setShowHideApiKeyDialog] = useState(false);
   const [showRegenerateApiKeyDialog, setShowRegenerateApiKeyDialog] =
     useState(false);
@@ -283,6 +290,7 @@ export function APIKeysTabPanel() {
   const loadPublicContexts = useCallback(async () => {
     if (publicContexts.length > 0 || loadingPublicContexts) return;
     setLoadingPublicContexts(true);
+    setPublicContextsError(null);
     try {
       const resp = await getContexts();
       // Filter to public contexts the current user can actually bind:
@@ -297,15 +305,20 @@ export function APIKeysTabPanel() {
         (c) => c.is_public && c.created_by === userId,
       );
       setPublicContexts(publics);
-    } catch {
-      // Picker silently empty on fetch failure; the dialog already has a
-      // gating message ("no public contexts available") that covers the
-      // empty-list case and the actual save attempt will surface any
-      // backend error via the inline message inside the dialog.
+    } catch (err) {
+      // Surface fetch failure distinctly from "fetched OK, list is empty".
+      // The dialog renders publicContextsError before the empty-list
+      // notice so the operator sees the real cause (network / auth
+      // failure) instead of a misleading "set is_public=true first" hint.
+      setPublicContextsError(
+        err instanceof Error && err.message.trim()
+          ? err.message
+          : t("publicBindLoadError"),
+      );
     } finally {
       setLoadingPublicContexts(false);
     }
-  }, [publicContexts.length, loadingPublicContexts, userId]);
+  }, [publicContexts.length, loadingPublicContexts, userId, t]);
 
   const resetCreateDialog = () => {
     setShowCreateKeyDialog(false);
@@ -313,6 +326,7 @@ export function APIKeysTabPanel() {
     setCreateKeyError(null);
     setBindToPublicContext(false);
     setBoundContextId("");
+    setPublicContextsError(null);
   };
 
   const handleCreateAPIKey = async () => {
@@ -756,6 +770,18 @@ export function APIKeysTabPanel() {
                       <InlineSpinner size="sm" />
                       {tCommon("loading")}
                     </p>
+                  ) : publicContextsError ? (
+                    // Fetch failure (network / auth / 5xx). Rendered as a
+                    // destructive inline alert per .claude/rules/frontend.md
+                    // "Errors raised inside a Dialog body → <Alert variant=
+                    // 'destructive'>". Distinct from the empty-list amber
+                    // notice below so the operator sees the real cause.
+                    <div
+                      role="alert"
+                      className="rounded-md border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 p-2 text-xs text-red-700 dark:text-red-300"
+                    >
+                      {publicContextsError}
+                    </div>
                   ) : publicContexts.length === 0 ? (
                     // Informational gating notice (prerequisite hint), NOT an
                     // empty-list "create your first" state — keep the amber

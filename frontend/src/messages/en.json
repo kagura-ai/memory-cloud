@@ -1524,6 +1524,7 @@
     "publicBindContextPlaceholder": "Select a public context…",
     "publicBindContextRequired": "Please select a public context to bind this key to.",
     "publicBindNoContextsAvailable": "No public contexts available. Set is_public=true on a context first.",
+    "publicBindLoadError": "Could not load public contexts. Check your connection and try again.",
     "publicBindWarning": "Anyone with this key can read the bound context publicly. The binding is immutable — revoke and create a new key to change it.",
     "publicBindBadge": "Public-bound",
     "publicBindBadgeTitle": "This key is attributed to one is_public=true context (per-key rate limit + audit).",
