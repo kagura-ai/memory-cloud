@@ -13,28 +13,47 @@ FIRST, then enforce on routes.
 
 Scope of the data fix (R1 policy from gate1 review):
 
-- Rows whose ``scope`` is exactly the post-#592 canonical string get
-  ``memory:admin`` stripped. This is the "got admin by default" cohort
-  — clients that did not explicitly opt into admin and would have
-  received it merely because the DCR fallback included it.
+- Only DCR-registered clients are touched. The WHERE clause includes
+  ``owner_id IS NULL`` — DCR clients have ``owner_id=NULL`` per
+  ``d04_519_oauth_owner_nullable``; admin-managed clients have a
+  non-null ``owner_id`` and are never touched by this migration even
+  if their scope string happens to match the canonical.
+- Among DCR clients, rows whose ``scope`` is exactly the post-#592
+  canonical string get ``memory:admin`` stripped. This is the "got
+  admin by default" cohort — clients that did not explicitly opt
+  into admin and would have received it merely because the DCR
+  fallback included it.
 - Rows whose ``scope`` differs from the exact post-#592 canonical
-  string are left untouched. This preserves any client that
-  EXPLICITLY requested ``memory:admin`` (their stored scope is a
-  custom subset / superset that does not match the full default), as
-  well as any other custom-scoped client.
+  string are left untouched. This preserves any DCR client that
+  registered with a custom scope set (subset, superset, or any
+  ordering that doesn't match the canonical exactly).
 
-This guarantees that no client that explicitly requested admin loses
-it. Clients that got admin by accident lose it, which is the intended
-behaviour — they never needed admin to begin with.
+Residual limitation (Copilot review on PR #615): the migration cannot
+distinguish a DCR client that EXPLICITLY requested the full canonical
+string (``scope="openid memory:read memory:write memory:admin
+memory:delete offline_access"`` in this exact ordering) from a client
+that received the same string via the fallback default. Such a client
+would have ``memory:admin`` stripped despite having explicitly
+requested it. In practice this collision is rare — it requires the
+client to type out all six scopes in the server's canonical ordering,
+which only matches clients that derived their scope list from the
+server's discovery endpoint. Affected clients can recover by
+re-registering with a distinguishing custom scope ordering, or by
+operator-driven re-grant.
 
 ``memory:delete`` is intentionally NOT narrowed in this migration. The
 distinct-vs-implied policy for ``memory:delete`` lands in #608 (D4) in
 a separate migration; coarsening admin first, then handling delete as
 its own least-privilege decision keeps the two concerns independent.
 
-Downgrade restores ``memory:admin`` on the exact rows we touched. We
-can identify them precisely because the pre-narrow and post-narrow
-canonical strings differ.
+Downgrade applies the inverse: re-adds ``memory:admin`` on DCR clients
+whose scope matches the post-narrow canonical. Same DCR-only filter
+(``owner_id IS NULL``) and the same canonical-string residual
+limitation apply in reverse — a DCR client that registered AFTER this
+migration with the exact post-narrow canonical string would have
+``memory:admin`` ADDED on downgrade (symmetric privilege escalation).
+Operators running the downgrade should re-issue narrower scopes to
+affected clients via the OAuth admin endpoints if this matters.
 
 Rollback (operator runbook): if Claude Code MCP DCR breaks post-deploy
 because a pre-SEP-835 SDK invalidates the narrowed token (the
@@ -81,21 +100,31 @@ _POST_NARROW_CANONICAL = "openid memory:read memory:write memory:delete offline_
 
 
 def upgrade() -> None:
-    # Strip memory:admin from rows that match the pre-narrow default
-    # exactly. Anything that doesn't match (custom-scoped clients,
-    # explicit-admin requests with extra scopes, etc.) is left alone.
+    # Strip memory:admin from DCR clients whose scope matches the
+    # pre-narrow canonical exactly. ``owner_id IS NULL`` restricts to
+    # DCR-registered clients (admin-managed clients have non-null
+    # owner_id per d04_519_oauth_owner_nullable) — any custom-scoped
+    # DCR client whose scope string differs from the canonical is also
+    # untouched. See module docstring for the residual exact-match
+    # canonical-ordering corner case.
     op.execute(
-        sa.text("UPDATE oauth_clients SET scope = :new_scope WHERE scope = :old_scope").bindparams(
-            new_scope=_POST_NARROW_CANONICAL, old_scope=_PRE_NARROW_CANONICAL
-        )
+        sa.text(
+            "UPDATE oauth_clients SET scope = :new_scope "
+            "WHERE scope = :old_scope AND owner_id IS NULL"
+        ).bindparams(new_scope=_POST_NARROW_CANONICAL, old_scope=_PRE_NARROW_CANONICAL)
     )
 
 
 def downgrade() -> None:
-    # Restore memory:admin on the exact rows we narrowed. Anything we
-    # did not touch in upgrade() stays put.
+    # Restore memory:admin on DCR clients whose scope matches the
+    # post-narrow canonical. Symmetric ``owner_id IS NULL`` filter
+    # excludes admin-managed clients. See module docstring for the
+    # symmetric privilege-escalation note on the rare exact-match
+    # corner case (DCR client registered post-upgrade with exact
+    # post-narrow canonical string).
     op.execute(
-        sa.text("UPDATE oauth_clients SET scope = :old_scope WHERE scope = :new_scope").bindparams(
-            old_scope=_PRE_NARROW_CANONICAL, new_scope=_POST_NARROW_CANONICAL
-        )
+        sa.text(
+            "UPDATE oauth_clients SET scope = :old_scope "
+            "WHERE scope = :new_scope AND owner_id IS NULL"
+        ).bindparams(old_scope=_PRE_NARROW_CANONICAL, new_scope=_POST_NARROW_CANONICAL)
     )

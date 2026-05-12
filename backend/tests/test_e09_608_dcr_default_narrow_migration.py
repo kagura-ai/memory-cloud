@@ -103,3 +103,34 @@ class TestE09DcrDefaultNarrowMigrationPins:
         """
         assert e09.revision == "e09_608_dcr_default_narrow"
         assert e09.down_revision == "e08_592_oauth_scope_canonicalize"
+
+    def test_where_clause_restricts_to_dcr_clients(self) -> None:
+        """The UPDATE WHERE clause MUST include ``owner_id IS NULL`` so the
+        migration only touches DCR-registered clients (admin-managed clients
+        have non-null ``owner_id`` per d04_519_oauth_owner_nullable).
+
+        Copilot review on PR #615 surfaced this: without the filter, an
+        admin-managed client that happens to have the exact canonical scope
+        string would also be touched, which the R1 policy explicitly forbids.
+        Verified by inspecting the migration source for the literal SQL
+        fragment, which is the cheapest way to pin a SQL invariant without
+        spinning up a real DB connection.
+        """
+        import inspect  # noqa: PLC0415
+
+        source = inspect.getsource(e09)
+        upgrade_src = inspect.getsource(e09.upgrade)
+        downgrade_src = inspect.getsource(e09.downgrade)
+
+        assert "owner_id IS NULL" in upgrade_src, (
+            "e09.upgrade() WHERE clause must include 'owner_id IS NULL' to "
+            "exclude admin-managed clients (Copilot finding on PR #615)."
+        )
+        assert "owner_id IS NULL" in downgrade_src, (
+            "e09.downgrade() WHERE clause must include 'owner_id IS NULL' to "
+            "exclude admin-managed clients symmetrically."
+        )
+        # Belt-and-suspenders: also assert the canonical full migration
+        # source contains the literal substring, in case a refactor moves the
+        # UPDATE into a module-level constant.
+        assert source.count("owner_id IS NULL") >= 2
