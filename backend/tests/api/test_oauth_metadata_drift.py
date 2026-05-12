@@ -16,7 +16,11 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from api.main import app  # noqa: E402
-from auth.mcp_scopes import ALL_ADVERTISED_SCOPES, DCR_DEFAULT_SCOPE  # noqa: E402
+from auth.mcp_scopes import (  # noqa: E402
+    ALL_ADVERTISED_SCOPES,
+    DCR_DEFAULT_SCOPE,
+    DCR_DEFAULT_SCOPES,
+)
 
 
 @pytest.fixture
@@ -58,7 +62,12 @@ class TestMetadataScopesNoDrift:
 
 class TestDcrFallbackScopeNoDrift:
     """DCR fallback scope (``POST /oauth/register`` with no ``scope``) matches
-    the canonical set, so a fresh DCR client holds every advertised scope.
+    ``DCR_DEFAULT_SCOPES`` — the advertised set minus ``memory:admin``.
+
+    #608 (D1) narrows the DCR fallback so a client that omits ``scope`` no
+    longer receives ``memory:admin`` by default. ``memory:admin`` remains
+    advertised in ``scopes_supported`` and explicitly requestable via the
+    ``scope`` parameter; only the silent auto-grant is removed.
     """
 
     def _patched_dcr_session(self):
@@ -102,19 +111,146 @@ class TestDcrFallbackScopeNoDrift:
         )
         body = response.json()
         issued_scopes = set(body["scope"].split())
-        assert issued_scopes == set(ALL_ADVERTISED_SCOPES), (
+        assert issued_scopes == set(DCR_DEFAULT_SCOPES), (
             f"DCR issued {sorted(issued_scopes)}, "
-            f"expected {sorted(ALL_ADVERTISED_SCOPES)} — fallback default "
-            "drifted from auth.mcp_scopes.DCR_DEFAULT_SCOPE."
+            f"expected {sorted(DCR_DEFAULT_SCOPES)} — fallback default "
+            "drifted from auth.mcp_scopes.DCR_DEFAULT_SCOPES."
+        )
+        assert "memory:admin" not in issued_scopes, (
+            "DCR fallback re-introduced memory:admin into the default — "
+            "this breaks the narrowing-first ordering required by #608 D1 "
+            "(a later require_scope deployment would silently grant admin "
+            "to every already-issued DCR token)."
         )
 
-    def test_dcr_default_scope_constant_matches_advertised_set(self) -> None:
+    def test_dcr_explicit_admin_request_preserves_admin(self, client: TestClient) -> None:
+        """When a client explicitly requests ``memory:admin`` at DCR
+        registration, the issued client retains admin in its registered
+        scope. The narrowing in #608 (D1) is to the FALLBACK default only,
+        not to the explicit-grant path.
+
+        This pins the R1 policy from gate1 review: admin remains an
+        opt-in capability, not a removed one. The e09 migration mirrors
+        this on the data side (custom-scope rows are preserved).
+        """
+        rate_limit, fake_session, fake_encryptor = self._patched_dcr_session()
+        with (
+            patch("db.redis.increment_counter", rate_limit),
+            patch("api.routes.oauth.get_sync_session", return_value=fake_session),
+            patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
+        ):
+            response = client.post(
+                "/api/v1/oauth/register",
+                json={
+                    "client_name": "Claude Code",
+                    "redirect_uris": ["http://localhost:8080/callback"],
+                    "token_endpoint_auth_method": "none",
+                    "scope": "memory:read memory:write memory:admin",
+                },
+            )
+
+        assert response.status_code == 201, (
+            f"DCR registration with explicit admin failed: {response.status_code} {response.text}"
+        )
+        body = response.json()
+        issued_scopes = set(body["scope"].split())
+        assert "memory:admin" in issued_scopes, (
+            f"DCR dropped explicitly-requested memory:admin from scope "
+            f"{sorted(issued_scopes)} — the narrowing in #608 D1 should "
+            "apply ONLY to the fallback default, not to explicit grants."
+        )
+
+    def test_dcr_default_scopes_excludes_only_memory_admin(self) -> None:
+        """Pin the narrowing contract: ``DCR_DEFAULT_SCOPES`` is exactly
+        ``ALL_ADVERTISED_SCOPES`` minus ``memory:admin``. No other scope is
+        dropped from the default. If a future change accidentally narrows
+        the default further (e.g. removes ``memory:delete`` here instead of
+        in the #608 D4 migration), this test fails loud.
+        """
+        assert set(DCR_DEFAULT_SCOPES) == set(ALL_ADVERTISED_SCOPES) - {"memory:admin"}
+
+    def test_dcr_default_scope_constant_matches_dcr_set(self) -> None:
         """Independent of any HTTP round-trip: the constant DCR_DEFAULT_SCOPE
-        is exactly the advertised set as a space-separated string. Pins both
+        is exactly DCR_DEFAULT_SCOPES as a space-separated string. Pins both
         the contents AND the encoding (space-separated, RFC 6749 §3.3).
         """
-        assert set(DCR_DEFAULT_SCOPE.split()) == set(ALL_ADVERTISED_SCOPES)
-        assert DCR_DEFAULT_SCOPE == " ".join(ALL_ADVERTISED_SCOPES)
+        assert set(DCR_DEFAULT_SCOPE.split()) == set(DCR_DEFAULT_SCOPES)
+        assert DCR_DEFAULT_SCOPE == " ".join(DCR_DEFAULT_SCOPES)
+
+
+class TestNarrowedClientScopeRequestRespectsIntersection:
+    """Server-side authorization behavior when a DCR-narrowed client requests
+    ``memory:admin``.
+
+    A DCR client registered under the narrowed default (post-#608 D1) holds
+    ``DCR_DEFAULT_SCOPES`` — no admin. If that client later requests
+    ``memory:admin`` at the authorization step (which a legacy SDK may do
+    if it builds the authz URL from ``scopes_supported`` instead of the
+    DCR-registered scope), the server-side ``OAuth2Client.get_allowed_scope``
+    method returns the intersection of requested-and-registered, so the
+    issued token gets the narrowed scope. The MCP authorization spec
+    (SEP-835) explicitly endorses this narrowing as least-privilege
+    behavior: "Authorization Servers MAY issue access tokens with narrower
+    scopes."
+
+    This test pins that contract at the model layer. An SEP-835-compliant
+    SDK will accept the narrowed token. A pre-SEP-835 strict-drift SDK may
+    invalidate the token; the rollback path is ``alembic downgrade
+    e08_592_oauth_scope_canonicalize`` plus reverting `mcp_scopes.py`.
+    """
+
+    def test_narrowed_client_requesting_admin_gets_intersection(self) -> None:
+        from models.auth import OAuth2Client  # noqa: PLC0415
+
+        narrowed_client = OAuth2Client(
+            client_id="test-narrowed-client",
+            client_secret_hash="dummy",
+            client_name="Test Client (DCR default)",
+            redirect_uris=["http://localhost:8080/callback"],
+            grant_types=["authorization_code"],
+            response_types=["code"],
+            scope=DCR_DEFAULT_SCOPE,
+            token_endpoint_auth_method="none",
+        )
+
+        granted = set(
+            narrowed_client.get_allowed_scope(
+                "memory:read memory:write memory:admin offline_access"
+            ).split()
+        )
+
+        assert granted == {"memory:read", "memory:write", "offline_access"}, (
+            f"Expected intersection to exclude memory:admin, got {sorted(granted)}. "
+            "OAuth2Client.get_allowed_scope must return requested ∩ registered — "
+            "a DCR-narrowed client (no admin in registered scope) requesting "
+            "admin must receive a token without admin (SEP-835 least-privilege)."
+        )
+        assert "memory:admin" not in granted
+
+    def test_explicit_admin_client_requesting_admin_gets_admin(self) -> None:
+        """Counterpart to the narrowed case: a client whose registered scope
+        includes ``memory:admin`` (explicit-grant via R1 policy) DOES receive
+        admin when requesting it. Confirms the intersection logic is
+        symmetric — narrowing applies only when the client wasn't granted
+        admin in the first place.
+        """
+        from models.auth import OAuth2Client  # noqa: PLC0415
+
+        explicit_admin_client = OAuth2Client(
+            client_id="test-explicit-admin",
+            client_secret_hash="dummy",
+            client_name="Admin Worker",
+            redirect_uris=["http://localhost:8080/callback"],
+            grant_types=["authorization_code"],
+            response_types=["code"],
+            scope="memory:read memory:write memory:admin",
+            token_endpoint_auth_method="none",
+        )
+
+        granted = set(explicit_admin_client.get_allowed_scope("memory:read memory:admin").split())
+
+        assert granted == {"memory:read", "memory:admin"}
+        assert "memory:admin" in granted
 
 
 class TestMcpAuthChallengeIncludesResourceMetadata:
