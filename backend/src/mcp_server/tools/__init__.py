@@ -67,6 +67,7 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         "get_cluster",  # Issue #496: read-only cluster drill-down
         "get_file_download_url",  # Issue #485: read-only presigned GET
         "list_files",  # Issue #485: read-only workspace listing
+        "list_tags",  # Issue #614: read-only tag discovery
     }
 )
 
@@ -93,6 +94,7 @@ def _build_registry() -> dict[str, Any]:
         handle_delete_context,
         handle_get_context_info,
         handle_list_contexts,
+        handle_list_tags,
         handle_merge_contexts,
         handle_update_context,
     )
@@ -137,6 +139,7 @@ def _build_registry() -> dict[str, Any]:
         "delete_context": handle_delete_context,
         "merge_contexts": handle_merge_contexts,
         "list_contexts": handle_list_contexts,
+        "list_tags": handle_list_tags,  # Issue #614
         "update_search_config": handle_update_search_config,
         "list_edges": handle_list_edges,
         "create_edge": handle_create_edge,

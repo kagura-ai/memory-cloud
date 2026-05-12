@@ -663,6 +663,81 @@ Response includes:
                 },
             },
         },
+        # =================================================================
+        # Issue #614: list_tags — tag-discovery for tag-drift mitigation
+        # =================================================================
+        {
+            "name": "list_tags",
+            "readOnly": True,
+            "description": """List existing tag vocabulary in a context with usage counts and recency.
+
+Use this to discover what tags already exist before calling remember() or recall(),
+so you reuse existing spellings instead of inventing new ones. This is the primary
+mitigation for tag drift, where semantically identical tags appear under different
+spellings (e.g. `troubleshoot` / `troubleshooting` / `trouble-shoot`) and silently
+degrade the precision of `recall(filters={"tags": [...]})` over time.
+
+**Call this BEFORE remember()** to pick existing tag spellings.
+**Call this BEFORE recall(filters={"tags": [...]})** to build accurate tag filters
+that actually match what is stored in this context.
+
+Examples:
+  list_tags(context_id="...")                       # top 50 tags by usage count
+  list_tags(context_id="...", min_count=5)          # only frequently-used tags
+  list_tags(context_id="...", prefix="auth")        # autocomplete style: tags starting with "auth"
+  list_tags(context_id="...", sort="recent")        # most recently used tags first
+  list_tags(context_id="...", sort="alpha")         # alphabetical (lower-case fold)
+
+Response shape:
+  {
+    "status": "success",
+    "context_id": "...",
+    "context_name": "...",
+    "tags": [{"tag": "...", "count": N, "last_used_at": "...Z"}, ...],
+    "total": N
+  }
+
+Empty context returns the same shape with tags=[] and total=0 — there is no 404.
+Soft-deleted memories are excluded; workspace boundary is honored for shared contexts.""",
+            "inputSchema": {
+                "type": "object",
+                "required": ["context_id"],
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Target context UUID. MUST be a valid UUID from list_contexts().",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum tags to return (1-500, default 50).",
+                    },
+                    "min_count": {
+                        "type": "integer",
+                        "description": (
+                            "Minimum memory count per tag (default 1 — show one-off tags "
+                            "so drift typos are visible; raise to hide low-frequency noise)."
+                        ),
+                    },
+                    "sort": {
+                        "type": "string",
+                        "enum": ["count", "recent", "alpha"],
+                        "description": (
+                            "Sort order: 'count' (most-used first, default), "
+                            "'recent' (most-recently used first), or 'alpha' (alphabetical)."
+                        ),
+                    },
+                    "prefix": {
+                        "type": "string",
+                        "description": (
+                            "Case-insensitive prefix filter for autocomplete. The characters "
+                            "% and _ are escaped to literal characters — this parameter "
+                            "cannot be used as a wildcard probe."
+                        ),
+                    },
+                },
+            },
+        },
         # Issue #240: switch_context removed - use context_id argument in each tool
         {
             "name": "create_context",

@@ -9,6 +9,7 @@ Contexts are owned by workspaces, not individual users.
 """
 
 import re
+from typing import Literal, get_args
 from uuid import UUID
 
 from sqlalchemy import and_, delete, func, select
@@ -29,10 +30,13 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Constants
 DEFAULT_CONTEXT_NAME = "default"
 DEFAULT_CONTEXT_DESCRIPTION = "Default context (auto-created)"
 CONTEXT_NAME_PATTERN = re.compile(r"^[a-z0-9_-]+$")
+
+# Issue #614: list_tags sort modes — single source of truth shared by REST
+# Query type and MCP handler validation.
+TagSortMode = Literal["count", "recent", "alpha"]
 
 
 class ContextService:
@@ -1076,6 +1080,144 @@ class ContextService:
                 error=str(e),
             )
             raise
+
+    # Single source of truth — derived from TagSortMode so adding a new mode
+    # requires only updating the Literal type.
+    _LIST_TAGS_SORT_MODES = get_args(TagSortMode)
+
+    async def aggregate_tags(
+        self,
+        user_id: str,
+        context_id: UUID,
+        *,
+        limit: int = 50,
+        min_count: int = 1,
+        sort: TagSortMode = "count",
+        prefix: str = "",
+    ) -> dict:
+        """Aggregate tags across non-deleted memories in a context (Issue #614).
+
+        Mirrors the canonical aggregation pattern from
+        ``tasks.sleep_tasks._refresh_hub_tag_cache``: the inner
+        ``SELECT DISTINCT id, unnest(tags)::text`` collapses intra-memory
+        duplicate tags so a memory with ``tags=["python","python"]`` counts
+        as 1 for ``python``, not 2 (Copilot loop 2 lesson from #223). The
+        ``deleted_at IS NULL`` filter excludes soft-deleted memories, and the
+        ``workspace_id`` filter (in addition to ``context_id``) preserves the
+        workspace boundary for shared contexts.
+
+        Args:
+            user_id: Caller's user ID for access check.
+            context_id: Target context UUID.
+            limit: Maximum tags to return (1-500). Validated here so future
+                internal callers can't slip through unbounded values.
+            min_count: Minimum memory count per tag (default 1, i.e. include
+                one-off tags so tag-drift typos are visible by default — see
+                Issue #614 DX review). Range 1-10000.
+            sort: One of ``"count"`` / ``"recent"`` / ``"alpha"``.
+            prefix: Case-insensitive prefix filter for autocomplete. ``%`` /
+                ``_`` / ``#`` are escaped to literal characters via
+                ``ILIKE ... ESCAPE '#'`` so the parameter cannot be used as a
+                wildcard probe.
+
+        Returns:
+            ``{"context_name": str, "rows": list[dict]}`` where each row is
+            ``{"tag": str, "count": int, "last_used_at": datetime | None}``.
+            ``context_name`` is carried back so MCP callers can include it
+            in the response envelope without re-resolving the context.
+            ``last_used_at`` is the naive UTC
+            ``GREATEST(created_at, updated_at)`` of the most recent memory
+            carrying the tag.
+
+        Raises:
+            NotFoundException: Context not found or caller lacks access.
+            ValidationError: Invalid ``sort`` mode.
+        """
+        from sqlalchemy import text
+
+        if sort not in self._LIST_TAGS_SORT_MODES:
+            raise ValidationError(
+                f"Invalid sort mode '{sort}'. Must be one of: "
+                f"{', '.join(self._LIST_TAGS_SORT_MODES)}."
+            )
+        if type(limit) is not int or not (1 <= limit <= 500):
+            raise ValidationError(f"limit must be an integer in [1, 500]; got {limit!r}.")
+        if type(min_count) is not int or not (1 <= min_count <= 10_000):
+            raise ValidationError(f"min_count must be an integer in [1, 10000]; got {min_count!r}.")
+
+        # Uniform 404 disclosure: not-found and access-denied are indistinguishable
+        # (CWE-639) — get_context conflates both into NotFoundException by design.
+        context = await self.get_context(user_id, context_id)
+
+        if prefix:
+            escaped = prefix.replace("#", "##").replace("%", "#%").replace("_", "#_")
+            prefix_pattern = f"{escaped}%"
+        else:
+            prefix_pattern = ""
+
+        # sort is allow-list validated above; safe to interpolate.
+        sort_clause = {
+            "count": "ORDER BY cnt DESC, tag ASC",
+            "recent": "ORDER BY last_used_at DESC NULLS LAST, tag ASC",
+            "alpha": "ORDER BY lower(tag) ASC, tag ASC",
+        }[sort]
+
+        sql = text(
+            f"""
+            WITH scope AS (
+                SELECT id,
+                       tags,
+                       GREATEST(created_at, updated_at) AS last_at
+                FROM memories
+                WHERE workspace_id = CAST(:workspace_id AS uuid)
+                  AND context_id = CAST(:context_id AS uuid)
+                  AND deleted_at IS NULL
+                  AND tags IS NOT NULL
+                  AND cardinality(tags) > 0
+            ),
+            tag_rows AS (
+                -- DISTINCT id, tag collapses intra-array duplicates so a
+                -- memory with ['python','python'] counts once. last_at is
+                -- functionally determined by id, so including it does not
+                -- change distinctness.
+                SELECT DISTINCT id, unnest(tags)::text AS tag, last_at
+                FROM scope
+            ),
+            tag_counts AS (
+                SELECT
+                    tag,
+                    COUNT(*) AS cnt,
+                    MAX(last_at) AS last_used_at
+                FROM tag_rows
+                WHERE (:prefix_pattern = '' OR tag ILIKE :prefix_pattern ESCAPE '#')
+                GROUP BY tag
+                HAVING COUNT(*) >= :min_count
+            )
+            SELECT tag, cnt, last_used_at
+            FROM tag_counts
+            {sort_clause}
+            LIMIT :limit
+            """
+        )
+        result = await self.db.execute(
+            sql,
+            {
+                "workspace_id": str(context.workspace_id),
+                "context_id": str(context_id),
+                "prefix_pattern": prefix_pattern,
+                "min_count": min_count,
+                "limit": limit,
+            },
+        )
+        rows = [
+            {
+                "tag": row.tag,
+                "count": int(row.cnt),
+                "last_used_at": row.last_used_at,
+            }
+            for row in result
+        ]
+        return {"context_name": context.name, "rows": rows}
 
     async def get_context_stats(
         self,

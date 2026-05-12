@@ -797,3 +797,163 @@ async def handle_merge_contexts(
             return _error_response("merge_contexts_error", str(e))
 
     return _error_response("internal_error", "Database session unavailable")
+
+
+async def handle_list_tags(
+    args: dict[str, Any], user_id: str, workspace_id: UUID | None
+) -> list[TextContent]:
+    """List tag vocabulary in a context (Issue #614).
+
+    Read-only tag-discovery tool that helps callers reuse existing tag
+    spellings before remember()/recall(), mitigating tag drift. Access is
+    gated inside ``ContextService.aggregate_tags`` via ``get_context``,
+    which raises ``NotFoundException`` for not-found / private-non-creator /
+    non-member / whitelist-miss — all caught here and reshaped into the
+    uniform ``context_not_found`` MCP error (CWE-639).
+    """
+    from db.base import get_db
+    from utils.datetime import to_utc_iso
+    from utils.exceptions import NotFoundException, ValidationError
+
+    start_time = time.time()
+
+    if "context_id" not in args:
+        return _error_response(
+            "context_id_required",
+            "list_tags requires context_id.",
+            help="Use list_contexts() to discover available context IDs.",
+        )
+    try:
+        context_id = _resolve_context_id(args["context_id"])
+    except ValueError as e:
+        return _error_response("invalid_context_id_format", str(e))
+
+    # ``type(x) is T`` (not ``isinstance``) so bool — which subclasses int — is
+    # rejected here. Service validates the same bounds defensively; the handler
+    # check stays so the MCP error code is ``invalid_argument`` rather than
+    # the generic 422-equivalent path. ``sort`` is service-validated.
+    limit = args.get("limit", 50)
+    if type(limit) is not int or limit < 1 or limit > 500:
+        return _error_response(
+            "invalid_argument",
+            "limit must be an integer between 1 and 500.",
+            received=limit,
+        )
+
+    min_count = args.get("min_count", 1)
+    if type(min_count) is not int or min_count < 1 or min_count > 10_000:
+        return _error_response(
+            "invalid_argument",
+            "min_count must be an integer between 1 and 10000.",
+            received=min_count,
+        )
+
+    # Treat absent / None as empty; reject any non-string up-front (without the
+    # ``or ""`` shorthand, which would silently coerce 0 / False to "").
+    prefix = args.get("prefix")
+    if prefix is None:
+        prefix = ""
+    if type(prefix) is not str or len(prefix) > 200:
+        return _error_response(
+            "invalid_argument",
+            "prefix must be a string up to 200 characters.",
+        )
+
+    sort = args.get("sort", "count")
+
+    async for db in get_db():
+        try:
+            from services.context_service import ContextService
+
+            service = ContextService(db)
+            result = await execute_with_timeout(
+                service.aggregate_tags(
+                    user_id,
+                    context_id,
+                    limit=limit,
+                    min_count=min_count,
+                    sort=sort,
+                    prefix=prefix,
+                ),
+                operation_name="list_tags",
+            )
+
+            tags_payload = [
+                {
+                    "tag": row["tag"],
+                    "count": row["count"],
+                    "last_used_at": to_utc_iso(row["last_used_at"]),
+                }
+                for row in result["rows"]
+            ]
+
+            await _log_tool_usage(
+                db,
+                user_id,
+                "list_tags",
+                start_time,
+                200,
+                context_id,
+                workspace_id,
+            )
+
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "status": "success",
+                            "context_id": str(context_id),
+                            "context_name": result["context_name"],
+                            "tags": tags_payload,
+                            "total": len(tags_payload),
+                        }
+                    ),
+                )
+            ]
+        except NotFoundException:
+            # CWE-639: never leak the deny reason. Surface shape matches
+            # `_ContextNotFoundError.to_response()` used by sibling handlers.
+            await db.rollback()
+            await _log_tool_usage(
+                db,
+                user_id,
+                "list_tags",
+                start_time,
+                404,
+                context_id,
+                workspace_id,
+            )
+            return _error_response(
+                "context_not_found",
+                "Context not found or you don't have access to it.",
+                context_id=str(context_id),
+                help="Use list_contexts() to see contexts you have access to.",
+            )
+        except ValidationError as e:
+            await db.rollback()
+            await _log_tool_usage(
+                db,
+                user_id,
+                "list_tags",
+                start_time,
+                422,
+                context_id,
+                workspace_id,
+            )
+            return _error_response("invalid_argument", str(e))
+        except Exception as e:
+            await db.rollback()
+            await _log_tool_usage(
+                db,
+                user_id,
+                "list_tags",
+                start_time,
+                500,
+                context_id,
+                workspace_id,
+            )
+            logger.error(f"list_tags_failed: {e}", exc_info=True)
+            return _error_response("list_tags_error", str(e))
+
+    return _error_response("internal_error", "Database session unavailable")
