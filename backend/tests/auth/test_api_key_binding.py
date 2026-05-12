@@ -15,7 +15,7 @@ constraint is covered by ``tests/integration/test_e10_626_apikey_bound_context_i
 from __future__ import annotations
 
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -112,7 +112,15 @@ class TestCreateKeyBoundContextValidation:
 
     @pytest.mark.asyncio
     async def test_bound_context_id_set_workspace_id_none_succeeds(self) -> None:
-        """Happy path: bound key with valid public context creates a row."""
+        """Happy path: bound key with valid public context creates a row.
+
+        Patches ``utils.encryption.get_encryptor`` because ``create_key``
+        encrypts the plaintext-for-reveal at-rest via Fernet, and the
+        global encryptor reads ``API_KEY_SECRET`` from the environment.
+        Setting that env var in unit tests would leak production-shaped
+        config into CI; mocking the encryptor keeps this test a true
+        validation-layer unit test.
+        """
         ctx = _public_context_row()
         # Execute sequence:
         #   1. Context lookup → returns the public ctx row
@@ -120,11 +128,14 @@ class TestCreateKeyBoundContextValidation:
         db = _make_db_mock(execute_results=[ctx, None])
         manager = APIKeyManager(db)
 
-        plaintext, returned_key = await manager.create_key(
-            name="bound-ok",
-            user_id="user-1",
-            bound_context_id=ctx.id,
-        )
+        mock_encryptor = MagicMock()
+        mock_encryptor.encrypt = MagicMock(return_value="encrypted-blob")
+        with patch("utils.encryption.get_encryptor", return_value=mock_encryptor):
+            plaintext, returned_key = await manager.create_key(
+                name="bound-ok",
+                user_id="user-1",
+                bound_context_id=ctx.id,
+            )
 
         # Returns a (plaintext, APIKey) tuple — the plaintext is kagura_…
         # and the row carries the binding.
