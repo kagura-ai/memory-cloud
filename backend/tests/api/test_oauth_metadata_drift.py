@@ -126,12 +126,15 @@ class TestMcpAuthChallengeIncludesResourceMetadata:
 
     def test_mcp_401_includes_resource_metadata_attr(self, client: TestClient) -> None:
         response = client.get("/mcp/")
-        if response.status_code != 401:
-            pytest.skip(
-                "MCP route did not return 401 for unauthenticated GET in test "
-                f"client (got {response.status_code}); transport may short-circuit "
-                "before auth in TestClient. Manual verification covers this path."
-            )
+        # /mcp/ must require authentication and emit the RFC 6750 + RFC 9728
+        # challenge. If the transport ever stops returning 401 here (auth
+        # short-circuit, accidental public access), failing loud is what we
+        # want — silently skipping would defeat the purpose of pinning the
+        # challenge contract.
+        assert response.status_code == 401, (
+            f"expected 401 for unauthenticated GET /mcp/, got "
+            f"{response.status_code}: {response.text[:200]}"
+        )
         www_authenticate = response.headers.get("www-authenticate", "")
         assert "Bearer" in www_authenticate, (
             f"missing Bearer challenge in WWW-Authenticate: {www_authenticate!r}"
