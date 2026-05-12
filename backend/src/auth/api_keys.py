@@ -31,9 +31,11 @@ class VerifiedKey(NamedTuple):
     Issue #626 — extended from a plain ``(user_id, workspace_id)`` 2-tuple
     so that public-bound keys (#626) and workspace-scoped keys (#169) can
     coexist without further breaking changes when more attribution shapes
-    appear. Adding a field is a non-breaking change for callers that read
-    by attribute name; positional unpacking remains backward-compatible
-    for the first two positions only.
+    appear. **Callers MUST use attribute access** (``result.user_id``,
+    ``result.workspace_id``) — positional unpacking like
+    ``user_id, workspace_id = verified`` will raise ``ValueError: too
+    many values to unpack`` against this 4-field tuple. All in-tree
+    callers were migrated to attribute access in this change.
 
     Attributes:
         id: ``api_keys.id`` integer primary key — surfaced here so the

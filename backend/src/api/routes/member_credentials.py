@@ -398,7 +398,7 @@ async def create_api_key(
                 AuditLog(
                     user_email=user.get("email") or f"{user_id}@api",
                     user_id=user_id,
-                    action="public_bound_api_key_created",
+                    action="public_bound_key_created",
                     resource=f"api_key:{new_key.id}",
                     user_metadata={
                         "bound_context_id": str(bound_context_uuid),
@@ -592,7 +592,7 @@ async def delete_api_key_by_id(
             AuditLog(
                 user_email=user.get("email") or f"{user_id}@api",
                 user_id=user_id,
-                action="public_bound_api_key_revoked",
+                action="public_bound_key_revoked",
                 resource=f"api_key:{key_id}",
                 user_metadata={
                     "bound_context_id": str(bound_ctx_id),

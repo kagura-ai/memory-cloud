@@ -282,10 +282,17 @@ export function APIKeysTabPanel() {
     setLoadingPublicContexts(true);
     try {
       const resp = await getContexts();
-      // Filter to public contexts only — the binding constraint requires
-      // is_public=true at create time on the backend, but surfacing only
-      // those in the picker avoids a confusing 422.
-      const publics = resp.contexts.filter((c) => c.is_public);
+      // Filter to public contexts the current user can actually bind:
+      // backend enforces is_public=true AND created_by==user_id at the
+      // route's ownership gate, so surfacing only those in the picker
+      // avoids a "selectable in UI, 403 on submit" confusion.
+      // Contexts with created_by===null (legacy data, pre-#160) are
+      // excluded — backend permits them, but the UI cannot prove
+      // ownership client-side; users with such contexts can still bind
+      // via the API directly.
+      const publics = resp.contexts.filter(
+        (c) => c.is_public && c.created_by === userId,
+      );
       setPublicContexts(publics);
     } catch {
       // Picker silently empty on fetch failure; the dialog already has a
@@ -295,7 +302,7 @@ export function APIKeysTabPanel() {
     } finally {
       setLoadingPublicContexts(false);
     }
-  }, [publicContexts.length, loadingPublicContexts]);
+  }, [publicContexts.length, loadingPublicContexts, userId]);
 
   const resetCreateDialog = () => {
     setShowCreateKeyDialog(false);
@@ -650,7 +657,16 @@ export function APIKeysTabPanel() {
                     {t("regenerate")}
                   </ActionButton>
 
-                  {!apiKey.revoked_at && (
+                  {/* Issue #626: hide the legacy per-card delete for
+                      public-bound keys — that flow routes through
+                      deleteWorkspaceMemberAPIKey which filters by
+                      workspace_id and would NOT delete a bound key
+                      (workspace_id IS NULL), or worse, would delete a
+                      different workspace-scoped key. Bound keys revoke
+                      via the dedicated trash icon next to the badge
+                      (see line ~555) which calls
+                      deleteWorkspaceMemberAPIKeyById. */}
+                  {!apiKey.revoked_at && !apiKey.bound_context_id && (
                     <ActionButton
                       onClick={() => handleDeleteAPIKeyClick(apiKey.id)}
                       variant="danger"
