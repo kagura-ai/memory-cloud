@@ -9,6 +9,7 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.test.{ts,tsx}'],
+    pool: 'vmForks',
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],
