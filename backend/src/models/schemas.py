@@ -185,12 +185,20 @@ class MemoryResponse(TZAwareBaseModel):
         from_attributes = True
 
 
-class RelatedTagItem(BaseModel):
-    """Related tag with count and sample summary."""
+class RelatedTagItem(TZAwareBaseModel):
+    """Related tag with count, sample summary, and last-used timestamp.
+
+    Used by ``recall.related_tags`` (Issue #104 — populates ``sample_summary``)
+    and ``list_tags`` (Issue #614 — populates ``last_used_at``). The shared
+    schema means clients can unify their "tag info" type across both surfaces.
+    Inherits ``TZAwareBaseModel`` so the optional ``last_used_at`` serializes
+    with an explicit UTC ``Z`` suffix when populated.
+    """
 
     tag: str
     count: int
     sample_summary: str | None = None
+    last_used_at: datetime | None = None
 
 
 class ExploreHint(BaseModel):

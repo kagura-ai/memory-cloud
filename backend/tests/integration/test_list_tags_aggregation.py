@@ -1,0 +1,404 @@
+"""Integration tests for ``ContextService.aggregate_tags``.
+
+Exercise the raw-SQL CTE against a real Postgres so the load-bearing
+correctness properties are pinned:
+
+1. Intra-array duplicates (``tags=["python","python"]``) collapse to 1 count.
+2. Soft-deleted memories (``deleted_at IS NOT NULL``) are excluded.
+3. Cross-workspace memories with the same ``context_id`` do NOT leak in.
+4. Empty / untagged context returns ``[]`` (200-equivalent).
+5. ``min_count`` filter (HAVING clause).
+6. ``prefix`` filter treats ``%`` / ``_`` as literal characters.
+7. Sort modes: ``count`` / ``recent`` / ``alpha``.
+8. ``last_used_at`` reflects ``MAX(GREATEST(created_at, updated_at))``
+   across distinct memories carrying the tag.
+
+The mock-only unit tests at ``tests/api/test_context_tags.py`` and
+``tests/mcp_server/test_list_tags.py`` cover the route / handler wiring;
+this file covers the SQL itself.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+from uuid import uuid4
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from models.auth import Context, Workspace, WorkspaceMember
+from models.memory import Memory
+from services.context_service import ContextService
+
+
+@pytest.fixture
+def now() -> datetime:
+    """Anchor for deterministic timestamps."""
+    return datetime(2026, 5, 12, 3, 0, 0)
+
+
+async def _agg_rows(db, user_id, ctx_id, **kwargs):
+    """Call aggregate_tags and unwrap the ``rows`` list for assertion convenience."""
+    result = await ContextService(db).aggregate_tags(user_id, ctx_id, **kwargs)
+    return result["rows"]
+
+
+async def _seed_workspace_context(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    is_private: bool = False,
+) -> tuple[Workspace, Context]:
+    """Mint a workspace + workspace_member + context owned by ``user_id``.
+
+    All UUIDs are random so each test run is isolated within the shared
+    session-scoped ``db_session`` fixture.
+    """
+    ws = Workspace(
+        id=uuid4(),
+        name=f"ws-{uuid4().hex[:8]}",
+        plan_name="pro",
+        owner_user_id=user_id,
+        memory_limit=100_000,
+        daily_api_limit=50_000,
+        weekly_api_limit=250_000,
+    )
+    member = WorkspaceMember(
+        workspace_id=ws.id,
+        user_id=user_id,
+        role="owner",
+    )
+    ctx = Context(
+        id=uuid4(),
+        workspace_id=ws.id,
+        name=f"ctx-{uuid4().hex[:8]}",
+        created_by=user_id,
+        is_private=is_private,
+    )
+    db.add_all([ws, member, ctx])
+    await db.flush()
+    return ws, ctx
+
+
+def _memory(
+    *,
+    ws_id,
+    ctx_id,
+    user_id: str,
+    tags: list[str] | None,
+    created_at: datetime,
+    updated_at: datetime | None = None,
+    deleted_at: datetime | None = None,
+) -> Memory:
+    return Memory(
+        id=uuid4(),
+        user_id=user_id,
+        workspace_id=ws_id,
+        context_id=ctx_id,
+        summary=f"mem-{uuid4().hex[:6]}",
+        content="x",
+        type="note",
+        client="test",
+        tags=tags,
+        created_at=created_at,
+        updated_at=updated_at or created_at,
+        deleted_at=deleted_at,
+    )
+
+
+@pytest.mark.asyncio
+class TestAggregateTagsCTE:
+    async def test_empty_context_returns_empty_list(self, db_session, now):
+        user_id = f"u_empty_{uuid4().hex[:6]}"
+        _, ctx = await _seed_workspace_context(db_session, user_id=user_id)
+
+        rows = await _agg_rows(db_session, user_id, ctx.id)
+
+        assert rows == []
+
+    async def test_intra_array_duplicates_count_once(self, db_session, now):
+        """`tags=['python','python','backend']` → python:1, backend:1 (not 2:1)."""
+        user_id = f"u_dup_{uuid4().hex[:6]}"
+        ws, ctx = await _seed_workspace_context(db_session, user_id=user_id)
+        db_session.add(
+            _memory(
+                ws_id=ws.id,
+                ctx_id=ctx.id,
+                user_id=user_id,
+                tags=["python", "python", "backend"],
+                created_at=now,
+            )
+        )
+        await db_session.flush()
+
+        rows = await _agg_rows(db_session, user_id, ctx.id)
+
+        counts = {r["tag"]: r["count"] for r in rows}
+        assert counts == {"python": 1, "backend": 1}
+
+    async def test_soft_deleted_memory_excluded(self, db_session, now):
+        user_id = f"u_softdel_{uuid4().hex[:6]}"
+        ws, ctx = await _seed_workspace_context(db_session, user_id=user_id)
+        db_session.add_all(
+            [
+                _memory(
+                    ws_id=ws.id,
+                    ctx_id=ctx.id,
+                    user_id=user_id,
+                    tags=["live"],
+                    created_at=now,
+                ),
+                _memory(
+                    ws_id=ws.id,
+                    ctx_id=ctx.id,
+                    user_id=user_id,
+                    tags=["ghost"],
+                    created_at=now - timedelta(days=1),
+                    deleted_at=now,
+                ),
+            ]
+        )
+        await db_session.flush()
+
+        rows = await _agg_rows(db_session, user_id, ctx.id)
+
+        tags = {r["tag"] for r in rows}
+        assert tags == {"live"}
+
+    async def test_cross_workspace_does_not_leak(self, db_session, now):
+        """Two workspaces, same caller in workspace A — only ws A's tags appear."""
+        user_id = f"u_xws_{uuid4().hex[:6]}"
+        other_user = f"u_other_{uuid4().hex[:6]}"
+        ws_a, ctx_a = await _seed_workspace_context(db_session, user_id=user_id)
+        ws_b, ctx_b = await _seed_workspace_context(db_session, user_id=other_user)
+
+        # Same fake context_id reuse is impossible (uuid4), but we still
+        # cross-check that workspace_id filter holds. Seed each with distinct
+        # tags so leakage would be obvious.
+        db_session.add_all(
+            [
+                _memory(
+                    ws_id=ws_a.id,
+                    ctx_id=ctx_a.id,
+                    user_id=user_id,
+                    tags=["alpha"],
+                    created_at=now,
+                ),
+                _memory(
+                    ws_id=ws_b.id,
+                    ctx_id=ctx_b.id,
+                    user_id=other_user,
+                    tags=["beta"],
+                    created_at=now,
+                ),
+            ]
+        )
+        await db_session.flush()
+
+        rows = await _agg_rows(db_session, user_id, ctx_a.id)
+
+        tags = {r["tag"] for r in rows}
+        assert tags == {"alpha"}
+
+    async def test_min_count_filter(self, db_session, now):
+        user_id = f"u_minc_{uuid4().hex[:6]}"
+        ws, ctx = await _seed_workspace_context(db_session, user_id=user_id)
+        for _ in range(3):
+            db_session.add(
+                _memory(
+                    ws_id=ws.id,
+                    ctx_id=ctx.id,
+                    user_id=user_id,
+                    tags=["popular"],
+                    created_at=now,
+                )
+            )
+        db_session.add(
+            _memory(
+                ws_id=ws.id,
+                ctx_id=ctx.id,
+                user_id=user_id,
+                tags=["once"],
+                created_at=now,
+            )
+        )
+        await db_session.flush()
+
+        rows_default = await _agg_rows(db_session, user_id, ctx.id, min_count=1)
+        rows_filtered = await _agg_rows(db_session, user_id, ctx.id, min_count=3)
+
+        assert {r["tag"] for r in rows_default} == {"popular", "once"}
+        assert {r["tag"] for r in rows_filtered} == {"popular"}
+
+    async def test_prefix_filter_treats_wildcards_as_literals(self, db_session, now):
+        """`prefix='100_'` matches the literal '100_', not the '100<any>' glob."""
+        user_id = f"u_pfx_{uuid4().hex[:6]}"
+        ws, ctx = await _seed_workspace_context(db_session, user_id=user_id)
+        db_session.add_all(
+            [
+                _memory(
+                    ws_id=ws.id,
+                    ctx_id=ctx.id,
+                    user_id=user_id,
+                    tags=["100_percent"],
+                    created_at=now,
+                ),
+                _memory(
+                    ws_id=ws.id,
+                    ctx_id=ctx.id,
+                    user_id=user_id,
+                    tags=["100xpercent"],  # would match '100_' if _ were a glob
+                    created_at=now,
+                ),
+                _memory(
+                    ws_id=ws.id,
+                    ctx_id=ctx.id,
+                    user_id=user_id,
+                    tags=["alphabet"],
+                    created_at=now,
+                ),
+            ]
+        )
+        await db_session.flush()
+
+        rows = await _agg_rows(db_session, user_id, ctx.id, prefix="100_")
+
+        tags = {r["tag"] for r in rows}
+        # '100_' is treated literally: only '100_percent' matches, NOT '100xpercent'.
+        assert tags == {"100_percent"}
+
+    async def test_sort_count_descending_then_alpha(self, db_session, now):
+        user_id = f"u_sortc_{uuid4().hex[:6]}"
+        ws, ctx = await _seed_workspace_context(db_session, user_id=user_id)
+        for tag, n in [("zeta", 2), ("alpha", 2), ("beta", 5)]:
+            for _ in range(n):
+                db_session.add(
+                    _memory(
+                        ws_id=ws.id,
+                        ctx_id=ctx.id,
+                        user_id=user_id,
+                        tags=[tag],
+                        created_at=now,
+                    )
+                )
+        await db_session.flush()
+
+        rows = await _agg_rows(db_session, user_id, ctx.id, sort="count")
+
+        ordered = [r["tag"] for r in rows]
+        # beta (5) first, then alpha and zeta tied at 2 → ascending alpha tiebreak.
+        assert ordered == ["beta", "alpha", "zeta"]
+
+    async def test_sort_recent_uses_greatest_created_updated(self, db_session, now):
+        """`recent` ordering uses MAX(GREATEST(created_at, updated_at))."""
+        user_id = f"u_sortr_{uuid4().hex[:6]}"
+        ws, ctx = await _seed_workspace_context(db_session, user_id=user_id)
+        # "old": created earlier, never updated.
+        db_session.add(
+            _memory(
+                ws_id=ws.id,
+                ctx_id=ctx.id,
+                user_id=user_id,
+                tags=["old"],
+                created_at=now - timedelta(days=10),
+            )
+        )
+        # "tagged_late": created early but tags-only update brings it to "now".
+        db_session.add(
+            _memory(
+                ws_id=ws.id,
+                ctx_id=ctx.id,
+                user_id=user_id,
+                tags=["tagged_late"],
+                created_at=now - timedelta(days=20),
+                updated_at=now,
+            )
+        )
+        await db_session.flush()
+
+        rows = await _agg_rows(db_session, user_id, ctx.id, sort="recent")
+
+        ordered = [r["tag"] for r in rows]
+        # tagged_late wins because updated_at=now > old.created_at=now-10d.
+        assert ordered == ["tagged_late", "old"]
+
+    async def test_sort_alpha_case_insensitive(self, db_session, now):
+        user_id = f"u_sorta_{uuid4().hex[:6]}"
+        ws, ctx = await _seed_workspace_context(db_session, user_id=user_id)
+        for tag in ["Banana", "apple", "Cherry"]:
+            db_session.add(
+                _memory(
+                    ws_id=ws.id,
+                    ctx_id=ctx.id,
+                    user_id=user_id,
+                    tags=[tag],
+                    created_at=now,
+                )
+            )
+        await db_session.flush()
+
+        rows = await _agg_rows(db_session, user_id, ctx.id, sort="alpha")
+
+        ordered = [r["tag"] for r in rows]
+        assert ordered == ["apple", "Banana", "Cherry"]
+
+    async def test_limit_cap(self, db_session, now):
+        user_id = f"u_lim_{uuid4().hex[:6]}"
+        ws, ctx = await _seed_workspace_context(db_session, user_id=user_id)
+        for i in range(7):
+            db_session.add(
+                _memory(
+                    ws_id=ws.id,
+                    ctx_id=ctx.id,
+                    user_id=user_id,
+                    tags=[f"tag-{i:02d}"],
+                    created_at=now,
+                )
+            )
+        await db_session.flush()
+
+        rows = await _agg_rows(db_session, user_id, ctx.id, limit=3)
+
+        assert len(rows) == 3
+
+    async def test_last_used_at_takes_max_across_memories(self, db_session, now):
+        """For a tag spanning multiple memories, last_used_at is the MAX."""
+        user_id = f"u_lua_{uuid4().hex[:6]}"
+        ws, ctx = await _seed_workspace_context(db_session, user_id=user_id)
+        early = now - timedelta(days=5)
+        late = now
+        db_session.add_all(
+            [
+                _memory(
+                    ws_id=ws.id,
+                    ctx_id=ctx.id,
+                    user_id=user_id,
+                    tags=["shared"],
+                    created_at=early,
+                ),
+                _memory(
+                    ws_id=ws.id,
+                    ctx_id=ctx.id,
+                    user_id=user_id,
+                    tags=["shared"],
+                    created_at=late,
+                ),
+            ]
+        )
+        await db_session.flush()
+
+        rows = await _agg_rows(db_session, user_id, ctx.id)
+
+        assert len(rows) == 1
+        assert rows[0]["tag"] == "shared"
+        assert rows[0]["count"] == 2
+        assert rows[0]["last_used_at"] == late
+
+    async def test_invalid_sort_raises_validation_error(self, db_session):
+        from utils.exceptions import ValidationError
+
+        user_id = f"u_badsort_{uuid4().hex[:6]}"
+        _, ctx = await _seed_workspace_context(db_session, user_id=user_id)
+
+        with pytest.raises(ValidationError):
+            await _agg_rows(db_session, user_id, ctx.id, sort="bogus")

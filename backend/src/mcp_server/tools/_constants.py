@@ -25,6 +25,7 @@ TOOL_TIMEOUTS: dict[str, float] = {
     "explore": _get_timeout("explore", 45.0),
     "get_context_info": _get_timeout("get_context_info", 15.0),
     "list_contexts": _get_timeout("list_contexts", 10.0),
+    "list_tags": _get_timeout("list_tags", 10.0),  # Issue #614
     "create_context": _get_timeout("create_context", 15.0),
     "update_context": _get_timeout("update_context", 15.0),
     "update_search_config": _get_timeout("update_search_config", 10.0),
@@ -407,7 +408,7 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 
 ---
 
-## Available Tools (31 tools)
+## Available Tools (32 tools)
 
 | Tool | Purpose |
 |------|---------|
@@ -417,6 +418,7 @@ update_context(context_id, summary="Project X knowledge base", usage_guide="Tag 
 | `forget` | Delete memories (soft delete, recoverable) |
 | `reference` | Get full memory details (Layer 3) by ID |
 | `explore` | Discover related memories via Neural Memory graph |
+| `list_tags` | List tag vocabulary in a context (call before remember/recall) |
 | `list_edges` | List edges connected to a memory |
 | `create_edge` | Create an edge between two memories |
 | `update_edge` | Update edge weight or type |

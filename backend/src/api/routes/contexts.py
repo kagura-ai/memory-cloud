@@ -22,8 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import APIKeyOrSessionUser, SessionUser, get_current_user
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
+from models.schemas import RelatedTagItem
 from models.sleep import SleepMode
-from services.context_service import ContextService
+from services.context_service import ContextService, TagSortMode
 from utils.datetime import to_utc_iso
 from utils.exceptions import NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -256,6 +257,21 @@ class ContextStatsResponse(BaseModel):
     context_name: str = Field(..., description="Context name")
     memory_count: int = Field(..., description="Number of memories in context")
     status: str = Field(..., description="Context status")
+
+
+class ContextTagsResponse(BaseModel):
+    """Response model for ``GET /contexts/{context_id}/tags`` (Issue #614).
+
+    Envelope wrapper consistent with ``ContextListResponse``. ``RelatedTagItem``
+    inherits ``TZAwareBaseModel`` so the per-item ``last_used_at`` datetime
+    serializes with an explicit UTC ``Z`` suffix when populated.
+    """
+
+    context_id: UUID = Field(..., description="Context UUID")
+    tags: list[RelatedTagItem] = Field(
+        ..., description="Aggregated tag info, sorted per the `sort` parameter."
+    )
+    total: int = Field(..., description="Number of tags returned (post-filter, post-limit).")
 
 
 # ============================================================================
@@ -678,6 +694,82 @@ async def get_context_stats(
 
     except NotFoundException as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+
+
+@router.get("/{context_id}/tags", response_model=ContextTagsResponse)
+async def list_context_tags(
+    context_id: UUID,
+    user: APIKeyOrSessionUser,
+    service: ContextService = Depends(get_context_service),
+    limit: int = Query(50, ge=1, le=500, description="Maximum tags to return."),
+    min_count: int = Query(
+        1,
+        ge=1,
+        le=10_000,
+        description=(
+            "Minimum memory count per tag. Default 1 surfaces one-off tags so "
+            "drift typos are visible; raise to hide low-frequency noise."
+        ),
+    ),
+    sort: TagSortMode = Query(
+        "count",
+        description="Sort: count (default), recent, or alpha (lower-case).",
+    ),
+    prefix: str = Query(
+        "",
+        max_length=200,
+        description=(
+            "Case-insensitive prefix filter for autocomplete. `%` / `_` are "
+            "escaped to literal characters — the parameter cannot be used as "
+            "a wildcard probe."
+        ),
+    ),
+) -> ContextTagsResponse:
+    """List existing tag vocabulary in a context (Issue #614).
+
+    Surfaces aggregated tags with usage counts and last-used timestamps so
+    LLM clients can discover existing tag spellings before calling
+    ``remember()`` (avoid drift: ``troubleshoot`` vs ``troubleshooting``) or
+    build accurate ``recall(filters={"tags": [...]})`` filters. Empty
+    contexts return ``200`` with ``tags=[]`` (no 404). Soft-deleted memories
+    are excluded, and the workspace boundary is honored for shared contexts.
+
+    Args:
+        context_id: Target context UUID.
+        limit: Max tags returned (1-500).
+        min_count: Minimum memory count per tag (default 1).
+        sort: Sort mode (``count`` | ``recent`` | ``alpha``).
+        prefix: Case-insensitive literal prefix filter.
+
+    Raises:
+        404: Context not found or caller has no access.
+        422: Invalid ``sort`` or ``min_count`` (FastAPI bound checks).
+    """
+    user_id = user.get("user_id")
+
+    try:
+        result = await service.aggregate_tags(
+            user_id,
+            context_id,
+            limit=limit,
+            min_count=min_count,
+            sort=sort,
+            prefix=prefix,
+        )
+    except NotFoundException as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
+
+    tags = [
+        RelatedTagItem(
+            tag=row["tag"],
+            count=row["count"],
+            last_used_at=row["last_used_at"],
+        )
+        for row in result["rows"]
+    ]
+    return ContextTagsResponse(context_id=context_id, tags=tags, total=len(tags))
 
 
 @router.put("/{context_id}", response_model=ContextResponse)
