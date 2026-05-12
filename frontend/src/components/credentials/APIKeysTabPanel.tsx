@@ -12,7 +12,10 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { useTranslations, useLocale } from "next-intl";
 import { Section } from "@/components/common/Section";
 import { ActionButton } from "@/components/common/ActionButton";
-import { TableLoadingState } from "@/components/common/LoadingState";
+import {
+  InlineSpinner,
+  TableLoadingState,
+} from "@/components/common/LoadingState";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -749,10 +752,15 @@ export function APIKeysTabPanel() {
               {bindToPublicContext && (
                 <div className="space-y-2 pl-6">
                   {loadingPublicContexts ? (
-                    <p className="text-xs text-muted-foreground">
+                    <p className="text-xs text-muted-foreground flex items-center gap-2">
+                      <InlineSpinner size="sm" />
                       {tCommon("loading")}
                     </p>
                   ) : publicContexts.length === 0 ? (
+                    // Informational gating notice (prerequisite hint), NOT an
+                    // empty-list "create your first" state — keep the amber
+                    // div per .claude/rules/frontend.md "Empty States" rule
+                    // for prerequisite-not-met cases.
                     <div className="rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-2 text-xs text-amber-800 dark:text-amber-200">
                       {t("publicBindNoContextsAvailable")}
                     </div>

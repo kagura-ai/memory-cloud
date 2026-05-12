@@ -158,7 +158,11 @@ class APIKeyManager:
         existing = result.scalar_one_or_none()
 
         if existing:
-            raise ValueError(f"API key with name '{name}' already exists in this workspace")
+            # The uniqueness query above scopes to workspace_id only when
+            # one is provided (#169 keys); for owner-scoped and public-bound
+            # keys it scopes to (user_id, active). Tail the message to match.
+            scope_phrase = "in this workspace" if workspace_id is not None else "for this user"
+            raise ValueError(f"API key with name '{name}' already exists {scope_phrase}")
 
         # Generate new key
         api_key = self._generate_key()
