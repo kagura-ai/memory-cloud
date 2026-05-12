@@ -521,12 +521,17 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         # Authentication failed - send 401 with RFC 6750 compliant headers
         logger.warning(f"MCP auth failed: {auth_error}")
 
-        # Determine error details for RFC 6750
+        # Map exception type to RFC 6750 §3.1 error code.
+        # RFC 6750 limits the error attribute to "invalid_request",
+        # "invalid_token", and "insufficient_scope" — internal error codes
+        # like AUTH-001/AUTH-003 must NOT leak into the challenge header.
+        # All token-related auth failures map to invalid_token; everything
+        # else (missing Bearer header, malformed request) is invalid_request.
         error_code = "invalid_request"
         error_description = str(auth_error)
 
         if isinstance(auth_error, (TokenExpiredError, TokenRevokedError, InvalidTokenError)):
-            error_code = getattr(auth_error, "error_code", "invalid_token")
+            error_code = "invalid_token"
             error_description = getattr(auth_error, "error_description", str(auth_error))
 
         # Sanitize every interpolated value, not just error_description.
