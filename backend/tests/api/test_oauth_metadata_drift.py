@@ -142,7 +142,7 @@ class TestDcrFallbackScopeNoDrift:
             response = client.post(
                 "/api/v1/oauth/register",
                 json={
-                    "client_name": "Admin Worker",
+                    "client_name": "Claude Code",
                     "redirect_uris": ["http://localhost:8080/callback"],
                     "token_endpoint_auth_method": "none",
                     "scope": "memory:read memory:write memory:admin",
