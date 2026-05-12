@@ -5,7 +5,7 @@ Kagura Memory Cloud provides both REST APIs and MCP (Model Context Protocol) too
 ## Overview
 
 - **REST API Base URL**: `http://localhost:8080/api/v1`
-- **MCP Server Endpoint**: `http://localhost:8080/mcp/sse`
+- **MCP Server Endpoint**: `http://localhost:8080/mcp/w/{WORKSPACE_ID}` (Streamable HTTP transport)
 - **OpenAPI Specification**: [openapi.json](../api/openapi.json)
 
 ## Authentication
@@ -621,6 +621,57 @@ Delete an OAuth2 client.
 
 ---
 
+### Device Authorization Grant (CLI / SDK login)
+
+The Kagura Memory Python SDK (and any future first-party CLI) uses the
+pre-registered `kagura-cli` public OAuth2 client to drive RFC 8628
+device authorization grant — no client registration step is required
+from the end user. From the terminal, `kagura auth login` does roughly:
+
+1. SDK calls `POST /api/v1/oauth2/device/authorize` with
+   `client_id=kagura-cli`.
+2. The server returns a `verification_uri` plus a short `user_code`.
+3. The user opens `verification_uri` in a browser, signs in to Kagura
+   Memory, picks the workspace they want to grant access to, and
+   approves the consent screen.
+4. The SDK polls `POST /api/v1/oauth2/token` (with
+   `grant_type=urn:ietf:params:oauth:grant-type:device_code`) and
+   receives an `access_token` plus a `refresh_token` scoped to the
+   chosen (user × workspace).
+5. `kagura auth refresh` exchanges the refresh token for a new pair
+   (refresh-token rotation is enforced server-side per RFC 6819
+   §5.2.2.3 — the old access/refresh pair is revoked when a new pair
+   is issued).
+6. `kagura auth logout` calls `POST /api/v1/oauth2/revoke` to revoke
+   the issued tokens.
+
+The `kagura-cli` row is seeded by alembic migration
+`e10_624_seed_kagura_cli_client` and has these capabilities:
+
+| Field | Value |
+|---|---|
+| `client_id` | `kagura-cli` |
+| `client_name` | `Kagura Memory CLI` (shown on the `/device` consent page) |
+| `token_endpoint_auth_method` | `none` (public client — no secret) |
+| `grant_types` | `urn:ietf:params:oauth:grant-type:device_code`, `refresh_token` only |
+| `scope` | `memory:read memory:write` |
+| `redirect_uris` | `urn:ietf:wg:oauth:2.0:oob` (OOB sentinel for device-flow), `http://127.0.0.1:0/` (loopback wildcard reserved for future PKCE fallback) |
+
+`memory:admin` is **intentionally excluded** from this client's scope
+(narrowing-first ordering per #608 D1). Admin operations on memories
+require a workspace-admin-managed client with an explicit non-default
+scope grant — they are not reachable through the SDK device-flow login.
+
+Workspace context is resolved at consent time from the signed-in
+user's session, not from the client record (`owner_id=NULL`,
+`workspace_id=NULL` on the seed row — same DCR pattern as #519).
+Workspaces the user is not a member of are not selectable on the
+`/device` consent screen.
+
+SDK companion: `kagura-ai/kagura-memory-python-sdk#100`.
+
+---
+
 ## API Keys Management
 
 ### POST /api/v1/config/api-keys
@@ -725,13 +776,13 @@ Health check endpoint.
 
 ### GET /api/v1/info
 
-System information.
+System information. The `version` reflects the running server (current stable: see [GitHub Releases](https://github.com/kagura-ai/memory-cloud/releases)).
 
 **Response:**
 
 ```json
 {
-  "version": "0.7.0",
+  "version": "<server_version>",
   "environment": "production",
   "features": {
     "neural_memory": true,
@@ -765,7 +816,7 @@ Sleep and Neural Memory tuning knobs (LLM provider, budgets, per-phase toggles, 
 
 ## MCP Tools
 
-Kagura Memory Cloud provides 21 MCP tools for AI assistants. See [Core Concepts › MCP Tools](concepts.md#mcp-tools) for the full table. The examples below are the most commonly used tools; the remaining tools (context CRUD, edge CRUD, `update_search_config`, `get_usage`, and the Sleep observability tools `get_sleep_history` / `get_sleep_report` / `rollback_sleep_run`) share the same JSON-RPC call shape.
+Kagura Memory Cloud provides 37 MCP tools for AI assistants across 9 categories (Memory, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Sleep Maintenance, Usage). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
 
 ### 1. remember
 
@@ -875,8 +926,8 @@ All errors follow this format:
 
 ## SDKs and Examples
 
-- **Python SDK**: Coming soon
-- **JavaScript SDK**: Coming soon
+- **Python SDK**: [`kagura-memory-python-sdk`](https://github.com/kagura-ai/kagura-memory-python-sdk) — `KaguraClient` (sync HTTP client) and `KaguraAgent` (LLM agent integration). Supports OAuth2 device flow via `kagura auth login` against the pre-seeded `kagura-cli` public client.
+- **JavaScript SDK**: Planned
 - **Example Code**: [GitHub Repository](https://github.com/kagura-ai/memory-cloud/tree/main/examples)
 
 ---

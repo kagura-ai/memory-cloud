@@ -144,36 +144,21 @@ See [Sleep Maintenance](sleep-maintenance.md) for the complete reference.
 
 ## MCP Tools
 
-Kagura Memory Cloud exposes 26 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/):
+Kagura Memory Cloud exposes 37 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 9 categories:
 
-| Tool | Description | Read-only |
-|------|------------|-----------|
-| `remember` | Store a new memory | No |
-| `recall` | Search memories (Hybrid Search) | Yes |
-| `reference` | Get full details of a memory (all 3 layers) | Yes |
-| `update_memory` | Update an existing memory or upsert by external ID | No |
-| `forget` | Soft-delete a memory (30-day retention) | No |
-| `explore` | Discover related memories via Neural Memory graph | Yes |
-| `list_edges` | List edges connected to a memory | Yes |
-| `create_edge` | Create an edge between two memories | No |
-| `update_edge` | Update edge weight or type | No |
-| `delete_edge` | Delete an edge between two memories | No |
-| `get_context_info` | Get context metadata and usage guidelines | Yes |
-| `list_contexts` | List available contexts in workspace | Yes |
-| `create_context` | Create a new context (owner/admin only) | No |
-| `update_context` | Update context settings | No |
-| `delete_context` | Delete a context and all its memories | No |
-| `merge_contexts` | Merge memories from source into target context | No |
-| `update_search_config` | Tune hybrid search weights and reranker per context | No |
-| `get_usage` | Quota and usage queries for the current workspace | Yes |
-| `get_sleep_history` | List recent Sleep Maintenance runs for a context | Yes |
-| `get_sleep_report` | Fetch a Sleep run's full report and action audit log | Yes |
-| `rollback_sleep_run` | Reverse every recorded action of a Sleep run | No |
-| `setup_resource` | Register or update a Resource (schema + indexer config) | No |
-| `ingest_events` | Append versioned events to a Resource | No |
-| `get_resource_schema` | Fetch the schema for a Resource | Yes |
-| `get_resource_impact` | Preview how a Resource re-index would affect memories | Yes |
-| `list_resource_tokens` | List Resource Tokens scoped to the caller | Yes |
+| Category | Tools | Purpose |
+|----------|-------|---------|
+| Memory | 6 | `remember`, `recall`, `reference`, `update_memory`, `forget`, `explore` — store / search / discover memories |
+| Neural Edges | 4 | `list_edges`, `create_edge`, `update_edge`, `delete_edge` — manage the Hebbian graph manually |
+| Contexts | 7 | `get_context_info`, `list_contexts`, `create_context`, `update_context`, `delete_context`, `merge_contexts`, `update_search_config` |
+| Tags | 1 | `list_tags` — tag vocabulary discovery for alignment before `remember`/`recall` |
+| Files / R2 | 5 | `init_file_upload`, `complete_file_upload`, `list_files`, `get_file_download_url`, `delete_file` — binary attachments via R2 |
+| Analyses (Broadlistening) | 5 | `analyze_context`, `list_analyses`, `get_analysis`, `get_active_analysis`, `get_cluster` — large-scale qualitative clustering (Owner + Pro plan) |
+| Resources | 5 | `setup_resource`, `list_resource_tokens`, `ingest_events`, `get_resource_impact`, `get_resource_schema` — external data ingestion |
+| Sleep Maintenance | 3 | `get_sleep_history`, `get_sleep_report`, `rollback_sleep_run` — background consolidation observability |
+| Usage | 1 | `get_usage` — workspace quota and usage queries |
+
+See [README › MCP Tools](../README.md#mcp-tools) for the full per-tool table with descriptions and required roles.
 
 **Typical workflow:**
 
