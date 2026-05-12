@@ -111,6 +111,73 @@ class TestCreateKeyBoundContextValidation:
         db.add.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_verify_api_key_user_rejects_bound_keys(self) -> None:
+        """Privilege-escalation guard: ``verify_api_key_user`` MUST 403 a
+        public-bound key (#626) so it cannot authenticate any endpoint
+        other than ``/api/v1/public/{ctx}/*``.
+
+        Without this gate, the bound key would inherit the owner's
+        ``current_workspace_id`` via ``_build_api_key_user_dict`` and
+        grant full account access — exactly the escalation the bound
+        scoping is supposed to prevent.
+        """
+        from fastapi import HTTPException
+
+        from auth.api_keys import VerifiedKey
+        from auth.dependencies import verify_api_key_user
+
+        bound_result = VerifiedKey(
+            id=42,
+            user_id="user-1",
+            workspace_id=None,
+            bound_context_id=uuid.uuid4(),
+        )
+
+        with patch(
+            "auth.api_keys.APIKeyManager.verify_key",
+            new=AsyncMock(return_value=bound_result),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await verify_api_key_user(api_key="kagura_test", db=AsyncMock())
+
+        assert exc_info.value.status_code == 403
+        assert "public-bound" in exc_info.value.detail.lower()
+
+    @pytest.mark.asyncio
+    async def test_verify_api_key_standalone_rejects_bound_keys(self) -> None:
+        """``auth.dependencies.verify_api_key`` (used by MCP) MUST return
+        None for public-bound keys — same privilege-escalation guard,
+        different code path. MCP auth treats None as "invalid token",
+        which is the correct rejection shape on that surface.
+        """
+        from auth.api_keys import VerifiedKey
+        from auth.dependencies import verify_api_key
+
+        bound_result = VerifiedKey(
+            id=42,
+            user_id="user-1",
+            workspace_id=None,
+            bound_context_id=uuid.uuid4(),
+        )
+
+        # Patch the inner db generator + manager.verify_key. The standalone
+        # opens its own session via async for db in get_db(), so we patch
+        # the whole APIKeyManager.verify_key path.
+        async def _fake_get_db():
+            yield AsyncMock()
+
+        with (
+            patch("db.base.get_db", new=_fake_get_db),
+            patch(
+                "auth.api_keys.APIKeyManager.verify_key",
+                new=AsyncMock(return_value=bound_result),
+            ),
+        ):
+            result = await verify_api_key("kagura_test")
+
+        assert result is None  # bound key rejected, masquerades as "invalid"
+
+    @pytest.mark.asyncio
     async def test_bound_context_id_set_workspace_id_none_succeeds(self) -> None:
         """Happy path: bound key with valid public context creates a row.
 

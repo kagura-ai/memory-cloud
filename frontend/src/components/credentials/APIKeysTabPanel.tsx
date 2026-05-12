@@ -58,6 +58,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Collapsible,
   CollapsibleContent,
@@ -124,6 +125,12 @@ export function APIKeysTabPanel() {
   const [selectedKeyId, setSelectedKeyId] = useState<number | null>(null);
   const [regenerating, setRegenerating] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // Issue #626: dedicated confirmation flow for revoking a public-bound
+  // key. Separate from the legacy showDeleteApiKeyDialog so the bound-key
+  // path stays clearly distinguished (different copy, calls the per-id
+  // delete endpoint rather than the singleton).
+  const [showBoundRevokeDialog, setShowBoundRevokeDialog] = useState(false);
+  const [boundRevokeKeyId, setBoundRevokeKeyId] = useState<number | null>(null);
 
   // Track if component is mounted to prevent state updates after unmount
   // (used by the load handlers; copy feedback owns its own mount tracking).
@@ -378,13 +385,17 @@ export function APIKeysTabPanel() {
   // Issue #626: per-id delete for bound keys. The legacy singleton DELETE
   // endpoint filters on workspace_id and so cannot see bound keys (which
   // have workspace_id IS NULL). Routes the delete through the new per-id
-  // endpoint when the key has a binding.
-  const handleConfirmDeleteBoundKey = async (keyId: number) => {
-    if (!currentWorkspaceId || !userId) return;
+  // endpoint when the key has a binding. Invoked from the bound-revoke
+  // AlertDialog confirm handler — destructive ops never fire on raw click.
+  const handleConfirmDeleteBoundKey = async () => {
+    if (!currentWorkspaceId || !userId || boundRevokeKeyId === null) return;
+    const keyId = boundRevokeKeyId;
     try {
       setDeleting(true);
       await deleteWorkspaceMemberAPIKeyById(currentWorkspaceId, userId, keyId);
       await loadCredentials();
+      setShowBoundRevokeDialog(false);
+      setBoundRevokeKeyId(null);
       toast({
         title: tCommon("success"),
         description: t("deleteSuccess"),
@@ -580,7 +591,14 @@ export function APIKeysTabPanel() {
                         type="button"
                         variant="ghost"
                         size="sm"
-                        onClick={() => handleConfirmDeleteBoundKey(apiKey.id)}
+                        onClick={() => {
+                          // Issue #626: destructive op — route through the
+                          // existing AlertDialog confirmation flow rather than
+                          // firing immediately, matching the rest of this
+                          // screen's UX for destructive actions.
+                          setBoundRevokeKeyId(apiKey.id);
+                          setShowBoundRevokeDialog(true);
+                        }}
                         disabled={deleting}
                         title={t("publicBindRevoke")}
                         aria-label={t("publicBindRevoke")}
@@ -771,17 +789,16 @@ export function APIKeysTabPanel() {
                       {tCommon("loading")}
                     </p>
                   ) : publicContextsError ? (
-                    // Fetch failure (network / auth / 5xx). Rendered as a
-                    // destructive inline alert per .claude/rules/frontend.md
+                    // Fetch failure (network / auth / 5xx). Use the shared
+                    // Alert primitive per .claude/rules/frontend.md
                     // "Errors raised inside a Dialog body → <Alert variant=
                     // 'destructive'>". Distinct from the empty-list amber
                     // notice below so the operator sees the real cause.
-                    <div
-                      role="alert"
-                      className="rounded-md border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 p-2 text-xs text-red-700 dark:text-red-300"
-                    >
-                      {publicContextsError}
-                    </div>
+                    <Alert variant="destructive">
+                      <AlertDescription className="text-xs">
+                        {publicContextsError}
+                      </AlertDescription>
+                    </Alert>
                   ) : publicContexts.length === 0 ? (
                     // Informational gating notice (prerequisite hint), NOT an
                     // empty-list "create your first" state — keep the amber
@@ -913,6 +930,40 @@ export function APIKeysTabPanel() {
               className="bg-red-600 hover:bg-red-700"
             >
               {deleting ? tCommon("saving") : tCommon("delete")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Issue #626: revoke confirmation for public-bound keys. Separate
+          from the legacy Delete dialog above so the copy can be specific
+          (the public surface this key was attributing to will lose its
+          per-key bucket) and the action routes through the per-id
+          endpoint rather than the singleton. */}
+      <AlertDialog
+        open={showBoundRevokeDialog}
+        onOpenChange={(open) => {
+          setShowBoundRevokeDialog(open);
+          if (!open) setBoundRevokeKeyId(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("publicBindRevoke")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("publicBindRevokeDesc")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>
+              {tCommon("cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleConfirmDeleteBoundKey}
+              disabled={deleting}
+              className="bg-red-600 hover:bg-red-700"
+            >
+              {deleting ? tCommon("saving") : t("publicBindRevoke")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

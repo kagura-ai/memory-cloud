@@ -1528,7 +1528,8 @@
     "publicBindWarning": "このキーを持つ誰でも、紐付けられたコンテキストを公開アクセスできます。紐付けは変更不可です。変更するには revoke して新しいキーを作成してください。",
     "publicBindBadge": "公開バインド",
     "publicBindBadgeTitle": "このキーは1つの is_public=true コンテキストに紐付けられています（キー単位のレート制限+監査）。",
-    "publicBindRevoke": "この公開バインドキーを revoke"
+    "publicBindRevoke": "この公開バインドキーを revoke",
+    "publicBindRevokeDesc": "このキーを永久に失効させます。使用中のクライアントは紐付けられた公開コンテキストへのアクセスを即座に失います。コンテキスト自体は公開のままで、このキーの属性付きアクセスのみが解除されます。"
   },
   "customApps": {
     "title": "アプリ認証",
