@@ -353,3 +353,47 @@ class TestDeviceConfirmEndpoint:
                 )
 
         assert resp.status_code == 409
+
+
+class TestTokenEndpointDefenseInDepth:
+    """Regression guard for Issue #638 defense-in-depth: unhandled exceptions
+    in ``_run_oauth_sync`` are shaped as RFC 6749 ``server_error`` JSON instead
+    of Starlette's default plain-text 500.
+
+    Pre-fix the bug from Issue #635 surfaced as ``Content-Type: text/plain``
+    body ``Internal Server Error`` (21 bytes). RFC 6749 §5.2 mandates JSON
+    error responses on the token endpoint, so even genuine 500s should carry
+    structured ``{error, error_description}`` for client tooling.
+    """
+
+    def test_unhandled_exception_returns_rfc6749_server_error_json(self):
+        with patch(
+            "api.routes.oauth._run_oauth_sync",
+            side_effect=RuntimeError("simulated authlib failure"),
+        ):
+            client = TestClient(app)
+            resp = client.post(
+                "/api/v1/oauth/token/",
+                data={
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                    "device_code": "any-device-code-since-we-mocked-the-runner",
+                    "client_id": "kagura-cli",
+                },
+            )
+
+        # Regression: pre-fix this returned 500 text/plain "Internal Server Error".
+        assert resp.status_code == 500
+        content_type = resp.headers.get("content-type", "")
+        assert content_type.startswith("application/json"), (
+            f"expected JSON content-type, got {content_type!r}"
+        )
+
+        body = resp.json()
+        assert body == {
+            "error": "server_error",
+            "error_description": "internal authorization server error",
+        }
+
+        # RFC 6749 §5.1 cache directives on token error responses
+        assert resp.headers.get("cache-control") == "no-store"
+        assert resp.headers.get("pragma") == "no-cache"

@@ -133,3 +133,49 @@ class TestDeviceGrantRegistration:
 
         registered_classes = [call.args[0] for call in wrapper.server.register_grant.call_args_list]
         assert DeviceAuthorizationGrant in registered_classes
+
+
+class TestDeviceAuthorizationGrantTokenGeneration:
+    """Regression guard for Issue #638: DeviceAuthorizationGrant.generate_token override.
+
+    Without this method Authlib's BaseGrant.generate_token falls through to
+    server.generate_token (intentionally unset) and raises
+    RuntimeError("No configured token generator") on every approved
+    device_code poll.
+    """
+
+    def _make_grant_with_request(self, client_id="kagura-cli"):
+        grant = _make_grant()
+        grant.request = MagicMock()
+        grant.request.client.client_id = client_id
+        grant.GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+        return grant
+
+    def test_generate_token_returns_oauth2_token_dict(self):
+        grant = self._make_grant_with_request()
+        token = grant.generate_token(scope="memory:read")
+
+        assert token["token_type"] == "Bearer"
+        assert "access_token" in token and len(token["access_token"]) > 0
+        assert "refresh_token" in token and len(token["refresh_token"]) > 0
+        assert token["scope"] == "memory:read"
+
+    def test_generate_token_uses_class_token_expires_in_when_none(self):
+        grant = self._make_grant_with_request()
+        token = grant.generate_token(scope="memory:read", expires_in=None)
+        assert token["expires_in"] == DeviceAuthorizationGrant.TOKEN_EXPIRES_IN
+        assert token["expires_in"] == 3600
+
+    def test_generate_token_respects_explicit_expires_in(self):
+        grant = self._make_grant_with_request()
+        token = grant.generate_token(scope="memory:read", expires_in=42)
+        assert token["expires_in"] == 42
+
+    def test_generate_token_uses_class_grant_type_when_none(self):
+        grant = self._make_grant_with_request()
+        token = grant.generate_token(scope="memory:read")
+        # Token dict itself doesn't echo grant_type, but the helper logs it.
+        # Confirm the call succeeded with the device_code GRANT_TYPE — no exception means
+        # _generate_token_with_expiry accepted the grant_type fallback path.
+        assert token is not None
+        assert "access_token" in token

@@ -1744,8 +1744,23 @@ async def oauth_token(request: Request):
     # Debug: log form data
     logger.info("token_request_form", form=request.state.form_data)
 
-    # Run Authlib operations in thread pool to avoid blocking event loop
-    authlib_resp = await asyncio.to_thread(_run_oauth_sync, "create_token_response", request)
+    # Run Authlib operations in thread pool to avoid blocking event loop.
+    # Defense-in-depth (Issue #638): wrap with try/except so any unhandled exception
+    # in the Authlib stack (e.g. a Grant subclass missing a required override) returns
+    # an RFC 6749 server_error JSON instead of Starlette's plain-text 500. The
+    # underlying traceback is already captured by _run_oauth_sync's logger.exception
+    # call (Issue #635 / PR #636), so this handler only shapes the response.
+    try:
+        authlib_resp = await asyncio.to_thread(_run_oauth_sync, "create_token_response", request)
+    except Exception:
+        return JSONResponse(
+            content={
+                "error": "server_error",
+                "error_description": "internal authorization server error",
+            },
+            status_code=500,
+            headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+        )
 
     # Extract status, body, headers from Authlib response
     if isinstance(authlib_resp, tuple) and len(authlib_resp) == 3:
