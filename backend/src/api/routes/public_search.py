@@ -373,23 +373,37 @@ async def public_search(
                 detail="This public context belongs to a different workspace. Please switch workspaces or use anonymous access.",
             )
 
-    # 3. Resolve workspace (used for rate-limit tier AND for the search
-    # owner_user_id below). One fetch covers both.
-    workspace = await db.get(Workspace, context.workspace_id)
-    if workspace is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Context workspace not found",
-        )
-
-    # 4. Rate limit dispatch by principal type.
+    # 3. Rate limit dispatch by principal type.
+    # The Workspace fetch is deferred to after this gate so a flood of
+    # 429-bound anonymous requests don't burn a DB lookup each. Bound-key
+    # path needs the plan tier (so it fetches workspace inline); other
+    # paths fetch lazily below, only on requests that survive the bucket.
+    workspace: Workspace | None = None
     if bound_key is not None:
+        workspace = await db.get(Workspace, context.workspace_id)
+        if workspace is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Context workspace not found",
+            )
         plan = get_plan_tier(workspace.plan_name or "free")
         await check_bound_key_rate_limit(bound_key.id, plan.bound_public_calls_per_minute)
     elif user is None:
         # Anonymous shared bucket — existing behavior preserved.
+        # Workspace lookup is deferred to step 4 below: under abuse, a
+        # 429 returns BEFORE any Workspace SELECT.
         await check_public_search_rate_limit(context_id, None)
     # else: workspace member session → no rate limit (existing behavior).
+
+    # 4. Resolve workspace lazily if not already fetched above. Required
+    # for the embedding-service caller user_id (search_user_id).
+    if workspace is None:
+        workspace = await db.get(Workspace, context.workspace_id)
+        if workspace is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Context workspace not found",
+            )
 
     # 5. Hoist usage-log attribution + caller id once so the success and
     # error paths below share one definition.

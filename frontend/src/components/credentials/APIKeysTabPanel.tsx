@@ -296,18 +296,23 @@ export function APIKeysTabPanel() {
   // the operator only wants regular keys.
   const loadPublicContexts = useCallback(async () => {
     if (publicContexts.length > 0 || loadingPublicContexts) return;
+    // Auth-loading race guard: ``userId`` is undefined during initial
+    // render. If the operator toggled the bind option before
+    // ``useAuth()`` resolved, filtering by ``created_by === undefined``
+    // would always match 0 contexts and cache an empty list, leaving
+    // the picker stuck in the "no public contexts available" state.
+    // Return early; the useEffect re-fire-on-toggle in the checkbox
+    // handler will retry once ``userId`` is populated.
+    if (!userId) return;
     setLoadingPublicContexts(true);
     setPublicContextsError(null);
     try {
       const resp = await getContexts();
       // Filter to public contexts the current user can actually bind:
       // backend enforces is_public=true AND created_by==user_id at the
-      // route's ownership gate, so surfacing only those in the picker
-      // avoids a "selectable in UI, 403 on submit" confusion.
-      // Contexts with created_by===null (legacy data, pre-#160) are
-      // excluded — backend permits them, but the UI cannot prove
-      // ownership client-side; users with such contexts can still bind
-      // via the API directly.
+      // route's ownership gate (strict — null-created_by is rejected
+      // post-loop-7), so surfacing only those in the picker avoids a
+      // "selectable in UI, 403 on submit" confusion.
       const publics = resp.contexts.filter(
         (c) => c.is_public && c.created_by === userId,
       );
