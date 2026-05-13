@@ -17,7 +17,7 @@ from auth.api_keys import APIKeyManager, VerifiedKey
 from auth.dependencies import get_api_key, get_current_user_optional
 from config.plan_tiers import get_plan_tier
 from db.base import get_db
-from db.redis import incrby_counter, increment_counter
+from db.redis import incrby_counter
 from models.auth import Context, Workspace
 from services.resource_lookup import get_latest_schema
 from services.search_service import SearchService
@@ -96,11 +96,16 @@ async def check_public_search_rate_limit(
         logger.debug("rate_limit_skipped_for_workspace_member", user_id=user_id)
         return
 
-    # Apply rate limit for anonymous/public token access
+    # Apply rate limit for anonymous/public token access. ``incrby_counter``
+    # post-checks the TTL via ``TTL`` and sets ``EXPIRE`` whenever absent —
+    # avoiding the race in the older ``increment_counter`` where two
+    # concurrent first-increments could leave the key with no TTL (counter
+    # grows forever, locking the bucket into permanent 429). Same primitive
+    # the new #626 bound-key bucket uses.
     redis_key = f"public_search:{context_id}:minute"
 
     try:
-        current_count = await increment_counter(redis_key, ttl=60)
+        current_count = await incrby_counter(redis_key, amount=1, ttl=60)
 
         if current_count > limit_per_minute:
             logger.warning(
@@ -534,7 +539,8 @@ async def get_public_context_info(
 
     Errors:
         - 401: API key supplied but invalid / expired
-        - 403: Context is not public, OR API key is bound to a different context
+        - 403: Context is not public, OR API key is not public-bound, OR
+               API key is bound to a different context (CWE-639 IDOR)
         - 404: Context not found
     """
     # Issue #626: IDOR guard runs before context lookup (symmetry with /search).
