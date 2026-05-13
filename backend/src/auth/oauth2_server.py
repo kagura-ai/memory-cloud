@@ -552,9 +552,15 @@ class DeviceAuthorizationGrant(_DeviceCodeGrant):
             if user_row:
                 token["user_email"] = user_row.email
                 if user_row.current_workspace_id:
+                    # Filter out soft-deleted workspaces. Matches the project
+                    # convention (services/workspace_service.py and others).
+                    # The FK ondelete=SET NULL only covers hard deletes; soft
+                    # deletes via Workspace.deleted_at would otherwise leak a
+                    # stale workspace_id/name into the token response.
                     workspace = (
                         self.server.db_session.query(Workspace)
                         .filter_by(id=user_row.current_workspace_id)
+                        .filter(Workspace.deleted_at.is_(None))
                         .first()
                     )
                     if workspace:
