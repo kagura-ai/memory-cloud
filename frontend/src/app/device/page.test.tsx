@@ -260,6 +260,28 @@ describe("DevicePage", () => {
     });
   });
 
+  it("discloses identity fields shared with the client on consent screen (#640)", async () => {
+    mockVerifyDeviceCode.mockResolvedValue({
+      user_code: "ABCD1234",
+      client_name: "Test CLI",
+      scope: "memory:read memory:write",
+      expires_at: "2026-01-01T00:00:00Z",
+      is_authorized: false,
+      is_expired: false,
+    });
+    render(<DevicePage />);
+
+    const input = screen.getByLabelText("device.codeLabel");
+    fireEvent.change(input, { target: { value: "ABCD1234" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(screen.getByText("device.identityShareLabel")).toBeDefined();
+      expect(screen.getByText("device.identityEmail")).toBeDefined();
+      expect(screen.getByText("device.identityWorkspace")).toBeDefined();
+    });
+  });
+
   it("transitions to denied on 409 already-denied during confirm", async () => {
     mockVerifyDeviceCode.mockResolvedValue({
       user_code: "ABCD1234",

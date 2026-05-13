@@ -40,7 +40,14 @@ from authlib.oauth2.rfc8628 import DeviceCodeGrant as _DeviceCodeGrant
 from sqlalchemy.orm import Session
 
 from config.settings import get_settings
-from models.auth import OAuth2AuthorizationCode, OAuth2Client, OAuth2DeviceCode, OAuth2Token
+from models.auth import (
+    OAuth2AuthorizationCode,
+    OAuth2Client,
+    OAuth2DeviceCode,
+    OAuth2Token,
+    User,
+    Workspace,
+)
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -528,7 +535,39 @@ class DeviceAuthorizationGrant(_DeviceCodeGrant):
             expires_in = self.TOKEN_EXPIRES_IN
         if grant_type is None:
             grant_type = self.GRANT_TYPE
-        return _generate_token_with_expiry(grant_type, client, expires_in, scope)
+        token = _generate_token_with_expiry(grant_type, client, expires_in, scope)
+
+        # Attach identity (email + workspace) to the response body for SDK
+        # display. Lawful basis: /device consent (RFC 8628 §3.3, APPI 第27条,
+        # GDPR Art.6(1)(a)); recipient disclosure: Privacy Policy thirdParty
+        # section. NOT security-bearing — do not use for authorization.
+        # Workspace is User.current_workspace_id at grant time (point-in-time,
+        # not consent-bound — OAuth2DeviceCode lacks a workspace column).
+        # ``getattr`` default guards the contract verified by
+        # tests/auth/test_device_code_grant.py: callers may pass ``user=None``
+        # to assert the base token-shape; identity injection is skipped then.
+        user_id = getattr(user, "user_id", None)
+        if user_id:
+            user_row = self.server.db_session.query(User).filter_by(user_id=user_id).first()
+            if user_row:
+                token["user_email"] = user_row.email
+                if user_row.current_workspace_id:
+                    # Filter out soft-deleted workspaces. Matches the project
+                    # convention (services/workspace_service.py and others).
+                    # The FK ondelete=SET NULL only covers hard deletes; soft
+                    # deletes via Workspace.deleted_at would otherwise leak a
+                    # stale workspace_id/name into the token response.
+                    workspace = (
+                        self.server.db_session.query(Workspace)
+                        .filter_by(id=user_row.current_workspace_id)
+                        .filter(Workspace.deleted_at.is_(None))
+                        .first()
+                    )
+                    if workspace:
+                        token["workspace_id"] = str(workspace.id)
+                        token["workspace_name"] = workspace.name
+
+        return token
 
     def query_device_credential(self, device_code: str) -> OAuth2DeviceCode | None:
         return (

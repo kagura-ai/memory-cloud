@@ -614,6 +614,7 @@
         "authentication": "**認証**: Google OAuth2（ログイン用）",
         "infrastructure": "**インフラストラクチャ**: Google Cloud Platform（ホスティング）、Qdrant Cloud（ベクターデータベース）",
         "aiApis": "**AI API**: OpenAI（埋め込み）、Voyage AI / Cohere（リランキング）- あなたが明示的に有効にした場合のみ。",
+        "oauthOutgoing": "**OAuth クライアントへの identity 提供**: あなたが /device 同意画面で third-party アプリケーション（kagura-memory-python-sdk、Claude Code、Cursor 等の MCP client）を承認した場合、それらのアプリケーションには access token と共にあなたのメールアドレス・workspace 識別子・workspace 名が提供されます。これはアプリケーション側でアカウント状態を表示するために必要です。承認の取り消しは Settings → OAuth Apps から行えます（GDPR 第13条第1項(e)、個人情報保護法 第27条）。",
         "conclusion": "これらのサービスには独自のプライバシーポリシーがあり、準拠性についてすべてのプロバイダーを慎重に審査しています。"
       },
       "subProcessors": {
@@ -3318,6 +3319,10 @@
     "scopeAdmin": "ワークスペースの管理",
     "scopeOffline": "オフラインアクセス",
     "unknownScope": "不明な権限: {scope}",
+    "permissionsLabel": "アクセス権限",
+    "identityShareLabel": "共有される情報",
+    "identityEmail": "メールアドレス",
+    "identityWorkspace": "ワークスペース",
     "approve": "認証する",
     "approving": "認証中...",
     "deny": "拒否する",

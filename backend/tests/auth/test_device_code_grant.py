@@ -178,3 +178,78 @@ class TestDeviceAuthorizationGrantTokenGeneration:
         token = grant.generate_token(scope="memory:read")
         assert token is not None
         assert "access_token" in token
+
+    # ----- Identity injection (#640) -----
+    # The next three tests pin the response-body identity contract that the SDK
+    # (kagura-memory-python-sdk device_flow.py:382-385) reads. They are the
+    # mirror of the user=None tests above for the user-populated branch.
+
+    @staticmethod
+    def _stub_identity_lookups(grant, user_row, workspace):
+        """Wire ``server.db_session.query(...)`` to return distinct chains for
+        ``User`` and ``Workspace`` lookups. ``Workspace`` uses a longer chain
+        (``filter_by(...).filter(...).first()``) because the production code
+        filters soft-deleted workspaces — keep this mirrored against
+        ``oauth2_server.py`` if that chain ever changes shape.
+        """
+        from models.auth import User
+
+        user_chain = MagicMock()
+        user_chain.filter_by.return_value.first.return_value = user_row
+        ws_chain = MagicMock()
+        ws_chain.filter_by.return_value.filter.return_value.first.return_value = workspace
+        grant.server.db_session.query.side_effect = lambda model: (
+            user_chain if model is User else ws_chain
+        )
+
+    def test_generate_token_injects_identity_when_user_and_workspace_present(self):
+        from uuid import uuid4
+
+        grant = _make_grant_with_request()
+        workspace_uuid = uuid4()
+        user_row = MagicMock(email="alice@example.com", current_workspace_id=workspace_uuid)
+        # ``MagicMock(name=...)`` sets the mock's repr name, not an attribute —
+        # assign workspace.name after construction so production reads it as data.
+        workspace = MagicMock(id=workspace_uuid)
+        workspace.name = "alice-workspace"
+        self._stub_identity_lookups(grant, user_row, workspace)
+
+        user = MagicMock(user_id="oauth-sub-alice")
+        token = grant.generate_token(user=user, scope="memory:read")
+
+        assert token["user_email"] == "alice@example.com"
+        assert token["workspace_id"] == str(workspace_uuid)
+        assert token["workspace_name"] == "alice-workspace"
+
+    def test_generate_token_skips_soft_deleted_workspace(self):
+        # Regression guard for the soft-delete filter (added after Copilot
+        # review loop 1). When the Workspace query returns None — which is
+        # what the ``.filter(Workspace.deleted_at.is_(None))`` clause produces
+        # for a soft-deleted row — the token must NOT carry stale identity.
+        from uuid import uuid4
+
+        grant = _make_grant_with_request()
+        user_row = MagicMock(email="bob@example.com", current_workspace_id=uuid4())
+        # workspace=None simulates the soft-delete filter excluding the row.
+        self._stub_identity_lookups(grant, user_row, None)
+
+        user = MagicMock(user_id="oauth-sub-bob")
+        token = grant.generate_token(user=user, scope="memory:read")
+
+        assert token["user_email"] == "bob@example.com"
+        assert "workspace_id" not in token
+        assert "workspace_name" not in token
+
+    def test_generate_token_skips_workspace_when_user_has_no_current_workspace(self):
+        grant = _make_grant_with_request()
+        user_row = MagicMock(email="carol@example.com", current_workspace_id=None)
+        # workspace stub is unused because user_row.current_workspace_id is
+        # falsy and the production code short-circuits before querying.
+        self._stub_identity_lookups(grant, user_row, workspace=None)
+
+        user = MagicMock(user_id="oauth-sub-carol")
+        token = grant.generate_token(user=user, scope="memory:read")
+
+        assert token["user_email"] == "carol@example.com"
+        assert "workspace_id" not in token
+        assert "workspace_name" not in token
