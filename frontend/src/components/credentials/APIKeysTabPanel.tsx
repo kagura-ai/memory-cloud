@@ -630,16 +630,25 @@ export function APIKeysTabPanel() {
                         className="flex-1"
                         data-testid={`api-key-field-${apiKey.id}`}
                       />
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => handleHideAPIKeyClick(apiKey.id)}
-                        title={t("hideSecretNow")}
-                        aria-label={t("hideSecretNow")}
-                      >
-                        <EyeOff className="w-4 h-4" />
-                      </Button>
+                      {/* Issue #626: Hide button targets the legacy
+                          singleton endpoint (filters by workspace_id,
+                          operates on "most recent" key) and cannot
+                          safely target public-bound keys. Suppressed
+                          for bound keys — they're meant to be shared
+                          as attribution, not zero-knowledge secrets,
+                          so manual-hide has no use case anyway. */}
+                      {!apiKey.bound_context_id && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => handleHideAPIKeyClick(apiKey.id)}
+                          title={t("hideSecretNow")}
+                          aria-label={t("hideSecretNow")}
+                        >
+                          <EyeOff className="w-4 h-4" />
+                        </Button>
+                      )}
                       {apiKey.visibility_expires_at &&
                         (() => {
                           const expiresAt = new Date(
@@ -688,23 +697,29 @@ export function APIKeysTabPanel() {
                   </div>
                 )}
 
-                {/* Action Buttons */}
+                {/* Action Buttons. Issue #626: ``regenerate`` and
+                    ``hide`` (above) both target legacy singleton
+                    endpoints that operate on "most recent active key
+                    for (user, workspace)" — workspace-scoped keys only.
+                    They cannot safely target public-bound keys
+                    (workspace_id IS NULL) and would either no-op or
+                    operate on a different key. Hide both buttons for
+                    bound keys; the bound-key lifecycle is intentionally
+                    simpler (revoke and create), so regenerate has no
+                    use case anyway. Plumbing per-id endpoints for
+                    hide/regenerate is deferred (no use case for bound
+                    keys, and workspace-scoped keys already have the
+                    existing UX). */}
                 <div className="flex gap-2">
-                  <ActionButton
-                    onClick={() => handleRegenerateAPIKeyClick(apiKey.id)}
-                    icon={<RefreshCw className="w-4 h-4" />}
-                  >
-                    {t("regenerate")}
-                  </ActionButton>
+                  {!apiKey.bound_context_id && (
+                    <ActionButton
+                      onClick={() => handleRegenerateAPIKeyClick(apiKey.id)}
+                      icon={<RefreshCw className="w-4 h-4" />}
+                    >
+                      {t("regenerate")}
+                    </ActionButton>
+                  )}
 
-                  {/* Issue #626: bound keys use the dedicated trash icon
-                      next to the badge (see line ~555) so the confirmation
-                      copy can name the public-context revocation
-                      specifically. ``deleteWorkspaceMemberAPIKey`` is now
-                      a thin alias around the per-id endpoint (post-#626
-                      both delete paths use ``DELETE /credentials/api-keys/
-                      {keyId}``), so this filter is purely a UX split —
-                      not a safety gate. */}
                   {!apiKey.revoked_at && !apiKey.bound_context_id && (
                     <ActionButton
                       onClick={() => handleDeleteAPIKeyClick(apiKey.id)}
