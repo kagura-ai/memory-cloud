@@ -42,6 +42,15 @@ def _make_grant():
     return grant
 
 
+def _make_grant_with_request(client_id="kagura-cli"):
+    """Grant with a mock request/client/GRANT_TYPE attached — for generate_token tests."""
+    grant = _make_grant()
+    grant.request = MagicMock()
+    grant.request.client.client_id = client_id
+    grant.GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+    return grant
+
+
 class TestDeviceAuthorizationGrant:
     def test_query_device_credential_found(self):
         grant = _make_grant()
@@ -136,23 +145,14 @@ class TestDeviceGrantRegistration:
 
 
 class TestDeviceAuthorizationGrantTokenGeneration:
-    """Regression guard for Issue #638: DeviceAuthorizationGrant.generate_token override.
-
-    Without this method Authlib's BaseGrant.generate_token falls through to
-    server.generate_token (intentionally unset) and raises
-    RuntimeError("No configured token generator") on every approved
+    """Without ``generate_token`` Authlib's ``BaseGrant.generate_token`` falls
+    through to ``server.generate_token`` (intentionally unset) and raises
+    ``RuntimeError("No configured token generator")`` on every approved
     device_code poll.
     """
 
-    def _make_grant_with_request(self, client_id="kagura-cli"):
-        grant = _make_grant()
-        grant.request = MagicMock()
-        grant.request.client.client_id = client_id
-        grant.GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
-        return grant
-
     def test_generate_token_returns_oauth2_token_dict(self):
-        grant = self._make_grant_with_request()
+        grant = _make_grant_with_request()
         token = grant.generate_token(scope="memory:read")
 
         assert token["token_type"] == "Bearer"
@@ -161,21 +161,20 @@ class TestDeviceAuthorizationGrantTokenGeneration:
         assert token["scope"] == "memory:read"
 
     def test_generate_token_uses_class_token_expires_in_when_none(self):
-        grant = self._make_grant_with_request()
+        grant = _make_grant_with_request()
         token = grant.generate_token(scope="memory:read", expires_in=None)
         assert token["expires_in"] == DeviceAuthorizationGrant.TOKEN_EXPIRES_IN
         assert token["expires_in"] == 3600
 
     def test_generate_token_respects_explicit_expires_in(self):
-        grant = self._make_grant_with_request()
+        grant = _make_grant_with_request()
         token = grant.generate_token(scope="memory:read", expires_in=42)
         assert token["expires_in"] == 42
 
     def test_generate_token_uses_class_grant_type_when_none(self):
-        grant = self._make_grant_with_request()
+        # GRANT_TYPE fallback path: no exception means _generate_token_with_expiry
+        # accepted the device_code grant_type from the class attribute.
+        grant = _make_grant_with_request()
         token = grant.generate_token(scope="memory:read")
-        # Token dict itself doesn't echo grant_type, but the helper logs it.
-        # Confirm the call succeeded with the device_code GRANT_TYPE — no exception means
-        # _generate_token_with_expiry accepted the grant_type fallback path.
         assert token is not None
         assert "access_token" in token

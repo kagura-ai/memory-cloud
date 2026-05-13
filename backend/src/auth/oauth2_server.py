@@ -520,17 +520,9 @@ class DeviceAuthorizationGrant(_DeviceCodeGrant):
         expires_in=None,
         include_refresh_token=True,
     ) -> dict[str, Any]:
-        """Generate OAuth2 token for the device_code grant (Issue #638).
-
-        Mirrors ``AuthorizationCodeGrant.generate_token`` and
-        ``RefreshTokenGrant.generate_token``. Without this override
-        Authlib's ``BaseGrant.generate_token`` falls back to
-        ``server.generate_token``, which is intentionally unset per the
-        server bootstrap comment ("Grant methods take precedence"), and
-        raises ``RuntimeError("No configured token generator")`` on every
-        approved device_code poll. See Issue #635 for the prod traceback
-        captured via the observability fix in PR #636.
-        """
+        # Override required: Authlib's BaseGrant.generate_token delegates to
+        # server.generate_token, which is intentionally unset on the wrapper
+        # (see _register_grants — "Grant methods take precedence").
         client = self.request.client
         if expires_in is None:
             expires_in = self.TOKEN_EXPIRES_IN
