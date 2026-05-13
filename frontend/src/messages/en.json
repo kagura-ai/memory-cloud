@@ -614,6 +614,7 @@
         "authentication": "**Authentication**: Google OAuth2 (for login)",
         "infrastructure": "**Infrastructure**: Google Cloud Platform (hosting), Qdrant Cloud (vector database)",
         "aiApis": "**AI APIs**: OpenAI (embeddings), Voyage AI / Cohere (reranking) - only when explicitly enabled by you.",
+        "oauthOutgoing": "**Identity disclosure to OAuth clients**: When you authorize a third-party application (kagura-memory-python-sdk, Claude Code, Cursor, and other MCP clients) at the /device consent screen, those applications receive your email address, workspace identifier, and workspace name alongside the access token. This is required so the application can display account status. You can revoke this authorization at any time via Settings → OAuth Apps (GDPR Art. 13(1)(e), Japan APPI Art. 27).",
         "conclusion": "These services have their own privacy policies and we carefully vet all providers for compliance."
       },
       "subProcessors": {
@@ -3318,6 +3319,10 @@
     "scopeAdmin": "Manage workspace",
     "scopeOffline": "Offline access",
     "unknownScope": "Unknown permission: {scope}",
+    "permissionsLabel": "Permissions",
+    "identityShareLabel": "Identity shared",
+    "identityEmail": "Email address",
+    "identityWorkspace": "Workspace",
     "approve": "Approve",
     "approving": "Approving...",
     "deny": "Deny",

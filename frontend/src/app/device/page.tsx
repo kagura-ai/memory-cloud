@@ -260,7 +260,24 @@ function DevicePageInner() {
                 {deviceInfo.client_name}
               </p>
 
-              {renderScopeBadges(deviceInfo.scope)}
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+                  {t("device.permissionsLabel")}
+                </p>
+                {renderScopeBadges(deviceInfo.scope)}
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+                  {t("device.identityShareLabel")}
+                </p>
+                <div className="flex flex-wrap gap-2 justify-center">
+                  <Badge variant="secondary">{t("device.identityEmail")}</Badge>
+                  <Badge variant="secondary">
+                    {t("device.identityWorkspace")}
+                  </Badge>
+                </div>
+              </div>
 
               <div className="flex gap-3 justify-center pt-2">
                 <Button
