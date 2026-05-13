@@ -104,14 +104,29 @@ async def authenticate_mcp_request(
 async def _verify_api_key(api_key: str) -> tuple[str, "UUID | None", "UUID | None"] | None:
     """Verify API key.
 
-    Migration 034: verify_api_key() returns (user_id, workspace_id) 2-tuple.
-    Issue #245: context_id is now required in tool args, not from auth.
+    Migration 034: verify_api_key() returned a 2-tuple of (user_id, workspace_id).
+    Issue #626: verify_api_key() now returns ``VerifiedKey``; we read attributes
+    by name. The MCP auth surface remains a 3-tuple ``(user_id, context_id,
+    workspace_id)`` for backward compatibility with MCP tool args (Issue #245).
+
+    **Public-bound key rejection (#626)**: ``auth.dependencies.verify_api_key``
+    (the standalone wrapper called below) returns ``None`` for any key with
+    ``bound_context_id != None``. That treats a public-bound key as
+    "invalid" on the MCP surface — preventing the privilege escalation
+    where a key intended for one public context would otherwise inherit
+    the owner's workspace_id and grant full account access on MCP tools.
+    Bound keys are only honored on the REST public endpoint
+    (``/api/v1/public/{ctx}/*`` via
+    ``api.routes.public_search._resolve_public_attribution``, which
+    reaches ``APIKeyManager.verify_key`` directly and bypasses this
+    wrapper). MCP introspection of bindings is a separate follow-up.
 
     Args:
         api_key: API key value
 
     Returns:
-        (user_id, context_id, workspace_id) tuple if key is valid, None otherwise.
+        (user_id, context_id, workspace_id) tuple if key is valid AND not
+        public-bound; None otherwise (invalid / revoked / expired / bound).
         - context_id is always None (now required in tool arguments)
         - workspace_id is from the API key scope (workspace-scoped keys)
     """
@@ -121,7 +136,8 @@ async def _verify_api_key(api_key: str) -> tuple[str, "UUID | None", "UUID | Non
         result = await verify_api_key(api_key)
 
         if result:
-            user_id, workspace_id = result
+            user_id = result.user_id
+            workspace_id = result.workspace_id
             context_id = None  # Issue #245: context_id is now in tool args
             logger.debug(f"API key valid: user={user_id}, workspace={workspace_id}")
             return (user_id, context_id, workspace_id)

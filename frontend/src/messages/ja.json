@@ -1518,7 +1518,18 @@
     "createSuccess": "APIキーが正常に作成されました",
     "deleteSuccess": "APIキーが正常に削除されました",
     "regenerateSuccess": "APIキーが正常に再生成されました",
-    "errorCreateKey": "APIキーの作成に失敗しました。もう一度お試しください。"
+    "errorCreateKey": "APIキーの作成に失敗しました。もう一度お試しください。",
+    "publicBindToggleLabel": "このキーを1つの公開コンテキストに紐付ける（任意）",
+    "publicBindContextLabel": "紐付ける公開コンテキスト",
+    "publicBindContextPlaceholder": "公開コンテキストを選択…",
+    "publicBindContextRequired": "紐付ける公開コンテキストを選択してください。",
+    "publicBindNoContextsAvailable": "公開コンテキストがありません。先にコンテキストの is_public=true を設定してください。",
+    "publicBindLoadError": "公開コンテキストを読み込めませんでした。ネットワークを確認してから再試行してください。",
+    "publicBindWarning": "このキーを持つ誰でも、紐付けられたコンテキストを公開アクセスできます。紐付けは変更不可です。変更するには revoke して新しいキーを作成してください。",
+    "publicBindBadge": "公開バインド",
+    "publicBindBadgeTitle": "このキーは1つの is_public=true コンテキストに紐付けられています（キー単位のレート制限+監査）。",
+    "publicBindRevoke": "この公開バインドキーを revoke",
+    "publicBindRevokeDesc": "このキーを永久に失効させます。使用中のクライアントは紐付けられた公開コンテキストへのアクセスを即座に失います。コンテキスト自体は公開のままで、このキーの属性付きアクセスのみが解除されます。"
   },
   "customApps": {
     "title": "アプリ認証",

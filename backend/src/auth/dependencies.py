@@ -11,6 +11,7 @@ from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.api_keys import VerifiedKey
 from db.base import get_db
 from models.auth import User
 from utils.exceptions import AuthorizationError
@@ -155,29 +156,43 @@ async def get_api_key(authorization: str | None = Header(None)) -> str | None:
     return authorization[7:]  # Remove "Bearer " prefix
 
 
-async def verify_api_key(api_key: str) -> tuple[str, UUID | None] | None:
-    """Verify API key and return (user_id, workspace_id).
+async def verify_api_key(api_key: str) -> VerifiedKey | None:
+    """Verify API key and return a ``VerifiedKey`` view.
 
-    Issue #169: Returns workspace_id for workspace-scoped API keys.
+    Issue #169: ``workspace_id`` for workspace-scoped API keys.
+    Issue #626: ``bound_context_id`` for public-bound API keys (REJECTED
+    here — see below).
     Migration 034: Removed context_id (deprecated).
 
     Standalone function for MCP authentication (non-FastAPI context).
     This function does not use FastAPI dependencies, making it suitable
     for use in MCP server authentication flows.
 
+    **Public-bound key rejection (#626)**: A key with
+    ``bound_context_id != None`` is intended ONLY for the REST public
+    endpoint (`/api/v1/public/{ctx}/*` via ``_resolve_public_attribution``)
+    and MUST NOT authenticate any other surface. Returning ``None`` here
+    treats such a key as "not authenticated" for MCP and any other
+    consumer of this standalone function — preventing a public-bound
+    key from being repurposed as a full-account API key (which would be
+    a privilege escalation: the bound key carries the owner's
+    workspace_id implicitly via the row, and downstream principal
+    construction would otherwise grant it). The public endpoint reaches
+    ``APIKeyManager.verify_key`` directly (not through this wrapper)
+    and bypasses this guard.
+
     Args:
         api_key: API key to verify (e.g., "kagura_...")
 
     Returns:
-        (user_id, workspace_id) tuple if valid, None if invalid/revoked/expired.
-        - For workspace-scoped keys: workspace_id=<UUID>
-        - For global keys: workspace_id=None
+        ``VerifiedKey`` if valid AND not public-bound; ``None`` if
+        invalid/revoked/expired OR if the key is public-bound (#626).
 
     Example:
         result = await verify_api_key("kagura_1234567890abcdef...")
         if result:
-            user_id, workspace_id = result
-            # API key is valid
+            # API key is valid and not public-bound
+            user_id = result.user_id
             ...
     """
     from auth.api_keys import APIKeyManager
@@ -186,11 +201,23 @@ async def verify_api_key(api_key: str) -> tuple[str, UUID | None] | None:
     try:
         async for db in get_db():
             manager = APIKeyManager(db)
-            result = await manager.verify_key(api_key)  # Returns 3-tuple
-            return result
+            verified = await manager.verify_key(api_key)
+            if verified is None:
+                return None
+            if verified.bound_context_id is not None:
+                # Public-bound key (#626) — reject from non-public surfaces.
+                # The public endpoint calls APIKeyManager.verify_key directly
+                # (not this wrapper) and is unaffected.
+                logger.warning(
+                    "public_bound_key_rejected_outside_public_endpoint",
+                    bound_context_id=str(verified.bound_context_id),
+                )
+                return None
+            return verified
     except Exception:
         # Silent failure - return None on any error
         return None
+    return None
 
 
 async def _build_api_key_user_dict(
@@ -201,6 +228,16 @@ async def _build_api_key_user_dict(
     """Build user info dict from verified API key data.
 
     Shared by verify_api_key_user and get_user_from_api_key_or_session.
+
+    Note (Issue #626): callers MUST reject public-bound keys
+    (``VerifiedKey.bound_context_id is not None``) BEFORE invoking this
+    helper. A public-bound key reaching this function would silently
+    inherit the owner's ``current_workspace_id`` via
+    ``_get_user_workspace_id``, granting the bound key full account
+    access — a privilege escalation. The dependency wrappers above
+    (``verify_api_key_user`` / ``get_user_from_api_key_or_session``)
+    enforce this gate; the standalone ``verify_api_key`` returns ``None``
+    for bound keys so MCP gets the same effective rejection.
 
     Args:
         user_id: Authenticated user ID
@@ -218,7 +255,7 @@ async def _build_api_key_user_dict(
     logger.info(
         "api_key_authenticated",
         user_id=user_id,
-        workspace_id=str(current_workspace_id),
+        workspace_id=str(current_workspace_id) if current_workspace_id else None,
     )
 
     return {
@@ -254,8 +291,24 @@ async def verify_api_key_user(
         logger.warning("invalid_api_key_attempt", key_prefix=api_key[:16] if api_key else None)
         raise HTTPException(status_code=401, detail="Invalid or expired API key")
 
-    user_id, api_key_workspace_id = result
-    return await _build_api_key_user_dict(user_id, api_key_workspace_id, db)
+    # Issue #626: public-bound keys MUST NOT authenticate outside the
+    # /api/v1/public/* attribution flow. Without this gate, a bound key
+    # would inherit the owner's workspace_id via _build_api_key_user_dict
+    # and grant full account access — privilege escalation.
+    if result.bound_context_id is not None:
+        logger.warning(
+            "public_bound_key_rejected_outside_public_endpoint",
+            bound_context_id=str(result.bound_context_id),
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Public-bound API keys cannot authenticate here; "
+                "they are only valid on /api/v1/public/{context_id}/* endpoints"
+            ),
+        )
+
+    return await _build_api_key_user_dict(result.user_id, result.workspace_id, db)
 
 
 async def require_session_auth(
@@ -353,8 +406,22 @@ async def get_user_from_api_key_or_session(
         result = await manager.verify_key(api_key)
 
         if result:
-            user_id, api_key_workspace_id = result
-            return await _build_api_key_user_dict(user_id, api_key_workspace_id, db)
+            # Issue #626: reject public-bound keys here too — same rationale
+            # as verify_api_key_user above. The public endpoint reaches
+            # APIKeyManager.verify_key directly and bypasses this gate.
+            if result.bound_context_id is not None:
+                logger.warning(
+                    "public_bound_key_rejected_outside_public_endpoint",
+                    bound_context_id=str(result.bound_context_id),
+                )
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Public-bound API keys cannot authenticate here; "
+                        "they are only valid on /api/v1/public/{context_id}/* endpoints"
+                    ),
+                )
+            return await _build_api_key_user_dict(result.user_id, result.workspace_id, db)
 
         logger.warning("invalid_api_key_attempt", key_prefix=api_key[:16])
         raise HTTPException(status_code=401, detail="Invalid or expired API key")
