@@ -175,48 +175,23 @@ export async function deleteWorkspaceMemberAPIKeyById(
 }
 
 /**
- * Delete member API key (Permission-based)
+ * Delete member API key by id (Permission-based).
  *
- * @deprecated Backend limitation: This function currently deletes the MOST RECENT API key
- * for the specified user, NOT the key identified by keyId parameter.
- *
- * The keyId parameter is accepted for API compatibility but is currently ignored by the backend.
- * Use with extreme caution - verify which key will be deleted before calling.
- *
- * @param workspaceId - Workspace ID
- * @param userId - Target user ID
- * @param keyId - API key ID (CURRENTLY IGNORED by backend)
- *
- * @todo Once backend implements DELETE /api/v1/workspaces/{workspaceId}/members/{userId}/credentials/api-keys/{keyId}
- * remove the @deprecated tag and update the endpoint URL.
- *
- * @see Issue #XXX - Multiple API Key deletion support
+ * Issue #626: rewritten on top of the per-id DELETE endpoint
+ * (`/credentials/api-keys/{keyId}`) — the legacy singleton DELETE this
+ * function previously wrapped IGNORED its `keyId` arg and deleted the
+ * most-recent active key, which was unsafe for callers that wanted a
+ * specific key. With the backend now exposing per-id deletion (added
+ * in #626), the function is now a thin alias around
+ * ``deleteWorkspaceMemberAPIKeyById`` so existing call sites get
+ * correct behavior without renaming. ``keyId`` is now required.
  */
 export async function deleteWorkspaceMemberAPIKey(
   workspaceId: string,
   userId: string,
-  keyId?: number, // CURRENTLY IGNORED - Backend deletes most recent key
+  keyId: number,
 ): Promise<void> {
-  // WARNING: Backend limitation - keyId is ignored, most recent key is deleted
-  // TODO: Update to /credentials/api-keys/${keyId} when backend supports it
-  const response = await fetch(
-    `${API_BASE}/api/v1/workspaces/${workspaceId}/members/${userId}/credentials/api-key`,
-    {
-      method: "DELETE",
-      credentials: "include",
-    },
-  );
-
-  if (!response.ok) {
-    throw new Error(`Failed to delete API key: ${response.statusText}`);
-  }
-
-  // TODO: Log warning in development if keyId is provided but ignored
-  if (process.env.NODE_ENV === "development" && keyId !== undefined) {
-    console.warn(
-      `deleteWorkspaceMemberAPIKey: keyId=${keyId} provided but ignored. Backend deletes most recent key.`,
-    );
-  }
+  return deleteWorkspaceMemberAPIKeyById(workspaceId, userId, keyId);
 }
 
 /**

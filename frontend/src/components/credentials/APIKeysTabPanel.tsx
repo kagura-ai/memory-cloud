@@ -692,15 +692,14 @@ export function APIKeysTabPanel() {
                     {t("regenerate")}
                   </ActionButton>
 
-                  {/* Issue #626: hide the legacy per-card delete for
-                      public-bound keys — that flow routes through
-                      deleteWorkspaceMemberAPIKey which filters by
-                      workspace_id and would NOT delete a bound key
-                      (workspace_id IS NULL), or worse, would delete a
-                      different workspace-scoped key. Bound keys revoke
-                      via the dedicated trash icon next to the badge
-                      (see line ~555) which calls
-                      deleteWorkspaceMemberAPIKeyById. */}
+                  {/* Issue #626: bound keys use the dedicated trash icon
+                      next to the badge (see line ~555) so the confirmation
+                      copy can name the public-context revocation
+                      specifically. ``deleteWorkspaceMemberAPIKey`` is now
+                      a thin alias around the per-id endpoint (post-#626
+                      both delete paths use ``DELETE /credentials/api-keys/
+                      {keyId}``), so this filter is purely a UX split —
+                      not a safety gate. */}
                   {!apiKey.revoked_at && !apiKey.bound_context_id && (
                     <ActionButton
                       onClick={() => handleDeleteAPIKeyClick(apiKey.id)}

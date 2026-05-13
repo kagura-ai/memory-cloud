@@ -348,7 +348,15 @@ async def create_api_key(
         # member from minting per-key buckets (and an audit-trail footprint)
         # against another member's public context. Workspace owner/admin gets
         # this implicitly by creating their own context to bind.
-        if ctx.created_by is not None and ctx.created_by != user_id:
+        # Strict match: ``created_by == user_id`` only. Legacy contexts with
+        # ``created_by IS NULL`` (pre-#160 backfill survivors) are NOT
+        # eligible — there is no way to prove client-side OR server-side
+        # which workspace member should own a null-created context, so
+        # defaulting-to-permit would let any workspace member mint keys
+        # against it. The owner can resolve by updating the context's
+        # ``created_by`` (via a separate admin action) or by recreating
+        # the context.
+        if ctx.created_by != user_id:
             raise HTTPException(
                 status_code=403,
                 detail=(

@@ -11,7 +11,7 @@ Implements:
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, delete, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import (
@@ -164,13 +164,27 @@ class MemberCredentialsService:
         # Permission check: Can view credentials?
         await self._check_can_view(requester_id, workspace_id, user_id)
 
-        # Get ALL api keys for user + workspace
+        # Get ALL api keys for user + workspace.
+        # Issue #626: public-bound keys have ``workspace_id=NULL`` (mutually
+        # exclusive with the #169 workspace scoping). To surface them in the
+        # credentials UI for the workspace where their bound context lives,
+        # OR in via the ``bound_context_id``'s workspace. Without this OR,
+        # public-bound keys are invisible to ``get_or_create_credentials``
+        # and the entire #626 frontend flow (binding badge, per-id revoke,
+        # one-time-reveal of plaintext) renders nothing.
+        from models.auth import Context as _Context
+
         result = await self.db.execute(
             select(APIKey)
             .where(
                 and_(
                     APIKey.user_id == user_id,
-                    APIKey.workspace_id == workspace_id,
+                    or_(
+                        APIKey.workspace_id == workspace_id,
+                        APIKey.bound_context_id.in_(
+                            select(_Context.id).where(_Context.workspace_id == workspace_id)
+                        ),
+                    ),
                     APIKey.revoked_at.is_(None),
                 )
             )
