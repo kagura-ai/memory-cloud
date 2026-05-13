@@ -196,6 +196,54 @@ async def check_bound_key_rate_limit(key_id: int, limit_per_minute: int) -> None
         logger.error("redis_bound_key_rate_limit_check_failed", error=str(e))
 
 
+async def check_pre_auth_rate_limit(context_id: UUID, limit_per_minute: int = 200) -> None:
+    """Pre-auth rate-limit bucket — protects against invalid-key DB DoS.
+
+    Without this gate, any caller can hammer the public endpoint with
+    ``Authorization: Bearer <random>`` headers: each request reaches
+    ``APIKeyManager.verify_key`` (a SELECT on the unique ``key_hash``
+    index) BEFORE the anonymous shared 50/min bucket is consulted —
+    turning the route into an unauthenticated DB-backed key-verification
+    oracle and amplifying the DB load per attacker-request.
+
+    Strategy: a cheap Redis check keyed on ``context_id`` runs BEFORE
+    ``verify_key``. The default 200/min/context is 4× the anonymous 50/
+    min cap, so legitimate bound-key callers (whose per-key quotas are
+    typically 100/min on PRO) are not the binding constraint — the
+    per-key bucket trips first. Invalid-key spammers, however, get
+    throttled at 200/min total per context regardless of how many
+    distinct keys they cycle through.
+
+    Args:
+        context_id: Target context UUID — bucket scope.
+        limit_per_minute: Pre-auth requests/minute cap (default 200).
+
+    Raises:
+        RateLimitError: If the per-minute bucket is exhausted. Redis
+            errors are logged and swallowed (fail-open).
+    """
+    redis_key = f"public_search_pre_auth:{context_id}:minute"
+    try:
+        current_count = await incrby_counter(redis_key, amount=1, ttl=60)
+        if current_count > limit_per_minute:
+            logger.warning(
+                "public_search_pre_auth_rate_limit_exceeded",
+                context_id=context_id,
+                current=current_count,
+                limit=limit_per_minute,
+            )
+            raise RateLimitError(
+                message=(
+                    f"Pre-auth rate limit exceeded: {current_count}/{limit_per_minute} per minute"
+                ),
+                retry_after=60,
+            )
+    except RateLimitError:
+        raise
+    except Exception as e:
+        logger.error("redis_pre_auth_rate_limit_check_failed", error=str(e))
+
+
 async def _resolve_public_attribution(
     api_key: str | None,
     context_id: UUID,
@@ -323,7 +371,17 @@ async def public_search(
     """
     start_time = utcnow()
 
-    # 1. Resolve optional API-key attribution BEFORE reading context data,
+    # 1a. Pre-auth rate limit when an Authorization header is supplied.
+    # Without this, an attacker could bypass the anonymous 50/min bucket
+    # by sending invalid-key Authorization headers — each request would
+    # reach ``verify_key`` (a DB SELECT) before any rate-limit check,
+    # turning the endpoint into a DB-DoS amplifier and a key-verification
+    # oracle. The cheap Redis check here runs BEFORE ``verify_key`` so
+    # invalid-key floods are bounded.
+    if api_key is not None:
+        await check_pre_auth_rate_limit(context_id)
+
+    # 1b. Resolve optional API-key attribution BEFORE reading context data,
     # so a key bound to a different context cannot leak existence of the
     # URL context via the response shape.
     bound_key = await _resolve_public_attribution(api_key, context_id, db)
@@ -557,7 +615,11 @@ async def get_public_context_info(
                API key is bound to a different context (CWE-639 IDOR)
         - 404: Context not found
     """
-    # Issue #626: IDOR guard runs before context lookup (symmetry with /search).
+    # Issue #626: pre-auth rate limit + IDOR guard run before context
+    # lookup, symmetry with /search. The pre-auth gate protects
+    # ``verify_key`` from invalid-key DB-DoS amplification.
+    if api_key is not None:
+        await check_pre_auth_rate_limit(context_id)
     await _resolve_public_attribution(api_key, context_id, db)
 
     # Get context
