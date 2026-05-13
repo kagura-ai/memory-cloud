@@ -42,6 +42,15 @@ def _make_grant():
     return grant
 
 
+def _make_grant_with_request(client_id="kagura-cli"):
+    """Grant with a mock request/client/GRANT_TYPE attached — for generate_token tests."""
+    grant = _make_grant()
+    grant.request = MagicMock()
+    grant.request.client.client_id = client_id
+    grant.GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+    return grant
+
+
 class TestDeviceAuthorizationGrant:
     def test_query_device_credential_found(self):
         grant = _make_grant()
@@ -133,3 +142,39 @@ class TestDeviceGrantRegistration:
 
         registered_classes = [call.args[0] for call in wrapper.server.register_grant.call_args_list]
         assert DeviceAuthorizationGrant in registered_classes
+
+
+class TestDeviceAuthorizationGrantTokenGeneration:
+    """Without ``generate_token`` Authlib's ``BaseGrant.generate_token`` falls
+    through to ``server.generate_token`` (intentionally unset) and raises
+    ``RuntimeError("No configured token generator")`` on every approved
+    device_code poll.
+    """
+
+    def test_generate_token_returns_oauth2_token_dict(self):
+        grant = _make_grant_with_request()
+        token = grant.generate_token(scope="memory:read")
+
+        assert token["token_type"] == "Bearer"
+        assert "access_token" in token and len(token["access_token"]) > 0
+        assert "refresh_token" in token and len(token["refresh_token"]) > 0
+        assert token["scope"] == "memory:read"
+
+    def test_generate_token_uses_class_token_expires_in_when_none(self):
+        grant = _make_grant_with_request()
+        token = grant.generate_token(scope="memory:read", expires_in=None)
+        assert token["expires_in"] == DeviceAuthorizationGrant.TOKEN_EXPIRES_IN
+        assert token["expires_in"] == 3600
+
+    def test_generate_token_respects_explicit_expires_in(self):
+        grant = _make_grant_with_request()
+        token = grant.generate_token(scope="memory:read", expires_in=42)
+        assert token["expires_in"] == 42
+
+    def test_generate_token_uses_class_grant_type_when_none(self):
+        # GRANT_TYPE fallback path: no exception means _generate_token_with_expiry
+        # accepted the device_code grant_type from the class attribute.
+        grant = _make_grant_with_request()
+        token = grant.generate_token(scope="memory:read")
+        assert token is not None
+        assert "access_token" in token

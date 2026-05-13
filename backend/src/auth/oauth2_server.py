@@ -510,6 +510,25 @@ class DeviceAuthorizationGrant(_DeviceCodeGrant):
     """
 
     TOKEN_ENDPOINT_AUTH_METHODS = _TOKEN_ENDPOINT_AUTH_METHODS
+    TOKEN_EXPIRES_IN = 3600
+
+    def generate_token(
+        self,
+        user=None,
+        scope=None,
+        grant_type=None,
+        expires_in=None,
+        include_refresh_token=True,
+    ) -> dict[str, Any]:
+        # Override required: Authlib's BaseGrant.generate_token delegates to
+        # server.generate_token, which is intentionally unset on the wrapper
+        # (see _register_grants — "Grant methods take precedence").
+        client = self.request.client
+        if expires_in is None:
+            expires_in = self.TOKEN_EXPIRES_IN
+        if grant_type is None:
+            grant_type = self.GRANT_TYPE
+        return _generate_token_with_expiry(grant_type, client, expires_in, scope)
 
     def query_device_credential(self, device_code: str) -> OAuth2DeviceCode | None:
         return (
