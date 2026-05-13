@@ -4,6 +4,10 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 
 ## [Unreleased]
 
+## [v0.16.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.16.0) — 2026-05-13
+
+Pre-1.0 Hardening release: SQLAlchemy 2.0 `Mapped[T]` migration (PR-A/B/C of #370), domain-exception refactor across PermissionService / SystemAdminService / handle_update_context (#401, #603, #604), DCR scope narrowing to exclude `memory:admin` (#608), zero-base-tier defense-in-depth across all `effective_*_limit` paths (#569), CI guards for ORM↔migration drift (#587) and `Mapped[T]` (#370), alembic head merge fix for safe production rollout (#632). 20 issues closed in this milestone.
+
 ### Added
 - **Body sha256 binding on presigned PUT (Phase 1.5)** (#556): `R2Storage.generate_presigned_put` now plumbs the reserved `sha256` through to R2's S3 Object Integrity feature (`ChecksumSHA256` param + `x-amz-checksum-sha256` SigV4 signing). When R2 receives bytes whose actual sha256 differs from the value signed in the URL, it rejects with HTTP 400 BadDigest before the bytes are persisted — closing the per-workspace dedup-poisoning gap that Copilot flagged 4× during PR #551 review of #485 Phase 1. The original `generate_presigned_post` proposal in #556 turned out to be non-viable on R2 (returns HTTP 501 NotImplemented for any presigned POST upload); the live integration test `backend/tests/integration/test_r2_live.py` documents that POST limitation in its module docstring and exercises the working PUT mechanism end-to-end. The integrity gate is wired but **DISABLED by default** via `R2_CHECKSUM_BINDING_ENABLED=false`, because enabling the binding makes the SDK's `x-amz-checksum-sha256` request header **required** (older deployed SDKs without it fail with HTTP 403 SignatureDoesNotMatch). **Rollout sequence for self-hosted operators:**
   1. Deploy this backend release with `R2_CHECKSUM_BINDING_ENABLED=false` (default — no behavior change vs. Phase 1).
