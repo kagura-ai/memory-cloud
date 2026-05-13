@@ -1592,6 +1592,12 @@ def _run_oauth_sync(action: str, request, **kwargs):
 
     Shared helper for ``_handle_authorize_sync`` and ``_handle_token_sync``.
     Creates/closes the session internally so callers don't manage lifecycle.
+
+    Any exception propagates to FastAPI's default handler which returns a
+    plain-text 500 (``Internal Server Error``) — but without a logged
+    traceback we can't see WHERE the failure originated. Log with
+    ``logger.exception(...)`` here so the next intermittent failure leaves
+    a stack trace in api-blue stdout for post-mortem (Issue #635).
     """
     db_session = get_sync_session()
     try:
@@ -1601,6 +1607,7 @@ def _run_oauth_sync(action: str, request, **kwargs):
         return result
     except Exception:
         db_session.rollback()
+        logger.exception("oauth_sync_failed", action=action)
         raise
     finally:
         db_session.close()
