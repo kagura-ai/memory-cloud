@@ -14,15 +14,35 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import search_memories_fulltext, search_memories_qdrant
+from models.llm_call_log import (
+    LLM_CALL_LOG_CALL_TYPES,
+    LLM_CALL_LOG_CALLERS,
+    LLM_CALL_LOG_PAID_BY_VALUES,
+)
 from repositories.config_repository import ContextSearchConfigRepository
 from services.context_routing import resolve_routing_from_config
 from services.embedding_service import EmbeddingService
+from services.llm_call_log_writer import LLMCallLogWriter
 from services.reranker_service import RerankerService
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 SearchMode = Literal["hybrid", "semantic", "keyword"]
+
+# #475 PR-3: pinned literal values for the llm_call_log row this module emits.
+# Module-level singletons with import-time tuple-membership assertions match
+# the pattern in ``services/analysis/orchestrator.py:121-129`` — a future
+# rename in the model's enum tuples turns into an ImportError here instead of
+# a runtime ``ValueError`` on the first recall after deploy. Cheaper than
+# indexing into the tuple (fragile to reorder) or repeating the literal at
+# every future call site (lets the looser convention ossify).
+_RECALL_CALLER = "recall"
+_EMBEDDING_CALL_TYPE = "embedding"
+_PAID_BY_PLATFORM = "platform"
+assert _RECALL_CALLER in LLM_CALL_LOG_CALLERS
+assert _EMBEDDING_CALL_TYPE in LLM_CALL_LOG_CALL_TYPES
+assert _PAID_BY_PLATFORM in LLM_CALL_LOG_PAID_BY_VALUES
 
 
 class SearchService:
@@ -161,9 +181,33 @@ class SearchService:
             logger.debug(
                 "semantic_search_starting", query=normalized_query[:50], fetch_size=fetch_size
             )
-            query_vector = await embed_svc.embed(
+            # #475 PR-3: capture token usage so we can attribute embedding
+            # cost via llm_call_log. ``embed_svc`` may be a context-specific
+            # service returned by ``resolve_routing_from_config`` above
+            # (different model than ``self.embedding_service``) — read
+            # provider/model from it directly so multi-tenant pricing
+            # routes correctly.
+            query_vector, embedding_tokens = await embed_svc.embed_with_usage(
                 normalized_query, user_id, context_id=primary_context_id, workspace_id=workspace_id
             )
+            if embedding_tokens > 0:
+                # Cache hits return 0 tokens and intentionally produce no
+                # llm_call_log row (B1 pin) — the table is "API was
+                # called" event log, not cache analytics. fail_on_error
+                # is False so a writer flake never breaks recall.
+                writer = LLMCallLogWriter(self.db)
+                await writer.record(
+                    caller=_RECALL_CALLER,
+                    call_type=_EMBEDDING_CALL_TYPE,
+                    provider=embed_svc.provider,
+                    model=embed_svc.model,
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    context_id=primary_context_id,
+                    embedding_tokens=embedding_tokens,
+                    paid_by=_PAID_BY_PLATFORM,
+                    fail_on_error=False,
+                )
             semantic_results = await search_memories_qdrant(
                 user_id=user_id,
                 query_vector=query_vector,

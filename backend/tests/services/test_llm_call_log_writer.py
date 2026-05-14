@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
+from structlog.testing import capture_logs
 
 from models.llm_call_log import LLMCallLog
 from services.llm_call_log_writer import LLMCallLogWriter
@@ -515,4 +516,153 @@ class TestRowConstruction:
             model="text-embedding-3-small",
             embedding_tokens=1,
         )
+        mock_db.flush.assert_awaited_once()
+
+
+class TestFailOnErrorSemantics:
+    """#475 PR-3 fail_on_error contract for read-path callers (recall).
+
+    Sleep / admin write-path callers keep the default ``fail_on_error=True``
+    so a missed ledger row surfaces as an exception. Recall pages a writer
+    flake or ``llm_pricing`` outage into a structured warning and a
+    ``None`` return so the user-facing recall response never 500s on
+    observability infrastructure.
+
+    Validation errors (bad enum, missing identity) always raise — see
+    ``test_fail_on_error_false_does_not_suppress_validation`` — because
+    they signal caller-side programming bugs that should not silently
+    hide behind a warning log.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fail_on_error_true_is_default_and_raises_on_flush(
+        self, writer, mock_pricing, mock_db
+    ):
+        """Default behavior unchanged: flush exceptions propagate."""
+        mock_pricing.compute_cost_usd.return_value = 0.0001
+        mock_db.flush.side_effect = RuntimeError("connection reset")
+
+        with pytest.raises(RuntimeError, match="connection reset"):
+            await writer.record(
+                caller="recall",
+                call_type="embedding",
+                provider="openai",
+                model="text-embedding-3-small",
+                user_id="u",
+                workspace_id=uuid4(),
+                context_id=uuid4(),
+                embedding_tokens=100,
+                # fail_on_error not passed — uses True default
+            )
+
+    @pytest.mark.asyncio
+    async def test_fail_on_error_false_swallows_flush_and_returns_none(
+        self, writer, mock_pricing, mock_db
+    ):
+        """Read-path opt-in: flush failure → warn log + None return."""
+        mock_pricing.compute_cost_usd.return_value = 0.0001
+        mock_db.flush.side_effect = RuntimeError("connection reset")
+
+        with capture_logs() as captured:
+            result = await writer.record(
+                caller="recall",
+                call_type="embedding",
+                provider="openai",
+                model="text-embedding-3-small",
+                user_id="u",
+                workspace_id=uuid4(),
+                context_id=uuid4(),
+                embedding_tokens=100,
+                fail_on_error=False,
+            )
+
+        assert result is None
+        warn_events = [e for e in captured if e.get("event") == "llm_call_log_write_failed"]
+        assert len(warn_events) == 1
+        ev = warn_events[0]
+        assert ev["caller"] == "recall"
+        assert ev["call_type"] == "embedding"
+        assert ev["provider"] == "openai"
+        assert ev["model"] == "text-embedding-3-small"
+        assert ev["error_type"] == "RuntimeError"
+        # Credential-handling rule: str(exc) must never leak into the log
+        # event (memory d5d09cd9). Verify no field carries the message.
+        assert all("connection reset" not in str(v) for v in ev.values())
+
+    @pytest.mark.asyncio
+    async def test_fail_on_error_false_swallows_pricing_exception(
+        self, writer, mock_pricing, mock_db
+    ):
+        """Pricing-service DB flake (not a clean miss) → warn + None."""
+        mock_pricing.compute_cost_usd.side_effect = RuntimeError("pricing db timeout")
+
+        with capture_logs() as captured:
+            result = await writer.record(
+                caller="recall",
+                call_type="embedding",
+                provider="openai",
+                model="text-embedding-3-small",
+                user_id="u",
+                workspace_id=uuid4(),
+                context_id=uuid4(),
+                embedding_tokens=100,
+                fail_on_error=False,
+            )
+
+        assert result is None
+        # The flush never happens because pricing raised first.
+        mock_db.flush.assert_not_awaited()
+        warn_events = [e for e in captured if e.get("event") == "llm_call_log_write_failed"]
+        assert len(warn_events) == 1
+        assert warn_events[0]["error_type"] == "RuntimeError"
+
+    @pytest.mark.asyncio
+    async def test_fail_on_error_false_does_not_suppress_validation(self, writer):
+        """ValueError from validation always raises — it's a caller bug.
+
+        The fail-open contract only catches infrastructure failures
+        (pricing DB lookups, flush). Hiding an invalid ``caller`` /
+        ``call_type`` / identity mismatch behind a warning log would
+        let a deploy-time wiring bug rot in production undetected.
+        """
+        # Missing user_id for caller='recall' (full-identity required).
+        with pytest.raises(ValueError, match="missing.*user_id"):
+            await writer.record(
+                caller="recall",
+                call_type="embedding",
+                provider="openai",
+                model="text-embedding-3-small",
+                # no user_id / workspace_id / context_id
+                embedding_tokens=100,
+                fail_on_error=False,  # still raises
+            )
+
+    @pytest.mark.asyncio
+    async def test_fail_on_error_false_happy_path_returns_row_no_warning(
+        self, writer, mock_pricing, mock_db
+    ):
+        """Successful write under fail_on_error=False behaves identically.
+
+        No warning, returns the row (not None), pricing/flush still ran.
+        """
+        mock_pricing.compute_cost_usd.return_value = 0.0001
+
+        with capture_logs() as captured:
+            result = await writer.record(
+                caller="recall",
+                call_type="embedding",
+                provider="openai",
+                model="text-embedding-3-small",
+                user_id="u",
+                workspace_id=uuid4(),
+                context_id=uuid4(),
+                embedding_tokens=512,
+                fail_on_error=False,
+            )
+
+        assert result is not None
+        assert isinstance(result, LLMCallLog)
+        assert result.embedding_tokens == 512
+        warn_events = [e for e in captured if e.get("event") == "llm_call_log_write_failed"]
+        assert warn_events == []
         mock_db.flush.assert_awaited_once()

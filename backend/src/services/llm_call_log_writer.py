@@ -13,9 +13,14 @@ Design contract (mirrors ``services/sleep/reporter.py:SleepReporter``):
 - ``record()`` performs ``self.db.add(row)`` + ``await self.db.flush()``
   so the caller can read back ``row.id`` immediately. ``commit()`` is
   the orchestrator's responsibility.
-- Errors propagate to the caller (no swallow). The recall-path call
-  site decides whether a writer failure should degrade silently — the
-  writer never makes that policy call.
+- Errors propagate to the caller by default. Read-path call sites pass
+  ``fail_on_error=False`` to opt into fail-open semantics: pricing /
+  flush failures are caught, a structured ``llm_call_log_write_failed``
+  warning is emitted, and ``record()`` returns ``None`` instead of
+  raising. Validation errors (invalid caller / call_type / identity
+  matrix) still raise unconditionally — those signal a caller-side
+  programming bug and must surface, not be swallowed (#475 PR-3
+  operator-pinned decision, 2026-05-14).
 
 Cost computation is **write-time snapshot**: for each non-None positive
 usage column, ``LLMPricingService.compute_cost_usd`` is called with
@@ -172,18 +177,40 @@ class LLMCallLogWriter:
         rerank_search_units: int | None = None,
         paid_by: str = "platform",
         call_metadata: dict[str, Any] | None = None,
-    ) -> LLMCallLog:
+        fail_on_error: bool = True,
+    ) -> LLMCallLog | None:
         """Insert one llm_call_log row with a write-time cost snapshot.
 
         Returns the inserted ``LLMCallLog`` (post-flush, so ``id`` is
         populated). The caller is responsible for the surrounding
-        transaction lifecycle.
+        transaction lifecycle. When ``fail_on_error=False``, returns
+        ``None`` instead of raising if the pricing lookup or DB flush
+        fails — used by read-path callers (recall) where cost-tracking
+        loss must not break the user-facing request.
+
+        Args:
+            fail_on_error: When ``True`` (default), pricing / flush
+                exceptions propagate — used by write-path callers
+                (Sleep emitters, admin actions) where a missed ledger
+                row is itself a failure. When ``False``, those
+                exceptions are caught, a structured
+                ``llm_call_log_write_failed`` warning is emitted with
+                ``caller`` / ``call_type`` / ``provider`` / ``model``
+                / ``error_type`` (never ``str(exc)`` — credential leak
+                guard), and the method returns ``None``. Validation
+                errors (bad enum, missing identity columns for the
+                caller) always raise regardless: they signal a
+                programming bug in the caller and would mask future
+                regressions if swallowed (#475 PR-3, 2026-05-14).
 
         Raises:
             ValueError: ``caller`` / ``call_type`` / ``paid_by`` is
                 outside its allowed set, OR ``caller`` is in
                 ``_FORBIDDEN_CALLERS`` (today: 'sleep'), OR the
-                nullability matrix is violated for the chosen caller.
+                nullability matrix is violated for the chosen caller,
+                OR a usage axis is populated outside its ``call_type``
+                allowlist, OR a usage value is negative. Always raised
+                regardless of ``fail_on_error`` — see Args.
         """
         self._validate_inputs(
             caller=caller,
@@ -259,55 +286,78 @@ class LLMCallLogWriter:
                 f"(rerank_tokens, rerank_search_units); got {populated_repr}"
             )
 
-        cost_usd, pricing_miss = await self._compute_cost_usd(
-            provider=provider,
-            model=model,
-            occurred_at=resolved_occurred_at,
-            usage_pairs=usage_pairs,
-        )
-
-        final_metadata: dict[str, Any] | None = dict(call_metadata) if call_metadata else None
-        if pricing_miss:
-            final_metadata = final_metadata or {}
-            final_metadata["pricing_miss"] = True
-            # Pricing misses are expected (newly-deployed model before
-            # its seed row lands; exotic provider). The signal is
-            # already carried on the row via ``call_metadata.pricing_miss``
-            # and surfaced in dashboards; logging at debug matches
-            # ``LLMPricingService.lookup()`` (the lower-level "no row"
-            # path) and avoids alert fatigue on a recall hot path
-            # (Copilot loop 4 #2).
-            logger.debug(
-                "llm_call_log_pricing_miss",
-                caller=caller,
+        # Pricing lookup + flush are the only async / IO-touching parts
+        # below validation. Read-path callers (recall) pass
+        # ``fail_on_error=False`` so a DB flake or ``llm_pricing`` outage
+        # never propagates into the user-facing recall response —
+        # observability loss is preferable to a recall 500. Validation
+        # above always raises; ``CancelledError`` is a ``BaseException``
+        # subclass so ``except Exception`` deliberately lets it through.
+        try:
+            cost_usd, pricing_miss = await self._compute_cost_usd(
                 provider=provider,
                 model=model,
-                call_type=call_type,
+                occurred_at=resolved_occurred_at,
+                usage_pairs=usage_pairs,
             )
 
-        row = LLMCallLog(
-            occurred_at=resolved_occurred_at,
-            user_id=user_id,
-            workspace_id=_coerce_uuid(workspace_id),
-            context_id=_coerce_uuid(context_id),
-            caller=caller,
-            call_type=call_type,
-            provider=provider,
-            model=model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cached_input_tokens=cached_input_tokens,
-            cache_write_tokens=cache_write_tokens,
-            embedding_tokens=embedding_tokens,
-            rerank_tokens=rerank_tokens,
-            rerank_search_units=rerank_search_units,
-            cost_usd=cost_usd,
-            paid_by=paid_by,
-            call_metadata=final_metadata,
-        )
-        self.db.add(row)
-        await self.db.flush()
-        return row
+            final_metadata: dict[str, Any] | None = dict(call_metadata) if call_metadata else None
+            if pricing_miss:
+                final_metadata = final_metadata or {}
+                final_metadata["pricing_miss"] = True
+                # Pricing misses are expected (newly-deployed model before
+                # its seed row lands; exotic provider). The signal is
+                # already carried on the row via ``call_metadata.pricing_miss``
+                # and surfaced in dashboards; logging at debug matches
+                # ``LLMPricingService.lookup()`` (the lower-level "no row"
+                # path) and avoids alert fatigue on a recall hot path
+                # (Copilot loop 4 #2).
+                logger.debug(
+                    "llm_call_log_pricing_miss",
+                    caller=caller,
+                    provider=provider,
+                    model=model,
+                    call_type=call_type,
+                )
+
+            row = LLMCallLog(
+                occurred_at=resolved_occurred_at,
+                user_id=user_id,
+                workspace_id=_coerce_uuid(workspace_id),
+                context_id=_coerce_uuid(context_id),
+                caller=caller,
+                call_type=call_type,
+                provider=provider,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=cached_input_tokens,
+                cache_write_tokens=cache_write_tokens,
+                embedding_tokens=embedding_tokens,
+                rerank_tokens=rerank_tokens,
+                rerank_search_units=rerank_search_units,
+                cost_usd=cost_usd,
+                paid_by=paid_by,
+                call_metadata=final_metadata,
+            )
+            self.db.add(row)
+            await self.db.flush()
+            return row
+        except Exception as exc:
+            if fail_on_error:
+                raise
+            # Structured-only — ``str(exc)`` can echo request bodies /
+            # credentials from upstream SDKs and is forbidden in this
+            # codebase's logging convention (memory ``d5d09cd9``).
+            logger.warning(
+                "llm_call_log_write_failed",
+                caller=caller,
+                call_type=call_type,
+                provider=provider,
+                model=model,
+                error_type=type(exc).__name__,
+            )
+            return None
 
     @staticmethod
     def _validate_inputs(
