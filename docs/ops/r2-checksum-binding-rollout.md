@@ -325,11 +325,16 @@ self-hosted 側の operator override は upstream からは観測不能なため
 
 flag 削除 PR が触る箇所 (将来のリファレンス):
 
-- `backend/src/config/settings.py` — `r2_checksum_binding_enabled` Field を削除。
+- `backend/src/config/settings.py` — `r2_checksum_binding_enabled` Field を削除 (`r2_checksum_binding_enabled` の docstring + §10 への crosslink もあわせて整理)。
 - `backend/src/storage/r2.py:136-137` — `if self._enable_checksum_binding:` 分岐を削除し、`ChecksumSHA256` を常時 params に付ける。
-- `backend/src/storage/r2.py` — `R2Storage.__init__` の関連 kwarg / instance attribute を削除。
+- `backend/src/storage/r2.py` — `R2Storage.__init__` の `enable_checksum_binding` kwarg と `self._enable_checksum_binding` instance attribute を削除。
+- `backend/src/storage/factory.py:56-62` — `R2Storage(enable_checksum_binding=settings.r2_checksum_binding_enabled, ...)` の呼び出しから当該 kwarg を削除。
+- `backend/src/services/file_storage_service.py:350` あたり — docstring 内の `r2_checksum_binding_enabled` 言及 (defense-in-depth コメント) を、flag が無くなった前提に書き直す。
 - `backend/tests/storage/test_r2.py::TestGeneratePresignedPutChecksumBinding` — flag OFF ケースのテスト削除、ON 経路だけを残して "binding always-on" を表す名前に rename。
+- `backend/tests/storage/test_factory.py` — factory が `enable_checksum_binding` kwarg を thread していることを assert しているテスト (`test_checksum_binding_flag_wires_through_to_r2_storage` 等) を、binding が常時有効である前提のテストに書き換え。
 - 本 runbook §1-§9 / 本 §10 自身 / CHANGELOG の §556 rollout sequence — flag が無くなった旨を 1 セクション追加して、過去経緯としてアーカイブ。
+
+> ℹ️ 上記は **想定される主要 touch point** のリスト。flag 削除 PR の最終 scope は、PR を開く時点で `grep -rln "R2_CHECKSUM_BINDING_ENABLED\|r2_checksum_binding_enabled\|enable_checksum_binding" backend/ docs/` の結果に従って確定する (リストにない箇所がヒットしたらこの §10.3 にもフィードバックする)。
 
 > 💡 flag 削除と同時にやらない方が良い変更: SDK 側の `MIN_SERVER_VERSION` bump。flag 削除後に古い SDK が走ると `HTTP 403 SignatureDoesNotMatch` で失敗するが、これは flag 削除直前 (default-true 期間中) と同じ振る舞いで、新規の壊れ方ではない。SDK 側の minimum version 強制は別 issue で管理する (kagura-memory-python-sdk 側の `MIN_SERVER_VERSION` バンプポリシー参照)。
 
