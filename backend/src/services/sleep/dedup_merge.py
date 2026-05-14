@@ -110,6 +110,10 @@ class DedupMergePhase:
         self.edge_repo = NeuralEdgeRepository(db)
         self.embedding_service = EmbeddingService(db, model=embedding_model)
         self.collection_name = collection_name
+        # #475: embedding cost-grade accumulators (init here so
+        # ``_find_similar_pairs`` can be unit-tested without execute()).
+        self._embedding_calls_used: int = 0
+        self._embedding_tokens_used: int = 0
 
     async def execute(
         self,
@@ -139,6 +143,9 @@ class DedupMergePhase:
         self._tokens_used = 0
         # #471: per-(provider, model) accumulator (lazy-init).
         self._llm_breakdown: LLMCallBreakdown | None = None
+        # #475: reset embedding accumulators between sleep cycles.
+        self._embedding_calls_used = 0
+        self._embedding_tokens_used = 0
 
         if not config.sleep_dedup_enabled:
             result.skipped = True
@@ -247,6 +254,13 @@ class DedupMergePhase:
         # #471: attach per-(provider, model) breakdown for child-row write.
         if self._llm_breakdown is not None:
             result.llm_breakdown = [self._llm_breakdown]
+        # #475: surface embedding usage; skip identity when no calls
+        # happened so no-memory early-returns don't fabricate it.
+        result.embedding_calls_used = self._embedding_calls_used
+        result.embedding_tokens = self._embedding_tokens_used
+        if self._embedding_calls_used > 0:
+            result.embedding_provider = self.embedding_service.provider
+            result.embedding_model = self.embedding_service.model
 
         logger.info(
             "dedup_merge_phase_completed",
@@ -301,13 +315,14 @@ class DedupMergePhase:
 
         for memory in memories:
             try:
-                # Get embedding for this memory's summary
-                vector = await self.embedding_service.embed(
+                vector, tokens = await self.embedding_service.embed_with_usage(
                     memory.summary,
                     user_id=user_id,
                     context_id=context_id,
                     workspace_id=workspace_id,
                 )
+                self._embedding_calls_used += 1
+                self._embedding_tokens_used += tokens
 
                 results = await search_memories_qdrant(
                     user_id=user_id,

@@ -356,6 +356,10 @@ class SleepReporter:
                     }
                     for b in result.llm_breakdown
                 ],
+                # #475: per-phase embedding usage (audit trail in JSONB
+                # blob, no sleep_report_llm_usage schema change).
+                "embedding_calls": result.embedding_calls_used,
+                "embedding_tokens": result.embedding_tokens,
             }
 
             if result.phase_name == "edge_discovery":

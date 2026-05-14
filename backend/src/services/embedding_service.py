@@ -229,8 +229,11 @@ class EmbeddingService:
 
         Thin wrapper around ``embed_with_usage()`` that discards the
         token count — kept for callers that don't need cost attribution
-        (recall, search). Issue #475 will migrate the remaining callers
-        to ``embed_with_usage()`` directly.
+        (recall path, ``resource_indexer``). Sleep phases 1/2/reindex
+        all use ``embed_with_usage`` directly post-#475 PR-1; the recall
+        path is the next migration target (#475 PR-3, gated on the #474
+        event-store schema). ``resource_indexer.py``'s migration is a
+        separate concern tracked outside #475.
 
         Args:
             text: Text to embed (summary)
@@ -269,9 +272,11 @@ class EmbeddingService:
 
         This is an additive companion to ``embed()`` rather than a
         breaking signature change — ``embed()`` keeps working for callers
-        that don't track cost (recall path, search service). #475 will
-        migrate the remaining callers as part of the
-        full-pipeline embedding-cost rollout.
+        that don't track cost (recall path, ``resource_indexer``). All
+        three sleep phases (edge_discovery, dedup_merge, reindex) use
+        ``embed_with_usage`` directly post-#475 PR-1. The recall path
+        migration is deferred to #475 PR-3 (blocked on the event-store
+        schema in #474).
 
         Args:
             text: Text to embed.

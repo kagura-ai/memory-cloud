@@ -363,6 +363,10 @@ class EdgeDiscoveryPhase:
         # initialized on the first LLM call so we don't fabricate empty
         # rows for runs that early-return before any LLM use.
         self._llm_breakdown: LLMCallBreakdown | None = None
+        # #475: embedding cost-grade accumulators (cache hits count as
+        # a call, tokens=0 — see ``embed_with_usage`` docstring).
+        self._embedding_calls_used: int = 0
+        self._embedding_tokens_used: int = 0
 
     async def execute(
         self,
@@ -380,6 +384,8 @@ class EdgeDiscoveryPhase:
         llm_calls_before = budget.llm_calls_used
         self._tokens_used = 0
         self._llm_breakdown = None
+        self._embedding_calls_used = 0
+        self._embedding_tokens_used = 0
 
         if not config.sleep_edge_discovery_enabled:
             result.skipped = True
@@ -521,6 +527,13 @@ class EdgeDiscoveryPhase:
         # #471: attach per-(provider, model) breakdown for child-row write.
         if self._llm_breakdown is not None:
             result.llm_breakdown = [self._llm_breakdown]
+        # #475: surface embedding usage; skip identity when no calls
+        # happened so no-memory early-returns don't fabricate it.
+        result.embedding_calls_used = self._embedding_calls_used
+        result.embedding_tokens = self._embedding_tokens_used
+        if self._embedding_calls_used > 0:
+            result.embedding_provider = self.embedding_service.provider
+            result.embedding_model = self.embedding_service.model
         result.details = {
             "sampled": len(sampled),
             "candidates": len(candidates),
@@ -605,12 +618,14 @@ class EdgeDiscoveryPhase:
 
         for memory in memories:
             try:
-                vector = await self.embedding_service.embed(
+                vector, tokens = await self.embedding_service.embed_with_usage(
                     memory.summary,
                     user_id=user_id,
                     context_id=context_id,
                     workspace_id=workspace_id,
                 )
+                self._embedding_calls_used += 1
+                self._embedding_tokens_used += tokens
 
                 results = await search_memories_qdrant(
                     user_id=user_id,
