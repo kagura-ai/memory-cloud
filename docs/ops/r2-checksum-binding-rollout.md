@@ -301,15 +301,16 @@ curl -s https://pypi.org/pypi/kagura-memory-python-sdk/json \
 
 | Surface | Entry point | SDK 分布の観測手段 |
 |---|---|---|
-| REST | `POST /api/v1/files/reserve` (`backend/src/api/routes/files.py`) | §4.2 の structlog grep が現状の手段。SQL 化は §9 Future Work #1 で予定。 |
-| MCP | `init_file_upload` tool (`backend/src/mcp_server/tools/files.py:handle_init_file_upload`) → 内部で `FileStorageService.reserve_upload` を呼ぶ | **現状 grep 可能な経路なし**。`handle_init_file_upload` は per-tool な User-Agent / SDK version を log / audit に出していない (transport 層も同様)。下記の *MCP 前提条件* を満たすまで §10.1 [B] の MCP 部分は判定不能。 |
+| REST | `POST /api/v1/files/reserve` (`backend/src/api/routes/files.py`) | **現状 grep 可能な経路なし**。route handler は `Request` を取らず、`RequestLoggingMiddleware` (`backend/src/api/middleware/request_logger.py`) は endpoint / method / status / latency / user_id / workspace_id のみ usage_stats に書き込み、`User-Agent` は捨てている。§4.2 の grep recipe (`jq -r '.user_agent'`) は対応する structlog field が存在しないため空振りする。下記の *User-Agent capture 前提条件* を満たすまで §10.1 [B] の REST 部分は判定不能。 |
+| MCP | `init_file_upload` tool (`backend/src/mcp_server/tools/files.py:handle_init_file_upload`) → 内部で `FileStorageService.reserve_upload` を呼ぶ | **現状 grep 可能な経路なし**。`handle_init_file_upload` は per-tool な `User-Agent` / SDK version を log / audit に出していない (transport 層も同様)。同じく下記の *User-Agent capture 前提条件* を満たすまで判定不能。 |
 
-**MCP 前提条件 (§10.1 [B] を MCP に拡張するために先に解決が必要)**:
+**User-Agent capture 前提条件 (§10.1 [B] 全体のブロッカー、両 surface 共通)**:
 
-1. MCP transport または `handle_init_file_upload` で SDK の `User-Agent` (またはそれに準じる client identifier) を structlog / audit_logs に capture する。実装場所候補は §9 Future Work #1 を MCP 側にも拡張する形。
-2. capture が始まった後、REST 側と同じ grep / SQL の手順で MCP の SDK 分布を取得できるようにする。
+1. REST 側: `backend/src/api/routes/files.py:reserve_upload` ハンドラまたは `RequestLoggingMiddleware` に `request.headers.get("user-agent")` の capture を追加し、structlog または audit_logs / usage_stats に保存する (§9 Future Work #1 の作業内容)。
+2. MCP 側: MCP transport または `handle_init_file_upload` で SDK の `User-Agent` (またはそれに準じる client identifier) を同等の場所に capture する (§9 #1 を MCP に拡張する形)。
+3. 両 capture が稼働してから 7 日以上の観測 window を確保してから §10.1 [B] を評価する。
 
-**MCP 前提条件が未達のとき**: §10.1 [B] は REST traffic のみで暫定判定する。ただし `memory.kagura-ai.com` の MCP 経由 upload 量が hosted observability で **量的に無視できる規模** (例: 過去 7 日の `file_objects` 行のうち MCP 経由が < 5%) でない限り、MCP 前提条件を先に潰すこと。MCP 経由の active client が古い SDK だと flip 直後に `SignatureDoesNotMatch` で全滅するため、observability ギャップ込みで flip を判断するのは避ける。
+**前提条件未達のあいだ**: §10.1 [B] の hosted telemetry signal は **取得不能 = 評価できない** とみなす。代替として `file_objects` 行数の推移と SDK release への inbound bug-report (§10.1 [C]) を併用するが、§10.1 [B] が緑だと宣言する根拠にはしない。`memory.kagura-ai.com` の MCP/REST 経由の active client が古い SDK だと flip 直後に `SignatureDoesNotMatch` で全滅するため、observability ギャップ込みで flip を判断するのは避ける。**User-Agent capture の実装を §10.1 [B] のクリティカルパス上に置く** ことが推奨。
 
 > **`file_objects=0` の期間中はこの check を skip 可** (該当 traffic がそもそも存在しないため判定不能)。`memory.kagura-ai.com` は 2026-05-09 時点で `file_objects=0` を観測していた — SDK FilesClient (v0.14.0) は 2026-05-11 に ship 済みなので、現時点の `file_objects` 行数は production で再確認すること。
 
@@ -325,7 +326,7 @@ self-hosted の SDK 分布は upstream からは観測不能なため、release-
 | 軸 | 観測対象 | 観測手段 | 観測タイミング |
 |---|---|---|---|
 | [A] | release tag + 公開日付 | `gh release view` / PyPI JSON `/pypi/<pkg>/json` / PyPI web UI (上記推奨) | flip PR を開く前 |
-| [B] | hosted の SDK 分布 (REST + MCP 両 surface) | REST: structlog grep (§4.2)。MCP: 上記 *MCP 前提条件* を満たした後の同等の手順 | flip PR を開く前の 7 日 window |
+| [B] | hosted の SDK 分布 (REST + MCP 両 surface) | 上記 *User-Agent capture 前提条件* を REST / MCP 両方で満たした後、§4.2 ライクな grep / SQL を実装 (現状未稼働) | 前提条件 deploy 後 7 日 window 経過してから |
 | [C] | self-hosted の error 報告 | GitHub / Slack inbound | flip PR を開く前の 1 release window |
 
 ### 10.2 Flag removal criteria (acceptance #3 trigger)
