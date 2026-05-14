@@ -147,6 +147,87 @@ class TestInputValidation:
                 input_tokens=-1,
             )
 
+    @pytest.mark.asyncio
+    async def test_completion_rejects_embedding_tokens(self, writer):
+        """call_type='completion' must not populate embedding_tokens.
+
+        Without this guard a caller could write a completion row with
+        only embedding_tokens populated, resulting in cost_usd=0 (the
+        pricing lookup uses unit_type='embedding_tokens' which has no
+        rows for the completion model). The row would land silently
+        under-counted and undetectable in dashboards.
+        """
+        with pytest.raises(
+            ValueError, match=r"call_type='completion' does not allow embedding_tokens"
+        ):
+            await writer.record(
+                caller="admin",
+                call_type="completion",
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+                embedding_tokens=100,
+            )
+
+    @pytest.mark.asyncio
+    async def test_embedding_rejects_input_tokens(self, writer):
+        """call_type='embedding' must not populate input_tokens."""
+        with pytest.raises(ValueError, match=r"call_type='embedding' does not allow input_tokens"):
+            await writer.record(
+                caller="admin",
+                call_type="embedding",
+                provider="openai",
+                model="text-embedding-3-small",
+                input_tokens=100,
+            )
+
+    @pytest.mark.asyncio
+    async def test_rerank_rejects_both_token_axes(self, writer):
+        """call_type='rerank' must populate exactly one of rerank_tokens / rerank_search_units.
+
+        Voyage uses rerank_tokens, Cohere uses rerank_search_units. Both
+        populated indicates a writer-side bug — the caller can't be both
+        providers at once.
+        """
+        with pytest.raises(ValueError, match=r"call_type='rerank' must populate exactly one"):
+            await writer.record(
+                caller="admin",
+                call_type="rerank",
+                provider="voyage",
+                model="rerank-2",
+                rerank_tokens=100,
+                rerank_search_units=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_rerank_accepts_voyage_tokens(self, writer, mock_pricing, mock_db):
+        """rerank with rerank_tokens only (Voyage) is allowed."""
+        mock_pricing.compute_cost_usd.return_value = 0.000005
+        await writer.record(
+            caller="admin",
+            call_type="rerank",
+            provider="voyage",
+            model="rerank-2",
+            rerank_tokens=100,
+        )
+        row = _added_row(mock_db)
+        assert row.rerank_tokens == 100
+        assert row.rerank_search_units is None
+
+    @pytest.mark.asyncio
+    async def test_rerank_accepts_cohere_search_units(self, writer, mock_pricing, mock_db):
+        """rerank with rerank_search_units only (Cohere) is allowed."""
+        mock_pricing.compute_cost_usd.return_value = 0.002
+        await writer.record(
+            caller="admin",
+            call_type="rerank",
+            provider="cohere",
+            model="rerank-3.5",
+            rerank_search_units=1,
+        )
+        row = _added_row(mock_db)
+        assert row.rerank_search_units == 1
+        assert row.rerank_tokens is None
+
 
 class TestCostComputation:
     """Write-time cost snapshot, single and multi-axis."""

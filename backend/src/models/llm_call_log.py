@@ -95,6 +95,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -208,22 +209,26 @@ class LLMCallLog(Base):
     # Both ``default=`` and ``server_default=`` declared so the value is
     # populated on ORM-constructed rows (Python-side) and the schema
     # carries a DDL DEFAULT clause matching the migration (catches drift
-    # between model and migration in ``test_schema_drift.py``).
+    # between model and migration in ``test_schema_drift.py``). The
+    # ``text(...)`` form is the canonical pattern for ``server_default``
+    # in this codebase (see ``SleepReport.source`` / ``SleepReport.paid_by``)
+    # so the rendered DDL byte-for-byte matches the alembic migration.
     cost_usd: Mapped[Decimal] = mapped_column(
         Numeric(12, 6),
         nullable=False,
         default=Decimal("0"),
-        server_default="0",
+        server_default=text("0"),
     )
 
     # 'platform' = kagura-managed billing path. 'byok' = user-supplied
     # API key (no kagura billing on this row, but still useful for
-    # operational cost telemetry). Mirrors ``sleep_reports.paid_by``.
+    # operational cost telemetry). Mirrors ``sleep_reports.paid_by``
+    # including the ``text("'platform'")`` server_default form.
     paid_by: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
         default="platform",
-        server_default="platform",
+        server_default=text("'platform'"),
     )
 
     # Free-form audit JSON. Allowed keys (writer convention, not

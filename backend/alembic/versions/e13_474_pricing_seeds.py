@@ -105,60 +105,69 @@ def _insert_pricing_row(
 
 
 def upgrade() -> None:
-    """Seed Voyage rerank + Cohere rerank/embed rows for 2026-04-28."""
-    # Voyage rerank — token-based, per 1M tokens.
-    _insert_pricing_row(
-        provider="voyage",
-        model="rerank-2",
-        unit_type="rerank_tokens",
-        price_per_unit="0.05",
-        unit_denominator=1_000_000,
-    )
-    _insert_pricing_row(
-        provider="voyage",
-        model="rerank-2-lite",
-        unit_type="rerank_tokens",
-        price_per_unit="0.02",
-        unit_denominator=1_000_000,
-    )
+    """Seed Voyage rerank + Cohere rerank/embed rows for 2026-04-28.
 
-    # Cohere rerank — billed per "search unit" at $2.00 per 1k SU.
-    # unit_denominator=1000 puts it on the same row shape as the
-    # token-based rows; the cost formula uses unit_denominator as the
-    # divisor uniformly.
-    _insert_pricing_row(
-        provider="cohere",
-        model="rerank-3.5",
-        unit_type="rerank_search_units",
-        price_per_unit="2.00",
-        unit_denominator=1_000,
-    )
+    Iterates ``_SEED_ROWS`` so the upgrade and downgrade stay locked to
+    the same authoritative list. Rate semantics:
 
-    # Cohere embedding — token-based, per 1M tokens. Aligns with the
-    # OpenAI embedding rows c03 seeded ($0.02-0.13 / 1M).
-    _insert_pricing_row(
-        provider="cohere",
-        model="embed-multilingual-v3",
-        unit_type="embedding_tokens",
-        price_per_unit="0.10",
-        unit_denominator=1_000_000,
-    )
+    - Voyage rerank-2 / rerank-2-lite: token-based, per 1M tokens.
+    - Cohere rerank-3.5: per "search unit", $2.00 per 1k SU
+      (``unit_denominator=1_000`` puts it on the same row shape as the
+      token-based rows; the cost formula uses ``unit_denominator`` as
+      the divisor uniformly).
+    - Cohere embed-multilingual-v3: token-based, per 1M tokens (aligns
+      with the OpenAI embedding rows c03 seeded).
+    """
+    for provider, model, unit_type, price_per_unit, unit_denominator in _SEED_ROWS:
+        _insert_pricing_row(
+            provider=provider,
+            model=model,
+            unit_type=unit_type,
+            price_per_unit=price_per_unit,
+            unit_denominator=unit_denominator,
+        )
+
+
+_DELETE_PRICING_SQL = sa.text("""
+    DELETE FROM llm_pricing
+    WHERE provider = :provider
+      AND model = :model
+      AND unit_type = :unit_type
+      AND effective_from = :effective_from
+""")
+
+
+# Authoritative list of the exact (provider, model, unit_type) tuples
+# this migration inserts. ``upgrade()`` and ``downgrade()`` both iterate
+# this so the two stay locked together — a future contributor who adds
+# a fifth seed row only edits one place.
+_SEED_ROWS: tuple[tuple[str, str, str, str, int], ...] = (
+    # (provider, model, unit_type, price_per_unit, unit_denominator)
+    ("voyage", "rerank-2", "rerank_tokens", "0.05", 1_000_000),
+    ("voyage", "rerank-2-lite", "rerank_tokens", "0.02", 1_000_000),
+    ("cohere", "rerank-3.5", "rerank_search_units", "2.00", 1_000),
+    ("cohere", "embed-multilingual-v3", "embedding_tokens", "0.10", 1_000_000),
+)
 
 
 def downgrade() -> None:
-    """Remove only the seed rows added by this migration.
+    """Remove only the seed rows this migration inserted.
 
-    Targets ``(effective_from, provider)`` so a future price correction
-    INSERTed with a later ``effective_from`` survives a partial rollback,
-    and so the c03 seeds (same effective_from, different providers) are
-    not collateral damage.
+    Targets each row by its exact ``(provider, model, unit_type,
+    effective_from)`` tuple, so a future price correction INSERTed with
+    a later ``effective_from`` AND any unrelated row added by a future
+    migration at the same ``effective_from`` (e.g., a new Voyage / Cohere
+    model rate that shares 2026-04-28 as its snapshot) survives a partial
+    rollback. The previous "WHERE provider IN ('voyage', 'cohere') AND
+    effective_from = ..." form was wider than the migration's actual
+    insertions.
     """
-    op.execute(
-        sa.text(
-            "DELETE FROM llm_pricing "
-            "WHERE effective_from = :effective_from "
-            "AND provider IN ('voyage', 'cohere')"
-        ).bindparams(
-            effective_from=_SEED_EFFECTIVE_FROM,
+    for provider, model, unit_type, _price, _denom in _SEED_ROWS:
+        op.execute(
+            _DELETE_PRICING_SQL.bindparams(
+                provider=provider,
+                model=model,
+                unit_type=unit_type,
+                effective_from=_SEED_EFFECTIVE_FROM,
+            )
         )
-    )

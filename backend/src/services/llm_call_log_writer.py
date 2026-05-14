@@ -85,6 +85,21 @@ _USAGE_TO_UNIT_TYPE: dict[str, str] = {
     "rerank_search_units": "rerank_search_units",
 }
 
+# Per ``call_type``, which usage axes are semantically allowed. The
+# model docstring (``models/llm_call_log.py:187-194``) declares this
+# contract — the writer enforces it here so a caller cannot mix
+# axes across call_types (e.g., completion + embedding_tokens) and
+# silently produce an under-counted row with ``cost_usd=0`` and no
+# ``pricing_miss`` signal. Empty / all-zero rows are still allowed
+# (a degenerate call that returned no usage is a valid audit row).
+_CALL_TYPE_ALLOWED_USAGE: dict[str, frozenset[str]] = {
+    "completion": frozenset(
+        {"input_tokens", "output_tokens", "cached_input_tokens", "cache_write_tokens"}
+    ),
+    "embedding": frozenset({"embedding_tokens"}),
+    "rerank": frozenset({"rerank_tokens", "rerank_search_units"}),
+}
+
 # Import-time guard: if anyone renames a usage column on ``LLMCallLog``
 # (e.g., ``cached_input_tokens`` → ``cache_read_input_tokens`` to match
 # the pricing axis), this assertion turns the silent miss into a hard
@@ -186,7 +201,12 @@ class LlmCallLogWriter:
         # unused column). Negative values are an error: silent drop
         # would let bad data into the row with cost_usd=0, which would
         # under-count cost without any signal at the writer boundary.
+        # The ``call_type``-allowed-axes contract from
+        # ``_CALL_TYPE_ALLOWED_USAGE`` is enforced inside the loop so a
+        # caller cannot silently mix axes across call_types.
+        allowed_axes = _CALL_TYPE_ALLOWED_USAGE[call_type]
         usage_pairs: list[tuple[str, int]] = []
+        rerank_axes_populated: list[str] = []
         for column_name, value in (
             ("input_tokens", input_tokens),
             ("output_tokens", output_tokens),
@@ -201,7 +221,27 @@ class LlmCallLogWriter:
             if value < 0:
                 raise ValueError(f"{column_name}={value} must be >= 0")
             if value > 0:
+                if column_name not in allowed_axes:
+                    raise ValueError(
+                        f"call_type={call_type!r} does not allow {column_name}; "
+                        f"allowed axes: {sorted(allowed_axes)}"
+                    )
                 usage_pairs.append((column_name, value))
+                if call_type == "rerank" and column_name in (
+                    "rerank_tokens",
+                    "rerank_search_units",
+                ):
+                    rerank_axes_populated.append(column_name)
+
+        # Rerank semantics: Voyage uses ``rerank_tokens``, Cohere uses
+        # ``rerank_search_units`` — exactly one provider, so exactly one
+        # axis. Both populated indicates a writer-side bug.
+        if len(rerank_axes_populated) > 1:
+            raise ValueError(
+                f"call_type='rerank' must populate exactly one of "
+                f"(rerank_tokens, rerank_search_units); got both: "
+                f"{rerank_axes_populated}"
+            )
 
         cost_usd, pricing_miss = await self._compute_cost_usd(
             provider=provider,
