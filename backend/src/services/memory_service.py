@@ -1749,6 +1749,9 @@ class MemoryService:
                 score=None,
             )
 
+            await self.memory_repo.update_access_stats(seed_memory.id, client="api")
+            await self.db.commit()
+
             return ExploreResponse(
                 seed_memory=seed_response,
                 related_memories=[],
@@ -1801,6 +1804,9 @@ class MemoryService:
                 context=seed_memory.context,
                 score=None,
             )
+
+            await self.memory_repo.update_access_stats(seed_memory.id, client="api")
+            await self.db.commit()
 
             return ExploreResponse(
                 seed_memory=seed_response,
@@ -1872,6 +1878,11 @@ class MemoryService:
             context=seed_memory.context,
             score=None,
         )
+
+        await self.memory_repo.update_access_stats(seed_memory.id, client="api")
+        for related in related_memories:
+            await self.memory_repo.update_access_stats(related.memory_id, client="api")
+        await self.db.commit()
 
         logger.info(
             "explore_completed",
