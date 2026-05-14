@@ -30,7 +30,7 @@ PR #574 (#556) で `R2Storage.generate_presigned_put` に S3 Object Integrity (`
 | Production observability | structured logs (structlog) が読める状態 |
 | `file_objects` row count | 0 でない場合のみ意味がある (0 のうちは flip しても影響ゼロ) |
 
-> ⚠️ **2026-05-09 時点の memory.kagura-ai.com の状態**: `file_objects=0` (Production deploy savepoint 参照)。R2 Storage はライブだが利用ゼロ。SDK FilesClient release もまだ。flip しても直接影響を受けるユーザーは現状ゼロ。**この状況で flip を急ぐ理由はない** — SDK FilesClient の release を待ってから本 runbook を回すのが本筋。
+> 📌 **memory.kagura-ai.com の現状**: `file_objects=0` (2026-05-09 時点の Production deploy savepoint 参照、SDK ship 後の最新値は production 側で再確認すること)。R2 Storage はライブだが利用は SDK ship 後に立ち上がる段階。**SDK FilesClient は kagura-memory-python-sdk v0.14.0 で 2026-05-11 に shipped 済み** — backend 側の前提条件 (table 内 `kagura-memory-python-sdk` 行) を満たす最初の release が出たので、本 runbook は実運用フェーズに入った。`R2_CHECKSUM_BINDING_ENABLED` の upstream default-flip 判断は §10 criteria を、self-hosted operator の個別 flip 判断は §3 Step 3 を参照。
 
 ---
 
@@ -57,9 +57,7 @@ curl -fsS https://your-host/health | jq .
 
 `kagura-memory-python-sdk` を `x-amz-checksum-sha256` ヘッダーを送る release に更新。
 
-> 📌 **2026-05-09 時点で SDK 側 release はまだ存在しない**。`backend/src/config/settings.py:r2_checksum_binding_enabled` の docstring が言及する `kagura-memory-python-sdk >= 0.4.0` は **placeholder** (現行 SDK は v0.13.0 系で、`FilesClient` 自体が未実装 — memory-cloud#556 land 待ちで起票見送りされている)。SDK FilesClient の actual release tag が確定したら、この runbook と settings.py docstring を同時に書き換える。
-
-このセクションは **TODO**: SDK FilesClient の最初の release が出た時点で、具体的な version (例: `kagura-memory-python-sdk >= v0.X.Y`) を確定させ、本 runbook の Step 4 pre-flip check / Step 5 verification の SQL/log 検索条件をその threshold で更新する。
+> 📌 **SDK 側の対応 release: `kagura-memory-python-sdk >= 0.14.0`** (`FilesClient` 実装は kagura-ai/kagura-memory-python-sdk#97、v0.14.0 で 2026-05-11 に ship 済み)。`backend/src/config/settings.py:r2_checksum_binding_enabled` の docstring も同 version を参照している。本 runbook 内で SDK version 閾値が現れる箇所は §3 Step 2 / §4.2 出力例 / §8 Q3 / §10 — いずれも `>= 0.14.0` を基準に判断する。
 
 ### Step 3 — SDK 採用待ち
 
@@ -98,9 +96,9 @@ FROM file_objects;
 
 ### 4.2 SDK 分布の確認 (User-Agent ベース)
 
-> ⚠️ **現状の制約**: `POST /api/v1/files/reserve` (presigned PUT URL を発行する endpoint) は **User-Agent を audit_logs に保存していない** (`backend/src/api/routes/files.py:146` を参照)。同 endpoint への inbound User-Agent は backend の structured log (structlog) には残るが、検索可能な集計テーブルには入らない。
+> ⚠️ **現状の制約**: `POST /api/v1/files/reserve` (presigned PUT URL を発行する endpoint) は **User-Agent を audit_logs にも structlog にも明示的に capture していない** — route handler (`backend/src/api/routes/files.py:reserve_upload`) が `Request` を引数で受け取らず headers にアクセスしないため、`RequestLoggingMiddleware` (`backend/src/api/middleware/request_logger.py`) も endpoint / method / status / latency / user_id / workspace_id のみ usage_stats に書き込み、`User-Agent` は捨てている。
 >
-> したがって現状の確認手段は「production logs の grep」になる。将来 audit_logs に capture する追加ワークが望ましい (§9 Future Work 参照)。
+> したがって下記の grep recipe は **将来 capture が実装された前提の target state** であり、現状は対応する `.user_agent` JSON field が出力されない (jq の `// "(missing)"` フォールバックが全件で発火する)。**実際の SDK 分布を確認するには、`backend/src/api/routes/files.py:reserve_upload` または middleware で `request.headers.get("user-agent")` を structlog / audit_logs に capture する変更が前提**。詳細は §9 Future Work #1 / §10.1 [B] の "User-Agent capture 前提条件" を参照。
 
 ```bash
 # Self-hosted operator の log inspection 例 (production blue/green setup)
@@ -112,12 +110,12 @@ docker logs "kagura-api-$ACTIVE" --since 168h 2>&1 \
   | sort | uniq -c | sort -rn
 
 # 期待出力例:
-#   142 kagura-memory-python-sdk/0.4.1 python/3.12
-#     8 kagura-memory-python-sdk/0.3.0 python/3.11   ← 古い! flip すると 403
+#   142 kagura-memory-python-sdk/0.14.2 python/3.12
+#     8 kagura-memory-python-sdk/0.13.0 python/3.11   ← 古い! flip すると 403
 #     3 Mozilla/5.0 (Macintosh; Intel ...)
 ```
 
-`kagura-memory-python-sdk/<old version>` が残っているうちは **flip しない**。
+`kagura-memory-python-sdk/<0.14.0` (v0.13.x 以前) が残っているうちは **flip しない**。v0.14.0 で `FilesClient` が初めて実装され、`x-amz-checksum-sha256` ヘッダーを送るようになった。
 
 > **Web app からの直 upload を SDK と区別**: `Mozilla/...` 系は `frontend/` 経由のブラウザ upload。フロントエンドは PR #574 と同時に新しいヘッダーを送るよう更新されているため、ブラウザは閾値判定の対象外 (常に新)。 SDK の `kagura-memory-python-sdk/<version>` 行のみ確認すれば良い。
 
@@ -233,7 +231,7 @@ docker compose --env-file .env.prod up -d --force-recreate kagura-api-<inactive-
 
 ### Q: CHANGELOG / settings docstring が言う `kagura-memory-python-sdk >= 0.4.0` の正体は?
 
-- A: PR #574 当時の placeholder。**実際の SDK FilesClient release は memory-cloud#556 land 待ちでまだ起票されていない** (memory `c41708e3` 参照)。SDK FilesClient が ship したらその version で確定し、本 runbook + `backend/src/config/settings.py` docstring を**同時に**更新する必要がある。
+- A: PR #574 当時の placeholder で、現在は **`>= 0.14.0` に確定済み**。SDK 側 `FilesClient` は kagura-ai/kagura-memory-python-sdk#97 として実装され、`kagura-memory-python-sdk v0.14.0` で 2026-05-11 に ship された。古い文書 (PR #574 当時の CHANGELOG エントリ等) で `>= 0.4.0` を見かけた場合は誤読しないこと — 当時は SDK 起票前で具体 version が決まっておらず、桁感だけ示すためにダミー値が入っていた。
 
 ### Q: `HTTP 400 BadDigest` (403 ではなく) が出た
 
@@ -252,12 +250,126 @@ docker compose --env-file .env.prod up -d --force-recreate kagura-api-<inactive-
 
 2. **自動 probe (Issue #576 が当初要求していた scope)**
    - audit_logs に user_agent が capture されれば、`make doctor-r2-checksum-readiness` のような Makefile target で SDK 分布 + 推奨 threshold を自動判定できる
-   - SDK FilesClient ship 後、threshold が確定してから着手するのが合理的
+   - SDK FilesClient (v0.14.0) は ship 済みなので threshold (`>= 0.14.0`) は確定 — 本 #1 audit_logs capture が入った後に着手可能。
 
 3. **frontend (browser upload) の `x-amz-checksum-sha256` 送信確認テスト**
    - 既に PR #574 と同時更新されているはずだが、E2E テストが薄い場合は別途 follow-up
 
-これらは Issue #576 の元 scope に含まれていたが、SDK FilesClient release ship 待ちのため本 runbook では deferred。SDK ship 後に必要に応じて起票する。
+これらは Issue #576 の元 scope に含まれていたが、本 runbook では deferred 状態。SDK FilesClient (v0.14.0) は shipped 済みなので、#1 と #2 は別 issue として起票すれば着手できる状態 (§10.1 [B] の MCP 前提条件にも同じ audit_logs capture が必要)。
+
+---
+
+## 10. Default flip & flag removal criteria
+
+本節は **memory-cloud upstream maintainer 向け** に、`R2_CHECKSUM_BINDING_ENABLED` の `default=False` を `default=True` へ flip する PR を開く判断基準 (Issue #577 acceptance #2)、およびその後 flag 自体を削除する条件 (Issue #577 acceptance #3) を定める。
+
+> 個別の self-hosted operator 自身が flag を flip する判断基準は §3 Step 3 を参照 (Conservative / Pragmatic / Aggressive 閾値、line 64-73)。本節は **upstream の default を変える判断** であって、個別 operator の判断とは別物。
+
+### 10.1 Default flip criteria (acceptance #2 trigger)
+
+以下を **ALL** 満たした時点で「`backend/src/config/settings.py` の `r2_checksum_binding_enabled` を `default=True` に変更する PR」を開く。
+
+#### [A] Upstream SDK signal — always observable
+
+- `kagura-memory-python-sdk >= 0.14.0` が PyPI 公開済 (✓ 2026-05-11 達成)。
+- 公開から **≥ 4 weeks 経過** (memory-cloud の release cycle で 1 サイクル分 — operator に SDK 取り込み窓を与える)。
+
+観測手段 (release tag 自体は常に観測可能、公開日付の取得は次のいずれか):
+
+```bash
+# 推奨: SDK は kagura-ai org の GitHub release が canonical な公開日付ソース
+gh release view v0.14.0 --repo kagura-ai/kagura-memory-python-sdk \
+  --json publishedAt --jq .publishedAt
+
+# 代替: SDK が PyPI に publish されている場合の upload_time (JSON API)
+curl -s https://pypi.org/pypi/kagura-memory-python-sdk/json \
+  | jq -r '.releases["0.14.0"][0].upload_time'
+
+# 手動: PyPI web UI で release 行の公開日を確認
+# https://pypi.org/project/kagura-memory-python-sdk/0.14.0/
+```
+
+> ℹ️ `pip index versions <pkg>` は version 列挙だけで upload date を返さないため、"≥ 4 weeks 経過" の判定には使えない。上記いずれかで公開日付を取得し、現在時刻との差分を計算する。
+
+#### [B] Hosted telemetry — `memory.kagura-ai.com` のみ
+
+- 最直近 7 日の **SDK 由来の upload reservation** (`User-Agent: kagura-memory-python-sdk/*`) のうち、`kagura-memory-python-sdk/0.14.x` 以上の比率 **≥ 95%**。
+
+**Denominator の定義**: 母数は「`User-Agent: kagura-memory-python-sdk/*` を name-and-version 形式で送ってくる upload reservation」のみ。§4.2 で説明している通り、`Mozilla/...` を含む browser 経由の upload は frontend が PR #574 と同時に新しいヘッダーを送るよう更新されているため **常に新クライアント扱い** であり、母数からも分子からも除外する (browser SDK distribution check には乗らない)。判定対象は SDK client のバージョン分布だけ。
+
+両 surface を観測する必要性: 同じ presigned PUT 経路を 2 つの surface が共有している。
+
+| Surface | Entry point | SDK 分布の観測手段 |
+|---|---|---|
+| REST | `POST /api/v1/files/reserve` (`backend/src/api/routes/files.py`) | **現状 grep 可能な経路なし**。route handler は `Request` を取らず、`RequestLoggingMiddleware` (`backend/src/api/middleware/request_logger.py`) は endpoint / method / status / latency / user_id / workspace_id のみ usage_stats に書き込み、`User-Agent` は捨てている。§4.2 の grep recipe (`jq -r '.user_agent'`) は対応する structlog field が存在しないため空振りする。下記の *User-Agent capture 前提条件* を満たすまで §10.1 [B] の REST 部分は判定不能。 |
+| MCP | `init_file_upload` tool (`backend/src/mcp_server/tools/files.py:handle_init_file_upload`) → 内部で `FileStorageService.reserve_upload` を呼ぶ | **現状 grep 可能な経路なし**。`handle_init_file_upload` は per-tool な `User-Agent` / SDK version を log / audit に出していない (transport 層も同様)。同じく下記の *User-Agent capture 前提条件* を満たすまで判定不能。 |
+
+**User-Agent capture 前提条件 (§10.1 [B] 全体のブロッカー、両 surface 共通)**:
+
+1. REST 側: `backend/src/api/routes/files.py:reserve_upload` ハンドラまたは `RequestLoggingMiddleware` に `request.headers.get("user-agent")` の capture を追加し、structlog または audit_logs / usage_stats に保存する (§9 Future Work #1 の作業内容)。
+2. MCP 側: MCP transport または `handle_init_file_upload` で SDK の `User-Agent` (またはそれに準じる client identifier) を同等の場所に capture する (§9 #1 を MCP に拡張する形)。
+3. 両 capture が稼働してから 7 日以上の観測 window を確保してから §10.1 [B] を評価する。
+
+**前提条件未達のあいだ**: §10.1 [B] の hosted telemetry signal は **取得不能 = 評価できない** とみなす。代替として `file_objects` 行数の推移と SDK release への inbound bug-report (§10.1 [C]) を併用するが、§10.1 [B] が緑だと宣言する根拠にはしない。`memory.kagura-ai.com` の MCP/REST 経由の active client が古い SDK だと flip 直後に `SignatureDoesNotMatch` で全滅するため、observability ギャップ込みで flip を判断するのは避ける。**User-Agent capture の実装を §10.1 [B] のクリティカルパス上に置く** ことが推奨。
+
+> **`file_objects=0` の期間中はこの check を skip 可** (該当 traffic がそもそも存在しないため判定不能)。`memory.kagura-ai.com` は 2026-05-09 時点で `file_objects=0` を観測していた — SDK FilesClient (v0.14.0) は 2026-05-11 に ship 済みなので、現時点の `file_objects` 行数は production で再確認すること。
+
+#### [C] Self-hosted bug-report signal — release-window heuristic
+
+self-hosted の SDK 分布は upstream からは観測不能なため、release-window 観点で代替する:
+
+- 過去 1 release window で `HTTP 403 SignatureDoesNotMatch` 関連の inbound bug report が **0 件** (GitHub Issues / Discussions / メーリングリスト / Slack 等の配布チャンネル)。
+- v0.14.0 SDK の release notes / blog post 等で「self-hosted operator は §3 Step 3 の手順で個別に flip を確認できる」旨が周知されていること。
+
+3 軸の関係:
+
+| 軸 | 観測対象 | 観測手段 | 観測タイミング |
+|---|---|---|---|
+| [A] | release tag + 公開日付 | `gh release view` / PyPI JSON `/pypi/<pkg>/json` / PyPI web UI (上記推奨) | flip PR を開く前 |
+| [B] | hosted の SDK 分布 (REST + MCP 両 surface) | 上記 *User-Agent capture 前提条件* を REST / MCP 両方で満たした後、§4.2 ライクな grep / SQL を実装 (現状未稼働) | 前提条件 deploy 後 7 日 window 経過してから |
+| [C] | self-hosted の error 報告 | GitHub / Slack inbound | flip PR を開く前の 1 release window |
+
+### 10.2 Flag removal criteria (acceptance #3 trigger)
+
+§10.1 を満たして default flip PR が merge され、**`default=True` の状態で ≥ 1 release window 経過した後**、以下を満たした時点で flag 自体を削除する PR を開く。
+
+#### [Hosted]
+
+- `R2_CHECKSUM_BINDING_ENABLED=false` への operator override が observability で **0 件** (production の env var が set されていない、または `true` のみ)。
+- default-true 状態で発生した R2 upload エラーが想定範囲内 (古い SDK の 403 だけで、それ以外の binding 起因エラー 0 件)。
+
+#### [Self-hosted]
+
+self-hosted 側の operator override は upstream からは観測不能なため、heuristic で代替:
+
+- default-true release 後 **≥ 8 weeks 経過** (個別 operator が「default を上書きしている」と気づいて報告するまでの実用的な観察窓)。
+- 関連 bug report 0 件 (`R2_CHECKSUM_BINDING_ENABLED=false` への override 経路が壊れた等)。
+- release notes で「default-true に switch されている」「override したい場合の手順」を **flag 削除より前の release 時点で** 明示しておく (削除直後に override を試みた operator が混乱しないため)。
+
+### 10.3 Flag removal scope (acceptance #3 actual edits)
+
+flag 削除 PR が触る箇所 (将来のリファレンス):
+
+- `backend/src/config/settings.py` — `r2_checksum_binding_enabled` Field を削除 (`r2_checksum_binding_enabled` の docstring + §10 への crosslink もあわせて整理)。
+- `backend/src/storage/r2.py:136-137` — `if self._enable_checksum_binding:` 分岐を削除し、`ChecksumSHA256` を常時 params に付ける。
+- `backend/src/storage/r2.py` — `R2Storage.__init__` の `enable_checksum_binding` kwarg と `self._enable_checksum_binding` instance attribute を削除。
+- `backend/src/storage/factory.py:56-62` — `R2Storage(enable_checksum_binding=settings.r2_checksum_binding_enabled, ...)` の呼び出しから当該 kwarg を削除。
+- `backend/src/services/file_storage_service.py:350` あたり — docstring 内の `r2_checksum_binding_enabled` 言及 (defense-in-depth コメント) を、flag が無くなった前提に書き直す。
+- `backend/tests/storage/test_r2.py::TestGeneratePresignedPutChecksumBinding` — flag OFF ケースのテスト削除、ON 経路だけを残して "binding always-on" を表す名前に rename。
+- `backend/tests/storage/test_factory.py` — factory が `enable_checksum_binding` kwarg を thread していることを assert しているテスト (`test_checksum_binding_flag_wires_through_to_r2_storage` 等) を、binding が常時有効である前提のテストに書き換え。
+- `.env.example` — `# R2_CHECKSUM_BINDING_ENABLED=false` の env var 行とその直上 docstring (Issue #556 sha256 binding gate 説明) を削除。env var を消す必要があるので **operator 向けに重要 touch point**。
+- 本 runbook §1-§9 / 本 §10 自身 / CHANGELOG の §556 rollout sequence — flag が無くなった旨を 1 セクション追加して、過去経緯としてアーカイブ。
+
+> ℹ️ 上記は **想定される主要 touch point** のリスト。flag 削除 PR の最終 scope は、PR を開く時点で次の grep を repo ルートから打って確定する (リストにない箇所がヒットしたらこの §10.3 にもフィードバックする):
+>
+> ```bash
+> grep -rln "R2_CHECKSUM_BINDING_ENABLED\|r2_checksum_binding_enabled\|enable_checksum_binding" \
+>   backend/ docs/ frontend/ .env.example CHANGELOG.md README.md 2>/dev/null
+> ```
+>
+> 単に `backend/ docs/` だけを見ると `.env.example` のような repo-root の operator-facing config / frontend 側で env var を参照しているケース / README に flag が書かれているケースを取りこぼす。
+
+> 💡 flag 削除と同時にやらない方が良い変更: SDK 側の `MIN_SERVER_VERSION` bump。flag 削除後に古い SDK が走ると `HTTP 403 SignatureDoesNotMatch` で失敗するが、これは flag 削除直前 (default-true 期間中) と同じ振る舞いで、新規の壊れ方ではない。SDK 側の minimum version 強制は別 issue で管理する (kagura-memory-python-sdk 側の `MIN_SERVER_VERSION` バンプポリシー参照)。
 
 ---
 
@@ -275,4 +387,4 @@ docker compose --env-file .env.prod up -d --force-recreate kagura-api-<inactive-
 
 ---
 
-> 📝 **このドキュメントの保守**: SDK FilesClient release が出た時点で、§3 Step 2 / §4.2 / §8 Q3 / §9 #1, #2 を確定値に更新すること。本 runbook と `backend/src/config/settings.py:r2_checksum_binding_enabled` docstring の **両方** に SDK version threshold が現れる — 同時更新が必要。
+> 📝 **このドキュメントの保守**: SDK version threshold は **v0.14.0 で確定済み** (2026-05-11)。以降、新しい SDK 機能のために再 bump が必要になった場合は、本 runbook 内 (§3 Step 2 / §4.2 出力例 / §8 Q3 / §10) と `backend/src/config/settings.py:r2_checksum_binding_enabled` docstring の **すべて** を同時に更新する。`R2_CHECKSUM_BINDING_ENABLED` の default を `true` に flip する PR、または flag 自体を削除する PR を開く際は §10 の criteria を再評価すること (Issue #577)。
