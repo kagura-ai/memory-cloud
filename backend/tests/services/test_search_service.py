@@ -7,20 +7,40 @@ import pytest
 from services.search_service import SearchService
 
 
+@pytest.fixture
+def _patch_routing():
+    """Patch ``resolve_routing_from_config`` so tests don't hit DB.
+
+    #475 PR-3: production code calls ``embed_with_usage`` on the routed
+    ``embed_svc`` (returns a ``(vector, tokens)`` tuple). ``tokens=0``
+    exercises the cache-hit branch — the writer is never constructed,
+    so these tests stay focused on search behavior without needing
+    ``LLMCallLogWriter`` mocks.
+
+    Module-level so both ``TestSearchService`` and ``TestSearchMode`` share
+    a single source of truth — a signature drift here previously required
+    editing two identical copies.
+    """
+    with patch(
+        "services.search_service.resolve_routing_from_config",
+        return_value=(
+            "kagura_memories",
+            MagicMock(
+                embed_with_usage=AsyncMock(return_value=([0.1] * 512, 0)),
+                provider="openai",
+                model="text-embedding-3-small",
+            ),
+        ),
+    ):
+        yield
+
+
 class TestSearchService:
     """Test SearchService for Hybrid Search (Semantic + BM25)."""
 
     @pytest.fixture(autouse=True)
-    def _patch_routing(self):
-        """Patch resolve_routing_from_config so tests don't hit DB."""
-        with patch(
-            "services.search_service.resolve_routing_from_config",
-            return_value=(
-                "kagura_memories",
-                MagicMock(embed=AsyncMock(return_value=[0.1] * 512)),
-            ),
-        ):
-            yield
+    def _routing(self, _patch_routing):
+        """Activate the module-level routing patch for every test in this class."""
 
     @pytest.fixture
     def mock_db(self):
@@ -66,7 +86,6 @@ class TestSearchService:
             {"id": "mem3", "score": 0.6, "payload": {"summary": "Test 3"}},
         ]
 
-        service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
         service._get_search_config = AsyncMock(return_value=default_search_config)
 
         mock_ctx_svc = MagicMock()
@@ -100,7 +119,6 @@ class TestSearchService:
     @pytest.mark.asyncio
     async def test_hybrid_search_no_results(self, service, default_search_config):
         """Test hybrid search with no results."""
-        service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
         service._get_search_config = AsyncMock(return_value=default_search_config)
 
         mock_ctx_svc = MagicMock()
@@ -135,16 +153,8 @@ class TestSearchMode:
     """Test search_mode parameter (Issue #17)."""
 
     @pytest.fixture(autouse=True)
-    def _patch_routing(self):
-        """Patch resolve_routing_from_config so tests don't hit DB."""
-        with patch(
-            "services.search_service.resolve_routing_from_config",
-            return_value=(
-                "kagura_memories",
-                MagicMock(embed=AsyncMock(return_value=[0.1] * 512)),
-            ),
-        ):
-            yield
+    def _routing(self, _patch_routing):
+        """Activate the module-level routing patch for every test in this class."""
 
     @pytest.fixture
     def mock_db(self):
@@ -171,7 +181,6 @@ class TestSearchMode:
 
     def _setup_mocks(self, service, default_search_config):
         """Common mock setup for search mode tests."""
-        service.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
         service._get_search_config = AsyncMock(return_value=default_search_config)
 
         mock_ctx_svc = MagicMock()
@@ -180,7 +189,14 @@ class TestSearchMode:
 
     @pytest.mark.asyncio
     async def test_keyword_mode_skips_embedding(self, service, default_search_config):
-        """keyword mode should not call embed() or search_memories_qdrant."""
+        """keyword mode skips Qdrant (no embedding call needed).
+
+        The "no embedding call" half of the contract is asserted at the
+        routed-service level in ``test_recall_llm_instrumentation.py``
+        (``test_keyword_only_search_skips_embedding_and_writer``) — that
+        is where the production code actually obtains its embedding
+        service, and where the assertion remains meaningful post-#475 PR-3.
+        """
         mock_ctx_svc = self._setup_mocks(service, default_search_config)
         fulltext_results = [{"id": "mem1", "score": 10.0, "payload": {"summary": "Test"}}]
 
@@ -202,7 +218,6 @@ class TestSearchMode:
             )
             mock_qdrant.assert_not_called()
             mock_fulltext.assert_called_once()
-            service.embedding_service.embed.assert_not_called()
             assert len(results) == 1
             assert results[0]["id"] == "mem1"
 
