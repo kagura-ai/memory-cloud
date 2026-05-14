@@ -293,16 +293,23 @@ curl -s https://pypi.org/pypi/kagura-memory-python-sdk/json \
 
 #### [B] Hosted telemetry — `memory.kagura-ai.com` のみ
 
-- 最直近 7 日の **`FileStorageService.reserve_upload` を経由するすべての upload reservation** のうち、`kagura-memory-python-sdk/0.14.x` 以上の比率 **≥ 95%**。
+- 最直近 7 日の **SDK 由来の upload reservation** (`User-Agent: kagura-memory-python-sdk/*`) のうち、`kagura-memory-python-sdk/0.14.x` 以上の比率 **≥ 95%**。
 
-「`reserve_upload` を経由するすべて」を集計対象に含める理由: 同じ presigned PUT 経路を 2 つの surface が共有している:
+**Denominator の定義**: 母数は「`User-Agent: kagura-memory-python-sdk/*` を name-and-version 形式で送ってくる upload reservation」のみ。§4.2 で説明している通り、`Mozilla/...` を含む browser 経由の upload は frontend が PR #574 と同時に新しいヘッダーを送るよう更新されているため **常に新クライアント扱い** であり、母数からも分子からも除外する (browser SDK distribution check には乗らない)。判定対象は SDK client のバージョン分布だけ。
 
-| Surface | Entry point | 観測手段 |
+両 surface を観測する必要性: 同じ presigned PUT 経路を 2 つの surface が共有している。
+
+| Surface | Entry point | SDK 分布の観測手段 |
 |---|---|---|
-| REST | `POST /api/v1/files/reserve` (`backend/src/api/routes/files.py`) | §4.2 の structlog grep / audit_logs (#1 in §9 Future Work) |
-| MCP | `init_file_upload` tool (`backend/src/mcp/...`) — 内部で `FileStorageService.reserve_upload` を呼ぶ | structlog 同様の grep、または MCP 専用 audit 経路 |
+| REST | `POST /api/v1/files/reserve` (`backend/src/api/routes/files.py`) | §4.2 の structlog grep が現状の手段。SQL 化は §9 Future Work #1 で予定。 |
+| MCP | `init_file_upload` tool (`backend/src/mcp_server/tools/files.py:handle_init_file_upload`) → 内部で `FileStorageService.reserve_upload` を呼ぶ | **現状 grep 可能な経路なし**。`handle_init_file_upload` は per-tool な User-Agent / SDK version を log / audit に出していない (transport 層も同様)。下記の *MCP 前提条件* を満たすまで §10.1 [B] の MCP 部分は判定不能。 |
 
-両方の SDK 分布を合算して 95% 閾値を判定する。**MCP-only な client が古い SDK のままだと、REST 側だけ見て flip した瞬間に MCP 経由の upload が `SignatureDoesNotMatch` で全滅する** ので、必ず両 surface を観測すること。
+**MCP 前提条件 (§10.1 [B] を MCP に拡張するために先に解決が必要)**:
+
+1. MCP transport または `handle_init_file_upload` で SDK の `User-Agent` (またはそれに準じる client identifier) を structlog / audit_logs に capture する。実装場所候補は §9 Future Work #1 を MCP 側にも拡張する形。
+2. capture が始まった後、REST 側と同じ grep / SQL の手順で MCP の SDK 分布を取得できるようにする。
+
+**MCP 前提条件が未達のとき**: §10.1 [B] は REST traffic のみで暫定判定する。ただし `memory.kagura-ai.com` の MCP 経由 upload 量が hosted observability で **量的に無視できる規模** (例: 過去 7 日の `file_objects` 行のうち MCP 経由が < 5%) でない限り、MCP 前提条件を先に潰すこと。MCP 経由の active client が古い SDK だと flip 直後に `SignatureDoesNotMatch` で全滅するため、observability ギャップ込みで flip を判断するのは避ける。
 
 > **`file_objects=0` の期間中はこの check を skip 可** (該当 traffic がそもそも存在しないため判定不能)。`memory.kagura-ai.com` は 2026-05-09 時点で `file_objects=0` だが、SDK FilesClient ship 後に upload が始まれば数値が出る。
 
@@ -317,8 +324,8 @@ self-hosted の SDK 分布は upstream からは観測不能なため、release-
 
 | 軸 | 観測対象 | 観測手段 | 観測タイミング |
 |---|---|---|---|
-| [A] | PyPI 公開 + 経過時間 | `pip index versions` | flip PR を開く前 |
-| [B] | hosted の SDK 分布 | structlog grep (§4.2) | flip PR を開く前の 7 日 window |
+| [A] | release tag + 公開日付 | `gh release view` / PyPI JSON `/pypi/<pkg>/json` / PyPI web UI (上記推奨) | flip PR を開く前 |
+| [B] | hosted の SDK 分布 (REST + MCP 両 surface) | REST: structlog grep (§4.2)。MCP: 上記 *MCP 前提条件* を満たした後の同等の手順 | flip PR を開く前の 7 日 window |
 | [C] | self-hosted の error 報告 | GitHub / Slack inbound | flip PR を開く前の 1 release window |
 
 ### 10.2 Flag removal criteria (acceptance #3 trigger)
