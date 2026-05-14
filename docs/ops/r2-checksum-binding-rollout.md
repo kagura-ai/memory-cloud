@@ -96,9 +96,9 @@ FROM file_objects;
 
 ### 4.2 SDK 分布の確認 (User-Agent ベース)
 
-> ⚠️ **現状の制約**: `POST /api/v1/files/reserve` (presigned PUT URL を発行する endpoint) は **User-Agent を audit_logs に保存していない** (`backend/src/api/routes/files.py:146` を参照)。同 endpoint への inbound User-Agent は backend の structured log (structlog) には残るが、検索可能な集計テーブルには入らない。
+> ⚠️ **現状の制約**: `POST /api/v1/files/reserve` (presigned PUT URL を発行する endpoint) は **User-Agent を audit_logs にも structlog にも明示的に capture していない** — route handler (`backend/src/api/routes/files.py:reserve_upload`) が `Request` を引数で受け取らず headers にアクセスしないため、`RequestLoggingMiddleware` (`backend/src/api/middleware/request_logger.py`) も endpoint / method / status / latency / user_id / workspace_id のみ usage_stats に書き込み、`User-Agent` は捨てている。
 >
-> したがって現状の確認手段は「production logs の grep」になる。将来 audit_logs に capture する追加ワークが望ましい (§9 Future Work 参照)。
+> したがって下記の grep recipe は **将来 capture が実装された前提の target state** であり、現状は対応する `.user_agent` JSON field が出力されない (jq の `// "(missing)"` フォールバックが全件で発火する)。**実際の SDK 分布を確認するには、`backend/src/api/routes/files.py:reserve_upload` または middleware で `request.headers.get("user-agent")` を structlog / audit_logs に capture する変更が前提**。詳細は §9 Future Work #1 / §10.1 [B] の "User-Agent capture 前提条件" を参照。
 
 ```bash
 # Self-hosted operator の log inspection 例 (production blue/green setup)
