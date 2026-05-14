@@ -154,6 +154,30 @@ async def test_context_ws2(db_session, test_workspace2):
     return context
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def pending_embedding_tasks(monkeypatch):
+    """Patch asyncio.create_task to track embedding tasks so tests can await them.
+
+    Tests that fire embedding-triggering calls (e.g., service.remember()) must await
+    all pending tasks before recall() — otherwise the Qdrant points are not yet
+    written and recall() returns empty. Tests that need that wait request this
+    fixture as a parameter and await it via asyncio.gather(*pending_embedding_tasks).
+    """
+    import asyncio
+
+    original_create_task = asyncio.create_task
+    pending_tasks: list = []
+
+    def tracking_create_task(coro, **kwargs):
+        task = original_create_task(coro, **kwargs)
+        pending_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(asyncio, "create_task", tracking_create_task)
+    yield pending_tasks
+    monkeypatch.setattr(asyncio, "create_task", original_create_task)
+
+
 @pytest.mark.asyncio
 class TestSingleCollectionIsolation:
     """Test 3-level isolation (workspace, context, user) in single collection design.
@@ -162,36 +186,14 @@ class TestSingleCollectionIsolation:
     because process_pending_embedding creates its own DB session via get_db().
     """
 
-    @pytest_asyncio.fixture(autouse=True)
-    async def patch_create_task(self, monkeypatch):
-        """Patch asyncio.create_task to track embedding tasks so tests can await them.
-
-        In test environment, asyncio.create_task fires a background coroutine (embedding).
-        Tests must await all pending embedding tasks before calling recall(), otherwise
-        the Qdrant points won't exist yet and recall() returns empty results.
-
-        This fixture replaces create_task with a version that collects tasks so that
-        tests can call await asyncio.gather(*pending_tasks) after remember().
-        """
-        import asyncio
-
-        original_create_task = asyncio.create_task
-        pending_tasks: list = []
-
-        def tracking_create_task(coro, **kwargs):
-            task = original_create_task(coro, **kwargs)
-            pending_tasks.append(task)
-            return task
-
-        monkeypatch.setattr(asyncio, "create_task", tracking_create_task)
-
-        # Expose pending_tasks via a helper stored on the fixture return value
-        self._pending_embedding_tasks = pending_tasks
-        yield
-        monkeypatch.setattr(asyncio, "create_task", original_create_task)
-
     async def test_cross_workspace_isolation(
-        self, db_session, test_workspace1, test_workspace2, test_context1, test_context_ws2
+        self,
+        db_session,
+        test_workspace1,
+        test_workspace2,
+        test_context1,
+        test_context_ws2,
+        pending_embedding_tasks,
     ):
         """Test that workspace1 cannot see workspace2's memories.
 
@@ -233,7 +235,7 @@ class TestSingleCollectionIsolation:
         # Wait for all background embedding tasks to complete before recall
         import asyncio
 
-        await asyncio.gather(*self._pending_embedding_tasks, return_exceptions=True)
+        await asyncio.gather(*pending_embedding_tasks, return_exceptions=True)
 
         # Test: Workspace1 recalls - should NOT see workspace2's memory
         recall_request = RecallRequest(query="secret data", k=10)
@@ -261,7 +263,12 @@ class TestSingleCollectionIsolation:
         )
 
     async def test_cross_context_isolation_within_same_workspace(
-        self, db_session, test_workspace1, test_context1, test_context2
+        self,
+        db_session,
+        test_workspace1,
+        test_context1,
+        test_context2,
+        pending_embedding_tasks,
     ):
         """Test that context1 cannot see context2's memories (same workspace).
 
@@ -302,7 +309,7 @@ class TestSingleCollectionIsolation:
         # Wait for all background embedding tasks to complete before recall
         import asyncio
 
-        await asyncio.gather(*self._pending_embedding_tasks, return_exceptions=True)
+        await asyncio.gather(*pending_embedding_tasks, return_exceptions=True)
 
         # Test: Recall from context1 - should NOT see context2's memory
         recall_request = RecallRequest(query="data", k=10)
@@ -321,7 +328,7 @@ class TestSingleCollectionIsolation:
         )
 
     async def test_shared_context_members_see_all_memories(
-        self, db_session, test_workspace1, test_context1
+        self, db_session, test_workspace1, test_context1, pending_embedding_tasks
     ):
         """Test that in shared contexts, all members see all memories.
 
@@ -362,7 +369,7 @@ class TestSingleCollectionIsolation:
         # Wait for all background embedding tasks to complete before recall
         import asyncio
 
-        await asyncio.gather(*self._pending_embedding_tasks, return_exceptions=True)
+        await asyncio.gather(*pending_embedding_tasks, return_exceptions=True)
 
         # Test: User1 recalls in shared context — should see both memories
         recall_request = RecallRequest(query="shared note", k=10)
@@ -381,7 +388,12 @@ class TestSingleCollectionIsolation:
         )
 
     async def test_context_deletion_only_deletes_own_points(
-        self, db_session, test_workspace1, test_context1, test_context2
+        self,
+        db_session,
+        test_workspace1,
+        test_context1,
+        test_context2,
+        pending_embedding_tasks,
     ):
         """Test that deleting context1 doesn't affect context2's points.
 
@@ -413,7 +425,7 @@ class TestSingleCollectionIsolation:
         # Wait for all background embedding tasks to complete before deletion/recall
         import asyncio
 
-        await asyncio.gather(*self._pending_embedding_tasks, return_exceptions=True)
+        await asyncio.gather(*pending_embedding_tasks, return_exceptions=True)
 
         # Delete context1's points
         from db.qdrant import delete_context_points
@@ -541,3 +553,274 @@ class TestSingleCollectionIsolation:
                 workspace_id="workspace1",
                 context_id="ctx1",
             )
+
+
+async def _insert_memory(db_session, *, workspace_id, context_id, user_id="user1", summary):
+    """Insert a Memory row directly via the ORM and return its UUID.
+
+    Used by explore() tests that don't need Qdrant — explore() reads from PostgreSQL
+    only (graph + Memory table), so skipping service.remember() avoids the OpenAI
+    embedding round-trip while still satisfying explore()'s data requirements.
+
+    Returns the UUID rather than the ORM object so the caller never accesses a
+    SQLAlchemy attribute on an object whose state may later be expired by a
+    commit inside explore() — that would trigger a synchronous lazy-load and
+    fail with MissingGreenlet in an async context.
+    """
+    memory = Memory(
+        user_id=user_id,
+        summary=summary,
+        content=summary,
+        type="note",
+        client="test",
+        workspace_id=workspace_id,
+        context_id=context_id,
+    )
+    db_session.add(memory)
+    await db_session.flush()
+    memory_id = memory.id
+    return memory_id
+
+
+@pytest.mark.asyncio
+class TestExploreAccessStats:
+    """Test that explore() bumps access_count / last_used_at / accessed_by_clients
+    on returned memories, matching the behavior of recall() and reference()
+    (Issue #644).
+
+    Real-DB integration tests — assertions read back the Memory rows post-call.
+    """
+
+    async def test_explore_bumps_seed_and_related_on_normal_path(
+        self, db_session, test_workspace1, test_context1
+    ):
+        """Path C (normal success): seed + each related memory get bumped once."""
+        service = MemoryService(db_session)
+
+        seed_id = await _insert_memory(
+            db_session,
+            workspace_id=test_workspace1.id,
+            context_id=test_context1.id,
+            summary="Seed node for access stat test",
+        )
+        related_id = await _insert_memory(
+            db_session,
+            workspace_id=test_workspace1.id,
+            context_id=test_context1.id,
+            summary="Related node for access stat test",
+        )
+
+        from services.graph_service import GraphService
+
+        graph_service = GraphService(
+            user_id="user1",
+            db=db_session,
+            workspace_id=str(test_workspace1.id),
+            context_id=str(test_context1.id),
+        )
+        await graph_service.add_edge(
+            src_id=str(seed_id),
+            dst_id=str(related_id),
+            rel_type="related_to",
+            weight=0.8,
+        )
+        await db_session.commit()
+
+        # Baseline: fresh memories have access_count=0, last_used_at IS NULL.
+        seed_row_before = (
+            await db_session.execute(select(Memory).where(Memory.id == seed_id))
+        ).scalar_one()
+        assert seed_row_before.access_count == 0
+        assert seed_row_before.last_used_at is None
+
+        explore_result = await service.explore(
+            ExploreRequest(memory_id=seed_id, depth=2),
+            user_id="user1",
+            current_context_id=test_context1.id,
+            current_workspace_id=test_workspace1.id,
+        )
+
+        # Sanity check: this exercises Path C (related memories present).
+        related_ids = [str(r.memory_id) for r in explore_result.related_memories]
+        assert str(related_id) in related_ids
+
+        # Re-fetch from DB and assert both rows were bumped.
+        db_session.expire_all()
+        seed_row = (
+            await db_session.execute(select(Memory).where(Memory.id == seed_id))
+        ).scalar_one()
+        related_row = (
+            await db_session.execute(select(Memory).where(Memory.id == related_id))
+        ).scalar_one()
+
+        assert seed_row.access_count == 1
+        assert seed_row.last_used_at is not None
+        assert seed_row.accessed_by_clients == ["api"]
+
+        assert related_row.access_count == 1
+        assert related_row.last_used_at is not None
+        assert related_row.accessed_by_clients == ["api"]
+
+    async def test_explore_bumps_seed_only_when_seed_not_in_graph(
+        self, db_session, test_workspace1, test_context1
+    ):
+        """Path A (seed_not_in_graph): only seed gets bumped, no related memories.
+
+        Skips service.remember() entirely — explore() reads from PostgreSQL only
+        and has_node() returns False for a memory with no graph entry, so direct
+        Memory insertion is sufficient.
+        """
+        service = MemoryService(db_session)
+
+        seed_id = await _insert_memory(
+            db_session,
+            workspace_id=test_workspace1.id,
+            context_id=test_context1.id,
+            summary="Lonely seed not in graph",
+        )
+        await db_session.commit()
+
+        explore_result = await service.explore(
+            ExploreRequest(memory_id=seed_id, depth=2),
+            user_id="user1",
+            current_context_id=test_context1.id,
+            current_workspace_id=test_workspace1.id,
+        )
+
+        # Sanity check: this exercises Path A.
+        assert explore_result.metadata.get("reason") == "seed_not_in_graph"
+        assert explore_result.related_memories == []
+
+        db_session.expire_all()
+        seed_row = (
+            await db_session.execute(select(Memory).where(Memory.id == seed_id))
+        ).scalar_one()
+        assert seed_row.access_count == 1
+        assert seed_row.last_used_at is not None
+        assert seed_row.accessed_by_clients == ["api"]
+
+    async def test_explore_bumps_seed_only_when_traversal_yields_empty(
+        self, db_session, test_workspace1, test_context1
+    ):
+        """Path B (empty_traversal): seed in graph, but min_weight filters out everything.
+
+        Skips service.remember() — direct Memory insert plus add_edge gives both
+        the seed graph node (so has_node() returns True) and a related node that
+        will be filtered out by min_weight.
+        """
+        service = MemoryService(db_session)
+
+        seed_id = await _insert_memory(
+            db_session,
+            workspace_id=test_workspace1.id,
+            context_id=test_context1.id,
+            summary="Seed B for empty traversal path",
+        )
+        related_id = await _insert_memory(
+            db_session,
+            workspace_id=test_workspace1.id,
+            context_id=test_context1.id,
+            summary="Related B for empty traversal path",
+        )
+
+        from services.graph_service import GraphService
+
+        graph_service = GraphService(
+            user_id="user1",
+            db=db_session,
+            workspace_id=str(test_workspace1.id),
+            context_id=str(test_context1.id),
+        )
+        # add_edge creates both nodes implicitly, so the seed IS in the graph
+        # (has_node returns True). min_weight=2.0 then filters everything out.
+        await graph_service.add_edge(
+            src_id=str(seed_id),
+            dst_id=str(related_id),
+            rel_type="related_to",
+            weight=0.05,
+        )
+        await db_session.commit()
+
+        explore_result = await service.explore(
+            ExploreRequest(memory_id=seed_id, depth=2, min_weight=2.0),
+            user_id="user1",
+            current_context_id=test_context1.id,
+            current_workspace_id=test_workspace1.id,
+        )
+
+        # Sanity check: this exercises Path B (related filtered out, but seed was in graph).
+        assert explore_result.related_memories == []
+        assert "suggestion" in explore_result.metadata
+
+        db_session.expire_all()
+        seed_row = (
+            await db_session.execute(select(Memory).where(Memory.id == seed_id))
+        ).scalar_one()
+        related_row = (
+            await db_session.execute(select(Memory).where(Memory.id == related_id))
+        ).scalar_one()
+
+        assert seed_row.access_count == 1
+        assert seed_row.last_used_at is not None
+        assert seed_row.accessed_by_clients == ["api"]
+        # Related was NOT in the returned response → must NOT be bumped.
+        assert related_row.access_count == 0
+        assert related_row.last_used_at is None
+
+    async def test_explore_repeated_calls_increment_count(
+        self, db_session, test_workspace1, test_context1
+    ):
+        """Two explore() calls on the same seed (with an edge → Path C) bump both seed and
+        related to access_count=2 and keep accessed_by_clients deduped to ["api"]."""
+        service = MemoryService(db_session)
+
+        seed_id = await _insert_memory(
+            db_session,
+            workspace_id=test_workspace1.id,
+            context_id=test_context1.id,
+            summary="Repeated seed for dedupe test",
+        )
+        related_id = await _insert_memory(
+            db_session,
+            workspace_id=test_workspace1.id,
+            context_id=test_context1.id,
+            summary="Related node for repeated dedupe test",
+        )
+
+        from services.graph_service import GraphService
+
+        graph_service = GraphService(
+            user_id="user1",
+            db=db_session,
+            workspace_id=str(test_workspace1.id),
+            context_id=str(test_context1.id),
+        )
+        await graph_service.add_edge(
+            src_id=str(seed_id),
+            dst_id=str(related_id),
+            rel_type="related_to",
+            weight=0.8,
+        )
+        await db_session.commit()
+
+        for _ in range(2):
+            await service.explore(
+                ExploreRequest(memory_id=seed_id, depth=2),
+                user_id="user1",
+                current_context_id=test_context1.id,
+                current_workspace_id=test_workspace1.id,
+            )
+
+        db_session.expire_all()
+        seed_row = (
+            await db_session.execute(select(Memory).where(Memory.id == seed_id))
+        ).scalar_one()
+        related_row = (
+            await db_session.execute(select(Memory).where(Memory.id == related_id))
+        ).scalar_one()
+
+        assert seed_row.access_count == 2
+        assert seed_row.accessed_by_clients == ["api"]
+        # Related is also bumped via Path C and dedupes the client too.
+        assert related_row.access_count == 2
+        assert related_row.accessed_by_clients == ["api"]

@@ -1092,3 +1092,69 @@ class TestExploreHints:
         # Recall succeeded despite hint failure
         assert response.results is not None
         assert len(response.results) == 1
+
+
+class TestExploreAccessStats:
+    """Issue #644: explore() bumps access_count / last_used_at on returned memories
+    consistent with recall() and reference()."""
+
+    @pytest.fixture
+    def service(self):
+        return MemoryService(MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_explore_bumps_seed_when_seed_not_in_graph(self, service):
+        """Path A: has_node() returns False → only seed is bumped, then return."""
+        from models.schemas import ExploreRequest
+
+        seed_id = uuid4()
+        workspace_id = uuid4()
+        context_id = uuid4()
+
+        mock_seed = MagicMock(
+            id=seed_id,
+            user_id="test_user",
+            summary="Seed",
+            context_summary=None,
+            type="note",
+            importance=0.5,
+            scope="working",
+            created_at=datetime.utcnow(),
+            client="api",
+            tags=[],
+            context=None,
+            workspace_id=workspace_id,
+            context_id=context_id,
+        )
+        service.memory_repo.get = AsyncMock(return_value=mock_seed)
+        service.memory_repo.update_access_stats = AsyncMock()
+        service.db.commit = AsyncMock()
+
+        with (
+            patch("services.permission_service.PermissionService") as mock_perm_cls,
+            patch("repositories.graph.GraphRepository") as mock_graph_repo_cls,
+            patch("services.graph_service.GraphService") as mock_graph_service_cls,
+        ):
+            mock_perm = MagicMock()
+            mock_perm.can_access_memory = AsyncMock(return_value=True)
+            mock_perm_cls.return_value = mock_perm
+
+            mock_graph_repo = MagicMock()
+            mock_graph_repo.get_or_create = AsyncMock()
+            mock_graph_repo_cls.return_value = mock_graph_repo
+
+            mock_graph_service = MagicMock()
+            mock_graph_service.has_node = AsyncMock(return_value=False)
+            mock_graph_service_cls.return_value = mock_graph_service
+
+            response = await service.explore(
+                request=ExploreRequest(memory_id=seed_id, depth=2),
+                user_id="test_user",
+            )
+
+        assert response.metadata.get("reason") == "seed_not_in_graph"
+        assert response.related_memories == []
+
+        # Only one update_access_stats call: for the seed, with client="api".
+        service.memory_repo.update_access_stats.assert_awaited_once_with(seed_id, client="api")
+        service.db.commit.assert_awaited()
