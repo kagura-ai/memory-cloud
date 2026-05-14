@@ -128,7 +128,7 @@ def _coerce_uuid(value: UUID | str | None) -> UUID | None:
     return UUID(value)
 
 
-class LlmCallLogWriter:
+class LLMCallLogWriter:
     """Inserts one ``llm_call_log`` row per provider call.
 
     Stateless from the caller's perspective; the only mutable state is
@@ -230,13 +230,18 @@ class LlmCallLogWriter:
                     f"call_type={call_type!r} does not allow {column_name}; "
                     f"allowed axes: {sorted(allowed_axes)}"
                 )
+            # Track rerank axes on **any** non-None value (including 0) —
+            # downstream queries treat ``IS NOT NULL`` as "this axis was
+            # relevant for the call", so the exclusivity check has to
+            # operate on the same signal that the schema produces, not
+            # just positive values (Copilot loop 3 #1).
+            if call_type == "rerank" and column_name in (
+                "rerank_tokens",
+                "rerank_search_units",
+            ):
+                rerank_axes_populated.append(column_name)
             if value > 0:
                 usage_pairs.append((column_name, value))
-                if call_type == "rerank" and column_name in (
-                    "rerank_tokens",
-                    "rerank_search_units",
-                ):
-                    rerank_axes_populated.append(column_name)
 
         # Rerank semantics: Voyage uses ``rerank_tokens``, Cohere uses
         # ``rerank_search_units`` — exactly one provider, so exactly one

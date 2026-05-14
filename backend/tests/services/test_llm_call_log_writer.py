@@ -1,4 +1,4 @@
-"""Unit tests for LlmCallLogWriter (#474).
+"""Unit tests for LLMCallLogWriter (#474).
 
 Mocked-DB tests — match ``test_reporter_cost_grade.py`` style so the
 suite runs without a Docker container. Database-level CHECK constraints
@@ -25,7 +25,7 @@ from uuid import uuid4
 import pytest
 
 from models.llm_call_log import LLMCallLog
-from services.llm_call_log_writer import LlmCallLogWriter
+from services.llm_call_log_writer import LLMCallLogWriter
 
 
 @pytest.fixture
@@ -46,7 +46,7 @@ def mock_pricing():
 
 @pytest.fixture
 def writer(mock_db, mock_pricing):
-    return LlmCallLogWriter(db=mock_db, pricing=mock_pricing)
+    return LLMCallLogWriter(db=mock_db, pricing=mock_pricing)
 
 
 def _added_row(mock_db) -> LLMCallLog:
@@ -216,6 +216,25 @@ class TestInputValidation:
                 provider="voyage",
                 model="rerank-2",
                 rerank_tokens=100,
+                rerank_search_units=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_rerank_rejects_both_axes_with_zero_value(self, writer):
+        """Exclusivity check fires even when one axis is 0 (non-None).
+
+        Loop-2 fix only tracked rerank axes inside ``if value > 0:``,
+        so ``rerank_tokens=0`` + ``rerank_search_units=10`` would bypass
+        the check and store both columns as non-NULL — ambiguous for
+        downstream queries that key off ``IS NOT NULL`` (Copilot loop 3 #1).
+        """
+        with pytest.raises(ValueError, match=r"call_type='rerank' must populate exactly one"):
+            await writer.record(
+                caller="admin",
+                call_type="rerank",
+                provider="voyage",
+                model="rerank-2",
+                rerank_tokens=0,
                 rerank_search_units=10,
             )
 
