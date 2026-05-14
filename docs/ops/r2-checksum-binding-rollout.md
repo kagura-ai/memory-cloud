@@ -30,7 +30,7 @@ PR #574 (#556) で `R2Storage.generate_presigned_put` に S3 Object Integrity (`
 | Production observability | structured logs (structlog) が読める状態 |
 | `file_objects` row count | 0 でない場合のみ意味がある (0 のうちは flip しても影響ゼロ) |
 
-> ⚠️ **2026-05-09 時点の memory.kagura-ai.com の状態**: `file_objects=0` (Production deploy savepoint 参照)。R2 Storage はライブだが利用ゼロ。SDK FilesClient release もまだ。flip しても直接影響を受けるユーザーは現状ゼロ。**この状況で flip を急ぐ理由はない** — SDK FilesClient の release を待ってから本 runbook を回すのが本筋。
+> 📌 **memory.kagura-ai.com の現状**: `file_objects=0` (2026-05-09 時点の Production deploy savepoint 参照、SDK ship 後の最新値は production 側で再確認すること)。R2 Storage はライブだが利用は SDK ship 後に立ち上がる段階。**SDK FilesClient は kagura-memory-python-sdk v0.14.0 で 2026-05-11 に shipped 済み** — backend 側の前提条件 (table 内 `kagura-memory-python-sdk` 行) を満たす最初の release が出たので、本 runbook は実運用フェーズに入った。`R2_CHECKSUM_BINDING_ENABLED` の upstream default-flip 判断は §10 criteria を、self-hosted operator の個別 flip 判断は §3 Step 3 を参照。
 
 ---
 
@@ -250,12 +250,12 @@ docker compose --env-file .env.prod up -d --force-recreate kagura-api-<inactive-
 
 2. **自動 probe (Issue #576 が当初要求していた scope)**
    - audit_logs に user_agent が capture されれば、`make doctor-r2-checksum-readiness` のような Makefile target で SDK 分布 + 推奨 threshold を自動判定できる
-   - SDK FilesClient ship 後、threshold が確定してから着手するのが合理的
+   - SDK FilesClient (v0.14.0) は ship 済みなので threshold (`>= 0.14.0`) は確定 — 本 #1 audit_logs capture が入った後に着手可能。
 
 3. **frontend (browser upload) の `x-amz-checksum-sha256` 送信確認テスト**
    - 既に PR #574 と同時更新されているはずだが、E2E テストが薄い場合は別途 follow-up
 
-これらは Issue #576 の元 scope に含まれていたが、SDK FilesClient release ship 待ちのため本 runbook では deferred。SDK ship 後に必要に応じて起票する。
+これらは Issue #576 の元 scope に含まれていたが、本 runbook では deferred 状態。SDK FilesClient (v0.14.0) は shipped 済みなので、#1 と #2 は別 issue として起票すれば着手できる状態 (§10.1 [B] の MCP 前提条件にも同じ audit_logs capture が必要)。
 
 ---
 
@@ -311,7 +311,7 @@ curl -s https://pypi.org/pypi/kagura-memory-python-sdk/json \
 
 **MCP 前提条件が未達のとき**: §10.1 [B] は REST traffic のみで暫定判定する。ただし `memory.kagura-ai.com` の MCP 経由 upload 量が hosted observability で **量的に無視できる規模** (例: 過去 7 日の `file_objects` 行のうち MCP 経由が < 5%) でない限り、MCP 前提条件を先に潰すこと。MCP 経由の active client が古い SDK だと flip 直後に `SignatureDoesNotMatch` で全滅するため、observability ギャップ込みで flip を判断するのは避ける。
 
-> **`file_objects=0` の期間中はこの check を skip 可** (該当 traffic がそもそも存在しないため判定不能)。`memory.kagura-ai.com` は 2026-05-09 時点で `file_objects=0` だが、SDK FilesClient ship 後に upload が始まれば数値が出る。
+> **`file_objects=0` の期間中はこの check を skip 可** (該当 traffic がそもそも存在しないため判定不能)。`memory.kagura-ai.com` は 2026-05-09 時点で `file_objects=0` を観測していた — SDK FilesClient (v0.14.0) は 2026-05-11 に ship 済みなので、現時点の `file_objects` 行数は production で再確認すること。
 
 #### [C] Self-hosted bug-report signal — release-window heuristic
 
