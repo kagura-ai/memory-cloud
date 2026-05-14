@@ -220,6 +220,25 @@ class TestInputValidation:
             )
 
     @pytest.mark.asyncio
+    async def test_rerank_rejects_no_axis_populated(self, writer):
+        """rerank with neither axis populated raises ValueError.
+
+        Voyage / Cohere always return a usage figure from a successful
+        rerank call, so a zero-axis rerank row is a caller-side bug,
+        not a degenerate audit case (Copilot loop 5 #1). The "exactly
+        one" contract enforces both rejection paths: both populated
+        AND neither populated.
+        """
+        with pytest.raises(ValueError, match=r"call_type='rerank' must populate exactly one"):
+            await writer.record(
+                caller="admin",
+                call_type="rerank",
+                provider="voyage",
+                model="rerank-2",
+                # Neither rerank_tokens nor rerank_search_units set.
+            )
+
+    @pytest.mark.asyncio
     async def test_rerank_rejects_both_axes_with_zero_value(self, writer):
         """Exclusivity check fires even when one axis is 0 (non-None).
 

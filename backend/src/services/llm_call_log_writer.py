@@ -244,13 +244,19 @@ class LLMCallLogWriter:
                 usage_pairs.append((column_name, value))
 
         # Rerank semantics: Voyage uses ``rerank_tokens``, Cohere uses
-        # ``rerank_search_units`` — exactly one provider, so exactly one
-        # axis. Both populated indicates a writer-side bug.
-        if len(rerank_axes_populated) > 1:
+        # ``rerank_search_units`` — exactly one provider per call, so
+        # exactly one axis. The check rejects both-populated AND
+        # neither-populated: the caller (``reranker_service``) always
+        # has a usage figure from the provider, so a zero-axis rerank
+        # row is a caller-side bug rather than a degenerate audit case.
+        # An axis with value=0 still counts as "populated" via the
+        # non-None tracking above (matches the schema's ``IS NOT NULL``
+        # signal). (Copilot loop 5 #1.)
+        if call_type == "rerank" and len(rerank_axes_populated) != 1:
+            populated_repr = rerank_axes_populated or "neither"
             raise ValueError(
                 f"call_type='rerank' must populate exactly one of "
-                f"(rerank_tokens, rerank_search_units); got both: "
-                f"{rerank_axes_populated}"
+                f"(rerank_tokens, rerank_search_units); got {populated_repr}"
             )
 
         cost_usd, pricing_miss = await self._compute_cost_usd(
