@@ -34,7 +34,9 @@ a partial rollback.
 Revision ID: e13_474_pricing_seeds
 Revises: e12_474_llm_call_log
 
-NOTE: Revision ID is 21 chars (under the 25-char asyncpg-safe limit).
+NOTE: Revision ID is 21 chars, well within the VARCHAR(32) limit on
+``alembic_version.version_num`` (see ``c02_471`` for the canonical
+note on the asyncpg truncation error path).
 """
 
 from collections.abc import Sequence

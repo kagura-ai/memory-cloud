@@ -264,7 +264,14 @@ class LLMCallLogWriter:
         if pricing_miss:
             final_metadata = final_metadata or {}
             final_metadata["pricing_miss"] = True
-            logger.warning(
+            # Pricing misses are expected (newly-deployed model before
+            # its seed row lands; exotic provider). The signal is
+            # already carried on the row via ``call_metadata.pricing_miss``
+            # and surfaced in dashboards; logging at debug matches
+            # ``LLMPricingService.lookup()`` (the lower-level "no row"
+            # path) and avoids alert fatigue on a recall hot path
+            # (Copilot loop 4 #2).
+            logger.debug(
                 "llm_call_log_pricing_miss",
                 caller=caller,
                 provider=provider,
@@ -364,7 +371,6 @@ class LLMCallLogWriter:
             return Decimal("0"), False
 
         total = Decimal("0")
-        miss = False
         for column_name, units in usage_pairs:
             unit_type = _USAGE_TO_UNIT_TYPE[column_name]
             partial = await self.pricing.compute_cost_usd(
@@ -375,17 +381,17 @@ class LLMCallLogWriter:
                 units=units,
             )
             if partial is None:
-                miss = True
-                continue
+                # First miss collapses the whole cost to 0 — short-circuit
+                # remaining lookups to save DB round-trips on the recall
+                # hot path. The "new model not yet seeded" case is the
+                # common cause and hitting all 4 axes adds no signal:
+                # ``call_metadata.pricing_miss=true`` carries the gap to
+                # the dashboard (Copilot loop 4 #1).
+                return Decimal("0"), True
             # ``compute_cost_usd`` returns float — convert via str to
             # preserve precision the float repr would otherwise mangle
             # (e.g. 0.05 → 0.05000000000000000277...) when crossing the
             # Decimal boundary.
             total += Decimal(str(partial))
 
-        if miss:
-            # Miss on any axis collapses the whole cost to 0; the
-            # metadata flag carries the signal. Don't return a partial
-            # sum — that would understate cost without being marked.
-            return Decimal("0"), True
         return total, False

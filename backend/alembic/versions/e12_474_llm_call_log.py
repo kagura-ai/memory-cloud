@@ -38,9 +38,10 @@ Out of scope (deferred to follow-ups):
 Revision ID: e12_474_llm_call_log
 Revises: e11_merge_e10_heads
 
-NOTE: Revision ID is 20 chars (alembic_version.version_num is VARCHAR(32),
-asyncpg raises StringDataRightTruncationError above 25 — see c02_471
-header for the canonical note).
+NOTE: Revision ID is 20 chars, well within the VARCHAR(32) limit on
+``alembic_version.version_num``. Revision IDs above 32 chars trigger
+``asyncpg.exceptions.StringDataRightTruncationError`` at upgrade time —
+see ``c02_471`` header for the canonical note describing the limit.
 """
 
 from collections.abc import Sequence
