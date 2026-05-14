@@ -274,18 +274,35 @@ docker compose --env-file .env.prod up -d --force-recreate kagura-api-<inactive-
 - `kagura-memory-python-sdk >= 0.14.0` が PyPI 公開済 (✓ 2026-05-11 達成)。
 - 公開から **≥ 4 weeks 経過** (memory-cloud の release cycle で 1 サイクル分 — operator に SDK 取り込み窓を与える)。
 
-観測手段は PyPI metadata (常に観測可能):
+観測手段 (release tag 自体は常に観測可能、公開日付の取得は次のいずれか):
 
 ```bash
-pip index versions kagura-memory-python-sdk
-# 0.14.0 行の公開日付を確認
+# 推奨: SDK は kagura-ai org の GitHub release が canonical な公開日付ソース
+gh release view v0.14.0 --repo kagura-ai/kagura-memory-python-sdk \
+  --json publishedAt --jq .publishedAt
+
+# 代替: SDK が PyPI に publish されている場合の upload_time (JSON API)
+curl -s https://pypi.org/pypi/kagura-memory-python-sdk/json \
+  | jq -r '.releases["0.14.0"][0].upload_time'
+
+# 手動: PyPI web UI で release 行の公開日を確認
+# https://pypi.org/project/kagura-memory-python-sdk/0.14.0/
 ```
+
+> ℹ️ `pip index versions <pkg>` は version 列挙だけで upload date を返さないため、"≥ 4 weeks 経過" の判定には使えない。上記いずれかで公開日付を取得し、現在時刻との差分を計算する。
 
 #### [B] Hosted telemetry — `memory.kagura-ai.com` のみ
 
-- 最直近 7 日の `/api/v1/files/reserve` 着信のうち、`kagura-memory-python-sdk/0.14.x` 以上の比率 **≥ 95%**。
+- 最直近 7 日の **`FileStorageService.reserve_upload` を経由するすべての upload reservation** のうち、`kagura-memory-python-sdk/0.14.x` 以上の比率 **≥ 95%**。
 
-観測手段は §4.2 の grep ベース手順 (SQL 化は §9 Future Work #1 で予定)。
+「`reserve_upload` を経由するすべて」を集計対象に含める理由: 同じ presigned PUT 経路を 2 つの surface が共有している:
+
+| Surface | Entry point | 観測手段 |
+|---|---|---|
+| REST | `POST /api/v1/files/reserve` (`backend/src/api/routes/files.py`) | §4.2 の structlog grep / audit_logs (#1 in §9 Future Work) |
+| MCP | `init_file_upload` tool (`backend/src/mcp/...`) — 内部で `FileStorageService.reserve_upload` を呼ぶ | structlog 同様の grep、または MCP 専用 audit 経路 |
+
+両方の SDK 分布を合算して 95% 閾値を判定する。**MCP-only な client が古い SDK のままだと、REST 側だけ見て flip した瞬間に MCP 経由の upload が `SignatureDoesNotMatch` で全滅する** ので、必ず両 surface を観測すること。
 
 > **`file_objects=0` の期間中はこの check を skip 可** (該当 traffic がそもそも存在しないため判定不能)。`memory.kagura-ai.com` は 2026-05-09 時点で `file_objects=0` だが、SDK FilesClient ship 後に upload が始まれば数値が出る。
 
@@ -332,9 +349,17 @@ flag 削除 PR が触る箇所 (将来のリファレンス):
 - `backend/src/services/file_storage_service.py:350` あたり — docstring 内の `r2_checksum_binding_enabled` 言及 (defense-in-depth コメント) を、flag が無くなった前提に書き直す。
 - `backend/tests/storage/test_r2.py::TestGeneratePresignedPutChecksumBinding` — flag OFF ケースのテスト削除、ON 経路だけを残して "binding always-on" を表す名前に rename。
 - `backend/tests/storage/test_factory.py` — factory が `enable_checksum_binding` kwarg を thread していることを assert しているテスト (`test_checksum_binding_flag_wires_through_to_r2_storage` 等) を、binding が常時有効である前提のテストに書き換え。
+- `.env.example` — `# R2_CHECKSUM_BINDING_ENABLED=false` の env var 行とその直上 docstring (Issue #556 sha256 binding gate 説明) を削除。env var を消す必要があるので **operator 向けに重要 touch point**。
 - 本 runbook §1-§9 / 本 §10 自身 / CHANGELOG の §556 rollout sequence — flag が無くなった旨を 1 セクション追加して、過去経緯としてアーカイブ。
 
-> ℹ️ 上記は **想定される主要 touch point** のリスト。flag 削除 PR の最終 scope は、PR を開く時点で `grep -rln "R2_CHECKSUM_BINDING_ENABLED\|r2_checksum_binding_enabled\|enable_checksum_binding" backend/ docs/` の結果に従って確定する (リストにない箇所がヒットしたらこの §10.3 にもフィードバックする)。
+> ℹ️ 上記は **想定される主要 touch point** のリスト。flag 削除 PR の最終 scope は、PR を開く時点で次の grep を repo ルートから打って確定する (リストにない箇所がヒットしたらこの §10.3 にもフィードバックする):
+>
+> ```bash
+> grep -rln "R2_CHECKSUM_BINDING_ENABLED\|r2_checksum_binding_enabled\|enable_checksum_binding" \
+>   backend/ docs/ frontend/ .env.example CHANGELOG.md README.md 2>/dev/null
+> ```
+>
+> 単に `backend/ docs/` だけを見ると `.env.example` のような repo-root の operator-facing config / frontend 側で env var を参照しているケース / README に flag が書かれているケースを取りこぼす。
 
 > 💡 flag 削除と同時にやらない方が良い変更: SDK 側の `MIN_SERVER_VERSION` bump。flag 削除後に古い SDK が走ると `HTTP 403 SignatureDoesNotMatch` で失敗するが、これは flag 削除直前 (default-true 期間中) と同じ振る舞いで、新規の壊れ方ではない。SDK 側の minimum version 強制は別 issue で管理する (kagura-memory-python-sdk 側の `MIN_SERVER_VERSION` バンプポリシー参照)。
 
