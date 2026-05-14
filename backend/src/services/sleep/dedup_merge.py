@@ -110,10 +110,8 @@ class DedupMergePhase:
         self.edge_repo = NeuralEdgeRepository(db)
         self.embedding_service = EmbeddingService(db, model=embedding_model)
         self.collection_name = collection_name
-        # #475: init here (matches edge_discovery convention) so
-        # ``_find_similar_pairs`` can be called in isolation from unit
-        # tests without ``AttributeError``. Reset in ``execute()`` for
-        # consecutive sleep cycles.
+        # #475: embedding cost-grade accumulators (init here so
+        # ``_find_similar_pairs`` can be unit-tested without execute()).
         self._embedding_calls_used: int = 0
         self._embedding_tokens_used: int = 0
 
@@ -146,8 +144,6 @@ class DedupMergePhase:
         # #471: per-(provider, model) accumulator (lazy-init).
         self._llm_breakdown: LLMCallBreakdown | None = None
         # #475: reset embedding accumulators between sleep cycles.
-        # Initialized in __init__ so direct ``_find_similar_pairs`` calls
-        # (e.g., unit tests) don't ``AttributeError`` before execute().
         self._embedding_calls_used = 0
         self._embedding_tokens_used = 0
 
@@ -258,9 +254,8 @@ class DedupMergePhase:
         # #471: attach per-(provider, model) breakdown for child-row write.
         if self._llm_breakdown is not None:
             result.llm_breakdown = [self._llm_breakdown]
-        # #475: surface embedding usage for cost-grade roll-up. Provider /
-        # model are set only when phase 2 actually performed at least one
-        # embed call (no-memories early-returns leave them None).
+        # #475: surface embedding usage; skip identity when no calls
+        # happened so no-memory early-returns don't fabricate it.
         result.embedding_calls_used = self._embedding_calls_used
         result.embedding_tokens = self._embedding_tokens_used
         if self._embedding_calls_used > 0:
@@ -320,12 +315,6 @@ class DedupMergePhase:
 
         for memory in memories:
             try:
-                # #475: capture embedding token usage via ``embed_with_usage``
-                # so phase 2 contributes to the cost-grade roll-up on
-                # ``sleep_reports`` (previously reindex-only). Mirror of the
-                # ``reindex.py`` accumulation pattern. Increment happens
-                # only after the await succeeds — failed embed calls do
-                # not count toward usage.
                 vector, tokens = await self.embedding_service.embed_with_usage(
                     memory.summary,
                     user_id=user_id,

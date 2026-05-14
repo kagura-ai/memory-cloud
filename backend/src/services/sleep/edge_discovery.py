@@ -363,11 +363,8 @@ class EdgeDiscoveryPhase:
         # initialized on the first LLM call so we don't fabricate empty
         # rows for runs that early-return before any LLM use.
         self._llm_breakdown: LLMCallBreakdown | None = None
-        # #475: embedding cost-grade accumulators. Mirror of the
-        # ``reindex.py`` per-call instrumentation pattern; calls increments
-        # +1 per ``embed_with_usage`` invocation (cache hit counts as a
-        # call), tokens accumulates the API-billed token count (cache hits
-        # contribute 0 — see ``EmbeddingService.embed_with_usage`` docstring).
+        # #475: embedding cost-grade accumulators (cache hits count as
+        # a call, tokens=0 — see ``embed_with_usage`` docstring).
         self._embedding_calls_used: int = 0
         self._embedding_tokens_used: int = 0
 
@@ -530,11 +527,8 @@ class EdgeDiscoveryPhase:
         # #471: attach per-(provider, model) breakdown for child-row write.
         if self._llm_breakdown is not None:
             result.llm_breakdown = [self._llm_breakdown]
-        # #475: surface embedding usage for cost-grade roll-up. Provider /
-        # model are instance-global (per ``EmbeddingService`` config) — only
-        # set them when phase 1 actually performed at least one call, so
-        # phases that early-return on no-memories don't fabricate identity
-        # for a service that was never invoked.
+        # #475: surface embedding usage; skip identity when no calls
+        # happened so no-memory early-returns don't fabricate it.
         result.embedding_calls_used = self._embedding_calls_used
         result.embedding_tokens = self._embedding_tokens_used
         if self._embedding_calls_used > 0:
@@ -624,12 +618,6 @@ class EdgeDiscoveryPhase:
 
         for memory in memories:
             try:
-                # #475: capture embedding token usage via ``embed_with_usage``
-                # so phase 1 contributes to the cost-grade roll-up on
-                # ``sleep_reports`` (previously reindex-only). Mirror of the
-                # ``reindex.py`` accumulation pattern. Increment happens
-                # only after the await succeeds — failed embed calls do
-                # not count toward usage.
                 vector, tokens = await self.embedding_service.embed_with_usage(
                     memory.summary,
                     user_id=user_id,
