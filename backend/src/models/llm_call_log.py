@@ -201,11 +201,16 @@ class LLMCallLog(Base):
     rerank_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rerank_search_units: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    # Write-time cost snapshot. NUMERIC(12, 6) handles a single call up
-    # to $999,999.999999 — orders of magnitude beyond any plausible
-    # per-call cost. NOT NULL with default 0 so aggregation queries
-    # don't need COALESCE; pricing misses store 0 + a flag in
-    # ``call_metadata``.
+    # Write-time cost snapshot. NUMERIC(14, 10) mirrors
+    # ``llm_pricing.price_per_unit`` precision: 4 digits before the
+    # decimal (per-call cap of ~$9,999.99 — orders of magnitude beyond
+    # any plausible single API call) and **10 digits after the decimal**
+    # so sub-microcent costs survive the row. A low-volume embedding
+    # call like 20 tokens at $0.02 / 1M = $0.0000004 stores faithfully;
+    # NUMERIC(12, 6) would have rounded this to 0 and made
+    # SUM-over-many-rows materially under-count (Copilot loop 2 #1).
+    # NOT NULL with default 0 so aggregation queries don't need COALESCE;
+    # pricing misses store 0 + a flag in ``call_metadata``.
     # Both ``default=`` and ``server_default=`` declared so the value is
     # populated on ORM-constructed rows (Python-side) and the schema
     # carries a DDL DEFAULT clause matching the migration (catches drift
@@ -214,7 +219,7 @@ class LLMCallLog(Base):
     # in this codebase (see ``SleepReport.source`` / ``SleepReport.paid_by``)
     # so the rendered DDL byte-for-byte matches the alembic migration.
     cost_usd: Mapped[Decimal] = mapped_column(
-        Numeric(12, 6),
+        Numeric(14, 10),
         nullable=False,
         default=Decimal("0"),
         server_default=text("0"),

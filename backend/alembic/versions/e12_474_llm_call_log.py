@@ -81,12 +81,18 @@ def upgrade() -> None:
         sa.Column("embedding_tokens", sa.Integer, nullable=True),
         sa.Column("rerank_tokens", sa.Integer, nullable=True),
         sa.Column("rerank_search_units", sa.Integer, nullable=True),
-        # Write-time cost snapshot. NOT NULL DEFAULT 0 so aggregation
-        # queries don't need COALESCE; pricing misses store 0 + a flag
-        # in ``call_metadata``.
+        # Write-time cost snapshot. NUMERIC(14, 10) mirrors
+        # ``llm_pricing.price_per_unit`` precision so sub-microcent
+        # per-call costs (e.g., 20 embedding tokens at $0.02/1M =
+        # $0.0000004) don't round to 0 and silently undercount when
+        # SUMmed across many rows (Copilot loop 2 #1). 4 digits before
+        # the decimal cap per-call cost at ~$9,999.99 — orders of
+        # magnitude above any plausible single API call. NOT NULL
+        # DEFAULT 0 so aggregation queries don't need COALESCE; pricing
+        # misses store 0 + a flag in ``call_metadata``.
         sa.Column(
             "cost_usd",
-            sa.Numeric(12, 6),
+            sa.Numeric(14, 10),
             nullable=False,
             server_default=sa.text("0"),
         ),

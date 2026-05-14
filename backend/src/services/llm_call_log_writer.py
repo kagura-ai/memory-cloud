@@ -220,12 +220,17 @@ class LlmCallLogWriter:
                 continue
             if value < 0:
                 raise ValueError(f"{column_name}={value} must be >= 0")
+            # Reject any non-None value on a disallowed axis — including
+            # 0. Downstream queries may treat ``IS NOT NULL`` as "this
+            # axis was relevant for this call_type"; permitting
+            # ``embedding_tokens=0`` on a completion row would write
+            # dirty data through that filter (Copilot loop 2 #3).
+            if column_name not in allowed_axes:
+                raise ValueError(
+                    f"call_type={call_type!r} does not allow {column_name}; "
+                    f"allowed axes: {sorted(allowed_axes)}"
+                )
             if value > 0:
-                if column_name not in allowed_axes:
-                    raise ValueError(
-                        f"call_type={call_type!r} does not allow {column_name}; "
-                        f"allowed axes: {sorted(allowed_axes)}"
-                    )
                 usage_pairs.append((column_name, value))
                 if call_type == "rerank" and column_name in (
                     "rerank_tokens",

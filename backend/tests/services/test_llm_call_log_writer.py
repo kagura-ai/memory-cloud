@@ -169,6 +169,27 @@ class TestInputValidation:
             )
 
     @pytest.mark.asyncio
+    async def test_completion_rejects_zero_value_on_disallowed_axis(self, writer):
+        """Disallowed axis with value=0 (non-None) also raises.
+
+        Downstream queries may treat ``IS NOT NULL`` as "this axis was
+        relevant for this row"; permitting ``embedding_tokens=0`` on a
+        completion row would write dirty data through that filter
+        (Copilot loop 2 #3 — loop-1 fix only guarded value > 0).
+        """
+        with pytest.raises(
+            ValueError, match=r"call_type='completion' does not allow embedding_tokens"
+        ):
+            await writer.record(
+                caller="admin",
+                call_type="completion",
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+                input_tokens=100,
+                embedding_tokens=0,
+            )
+
+    @pytest.mark.asyncio
     async def test_embedding_rejects_input_tokens(self, writer):
         """call_type='embedding' must not populate input_tokens."""
         with pytest.raises(ValueError, match=r"call_type='embedding' does not allow input_tokens"):
