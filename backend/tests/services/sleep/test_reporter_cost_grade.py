@@ -183,3 +183,66 @@ class TestReporterCostGradeChildRows:
         # Legacy roll-up still populated (back-compat path).
         assert report.llm_calls_made == 5
         assert report.llm_tokens_used == 500
+
+    @pytest.mark.asyncio
+    async def test_complete_report_aggregates_phase_1_2_embedding(self, reporter):
+        """#475 PR-1: phases 1 and 2 now contribute embedding usage to
+        the cost-grade roll-up. Prior to PR-1 only reindex populated
+        ``result.embedding_*`` and the roll-up was reindex-only by
+        accident; this test pins the post-PR-1 contract that the
+        reporter correctly sums across all phases that report embedding
+        usage and that the per-phase JSONB blob carries the breakdown
+        (Option C audit trail).
+        """
+        report = MagicMock()
+        report.id = uuid4()
+        report.embedding_provider = None
+        report.embedding_model = None
+        report.edge_discovery_result = None
+        report.dedup_result = None
+        report.reindex_result = None
+
+        results = [
+            PhaseResult(
+                phase_name="edge_discovery",
+                memories_processed=20,
+                embedding_calls_used=20,
+                embedding_tokens=2000,
+                embedding_provider="openai",
+                embedding_model="text-embedding-3-small",
+            ),
+            PhaseResult(
+                phase_name="dedup_merge",
+                memories_processed=10,
+                embedding_calls_used=10,
+                embedding_tokens=1000,
+                embedding_provider="openai",
+                embedding_model="text-embedding-3-small",
+            ),
+            PhaseResult(
+                phase_name="reindex",
+                memories_processed=8,
+                embedding_calls_used=8,
+                embedding_tokens=4096,
+                embedding_provider="openai",
+                embedding_model="text-embedding-3-small",
+            ),
+        ]
+
+        await reporter.complete_report(report, results)
+
+        # Embedding scalar columns aggregate across all three phases.
+        assert report.embedding_calls_made == 38  # 20 + 10 + 8
+        assert report.embedding_tokens == 7096  # 2000 + 1000 + 4096
+        # Provider / model captured from the first phase with non-empty
+        # pair (edge_discovery, which runs first in phase order).
+        assert report.embedding_provider == "openai"
+        assert report.embedding_model == "text-embedding-3-small"
+
+        # Per-phase JSONB blobs carry the embedding breakdown (Option C).
+        assert report.edge_discovery_result["embedding_calls"] == 20
+        assert report.edge_discovery_result["embedding_tokens"] == 2000
+        assert report.dedup_result["embedding_calls"] == 10
+        assert report.dedup_result["embedding_tokens"] == 1000
+        assert report.reindex_result["embedding_calls"] == 8
+        assert report.reindex_result["embedding_tokens"] == 4096

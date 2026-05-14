@@ -1360,3 +1360,54 @@ class TestConfidenceHistogram:
             "0.7-0.85": 2,  # 0.7, 0.8
             "0.85-1.0": 3,  # 0.85, 0.9, 1.0
         }
+
+
+# ============================================================================
+# #475: Embedding cost-grade instrumentation tests
+# ============================================================================
+
+
+class TestEdgeDiscoveryEmbeddingInstrumentation:
+    """Phase 1 ``_find_candidates`` accumulates embedding usage via
+    ``embed_with_usage`` (#475 PR-1). Mirrors ``reindex.py`` semantics:
+    calls increments +1 per invocation (cache hit included), tokens
+    accumulates the API-billed count (cache hits contribute 0).
+    """
+
+    @pytest.mark.asyncio
+    async def test_find_candidates_accumulates_tokens(self, edge_phase):
+        """Happy path: embed_with_usage returns positive tokens; both
+        counters move."""
+        edge_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1] * 768, 50))
+        edge_phase.embedding_service.provider = "openai"
+        edge_phase.embedding_service.model = "text-embedding-3-small"
+
+        memories = [_make_memory(summary="alpha"), _make_memory(summary="beta")]
+
+        with patch(
+            "services.sleep.edge_discovery.search_memories_qdrant",
+            AsyncMock(return_value=[]),
+        ):
+            await edge_phase._find_candidates(memories, "user-1", "ws-1", "ctx-1")
+
+        assert edge_phase._embedding_calls_used == 2
+        assert edge_phase._embedding_tokens_used == 100  # 50 + 50
+
+    @pytest.mark.asyncio
+    async def test_find_candidates_cache_hit_counts_call_not_tokens(self, edge_phase):
+        """Cache-hit semantic: tokens=0 is correctly attributed (no API
+        bill), but the call still counts (+1) for parity with reindex.py."""
+        edge_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1] * 768, 0))
+        edge_phase.embedding_service.provider = "openai"
+        edge_phase.embedding_service.model = "text-embedding-3-small"
+
+        memories = [_make_memory(summary="cached")]
+
+        with patch(
+            "services.sleep.edge_discovery.search_memories_qdrant",
+            AsyncMock(return_value=[]),
+        ):
+            await edge_phase._find_candidates(memories, "user-1", "ws-1", "ctx-1")
+
+        assert edge_phase._embedding_calls_used == 1
+        assert edge_phase._embedding_tokens_used == 0

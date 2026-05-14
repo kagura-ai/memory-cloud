@@ -356,6 +356,14 @@ class SleepReporter:
                     }
                     for b in result.llm_breakdown
                 ],
+                # #475: per-phase embedding usage. Surfaces in the
+                # JSONB column for the phase (``edge_discovery_result`` /
+                # ``dedup_result`` / ``reindex_result``) so the per-phase
+                # breakdown is auditable without adding a child row to
+                # ``sleep_report_llm_usage`` (that schema decision is
+                # deferred to #472 co-decision).
+                "embedding_calls": result.embedding_calls_used,
+                "embedding_tokens": result.embedding_tokens,
             }
 
             if result.phase_name == "edge_discovery":
