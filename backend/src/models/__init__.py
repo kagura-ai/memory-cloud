@@ -10,6 +10,7 @@
 # test environment's import graph (#531).
 import models.analysis  # noqa: F401
 import models.file_objects  # noqa: F401  # Issue #485: file storage
+import models.llm_call_log  # noqa: F401  # Issue #474: comprehensive call ledger
 import models.llm_pricing  # noqa: F401
 import models.sleep  # noqa: F401
 from models.config import ContextSearchConfig

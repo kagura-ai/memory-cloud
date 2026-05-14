@@ -17,6 +17,7 @@ from models.memory import Base as MemoryBase
 # transitively via service imports today; importing explicitly here
 # keeps the test setup robust to future import-graph changes.
 import models.llm_pricing  # noqa: F401  isort: skip
+import models.llm_call_log  # noqa: F401  isort: skip  # Issue #474: comprehensive LLM call ledger
 import models.sleep  # noqa: F401  isort: skip
 import models.analysis  # noqa: F401  isort: skip  # Issue #494: Memory Broadlistening tables
 
