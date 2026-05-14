@@ -375,11 +375,14 @@ class Settings(BaseSettings):
             "When True, R2 verifies the body sha256 server-side and rejects "
             "mismatched bytes with HTTP 400 BadDigest — closes the per-workspace "
             "dedup-poisoning gap from #485 Phase 1. REQUIRES the SDK to send the "
-            "x-amz-checksum-sha256 header (kagura-memory-python-sdk >= 0.4.0); "
-            "older SDKs will fail with 403 SignatureDoesNotMatch. "
+            "x-amz-checksum-sha256 header (kagura-memory-python-sdk >= 0.14.0, "
+            "FilesClient shipped 2026-05-11); older SDKs (v0.13.x and below) "
+            "will fail with 403 SignatureDoesNotMatch. "
             "Default False keeps the Phase 1 behavior so backend can deploy "
             "ahead of SDK rollout — operators flip to True after their tenants "
-            "have updated. Plan to default True once SDK adoption stabilizes."
+            "have updated. Plan to default True once SDK adoption stabilizes; "
+            "criteria for the upstream default flip and eventual flag removal "
+            "are codified in docs/ops/r2-checksum-binding-rollout.md §10 (#577)."
         ),
     )
     allowed_file_content_types: str = Field(
