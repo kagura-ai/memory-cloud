@@ -57,20 +57,67 @@ class TestCheckAccess:
         assert result is legacy_redirect
 
     @pytest.mark.asyncio
-    async def test_enabled_google_passes_through(self):
-        """provider=google never invokes the allowlist (Google-side controls signup)."""
+    async def test_enabled_google_now_gated(self):
+        """#655: Google no longer passes through; the allowlist is consulted.
+
+        Before #655 the gate trusted Google's Consent Screen test-user list
+        to filter signups. That assumption only holds for sensitive scopes —
+        for openid/email/profile the test-user list is advisory. The gate
+        now applies uniformly to both providers; Google goes through the
+        same existing-user / first-user / allowlist branches.
+        """
         svc = _svc()
         svc._load_config = AsyncMock(return_value=_config(enabled=True, mode="manual"))
-        svc._is_existing_user = AsyncMock()
-        svc._is_allowlisted = AsyncMock()
+        svc._is_existing_user = AsyncMock(return_value=False)
+        svc._is_first_user = AsyncMock(return_value=False)
+        svc._is_allowlisted = AsyncMock(return_value=True)
 
         result = await svc.check_access(
-            provider="google", oauth_sub="5678", email="a@b.com", username=None
+            provider="google",
+            oauth_sub="108276939729829363",
+            email="a@b.com",
+            username="a@b.com",
         )
 
         assert result is None
-        svc._is_existing_user.assert_not_awaited()
-        svc._is_allowlisted.assert_not_awaited()
+        # Allowlist IS consulted for Google now (with provider="google"
+        # and subject_id=oauth_sub as the match key).
+        svc._is_allowlisted.assert_awaited_once_with("google", "108276939729829363", "manual")
+
+    @pytest.mark.asyncio
+    async def test_enabled_google_blocked_when_not_allowlisted(self):
+        """#655: a Google user outside the allowlist is blocked and logged."""
+        svc = _svc()
+        svc._load_config = AsyncMock(return_value=_config(enabled=True, mode="manual"))
+        svc._is_existing_user = AsyncMock(return_value=False)
+        svc._is_first_user = AsyncMock(return_value=False)
+        svc._is_allowlisted = AsyncMock(return_value=False)
+        # Stub the audit-write so the test doesn't try to talk to a real
+        # session — _record_blocked_signup is exercised on its own below.
+        svc._record_blocked_signup = AsyncMock()
+
+        result = await svc.check_access(
+            provider="google",
+            oauth_sub="108276939729829363",
+            email="stranger@example.com",
+            username="stranger@example.com",
+            ip_address="203.0.113.7",
+            user_agent="Mozilla/5.0",
+        )
+
+        assert isinstance(result, RedirectResponse)
+        assert "/signup-blocked" in result.headers["location"]
+        # Reason hints surfaced via query params (provider + first 8 chars
+        # of the sub) so the frontend can render an admin-contact prompt.
+        assert "provider=google" in result.headers["location"]
+        assert "sub=10827693" in result.headers["location"]
+        svc._record_blocked_signup.assert_awaited_once()
+        kwargs = svc._record_blocked_signup.await_args.kwargs
+        assert kwargs["provider"] == "google"
+        assert kwargs["oauth_sub"] == "108276939729829363"
+        assert kwargs["email"] == "stranger@example.com"
+        assert kwargs["ip_address"] == "203.0.113.7"
+        assert kwargs["user_agent"] == "Mozilla/5.0"
 
     @pytest.mark.asyncio
     async def test_existing_user_always_allowed(self):
@@ -148,6 +195,10 @@ class TestCheckAccess:
         svc._is_existing_user = AsyncMock(return_value=False)
         svc._is_first_user = AsyncMock(return_value=False)
         svc._is_allowlisted = AsyncMock(return_value=False)
+        # #655: blocked-signup also writes an audit_logs row; stub the
+        # helper so the test stays pure (the audit-write itself is
+        # exercised in TestRecordBlockedSignup).
+        svc._record_blocked_signup = AsyncMock()
 
         result = await svc.check_access(
             provider="github", oauth_sub="1234", email="a@b.com", username="octocat"
@@ -155,7 +206,10 @@ class TestCheckAccess:
 
         assert isinstance(result, RedirectResponse)
         assert "/signup-blocked" in result.headers["location"]
+        assert "provider=github" in result.headers["location"]
+        assert "sub=1234" in result.headers["location"]
         assert result.status_code == 303
+        svc._record_blocked_signup.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_sponsors_mode_raises_not_implemented_in_phase1(self):
@@ -171,6 +225,34 @@ class TestCheckAccess:
                 email="a@b.com",
                 username="octocat",
             )
+
+    @pytest.mark.asyncio
+    async def test_google_sponsors_mode_falls_back_to_manual(self):
+        """#655: provider=google + sponsors mode → manual semantics.
+
+        Sponsorship is GitHub-specific (no equivalent Google concept), so
+        when an admin has the gate set to ``github_sponsors`` or ``both``
+        the Google path falls back to the manual allowlist rather than
+        raising NotImplementedError. Avoids surfacing a 500 for Google
+        users when the GitHub Sponsors integration is in flight.
+        """
+        svc = _svc()
+        svc._load_config = AsyncMock(return_value=_config(enabled=True, mode="github_sponsors"))
+        svc._is_existing_user = AsyncMock(return_value=False)
+        svc._is_first_user = AsyncMock(return_value=False)
+        svc._is_allowlisted = AsyncMock(return_value=True)
+
+        result = await svc.check_access(
+            provider="google",
+            oauth_sub="9999",
+            email="a@b.com",
+            username="a@b.com",
+        )
+
+        assert result is None
+        # The fallback evaluates ``manual`` semantics, NOT github_sponsors —
+        # _is_allowlisted is called with mode='manual'.
+        svc._is_allowlisted.assert_awaited_once_with("google", "9999", "manual")
 
     @pytest.mark.asyncio
     async def test_both_mode_raises_not_implemented_in_phase1(self):
@@ -369,7 +451,8 @@ class TestIsAllowlistedSourceFiltering:
 
         svc.db.execute = fake_execute
 
-        allowed = await svc._is_allowlisted("1234", mode)
+        # #655: _is_allowlisted now takes (provider, subject_id, mode).
+        allowed = await svc._is_allowlisted("github", "1234", mode)
         assert allowed is False  # no matching row → not allowlisted
 
         # SQL contains "source = " clause iff mode != 'both'
@@ -378,6 +461,9 @@ class TestIsAllowlistedSourceFiltering:
             assert not has_source_filter, f"mode=both must not filter by source: {captured['sql']}"
         else:
             assert has_source_filter, f"mode={mode} must filter by source: {captured['sql']}"
+        # All modes must include the provider + subject_id filters.
+        assert "signup_allowlist.provider" in captured["sql"]
+        assert "signup_allowlist.subject_id" in captured["sql"]
 
 
 class TestIsExistingUser:
@@ -470,3 +556,172 @@ class TestLegacyCheckPassesUserIdThrough:
         )
 
         svc._legacy_check.assert_awaited_once_with("user@example.com", "gh-sub-99")
+
+
+class TestAddToAllowlistEntry:
+    """#655: provider-aware add. Covers both the Google path (no GitHub API
+    call) and the GitHub legacy-column write side-effect."""
+
+    @pytest.mark.asyncio
+    async def test_adds_google_entry_with_sentinel_legacy_columns(self):
+        """Google entries must populate the deprecated github_user_id / github_username
+        columns with sentinel values since both stay NOT NULL during the migration."""
+        svc = _svc()
+        scalar_result = MagicMock()
+        scalar_result.scalar_one_or_none = MagicMock(return_value=None)
+        svc.db.execute = AsyncMock(return_value=scalar_result)
+        svc.db.add = MagicMock()
+        svc.db.commit = AsyncMock()
+        svc.db.refresh = AsyncMock()
+
+        entry = await svc.add_to_allowlist_entry(
+            provider="google",
+            subject_id="108276939729829363",
+            subject_label="a@b.com",
+            added_by_user_id="admin1",
+        )
+
+        assert entry.provider == "google"
+        assert entry.subject_id == "108276939729829363"
+        assert entry.subject_label == "a@b.com"
+        # Sentinel writes to the deprecated columns (the migration window
+        # constraint requires NOT NULL on these until a future drop).
+        assert entry.github_user_id == "google:108276939729829363"
+        assert entry.github_username == "a@b.com"
+        assert entry.source == "manual"
+        assert entry.state == "active"
+        svc.db.add.assert_called_once()
+        svc.db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_rejects_duplicate_google_entry(self):
+        svc = _svc()
+        scalar_result = MagicMock()
+        scalar_result.scalar_one_or_none = MagicMock(return_value=MagicMock())
+        svc.db.execute = AsyncMock(return_value=scalar_result)
+        svc.db.add = MagicMock()
+        svc.db.commit = AsyncMock()
+
+        with pytest.raises(ValueError, match="already on the manual allowlist"):
+            await svc.add_to_allowlist_entry(
+                provider="google",
+                subject_id="9999",
+                subject_label="dup@b.com",
+                added_by_user_id="admin1",
+            )
+
+        svc.db.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_github_path_requires_legacy_columns(self):
+        """provider='github' callers MUST supply the legacy github_user_id /
+        github_username — the entry-point is the migration-window contract."""
+        svc = _svc()
+        svc.db.execute = AsyncMock()
+
+        with pytest.raises(ValueError, match="legacy columns are still NOT NULL"):
+            await svc.add_to_allowlist_entry(
+                provider="github",
+                subject_id="583231",
+                subject_label="octocat",
+                added_by_user_id="admin1",
+            )
+
+
+class TestRecordBlockedSignup:
+    """#655: blocked signups now write an audit_logs row in addition to
+    the structlog event (CSO gate1 D2)."""
+
+    @pytest.mark.asyncio
+    async def test_writes_audit_log_with_hmac_email(self):
+        """The audit row must HMAC the email — never log plaintext PII."""
+        svc = _svc()
+        svc.db.add = MagicMock()
+        svc.db.commit = AsyncMock()
+
+        with patch(
+            "services.signup_gate_service.get_settings",
+            return_value=SimpleNamespace(audit_hmac_key="test-key"),
+        ):
+            await svc._record_blocked_signup(
+                provider="google",
+                oauth_sub="108276939729829363",
+                email="stranger@example.com",
+                username="stranger@example.com",
+                ip_address="203.0.113.7",
+                user_agent="Mozilla/5.0",
+            )
+
+        svc.db.add.assert_called_once()
+        audit = svc.db.add.call_args.args[0]
+        assert audit.action == "signup_blocked"
+        assert audit.resource == "signup_gate:google"
+        assert audit.user_id == "108276939729829363"
+        # Plaintext email must not leak into the row.
+        assert audit.new_value_hash is not None
+        assert audit.new_value_hash != "stranger@example.com"
+        # 64-char hex (SHA256 hex) shape.
+        assert len(audit.new_value_hash) == 64
+        # IP / UA are captured for triage.
+        assert audit.ip_address == "203.0.113.7"
+        assert audit.user_agent == "Mozilla/5.0"
+        # Metadata stores provider type only — never the email or any
+        # other PII. The HMAC in new_value_hash is the canonical email
+        # reference (matches the auth/roles.py precedent; PR #657 Copilot
+        # review / CSO finding #1).
+        assert audit.user_metadata == {"provider": "google"}
+        # Defense in depth: the plaintext email MUST NOT appear anywhere
+        # on the row (not in user_metadata, not in any other column).
+        assert "stranger@example.com" not in str(audit.user_metadata)
+        assert audit.user_email == "oauth-callback"  # the actor sentinel, not the subject
+        svc.db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_audit_failure_is_swallowed(self):
+        """A DB hiccup during the audit-write must NOT escalate into a
+        callback 500 for the user being blocked."""
+        svc = _svc()
+        svc.db.add = MagicMock()
+        svc.db.commit = AsyncMock(side_effect=RuntimeError("db down"))
+        svc.db.rollback = AsyncMock()
+
+        with patch(
+            "services.signup_gate_service.get_settings",
+            return_value=SimpleNamespace(audit_hmac_key="test-key"),
+        ):
+            # Must NOT raise.
+            await svc._record_blocked_signup(
+                provider="github",
+                oauth_sub="1234",
+                email="a@b.com",
+                username="octocat",
+                ip_address=None,
+                user_agent=None,
+            )
+
+        svc.db.rollback.assert_awaited_once()
+
+
+class TestBlockedResponse:
+    """The blocked redirect must include reason hints (#655 D1)."""
+
+    def test_includes_provider_and_sub_head8(self):
+        svc = _svc()
+        response = svc._blocked_response(provider="google", oauth_sub="108276939729829363")
+
+        location = response.headers["location"]
+        assert "/signup-blocked" in location
+        assert "provider=google" in location
+        # First 8 chars only (Git short-SHA convention); the rest must
+        # not leak into the URL.
+        assert "sub=10827693" in location
+        assert "108276939729829363" not in location
+
+    def test_no_params_when_context_absent(self):
+        """Defensive call without context should still produce a valid URL."""
+        svc = _svc()
+        response = svc._blocked_response()
+
+        location = response.headers["location"]
+        assert "/signup-blocked" in location
+        assert "?" not in location

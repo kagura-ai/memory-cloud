@@ -47,11 +47,38 @@ def _mock_config(enabled: bool = False, mode: str = "manual") -> Any:
     )
 
 
-def _mock_entry(username: str = "octocat", user_id: str = "583231") -> Any:
+def _mock_entry(
+    username: str = "octocat",
+    user_id: str = "583231",
+    *,
+    provider: str = "github",
+    subject_id: str | None = None,
+    subject_label: str | None = None,
+) -> Any:
+    """Build a provider-aware MagicMock entry (#655).
+
+    Defaults mimic a pre-#655 GitHub row so existing tests need no
+    changes. Pass ``provider="google"`` + ``subject_id``/``subject_label``
+    to mock a Google row.
+    """
+    if provider == "github":
+        resolved_sub = subject_id or user_id
+        resolved_label = subject_label or username
+        legacy_uid = user_id
+        legacy_username = username
+    else:
+        assert subject_id is not None, "google mock requires subject_id"
+        resolved_sub = subject_id
+        resolved_label = subject_label or username
+        legacy_uid = f"{provider}:{subject_id}"
+        legacy_username = resolved_label
     return MagicMock(
         id=uuid4(),
-        github_user_id=user_id,
-        github_username=username,
+        provider=provider,
+        subject_id=resolved_sub,
+        subject_label=resolved_label,
+        github_user_id=legacy_uid,
+        github_username=legacy_username,
         source="manual",
         state="active",
         added_by_user_id="admin_user_1",
@@ -212,6 +239,157 @@ class TestAddToAllowlist:
             json={"github_username": bad_username},
         )
         assert resp.status_code == 422
+
+    # ---- #655: provider-aware add ---------------------------------------
+
+    def test_legacy_payload_still_works(self, client, monkeypatch):
+        """Pre-#655 payload ``{github_username}`` (no provider field) still
+        routes to the GitHub path (provider defaults to 'github')."""
+        monkeypatch.setattr(
+            "services.signup_gate_service.SignupGateService.add_to_allowlist",
+            AsyncMock(return_value=_mock_entry("octocat")),
+        )
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={"github_username": "octocat"},
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        # Response shape now includes the provider-aware fields too.
+        assert body["provider"] == "github"
+        assert body["subject_id"] == "583231"
+        assert body["subject_label"] == "octocat"
+        assert body["github_username"] == "octocat"
+
+    def test_201_on_google_success(self, client, monkeypatch):
+        """provider='google' resolves sub via the local users table and
+        creates an entry with the OIDC sub as subject_id."""
+        google_sub = "108276939729829363"
+        monkeypatch.setattr(
+            "api.routes.admin_signup_gate.resolve_google_sub_by_email",
+            AsyncMock(return_value=(google_sub, "alice@example.com")),
+        )
+        monkeypatch.setattr(
+            "services.signup_gate_service.SignupGateService.add_to_allowlist_entry",
+            AsyncMock(
+                return_value=_mock_entry(
+                    provider="google",
+                    subject_id=google_sub,
+                    subject_label="alice@example.com",
+                )
+            ),
+        )
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={"provider": "google", "email": "alice@example.com"},
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["provider"] == "google"
+        assert body["subject_id"] == google_sub
+        assert body["subject_label"] == "alice@example.com"
+
+    def test_google_404_when_user_not_in_users_table(self, client, monkeypatch):
+        """Bootstrap UX gap: a Google user must OAuth once before they can
+        be added — return 404 with the actionable hint baked into the
+        helper's exception message."""
+        from utils.google_user import GoogleUserNotFound
+
+        monkeypatch.setattr(
+            "api.routes.admin_signup_gate.resolve_google_sub_by_email",
+            AsyncMock(side_effect=GoogleUserNotFound("user must OAuth first")),
+        )
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={"provider": "google", "email": "stranger@example.com"},
+        )
+        assert resp.status_code == 404
+        # The bootstrap-UX hint comes through verbatim.
+        assert "OAuth" in resp.json()["detail"]
+
+    def test_google_422_when_email_missing(self, client):
+        """provider='google' requires the email field."""
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={"provider": "google"},
+        )
+        assert resp.status_code == 422
+
+    def test_github_422_when_username_missing(self, client):
+        """Explicit provider='github' still needs github_username."""
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={"provider": "github"},
+        )
+        assert resp.status_code == 422
+
+    def test_422_on_unknown_provider(self, client):
+        """provider values outside the Literal allow-list reject at parse time."""
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={"provider": "microsoft", "email": "alice@example.com"},
+        )
+        assert resp.status_code == 422
+
+    def test_422_when_github_payload_has_email(self, client):
+        """PR #657 review #3: provider=github MUST NOT accept an email field.
+
+        Without the model_validator, the extra field would be silently
+        ignored and the request would succeed with confusing data — admins
+        would not see their typo. The validator rejects with 422 so the
+        mismatch is explicit.
+        """
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={
+                "provider": "github",
+                "github_username": "octocat",
+                "email": "alice@example.com",
+            },
+        )
+        assert resp.status_code == 422
+        assert "email must not be set" in str(resp.json())
+
+    def test_422_when_google_payload_has_github_username(self, client):
+        """Symmetric: provider=google MUST NOT accept github_username."""
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={
+                "provider": "google",
+                "email": "alice@example.com",
+                "github_username": "octocat",
+            },
+        )
+        assert resp.status_code == 422
+        assert "github_username must not be set" in str(resp.json())
+
+    def test_422_on_malformed_google_email(self, client):
+        """The email regex pattern (Field(pattern=...)) rejects non-RFC strings
+        before we hit the DB. We deliberately use a regex rather than
+        pydantic.EmailStr to avoid pulling in email-validator as a new
+        dependency — see the AllowlistAddRequest.email comment in
+        admin_signup_gate.py."""
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={"provider": "google", "email": "not-an-email"},
+        )
+        assert resp.status_code == 422
+
+    def test_409_on_duplicate_google_entry(self, client, monkeypatch):
+        """Duplicate Google entry surfaces the standard 409 conflict."""
+        monkeypatch.setattr(
+            "api.routes.admin_signup_gate.resolve_google_sub_by_email",
+            AsyncMock(return_value=("9999", "dup@b.com")),
+        )
+        monkeypatch.setattr(
+            "services.signup_gate_service.SignupGateService.add_to_allowlist_entry",
+            AsyncMock(side_effect=ValueError("already on the manual allowlist")),
+        )
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={"provider": "google", "email": "dup@b.com"},
+        )
+        assert resp.status_code == 409
 
 
 class TestRemoveFromAllowlist:
