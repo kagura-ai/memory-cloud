@@ -81,14 +81,6 @@ DB_POOL_SIZE = 20
 DB_MAX_OVERFLOW = 10
 
 # ============================================================================
-# Quota & Limits (Plan-based)
-# ============================================================================
-
-# Maximum owned workspaces per user (all plans)
-# Issue #276: Users can own max 10 workspaces but can be members of unlimited workspaces via invites.
-MAX_OWNED_WORKSPACES_PER_USER = 10
-
-# ============================================================================
 # Migration & Validation
 # ============================================================================
 
