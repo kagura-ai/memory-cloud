@@ -76,6 +76,45 @@ vi.mock("@/components/common/PageHeader", () => ({
   PageHeader: ({ title }: { title: string }) => <h1>{title}</h1>,
 }));
 
+// Radix Select renders a visible combobox button + a hidden native
+// <select> for form submission. The combobox uses pointer events that
+// jsdom does not fire reliably, so we substitute a plain <select> that
+// preserves the controlled-value contract (value / onValueChange) used
+// by the page. This unblocks the provider-switch path coverage below.
+type SelectChildren = { children?: React.ReactNode };
+vi.mock("@/components/ui/select", () => ({
+  Select: ({
+    value,
+    onValueChange,
+    children,
+    disabled,
+  }: {
+    value: string;
+    onValueChange?: (v: string) => void;
+    children: React.ReactNode;
+    disabled?: boolean;
+  }) => (
+    <select
+      data-testid="select-mock"
+      value={value}
+      disabled={disabled}
+      onChange={(e) => onValueChange?.(e.target.value)}
+    >
+      {children}
+    </select>
+  ),
+  SelectTrigger: ({ children }: SelectChildren) => <>{children}</>,
+  SelectValue: () => null,
+  SelectContent: ({ children }: SelectChildren) => <>{children}</>,
+  SelectItem: ({
+    value,
+    children,
+  }: {
+    value: string;
+    children: React.ReactNode;
+  }) => <option value={value}>{children}</option>,
+}));
+
 import AdminSignupGatePage from "./page";
 
 // ---------- Helpers --------------------------------------------------------
@@ -168,9 +207,60 @@ describe("AdminSignupGatePage", () => {
     fireEvent.click(addButton);
 
     await waitFor(() => {
-      expect(mockAddEntry).toHaveBeenCalledWith("octocat");
+      // Issue #655: payload is now a discriminated union {provider, ...}
+      // instead of a bare username string. Default provider is GitHub
+      // so the form submits `{provider: "github", github_username}`.
+      expect(mockAddEntry).toHaveBeenCalledWith({
+        provider: "github",
+        github_username: "octocat",
+      });
     });
     await screen.findByText(/octocat/);
+  });
+
+  it("adds a Google entry when the provider is switched to Google", async () => {
+    // Issue #670 acceptance: switching the provider Select to "google"
+    // routes the submit through the Google branch with the canonical
+    // `{provider: "google", email}` payload (matching the backend's
+    // AllowlistAddRequest discriminated union). Without this test the
+    // Google submit path would regress silently on future refactors.
+    initialTab = "allowlist";
+    primeHappyPath();
+    const googleEntry = {
+      ...sampleEntry,
+      provider: "google" as const,
+      subject_id: "google-sub-1",
+      subject_label: "alice@example.com",
+    };
+    mockAddEntry.mockResolvedValue(googleEntry);
+
+    render(<AdminSignupGatePage />);
+
+    // Wait for the form to render (GitHub placeholder is the initial state).
+    await screen.findByPlaceholderText("admin.signupGate.addUsername");
+
+    // Provider selector is rendered via the mocked Select (plain <select>),
+    // so a normal change event drives the controlled value.
+    const providerSelect = screen.getByTestId("select-mock");
+    fireEvent.change(providerSelect, { target: { value: "google" } });
+
+    // Placeholder + aria-label switch to the email variant.
+    const emailInput = await screen.findByPlaceholderText(
+      "admin.signupGate.addEmail",
+    );
+    fireEvent.change(emailInput, { target: { value: "alice@example.com" } });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /admin\.signupGate\.addButton/ }),
+    );
+
+    await waitFor(() => {
+      expect(mockAddEntry).toHaveBeenCalledWith({
+        provider: "google",
+        email: "alice@example.com",
+      });
+    });
+    await screen.findByText(/alice@example.com/);
   });
 
   it("surfaces a destructive toast when add fails", async () => {

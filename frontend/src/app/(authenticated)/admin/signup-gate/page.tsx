@@ -52,6 +52,7 @@ import {
   type SignupAllowlistEntry,
   type SignupGateConfig,
   type SignupGateMode,
+  type SignupGateProvider,
 } from "@/lib/api/signup-gate";
 
 const TABS = ["settings", "allowlist"] as const;
@@ -67,6 +68,11 @@ export default function AdminSignupGatePage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  const [provider, setProvider] = useState<SignupGateProvider>("github");
+  // Single input bound to both username and email — the placeholder /
+  // aria-label switches based on the selected provider. Backend's
+  // canonical payload is `{provider, github_username}` for github or
+  // `{provider, email}` for google, so we route at submit time.
   const [username, setUsername] = useState("");
   const [adding, setAdding] = useState(false);
   // Guards against rapid toggle/select interleaving: without it, response
@@ -131,7 +137,14 @@ export default function AdminSignupGatePage() {
     if (!trimmed) return;
     setAdding(true);
     try {
-      const entry = await addSignupAllowlistEntry(trimmed);
+      // Issue #655: route the payload by selected provider. Backend
+      // validates shape (rejects email when provider=github and vice
+      // versa) so the UI just trusts the user's selection.
+      const entry = await addSignupAllowlistEntry(
+        provider === "github"
+          ? { provider: "github", github_username: trimmed }
+          : { provider: "google", email: trimmed },
+      );
       setAllowlist((prev) => [entry, ...prev]);
       setUsername("");
       toast({ title: tCommon("success"), description: t("addSuccess") });
@@ -149,7 +162,14 @@ export default function AdminSignupGatePage() {
 
   async function handleRemove(entry: SignupAllowlistEntry): Promise<void> {
     if (
-      !window.confirm(t("removeConfirm", { username: entry.github_username }))
+      !window.confirm(
+        t("removeConfirm", {
+          // subject_label is the provider-agnostic display string (github_username
+          // for github, email for google); falls back to the legacy github_username
+          // for any pre-#655 rows that somehow miss the new field.
+          username: entry.subject_label || entry.github_username,
+        }),
+      )
     ) {
       return;
     }
@@ -230,13 +250,33 @@ export default function AdminSignupGatePage() {
           </TabsContent>
 
           <TabsContent value="allowlist" className="space-y-4 pt-6">
-            <form onSubmit={handleAdd} className="flex gap-2 max-w-md">
+            <form onSubmit={handleAdd} className="flex gap-2 max-w-xl">
+              <Select
+                value={provider}
+                disabled={adding}
+                onValueChange={(value) =>
+                  setProvider(value as SignupGateProvider)
+                }
+              >
+                <SelectTrigger className="w-32" aria-label={t("providerLabel")}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="github">{t("providerGitHub")}</SelectItem>
+                  <SelectItem value="google">{t("providerGoogle")}</SelectItem>
+                </SelectContent>
+              </Select>
               <Input
-                placeholder={t("addUsername")}
+                placeholder={
+                  provider === "github" ? t("addUsername") : t("addEmail")
+                }
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 disabled={adding}
-                aria-label={t("addUsername")}
+                aria-label={
+                  provider === "github" ? t("addUsername") : t("addEmail")
+                }
+                type={provider === "google" ? "email" : "text"}
               />
               <Button type="submit" disabled={adding || !username.trim()}>
                 <Plus className="h-4 w-4 mr-1" />
@@ -253,6 +293,7 @@ export default function AdminSignupGatePage() {
               <Table>
                 <TableHeader>
                   <TableRow>
+                    <TableHead>{t("tableProvider")}</TableHead>
                     <TableHead>{t("tableUser")}</TableHead>
                     <TableHead>{t("tableSource")}</TableHead>
                     <TableHead>{t("tableState")}</TableHead>
@@ -262,30 +303,47 @@ export default function AdminSignupGatePage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {allowlist.map((entry) => (
-                    <TableRow key={entry.id}>
-                      <TableCell className="font-medium">
-                        {entry.github_username}
-                        <span className="ml-2 text-xs text-muted-foreground">
-                          {t("githubUserId", { id: entry.github_user_id })}
-                        </span>
-                      </TableCell>
-                      <TableCell>{t(`source.${entry.source}`)}</TableCell>
-                      <TableCell>{t(`state.${entry.state}`)}</TableCell>
-                      <TableCell className="text-right">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => void handleRemove(entry)}
-                          aria-label={t("removeAllowlistEntry", {
-                            username: entry.github_username,
-                          })}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                  {allowlist.map((entry) => {
+                    // Display label: subject_label is canonical post-#655;
+                    // fall back to github_username for any row missing it.
+                    const label = entry.subject_label || entry.github_username;
+                    const providerKey =
+                      entry.provider === "google" ? "google" : "github";
+                    return (
+                      <TableRow key={entry.id}>
+                        <TableCell>
+                          {t(
+                            `provider${providerKey === "google" ? "Google" : "GitHub"}`,
+                          )}
+                        </TableCell>
+                        <TableCell className="font-medium">
+                          {label}
+                          {entry.provider === "github" &&
+                            entry.github_user_id && (
+                              <span className="ml-2 text-xs text-muted-foreground">
+                                {t("githubUserId", {
+                                  id: entry.github_user_id,
+                                })}
+                              </span>
+                            )}
+                        </TableCell>
+                        <TableCell>{t(`source.${entry.source}`)}</TableCell>
+                        <TableCell>{t(`state.${entry.state}`)}</TableCell>
+                        <TableCell className="text-right">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => void handleRemove(entry)}
+                            aria-label={t("removeAllowlistEntry", {
+                              username: label,
+                            })}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
                 </TableBody>
               </Table>
             )}
