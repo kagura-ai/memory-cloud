@@ -321,6 +321,28 @@ class Settings(BaseSettings):
         default=None,
         description="Override PRO plan sleep-enabled contexts cap (Issue #560; default 3)",
     )
+    plan_free_max_owned_workspaces: int | None = Field(
+        default=None,
+        description="Override FREE plan owned-workspace cap (Issue #661; default 1)",
+    )
+    plan_basic_max_owned_workspaces: int | None = Field(
+        default=None,
+        description="Override BASIC plan owned-workspace cap (Issue #661; default 3)",
+    )
+    plan_pro_max_owned_workspaces: int | None = Field(
+        default=None,
+        description="Override PRO plan owned-workspace cap (Issue #661; default 10)",
+    )
+    enforce_workspace_cap: bool = Field(
+        default=False,
+        description=(
+            "Issue #661 rollout gate. When False (default), workspace creation "
+            "is allowed unconditionally but a structured warn log is emitted "
+            "whenever a user is over their tier's max_owned_workspaces — used "
+            "to surface affected accounts before enforcement. Flip to True "
+            "after the email-outreach cleanup window."
+        ),
+    )
 
     # Plan Display Names (customizable for SaaS forks)
     plan_free_display_name: str | None = Field(
