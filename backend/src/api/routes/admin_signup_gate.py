@@ -121,7 +121,17 @@ class AllowlistAddRequest(BaseModel):
     )
     email: str | None = Field(
         default=None,
-        max_length=255,
+        # Capped at 247 (= 255 − len("pending:")) so the Phase 2 sentinel
+        # ``subject_id=f"pending:{email-lower}"`` always fits the
+        # ``signup_allowlist.subject_id VARCHAR(255)`` column. Without
+        # this cap a valid 248–255-char email would fail at COMMIT with
+        # a DB error instead of returning a controlled 422 here. The
+        # ``subject_id`` column IS the matching key used by the OAuth
+        # callback gate's promotion lookup, so column-side truncation
+        # would corrupt uniqueness — schema-side cap is the safe fix.
+        # 247 still exceeds the RFC 3696 practical email limit (~254
+        # octets; real-world addresses are typically <100 chars).
+        max_length=247,
         # Same shape as the InvitationCreateRequest email field
         # (models/schemas.py:830) — kept identical so admin/invitation
         # flows share one validation surface.

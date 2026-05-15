@@ -400,6 +400,43 @@ class TestAddToAllowlist:
         )
         assert resp.status_code == 422
 
+    def test_google_422_when_email_exceeds_pending_sentinel_budget(self, client):
+        """PR #673 Copilot review #2: ``AllowlistAddRequest.email`` is capped
+        at 247 (= 255 − len("pending:")) so the Phase 2 pending sentinel
+        ``f"pending:{email}"`` always fits ``subject_id VARCHAR(255)``.
+
+        A 248-char email would have produced a 256-char sentinel and
+        failed at DB commit with a controlled-error-skipping
+        ``StringDataRightTruncationError``. The schema-side cap turns
+        that DB error into a 422 here.
+        """
+        # local part 235 chars + "@example.com" (12 chars) = 247 OK
+        ok_email = ("a" * 235) + "@example.com"
+        assert len(ok_email) == 247
+        # local part 236 chars + "@example.com" = 248 over the cap
+        too_long = ("a" * 236) + "@example.com"
+        assert len(too_long) == 248
+
+        # 248 chars → 422 from Pydantic max_length, no DB call
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={"provider": "google", "email": too_long},
+        )
+        assert resp.status_code == 422
+
+        # 247 chars passes parse (handler then takes its normal path —
+        # we don't drive the full pending-row creation here; the
+        # boundary check is the contract under test).
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={"provider": "google", "email": ok_email},
+        )
+        # 422 would mean the schema rejected the 247-char input — that's
+        # the regression we're guarding against. Any other status is
+        # produced downstream (the real google-sub resolver runs and
+        # 500s because no DB; we only care that parse passed).
+        assert resp.status_code != 422
+
     def test_409_on_duplicate_google_entry(self, client, monkeypatch):
         """Duplicate Google entry surfaces the standard 409 conflict."""
         monkeypatch.setattr(
