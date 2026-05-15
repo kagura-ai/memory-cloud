@@ -30,9 +30,16 @@ function WorkspaceGuard({ children }: { children: React.ReactNode }) {
     useWorkspace();
   const [showSelection, setShowSelection] = useState(false);
 
-  // Pages that don't require an workspace
+  // Pages that don't require an workspace. /workspace/settings is a
+  // compatibility-only route that immediately redirects to
+  // /workspace/settings/general (see workspace/settings/page.tsx), so both
+  // paths must be exempted — otherwise zero-workspace users land on
+  // /workspace/settings/general?create=true and the guard pushes them back,
+  // producing a redirect loop (Copilot review on PR #662).
   const isWorkspaceCreationPage =
-    pathname === "/workspace/settings" && searchParams.get("create") === "true";
+    (pathname === "/workspace/settings" ||
+      pathname === "/workspace/settings/general") &&
+    searchParams.get("create") === "true";
   const isPublicPage =
     pathname === "/pricing" || pathname === "/login" || pathname === "/";
 
@@ -43,14 +50,13 @@ function WorkspaceGuard({ children }: { children: React.ReactNode }) {
     // Skip check for workspace creation page and public pages
     if (isWorkspaceCreationPage || isPublicPage) return;
 
-    // Issue #246 / #660: When the user has zero workspaces, send them to the
-    // explicit create form rather than the dashboard. /workspace/dashboard
-    // does not render a create UI; redirecting there from here (the source
-    // route) would loop back through this guard and keep the user on the
-    // loading spinner forever. /workspace/settings?create=true renders
-    // WorkspaceCreateForm (with `deleteExistingToCreate` copy when applicable).
+    // Issue #246 / #660: When the user has zero workspaces, send them
+    // directly to the canonical create-form route. /workspace/settings
+    // immediately redirects to /workspace/settings/general for backwards
+    // compatibility — pushing here saves one redirect hop and avoids
+    // depending on the redirect intermediate (Copilot review on PR #662).
     if (workspaces.length === 0) {
-      router.push("/workspace/settings?create=true");
+      router.push("/workspace/settings/general?create=true");
       return;
     }
 
