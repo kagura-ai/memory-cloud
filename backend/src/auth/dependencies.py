@@ -12,10 +12,47 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.api_keys import VerifiedKey
+from auth.oauth2_bearer import is_oauth_bearer_token, verify_oauth_bearer_token
 from db.base import get_db
 from models.auth import User
 from utils.exceptions import AuthorizationError
 from utils.logger import get_logger
+
+# HTTP method → required OAuth scope. GET/HEAD/OPTIONS → memory:read;
+# mutating verbs → memory:write. Routes that need finer enforcement
+# (admin-only, etc.) layer their own scope check on top.
+_METHOD_REQUIRED_SCOPE: dict[str, str] = {
+    "GET": "memory:read",
+    "HEAD": "memory:read",
+    "OPTIONS": "memory:read",
+    "POST": "memory:write",
+    "PUT": "memory:write",
+    "PATCH": "memory:write",
+    "DELETE": "memory:write",
+}
+
+
+def _required_scope_for_method(method: str) -> str:
+    """Return the OAuth scope required for an HTTP method.
+
+    Unknown methods fail closed to ``memory:write`` so a future verb
+    cannot accidentally bypass enforcement.
+    """
+    return _METHOD_REQUIRED_SCOPE.get(method.upper(), "memory:write")
+
+
+def _scope_granted(granted: str | None, required: str) -> bool:
+    """Check whether ``required`` is present in a space-separated scope string.
+
+    RFC 6749 §3.3: scope is a space-delimited list of case-sensitive
+    strings. Membership test only — there is no hierarchy (``memory:admin``
+    does NOT imply ``memory:write``); routes that want admin-level access
+    must require ``memory:admin`` explicitly.
+    """
+    if not granted:
+        return False
+    return required in granted.split()
+
 
 logger = get_logger(__name__)
 
@@ -268,6 +305,41 @@ async def _build_api_key_user_dict(
     }
 
 
+async def _build_oauth_user_dict(
+    user_id: str,
+    granted_scope: str | None,
+    db: AsyncSession,
+) -> dict:
+    """Build user info dict from a verified OAuth Bearer token.
+
+    Mirrors the session-auth shape rather than the API-key shape: OAuth
+    tokens are NOT workspace-bound (``OAuth2Token`` has no workspace_id
+    column, and the workspace_id in the device-flow token response is
+    point-in-time and explicitly not security-bearing per the comment
+    in ``auth.oauth2_server``). Workspace gating is delegated downstream
+    to ``PermissionService.check_workspace_access``, same as session
+    auth. ``oauth_scope`` is attached so routes that want extra
+    introspection (e.g. require ``memory:admin``) can layer it.
+    """
+    current_workspace_id = await _get_user_workspace_id(user_id, db)
+
+    logger.info(
+        "oauth_bearer_authenticated",
+        user_id=user_id,
+        workspace_id=str(current_workspace_id) if current_workspace_id else None,
+        scope=granted_scope,
+    )
+
+    return {
+        "user_id": user_id,
+        "email": f"{user_id}@oauth",
+        "role": "user",
+        "current_context_id": None,
+        "current_workspace_id": current_workspace_id,
+        "oauth_scope": granted_scope,
+    }
+
+
 async def verify_api_key_user(
     api_key: str | None = Depends(get_api_key),
     db: AsyncSession = Depends(get_db),
@@ -342,16 +414,25 @@ async def require_session_auth(
             # Only accessible via browser session
             ...
     """
-    # Reject API key authentication for Web UI endpoints
+    # Web UI endpoints reject every Bearer credential — both ``kagura_*``
+    # API keys and OAuth device-flow tokens carry programmatic / CLI
+    # semantics, and UI-only flows (billing checkout, MFA) must require
+    # a real browser session. The event key stays ``api_key_rejected_for_web_ui``
+    # for dashboard continuity since #252; OAuth-vs-API-key is surfaced
+    # via the ``token_kind`` field instead of a new event name.
     if api_key:
         logger.warning(
             "api_key_rejected_for_web_ui",
             path=request.url.path,
-            key_prefix=api_key[:16] if api_key else None,
+            token_kind="oauth" if is_oauth_bearer_token(api_key) else "api_key",
+            token_prefix=api_key[:8],
         )
         raise HTTPException(
             status_code=403,
-            detail="API keys are not allowed for Web UI endpoints. Use browser session authentication.",
+            detail=(
+                "Bearer tokens (API keys or OAuth) are not allowed for Web UI endpoints. "
+                "Use browser session authentication."
+            ),
         )
 
     # Require session authentication
@@ -398,6 +479,40 @@ async def get_user_from_api_key_or_session(
             context_id = user.get("current_context_id")
             return await save_memory(user["user_id"], context_id, ...)
     """
+    # Priority 0: OAuth Bearer. The prefix check skips the OAuth DB
+    # lookup for ``kagura_*`` API keys (and vice versa), so each Bearer
+    # request hits only one of the two stores.
+    if api_key and is_oauth_bearer_token(api_key):
+        result = await verify_oauth_bearer_token(api_key, db)
+        if result is None:
+            logger.warning("invalid_oauth_bearer_attempt", token_prefix=api_key[:8])
+            raise HTTPException(status_code=401, detail="Invalid or expired Bearer token")
+
+        user_id, granted_scope = result
+
+        # Scope enforcement (RFC 6750 §3): map HTTP method → required scope,
+        # 403 with ``WWW-Authenticate: Bearer error="insufficient_scope"``
+        # on miss so SDK clients can recover via the upgrade flow.
+        required = _required_scope_for_method(request.method)
+        if not _scope_granted(granted_scope, required):
+            logger.warning(
+                "oauth_bearer_insufficient_scope",
+                user_id=user_id,
+                required=required,
+                granted=granted_scope,
+                method=request.method,
+                path=request.url.path,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail=f"Insufficient scope: '{required}' required",
+                headers={
+                    "WWW-Authenticate": f'Bearer error="insufficient_scope", scope="{required}"'
+                },
+            )
+
+        return await _build_oauth_user_dict(user_id, granted_scope, db)
+
     # Priority 1: API Key authentication
     if api_key:
         from auth.api_keys import APIKeyManager

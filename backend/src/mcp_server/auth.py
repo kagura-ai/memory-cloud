@@ -151,59 +151,25 @@ async def _verify_api_key(api_key: str) -> tuple[str, "UUID | None", "UUID | Non
 
 
 async def _verify_oauth2_token(access_token: str) -> str | None:
-    """Verify OAuth2 access token.
+    """Verify OAuth2 access token and return user_id.
 
-    Args:
-        access_token: OAuth2 access token value
-
-    Returns:
-        user_id if token is valid
-
-    Raises:
-        TokenExpiredError: Token has expired
-        TokenRevokedError: Token has been revoked
-        InvalidTokenError: Token is invalid or not found
+    Scope is discarded here because MCP enforces scopes at the tool
+    layer (``auth.mcp_scopes``), not at the transport gate. MCP's
+    transport entry point has no FastAPI-injected session, so this
+    shim opens its own short-lived async session — symmetric with
+    ``_verify_api_key`` above, which also calls a session-managing
+    wrapper.
     """
-    import asyncio
+    from auth.oauth2_bearer import verify_oauth_bearer_token
+    from db.base import get_db
 
-    from db.base import get_sync_session
-    from models.auth import OAuth2Token
-    from utils.exceptions import InvalidTokenError, TokenExpiredError, TokenRevokedError
-
-    # Issue #102: Wrap sync DB call in thread to avoid blocking event loop
-    def _verify_sync():
-        db_session = get_sync_session()
-        try:
-            token = db_session.query(OAuth2Token).filter_by(access_token=access_token).first()
-
-            if not token:
-                logger.debug("OAuth2 token not found")
-                raise InvalidTokenError("Token not found in database")
-
-            # Check if token is revoked
-            if token.is_revoked():
-                logger.debug(f"OAuth2 token revoked: token_id={token.id}")
-                raise TokenRevokedError()
-
-            # Check if token is expired
-            if token.is_expired():
-                logger.debug(f"OAuth2 token expired: token_id={token.id}")
-                raise TokenExpiredError()
-
-            logger.debug(f"OAuth2 token valid: user={token.user_id}")
-            return token.user_id
-
-        except (TokenExpiredError, TokenRevokedError, InvalidTokenError):
-            # Re-raise specific token errors
-            raise
-        except Exception as e:
-            logger.error(f"OAuth2 token verification error: {e}")
-            raise InvalidTokenError(f"Token verification failed: {e}") from e
-        finally:
-            db_session.close()
-
-    # Run in thread pool to avoid blocking event loop
-    return await asyncio.to_thread(_verify_sync)
+    async for db in get_db():
+        result = await verify_oauth_bearer_token(access_token, db)
+        if result is None:
+            return None
+        user_id, _scope = result
+        return user_id
+    return None
 
 
 async def _verify_session_cookie(cookie_header: bytes) -> str | None:
