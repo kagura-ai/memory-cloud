@@ -32,11 +32,17 @@ zero-downtime deploy). In a true rolling deploy where new and old code
 serve INSERTs concurrently for an extended window, do NOT rely on this
 migration alone — coordinate by quiescing the admin allowlist API first.
 
-Revision ID: e14_655_signup_allowlist_provider
+Revision ID: e14_655_allowlist_provider
 Revises: e13_474_pricing_seeds
 
 NOTE: Revision IDs are capped at 32 chars because ``alembic_version.version_num``
-is VARCHAR(32) in this database (32 chars exact).
+is VARCHAR(32) in this database. The originally-drafted ID
+``e14_655_signup_allowlist_provider`` was 33 chars and would have failed the
+INSERT into ``alembic_version`` on ``alembic upgrade`` (asyncpg raises
+``StringDataRightTruncationError``; some backends silently truncate, which
+is worse — it leaves the DB in an unknown revision state). Shortened to
+``e14_655_allowlist_provider`` (26 chars). Caught by Copilot review loop
+on PR #657.
 """
 
 import sqlalchemy as sa
@@ -44,7 +50,7 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "e14_655_signup_allowlist_provider"
+revision = "e14_655_allowlist_provider"
 down_revision = "e13_474_pricing_seeds"
 branch_labels = None
 depends_on = None
@@ -168,6 +174,18 @@ def upgrade() -> None:
     #
     # Mirror Step 2's predicate exactly: ``subject_id IS NULL OR
     # subject_id = ''`` (and same for subject_label) covers both shapes.
+    #
+    # ``provider`` is intentionally NOT in this WHERE clause. Unlike
+    # subject_id/subject_label whose server_default is dropped at Step
+    # 2.5, the server_default on ``provider`` ('github') persists through
+    # to the schema's permanent state — so any concurrent INSERT during
+    # the entire migration window picks up provider='github' from the
+    # default. The only path to provider IS NULL would be an explicit
+    # ``INSERT ... (provider) VALUES (NULL)``, which requires the writer
+    # to know about the new column — and any writer that does also
+    # supplies subject_id/subject_label explicitly (see
+    # ``add_to_allowlist_entry``). Old-code writers never name provider
+    # so the default fires unconditionally.
     conn.execute(
         sa.text(
             "UPDATE signup_allowlist "

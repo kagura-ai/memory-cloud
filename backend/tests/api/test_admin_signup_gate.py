@@ -364,7 +364,11 @@ class TestAddToAllowlist:
         assert "github_username must not be set" in str(resp.json())
 
     def test_422_on_malformed_google_email(self, client):
-        """EmailStr rejects non-RFC strings before we hit the DB."""
+        """The email regex pattern (Field(pattern=...)) rejects non-RFC strings
+        before we hit the DB. We deliberately use a regex rather than
+        pydantic.EmailStr to avoid pulling in email-validator as a new
+        dependency — see the AllowlistAddRequest.email comment in
+        admin_signup_gate.py."""
         resp = client.post(
             "/api/v1/admin/signup-gate/allowlist",
             json={"provider": "google", "email": "not-an-email"},

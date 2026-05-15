@@ -274,11 +274,19 @@ class SignupGateService:
         """
         # Sentinel values for the deprecated legacy columns when the row is
         # for a non-GitHub provider. The legacy columns stay NOT NULL during
-        # the migration window (#655), so we MUST write something. Using a
-        # prefixed/echoed sentinel keeps the deprecated columns unique per
-        # row (no spurious unique-index collisions on the old constraint
-        # *if* a future revert reintroduces it) and makes the source of the
-        # value obvious to anyone querying the table mid-migration.
+        # the migration window (#655), so we MUST write something. The
+        # ``<provider>:<subject_id>`` format is chosen deliberately:
+        #
+        # - GitHub real values are pure numeric strings (no colons), so the
+        #   prefixed sentinel cannot accidentally collide with a real GitHub
+        #   numeric ID. Even if the e14 downgrade-then-upgrade cycle restored
+        #   the old (github_user_id, source) UNIQUE constraint, two rows for
+        #   the same (provider="google", sub) would still collide via the
+        #   sentinel — which is the SAME failure mode as the new (provider,
+        #   subject_id, source) UNIQUE, so the legacy constraint enforcing
+        #   uniqueness on the sentinel is a feature, not a bug.
+        # - The colon prefix makes the value's origin obvious to anyone
+        #   spot-querying the table during the migration window.
         if provider == "github":
             if github_user_id is None or github_username is None:
                 raise ValueError(

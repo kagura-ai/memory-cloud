@@ -1,4 +1,4 @@
-"""Migration data-shape check for e14_655_signup_allowlist_provider.
+"""Migration data-shape check for e14_655_allowlist_provider.
 
 The general round-trip (upgrade-then-downgrade-then-upgrade) is already
 covered by ``TestAlembicMigrations`` in the sibling
@@ -25,7 +25,7 @@ from tests.integration.test_alembic_migrations import (
 
 
 class TestSignupAllowlistProviderMigration:
-    """Data-shape checks for e14_655_signup_allowlist_provider."""
+    """Data-shape checks for e14_655_allowlist_provider."""
 
     def test_upgrade_adds_columns_and_backfills_existing_rows(self):
         """Seed a pre-#655 row, upgrade, verify backfill + constraints."""
@@ -50,7 +50,7 @@ class TestSignupAllowlistProviderMigration:
                     )
 
                 # Step 2: apply the new migration.
-                command.upgrade(_get_alembic_config(), "e14_655_signup_allowlist_provider")
+                command.upgrade(_get_alembic_config(), "e14_655_allowlist_provider")
 
                 # Step 3: verify the seeded row now has all three new fields
                 # populated from the backfill.
