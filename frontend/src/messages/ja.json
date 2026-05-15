@@ -2002,11 +2002,6 @@
       "cohereDesc": "オプションのリランカー"
     }
   },
-  "notFoundPage": {
-    "title": "404",
-    "description": "お探しのページは存在しません。",
-    "returnHome": "ホームに戻る"
-  },
   "errors": {
     "generic": "エラーが発生しました",
     "notFound": "見つかりませんでした",
