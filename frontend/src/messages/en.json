@@ -880,6 +880,8 @@
     "workspaceUpdatedDesc": "Your workspace information has been saved successfully.",
     "workspaceDeleted": "Workspace deleted",
     "workspaceDeletedDesc": "The workspace has been deleted successfully.",
+    "workspaceAutoSwitchedTitle": "Workspace switched",
+    "workspaceAutoSwitchedDesc": "{deleted} was deleted — switched to {switched}.",
     "settingsSaved": "Settings saved successfully",
     "failedToLoadWorkspace": "Failed to load workspace",
     "failedToUpdateWorkspace": "Failed to update workspace",

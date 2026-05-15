@@ -31,6 +31,11 @@ import { MemoryTimelineChart } from "@/components/dashboard/MemoryTimelineChart"
 import { AdminSections } from "@/components/dashboard/AdminSections";
 import { PlanBadge } from "@/components/common/PlanBadge";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useToast } from "@/hooks/use-toast";
+import {
+  clearRecentlyDeletedWorkspace,
+  readRecentlyDeletedWorkspace,
+} from "@/lib/storage/recently-deleted-workspace";
 import {
   getContextStats,
   ContextStatsResponse,
@@ -38,6 +43,11 @@ import {
   MemoryTimelineResponse,
   WorkspaceStats,
 } from "@/lib/api/workspaces";
+
+// 10-minute window between user-clicked-delete and dashboard mount. Long
+// enough to span a 2FA round-trip; short enough that stale stash from a
+// previous session doesn't fire a misleading toast.
+const AUTO_SWITCH_TOAST_TTL_MS = 10 * 60 * 1000;
 
 export default function WorkspaceStatsPage() {
   const t = useTranslations("workspace");
@@ -48,6 +58,7 @@ export default function WorkspaceStatsPage() {
     currentWorkspaceId,
     loading: workspaceLoading,
   } = useWorkspace();
+  const { toast } = useToast();
 
   // Issue #398: viewer cannot read workspace stats (backend 403's on
   // /workspaces/{id}/contexts/stats with required_role="member"). Send
@@ -60,6 +71,35 @@ export default function WorkspaceStatsPage() {
       router.push("/workspace/contexts");
     }
   }, [currentWorkspace, router]);
+
+  // Issue #660: surface backend auto-switch as a one-shot toast. The settings
+  // page stashed the deleted workspace's name in localStorage just before
+  // `deleteWorkspace()`; the backend has since picked a remaining workspace via
+  // role-preferring order. Read once, render `"<old> was deleted — switched to
+  // <new>"`, then clear.
+  useEffect(() => {
+    if (!currentWorkspace || !currentWorkspaceId) return;
+    const stash = readRecentlyDeletedWorkspace();
+    if (!stash) return;
+
+    const now = Date.now();
+    // Clamp future-dated `ts` (tampering / clock skew) — without the upper
+    // bound, a future timestamp passes `now - ts < TTL` indefinitely.
+    const isRecent =
+      stash.ts <= now && now - stash.ts < AUTO_SWITCH_TOAST_TTL_MS;
+    const isDifferentWorkspace = stash.id !== currentWorkspaceId;
+
+    if (isRecent && isDifferentWorkspace) {
+      toast({
+        title: t("workspaceAutoSwitchedTitle"),
+        description: t("workspaceAutoSwitchedDesc", {
+          deleted: stash.name,
+          switched: currentWorkspace.name,
+        }),
+      });
+    }
+    clearRecentlyDeletedWorkspace();
+  }, [currentWorkspace, currentWorkspaceId, t, toast]);
   const [stats, setStats] = useState<WorkspaceStats | null>(null);
   const [contextStats, setContextStats] = useState<ContextStatsResponse | null>(
     null,

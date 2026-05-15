@@ -41,6 +41,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { WorkspaceCreateForm } from "@/components/workspaces/WorkspaceCreateForm";
 import { ApiError } from "@/lib/api/base";
+import { writeRecentlyDeletedWorkspace } from "@/lib/storage/recently-deleted-workspace";
 
 export default function WorkspaceSettingsPage() {
   const t = useTranslations("workspace");
@@ -176,6 +177,17 @@ export default function WorkspaceSettingsPage() {
 
     setDeleting(true);
     try {
+      // Issue #660: stash the deleted name so the dashboard can render an
+      // auto-switch toast after the backend picks a remaining workspace.
+      // Skip on the last-workspace path (user is being logged out — no switch).
+      if (!isLastWorkspace && workspace?.name) {
+        writeRecentlyDeletedWorkspace({
+          id: currentWorkspaceId,
+          name: workspace.name,
+          ts: Date.now(),
+        });
+      }
+
       await deleteWorkspace(currentWorkspaceId);
 
       // Close dialog first
