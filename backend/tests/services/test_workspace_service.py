@@ -417,3 +417,294 @@ class TestEnsurePersonalWorkspace:
         service = WorkspaceService(db_session)
         result = await service.ensure_personal_workspace("ghost", "ghost@example.com")
         assert result is None
+
+    # ---- Issue #660 — three-branch decision ----
+
+    @pytest.mark.asyncio
+    async def test_branch_2_first_login_creates_workspace(self, db_session) -> None:
+        """Branch (2): zero historical WorkspaceMember rows → create.
+
+        First-login discriminator is `count(WorkspaceMember WHERE user_id=...) == 0`,
+        NOT `last_login_at IS None`. `auth.roles.RoleManager.ensure_user` writes
+        `last_login_at` whenever a User row is touched (creation or sync) — this
+        runs BEFORE `ensure_personal_workspace` in every OAuth callback, so
+        `last_login_at` is never None by the time we evaluate it.
+        """
+        from utils.datetime import utcnow
+
+        service = WorkspaceService(db_session)
+        user = User(
+            user_id="u660-1",
+            email="u660-1@example.com",
+            name="First Login",
+            role="user",
+            # Simulate roles.py:326 having already written last_login_at.
+            # The fix must NOT rely on this being None.
+            last_login_at=utcnow(),
+        )
+        db_session.add(user)
+        await db_session.flush()
+        # No WorkspaceMember rows for this user — true first-ever login.
+
+        ws = await service.ensure_personal_workspace("u660-1", "u660-1@example.com")
+        assert ws is not None
+        assert ws.name == "Personal Workspace"
+
+    @pytest.mark.asyncio
+    async def test_branch_3_returning_user_with_no_live_memberships_skipped(
+        self, db_session
+    ) -> None:
+        """Branch (3): historical WorkspaceMember rows on soft-deleted workspaces
+        but none on a live workspace → return None.
+
+        This is the issue #660 core fix: existing user who deleted everything on
+        purpose must not get a workspace silently recreated. The "has been part
+        of the system before" signal is the orphan WorkspaceMember row that
+        `delete_workspace` leaves behind when it soft-deletes the workspace.
+        """
+        from utils.datetime import utcnow
+
+        service = WorkspaceService(db_session)
+        # Soft-deleted workspace that the user used to belong to.
+        dead_ws = Workspace(
+            id=uuid4(),
+            name="Old",
+            owner_user_id="u660-2",
+            plan_name="free",
+            deleted_at=utcnow(),
+        )
+        db_session.add(dead_ws)
+        await db_session.flush()
+        # delete_workspace soft-deletes the workspace but leaves WorkspaceMember
+        # rows intact — that is the "historical membership" signal.
+        db_session.add(WorkspaceMember(workspace_id=dead_ws.id, user_id="u660-2", role="owner"))
+
+        user = User(
+            user_id="u660-2",
+            email="u660-2@example.com",
+            name="Returning User",
+            role="user",
+            last_login_at=utcnow(),  # set by ensure_user, immaterial to the fix
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        result = await service.ensure_personal_workspace("u660-2", "u660-2@example.com")
+        assert result is None
+        # Crucially: user.current_workspace_id must remain None — no recreation.
+        await db_session.refresh(user)
+        assert user.current_workspace_id is None
+
+    @pytest.mark.asyncio
+    async def test_branch_1_picks_remaining_membership_and_skips_creation(self, db_session) -> None:
+        """Branch (1): user is still a member of a non-deleted workspace.
+
+        Sets current_workspace_id to that workspace and does NOT create a new
+        Personal Workspace. Returns the selected workspace.
+        """
+        from utils.datetime import utcnow
+
+        service = WorkspaceService(db_session)
+        ws_remaining = Workspace(
+            id=uuid4(), name="Remaining", owner_user_id="u660-3", plan_name="free"
+        )
+        db_session.add(ws_remaining)
+        await db_session.flush()
+        db_session.add(
+            WorkspaceMember(workspace_id=ws_remaining.id, user_id="u660-3", role="owner")
+        )
+
+        user = User(
+            user_id="u660-3",
+            email="u660-3@example.com",
+            name="Has Memberships",
+            role="user",
+            last_login_at=utcnow(),
+            # current_workspace_id intentionally None to model post-delete state
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        ws = await service.ensure_personal_workspace("u660-3", "u660-3@example.com")
+        assert ws is not None
+        assert ws.id == ws_remaining.id
+        # No new "Personal Workspace" was created
+        assert ws.name == "Remaining"
+        await db_session.refresh(user)
+        assert user.current_workspace_id == ws_remaining.id
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "memberships, expected_workspace_name",
+        [
+            # Mixed roles: owner wins over member regardless of recency
+            (
+                [
+                    ("owner_old", "owner", -86400 * 30),
+                    ("member_new", "member", -3600),
+                    ("owner_newer", "owner", -86400),
+                ],
+                "owner_newer",
+            ),
+            # Tied roles: most recent joined_at wins
+            (
+                [
+                    ("m_old", "member", -86400 * 7),
+                    ("m_new", "member", -3600),
+                ],
+                "m_new",
+            ),
+            # Admin beats member, even if member is more recent
+            (
+                [
+                    ("admin_old", "admin", -86400 * 30),
+                    ("member_recent", "member", -60),
+                ],
+                "admin_old",
+            ),
+            # Viewer is the lowest priority
+            (
+                [
+                    ("viewer_recent", "viewer", -60),
+                    ("member_old", "member", -86400 * 30),
+                ],
+                "member_old",
+            ),
+        ],
+    )
+    async def test_branch_1_role_preferring_selection_order(
+        self,
+        db_session,
+        memberships: list[tuple[str, str, int]],
+        expected_workspace_name: str,
+    ) -> None:
+        """AC #3: deterministic, role-preferring selection.
+
+        Covers the #389 / PR #391 lesson — role-imprecise selection caused a
+        cross-tenant leak. Order must be: owner > admin > member > viewer,
+        tied by joined_at desc.
+        """
+        from datetime import timedelta
+
+        from utils.datetime import utcnow
+
+        service = WorkspaceService(db_session)
+        now = utcnow()
+        user_id = f"u660-order-{expected_workspace_name}"
+
+        for ws_name, role, joined_at_offset_seconds in memberships:
+            ws = Workspace(id=uuid4(), name=ws_name, owner_user_id=user_id, plan_name="free")
+            db_session.add(ws)
+            await db_session.flush()
+            db_session.add(
+                WorkspaceMember(
+                    workspace_id=ws.id,
+                    user_id=user_id,
+                    role=role,
+                    joined_at=now + timedelta(seconds=joined_at_offset_seconds),
+                )
+            )
+
+        user = User(
+            user_id=user_id,
+            email=f"{user_id}@example.com",
+            name="Selection Test",
+            role="user",
+            last_login_at=now,
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        selected = await service.ensure_personal_workspace(user_id, f"{user_id}@example.com")
+        assert selected is not None
+        assert selected.name == expected_workspace_name
+
+    @pytest.mark.asyncio
+    async def test_branch_1_skips_soft_deleted_workspaces(self, db_session) -> None:
+        """Branch (1) must not select a soft-deleted workspace.
+
+        Defense in depth — PermissionService.check_workspace_access already
+        filters deleted workspaces (#276 / PR #329), but ensure_personal_workspace
+        should not even set current_workspace_id to a deleted one.
+        """
+        from utils.datetime import utcnow
+
+        service = WorkspaceService(db_session)
+        live_ws = Workspace(id=uuid4(), name="Live", owner_user_id="u660-4", plan_name="free")
+        dead_ws = Workspace(
+            id=uuid4(),
+            name="Dead",
+            owner_user_id="u660-4",
+            plan_name="free",
+            deleted_at=utcnow(),
+        )
+        db_session.add_all([live_ws, dead_ws])
+        await db_session.flush()
+        db_session.add_all(
+            [
+                WorkspaceMember(workspace_id=live_ws.id, user_id="u660-4", role="member"),
+                # Membership row on a soft-deleted workspace can exist — Workspace.deleted_at IS NULL filter is what excludes it.
+                WorkspaceMember(workspace_id=dead_ws.id, user_id="u660-4", role="owner"),
+            ]
+        )
+
+        user = User(
+            user_id="u660-4",
+            email="u660-4@example.com",
+            name="Mixed",
+            role="user",
+            last_login_at=utcnow(),
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        ws = await service.ensure_personal_workspace("u660-4", "u660-4@example.com")
+        assert ws is not None
+        assert ws.id == live_ws.id  # NOT dead_ws even though dead_ws has owner role
+
+    @pytest.mark.asyncio
+    async def test_branch_1_deterministic_when_joined_at_all_null(self, db_session) -> None:
+        """Selection stays deterministic when every membership ties on role
+        AND `joined_at IS NULL`. WorkspaceMember.joined_at is nullable on the
+        model — legacy or backfilled rows can lack it. The final UUID tiebreaker
+        guarantees the same workspace is picked every time."""
+        from utils.datetime import utcnow
+
+        service = WorkspaceService(db_session)
+        ws_a = Workspace(id=uuid4(), name="A", owner_user_id="u660-5", plan_name="free")
+        ws_b = Workspace(id=uuid4(), name="B", owner_user_id="u660-5", plan_name="free")
+        db_session.add_all([ws_a, ws_b])
+        await db_session.flush()
+        # Both memberships have role=member and joined_at=None — without the
+        # UUID tiebreaker, sort order depends on DB row order which has no ORDER BY.
+        db_session.add_all(
+            [
+                WorkspaceMember(
+                    workspace_id=ws_a.id, user_id="u660-5", role="member", joined_at=None
+                ),
+                WorkspaceMember(
+                    workspace_id=ws_b.id, user_id="u660-5", role="member", joined_at=None
+                ),
+            ]
+        )
+
+        user = User(
+            user_id="u660-5",
+            email="u660-5@example.com",
+            name="Tied",
+            role="user",
+            last_login_at=utcnow(),
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        # Two invocations must pick the same workspace; reset current_workspace_id
+        # between calls to ensure both runs traverse branch (1) afresh.
+        first = await service.ensure_personal_workspace("u660-5", "u660-5@example.com")
+        assert first is not None
+        await db_session.refresh(user)
+        user.current_workspace_id = None
+        await db_session.commit()
+        second = await service.ensure_personal_workspace("u660-5", "u660-5@example.com")
+        assert second is not None
+        assert first.id == second.id

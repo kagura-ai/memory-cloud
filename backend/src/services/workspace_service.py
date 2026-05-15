@@ -186,25 +186,50 @@ class WorkspaceService:
         user_id: str,
         email: str,
     ) -> Workspace | None:
-        """Ensure user has a personal workspace (auto-create if needed).
+        """Ensure user has a personal workspace (auto-create only when appropriate).
 
         Issue #212: Auto-create personal workspace on first login.
+        Issue #660: Avoid silently recreating a workspace after a user intentionally
+        deletes one. The original logic decided based solely on `current_workspace_id`,
+        which `delete_workspace` clears as a side-effect — making "first-ever login"
+        and "existing user deleted everything on purpose" indistinguishable.
+
+        Branch table (after the SKIP fast-path):
+          SKIP : current_workspace_id resolves to a live workspace → return None
+          (1)  : user still has WorkspaceMember rows on non-deleted workspaces →
+                 select with deterministic role-preferring order (owner > admin > member
+                 > viewer, tie by joined_at desc), set current_workspace_id, return it
+          (2)  : zero WorkspaceMember rows ever recorded (true first-ever login) →
+                 create personal workspace
+          (3)  : has historical WorkspaceMember rows but none on a live workspace
+                 (returning user deleted everything) → return None; frontend renders
+                 the empty-state UI
+
+        First-login discriminator: `count(WorkspaceMember WHERE user_id = ?) == 0`.
+        `last_login_at` is NOT usable here — `auth.roles.RoleManager.ensure_user`
+        writes it whenever a User row is touched (creation OR sync), which runs
+        BEFORE this method in every OAuth callback. WorkspaceMember rows persist
+        through workspace soft-delete (`delete_workspace` does not hard-delete
+        members), so a non-zero count = "user has been part of the system before".
 
         Args:
             user_id: User ID (OAuth sub claim)
             email: User email (for logging)
 
         Returns:
-            Workspace if created or already exists, None if user already has an workspace
+            Workspace on branches (1) and (2); None on SKIP and (3).
 
         Note:
             - Does NOT create default context (user creates manually)
-            - Sets user.current_workspace_id to the created workspace
-            - Non-blocking: returns None on error (user can create workspace manually)
+            - Sets `user.current_workspace_id` on branches (1) and (2)
+            - Non-blocking: returns None on error
         """
         from sqlalchemy.orm import aliased
 
         from models.auth import User
+
+        # Lazy import: permission_service imports WorkspaceService at module level.
+        from services.permission_service import ORG_ROLE_WEIGHTS
 
         try:
             # Single query: fetch user with optional active workspace via LEFT JOIN
@@ -223,43 +248,101 @@ class WorkspaceService:
             row = result.one_or_none()
 
             if not row:
-                logger.warning(f"User not found: {user_id}")
+                logger.warning("ensure_workspace_user_not_found", user_id=user_id)
                 return None
 
             user, existing_workspace = row
 
             if user.current_workspace_id and existing_workspace:
-                # User already has active workspace - skip auto-creation
                 logger.debug(
                     f"User {email} already has active workspace: {user.current_workspace_id}"
                 )
                 return None
 
+            # `delete_workspace` already clears `current_workspace_id` for every
+            # user that had the deleted workspace as current (Issue #218); this
+            # fires only in edge cases (e.g., concurrent state).
             if user.current_workspace_id and not existing_workspace:
-                # Workspace was deleted - clear current_workspace_id and create new one
                 logger.info(
-                    f"User {email}'s workspace {user.current_workspace_id} was deleted, creating new one"
+                    "ensure_workspace_cleared_dangling_current",
+                    user_id=user_id,
+                    email=email,
+                    dangling_workspace_id=str(user.current_workspace_id),
                 )
                 user.current_workspace_id = None
 
-            # First time login or workspace deleted - create personal workspace
-            # Initial admin gets pro plan by default
-            from config.plan_tiers import PlanName
+            # Fetch every WorkspaceMember row for this user — including those
+            # pointing at soft-deleted workspaces. One query answers both
+            # "any live membership for branch (1)?" and "any historical
+            # membership for the branch (2)/(3) discriminator?".
+            all_memberships = (
+                await self.db.execute(
+                    select(WorkspaceMember, Workspace)
+                    .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
+                    .where(WorkspaceMember.user_id == user_id)
+                )
+            ).all()
+            live_memberships = [(m, w) for m, w in all_memberships if w.deleted_at is None]
 
-            plan = PlanName.PRO if user.is_initial_admin else PlanName.FREE
-            workspace = await self.create_workspace(
-                name="Personal Workspace",
-                owner_user_id=user_id,
-                description="Personal workspace (auto-created)",
-                plan_name=plan,
-                create_default_context=False,  # User creates context manually
+            if live_memberships:
+                # Highest privilege first (owner > admin > member > viewer),
+                # tie by most recent joined_at, final tiebreaker on the
+                # WorkspaceMember UUID so the pick is fully deterministic even
+                # when `joined_at` is None (nullable on the model; legacy or
+                # backfilled rows can leave it unset).
+                live_memberships.sort(
+                    key=lambda r: (
+                        -ORG_ROLE_WEIGHTS.get(r[0].role, 0),
+                        -(r[0].joined_at.timestamp() if r[0].joined_at else 0.0),
+                        str(r[0].id),
+                    )
+                )
+                selected_member, selected_workspace = live_memberships[0]
+                user.current_workspace_id = selected_workspace.id
+                await self.db.commit()
+                logger.info(
+                    "auto_selected_remaining_workspace",
+                    user_id=user_id,
+                    email=email,
+                    workspace_id=str(selected_workspace.id),
+                    role=selected_member.role,
+                    memberships_count=len(live_memberships),
+                )
+                return selected_workspace
+
+            if not all_memberships:
+                # True first-ever login.
+                from config.plan_tiers import PlanName
+
+                plan = PlanName.PRO if user.is_initial_admin else PlanName.FREE
+                workspace = await self.create_workspace(
+                    name="Personal Workspace",
+                    owner_user_id=user_id,
+                    description="Personal workspace (auto-created)",
+                    plan_name=plan,
+                    create_default_context=False,  # User creates context manually
+                )
+                logger.info(
+                    "auto_created_personal_workspace",
+                    user_id=user_id,
+                    email=email,
+                    workspace_id=str(workspace.id),
+                )
+                return workspace
+
+            # Returning user with only soft-deleted memberships — respect intent.
+            # Commit any defensive-fallback clearing from above.
+            await self.db.commit()
+            logger.info(
+                "returning_user_no_memberships_skipped",
+                user_id=user_id,
+                email=email,
+                historical_memberships=len(all_memberships),
             )
-
-            logger.info(f"Auto-created personal workspace for {email}: {workspace.id}")
-            return workspace
+            return None
 
         except Exception as e:
-            logger.error(f"Failed to auto-create workspace for {email}: {e}")
+            logger.error(f"Failed to ensure personal workspace for {email}: {e}")
             await self.db.rollback()
             return None
 

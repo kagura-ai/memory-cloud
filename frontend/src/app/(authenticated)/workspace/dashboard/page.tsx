@@ -60,6 +60,7 @@ export default function WorkspaceStatsPage() {
       router.push("/workspace/contexts");
     }
   }, [currentWorkspace, router]);
+
   const [stats, setStats] = useState<WorkspaceStats | null>(null);
   const [contextStats, setContextStats] = useState<ContextStatsResponse | null>(
     null,

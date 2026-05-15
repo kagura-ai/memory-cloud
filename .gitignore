@@ -256,6 +256,7 @@ next-env.d.ts
 # Claude Code (local settings - keep settings.json for team sharing)
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+.claude/worktrees/
 *.bak.*
 backend/=*
 backend/uv.lock
