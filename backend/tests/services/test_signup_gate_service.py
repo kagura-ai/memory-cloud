@@ -185,10 +185,15 @@ class TestCheckAccess:
         svc.db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_promote_pending_google_entry_integrity_error_rolls_back(self):
-        """If commit raises IntegrityError (race: a real-sub row for the
-        same OIDC sub already exists), the method rolls back the in-flight
-        promotion and returns False so the caller falls through cleanly.
+    async def test_promote_pending_google_entry_integrity_error_no_race_winner_returns_false(self):
+        """IntegrityError + post-rollback re-check finds no
+        ``(google, oauth_sub, active, manual)`` row → method returns
+        False so the caller falls through to the regular block path.
+
+        Covers the stale/inconsistent case: a duplicate-key error came
+        from a row outside the active+manual scope (e.g. a soft-deleted
+        or sponsor-source row), so the user is NOT effectively
+        allowlisted under the manual gate.
         """
         from sqlalchemy.exc import IntegrityError
 
@@ -196,12 +201,107 @@ class TestCheckAccess:
         pending = MagicMock()
         pending.id = uuid4()
         pending.subject_id = "pending:racy@example.com"
-        execute_result = MagicMock()
-        execute_result.scalar_one_or_none = MagicMock(return_value=pending)
-        svc.db.execute = AsyncMock(return_value=execute_result)
+
+        # First execute() = initial SELECT returns pending. Second
+        # execute() = post-rollback re-check returns no row.
+        initial_result = MagicMock()
+        initial_result.scalar_one_or_none = MagicMock(return_value=pending)
+        recheck_result = MagicMock()
+        recheck_result.first = MagicMock(return_value=None)
+        svc.db.execute = AsyncMock(side_effect=[initial_result, recheck_result])
         svc.db.commit = AsyncMock(side_effect=IntegrityError("INSERT", {}, BaseException("dup")))
         svc.db.rollback = AsyncMock()
 
+        result = await svc._promote_pending_google_entry(
+            email="racy@example.com", oauth_sub="2222222222"
+        )
+
+        assert result is False
+        svc.db.rollback.assert_awaited_once()
+        # Two execute() calls = initial SELECT + post-rollback re-check.
+        assert svc.db.execute.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_promote_pending_google_entry_integrity_error_with_race_winner_returns_true(self):
+        """IntegrityError caused by a concurrent admin add (or another
+        promotion) that just inserted ``(google, oauth_sub, manual)`` —
+        re-check finds the winning row → method returns True so the
+        gate treats the user as allowlisted rather than blocking them
+        despite the row actually being present (PR #673 Copilot
+        review #3 finding E).
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        svc = _svc()
+        pending = MagicMock()
+        pending.id = uuid4()
+        pending.subject_id = "pending:racy@example.com"
+
+        # First execute() = initial SELECT returns pending. Second
+        # execute() = post-rollback re-check finds the race-winning row.
+        initial_result = MagicMock()
+        initial_result.scalar_one_or_none = MagicMock(return_value=pending)
+        recheck_result = MagicMock()
+        # ``first()`` returning anything non-None signals "row present".
+        recheck_result.first = MagicMock(return_value=(uuid4(),))
+        svc.db.execute = AsyncMock(side_effect=[initial_result, recheck_result])
+        svc.db.commit = AsyncMock(side_effect=IntegrityError("INSERT", {}, BaseException("dup")))
+        svc.db.rollback = AsyncMock()
+
+        result = await svc._promote_pending_google_entry(
+            email="racy@example.com", oauth_sub="2222222222"
+        )
+
+        assert result is True
+        svc.db.rollback.assert_awaited_once()
+        assert svc.db.execute.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_promote_pending_google_entry_rollback_does_not_touch_orm_instance(self):
+        """The rollback / success-log paths must reference a pre-commit
+        ID snapshot, not ``pending.id`` on an instance that may have
+        been expired by ``db.rollback()`` (which in async sessions
+        triggers an implicit lazy load → ``MissingGreenlet``).
+
+        Simulate the failure mode by making ``pending.id`` raise on
+        access after rollback, and verify the method still completes
+        without hitting that attribute (PR #673 Copilot review #3
+        finding D).
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        svc = _svc()
+
+        # Use a class with a property that raises after a flag is set,
+        # so the snapshot at the top of the method captures a usable
+        # ID but any post-commit/post-rollback access blows up.
+        class _ExpiringInstance:
+            def __init__(self):
+                self._id = uuid4()
+                self._expired = False
+                self.subject_id = "pending:racy@example.com"
+                self.github_user_id = "google:pending:racy@example.com"
+
+            @property
+            def id(self):
+                if self._expired:
+                    raise RuntimeError("MissingGreenlet-like lazy load on expired instance")
+                return self._id
+
+        pending = _ExpiringInstance()
+        initial_result = MagicMock()
+        initial_result.scalar_one_or_none = MagicMock(return_value=pending)
+        recheck_result = MagicMock()
+        recheck_result.first = MagicMock(return_value=None)
+        svc.db.execute = AsyncMock(side_effect=[initial_result, recheck_result])
+
+        async def _rollback_then_expire():
+            pending._expired = True
+
+        svc.db.commit = AsyncMock(side_effect=IntegrityError("INSERT", {}, BaseException("dup")))
+        svc.db.rollback = AsyncMock(side_effect=_rollback_then_expire)
+
+        # Must NOT raise — the method captured pending_id before commit.
         result = await svc._promote_pending_google_entry(
             email="racy@example.com", oauth_sub="2222222222"
         )

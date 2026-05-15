@@ -480,6 +480,15 @@ class SignupGateService:
         if pending is None:
             return False
 
+        # Snapshot the PK before mutating + committing so the rollback /
+        # success-log paths can reference the ID without re-reading the
+        # ORM instance. After ``db.rollback()`` the async session expires
+        # attached instances; accessing ``pending.id`` afterwards can
+        # trigger an implicit lazy load in async context and raise
+        # ``MissingGreenlet``, masking the intended recovery path
+        # (PR #673 Copilot review #3).
+        pending_id = pending.id
+
         pending.subject_id = oauth_sub
         # Keep the deprecated NOT-NULL column populated with the
         # ``<provider>:<subject_id>`` sentinel format used by other
@@ -494,24 +503,46 @@ class SignupGateService:
         try:
             await self.db.commit()
         except IntegrityError:
-            # Defensive: a real-sub row for the same OIDC sub already
-            # exists (admin double-allowlisted via two paths). Roll back
-            # the in-flight promotion and report "not promoted" — the
-            # caller's ``_is_allowlisted`` check earlier already would
-            # have hit the real row, so reaching here means a race that
-            # is fine to fall through.
+            # The commit collided on the unique
+            # ``(provider, subject_id, source)`` constraint. Two
+            # realistic causes:
+            #   1. A concurrent admin add or another promotion just
+            #      inserted a ``(google, oauth_sub, manual)`` row →
+            #      the user IS now allowlisted; returning False would
+            #      send them through the blocked-signup redirect
+            #      despite a winning entry being present
+            #      (PR #673 Copilot review #3 finding E).
+            #   2. A stale/inconsistent real-sub row for the same sub
+            #      exists outside the active+manual scope (different
+            #      source / state). The re-check below will not see
+            #      it, so we return False and fall through to block
+            #      — the original defensive intent of the handler.
+            # After rollback the in-flight UPDATE is discarded; the
+            # pending sentinel row remains for a future retry.
             await self.db.rollback()
+            race_result = await self.db.execute(
+                select(SignupAllowlistEntry.id)
+                .where(
+                    SignupAllowlistEntry.provider == "google",
+                    SignupAllowlistEntry.subject_id == oauth_sub,
+                    SignupAllowlistEntry.state == "active",
+                    SignupAllowlistEntry.source == "manual",
+                )
+                .limit(1)
+            )
+            race_winner_present = race_result.first() is not None
             logger.warning(
                 "signup_allowlist_pending_promote_race",
                 email_hmac=hmac_sha256_hex(email, get_settings().audit_hmac_key),
-                pending_id=str(pending.id),
+                pending_id=str(pending_id),
+                race_winner_present=race_winner_present,
             )
-            return False
+            return race_winner_present
 
         logger.info(
             "signup_allowlist_pending_promoted",
             email_hmac=hmac_sha256_hex(email, get_settings().audit_hmac_key),
-            pending_id=str(pending.id),
+            pending_id=str(pending_id),
         )
         return True
 
