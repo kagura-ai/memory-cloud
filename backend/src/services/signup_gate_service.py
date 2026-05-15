@@ -1,4 +1,4 @@
-"""Admin-configurable signup gate service (Issue #358 Phase 1).
+"""Admin-configurable signup gate service (Issue #358 Phase 1, extended #655).
 
 Sits in front of the OAuth callback's user-creation step. When the gate is
 disabled (default OSS behavior), delegates to the existing env-based
@@ -6,10 +6,18 @@ disabled (default OSS behavior), delegates to the existing env-based
 don't need allowlists. When enabled, applies the configured mode — Phase 1
 implements ``manual`` only; ``github_sponsors`` / ``both`` raise
 NotImplementedError and are covered by the Phase 2 follow-up issue.
+
+#655 removed the Google pass-through that #358 Phase 1 had as a temporary
+trust-Google's-test-users-list contract; Google's "Testing" status does not
+enforce that list for non-sensitive scopes, so the gate now applies
+provider-uniformly. Both providers match on the immutable IdP identity
+(``provider`` + ``subject_id``) — GitHub numeric ID for github rows, OIDC
+``sub`` claim for google rows. Email is never used for matching to keep
+email-change attacks closed.
 """
 
 import os
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID
 
 from fastapi.responses import RedirectResponse
@@ -17,23 +25,29 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.roles import _OAUTH_CALLBACK_ACTOR
+from config.settings import get_settings
 from db.base import get_db
-from models.auth import User
+from models.auth import AuditLog, User
 from models.signup_gate import SignupAllowlistEntry, SignupGateConfig
 from utils.github_user import resolve_github_user_id
+from utils.hashing import hmac_sha256_hex
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 SignupGateMode = Literal["manual", "github_sponsors", "both"]
+SignupGateProvider = Literal["github", "google"]
 
 
 async def check_signup_access(
     *,
-    provider: Literal["github", "google"],
+    provider: SignupGateProvider,
     oauth_sub: str,
     email: str,
     username: str | None = None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
 ) -> RedirectResponse | None:
     """Run the signup gate for an OAuth callback.
 
@@ -42,7 +56,23 @@ async def check_signup_access(
     the ``async for db in get_db()`` boilerplate and the inline service
     import (which exists to break a circular dependency with auth.py).
 
-    Returns None when signup is allowed, a RedirectResponse when blocked.
+    Args:
+        provider: OAuth provider (``"github"`` or ``"google"``).
+        oauth_sub: Immutable IdP identity — GitHub numeric ID (as string)
+            for github, OIDC ``sub`` claim for google. Matched verbatim
+            against ``signup_allowlist.subject_id``.
+        email: Candidate signup email. Used only for the existing-user /
+            legacy-gate paths; never for allowlist matching.
+        username: Display label (GitHub login for github, email for google).
+            Stored in ``audit_logs.user_metadata`` and structlog only; not
+            a matching key.
+        ip_address: Caller IP, passed into the audit row for blocked-signup
+            events (#655). Optional — None when called from a non-HTTP
+            context.
+        user_agent: Caller User-Agent header, same role as ``ip_address``.
+
+    Returns:
+        None when signup is allowed, a RedirectResponse when blocked.
     """
     async for db in get_db():
         gate = SignupGateService(db)
@@ -51,6 +81,8 @@ async def check_signup_access(
             oauth_sub=oauth_sub,
             email=email,
             username=username,
+            ip_address=ip_address,
+            user_agent=user_agent,
         )
     return None
 
@@ -68,36 +100,37 @@ class SignupGateService:
     async def check_access(
         self,
         *,
-        provider: Literal["github", "google"],
+        provider: SignupGateProvider,
         oauth_sub: str,
         email: str,
         username: str | None,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
     ) -> RedirectResponse | None:
         """Return None when signup is allowed, RedirectResponse when blocked.
 
-        Phase 1 rules (top-down):
+        Rules (top-down, applied uniformly across both providers since #655):
         1. ``enabled=false`` → delegate to legacy env-based gate (OSS path).
-        2. ``provider == "google"`` → pass through (Google-side controls signup;
-           backend is a no-op for Google in Phase 1).
-        3. Existing user (users row matching this email or user_id/sub) → allowed
+        2. Existing user (users row matching this email or user_id/sub) → allowed
            (login not signup; user_id match handles email-change-at-IdP case).
-        4. First user (users table empty) → allowed (initial admin bootstrap).
-        5. ``mode == "manual"`` → allowed iff ``github_user_id`` is on the
-           allowlist with ``state='active'``.
-        6. ``mode in ("github_sponsors", "both")`` → NotImplementedError
-           (Phase 2).
+        3. First user (users table empty) → allowed (initial admin bootstrap).
+        4. ``mode == "manual"`` → allowed iff ``(provider, subject_id=oauth_sub)``
+           is on the allowlist with ``state='active'``.
+        5. ``mode in ("github_sponsors", "both")`` → NotImplementedError when
+           provider is ``"github"`` (Phase 2 work). When provider is
+           ``"google"`` these modes fall back to manual semantics (sponsorship
+           is GitHub-specific; #655 docs this).
         """
         config = await self._load_config()
 
         if not config.enabled:
             return await self._legacy_check(email, oauth_sub)
 
-        # Google's own OAuth + workspace configuration decides who can sign up
-        # on that side — having two places (backend allowlist + Google console)
-        # gate the same flow would just confuse admins. Backend stays neutral
-        # for provider=google in Phase 1.
-        if provider == "google":
-            return None
+        # #655: the historical Google pass-through is removed. Google's
+        # "Testing" status does NOT enforce the test-users list for
+        # non-sensitive scopes — the warning screen is click-through. The
+        # gate now applies uniformly to both providers, matching on the
+        # immutable IdP identity (subject_id).
 
         if await self._is_existing_user(email, oauth_sub):
             return None
@@ -105,26 +138,53 @@ class SignupGateService:
         if await self._is_first_user():
             return None
 
-        if config.mode == "manual":
-            if await self._is_allowlisted(oauth_sub, config.mode):
+        # Validate the mode against the Literal allow-list before narrowing.
+        # The DB has a CHECK constraint that pins ``mode`` to the same set,
+        # but admins with DB access can disable CHECK constraints, and a
+        # corrupted row would otherwise fall through to the NotImplementedError
+        # at the bottom of this function with a misleading "reserved for
+        # Phase 2" message. Raising here surfaces the actual problem.
+        if config.mode not in ("manual", "github_sponsors", "both"):
+            raise ValueError(
+                f"unknown signup_gate_config.mode value: {config.mode!r} "
+                f"(expected one of: manual, github_sponsors, both)"
+            )
+        # Pyright can't narrow ``Mapped[str]`` through the ``in`` check
+        # above, but the runtime guard means the cast is safe here.
+        effective_mode: SignupGateMode = cast(SignupGateMode, config.mode)
+
+        # #655: sponsors-style modes only apply to GitHub; for Google fall
+        # back to manual semantics (a Google user is never a "GitHub
+        # Sponsor"). Document the fallback explicitly so a future admin
+        # reading the gate logic isn't surprised by why mode='github_sponsors'
+        # only checks the manual allowlist for Google.
+        if provider == "google" and effective_mode in ("github_sponsors", "both"):
+            effective_mode = "manual"
+
+        if effective_mode == "manual":
+            if await self._is_allowlisted(provider, oauth_sub, effective_mode):
                 return None
-            logger.info(
-                "signup_blocked",
+            await self._record_blocked_signup(
                 provider=provider,
-                github_user_id=oauth_sub,
+                oauth_sub=oauth_sub,
+                email=email,
                 username=username,
+                ip_address=ip_address,
+                user_agent=user_agent,
             )
-            return self._blocked_response()
+            return self._blocked_response(provider=provider, oauth_sub=oauth_sub)
 
-        if config.mode in ("github_sponsors", "both"):
-            raise NotImplementedError(
-                f"Signup gate mode '{config.mode}' is reserved for Phase 2 "
-                "(Issue #358 follow-up). In Phase 1 the admin UI disables "
-                "selecting these modes; reaching this branch indicates a "
-                "direct DB edit."
-            )
-
-        return self._blocked_response()
+        # Reached only for provider="github" + mode in ("github_sponsors",
+        # "both") since the Google fallback above coerced those modes to
+        # "manual", and "manual" itself returned in the block above. With
+        # SignupGateMode being a 3-value Literal, this branch is the
+        # exhaustive remainder — there is no trailing-fallback return.
+        raise NotImplementedError(
+            f"Signup gate mode '{effective_mode}' is reserved for Phase 2 "
+            "(Issue #358 follow-up). In Phase 1 the admin UI disables "
+            "selecting these modes; reaching this branch indicates a "
+            "direct DB edit."
+        )
 
     # ------------------------------------------------------------------
     # Admin: config
@@ -154,26 +214,100 @@ class SignupGateService:
     async def add_to_allowlist(
         self, *, github_username: str, added_by_user_id: str
     ) -> SignupAllowlistEntry:
-        """Resolve username to canonical ID via GitHub API and insert.
+        """Resolve a GitHub username to canonical ID via GitHub API and insert.
+
+        Legacy single-provider entry point kept for backward compatibility
+        with the existing admin HTTP API. New callers should prefer
+        :meth:`add_to_allowlist_entry` which is provider-aware.
 
         Raises:
             GitHubUserNotFound: The username does not exist on GitHub.
-            ValueError: The (github_user_id, source='manual') pair already exists.
+            ValueError: The (provider='github', subject_id, source='manual')
+                triple already exists.
         """
         user_id, canonical_login = await resolve_github_user_id(github_username)
+        return await self.add_to_allowlist_entry(
+            provider="github",
+            subject_id=user_id,
+            subject_label=canonical_login,
+            added_by_user_id=added_by_user_id,
+            # Backward-compat: legacy column writes too. These shadow the
+            # provider/subject_id pair for the GitHub case so the
+            # deprecated columns remain populated for existing tooling
+            # until they get physically dropped.
+            github_user_id=user_id,
+            github_username=canonical_login,
+        )
+
+    async def add_to_allowlist_entry(
+        self,
+        *,
+        provider: SignupGateProvider,
+        subject_id: str,
+        subject_label: str,
+        added_by_user_id: str,
+        github_user_id: str | None = None,
+        github_username: str | None = None,
+    ) -> SignupAllowlistEntry:
+        """Insert a provider-aware allowlist entry.
+
+        Args:
+            provider: ``"github"`` or ``"google"``.
+            subject_id: Immutable IdP identity (GitHub numeric ID or Google
+                OIDC ``sub``). Stored in ``signup_allowlist.subject_id``
+                and used as the matching key.
+            subject_label: Display label (GitHub login or email). Snapshot
+                taken at add time; NOT used for matching.
+            added_by_user_id: Admin user_id (auth subject) doing the add.
+            github_user_id / github_username: Legacy column writes for the
+                GitHub case. When ``provider == "github"``, both MUST be
+                provided (the legacy columns are still NOT NULL during the
+                migration window). When ``provider == "google"``, both
+                are populated with sentinel values (``"google:<sub>"`` /
+                ``"<email>"``) since the columns remain NOT NULL until a
+                future migration drops them.
+
+        Raises:
+            ValueError: The (provider, subject_id, source='manual') triple
+                already exists.
+        """
+        # Sentinel values for the deprecated legacy columns when the row is
+        # for a non-GitHub provider. The legacy columns stay NOT NULL during
+        # the migration window (#655), so we MUST write something. Using a
+        # prefixed/echoed sentinel keeps the deprecated columns unique per
+        # row (no spurious unique-index collisions on the old constraint
+        # *if* a future revert reintroduces it) and makes the source of the
+        # value obvious to anyone querying the table mid-migration.
+        if provider == "github":
+            if github_user_id is None or github_username is None:
+                raise ValueError(
+                    "github_user_id and github_username are required when "
+                    "provider='github' (legacy columns are still NOT NULL)"
+                )
+            legacy_user_id = github_user_id
+            legacy_username = github_username
+        else:
+            legacy_user_id = f"{provider}:{subject_id}"
+            legacy_username = subject_label
 
         existing = await self.db.execute(
             select(SignupAllowlistEntry).where(
-                SignupAllowlistEntry.github_user_id == user_id,
+                SignupAllowlistEntry.provider == provider,
+                SignupAllowlistEntry.subject_id == subject_id,
                 SignupAllowlistEntry.source == "manual",
             )
         )
         if existing.scalar_one_or_none() is not None:
-            raise ValueError(f"User '{canonical_login}' is already on the manual allowlist")
+            raise ValueError(
+                f"{provider} subject '{subject_label}' is already on the manual allowlist"
+            )
 
         entry = SignupAllowlistEntry(
-            github_user_id=user_id,
-            github_username=canonical_login,
+            provider=provider,
+            subject_id=subject_id,
+            subject_label=subject_label,
+            github_user_id=legacy_user_id,
+            github_username=legacy_username,
             source="manual",
             state="active",
             added_by_user_id=added_by_user_id,
@@ -188,13 +322,14 @@ class SignupGateService:
             # consistent "duplicate" signal instead of a 500.
             await self.db.rollback()
             raise ValueError(
-                f"User '{canonical_login}' is already on the manual allowlist"
+                f"{provider} subject '{subject_label}' is already on the manual allowlist"
             ) from exc
         await self.db.refresh(entry)
         logger.info(
             "signup_allowlist_added",
-            github_username=canonical_login,
-            github_user_id=user_id,
+            provider=provider,
+            subject_id=subject_id,
+            subject_label=subject_label,
             added_by=added_by_user_id,
         )
         return entry
@@ -203,10 +338,20 @@ class SignupGateService:
         entry = await self.db.get(SignupAllowlistEntry, entry_id)
         if entry is None:
             raise ValueError(f"Allowlist entry {entry_id} not found")
-        username = entry.github_username
+        # Snapshot provider-aware fields before deletion so the log line
+        # survives the cascade. ``subject_label`` is the user-facing
+        # identifier post-#655 (GitHub login or email).
+        provider = entry.provider
+        subject_id = entry.subject_id
+        subject_label = entry.subject_label
         await self.db.delete(entry)
         await self.db.commit()
-        logger.info("signup_allowlist_removed", github_username=username)
+        logger.info(
+            "signup_allowlist_removed",
+            provider=provider,
+            subject_id=subject_id,
+            subject_label=subject_label,
+        )
 
     # ------------------------------------------------------------------
     # Internals
@@ -263,13 +408,20 @@ class SignupGateService:
         result = await self.db.execute(select(func.count()).select_from(User))
         return (result.scalar() or 0) == 0
 
-    async def _is_allowlisted(self, github_user_id: str, mode: SignupGateMode) -> bool:
+    async def _is_allowlisted(
+        self,
+        provider: SignupGateProvider,
+        subject_id: str,
+        mode: SignupGateMode,
+    ) -> bool:
         # Filter by source so mode='manual' doesn't silently accept a
         # sponsor-only row in Phase 2, and mode='github_sponsors' doesn't
         # silently accept a manually-added row — i.e. keep 'manual' and 'both'
         # semantically distinct. mode='both' omits the source filter by design.
+        # #655: match key is (provider, subject_id), not github_user_id alone.
         filters = [
-            SignupAllowlistEntry.github_user_id == github_user_id,
+            SignupAllowlistEntry.provider == provider,
+            SignupAllowlistEntry.subject_id == subject_id,
             SignupAllowlistEntry.state == "active",
         ]
         if mode == "manual":
@@ -278,9 +430,10 @@ class SignupGateService:
             filters.append(SignupAllowlistEntry.source == "github_sponsors")
         # mode == "both" → no source filter
 
-        # A GitHub user can have multiple rows (one per source), so
-        # scalar_one_or_none would raise MultipleResultsFound when mode='both'
-        # matches two rows. first() returns whichever active row hits first.
+        # A single (provider, subject_id) can have multiple rows (one per
+        # source), so scalar_one_or_none would raise MultipleResultsFound
+        # when mode='both' matches two rows. first() returns whichever
+        # active row hits first.
         result = await self.db.execute(select(SignupAllowlistEntry.id).where(*filters).limit(1))
         return result.first() is not None
 
@@ -296,6 +449,95 @@ class SignupGateService:
 
         return await _check_registration_allowed(email, self.db, user_id=user_id)
 
-    def _blocked_response(self) -> RedirectResponse:
+    def _blocked_response(
+        self,
+        *,
+        provider: SignupGateProvider | None = None,
+        oauth_sub: str | None = None,
+    ) -> RedirectResponse:
+        """Build the blocked-signup redirect.
+
+        #655: query params carry provider + first 8 chars of the OIDC sub
+        so the frontend ``/signup-blocked`` page can surface "show this to
+        the admin and they'll grant access" guidance without leaking the
+        full immutable identity. ``oauth_sub`` is sliced to 8 chars (cf.
+        Git short-SHA convention) — enough for an admin to disambiguate
+        between blocked attempts when correlating with the audit_log row
+        they share a request with, but short enough to be uncomfortable as
+        a leaked tracking handle on its own.
+
+        ``provider`` / ``oauth_sub`` are intentionally optional so the
+        function can still be called without context (e.g. a defensive
+        terminal-branch in :meth:`check_access`).
+        """
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-        return RedirectResponse(f"{frontend_url}/signup-blocked", status_code=303)
+        params: list[str] = []
+        if provider is not None:
+            params.append(f"provider={provider}")
+        if oauth_sub:
+            params.append(f"sub={oauth_sub[:8]}")
+        suffix = ("?" + "&".join(params)) if params else ""
+        return RedirectResponse(f"{frontend_url}/signup-blocked{suffix}", status_code=303)
+
+    async def _record_blocked_signup(
+        self,
+        *,
+        provider: SignupGateProvider,
+        oauth_sub: str,
+        email: str,
+        username: str | None,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> None:
+        """Record a blocked signup attempt to structlog AND audit_logs.
+
+        #655 (CSO gate1 D2): without a durable trail in ``audit_logs``,
+        admins cannot triage who tried to sign up after the fact — only
+        live structlog tails can. The audit row keeps the email HMAC'd
+        (never plaintext, matching the convention from
+        ``RoleManager._sync_existing_user``) and pins the IdP identity by
+        ``user_id`` so a future cleanup workflow can correlate the
+        blocked attempt with the eventual allowlist add.
+
+        Failures inside this method are swallowed deliberately. The
+        gate's primary responsibility is correctness of the block
+        decision; an audit-write failure should never escalate into a
+        callback 500 for the user being blocked.
+        """
+        logger.info(
+            "signup_blocked",
+            provider=provider,
+            subject_id=oauth_sub,
+            username=username,
+        )
+
+        try:
+            hmac_key = get_settings().audit_hmac_key
+            audit = AuditLog(
+                user_email=_OAUTH_CALLBACK_ACTOR,
+                user_id=oauth_sub,
+                action="signup_blocked",
+                resource=f"signup_gate:{provider}",
+                new_value_hash=hmac_sha256_hex(email, hmac_key),
+                user_metadata={
+                    "provider": provider,
+                    "subject_label": username,
+                },
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+            self.db.add(audit)
+            await self.db.commit()
+        except Exception as exc:  # pragma: no cover — defensive; logged below
+            # Roll the failed audit out of the session so a later commit
+            # on this session doesn't trip over it.
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
+            logger.warning(
+                "signup_blocked_audit_failed",
+                provider=provider,
+                subject_id=oauth_sub,
+                error=str(exc),
+            )

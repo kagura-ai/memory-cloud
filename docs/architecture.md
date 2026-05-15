@@ -280,6 +280,20 @@ All checks funnel through `PermissionService` in `backend/src/services/permissio
 - **JWT Tokens**: HS256 signing (1 hour expiration)
 - **OAuth2 Secrets**: SHA256 hash storage
 
+### Signup Gate
+
+The admin-configurable signup gate (`backend/src/services/signup_gate_service.py`) sits in front of the OAuth callback's user-creation step. It applies **uniformly to both GitHub and Google** (since #655 — the original #358 Phase 1 design trusted Google's Consent Screen test-user list, but that list is only strictly enforced for sensitive scopes and is click-through for basic profile scopes).
+
+**Match key**: `(provider, subject_id)` in `signup_allowlist`. `subject_id` is the immutable IdP identity (GitHub numeric ID for github rows, OIDC `sub` claim for google rows). Email is never used for matching — that would re-open email-change attacks at the IdP.
+
+**Modes** (singleton `signup_gate_config.mode`):
+- `manual`: signup allowed iff `(provider, subject_id)` is on the allowlist with `state='active'`.
+- `github_sponsors` / `both`: Phase 2 (NotImplemented for GitHub today; for Google, falls back to `manual` since sponsorship is GitHub-specific).
+
+**Blocked signup observability**: every blocked attempt writes to `audit_logs` (action=`signup_blocked`) with the email HMAC'd (never plaintext), plus IP / User-Agent for triage. The blocked redirect to `/signup-blocked?provider=<p>&sub=<first8>` lets the frontend render an admin-contact prompt without leaking the full identity.
+
+**Admin API**: `POST /api/v1/admin/signup-gate/allowlist` accepts either `{github_username}` (legacy GitHub shape) or `{provider: "google", email}`. Google adds resolve the OIDC `sub` from a pre-existing `users` row — the invitee must complete Google OAuth at least once before they can be allowlisted (pre-OAuth invitation by email is a Phase 2 follow-up).
+
 ## Scalability Considerations
 
 ### Horizontal Scaling

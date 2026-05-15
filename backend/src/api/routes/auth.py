@@ -472,16 +472,24 @@ async def google_callback(
         # 3. Get user info from Google
         user_info = _oauth2_manager.get_user_info_web(credentials)
 
-        # 3.5. Registration gate. Google's own OAuth + workspace configuration
-        # decides who can sign up via Google, so the backend gate passes
-        # through for provider="google" when admin-configurable mode is on;
-        # when off, delegates to _check_registration_allowed (Issue #349) just
-        # like the GitHub path. This keeps a single gate abstraction without
-        # layering a redundant backend allowlist on top of Google's own.
+        # 3.5. Registration gate. #655 removed the Google pass-through that
+        # #358 Phase 1 had — Google's "Testing" status does not enforce the
+        # test-users list for non-sensitive scopes (openid/email/profile),
+        # so the backend now gates Google uniformly with GitHub. Match is on
+        # the immutable OIDC `sub` claim; ip_address/user_agent are plumbed
+        # in so the audit_log row written on a blocked attempt has triage
+        # context (CSO gate1 D2).
         blocked = await check_signup_access(
             provider="google",
             oauth_sub=user_info["sub"],
             email=user_info["email"],
+            # Google has no GitHub-style "login" handle, so use the email
+            # as the display label. This is logged in audit_log
+            # user_metadata.subject_label and structlog only — never used
+            # for the allowlist match.
+            username=user_info["email"],
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
         )
         if blocked:
             return blocked
@@ -915,11 +923,15 @@ async def github_callback(
 
         # 3.5. Registration gate: admin-configurable (Issue #358) with legacy
         # _check_registration_allowed delegation when disabled (Issue #349).
+        # #655 added ip_address/user_agent plumbing so the audit_log row
+        # written on a blocked attempt has triage context.
         blocked = await check_signup_access(
             provider="github",
             oauth_sub=user_info["sub"],
             email=user_info["email"],
             username=user_info.get("login"),
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
         )
         if blocked:
             return blocked
