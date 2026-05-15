@@ -30,13 +30,7 @@ import { ContextBreakdownTable } from "@/components/dashboard/ContextBreakdownTa
 import { MemoryTimelineChart } from "@/components/dashboard/MemoryTimelineChart";
 import { AdminSections } from "@/components/dashboard/AdminSections";
 import { PlanBadge } from "@/components/common/PlanBadge";
-import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
-import { useToast } from "@/hooks/use-toast";
-import {
-  clearRecentlyDeletedWorkspace,
-  readRecentlyDeletedWorkspace,
-} from "@/lib/storage/recently-deleted-workspace";
 import {
   getContextStats,
   ContextStatsResponse,
@@ -44,11 +38,6 @@ import {
   MemoryTimelineResponse,
   WorkspaceStats,
 } from "@/lib/api/workspaces";
-
-// 10-minute window between user-clicked-delete and dashboard mount. Long
-// enough to span a 2FA round-trip; short enough that stale stash from a
-// previous session doesn't fire a misleading toast.
-const AUTO_SWITCH_TOAST_TTL_MS = 10 * 60 * 1000;
 
 export default function WorkspaceStatsPage() {
   const t = useTranslations("workspace");
@@ -59,8 +48,6 @@ export default function WorkspaceStatsPage() {
     currentWorkspaceId,
     loading: workspaceLoading,
   } = useWorkspace();
-  const { toast } = useToast();
-  const { user } = useAuth();
 
   // Issue #398: viewer cannot read workspace stats (backend 403's on
   // /workspaces/{id}/contexts/stats with required_role="member"). Send
@@ -74,39 +61,6 @@ export default function WorkspaceStatsPage() {
     }
   }, [currentWorkspace, router]);
 
-  // Issue #660: surface backend auto-switch as a one-shot toast. The settings
-  // page stashed the deleted workspace's name in localStorage just before
-  // `deleteWorkspace()`; the backend has since picked a remaining workspace via
-  // role-preferring order. Read once, render `"<old> was deleted — switched to
-  // <new>"`, then clear.
-  useEffect(() => {
-    if (!currentWorkspace || !currentWorkspaceId || !user?.id) return;
-    const stash = readRecentlyDeletedWorkspace();
-    if (!stash) return;
-
-    const now = Date.now();
-    // Clamp future-dated `ts` (tampering / clock skew) — without the upper
-    // bound, a future timestamp passes `now - ts < TTL` indefinitely.
-    const isRecent =
-      stash.ts <= now && now - stash.ts < AUTO_SWITCH_TOAST_TTL_MS;
-    const isDifferentWorkspace = stash.id !== currentWorkspaceId;
-    // Bind to the authenticated user: localStorage is per-origin, not per-user,
-    // so account A's stash must NOT surface in account B's toast after a
-    // logout/login on the same browser (Copilot review on PR #662). When the
-    // stash belongs to a different user, drop it without rendering.
-    const isSameUser = stash.user_id === user.id;
-
-    if (isSameUser && isRecent && isDifferentWorkspace) {
-      toast({
-        title: t("workspaceAutoSwitchedTitle"),
-        description: t("workspaceAutoSwitchedDesc", {
-          deleted: stash.name,
-          switched: currentWorkspace.name,
-        }),
-      });
-    }
-    clearRecentlyDeletedWorkspace();
-  }, [currentWorkspace, currentWorkspaceId, user?.id, t, toast]);
   const [stats, setStats] = useState<WorkspaceStats | null>(null);
   const [contextStats, setContextStats] = useState<ContextStatsResponse | null>(
     null,

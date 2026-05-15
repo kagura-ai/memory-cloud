@@ -141,9 +141,14 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  // Check if on workspace creation page
+  // Check if on workspace creation page. Mirrors WorkspaceGuard's logic so the
+  // create form renders in the minimal layout even after the compatibility
+  // redirect from /workspace/settings → /workspace/settings/general (Copilot
+  // review on PR #662 loop 3).
   const isWorkspaceCreationPage =
-    pathname === "/workspace/settings" && searchParams.get("create") === "true";
+    (pathname === "/workspace/settings" ||
+      pathname === "/workspace/settings/general") &&
+    searchParams.get("create") === "true";
 
   // Redirect to login for protected routes (not homepage)
   useEffect(() => {

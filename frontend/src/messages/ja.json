@@ -880,8 +880,6 @@
     "workspaceUpdatedDesc": "ワークスペース情報が正常に保存されました。",
     "workspaceDeleted": "ワークスペースを削除しました",
     "workspaceDeletedDesc": "ワークスペースが正常に削除されました。",
-    "workspaceAutoSwitchedTitle": "ワークスペースを切り替えました",
-    "workspaceAutoSwitchedDesc": "{deleted} を削除したため、{switched} に切り替えました。",
     "settingsSaved": "設定を保存しました",
     "failedToLoadWorkspace": "ワークスペースの読み込みに失敗しました",
     "failedToUpdateWorkspace": "ワークスペースの更新に失敗しました",
