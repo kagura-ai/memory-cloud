@@ -20,7 +20,7 @@ that the provider-aware ``subject_id`` design was added to close.
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import User
@@ -56,10 +56,17 @@ async def resolve_google_sub_by_email(email: str, db: AsyncSession) -> tuple[str
     # Case-insensitive match — emails landing via Google OIDC are
     # lowercase per Google's userinfo response, but the canonical
     # storage isn't enforced, so the match needs to forgive case drift.
+    #
+    # Use ``func.lower(...) == lower(email)`` rather than ``email.ilike(...)``
+    # so that ``%`` and ``_`` in an admin-supplied email (RFC 5321 permits
+    # both in the local part) are treated as literal characters, not as SQL
+    # LIKE wildcards. PR #657 Copilot review / CSO finding #2: with `ilike`,
+    # ``a%@example.com`` would over-match any Google user matching the
+    # surrounding pattern and silently allowlist the wrong account.
     result = await db.execute(
         select(User.user_id, User.email)
         .where(User.auth_provider == "google")
-        .where(User.email.ilike(email))
+        .where(func.lower(User.email) == email.lower())
         .limit(1)
     )
     row = result.first()

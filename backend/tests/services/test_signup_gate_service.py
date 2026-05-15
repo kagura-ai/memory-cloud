@@ -665,11 +665,15 @@ class TestRecordBlockedSignup:
         # IP / UA are captured for triage.
         assert audit.ip_address == "203.0.113.7"
         assert audit.user_agent == "Mozilla/5.0"
-        # subject_label preserved in metadata for admin readability.
-        assert audit.user_metadata == {
-            "provider": "google",
-            "subject_label": "stranger@example.com",
-        }
+        # Metadata stores provider type only — never the email or any
+        # other PII. The HMAC in new_value_hash is the canonical email
+        # reference (matches the auth/roles.py precedent; PR #657 Copilot
+        # review / CSO finding #1).
+        assert audit.user_metadata == {"provider": "google"}
+        # Defense in depth: the plaintext email MUST NOT appear anywhere
+        # on the row (not in user_metadata, not in any other column).
+        assert "stranger@example.com" not in str(audit.user_metadata)
+        assert audit.user_email == "oauth-callback"  # the actor sentinel, not the subject
         svc.db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio

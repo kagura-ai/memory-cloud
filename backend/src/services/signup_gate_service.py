@@ -18,6 +18,7 @@ email-change attacks closed.
 
 import os
 from typing import Literal, cast
+from urllib.parse import urlencode
 from uuid import UUID
 
 from fastapi.responses import RedirectResponse
@@ -470,13 +471,18 @@ class SignupGateService:
         function can still be called without context (e.g. a defensive
         terminal-branch in :meth:`check_access`).
         """
+        # Use urllib.parse.urlencode for correctness-by-default. Today both
+        # ``provider`` (Literal) and the GitHub/Google ``oauth_sub`` prefix
+        # are URL-safe, but a future provider whose ``sub`` could include
+        # ``&`` / ``#`` / ``+`` / non-ASCII would silently corrupt the URL
+        # if we hand-concatenated (Copilot review #5 on PR #657).
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-        params: list[str] = []
+        params: dict[str, str] = {}
         if provider is not None:
-            params.append(f"provider={provider}")
+            params["provider"] = provider
         if oauth_sub:
-            params.append(f"sub={oauth_sub[:8]}")
-        suffix = ("?" + "&".join(params)) if params else ""
+            params["sub"] = oauth_sub[:8]
+        suffix = ("?" + urlencode(params)) if params else ""
         return RedirectResponse(f"{frontend_url}/signup-blocked{suffix}", status_code=303)
 
     async def _record_blocked_signup(
@@ -499,10 +505,19 @@ class SignupGateService:
         ``user_id`` so a future cleanup workflow can correlate the
         blocked attempt with the eventual allowlist add.
 
+        ``user_metadata`` deliberately stores only the provider type — never
+        the email or any other PII. The HMAC in ``new_value_hash`` is the
+        canonical email reference for an audit reader; storing the plaintext
+        email in metadata too would defeat that design intent and contradict
+        the ``auth/roles.py`` precedent (PR #657 CSO finding #1). For admin
+        triage, correlate ``user_id`` (immutable OIDC sub) + ``created_at``
+        + ``new_value_hash`` against the live OAuth flow.
+
         Failures inside this method are swallowed deliberately. The
         gate's primary responsibility is correctness of the block
         decision; an audit-write failure should never escalate into a
-        callback 500 for the user being blocked.
+        callback 500 for the user being blocked. The structlog warn line
+        below preserves observability of audit-write failures.
         """
         logger.info(
             "signup_blocked",
@@ -519,22 +534,29 @@ class SignupGateService:
                 action="signup_blocked",
                 resource=f"signup_gate:{provider}",
                 new_value_hash=hmac_sha256_hex(email, hmac_key),
-                user_metadata={
-                    "provider": provider,
-                    "subject_label": username,
-                },
+                # Provider type only — see docstring on PII rationale.
+                user_metadata={"provider": provider},
                 ip_address=ip_address,
                 user_agent=user_agent,
             )
             self.db.add(audit)
             await self.db.commit()
-        except Exception as exc:  # pragma: no cover — defensive; logged below
+        except Exception as exc:
             # Roll the failed audit out of the session so a later commit
-            # on this session doesn't trip over it.
+            # on this session doesn't trip over it. The rollback itself
+            # may fail (e.g. connection already torn down by the same
+            # error that broke commit) — that's expected and not
+            # actionable here; debug-log it so the rare case is still
+            # observable without bloating production logs.
             try:
                 await self.db.rollback()
-            except Exception:
-                pass
+            except Exception as rollback_exc:
+                logger.debug(
+                    "signup_blocked_rollback_failed",
+                    provider=provider,
+                    subject_id=oauth_sub,
+                    error=str(rollback_exc),
+                )
             logger.warning(
                 "signup_blocked_audit_failed",
                 provider=provider,

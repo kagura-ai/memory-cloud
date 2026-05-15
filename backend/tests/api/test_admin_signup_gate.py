@@ -331,6 +331,38 @@ class TestAddToAllowlist:
         )
         assert resp.status_code == 422
 
+    def test_422_when_github_payload_has_email(self, client):
+        """PR #657 review #3: provider=github MUST NOT accept an email field.
+
+        Without the model_validator, the extra field would be silently
+        ignored and the request would succeed with confusing data — admins
+        would not see their typo. The validator rejects with 422 so the
+        mismatch is explicit.
+        """
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={
+                "provider": "github",
+                "github_username": "octocat",
+                "email": "alice@example.com",
+            },
+        )
+        assert resp.status_code == 422
+        assert "email must not be set" in str(resp.json())
+
+    def test_422_when_google_payload_has_github_username(self, client):
+        """Symmetric: provider=google MUST NOT accept github_username."""
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={
+                "provider": "google",
+                "email": "alice@example.com",
+                "github_username": "octocat",
+            },
+        )
+        assert resp.status_code == 422
+        assert "github_username must not be set" in str(resp.json())
+
     def test_422_on_malformed_google_email(self, client):
         """EmailStr rejects non-RFC strings before we hit the DB."""
         resp = client.post(

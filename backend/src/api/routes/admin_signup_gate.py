@@ -14,7 +14,7 @@ from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import AdminUser
@@ -127,6 +127,32 @@ class AllowlistAddRequest(BaseModel):
         # flows share one validation surface.
         pattern=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$",
     )
+
+    @model_validator(mode="after")
+    def _enforce_provider_field_match(self) -> AllowlistAddRequest:
+        """Reject payloads where the supplied field doesn't match the provider.
+
+        Without this, an admin could pass ``{provider: "github", email: ...}``
+        and have the extra field silently ignored — an "add with extra data
+        success" surface that hides typos. We want the request to fail
+        explicitly with a 422 so the admin sees the mismatch (PR #657
+        Copilot review #3).
+        """
+        if self.provider == "github":
+            if self.email is not None:
+                raise ValueError(
+                    "email must not be set when provider='github'; use github_username instead"
+                )
+            if self.github_username is None:
+                raise ValueError("github_username is required when provider='github'")
+        else:  # provider == "google"
+            if self.github_username is not None:
+                raise ValueError(
+                    "github_username must not be set when provider='google'; use email instead"
+                )
+            if self.email is None:
+                raise ValueError("email is required when provider='google'")
+        return self
 
 
 # ============================================================================
