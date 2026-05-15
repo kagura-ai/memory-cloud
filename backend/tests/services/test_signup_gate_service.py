@@ -13,7 +13,10 @@ from uuid import uuid4
 import pytest
 from fastapi.responses import RedirectResponse
 
-from services.signup_gate_service import SignupGateService
+from services.signup_gate_service import (
+    SignupGateService,
+    _legacy_user_id_for_non_github,
+)
 from utils.github_user import GitHubUserNotFound
 
 
@@ -876,6 +879,93 @@ class TestAddToAllowlistEntry:
                 subject_label="octocat",
                 added_by_user_id="admin1",
             )
+
+    @pytest.mark.asyncio
+    async def test_long_pending_sentinel_uses_hashed_legacy_value(self):
+        """PR #673 Copilot review #4 finding F: a long pending sentinel
+        for the Phase 2 path
+        (``subject_id='pending:<email>'`` with an email near the 247-char
+        cap) would overflow the legacy ``github_user_id String(64)``.
+        Hash-based fallback keeps the value ≤64 chars AND
+        collision-resistant under the downgrade migration's restored
+        unique on ``(github_user_id, source)``.
+        """
+        svc = _svc()
+        scalar_result = MagicMock()
+        scalar_result.scalar_one_or_none = MagicMock(return_value=None)
+        svc.db.execute = AsyncMock(return_value=scalar_result)
+        svc.db.add = MagicMock()
+        svc.db.commit = AsyncMock()
+        svc.db.refresh = AsyncMock()
+
+        # Email at the 247-char cap → sentinel is "pending:" + 247 = 255.
+        long_email = ("a" * 235) + "@example.com"
+        assert len(long_email) == 247
+        long_sentinel = f"pending:{long_email}"
+
+        entry = await svc.add_to_allowlist_entry(
+            provider="google",
+            subject_id=long_sentinel,
+            subject_label=long_email,
+            added_by_user_id="admin1",
+        )
+
+        assert entry.subject_id == long_sentinel  # full sentinel preserved
+        # Legacy column fits the 64-char limit AND keeps the provider
+        # prefix readable so spot-queries during the migration window
+        # still identify the row's origin.
+        assert len(entry.github_user_id) <= 64
+        assert entry.github_user_id.startswith("google:")
+        # Raw truncation would have produced this colliding value:
+        raw_truncated = f"google:{long_sentinel}"[:64]
+        assert entry.github_user_id != raw_truncated
+
+
+class TestLegacyUserIdForNonGithub:
+    """PR #673 Copilot review #4 finding F: legacy ``github_user_id`` write
+    must be downgrade-safe. The helper switches from readable
+    ``<provider>:<subject_id>`` to a sha256-based sentinel when the
+    readable form would overflow ``String(64)``, so two distinct
+    subject_ids never collide on the legacy column (which the e14
+    downgrade migration re-uniques on)."""
+
+    def test_short_subject_returns_readable_form(self):
+        # Real OIDC sub (~21 chars) + "google:" = 28 chars — fits 64.
+        result = _legacy_user_id_for_non_github("google", "108276939729829363")
+        assert result == "google:108276939729829363"
+
+    def test_long_subject_returns_hashed_form_fitting_column(self):
+        long_subject = "pending:" + ("a" * 235) + "@example.com"
+        result = _legacy_user_id_for_non_github("google", long_subject)
+        assert len(result) == 64  # exactly the column width
+        assert result.startswith("google:")
+        # Hash budget = 64 - len("google:") = 57 hex chars.
+        digest_part = result[len("google:") :]
+        assert len(digest_part) == 57
+        assert all(c in "0123456789abcdef" for c in digest_part)
+
+    def test_long_subject_helper_is_deterministic(self):
+        """Same subject_id → same legacy value (idempotent across
+        re-writes; e.g. _promote_pending_google_entry retries)."""
+        s = "pending:" + ("a" * 235) + "@example.com"
+        assert _legacy_user_id_for_non_github("google", s) == _legacy_user_id_for_non_github(
+            "google", s
+        )
+
+    def test_long_subject_helper_collision_resistant_on_shared_prefix(self):
+        """Two distinct long subject_ids that share a 49+ char prefix
+        (raw truncation would collide) must map to distinct legacy
+        values via the hash branch — this is the corner case the
+        downgrade migration's unique constraint relies on.
+        """
+        s1 = "pending:" + ("a" * 235) + "@example.com"
+        s2 = "pending:" + ("a" * 235) + "@example.org"
+        v1 = _legacy_user_id_for_non_github("google", s1)
+        v2 = _legacy_user_id_for_non_github("google", s2)
+        # Pre-fix raw truncation would have collided here:
+        assert f"google:{s1}"[:64] == f"google:{s2}"[:64]
+        # Hashed form does not:
+        assert v1 != v2
 
 
 class TestRecordBlockedSignup:

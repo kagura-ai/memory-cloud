@@ -16,6 +16,7 @@ provider-uniformly. Both providers match on the immutable IdP identity
 email-change attacks closed.
 """
 
+import hashlib
 import os
 from typing import Literal, cast
 from urllib.parse import urlencode
@@ -39,6 +40,43 @@ logger = get_logger(__name__)
 
 SignupGateMode = Literal["manual", "github_sponsors", "both"]
 SignupGateProvider = Literal["github", "google"]
+
+# ``signup_allowlist.github_user_id`` is a deprecated ``String(64)``
+# kept NOT NULL during the #655 migration window. For non-github
+# providers we synthesize a ``<provider>:<subject_id>`` value. The
+# current schema's unique key is ``(provider, subject_id, source)``,
+# so a truncated legacy column value is normally harmless — BUT the
+# downgrade migration in ``e14_655_signup_allowlist_provider`` restores
+# the old unique constraint on ``(github_user_id, source)``. Two
+# distinct ``subject_id`` values whose first 64 chars of
+# ``<provider>:<subject_id>`` are equal (e.g. Phase 2 pending sentinels
+# for two emails sharing a 49+ char prefix) would then collide and
+# break downgrade. Use a hash-based sentinel when the readable form
+# would exceed the column limit so each distinct ``subject_id`` maps
+# to a distinct legacy value (PR #673 Copilot review #4 finding F).
+_LEGACY_USER_ID_COLUMN_LEN = 64
+
+
+def _legacy_user_id_for_non_github(provider: str, subject_id: str) -> str:
+    """Build a downgrade-safe ``github_user_id`` value for a non-github row.
+
+    - Returns the readable ``f"{provider}:{subject_id}"`` when it fits
+      the 64-char column (the common case: a real OIDC sub is ~21 chars).
+    - Falls back to ``f"{provider}:<sha256(subject_id) hex prefix>"``
+      truncated to fit when the readable form would overflow. The hash
+      input is the full ``subject_id``, so distinct subject_ids never
+      collide regardless of shared prefixes.
+
+    The column is deprecated and slated for removal in a #655 follow-up;
+    this helper is the temporary write-side safety until that drop lands.
+    """
+    readable = f"{provider}:{subject_id}"
+    if len(readable) <= _LEGACY_USER_ID_COLUMN_LEN:
+        return readable
+    prefix = f"{provider}:"
+    digest_budget = _LEGACY_USER_ID_COLUMN_LEN - len(prefix)
+    digest = hashlib.sha256(subject_id.encode("utf-8")).hexdigest()
+    return f"{prefix}{digest[:digest_budget]}"
 
 
 async def check_signup_access(
@@ -309,17 +347,12 @@ class SignupGateService:
             legacy_user_id = github_user_id
             legacy_username = github_username
         else:
-            # ``signup_allowlist.github_user_id`` is ``String(64)`` (legacy
-            # GitHub numeric IDs fit easily). For Google rows the sentinel
-            # is ``google:<subject_id>`` — fine for a real OIDC sub
-            # (numeric, ~21 chars), but a Phase 2 pending sentinel
-            # ``google:pending:<email>`` can exceed 64 when the email is
-            # long (RFC 5321 caps the local part at 64 + domain up to 255).
-            # Truncate to the column limit; the column is deprecated and
-            # not used as a matching key (``subject_id`` carries the full
-            # value for matching), so a truncated legacy value cannot
-            # cause data loss for any feature.
-            legacy_user_id = f"{provider}:{subject_id}"[:64]
+            # See ``_legacy_user_id_for_non_github`` for the column-fit +
+            # downgrade-safe construction. Real OIDC subs (~21 chars)
+            # land in the readable branch; Phase 2 pending sentinels
+            # with long emails take the hash branch so distinct
+            # subject_ids never collide on the legacy column.
+            legacy_user_id = _legacy_user_id_for_non_github(provider, subject_id)
             legacy_username = subject_label
 
         existing = await self.db.execute(
@@ -492,13 +525,14 @@ class SignupGateService:
         pending.subject_id = oauth_sub
         # Keep the deprecated NOT-NULL column populated with the
         # ``<provider>:<subject_id>`` sentinel format used by other
-        # google rows (see ``add_to_allowlist_entry``). The column is
-        # ``String(64)``; an OIDC sub is ~21 chars so the full sentinel
-        # fits comfortably, but the slice keeps this code defensive
-        # against any future IdP whose sub format pushes past the
-        # limit. The label column is left as the email, which is the
-        # snapshot the admin wrote at add-time.
-        pending.github_user_id = f"google:{oauth_sub}"[:64]
+        # google rows. ``_legacy_user_id_for_non_github`` keeps the
+        # value ≤64 chars and collision-resistant under the downgrade
+        # migration's restored unique on ``(github_user_id, source)``.
+        # An OIDC sub is ~21 chars so the readable branch wins here;
+        # the helper makes that explicit instead of hand-truncating.
+        # The label column is left as the email, which is the snapshot
+        # the admin wrote at add-time.
+        pending.github_user_id = _legacy_user_id_for_non_github("google", oauth_sub)
 
         try:
             await self.db.commit()
