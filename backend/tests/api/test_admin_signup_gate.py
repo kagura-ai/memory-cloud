@@ -289,23 +289,48 @@ class TestAddToAllowlist:
         assert body["subject_id"] == google_sub
         assert body["subject_label"] == "alice@example.com"
 
-    def test_google_404_when_user_not_in_users_table(self, client, monkeypatch):
-        """Bootstrap UX gap: a Google user must OAuth once before they can
-        be added — return 404 with the actionable hint baked into the
-        helper's exception message."""
+    def test_google_pending_row_when_user_not_in_users_table(self, client, monkeypatch):
+        """Phase 2 (#655 follow-up): admin can pre-allowlist a Google user
+        by email before they've OAuth'd. The handler creates a pending row
+        with a sentinel ``subject_id='pending:<email>'`` that the OAuth
+        callback gate promotes to the real OIDC sub on first sign-in.
+        """
         from utils.google_user import GoogleUserNotFound
 
         monkeypatch.setattr(
             "api.routes.admin_signup_gate.resolve_google_sub_by_email",
             AsyncMock(side_effect=GoogleUserNotFound("user must OAuth first")),
         )
+        add_mock = AsyncMock(
+            return_value=_mock_entry(
+                provider="google",
+                subject_id="pending:stranger@example.com",
+                subject_label="stranger@example.com",
+            )
+        )
+        monkeypatch.setattr(
+            "services.signup_gate_service.SignupGateService.add_to_allowlist_entry",
+            add_mock,
+        )
+
         resp = client.post(
             "/api/v1/admin/signup-gate/allowlist",
-            json={"provider": "google", "email": "stranger@example.com"},
+            json={"provider": "google", "email": "Stranger@Example.com"},
         )
-        assert resp.status_code == 404
-        # The bootstrap-UX hint comes through verbatim.
-        assert "OAuth" in resp.json()["detail"]
+        assert resp.status_code == 201
+
+        # Route normalized the email to lower-case and built the sentinel
+        # subject_id format the OAuth callback gate looks for.
+        add_mock.assert_awaited_once()
+        kwargs = add_mock.await_args.kwargs
+        assert kwargs["provider"] == "google"
+        assert kwargs["subject_id"] == "pending:stranger@example.com"
+        assert kwargs["subject_label"] == "stranger@example.com"
+
+        body = resp.json()
+        assert body["provider"] == "google"
+        assert body["subject_id"] == "pending:stranger@example.com"
+        assert body["subject_label"] == "stranger@example.com"
 
     def test_google_422_when_email_missing(self, client):
         """provider='google' requires the email field."""

@@ -165,6 +165,19 @@ class SignupGateService:
         if effective_mode == "manual":
             if await self._is_allowlisted(provider, oauth_sub, effective_mode):
                 return None
+            # Phase 2 (#655 follow-up): Google admins can pre-allowlist a
+            # target by email before the user has OAuth'd. Such rows carry
+            # a sentinel ``subject_id='pending:<email>'`` (set by the admin
+            # POST handler). On first OAuth callback for that email we
+            # rewrite ``subject_id`` to the real OIDC ``sub`` so subsequent
+            # logins match the regular ``(provider, subject_id)`` path
+            # above. GitHub has no email-only fallback because
+            # ``resolve_github_user_id`` resolves to a numeric ID at
+            # add-time, so the pending state only exists for Google.
+            if provider == "google" and await self._promote_pending_google_entry(
+                email=email, oauth_sub=oauth_sub
+            ):
+                return None
             await self._record_blocked_signup(
                 provider=provider,
                 oauth_sub=oauth_sub,
@@ -416,6 +429,78 @@ class SignupGateService:
     async def _is_first_user(self) -> bool:
         result = await self.db.execute(select(func.count()).select_from(User))
         return (result.scalar() or 0) == 0
+
+    async def _promote_pending_google_entry(self, *, email: str, oauth_sub: str) -> bool:
+        """Promote a pending Google allowlist row to the real OIDC sub.
+
+        Phase 2 (#655 follow-up): admin pre-allowlists a Google user
+        by email before they have OAuth'd. The row carries a sentinel
+        ``subject_id='pending:<email-lower>'``; on the user's first
+        OAuth callback, this method looks up the pending row, rewrites
+        ``subject_id`` to the real sub, and updates the legacy column
+        ``github_user_id`` (still NOT NULL during the #655 migration
+        window) to ``google:<sub>``. ``subject_label`` (the email) is
+        left unchanged — it was a snapshot at add-time and the email
+        may legitimately differ from the IdP's current email by the
+        time the user OAuths.
+
+        Email match is case-insensitive (IdP convention).
+
+        Args:
+            email: Email from the OAuth ``userinfo`` payload.
+            oauth_sub: OIDC ``sub`` claim, the immutable per-IdP ID.
+
+        Returns:
+            True if a pending row was found and promoted; False
+            otherwise. The caller treats False as "no pending row —
+            apply the normal block".
+        """
+        pending_subject_id = f"pending:{email.lower()}"
+        result = await self.db.execute(
+            select(SignupAllowlistEntry)
+            .where(
+                SignupAllowlistEntry.provider == "google",
+                SignupAllowlistEntry.subject_id == pending_subject_id,
+                SignupAllowlistEntry.state == "active",
+                SignupAllowlistEntry.source == "manual",
+            )
+            .limit(1)
+        )
+        pending = result.scalar_one_or_none()
+        if pending is None:
+            return False
+
+        pending.subject_id = oauth_sub
+        # Keep the deprecated NOT-NULL column populated with the
+        # ``<provider>:<subject_id>`` sentinel format used by other
+        # google rows (see ``add_to_allowlist_entry``). The label
+        # column is left as the email, which is the snapshot the
+        # admin wrote at add-time.
+        pending.github_user_id = f"google:{oauth_sub}"
+
+        try:
+            await self.db.commit()
+        except IntegrityError:
+            # Defensive: a real-sub row for the same OIDC sub already
+            # exists (admin double-allowlisted via two paths). Roll back
+            # the in-flight promotion and report "not promoted" — the
+            # caller's ``_is_allowlisted`` check earlier already would
+            # have hit the real row, so reaching here means a race that
+            # is fine to fall through.
+            await self.db.rollback()
+            logger.warning(
+                "signup_allowlist_pending_promote_race",
+                email_hmac=hmac_sha256_hex(email, get_settings().audit_hmac_key),
+                pending_id=str(pending.id),
+            )
+            return False
+
+        logger.info(
+            "signup_allowlist_pending_promoted",
+            email_hmac=hmac_sha256_hex(email, get_settings().audit_hmac_key),
+            pending_id=str(pending.id),
+        )
+        return True
 
     async def _is_allowlisted(
         self,

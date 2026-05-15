@@ -92,6 +92,11 @@ class TestCheckAccess:
         svc._is_existing_user = AsyncMock(return_value=False)
         svc._is_first_user = AsyncMock(return_value=False)
         svc._is_allowlisted = AsyncMock(return_value=False)
+        # Phase 2 (#655 follow-up): check_access now also consults
+        # _promote_pending_google_entry before falling through to block.
+        # Stub it to "not promoted" so this test still covers the block
+        # path; the promotion path has its own coverage below.
+        svc._promote_pending_google_entry = AsyncMock(return_value=False)
         # Stub the audit-write so the test doesn't try to talk to a real
         # session — _record_blocked_signup is exercised on its own below.
         svc._record_blocked_signup = AsyncMock()
@@ -118,6 +123,66 @@ class TestCheckAccess:
         assert kwargs["email"] == "stranger@example.com"
         assert kwargs["ip_address"] == "203.0.113.7"
         assert kwargs["user_agent"] == "Mozilla/5.0"
+
+    @pytest.mark.asyncio
+    async def test_google_pending_entry_promoted_on_first_oauth(self):
+        """Phase 2 (#655 follow-up): a pending pre-OAuth row is promoted
+        to the real OIDC sub on first sign-in, and the gate returns None
+        (signup allowed) without writing a blocked-signup audit row.
+        """
+        svc = _svc()
+        svc._load_config = AsyncMock(return_value=_config(enabled=True, mode="manual"))
+        svc._is_existing_user = AsyncMock(return_value=False)
+        svc._is_first_user = AsyncMock(return_value=False)
+        # Regular allowlist check misses (no real-sub row yet).
+        svc._is_allowlisted = AsyncMock(return_value=False)
+        # Promotion succeeds for this email.
+        svc._promote_pending_google_entry = AsyncMock(return_value=True)
+        svc._record_blocked_signup = AsyncMock()
+
+        result = await svc.check_access(
+            provider="google",
+            oauth_sub="108276939729829363",
+            email="newcomer@example.com",
+            username="newcomer@example.com",
+        )
+
+        assert result is None
+        svc._promote_pending_google_entry.assert_awaited_once_with(
+            email="newcomer@example.com",
+            oauth_sub="108276939729829363",
+        )
+        # Promotion path must not write a blocked-signup audit row — the
+        # signup is actually being ALLOWED via the pending → real-sub flip.
+        svc._record_blocked_signup.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_github_does_not_attempt_pending_promotion(self):
+        """Phase 2 (#655 follow-up): the pending-promotion path is
+        Google-only. GitHub usernames are resolvable to a numeric ID via
+        the GitHub API at add-time, so a "pending sub" state cannot
+        exist; the check_access path must NOT invoke the promotion
+        helper when provider=github (it would otherwise scan for sentinel
+        rows that can't be created via the github path).
+        """
+        svc = _svc()
+        svc._load_config = AsyncMock(return_value=_config(enabled=True, mode="manual"))
+        svc._is_existing_user = AsyncMock(return_value=False)
+        svc._is_first_user = AsyncMock(return_value=False)
+        svc._is_allowlisted = AsyncMock(return_value=False)
+        # If this were called, the assertion below would fail.
+        svc._promote_pending_google_entry = AsyncMock(return_value=False)
+        svc._record_blocked_signup = AsyncMock()
+
+        result = await svc.check_access(
+            provider="github",
+            oauth_sub="1234",
+            email="stranger@example.com",
+            username="stranger",
+        )
+
+        assert isinstance(result, RedirectResponse)
+        svc._promote_pending_google_entry.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_existing_user_always_allowed(self):
