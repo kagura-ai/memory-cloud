@@ -76,34 +76,30 @@ def upgrade() -> None:
     # the end of Step 2 (DROP DEFAULT) so post-migration INSERTs from new
     # code must supply real values — the columns having a permanent default
     # is exactly what we are NOT trying to bake in.
-    op.add_column(
-        "signup_allowlist",
-        sa.Column(
-            "provider",
-            sa.String(20),
-            nullable=True,
-            server_default=sa.text("'github'"),
-        ),
+    #
+    # Each ADD COLUMN goes through raw SQL with ``IF NOT EXISTS`` so a
+    # partial-rerun under autocommit mode self-heals (PR #657 Copilot loop
+    # 4 finding #3). PG 9.6+ has native ``ADD COLUMN IF NOT EXISTS`` so this
+    # is one statement, not a DO block.
+    op.execute(
+        sa.text(
+            "ALTER TABLE signup_allowlist "
+            "ADD COLUMN IF NOT EXISTS provider VARCHAR(20) DEFAULT 'github'"
+        )
     )
-    op.add_column(
-        "signup_allowlist",
-        sa.Column(
-            "subject_id",
-            sa.String(255),
-            nullable=True,
+    op.execute(
+        sa.text(
+            "ALTER TABLE signup_allowlist "
             # Empty-string sentinel. Step 2's backfill overwrites both
             # legacy NULL rows and any '' rows from the deploy window.
-            server_default=sa.text("''"),
-        ),
+            "ADD COLUMN IF NOT EXISTS subject_id VARCHAR(255) DEFAULT ''"
+        )
     )
-    op.add_column(
-        "signup_allowlist",
-        sa.Column(
-            "subject_label",
-            sa.String(255),
-            nullable=True,
-            server_default=sa.text("''"),
-        ),
+    op.execute(
+        sa.text(
+            "ALTER TABLE signup_allowlist "
+            "ADD COLUMN IF NOT EXISTS subject_label VARCHAR(255) DEFAULT ''"
+        )
     )
 
     # Step 2: backfill from existing GitHub-only columns.
@@ -136,26 +132,36 @@ def upgrade() -> None:
     op.alter_column("signup_allowlist", "subject_label", server_default=None)
 
     # Step 3: drop old UNIQUE + INDEX before tightening to NOT NULL, so the
-    # new constraints can sit on the new columns. ``type_="unique"`` on
-    # drop_constraint matches the codebase convention from a99 / b03.
-    op.drop_constraint(
-        "uq_allowlist_user_source",
-        "signup_allowlist",
-        type_="unique",
+    # new constraints can sit on the new columns. Raw SQL with ``IF EXISTS``
+    # guards (PR #657 Copilot loop 4 finding #3): self-heals if a prior run
+    # already dropped these and was interrupted before reaching the version
+    # bump, OR if an operator runs the migration manually with
+    # ``transaction_per_migration=False`` and the alembic_version row
+    # wasn't updated. Under the default transactional mode the guards are
+    # idempotency insurance; under autocommit mode they're actually load-
+    # bearing.
+    op.execute(
+        sa.text("ALTER TABLE signup_allowlist DROP CONSTRAINT IF EXISTS uq_allowlist_user_source")
     )
-    op.drop_index(
-        "ix_signup_allowlist_github_user_id",
-        table_name="signup_allowlist",
-    )
+    op.execute(sa.text("DROP INDEX IF EXISTS ix_signup_allowlist_github_user_id"))
 
     # Step 4: add CHECK constraint on provider. For this small table we
     # don't need the NOT VALID + VALIDATE dance from b03 (which is for
     # large tables where the scan would block writes); a direct ADD
     # CONSTRAINT is fine.
-    op.create_check_constraint(
-        "valid_signup_allowlist_provider",
-        "signup_allowlist",
-        "provider IN ('github', 'google')",
+    #
+    # Wrapped in a DO block that catches ``duplicate_object`` so a partial-
+    # rerun under autocommit mode self-heals. PG has no native
+    # ``ADD CONSTRAINT IF NOT EXISTS`` for CHECK constraints.
+    op.execute(
+        sa.text(
+            "DO $$ BEGIN "
+            "  ALTER TABLE signup_allowlist "
+            "    ADD CONSTRAINT valid_signup_allowlist_provider "
+            "    CHECK (provider IN ('github', 'google')); "
+            "EXCEPTION WHEN duplicate_object THEN NULL; "
+            "END $$"
+        )
     )
 
     # Step 4.5: belt-and-suspenders re-backfill. Step 2 caught the rows
@@ -206,15 +212,27 @@ def upgrade() -> None:
     # includes ``source`` for the same reason the old one did — a single
     # subject can legitimately have one ``manual`` row and one
     # ``github_sponsors`` row simultaneously.
-    op.create_unique_constraint(
-        "uq_allowlist_provider_subject_source",
-        "signup_allowlist",
-        ["provider", "subject_id", "source"],
+    #
+    # Both wrapped for idempotency (PR #657 Copilot loop 4 finding #3):
+    # UNIQUE goes through a ``DO $$ ... EXCEPTION WHEN duplicate_table``
+    # block because PG has no native ``ADD CONSTRAINT IF NOT EXISTS``
+    # for unique constraints. INDEX uses native ``CREATE INDEX IF NOT
+    # EXISTS`` which is the cleaner path.
+    op.execute(
+        sa.text(
+            "DO $$ BEGIN "
+            "  ALTER TABLE signup_allowlist "
+            "    ADD CONSTRAINT uq_allowlist_provider_subject_source "
+            "    UNIQUE (provider, subject_id, source); "
+            "EXCEPTION WHEN duplicate_table THEN NULL; "
+            "END $$"
+        )
     )
-    op.create_index(
-        "ix_signup_allowlist_provider_subject",
-        "signup_allowlist",
-        ["provider", "subject_id"],
+    op.execute(
+        sa.text(
+            "CREATE INDEX IF NOT EXISTS ix_signup_allowlist_provider_subject "
+            "ON signup_allowlist (provider, subject_id)"
+        )
     )
 
 
