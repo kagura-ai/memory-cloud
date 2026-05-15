@@ -117,6 +117,30 @@ class SleepContextsUsage(BaseModel):
     remaining: int = Field(0, description="max(0, limit - used)")
 
 
+class WorkspacesUsage(BaseModel):
+    """Owned-workspace cap usage (Issue #661).
+
+    User-level — the cap is per-user, not per-workspace. The dashboard
+    surfaces this so users can see "X / N workspaces owned" before
+    hitting the cap on workspace creation.
+
+    Unlike ``AnalysisUsage`` / ``SleepContextsUsage``, this field is
+    populated regardless of which workspace the caller currently has
+    selected — it is the user's own quota across all their owned
+    workspaces.
+
+    No ``addon_bonus`` field as of Issue #661 because there is no
+    per-user addon SKU. If ``addon_workspace_bonus`` (or equivalent)
+    is introduced — see the Out-of-scope section of #661 — add
+    ``addon_bonus`` here to match ``SleepContextsUsage`` /
+    ``AnalysisUsage`` shape.
+    """
+
+    used: int = Field(0, description="Owned workspaces (deleted_at IS NULL)")
+    limit: int = Field(0, description="Plan tier's max_owned_workspaces")
+    remaining: int = Field(0, description="max(0, limit - used)")
+
+
 class CurrentUsage(BaseModel):
     """Current usage statistics."""
 
@@ -141,6 +165,13 @@ class CurrentUsage(BaseModel):
         description=(
             "Sleep-enabled contexts quota stats (Issue #560). "
             "NULL when the caller has no current workspace selected."
+        ),
+    )
+    workspaces: WorkspacesUsage = Field(
+        ...,
+        description=(
+            "Owned-workspace cap usage for the caller (Issue #661). "
+            "User-level — always populated, independently of current workspace."
         ),
     )
 
@@ -380,6 +411,32 @@ async def _build_sleep_contexts_usage(
     )
 
 
+async def _build_workspaces_usage(db: AsyncSession, user_id: str) -> "WorkspacesUsage":
+    """Build the ``workspaces`` field of /usage/current (Issue #661).
+
+    User-level cap: ``get_user_workspace_summary`` returns the owned
+    count and the user's effective plan tier (highest tier across
+    owned workspaces; FREE when none owned) in a single SELECT. The
+    same helper is used by ``QuotaService.check_workspace_creation_allowed``
+    so the gate and the dashboard read consistent state.
+
+    Always returns a populated ``WorkspacesUsage`` — the cap is
+    user-scoped so there is no "no current workspace" null case here.
+    """
+    from config.plan_tiers import get_plan_tier
+    from utils.plan_resolver import get_user_workspace_summary
+
+    owned_count, user_plan = await get_user_workspace_summary(db, user_id)
+    plan_tier = get_plan_tier(user_plan)
+    limit = plan_tier.max_owned_workspaces
+
+    return WorkspacesUsage(
+        used=owned_count,
+        limit=limit,
+        remaining=max(0, limit - owned_count),
+    )
+
+
 @router.get("/current", response_model=UsageCurrentResponse)
 async def get_current_usage(
     user: SessionUser,
@@ -531,6 +588,8 @@ async def get_current_usage(
         sleep_contexts_usage = await _build_sleep_contexts_usage(
             db, current_workspace_id, effective_quotas=effective_quotas_dict
         )
+        # Issue #661: user-level owned-workspace cap (independent of current_workspace_id).
+        workspaces_usage = await _build_workspaces_usage(db, user_id)
 
         # Build response
         response = UsageCurrentResponse(
@@ -552,6 +611,7 @@ async def get_current_usage(
                 public_calls_this_week=public_calls_week,
                 analysis=analysis_usage,
                 sleep_contexts=sleep_contexts_usage,
+                workspaces=workspaces_usage,
             ),
             memory_usage=calculate_usage_status(memory_count, plan.memory_limit),
             daily_api_usage=calculate_usage_status(api_calls_today, plan.daily_api_limit),

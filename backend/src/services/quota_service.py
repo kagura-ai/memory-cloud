@@ -203,8 +203,20 @@ class QuotaService:
     ) -> tuple[bool, str | None]:
         """Check if user can create another workspace.
 
-        Issue #276: All users can own max 10 workspaces.
-        Users can be members of additional workspaces via invites.
+        Issue #276 (updated by Issue #661): owned-workspace cap is per
+        plan tier. Joined workspaces (via invite) do not count toward
+        this limit — they consume the inviting workspace's seat quota,
+        which the inviter pays for.
+
+        The user's effective tier is the highest tier among their owned
+        (``deleted_at IS NULL``) workspaces; users with zero owned
+        workspaces default to FREE.
+
+        Rollout (Issue #661): when ``settings.enforce_workspace_cap`` is
+        False (default), this method emits a structured warn log when a
+        user would be over their tier's cap, but still returns OK. This
+        surfaces affected accounts via telemetry before the flag is
+        flipped to True.
 
         Args:
             user_id: User ID
@@ -214,34 +226,51 @@ class QuotaService:
             Tuple of (can_create, error_message)
 
         Raises:
-            QuotaExceededError: If raise_on_denied=True and limit reached
+            QuotaExceededError: If raise_on_denied=True, the limit is
+                reached, AND ``settings.enforce_workspace_cap`` is True.
         """
-        from config.constants import MAX_OWNED_WORKSPACES_PER_USER
+        from config.settings import get_settings
+        from utils.plan_resolver import get_user_workspace_summary
 
-        # Count user's owned workspaces (where user is owner)
-        workspace_count_result = await self.db.execute(
-            select(func.count(Workspace.id)).where(
-                Workspace.owner_user_id == user_id,
-                Workspace.deleted_at.is_(None),
-            )
-        )
-        workspace_count = workspace_count_result.scalar() or 0
+        settings = get_settings()
 
-        # Issue #276: Use centralized constant
-        MAX_OWNED_WORKSPACES = MAX_OWNED_WORKSPACES_PER_USER
+        # Issue #661: fold "owned count" + "effective plan" into one SELECT.
+        # Sharing this helper with ``_build_workspaces_usage`` keeps the
+        # gate and the dashboard reading from the same source.
+        #
+        # TOCTOU note: this read happens without ``WITH FOR UPDATE`` /
+        # row-level locking. The same race existed for the pre-#661
+        # plan-independent constant cap (Issue #276), but the new tighter
+        # Free=1 cap makes it more exploitable: two concurrent
+        # ``POST /workspaces`` requests can both see ``count=0 < cap=1``
+        # and both succeed. A follow-up should add a SELECT FOR UPDATE on
+        # a per-user sentinel row or a partial unique constraint on
+        # ``(owner_user_id) WHERE deleted_at IS NULL`` before flipping
+        # ``enforce_workspace_cap=True`` in production. Until then the
+        # gate is log-only (see flag handling below) so the race has no
+        # user-visible effect.
+        workspace_count, user_plan = await get_user_workspace_summary(self.db, user_id)
+        plan_tier = get_plan_tier(user_plan)
+        max_owned = plan_tier.max_owned_workspaces
 
-        if workspace_count >= MAX_OWNED_WORKSPACES:
+        if workspace_count >= max_owned:
             error = (
                 f"Workspace limit reached. "
-                f"You can own maximum {MAX_OWNED_WORKSPACES} workspaces. "
-                f"You can join other workspaces as a member via invite."
+                f"Your {plan_tier.display_name} tier allows owning {max_owned} "
+                f"workspace(s). You can still join other workspaces as a member via invite."
             )
             logger.warning(
                 "workspace_creation_denied",
                 user_id=user_id,
                 current_owned_workspaces=workspace_count,
-                max_owned_workspaces=MAX_OWNED_WORKSPACES,
+                max_owned_workspaces=max_owned,
+                user_plan=user_plan,
+                enforced=settings.enforce_workspace_cap,
             )
+
+            # Issue #661 rollout gate: when the flag is off, log but allow.
+            if not settings.enforce_workspace_cap:
+                return True, None
 
             if raise_on_denied:
                 raise QuotaExceededError(error)

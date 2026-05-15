@@ -27,6 +27,7 @@ from api.routes.usage import (
     UsageCurrentResponse,
     UsageHistoryResponse,
     _build_sleep_contexts_usage,
+    _build_workspaces_usage,
     calculate_usage_status,
 )
 from auth.dependencies import get_user_from_api_key_or_session
@@ -415,6 +416,10 @@ async def get_workspace_usage_current(
                 sleep_contexts=await _build_sleep_contexts_usage(
                     db, workspace_id, effective_quotas=effective_quotas
                 ),
+                # Issue #661: user-level owned-workspace cap. The /workspace/usage/current
+                # endpoint is workspace-scoped overall but ``workspaces`` is required on
+                # ``CurrentUsage`` (always populated, user-scoped). Use the caller's user_id.
+                workspaces=await _build_workspaces_usage(db, user["user_id"]),
             ),
             memory_usage=calculate_usage_status(memory_count, effective_memory_limit),
             daily_api_usage=calculate_usage_status(api_calls_today, effective_daily_api_limit),

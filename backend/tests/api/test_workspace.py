@@ -487,8 +487,10 @@ class TestWorkspaceUsageCurrent:
         # Issue #65 baseline: 3 queries (workspace, memory count, usage aggregation —
         # the IN-list member_ids query is eliminated, that's the optimization).
         # Issue #560 adds 2 more queries via _build_sleep_contexts_usage (addon select +
-        # contexts count). Total 5; the Issue #65 invariant on the IN-list still holds.
-        assert call_count == 5
+        # contexts count). Issue #661 adds 1 more via _build_workspaces_usage
+        # (single-SELECT plan_names lookup in get_user_workspace_summary).
+        # Total 6; the Issue #65 invariant on the IN-list still holds.
+        assert call_count == 6
 
     @staticmethod
     def _make_effective_quotas():
@@ -523,8 +525,10 @@ class TestWorkspaceUsageCurrent:
         dict into the helper so EffectiveQuotaService is NOT re-invoked from inside the
         helper — important because that service may COMMIT via AddonCalculatorService's
         self-heal path (a request-side COMMIT on a GET endpoint).
+        Issue #661 added 1 query via _build_workspaces_usage (single-SELECT
+        plan_names lookup in get_user_workspace_summary).
 
-        Total: 5 queries. The Issue #65 invariant ("no member_ids IN-list, no
+        Total: 6 queries. The Issue #65 invariant ("no member_ids IN-list, no
         per-endpoint usage queries") still holds.
         """
         # Query 1: workspace fetch
@@ -551,4 +555,18 @@ class TestWorkspaceUsageCurrent:
         # Query 5: count contexts with sleep_mode != 'skip' (Issue #560)
         count_result = MagicMock(scalar_one=MagicMock(return_value=0))
 
-        return [workspace_result, memory_result, usage_result, addon_result, count_result]
+        # Query 6: Workspace.plan_name rows for the caller's owned workspaces
+        # (Issue #661 — plan_resolver.get_user_workspace_summary). Returning
+        # ["pro"] resolves to (count=1, plan=PRO) → cap 10, remaining 9.
+        plan_scalars = MagicMock()
+        plan_scalars.all = MagicMock(return_value=["pro"])
+        plan_resolver_result = MagicMock(scalars=MagicMock(return_value=plan_scalars))
+
+        return [
+            workspace_result,
+            memory_result,
+            usage_result,
+            addon_result,
+            count_result,
+            plan_resolver_result,
+        ]

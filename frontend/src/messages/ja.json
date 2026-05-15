@@ -1751,7 +1751,9 @@
     "otherEndpointsLabel": "その他 ({count})",
     "sleepEnabledContexts": "Sleep 有効コンテキスト",
     "sleepContextsWithAddon": "extra_sleep_contexts アドオンによる +{addon} を含む",
-    "sleepContextsTier": "プラン基本上限 (Sleep メンテナンスは PRO 専用機能)"
+    "sleepContextsTier": "プラン基本上限 (Sleep メンテナンスは PRO 専用機能)",
+    "ownedWorkspaces": "所有 Workspace",
+    "ownedWorkspacesTier": "プラン別の所有 Workspace 上限 (招待 join は無制限)"
   },
   "memoryOverview": {
     "failedToLoad": "メモリー概要の読み込みに失敗しました",

@@ -38,6 +38,20 @@ export interface SleepContextsUsage {
   remaining: number;
 }
 
+/**
+ * Owned-workspace cap usage (Issue #661).
+ *
+ * User-level: counts the caller's owned (`deleted_at IS NULL`) workspaces
+ * against `PlanTier.max_owned_workspaces`. Populated unconditionally —
+ * unlike `analysis` / `sleep_contexts`, this does not depend on the
+ * caller's current workspace selection.
+ */
+export interface WorkspacesUsage {
+  used: number;
+  limit: number;
+  remaining: number;
+}
+
 export interface CurrentUsage {
   memory_count: number;
   api_calls_today: number;
@@ -49,6 +63,9 @@ export interface CurrentUsage {
   public_calls_today: number; // Issue #238: Public quota separation
   public_calls_this_week: number;
   sleep_contexts: SleepContextsUsage | null; // Issue #560
+  // Issue #661 — always populated (user-level cap), unlike sleep_contexts
+  // which is workspace-scoped. See backend WorkspacesUsage docstring.
+  workspaces: WorkspacesUsage;
 }
 
 export interface UsageStatus {
