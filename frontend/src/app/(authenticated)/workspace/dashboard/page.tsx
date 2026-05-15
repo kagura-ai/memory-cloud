@@ -30,6 +30,7 @@ import { ContextBreakdownTable } from "@/components/dashboard/ContextBreakdownTa
 import { MemoryTimelineChart } from "@/components/dashboard/MemoryTimelineChart";
 import { AdminSections } from "@/components/dashboard/AdminSections";
 import { PlanBadge } from "@/components/common/PlanBadge";
+import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -59,6 +60,7 @@ export default function WorkspaceStatsPage() {
     loading: workspaceLoading,
   } = useWorkspace();
   const { toast } = useToast();
+  const { user } = useAuth();
 
   // Issue #398: viewer cannot read workspace stats (backend 403's on
   // /workspaces/{id}/contexts/stats with required_role="member"). Send
@@ -78,7 +80,7 @@ export default function WorkspaceStatsPage() {
   // role-preferring order. Read once, render `"<old> was deleted — switched to
   // <new>"`, then clear.
   useEffect(() => {
-    if (!currentWorkspace || !currentWorkspaceId) return;
+    if (!currentWorkspace || !currentWorkspaceId || !user?.id) return;
     const stash = readRecentlyDeletedWorkspace();
     if (!stash) return;
 
@@ -88,8 +90,13 @@ export default function WorkspaceStatsPage() {
     const isRecent =
       stash.ts <= now && now - stash.ts < AUTO_SWITCH_TOAST_TTL_MS;
     const isDifferentWorkspace = stash.id !== currentWorkspaceId;
+    // Bind to the authenticated user: localStorage is per-origin, not per-user,
+    // so account A's stash must NOT surface in account B's toast after a
+    // logout/login on the same browser (Copilot review on PR #662). When the
+    // stash belongs to a different user, drop it without rendering.
+    const isSameUser = stash.user_id === user.id;
 
-    if (isRecent && isDifferentWorkspace) {
+    if (isSameUser && isRecent && isDifferentWorkspace) {
       toast({
         title: t("workspaceAutoSwitchedTitle"),
         description: t("workspaceAutoSwitchedDesc", {
@@ -99,7 +106,7 @@ export default function WorkspaceStatsPage() {
       });
     }
     clearRecentlyDeletedWorkspace();
-  }, [currentWorkspace, currentWorkspaceId, t, toast]);
+  }, [currentWorkspace, currentWorkspaceId, user?.id, t, toast]);
   const [stats, setStats] = useState<WorkspaceStats | null>(null);
   const [contextStats, setContextStats] = useState<ContextStatsResponse | null>(
     null,

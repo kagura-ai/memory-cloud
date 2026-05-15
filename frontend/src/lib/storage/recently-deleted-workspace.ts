@@ -10,6 +10,14 @@
 import { RECENTLY_DELETED_WORKSPACE_KEY } from "@/lib/constants/storage-keys";
 
 export interface RecentlyDeletedWorkspace {
+  /**
+   * Authenticated user ID at the time of deletion. The reader checks this
+   * against the currently authenticated user so that a stale stash from
+   * account A is not displayed in account B's dashboard toast after a
+   * logout/login on the same browser (localStorage is per-origin, not
+   * per-user — Copilot review on PR #662).
+   */
+  user_id: string;
   id: string;
   name: string;
   ts: number;
@@ -39,18 +47,25 @@ export function readRecentlyDeletedWorkspace(): RecentlyDeletedWorkspace | null 
 
   try {
     const parsed = JSON.parse(raw) as {
+      user_id?: unknown;
       id?: unknown;
       name?: unknown;
       ts?: unknown;
     };
     if (
+      typeof parsed?.user_id !== "string" ||
       typeof parsed?.id !== "string" ||
       typeof parsed?.name !== "string" ||
       typeof parsed?.ts !== "number"
     ) {
       return null;
     }
-    return { id: parsed.id, name: parsed.name, ts: parsed.ts };
+    return {
+      user_id: parsed.user_id,
+      id: parsed.id,
+      name: parsed.name,
+      ts: parsed.ts,
+    };
   } catch {
     return null;
   }

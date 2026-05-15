@@ -56,7 +56,7 @@ export default function WorkspaceSettingsPage() {
     loading: workspaceLoading,
   } = useWorkspace();
   const { toast } = useToast();
-  const { logout } = useAuth();
+  const { logout, user } = useAuth();
 
   // Issue #276: Check if in create mode
   const isCreateMode = searchParams.get("create") === "true";
@@ -176,19 +176,27 @@ export default function WorkspaceSettingsPage() {
     const isLastWorkspace = workspaces.length === 1;
 
     setDeleting(true);
+    // Capture pre-delete state for the post-success stash. `workspace.name` is
+    // read here because `workspace` (and `user`) might be cleared during the
+    // post-success refresh/redirect cycle.
+    const deletedName = workspace?.name ?? null;
+    const stashUserId = user?.id ?? null;
     try {
+      await deleteWorkspace(currentWorkspaceId);
+
       // Issue #660: stash the deleted name so the dashboard can render an
       // auto-switch toast after the backend picks a remaining workspace.
+      // Written ONLY after the API call succeeds — Copilot review on PR #662
+      // caught that pre-write left a misleading stash on delete failure.
       // Skip on the last-workspace path (user is being logged out — no switch).
-      if (!isLastWorkspace && workspace?.name) {
+      if (!isLastWorkspace && deletedName && stashUserId) {
         writeRecentlyDeletedWorkspace({
+          user_id: stashUserId,
           id: currentWorkspaceId,
-          name: workspace.name,
+          name: deletedName,
           ts: Date.now(),
         });
       }
-
-      await deleteWorkspace(currentWorkspaceId);
 
       // Close dialog first
       setShowDeleteDialog(false);
