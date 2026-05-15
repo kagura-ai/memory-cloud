@@ -79,8 +79,12 @@ class TestConsolidationPhase:
 class TestRuleBasedPromotion:
     """Test that rule-based promotion matches legacy consolidation_task.
 
-    These rules must be identical to neural_tasks.py:137-157 for
-    backward compatibility when sleep_enabled=true.
+    Patterns 1-4 (memory access / importance / age) must stay identical to
+    the rules in tasks/neural_tasks.py::consolidation_task for backward
+    compatibility when sleep_enabled=true. The Issue #44 neural metrics
+    criteria were dropped from neural_tasks.py in Issue #651 (they live on
+    in services/sleep/consolidation.py only), so this parity covers Issue
+    #1 patterns only.
     """
 
     def test_pattern1_frequent_and_important(self):

@@ -5,7 +5,6 @@ Implements:
 - Memory consolidation (daily)
 """
 
-import logging
 import os
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -18,9 +17,10 @@ from neural.decay import DecayManager
 from repositories.graph import GraphRepository
 from repositories.memory import MemoryRepository
 from services.graph_service import GraphService
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
+from utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 async def weight_decay_task():
@@ -32,12 +32,12 @@ async def weight_decay_task():
 
     # Check if Neural Memory is enabled
     if os.getenv("ENABLE_NEURAL_MEMORY", "false").lower() != "true":
-        logger.info("weight_decay_task_skipped")
+        logger.info("weight_decay_task_skipped", reason="neural_memory_disabled")
         return
 
     # Check if decay is enabled
     if os.getenv("ENABLE_DECAY", "true").lower() != "true":
-        logger.info("weight_decay_task_skipped")
+        logger.info("weight_decay_task_skipped", reason="decay_disabled")
         return
 
     try:
@@ -61,32 +61,40 @@ async def weight_decay_task():
                 edges_decayed = decay_result.get("edges_decayed", 0)
 
                 if edges_decayed > 0:
-                    stats = await graph_service.stats()
-
-                    graph_model.total_nodes = stats["total_nodes"]
-                    graph_model.total_edges = stats["total_edges"]
-                    graph_model.avg_edge_weight = stats["avg_edge_weight"]
-                    graph_model.max_edge_weight = stats["max_edge_weight"]
-                    graph_model.last_decay_at = utcnow()
-                    graph_model.updated_at = utcnow()
+                    # Issue #651: previously called graph_service.stats() here to
+                    # refresh graph_memory.total_*/avg/max cache columns. That call
+                    # violates the 3-level isolation invariant from #273 H-2 / #383
+                    # (workspace_id/context_id are unavailable in this global
+                    # cross-tenant task, and the validator on get_stats rejects
+                    # None pairs to prevent cross-tenant aggregation). The cache
+                    # columns are write-only — no consumer reads them — so
+                    # dropping the refresh has no functional impact. Removal of
+                    # the dead columns themselves is tracked as a follow-up
+                    # issue (TBD — to be filed when this PR lands).
+                    now = utcnow()
+                    graph_model.last_decay_at = now
+                    graph_model.updated_at = now
 
                     total_updated += 1
 
                     logger.info(
-                        f"graph_decay_applied: user={user_id}, "
-                        f"edges_decayed={edges_decayed}, total_edges={stats['total_edges']}"
+                        "graph_decay_applied",
+                        user_id=user_id,
+                        edges_decayed=edges_decayed,
+                        edges_pruned=decay_result.get("edges_pruned", 0),
                     )
 
             await db.commit()
 
             logger.info(
-                f"weight_decay_task_completed: total_graphs={len(graphs)}, "
-                f"updated_graphs={total_updated}"
+                "weight_decay_task_completed",
+                total_graphs=len(graphs),
+                updated_graphs=total_updated,
             )
             return
 
     except Exception as e:
-        logger.error(f"weight_decay_task_failed: {e}", exc_info=True)
+        logger.error("weight_decay_task_failed", error=str(e), exc_info=True)
 
 
 async def consolidation_task():
@@ -94,6 +102,25 @@ async def consolidation_task():
 
     Runs daily at 3 AM UTC to promote frequently used working memories
     and delete old unused ones.
+
+    Issue #651: removed the Neural Memory metrics integration (the Issue #44
+    enhancement). graph_service.stats() and graph_service.get_node_metrics()
+    both require workspace_id and context_id, which are not available in this
+    global cross-tenant task, and the get_stats validator rejects None pairs
+    to prevent cross-tenant aggregation (#273 H-2 / #383). Additionally, the
+    get_node_metrics call in main lacked an ``await``, so the entire neural-
+    enhanced branch was already raising TypeError and being swallowed by the
+    bare ``except`` — the integration was non-functional in practice. Promotion
+    and deletion now use only the original Issue #1 criteria (access patterns,
+    importance, age). The deletion guard's former ``is_isolated`` check is
+    therefore not restored here (it never executed in prod). Re-introducing
+    neural metrics under the 3-level isolation model — including a properly
+    awaited isolation-aware ``is_isolated`` deletion guard — is tracked as a
+    follow-up issue (TBD — to be filed when this PR lands).
+
+    Note: this task only runs when ``SLEEP_ENABLED=false``. With sleep
+    enabled (the production setting), ``services/sleep/consolidation.py``
+    handles consolidation and retains its own neural metrics path.
     """
     logger.info("consolidation_task_started")
 
@@ -109,17 +136,7 @@ async def consolidation_task():
             total_promoted = 0
             total_deleted = 0
 
-            # Get environment variable thresholds (Issue #44)
-            neural_centrality_threshold = float(os.getenv("NEURAL_CENTRALITY_THRESHOLD", "0.7"))
-            neural_hub_threshold = int(os.getenv("NEURAL_HUB_NODE_THRESHOLD", "5"))
-            neural_weight_threshold = float(os.getenv("NEURAL_EDGE_WEIGHT_THRESHOLD", "0.8"))
-
             for user_id in user_ids:
-                # Load graph for Neural Memory metrics (Issue #44)
-                graph_service = GraphService(user_id, db)
-                graph_stats = await graph_service.stats()
-                has_graph = graph_stats["total_edges"] > 0
-
                 # Get working memories
                 working_memories = await memory_repo.list(
                     filters={"user_id": user_id, "scope": "working"}
@@ -128,14 +145,8 @@ async def consolidation_task():
                 for memory in working_memories:
                     age_days = (utcnow() - memory.created_at).days
 
-                    # Get Neural Memory metrics (Issue #44)
-                    neural_metrics = None
-                    if has_graph:
-                        neural_metrics = graph_service.get_node_metrics(str(memory.id))
-
-                    # Enhanced promotion criteria (Issue #44)
+                    # Promotion criteria (Issue #1)
                     should_promote = (
-                        # Existing criteria (from Issue #1)
                         # Pattern 1: Frequently used + Important
                         (memory.access_count >= 3 and memory.importance >= 0.5)
                         # Pattern 2: Very frequently used
@@ -144,16 +155,6 @@ async def consolidation_task():
                         or (memory.importance >= 0.8 and age_days >= 3)
                         # Pattern 4: Old + used at least once
                         or (age_days >= 30 and memory.access_count >= 1)
-                        # NEW: Neural Memory criteria (Issue #44)
-                        or (
-                            neural_metrics
-                            and neural_metrics["centrality"] >= neural_centrality_threshold
-                        )
-                        or (neural_metrics and neural_metrics["edge_count"] >= neural_hub_threshold)
-                        or (
-                            neural_metrics
-                            and neural_metrics["avg_edge_weight"] >= neural_weight_threshold
-                        )
                     )
 
                     if should_promote:
@@ -161,28 +162,17 @@ async def consolidation_task():
                         await memory_repo.promote_to_persistent(memory.id)
                         total_promoted += 1
 
-                        promotion_reason = "standard"
-                        if neural_metrics:
-                            if neural_metrics["centrality"] >= neural_centrality_threshold:
-                                promotion_reason = "neural_centrality"
-                            elif neural_metrics["edge_count"] >= neural_hub_threshold:
-                                promotion_reason = "neural_hub"
-                            elif neural_metrics["avg_edge_weight"] >= neural_weight_threshold:
-                                promotion_reason = "neural_weight"
-
                         logger.info(
-                            f"memory_promoted: memory_id={memory.id}, user={user_id}, "
-                            f"access_count={memory.access_count}, age_days={age_days}, "
-                            f"importance={memory.importance}, reason={promotion_reason}, "
-                            f"neural_metrics={neural_metrics}"
+                            "memory_promoted",
+                            memory_id=str(memory.id),
+                            user_id=user_id,
+                            access_count=memory.access_count,
+                            age_days=age_days,
+                            importance=memory.importance,
                         )
 
-                    # Enhanced deletion criteria (Issue #44)
-                    elif (
-                        age_days >= 30
-                        and memory.access_count == 0
-                        and (not neural_metrics or neural_metrics["is_isolated"])
-                    ):
+                    # Deletion criteria
+                    elif age_days >= 30 and memory.access_count == 0:
                         # ================================================================
                         # BUG FIX #83-10: Delete from Qdrant to prevent orphan vectors
                         # ================================================================
@@ -208,21 +198,24 @@ async def consolidation_task():
                         total_deleted += 1
 
                         logger.info(
-                            f"old_memory_deleted: memory_id={memory.id}, "
-                            f"user={user_id}, age_days={age_days}, "
-                            f"isolated={neural_metrics['is_isolated'] if neural_metrics else True}"
+                            "old_memory_deleted",
+                            memory_id=str(memory.id),
+                            user_id=user_id,
+                            age_days=age_days,
                         )
 
             await db.commit()
 
             logger.info(
-                f"consolidation_task_completed: users={len(user_ids)}, "
-                f"promoted={total_promoted}, deleted={total_deleted}"
+                "consolidation_task_completed",
+                users=len(user_ids),
+                promoted=total_promoted,
+                deleted=total_deleted,
             )
             return
 
     except Exception as e:
-        logger.error(f"consolidation_task_failed: {e}", exc_info=True)
+        logger.error("consolidation_task_failed", error=str(e), exc_info=True)
 
 
 async def cleanup_deleted_memories_task():
@@ -259,19 +252,23 @@ async def cleanup_deleted_memories_task():
                 await memory_repo.delete(memory.id)
                 total_deleted += 1
                 logger.info(
-                    f"old_deleted_memory_purged: memory_id={memory.id}, "
-                    f"deleted_at={memory.deleted_at}, age_days={(utcnow() - memory.deleted_at).days}"
+                    "old_deleted_memory_purged",
+                    memory_id=str(memory.id),
+                    deleted_at=to_utc_iso(memory.deleted_at),
+                    age_days=(utcnow() - memory.deleted_at).days,
                 )
 
             await db.commit()
 
             logger.info(
-                f"cleanup_deleted_memories_task_completed: purged={total_deleted}, cutoff={cutoff}"
+                "cleanup_deleted_memories_task_completed",
+                purged=total_deleted,
+                cutoff=to_utc_iso(cutoff),
             )
             return
 
     except Exception as e:
-        logger.error(f"cleanup_deleted_memories_task_failed: {e}", exc_info=True)
+        logger.error("cleanup_deleted_memories_task_failed", error=str(e), exc_info=True)
 
 
 def schedule_neural_tasks(scheduler: AsyncIOScheduler) -> None:
@@ -301,9 +298,9 @@ def schedule_neural_tasks(scheduler: AsyncIOScheduler) -> None:
             name="Memory Consolidation",
             replace_existing=True,
         )
-        logger.info("scheduled_consolidation_task (legacy)")
+        logger.info("scheduled_consolidation_task", mode="legacy")
     else:
-        logger.info("consolidation_task_skipped (sleep_maintenance_handles_this)")
+        logger.info("consolidation_task_skipped", reason="sleep_maintenance_handles_this")
 
     # Cleanup Deleted Memories: Daily at 4 AM UTC
     scheduler.add_job(
