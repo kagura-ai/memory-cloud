@@ -125,6 +125,91 @@ class TestCheckAccess:
         assert kwargs["user_agent"] == "Mozilla/5.0"
 
     @pytest.mark.asyncio
+    async def test_promote_pending_google_entry_updates_row_and_returns_true(self):
+        """Direct unit cover for ``_promote_pending_google_entry`` — the
+        method that the broader ``test_google_pending_entry_promoted_on_first_oauth``
+        only exercises through a mock. This test pins the actual
+        query / mutation / commit path so a refactor that breaks the
+        sentinel lookup or the legacy-column rewrite surfaces here
+        before reaching production.
+        """
+        svc = _svc()
+        # Mock a SignupAllowlistEntry instance the query returns.
+        pending = MagicMock()
+        pending.id = uuid4()
+        pending.subject_id = "pending:newcomer@example.com"
+        pending.github_user_id = "google:pending:newcomer@example.com"
+        pending.provider = "google"
+        pending.state = "active"
+        pending.source = "manual"
+
+        # First db.execute call (the SELECT inside the method) returns a
+        # result whose scalar_one_or_none yields the pending row.
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none = MagicMock(return_value=pending)
+        svc.db.execute = AsyncMock(return_value=execute_result)
+        svc.db.commit = AsyncMock()
+        svc.db.rollback = AsyncMock()
+
+        result = await svc._promote_pending_google_entry(
+            email="Newcomer@Example.com",  # mixed case — method lower-cases
+            oauth_sub="108276939729829363",
+        )
+
+        assert result is True
+        # subject_id rewritten to the real sub.
+        assert pending.subject_id == "108276939729829363"
+        # Legacy column also updated, with provider prefix.
+        assert pending.github_user_id == "google:108276939729829363"
+        svc.db.commit.assert_awaited_once()
+        svc.db.rollback.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_promote_pending_google_entry_missing_returns_false(self):
+        """No pending row → return False without committing.
+
+        Ensures the gate falls through to the regular block path instead
+        of silently committing on every Google sign-in attempt.
+        """
+        svc = _svc()
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none = MagicMock(return_value=None)
+        svc.db.execute = AsyncMock(return_value=execute_result)
+        svc.db.commit = AsyncMock()
+
+        result = await svc._promote_pending_google_entry(
+            email="absent@example.com", oauth_sub="999999999999999"
+        )
+
+        assert result is False
+        svc.db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_promote_pending_google_entry_integrity_error_rolls_back(self):
+        """If commit raises IntegrityError (race: a real-sub row for the
+        same OIDC sub already exists), the method rolls back the in-flight
+        promotion and returns False so the caller falls through cleanly.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        svc = _svc()
+        pending = MagicMock()
+        pending.id = uuid4()
+        pending.subject_id = "pending:racy@example.com"
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none = MagicMock(return_value=pending)
+        svc.db.execute = AsyncMock(return_value=execute_result)
+        svc.db.commit = AsyncMock(side_effect=IntegrityError("INSERT", {}, BaseException("dup")))
+        svc.db.rollback = AsyncMock()
+
+        result = await svc._promote_pending_google_entry(
+            email="racy@example.com", oauth_sub="2222222222"
+        )
+
+        assert result is False
+        svc.db.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_google_pending_entry_promoted_on_first_oauth(self):
         """Phase 2 (#655 follow-up): a pending pre-OAuth row is promoted
         to the real OIDC sub on first sign-in, and the gate returns None

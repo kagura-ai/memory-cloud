@@ -309,7 +309,17 @@ class SignupGateService:
             legacy_user_id = github_user_id
             legacy_username = github_username
         else:
-            legacy_user_id = f"{provider}:{subject_id}"
+            # ``signup_allowlist.github_user_id`` is ``String(64)`` (legacy
+            # GitHub numeric IDs fit easily). For Google rows the sentinel
+            # is ``google:<subject_id>`` — fine for a real OIDC sub
+            # (numeric, ~21 chars), but a Phase 2 pending sentinel
+            # ``google:pending:<email>`` can exceed 64 when the email is
+            # long (RFC 5321 caps the local part at 64 + domain up to 255).
+            # Truncate to the column limit; the column is deprecated and
+            # not used as a matching key (``subject_id`` carries the full
+            # value for matching), so a truncated legacy value cannot
+            # cause data loss for any feature.
+            legacy_user_id = f"{provider}:{subject_id}"[:64]
             legacy_username = subject_label
 
         existing = await self.db.execute(
@@ -473,10 +483,13 @@ class SignupGateService:
         pending.subject_id = oauth_sub
         # Keep the deprecated NOT-NULL column populated with the
         # ``<provider>:<subject_id>`` sentinel format used by other
-        # google rows (see ``add_to_allowlist_entry``). The label
-        # column is left as the email, which is the snapshot the
-        # admin wrote at add-time.
-        pending.github_user_id = f"google:{oauth_sub}"
+        # google rows (see ``add_to_allowlist_entry``). The column is
+        # ``String(64)``; an OIDC sub is ~21 chars so the full sentinel
+        # fits comfortably, but the slice keeps this code defensive
+        # against any future IdP whose sub format pushes past the
+        # limit. The label column is left as the email, which is the
+        # snapshot the admin wrote at add-time.
+        pending.github_user_id = f"google:{oauth_sub}"[:64]
 
         try:
             await self.db.commit()
