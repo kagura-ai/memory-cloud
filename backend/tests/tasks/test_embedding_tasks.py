@@ -12,15 +12,7 @@ from uuid import uuid4
 import pytest
 
 from tasks.embedding_tasks import schedule_embedding_tasks, sweep_pending_embeddings
-
-
-def _mock_get_db(mock_db):
-    """Return an async generator that yields mock_db once."""
-
-    async def get_db():
-        yield mock_db
-
-    return get_db
+from tests.tasks.conftest import mock_get_db_factory
 
 
 class TestScheduleEmbeddingTasks:
@@ -47,7 +39,7 @@ class TestSweepPendingEmbeddings:
         mock_result.all.return_value = []
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with patch("db.base.get_db", _mock_get_db(mock_db)):
+        with patch("db.base.get_db", mock_get_db_factory(mock_db)):
             await sweep_pending_embeddings()
 
         mock_db.execute.assert_called_once()
@@ -62,7 +54,7 @@ class TestSweepPendingEmbeddings:
         mock_db.execute = AsyncMock(return_value=mock_result)
 
         with (
-            patch("db.base.get_db", _mock_get_db(mock_db)),
+            patch("db.base.get_db", mock_get_db_factory(mock_db)),
             patch(
                 "services.memory_service.process_pending_embedding", new=AsyncMock()
             ) as mock_process,
@@ -90,7 +82,7 @@ class TestSweepPendingEmbeddings:
 
         mock_db.execute.side_effect = capture_execute
 
-        with patch("db.base.get_db", _mock_get_db(mock_db)):
+        with patch("db.base.get_db", mock_get_db_factory(mock_db)):
             await sweep_pending_embeddings()
 
         assert captured_stmt is not None
@@ -104,7 +96,7 @@ class TestSweepPendingEmbeddings:
         mock_db = MagicMock()
         mock_db.execute = AsyncMock(side_effect=RuntimeError("DB exploded"))
 
-        with patch("db.base.get_db", _mock_get_db(mock_db)):
+        with patch("db.base.get_db", mock_get_db_factory(mock_db)):
             # Should not raise despite DB error
             await sweep_pending_embeddings()
 
@@ -135,7 +127,7 @@ class TestSweepPendingEmbeddings:
         flaky_process.side_effect = flaky_side_effect
 
         with (
-            patch("db.base.get_db", _mock_get_db(mock_db)),
+            patch("db.base.get_db", mock_get_db_factory(mock_db)),
             patch("services.memory_service.process_pending_embedding", flaky_process),
         ):
             await sweep_pending_embeddings()
