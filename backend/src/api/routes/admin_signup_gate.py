@@ -220,23 +220,24 @@ async def add_to_allowlist(
       local ``users`` table; the user must have OAuth'd at least once).
     """
     svc = SignupGateService(db)
+    # By the time the request reaches this handler, ``AllowlistAddRequest``'s
+    # ``_enforce_provider_field_match`` validator (defined in the schema
+    # above) has already rejected payloads missing the provider-specific
+    # required field with a 422 — so ``payload.github_username`` is
+    # guaranteed non-None when ``provider == "github"``, and ``payload.email``
+    # is guaranteed non-None when ``provider == "google"``. Asserts below
+    # narrow the types for the type checker without adding runtime cost
+    # (PR #657 Copilot loop 2 finding #4: keep validation centralized in
+    # the Pydantic validator, not duplicated as dead-code HTTPExceptions).
     try:
         if payload.provider == "github":
-            if not payload.github_username:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="github_username is required when provider='github'",
-                )
+            assert payload.github_username is not None  # validator guarantee
             entry = await svc.add_to_allowlist(
                 github_username=payload.github_username,
                 added_by_user_id=user["user_id"],
             )
         else:  # provider == "google"
-            if not payload.email:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="email is required when provider='google'",
-                )
+            assert payload.email is not None  # validator guarantee
             sub, canonical_email = await resolve_google_sub_by_email(payload.email, db)
             entry = await svc.add_to_allowlist_entry(
                 provider="google",

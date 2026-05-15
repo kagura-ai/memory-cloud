@@ -154,18 +154,27 @@ def upgrade() -> None:
 
     # Step 4.5: belt-and-suspenders re-backfill. Step 2 caught the rows
     # that existed when the migration started; this catches any row that
-    # may have slipped in between Step 2 and now via the server_default
-    # path (e.g. a stray INSERT during a non-quiesced deploy window).
-    # Without this pass, a row inserted between Step 2 and Step 5 would
-    # land with subject_id='' from the now-dropped server_default,
-    # survive the NOT NULL check, and become a "ghost" row that the
-    # gate's (provider, subject_id) lookup can never match.
+    # may have slipped in via two paths:
+    #
+    # 1. Between Step 2 and Step 2.5: a stray INSERT during the deploy
+    #    window picked up the server_default sentinel ('') from Step 1.
+    # 2. **Between Step 2.5 and now**: after Step 2.5 drops the
+    #    server_default, an old-code INSERT that doesn't know about the
+    #    new columns lands them as NULL (column is still nullable until
+    #    Step 5). Without the NULL branch here, such a row would fail
+    #    Step 5's NOT NULL ALTER and abort the migration. (PR #657
+    #    Copilot loop 2 finding #3 — caught a real correctness bug in
+    #    the zero-downtime-deploy edge case.)
+    #
+    # Mirror Step 2's predicate exactly: ``subject_id IS NULL OR
+    # subject_id = ''`` (and same for subject_label) covers both shapes.
     conn.execute(
         sa.text(
             "UPDATE signup_allowlist "
             "SET subject_id = github_user_id, "
             "    subject_label = github_username "
-            "WHERE subject_id = '' OR subject_label = ''"
+            "WHERE subject_id IS NULL OR subject_id = '' "
+            "   OR subject_label IS NULL OR subject_label = ''"
         )
     )
 

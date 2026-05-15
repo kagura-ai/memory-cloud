@@ -518,6 +518,18 @@ class SignupGateService:
         decision; an audit-write failure should never escalate into a
         callback 500 for the user being blocked. The structlog warn line
         below preserves observability of audit-write failures.
+
+        Session commit invariant (PR #657 Copilot loop 2 finding #7): this
+        method calls ``await self.db.commit()`` on the session that
+        ``check_signup_access`` borrowed from ``get_db()``. The gate runs
+        as step 3.5 of the OAuth callback — BEFORE any other DB mutation
+        (``ensure_user`` and downstream writes happen at step 4, only when
+        the gate passes). So at gate-time the session has no other pending
+        writes and the early commit can only flush the AuditLog row we
+        just added. **If a future refactor moves DB work in front of the
+        gate, switch this to ``async with self.db.begin_nested():`` to
+        scope the audit write to a SAVEPOINT** rather than committing the
+        outer transaction.
         """
         logger.info(
             "signup_blocked",

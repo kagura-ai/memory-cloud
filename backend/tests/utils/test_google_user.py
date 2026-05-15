@@ -77,9 +77,12 @@ class TestResolveGoogleSubByEmail:
         # WHERE clause includes the provider scope.
         sql = captured["sql"]
         assert "auth_provider" in sql
-        # Case-insensitive email match. SQLAlchemy compiles ``.ilike(...)``
-        # to either ``ILIKE`` (PostgreSQL dialect) or ``LOWER(...) LIKE
-        # LOWER(...)`` (default dialect — what the in-memory mock sees).
-        # Both produce the same runtime semantics, so accept either shape.
+        # Case-insensitive email match emits ``LOWER(users.email) = LOWER(:email_1)``
+        # from ``func.lower(User.email) == email.lower()`` (PR #657 Copilot loop 1
+        # finding #2 — switched from ``.ilike(...)`` to avoid SQL LIKE wildcard
+        # injection via admin-supplied ``%`` / ``_``). The assertion below tolerates
+        # both ``LOWER`` and the legacy ``ILIKE`` form so a future refactor that goes
+        # back to ``.ilike(...)`` with proper escaping wouldn't immediately break the
+        # test, but the production path is the LOWER one.
         upper = sql.upper()
-        assert "ILIKE" in upper or "LOWER" in upper
+        assert "LOWER" in upper or "ILIKE" in upper
