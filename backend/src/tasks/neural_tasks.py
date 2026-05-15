@@ -17,7 +17,7 @@ from neural.decay import DecayManager
 from repositories.graph import GraphRepository
 from repositories.memory import MemoryRepository
 from services.graph_service import GraphService
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -254,7 +254,7 @@ async def cleanup_deleted_memories_task():
                 logger.info(
                     "old_deleted_memory_purged",
                     memory_id=str(memory.id),
-                    deleted_at=memory.deleted_at,
+                    deleted_at=to_utc_iso(memory.deleted_at),
                     age_days=(utcnow() - memory.deleted_at).days,
                 )
 
@@ -263,7 +263,7 @@ async def cleanup_deleted_memories_task():
             logger.info(
                 "cleanup_deleted_memories_task_completed",
                 purged=total_deleted,
-                cutoff=cutoff,
+                cutoff=to_utc_iso(cutoff),
             )
             return
 
