@@ -13,7 +13,10 @@ from uuid import uuid4
 import pytest
 from fastapi.responses import RedirectResponse
 
-from services.signup_gate_service import SignupGateService
+from services.signup_gate_service import (
+    SignupGateService,
+    _legacy_user_id_for_non_github,
+)
 from utils.github_user import GitHubUserNotFound
 
 
@@ -92,6 +95,11 @@ class TestCheckAccess:
         svc._is_existing_user = AsyncMock(return_value=False)
         svc._is_first_user = AsyncMock(return_value=False)
         svc._is_allowlisted = AsyncMock(return_value=False)
+        # Phase 2 (#655 follow-up): check_access now also consults
+        # _promote_pending_google_entry before falling through to block.
+        # Stub it to "not promoted" so this test still covers the block
+        # path; the promotion path has its own coverage below.
+        svc._promote_pending_google_entry = AsyncMock(return_value=False)
         # Stub the audit-write so the test doesn't try to talk to a real
         # session — _record_blocked_signup is exercised on its own below.
         svc._record_blocked_signup = AsyncMock()
@@ -118,6 +126,251 @@ class TestCheckAccess:
         assert kwargs["email"] == "stranger@example.com"
         assert kwargs["ip_address"] == "203.0.113.7"
         assert kwargs["user_agent"] == "Mozilla/5.0"
+
+    @pytest.mark.asyncio
+    async def test_promote_pending_google_entry_updates_row_and_returns_true(self):
+        """Direct unit cover for ``_promote_pending_google_entry`` — the
+        method that the broader ``test_google_pending_entry_promoted_on_first_oauth``
+        only exercises through a mock. This test pins the actual
+        query / mutation / commit path so a refactor that breaks the
+        sentinel lookup or the legacy-column rewrite surfaces here
+        before reaching production.
+        """
+        svc = _svc()
+        # Mock a SignupAllowlistEntry instance the query returns.
+        pending = MagicMock()
+        pending.id = uuid4()
+        pending.subject_id = "pending:newcomer@example.com"
+        pending.github_user_id = "google:pending:newcomer@example.com"
+        pending.provider = "google"
+        pending.state = "active"
+        pending.source = "manual"
+
+        # First db.execute call (the SELECT inside the method) returns a
+        # result whose scalar_one_or_none yields the pending row.
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none = MagicMock(return_value=pending)
+        svc.db.execute = AsyncMock(return_value=execute_result)
+        svc.db.commit = AsyncMock()
+        svc.db.rollback = AsyncMock()
+
+        result = await svc._promote_pending_google_entry(
+            email="Newcomer@Example.com",  # mixed case — method lower-cases
+            oauth_sub="108276939729829363",
+        )
+
+        assert result is True
+        # subject_id rewritten to the real sub.
+        assert pending.subject_id == "108276939729829363"
+        # Legacy column also updated, with provider prefix.
+        assert pending.github_user_id == "google:108276939729829363"
+        svc.db.commit.assert_awaited_once()
+        svc.db.rollback.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_promote_pending_google_entry_missing_returns_false(self):
+        """No pending row → return False without committing.
+
+        Ensures the gate falls through to the regular block path instead
+        of silently committing on every Google sign-in attempt.
+        """
+        svc = _svc()
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none = MagicMock(return_value=None)
+        svc.db.execute = AsyncMock(return_value=execute_result)
+        svc.db.commit = AsyncMock()
+
+        result = await svc._promote_pending_google_entry(
+            email="absent@example.com", oauth_sub="999999999999999"
+        )
+
+        assert result is False
+        svc.db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_promote_pending_google_entry_integrity_error_no_race_winner_returns_false(self):
+        """IntegrityError + post-rollback re-check finds no
+        ``(google, oauth_sub, active, manual)`` row → method returns
+        False so the caller falls through to the regular block path.
+
+        Covers the stale/inconsistent case: a duplicate-key error came
+        from a row outside the active+manual scope (e.g. a soft-deleted
+        or sponsor-source row), so the user is NOT effectively
+        allowlisted under the manual gate.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        svc = _svc()
+        pending = MagicMock()
+        pending.id = uuid4()
+        pending.subject_id = "pending:racy@example.com"
+
+        # First execute() = initial SELECT returns pending. Second
+        # execute() = post-rollback re-check returns no row.
+        initial_result = MagicMock()
+        initial_result.scalar_one_or_none = MagicMock(return_value=pending)
+        recheck_result = MagicMock()
+        recheck_result.first = MagicMock(return_value=None)
+        svc.db.execute = AsyncMock(side_effect=[initial_result, recheck_result])
+        svc.db.commit = AsyncMock(side_effect=IntegrityError("INSERT", {}, BaseException("dup")))
+        svc.db.rollback = AsyncMock()
+
+        result = await svc._promote_pending_google_entry(
+            email="racy@example.com", oauth_sub="2222222222"
+        )
+
+        assert result is False
+        svc.db.rollback.assert_awaited_once()
+        # Two execute() calls = initial SELECT + post-rollback re-check.
+        assert svc.db.execute.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_promote_pending_google_entry_integrity_error_with_race_winner_returns_true(self):
+        """IntegrityError caused by a concurrent admin add (or another
+        promotion) that just inserted ``(google, oauth_sub, manual)`` —
+        re-check finds the winning row → method returns True so the
+        gate treats the user as allowlisted rather than blocking them
+        despite the row actually being present (PR #673 Copilot
+        review #3 finding E).
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        svc = _svc()
+        pending = MagicMock()
+        pending.id = uuid4()
+        pending.subject_id = "pending:racy@example.com"
+
+        # First execute() = initial SELECT returns pending. Second
+        # execute() = post-rollback re-check finds the race-winning row.
+        initial_result = MagicMock()
+        initial_result.scalar_one_or_none = MagicMock(return_value=pending)
+        recheck_result = MagicMock()
+        # ``first()`` returning anything non-None signals "row present".
+        recheck_result.first = MagicMock(return_value=(uuid4(),))
+        svc.db.execute = AsyncMock(side_effect=[initial_result, recheck_result])
+        svc.db.commit = AsyncMock(side_effect=IntegrityError("INSERT", {}, BaseException("dup")))
+        svc.db.rollback = AsyncMock()
+
+        result = await svc._promote_pending_google_entry(
+            email="racy@example.com", oauth_sub="2222222222"
+        )
+
+        assert result is True
+        svc.db.rollback.assert_awaited_once()
+        assert svc.db.execute.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_promote_pending_google_entry_rollback_does_not_touch_orm_instance(self):
+        """The rollback / success-log paths must reference a pre-commit
+        ID snapshot, not ``pending.id`` on an instance that may have
+        been expired by ``db.rollback()`` (which in async sessions
+        triggers an implicit lazy load → ``MissingGreenlet``).
+
+        Simulate the failure mode by making ``pending.id`` raise on
+        access after rollback, and verify the method still completes
+        without hitting that attribute (PR #673 Copilot review #3
+        finding D).
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        svc = _svc()
+
+        # Use a class with a property that raises after a flag is set,
+        # so the snapshot at the top of the method captures a usable
+        # ID but any post-commit/post-rollback access blows up.
+        class _ExpiringInstance:
+            def __init__(self):
+                self._id = uuid4()
+                self._expired = False
+                self.subject_id = "pending:racy@example.com"
+                self.github_user_id = "google:pending:racy@example.com"
+
+            @property
+            def id(self):
+                if self._expired:
+                    raise RuntimeError("MissingGreenlet-like lazy load on expired instance")
+                return self._id
+
+        pending = _ExpiringInstance()
+        initial_result = MagicMock()
+        initial_result.scalar_one_or_none = MagicMock(return_value=pending)
+        recheck_result = MagicMock()
+        recheck_result.first = MagicMock(return_value=None)
+        svc.db.execute = AsyncMock(side_effect=[initial_result, recheck_result])
+
+        async def _rollback_then_expire():
+            pending._expired = True
+
+        svc.db.commit = AsyncMock(side_effect=IntegrityError("INSERT", {}, BaseException("dup")))
+        svc.db.rollback = AsyncMock(side_effect=_rollback_then_expire)
+
+        # Must NOT raise — the method captured pending_id before commit.
+        result = await svc._promote_pending_google_entry(
+            email="racy@example.com", oauth_sub="2222222222"
+        )
+
+        assert result is False
+        svc.db.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_google_pending_entry_promoted_on_first_oauth(self):
+        """Phase 2 (#655 follow-up): a pending pre-OAuth row is promoted
+        to the real OIDC sub on first sign-in, and the gate returns None
+        (signup allowed) without writing a blocked-signup audit row.
+        """
+        svc = _svc()
+        svc._load_config = AsyncMock(return_value=_config(enabled=True, mode="manual"))
+        svc._is_existing_user = AsyncMock(return_value=False)
+        svc._is_first_user = AsyncMock(return_value=False)
+        # Regular allowlist check misses (no real-sub row yet).
+        svc._is_allowlisted = AsyncMock(return_value=False)
+        # Promotion succeeds for this email.
+        svc._promote_pending_google_entry = AsyncMock(return_value=True)
+        svc._record_blocked_signup = AsyncMock()
+
+        result = await svc.check_access(
+            provider="google",
+            oauth_sub="108276939729829363",
+            email="newcomer@example.com",
+            username="newcomer@example.com",
+        )
+
+        assert result is None
+        svc._promote_pending_google_entry.assert_awaited_once_with(
+            email="newcomer@example.com",
+            oauth_sub="108276939729829363",
+        )
+        # Promotion path must not write a blocked-signup audit row — the
+        # signup is actually being ALLOWED via the pending → real-sub flip.
+        svc._record_blocked_signup.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_github_does_not_attempt_pending_promotion(self):
+        """Phase 2 (#655 follow-up): the pending-promotion path is
+        Google-only. GitHub usernames are resolvable to a numeric ID via
+        the GitHub API at add-time, so a "pending sub" state cannot
+        exist; the check_access path must NOT invoke the promotion
+        helper when provider=github (it would otherwise scan for sentinel
+        rows that can't be created via the github path).
+        """
+        svc = _svc()
+        svc._load_config = AsyncMock(return_value=_config(enabled=True, mode="manual"))
+        svc._is_existing_user = AsyncMock(return_value=False)
+        svc._is_first_user = AsyncMock(return_value=False)
+        svc._is_allowlisted = AsyncMock(return_value=False)
+        # If this were called, the assertion below would fail.
+        svc._promote_pending_google_entry = AsyncMock(return_value=False)
+        svc._record_blocked_signup = AsyncMock()
+
+        result = await svc.check_access(
+            provider="github",
+            oauth_sub="1234",
+            email="stranger@example.com",
+            username="stranger",
+        )
+
+        assert isinstance(result, RedirectResponse)
+        svc._promote_pending_google_entry.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_existing_user_always_allowed(self):
@@ -626,6 +879,93 @@ class TestAddToAllowlistEntry:
                 subject_label="octocat",
                 added_by_user_id="admin1",
             )
+
+    @pytest.mark.asyncio
+    async def test_long_pending_sentinel_uses_hashed_legacy_value(self):
+        """PR #673 Copilot review #4 finding F: a long pending sentinel
+        for the Phase 2 path
+        (``subject_id='pending:<email>'`` with an email near the 247-char
+        cap) would overflow the legacy ``github_user_id String(64)``.
+        Hash-based fallback keeps the value ≤64 chars AND
+        collision-resistant under the downgrade migration's restored
+        unique on ``(github_user_id, source)``.
+        """
+        svc = _svc()
+        scalar_result = MagicMock()
+        scalar_result.scalar_one_or_none = MagicMock(return_value=None)
+        svc.db.execute = AsyncMock(return_value=scalar_result)
+        svc.db.add = MagicMock()
+        svc.db.commit = AsyncMock()
+        svc.db.refresh = AsyncMock()
+
+        # Email at the 247-char cap → sentinel is "pending:" + 247 = 255.
+        long_email = ("a" * 235) + "@example.com"
+        assert len(long_email) == 247
+        long_sentinel = f"pending:{long_email}"
+
+        entry = await svc.add_to_allowlist_entry(
+            provider="google",
+            subject_id=long_sentinel,
+            subject_label=long_email,
+            added_by_user_id="admin1",
+        )
+
+        assert entry.subject_id == long_sentinel  # full sentinel preserved
+        # Legacy column fits the 64-char limit AND keeps the provider
+        # prefix readable so spot-queries during the migration window
+        # still identify the row's origin.
+        assert len(entry.github_user_id) <= 64
+        assert entry.github_user_id.startswith("google:")
+        # Raw truncation would have produced this colliding value:
+        raw_truncated = f"google:{long_sentinel}"[:64]
+        assert entry.github_user_id != raw_truncated
+
+
+class TestLegacyUserIdForNonGithub:
+    """PR #673 Copilot review #4 finding F: legacy ``github_user_id`` write
+    must be downgrade-safe. The helper switches from readable
+    ``<provider>:<subject_id>`` to a sha256-based sentinel when the
+    readable form would overflow ``String(64)``, so two distinct
+    subject_ids never collide on the legacy column (which the e14
+    downgrade migration re-uniques on)."""
+
+    def test_short_subject_returns_readable_form(self):
+        # Real OIDC sub (~21 chars) + "google:" = 28 chars — fits 64.
+        result = _legacy_user_id_for_non_github("google", "108276939729829363")
+        assert result == "google:108276939729829363"
+
+    def test_long_subject_returns_hashed_form_fitting_column(self):
+        long_subject = "pending:" + ("a" * 235) + "@example.com"
+        result = _legacy_user_id_for_non_github("google", long_subject)
+        assert len(result) == 64  # exactly the column width
+        assert result.startswith("google:")
+        # Hash budget = 64 - len("google:") = 57 hex chars.
+        digest_part = result[len("google:") :]
+        assert len(digest_part) == 57
+        assert all(c in "0123456789abcdef" for c in digest_part)
+
+    def test_long_subject_helper_is_deterministic(self):
+        """Same subject_id → same legacy value (idempotent across
+        re-writes; e.g. _promote_pending_google_entry retries)."""
+        s = "pending:" + ("a" * 235) + "@example.com"
+        assert _legacy_user_id_for_non_github("google", s) == _legacy_user_id_for_non_github(
+            "google", s
+        )
+
+    def test_long_subject_helper_collision_resistant_on_shared_prefix(self):
+        """Two distinct long subject_ids that share a 49+ char prefix
+        (raw truncation would collide) must map to distinct legacy
+        values via the hash branch — this is the corner case the
+        downgrade migration's unique constraint relies on.
+        """
+        s1 = "pending:" + ("a" * 235) + "@example.com"
+        s2 = "pending:" + ("a" * 235) + "@example.org"
+        v1 = _legacy_user_id_for_non_github("google", s1)
+        v2 = _legacy_user_id_for_non_github("google", s2)
+        # Pre-fix raw truncation would have collided here:
+        assert f"google:{s1}"[:64] == f"google:{s2}"[:64]
+        # Hashed form does not:
+        assert v1 != v2
 
 
 class TestRecordBlockedSignup:

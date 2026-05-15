@@ -121,7 +121,17 @@ class AllowlistAddRequest(BaseModel):
     )
     email: str | None = Field(
         default=None,
-        max_length=255,
+        # Capped at 247 (= 255 − len("pending:")) so the Phase 2 sentinel
+        # ``subject_id=f"pending:{email-lower}"`` always fits the
+        # ``signup_allowlist.subject_id VARCHAR(255)`` column. Without
+        # this cap a valid 248–255-char email would fail at COMMIT with
+        # a DB error instead of returning a controlled 422 here. The
+        # ``subject_id`` column IS the matching key used by the OAuth
+        # callback gate's promotion lookup, so column-side truncation
+        # would corrupt uniqueness — schema-side cap is the safe fix.
+        # 247 still exceeds the RFC 3696 practical email limit (~254
+        # octets; real-world addresses are typically <100 chars).
+        max_length=247,
         # Same shape as the InvitationCreateRequest email field
         # (models/schemas.py:830) — kept identical so admin/invitation
         # flows share one validation surface.
@@ -238,25 +248,52 @@ async def add_to_allowlist(
             )
         else:  # provider == "google"
             assert payload.email is not None  # validator guarantee
-            sub, canonical_email = await resolve_google_sub_by_email(payload.email, db)
-            entry = await svc.add_to_allowlist_entry(
-                provider="google",
-                subject_id=sub,
-                subject_label=canonical_email,
-                added_by_user_id=user["user_id"],
-            )
+            try:
+                sub, canonical_email = await resolve_google_sub_by_email(payload.email, db)
+            except GoogleUserNotFound:
+                # Phase 2 (#655 follow-up): the target user hasn't OAuth'd
+                # yet, so we can't resolve their OIDC ``sub``. Create a
+                # **pending** allowlist row with a sentinel ``subject_id``
+                # that the OAuth callback gate will promote to the real
+                # ``sub`` on first sign-in
+                # (see ``SignupGateService._promote_pending_google_entry``).
+                #
+                # The sentinel format is ``pending:<email-lower>``:
+                # - Distinct from a real OIDC ``sub`` (Google subs are
+                #   numeric strings, no colons), so the unique constraint
+                #   ``(provider, subject_id, source)`` cannot collide
+                #   between a pending row and a real-sub row.
+                # - Two admins trying to pre-allowlist the same email
+                #   collide on the same constraint via the lower-cased
+                #   email, which is the desired behaviour
+                #   (raises ValueError → 409 below).
+                #
+                # Email-change attack: the IdP can change the email
+                # between admin-add and user-OAuth, in which case the
+                # promotion lookup will miss and the row stays pending
+                # (eventually rejected by the gate). The window is
+                # operator-controlled, so this is documented as an
+                # accepted risk for Phase 2 v1; the long-term mitigation
+                # is the OIDC ``sub`` claim, which we resolve at promotion
+                # time.
+                canonical_email = payload.email.lower()
+                entry = await svc.add_to_allowlist_entry(
+                    provider="google",
+                    subject_id=f"pending:{canonical_email}",
+                    subject_label=canonical_email,
+                    added_by_user_id=user["user_id"],
+                )
+            else:
+                entry = await svc.add_to_allowlist_entry(
+                    provider="google",
+                    subject_id=sub,
+                    subject_label=canonical_email,
+                    added_by_user_id=user["user_id"],
+                )
     except GitHubUserNotFound as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"GitHub user '{payload.github_username}' not found",
-        ) from exc
-    except GoogleUserNotFound as exc:
-        # Distinct from the GitHub 404: the user simply hasn't OAuth'd yet
-        # against this app, so we can't resolve their sub. Surface the
-        # bootstrap UX hint from the exception message verbatim.
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(exc),
         ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc

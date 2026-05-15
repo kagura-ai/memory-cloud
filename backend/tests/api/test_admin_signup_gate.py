@@ -289,23 +289,48 @@ class TestAddToAllowlist:
         assert body["subject_id"] == google_sub
         assert body["subject_label"] == "alice@example.com"
 
-    def test_google_404_when_user_not_in_users_table(self, client, monkeypatch):
-        """Bootstrap UX gap: a Google user must OAuth once before they can
-        be added — return 404 with the actionable hint baked into the
-        helper's exception message."""
+    def test_google_pending_row_when_user_not_in_users_table(self, client, monkeypatch):
+        """Phase 2 (#655 follow-up): admin can pre-allowlist a Google user
+        by email before they've OAuth'd. The handler creates a pending row
+        with a sentinel ``subject_id='pending:<email>'`` that the OAuth
+        callback gate promotes to the real OIDC sub on first sign-in.
+        """
         from utils.google_user import GoogleUserNotFound
 
         monkeypatch.setattr(
             "api.routes.admin_signup_gate.resolve_google_sub_by_email",
             AsyncMock(side_effect=GoogleUserNotFound("user must OAuth first")),
         )
+        add_mock = AsyncMock(
+            return_value=_mock_entry(
+                provider="google",
+                subject_id="pending:stranger@example.com",
+                subject_label="stranger@example.com",
+            )
+        )
+        monkeypatch.setattr(
+            "services.signup_gate_service.SignupGateService.add_to_allowlist_entry",
+            add_mock,
+        )
+
         resp = client.post(
             "/api/v1/admin/signup-gate/allowlist",
-            json={"provider": "google", "email": "stranger@example.com"},
+            json={"provider": "google", "email": "Stranger@Example.com"},
         )
-        assert resp.status_code == 404
-        # The bootstrap-UX hint comes through verbatim.
-        assert "OAuth" in resp.json()["detail"]
+        assert resp.status_code == 201
+
+        # Route normalized the email to lower-case and built the sentinel
+        # subject_id format the OAuth callback gate looks for.
+        add_mock.assert_awaited_once()
+        kwargs = add_mock.await_args.kwargs
+        assert kwargs["provider"] == "google"
+        assert kwargs["subject_id"] == "pending:stranger@example.com"
+        assert kwargs["subject_label"] == "stranger@example.com"
+
+        body = resp.json()
+        assert body["provider"] == "google"
+        assert body["subject_id"] == "pending:stranger@example.com"
+        assert body["subject_label"] == "stranger@example.com"
 
     def test_google_422_when_email_missing(self, client):
         """provider='google' requires the email field."""
@@ -374,6 +399,43 @@ class TestAddToAllowlist:
             json={"provider": "google", "email": "not-an-email"},
         )
         assert resp.status_code == 422
+
+    def test_google_422_when_email_exceeds_pending_sentinel_budget(self, client):
+        """PR #673 Copilot review #2: ``AllowlistAddRequest.email`` is capped
+        at 247 (= 255 − len("pending:")) so the Phase 2 pending sentinel
+        ``f"pending:{email}"`` always fits ``subject_id VARCHAR(255)``.
+
+        A 248-char email would have produced a 256-char sentinel and
+        failed at DB commit with a controlled-error-skipping
+        ``StringDataRightTruncationError``. The schema-side cap turns
+        that DB error into a 422 here.
+        """
+        # local part 235 chars + "@example.com" (12 chars) = 247 OK
+        ok_email = ("a" * 235) + "@example.com"
+        assert len(ok_email) == 247
+        # local part 236 chars + "@example.com" = 248 over the cap
+        too_long = ("a" * 236) + "@example.com"
+        assert len(too_long) == 248
+
+        # 248 chars → 422 from Pydantic max_length, no DB call
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={"provider": "google", "email": too_long},
+        )
+        assert resp.status_code == 422
+
+        # 247 chars passes parse (handler then takes its normal path —
+        # we don't drive the full pending-row creation here; the
+        # boundary check is the contract under test).
+        resp = client.post(
+            "/api/v1/admin/signup-gate/allowlist",
+            json={"provider": "google", "email": ok_email},
+        )
+        # 422 would mean the schema rejected the 247-char input — that's
+        # the regression we're guarding against. Any other status is
+        # produced downstream (the real google-sub resolver runs and
+        # 500s because no DB; we only care that parse passed).
+        assert resp.status_code != 422
 
     def test_409_on_duplicate_google_entry(self, client, monkeypatch):
         """Duplicate Google entry surfaces the standard 409 conflict."""

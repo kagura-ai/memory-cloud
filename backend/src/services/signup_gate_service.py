@@ -16,6 +16,7 @@ provider-uniformly. Both providers match on the immutable IdP identity
 email-change attacks closed.
 """
 
+import hashlib
 import os
 from typing import Literal, cast
 from urllib.parse import urlencode
@@ -39,6 +40,43 @@ logger = get_logger(__name__)
 
 SignupGateMode = Literal["manual", "github_sponsors", "both"]
 SignupGateProvider = Literal["github", "google"]
+
+# ``signup_allowlist.github_user_id`` is a deprecated ``String(64)``
+# kept NOT NULL during the #655 migration window. For non-github
+# providers we synthesize a ``<provider>:<subject_id>`` value. The
+# current schema's unique key is ``(provider, subject_id, source)``,
+# so a truncated legacy column value is normally harmless — BUT the
+# downgrade migration in ``e14_655_signup_allowlist_provider`` restores
+# the old unique constraint on ``(github_user_id, source)``. Two
+# distinct ``subject_id`` values whose first 64 chars of
+# ``<provider>:<subject_id>`` are equal (e.g. Phase 2 pending sentinels
+# for two emails sharing a 49+ char prefix) would then collide and
+# break downgrade. Use a hash-based sentinel when the readable form
+# would exceed the column limit so each distinct ``subject_id`` maps
+# to a distinct legacy value (PR #673 Copilot review #4 finding F).
+_LEGACY_USER_ID_COLUMN_LEN = 64
+
+
+def _legacy_user_id_for_non_github(provider: str, subject_id: str) -> str:
+    """Build a downgrade-safe ``github_user_id`` value for a non-github row.
+
+    - Returns the readable ``f"{provider}:{subject_id}"`` when it fits
+      the 64-char column (the common case: a real OIDC sub is ~21 chars).
+    - Falls back to ``f"{provider}:<sha256(subject_id) hex prefix>"``
+      truncated to fit when the readable form would overflow. The hash
+      input is the full ``subject_id``, so distinct subject_ids never
+      collide regardless of shared prefixes.
+
+    The column is deprecated and slated for removal in a #655 follow-up;
+    this helper is the temporary write-side safety until that drop lands.
+    """
+    readable = f"{provider}:{subject_id}"
+    if len(readable) <= _LEGACY_USER_ID_COLUMN_LEN:
+        return readable
+    prefix = f"{provider}:"
+    digest_budget = _LEGACY_USER_ID_COLUMN_LEN - len(prefix)
+    digest = hashlib.sha256(subject_id.encode("utf-8")).hexdigest()
+    return f"{prefix}{digest[:digest_budget]}"
 
 
 async def check_signup_access(
@@ -164,6 +202,19 @@ class SignupGateService:
 
         if effective_mode == "manual":
             if await self._is_allowlisted(provider, oauth_sub, effective_mode):
+                return None
+            # Phase 2 (#655 follow-up): Google admins can pre-allowlist a
+            # target by email before the user has OAuth'd. Such rows carry
+            # a sentinel ``subject_id='pending:<email>'`` (set by the admin
+            # POST handler). On first OAuth callback for that email we
+            # rewrite ``subject_id`` to the real OIDC ``sub`` so subsequent
+            # logins match the regular ``(provider, subject_id)`` path
+            # above. GitHub has no email-only fallback because
+            # ``resolve_github_user_id`` resolves to a numeric ID at
+            # add-time, so the pending state only exists for Google.
+            if provider == "google" and await self._promote_pending_google_entry(
+                email=email, oauth_sub=oauth_sub
+            ):
                 return None
             await self._record_blocked_signup(
                 provider=provider,
@@ -296,7 +347,12 @@ class SignupGateService:
             legacy_user_id = github_user_id
             legacy_username = github_username
         else:
-            legacy_user_id = f"{provider}:{subject_id}"
+            # See ``_legacy_user_id_for_non_github`` for the column-fit +
+            # downgrade-safe construction. Real OIDC subs (~21 chars)
+            # land in the readable branch; Phase 2 pending sentinels
+            # with long emails take the hash branch so distinct
+            # subject_ids never collide on the legacy column.
+            legacy_user_id = _legacy_user_id_for_non_github(provider, subject_id)
             legacy_username = subject_label
 
         existing = await self.db.execute(
@@ -416,6 +472,113 @@ class SignupGateService:
     async def _is_first_user(self) -> bool:
         result = await self.db.execute(select(func.count()).select_from(User))
         return (result.scalar() or 0) == 0
+
+    async def _promote_pending_google_entry(self, *, email: str, oauth_sub: str) -> bool:
+        """Promote a pending Google allowlist row to the real OIDC sub.
+
+        Phase 2 (#655 follow-up): admin pre-allowlists a Google user
+        by email before they have OAuth'd. The row carries a sentinel
+        ``subject_id='pending:<email-lower>'``; on the user's first
+        OAuth callback, this method looks up the pending row, rewrites
+        ``subject_id`` to the real sub, and updates the legacy column
+        ``github_user_id`` (still NOT NULL during the #655 migration
+        window) to ``google:<sub>``. ``subject_label`` (the email) is
+        left unchanged — it was a snapshot at add-time and the email
+        may legitimately differ from the IdP's current email by the
+        time the user OAuths.
+
+        Email match is case-insensitive (IdP convention).
+
+        Args:
+            email: Email from the OAuth ``userinfo`` payload.
+            oauth_sub: OIDC ``sub`` claim, the immutable per-IdP ID.
+
+        Returns:
+            True if a pending row was found and promoted; False
+            otherwise. The caller treats False as "no pending row —
+            apply the normal block".
+        """
+        pending_subject_id = f"pending:{email.lower()}"
+        result = await self.db.execute(
+            select(SignupAllowlistEntry)
+            .where(
+                SignupAllowlistEntry.provider == "google",
+                SignupAllowlistEntry.subject_id == pending_subject_id,
+                SignupAllowlistEntry.state == "active",
+                SignupAllowlistEntry.source == "manual",
+            )
+            .limit(1)
+        )
+        pending = result.scalar_one_or_none()
+        if pending is None:
+            return False
+
+        # Snapshot the PK before mutating + committing so the rollback /
+        # success-log paths can reference the ID without re-reading the
+        # ORM instance. After ``db.rollback()`` the async session expires
+        # attached instances; accessing ``pending.id`` afterwards can
+        # trigger an implicit lazy load in async context and raise
+        # ``MissingGreenlet``, masking the intended recovery path
+        # (PR #673 Copilot review #3).
+        pending_id = pending.id
+
+        pending.subject_id = oauth_sub
+        # Keep the deprecated NOT-NULL column populated with the
+        # ``<provider>:<subject_id>`` sentinel format used by other
+        # google rows. ``_legacy_user_id_for_non_github`` keeps the
+        # value ≤64 chars and collision-resistant under the downgrade
+        # migration's restored unique on ``(github_user_id, source)``.
+        # An OIDC sub is ~21 chars so the readable branch wins here;
+        # the helper makes that explicit instead of hand-truncating.
+        # The label column is left as the email, which is the snapshot
+        # the admin wrote at add-time.
+        pending.github_user_id = _legacy_user_id_for_non_github("google", oauth_sub)
+
+        try:
+            await self.db.commit()
+        except IntegrityError:
+            # The commit collided on the unique
+            # ``(provider, subject_id, source)`` constraint. Two
+            # realistic causes:
+            #   1. A concurrent admin add or another promotion just
+            #      inserted a ``(google, oauth_sub, manual)`` row →
+            #      the user IS now allowlisted; returning False would
+            #      send them through the blocked-signup redirect
+            #      despite a winning entry being present
+            #      (PR #673 Copilot review #3 finding E).
+            #   2. A stale/inconsistent real-sub row for the same sub
+            #      exists outside the active+manual scope (different
+            #      source / state). The re-check below will not see
+            #      it, so we return False and fall through to block
+            #      — the original defensive intent of the handler.
+            # After rollback the in-flight UPDATE is discarded; the
+            # pending sentinel row remains for a future retry.
+            await self.db.rollback()
+            race_result = await self.db.execute(
+                select(SignupAllowlistEntry.id)
+                .where(
+                    SignupAllowlistEntry.provider == "google",
+                    SignupAllowlistEntry.subject_id == oauth_sub,
+                    SignupAllowlistEntry.state == "active",
+                    SignupAllowlistEntry.source == "manual",
+                )
+                .limit(1)
+            )
+            race_winner_present = race_result.first() is not None
+            logger.warning(
+                "signup_allowlist_pending_promote_race",
+                email_hmac=hmac_sha256_hex(email, get_settings().audit_hmac_key),
+                pending_id=str(pending_id),
+                race_winner_present=race_winner_present,
+            )
+            return race_winner_present
+
+        logger.info(
+            "signup_allowlist_pending_promoted",
+            email_hmac=hmac_sha256_hex(email, get_settings().audit_hmac_key),
+            pending_id=str(pending_id),
+        )
+        return True
 
     async def _is_allowlisted(
         self,
