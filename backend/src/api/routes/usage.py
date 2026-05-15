@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import SessionUser
 from config.settings import get_settings
 from db.base import get_db
-from models.auth import UsageStats, UserPlan, Workspace
+from models.auth import UsageStats, UserPlan
 from models.memory import Memory
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -128,6 +128,12 @@ class WorkspacesUsage(BaseModel):
     populated regardless of which workspace the caller currently has
     selected — it is the user's own quota across all their owned
     workspaces.
+
+    No ``addon_bonus`` field as of Issue #661 because there is no
+    per-user addon SKU. If ``addon_workspace_bonus`` (or equivalent)
+    is introduced — see the Out-of-scope section of #661 — add
+    ``addon_bonus`` here to match ``SleepContextsUsage`` /
+    ``AnalysisUsage`` shape.
     """
 
     used: int = Field(0, description="Owned workspaces (deleted_at IS NULL)")
@@ -161,11 +167,11 @@ class CurrentUsage(BaseModel):
             "NULL when the caller has no current workspace selected."
         ),
     )
-    workspaces: WorkspacesUsage | None = Field(
-        None,
+    workspaces: WorkspacesUsage = Field(
+        ...,
         description=(
             "Owned-workspace cap usage for the caller (Issue #661). "
-            "User-level — populated independently of current workspace."
+            "User-level — always populated, independently of current workspace."
         ),
     )
 
@@ -408,26 +414,19 @@ async def _build_sleep_contexts_usage(
 async def _build_workspaces_usage(db: AsyncSession, user_id: str) -> "WorkspacesUsage":
     """Build the ``workspaces`` field of /usage/current (Issue #661).
 
-    User-level cap: counts the user's owned (``deleted_at IS NULL``)
-    workspaces and resolves the cap from their effective plan tier
-    (highest tier across owned workspaces; FREE when none owned).
+    User-level cap: ``get_user_workspace_summary`` returns the owned
+    count and the user's effective plan tier (highest tier across
+    owned workspaces; FREE when none owned) in a single SELECT. The
+    same helper is used by ``QuotaService.check_workspace_creation_allowed``
+    so the gate and the dashboard read consistent state.
 
     Always returns a populated ``WorkspacesUsage`` — the cap is
     user-scoped so there is no "no current workspace" null case here.
     """
     from config.plan_tiers import get_plan_tier
-    from utils.plan_resolver import get_user_effective_plan
+    from utils.plan_resolver import get_user_workspace_summary
 
-    owned_count = (
-        await db.execute(
-            select(func.count(Workspace.id)).where(
-                Workspace.owner_user_id == user_id,
-                Workspace.deleted_at.is_(None),
-            )
-        )
-    ).scalar() or 0
-
-    user_plan = await get_user_effective_plan(db, user_id)
+    owned_count, user_plan = await get_user_workspace_summary(db, user_id)
     plan_tier = get_plan_tier(user_plan)
     limit = plan_tier.max_owned_workspaces
 

@@ -230,21 +230,26 @@ class QuotaService:
                 reached, AND ``settings.enforce_workspace_cap`` is True.
         """
         from config.settings import get_settings
-        from utils.plan_resolver import get_user_effective_plan
+        from utils.plan_resolver import get_user_workspace_summary
 
         settings = get_settings()
 
-        # Count user's owned workspaces (where user is owner, not soft-deleted).
-        workspace_count_result = await self.db.execute(
-            select(func.count(Workspace.id)).where(
-                Workspace.owner_user_id == user_id,
-                Workspace.deleted_at.is_(None),
-            )
-        )
-        workspace_count = workspace_count_result.scalar() or 0
-
-        # Issue #661: resolve user's effective plan tier and cap.
-        user_plan = await get_user_effective_plan(self.db, user_id)
+        # Issue #661: fold "owned count" + "effective plan" into one SELECT.
+        # Sharing this helper with ``_build_workspaces_usage`` keeps the
+        # gate and the dashboard reading from the same source.
+        #
+        # TOCTOU note: this read happens without ``WITH FOR UPDATE`` /
+        # row-level locking. The same race existed for the pre-#661
+        # plan-independent constant cap (Issue #276), but the new tighter
+        # Free=1 cap makes it more exploitable: two concurrent
+        # ``POST /workspaces`` requests can both see ``count=0 < cap=1``
+        # and both succeed. A follow-up should add a SELECT FOR UPDATE on
+        # a per-user sentinel row or a partial unique constraint on
+        # ``(owner_user_id) WHERE deleted_at IS NULL`` before flipping
+        # ``enforce_workspace_cap=True`` in production. Until then the
+        # gate is log-only (see flag handling below) so the race has no
+        # user-visible effect.
+        workspace_count, user_plan = await get_user_workspace_summary(self.db, user_id)
         plan_tier = get_plan_tier(user_plan)
         max_owned = plan_tier.max_owned_workspaces
 

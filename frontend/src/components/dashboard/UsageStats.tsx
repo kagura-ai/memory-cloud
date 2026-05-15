@@ -63,7 +63,7 @@ interface CurrentUsage {
   public_calls_today: number; // Issue #238
   public_calls_this_week: number; // Issue #238
   sleep_contexts: SleepContextsUsage | null; // Issue #560
-  workspaces: WorkspacesUsage | null; // Issue #661
+  workspaces: WorkspacesUsage; // Issue #661 — always populated
 }
 
 interface UsageStatus {
@@ -399,41 +399,38 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
             )}
 
             {/* Owned Workspaces (Issue #661) — user-level cap, unlike
-                sleep_contexts which is workspace-scoped. Always present
-                in the response (backend populates it independently of
-                current_workspace_id), so no null gate. */}
-            {currentUsage.usage.workspaces && (
-              <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm font-medium flex items-center gap-2">
-                    <Briefcase className="h-4 w-4" />
-                    {t("ownedWorkspaces")}
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold mb-2">
-                    {currentUsage.usage.workspaces.used} /{" "}
-                    {currentUsage.usage.workspaces.limit}
-                  </div>
-                  <Progress
-                    value={
-                      currentUsage.usage.workspaces.limit > 0
-                        ? Math.min(
-                            (currentUsage.usage.workspaces.used /
-                              currentUsage.usage.workspaces.limit) *
-                              100,
+                sleep_contexts which is workspace-scoped. Always populated
+                by the backend so this card renders unconditionally. */}
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium flex items-center gap-2">
+                  <Briefcase className="h-4 w-4" />
+                  {t("ownedWorkspaces")}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold mb-2">
+                  {currentUsage.usage.workspaces.used} /{" "}
+                  {currentUsage.usage.workspaces.limit}
+                </div>
+                <Progress
+                  value={
+                    currentUsage.usage.workspaces.limit > 0
+                      ? Math.min(
+                          (currentUsage.usage.workspaces.used /
+                            currentUsage.usage.workspaces.limit) *
                             100,
-                          )
-                        : 0
-                    }
-                    className="h-2"
-                  />
-                  <p className="text-xs text-muted-foreground mt-2">
-                    {t("ownedWorkspacesTier")}
-                  </p>
-                </CardContent>
-              </Card>
-            )}
+                          100,
+                        )
+                      : 0
+                  }
+                  className="h-2"
+                />
+                <p className="text-xs text-muted-foreground mt-2">
+                  {t("ownedWorkspacesTier")}
+                </p>
+              </CardContent>
+            </Card>
           </div>
 
           {/* API Breakdown - Issue #238: MCP/REST/Public separation,

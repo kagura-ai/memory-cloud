@@ -210,14 +210,17 @@ class TestQuotaServiceMemberQuota:
 class TestQuotaServiceWorkspaceCreationCap:
     """Test QuotaService.check_workspace_creation_allowed() — Issue #661.
 
-    Mocks two execute() calls per check:
-      1. SELECT count(Workspace.id) WHERE owner_user_id = X AND deleted_at IS NULL
-      2. plan_resolver's SELECT Workspace.plan_name WHERE owner_user_id = X AND deleted_at IS NULL
+    After the post-review refactor, ``check_workspace_creation_allowed``
+    issues a single SELECT via ``get_user_workspace_summary`` which
+    returns ``(owned_count, plan_name)``. The mock arms exactly one
+    ``execute()`` call whose ``.scalars().all()`` returns the supplied
+    plan_names list — owned_count is derived from ``len(plan_names)``.
 
-    Settings are patched so each test controls ``enforce_workspace_cap``
-    explicitly. Tier resolution is exercised through the real
-    ``get_user_effective_plan`` and real ``PLAN_TIERS`` so the test
-    locks the actual tier→cap mapping (Free=1 / Basic=3 / Pro=10).
+    Settings are patched at ``services.quota_service.get_settings``
+    (the binding the method's lazy import resolves to) so each test
+    controls ``enforce_workspace_cap`` explicitly. Tier resolution is
+    exercised through the real ``PLAN_TIERS`` so the test locks the
+    actual tier→cap mapping (Free=1 / Basic=3 / Pro=10).
     """
 
     @pytest.fixture
@@ -233,27 +236,34 @@ class TestQuotaServiceWorkspaceCreationCap:
     def _patch_settings(self, enforce: bool):
         """Return a context manager that patches get_settings to return
         a settings object whose ``enforce_workspace_cap`` is ``enforce``.
+
+        Patches at the definition site (``config.settings.get_settings``)
+        rather than ``services.quota_service.get_settings`` because the
+        method uses a *local* (function-scope) ``from config.settings
+        import get_settings``. Local imports look the name up on the
+        source module at call time, so patching the source module is
+        what intercepts the lookup. Patching at
+        ``services.quota_service.get_settings`` would fail with
+        ``AttributeError`` because there is no module-level binding of
+        that name in ``services.quota_service``.
         """
         mock_settings = MagicMock()
         mock_settings.enforce_workspace_cap = enforce
         return patch("config.settings.get_settings", return_value=mock_settings)
 
-    def _arm_db(self, mock_db, owned_count: int, plan_names: list[str]):
-        """Configure mock_db.execute side_effect for the two SELECTs.
+    def _arm_db(self, mock_db, plan_names: list[str]):
+        """Configure mock_db.execute for the single SELECT inside
+        ``get_user_workspace_summary``.
 
-        Order matches check_workspace_creation_allowed:
-          1. count query → ``.scalar()``
-          2. plan_resolver query → ``.scalars().all()``
+        ``.scalars().all()`` returns ``plan_names``; the resolver
+        derives ``owned_count = len(plan_names)``.
         """
-        count_result = MagicMock()
-        count_result.scalar = MagicMock(return_value=owned_count)
-
         plan_scalars = MagicMock()
         plan_scalars.all = MagicMock(return_value=plan_names)
         plan_result = MagicMock()
         plan_result.scalars = MagicMock(return_value=plan_scalars)
 
-        mock_db.execute.side_effect = [count_result, plan_result]
+        mock_db.execute.return_value = plan_result
 
     # ------------------------------------------------------------------
     # Free tier (cap = 1)
@@ -262,7 +272,7 @@ class TestQuotaServiceWorkspaceCreationCap:
     @pytest.mark.asyncio
     async def test_free_user_zero_owned_can_create(self, service, mock_db):
         """Free user with 0 owned workspaces can create (count=0 < cap=1)."""
-        self._arm_db(mock_db, owned_count=0, plan_names=[])
+        self._arm_db(mock_db, plan_names=[])
         with self._patch_settings(enforce=True):
             can_create, error = await service.check_workspace_creation_allowed("user-1")
         assert can_create is True
@@ -271,7 +281,7 @@ class TestQuotaServiceWorkspaceCreationCap:
     @pytest.mark.asyncio
     async def test_free_user_one_owned_denied_when_enforced(self, service, mock_db):
         """Free user with 1 owned workspace denied when flag=True."""
-        self._arm_db(mock_db, owned_count=1, plan_names=[PlanName.FREE])
+        self._arm_db(mock_db, plan_names=[PlanName.FREE])
         with self._patch_settings(enforce=True):
             can_create, error = await service.check_workspace_creation_allowed("user-1")
         assert can_create is False
@@ -282,7 +292,7 @@ class TestQuotaServiceWorkspaceCreationCap:
     @pytest.mark.asyncio
     async def test_free_user_one_owned_allowed_when_flag_off(self, service, mock_db):
         """Free user with 1 owned workspace passes when flag=False (rollout gate)."""
-        self._arm_db(mock_db, owned_count=1, plan_names=[PlanName.FREE])
+        self._arm_db(mock_db, plan_names=[PlanName.FREE])
         with self._patch_settings(enforce=False):
             can_create, error = await service.check_workspace_creation_allowed("user-1")
         # Flag off: still returns OK so the cap is observable via log only.
@@ -296,7 +306,7 @@ class TestQuotaServiceWorkspaceCreationCap:
     @pytest.mark.asyncio
     async def test_basic_user_two_owned_can_create(self, service, mock_db):
         """Basic user with 2 owned workspaces can create (count=2 < cap=3)."""
-        self._arm_db(mock_db, owned_count=2, plan_names=[PlanName.BASIC, PlanName.BASIC])
+        self._arm_db(mock_db, plan_names=[PlanName.BASIC, PlanName.BASIC])
         with self._patch_settings(enforce=True):
             can_create, error = await service.check_workspace_creation_allowed("user-1")
         assert can_create is True
@@ -307,7 +317,6 @@ class TestQuotaServiceWorkspaceCreationCap:
         """Basic user with 3 owned workspaces denied at cap."""
         self._arm_db(
             mock_db,
-            owned_count=3,
             plan_names=[PlanName.BASIC, PlanName.BASIC, PlanName.BASIC],
         )
         with self._patch_settings(enforce=True):
@@ -323,7 +332,7 @@ class TestQuotaServiceWorkspaceCreationCap:
     @pytest.mark.asyncio
     async def test_pro_user_nine_owned_can_create(self, service, mock_db):
         """Pro user with 9 owned workspaces can create (count=9 < cap=10)."""
-        self._arm_db(mock_db, owned_count=9, plan_names=[PlanName.PRO] * 9)
+        self._arm_db(mock_db, plan_names=[PlanName.PRO] * 9)
         with self._patch_settings(enforce=True):
             can_create, error = await service.check_workspace_creation_allowed("user-1")
         assert can_create is True
@@ -332,7 +341,7 @@ class TestQuotaServiceWorkspaceCreationCap:
     @pytest.mark.asyncio
     async def test_pro_user_ten_owned_denied(self, service, mock_db):
         """Pro user with 10 owned workspaces denied at cap."""
-        self._arm_db(mock_db, owned_count=10, plan_names=[PlanName.PRO] * 10)
+        self._arm_db(mock_db, plan_names=[PlanName.PRO] * 10)
         with self._patch_settings(enforce=True):
             can_create, error = await service.check_workspace_creation_allowed("user-1")
         assert can_create is False
@@ -345,7 +354,7 @@ class TestQuotaServiceWorkspaceCreationCap:
     @pytest.mark.asyncio
     async def test_mixed_free_and_basic_uses_basic_cap(self, service, mock_db):
         """User owning 1 Free + 1 Basic gets Basic cap (3). With 2 owned → allowed."""
-        self._arm_db(mock_db, owned_count=2, plan_names=[PlanName.FREE, PlanName.BASIC])
+        self._arm_db(mock_db, plan_names=[PlanName.FREE, PlanName.BASIC])
         with self._patch_settings(enforce=True):
             can_create, error = await service.check_workspace_creation_allowed("user-1")
         assert can_create is True
@@ -356,7 +365,6 @@ class TestQuotaServiceWorkspaceCreationCap:
         """User owning Basic + Pro gets Pro cap (10). With 5 owned → allowed."""
         self._arm_db(
             mock_db,
-            owned_count=5,
             plan_names=[PlanName.BASIC, PlanName.PRO, PlanName.PRO, PlanName.PRO, PlanName.PRO],
         )
         with self._patch_settings(enforce=True):
@@ -371,7 +379,7 @@ class TestQuotaServiceWorkspaceCreationCap:
     @pytest.mark.asyncio
     async def test_raises_on_denied_when_enforced(self, service, mock_db):
         """raise_on_denied=True raises QuotaExceededError when flag=True and over cap."""
-        self._arm_db(mock_db, owned_count=1, plan_names=[PlanName.FREE])
+        self._arm_db(mock_db, plan_names=[PlanName.FREE])
         with self._patch_settings(enforce=True):
             with pytest.raises(QuotaExceededError) as exc_info:
                 await service.check_workspace_creation_allowed("user-1", raise_on_denied=True)
@@ -380,7 +388,7 @@ class TestQuotaServiceWorkspaceCreationCap:
     @pytest.mark.asyncio
     async def test_does_not_raise_when_flag_off(self, service, mock_db):
         """raise_on_denied=True does NOT raise when flag=False — log-only mode."""
-        self._arm_db(mock_db, owned_count=1, plan_names=[PlanName.FREE])
+        self._arm_db(mock_db, plan_names=[PlanName.FREE])
         with self._patch_settings(enforce=False):
             # Should silently allow, not raise.
             can_create, error = await service.check_workspace_creation_allowed(

@@ -63,7 +63,9 @@ export interface CurrentUsage {
   public_calls_today: number; // Issue #238: Public quota separation
   public_calls_this_week: number;
   sleep_contexts: SleepContextsUsage | null; // Issue #560
-  workspaces: WorkspacesUsage | null; // Issue #661
+  // Issue #661 — always populated (user-level cap), unlike sleep_contexts
+  // which is workspace-scoped. See backend WorkspacesUsage docstring.
+  workspaces: WorkspacesUsage;
 }
 
 export interface UsageStatus {
