@@ -168,7 +168,13 @@ describe("AdminSignupGatePage", () => {
     fireEvent.click(addButton);
 
     await waitFor(() => {
-      expect(mockAddEntry).toHaveBeenCalledWith("octocat");
+      // Issue #655: payload is now a discriminated union {provider, ...}
+      // instead of a bare username string. Default provider is GitHub
+      // so the form submits `{provider: "github", github_username}`.
+      expect(mockAddEntry).toHaveBeenCalledWith({
+        provider: "github",
+        github_username: "octocat",
+      });
     });
     await screen.findByText(/octocat/);
   });
