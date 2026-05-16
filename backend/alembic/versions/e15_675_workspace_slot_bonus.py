@@ -50,7 +50,7 @@ Downgrade:
     recomputable from live workspace state on re-upgrade.
 
 Revision ID: e15_675_workspace_slot_bonus
-Revises: e14_655_signup_allowlist_provider
+Revises: e14_655_allowlist_provider
 
 NOTE: Revision ID is 27 chars — within VARCHAR(32) on alembic_version.
 """
@@ -58,7 +58,7 @@ NOTE: Revision ID is 27 chars — within VARCHAR(32) on alembic_version.
 from alembic import op
 
 revision = "e15_675_workspace_slot_bonus"
-down_revision = "e14_655_signup_allowlist_provider"
+down_revision = "e14_655_allowlist_provider"
 branch_labels = None
 depends_on = None
 

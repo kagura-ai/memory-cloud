@@ -12,7 +12,7 @@ These tests cover the data-shape and grandfather backfill that
    live + 4 deleted workspaces gets bonus = 0, not 4.
 5. ``downgrade()`` drops the column.
 
-Pre-revision is ``e14_655_signup_allowlist_provider``.
+Pre-revision is ``e14_655_allowlist_provider``.
 """
 
 import uuid
@@ -30,7 +30,7 @@ from tests.integration.test_alembic_migrations import (
 # Pre-e15 revision: state where users.workspace_slot_bonus column does
 # NOT yet exist. Pinning this target keeps the test correct as more
 # migrations land on top of e15.
-PRE_E15_REV = "e14_655_signup_allowlist_provider"
+PRE_E15_REV = "e14_655_allowlist_provider"
 
 
 def _seed_user(conn, user_id: str | None = None) -> str:
