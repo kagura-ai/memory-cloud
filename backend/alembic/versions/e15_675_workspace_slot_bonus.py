@@ -106,12 +106,36 @@ def upgrade() -> None:
         """
     )
 
-    # 2. Acquire exclusive locks on BOTH users and workspaces for the rest
-    #    of this transaction. The users lock alone would not block a
-    #    concurrent INSERT INTO workspaces — that could change the count
-    #    we compute below. Locking both tables makes the grandfather
-    #    computation a true atomic snapshot. SHARE ROW EXCLUSIVE on
-    #    workspaces still allows concurrent reads but blocks writers.
+    # 2. Acquire exclusive locks on BOTH users and workspaces for the
+    #    duration of the migration transaction.
+    #
+    #    Scope of what these locks fix:
+    #      A concurrent ``INSERT INTO workspaces`` that REACHES the INSERT
+    #      statement during the lock window will block until commit, so
+    #      its row is NOT in the snapshot the backfill UPDATE sees AND
+    #      its row IS present after commit — leaving the user immediately
+    #      over the new ``1 + workspace_slot_bonus`` cap.
+    #
+    #    Scope of what these locks do NOT fix:
+    #      The TOCTOU race where a workspace-create request has already
+    #      passed ``QuotaService.check_workspace_creation_allowed`` (count
+    #      read, cap compared, gate passed) but has not yet executed the
+    #      INSERT when the migration begins. That request blocks on the
+    #      lock, waits for the migration to commit, then inserts its row
+    #      based on a stale pre-migration count read — same over-cap
+    #      outcome as the unlocked case. Closing this gap requires the
+    #      create-path itself to hold a serializing lock between count
+    #      and INSERT — which is exactly the scope of sub-C (#677, the
+    #      ``pg_advisory_xact_lock`` + ``enforce_workspace_cap=True``
+    #      flip). The locks below are the strongest atomic-snapshot
+    #      guarantee achievable from a migration alone.
+    #
+    #    Operational mitigation in the meantime:
+    #      Per .claude/rules/dev-environment.md the API container is
+    #      stopped before alembic migrations run in production, so there
+    #      is no live writer to race. The locks are "belt-and-suspenders"
+    #      correctness against unusual deploy paths (manual migrate, dev
+    #      env, etc.).
     op.execute("LOCK TABLE users IN EXCLUSIVE MODE")
     op.execute("LOCK TABLE workspaces IN SHARE ROW EXCLUSIVE MODE")
 
