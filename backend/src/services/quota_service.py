@@ -12,7 +12,8 @@ Responsibilities:
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.plan_tiers import PLAN_TIERS, get_plan_tier, has_feature
@@ -203,20 +204,28 @@ class QuotaService:
     ) -> tuple[bool, str | None]:
         """Check if user can create another workspace.
 
-        Issue #276 (updated by Issue #661): owned-workspace cap is per
-        plan tier. Joined workspaces (via invite) do not count toward
-        this limit — they consume the inviting workspace's seat quota,
-        which the inviter pays for.
+        Issue #276 (updated by Issue #661, refined by #674/#675): the
+        owned-workspace cap is ``1 (base) + users.workspace_slot_bonus``.
+        Joined workspaces (via invite) do not count toward this limit —
+        they consume the inviting workspace's seat quota, which the
+        inviter pays for.
 
-        The user's effective tier is the highest tier among their owned
-        (``deleted_at IS NULL``) workspaces; users with zero owned
-        workspaces default to FREE.
+        Issue #677 (sub-C): a per-user ``pg_advisory_xact_lock`` is
+        acquired before the count/cap read to close the TOCTOU race
+        where two concurrent create paths could each observe
+        ``count < cap`` and both insert. The lock is xact-scoped, so
+        the caller must wrap the cap check and the workspace insert in
+        the same transaction for the serialization to extend across
+        the insert.
 
-        Rollout (Issue #661): when ``settings.enforce_workspace_cap`` is
-        False (default), this method emits a structured warn log when a
-        user would be over their tier's cap, but still returns OK. This
-        surfaces affected accounts via telemetry before the flag is
-        flipped to True.
+        Rollout (Issue #661, refined by #677): when
+        ``settings.enforce_workspace_cap`` is False (default), the
+        method logs over-cap creates but still returns OK so affected
+        accounts surface via telemetry. Lock-acquire failures
+        (``lock_timeout`` or unexpected DB errors) follow a hybrid fail
+        policy: deny when ``enforce=True`` (cap is the safety
+        invariant), allow + log when ``enforce=False`` (log-only mode
+        must not generate false denials).
 
         Args:
             user_id: User ID
@@ -234,18 +243,39 @@ class QuotaService:
 
         settings = get_settings()
 
+        # Issue #677 (sub-C): acquire a per-user advisory lock so the
+        # subsequent count/cap read and the caller's workspace insert
+        # serialize per user_id. Hybrid fail policy applied on errors:
+        # deny when enforced (cap is the safety invariant), allow+log
+        # when not enforced (log-only must not produce false denials).
+        lock_wait_ms: int | None = None
+        try:
+            lock_wait_ms = await self._acquire_workspace_create_lock(user_id)
+        except OperationalError as exc:
+            # SQLSTATE 55P03 = lock_not_available (SET LOCAL lock_timeout
+            # fired). Other DB errors get the same policy treatment but
+            # are logged with a distinct reason for triage.
+            sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+            reason = "lock_timeout" if sqlstate == "55P03" else "lock_error"
+            logger.warning(
+                "workspace_create_lock_failed",
+                user_id=user_id,
+                reason=reason,
+                sqlstate=sqlstate,
+                enforced=settings.enforce_workspace_cap,
+            )
+            if settings.enforce_workspace_cap:
+                error = "Workspace creation temporarily unavailable. Please retry in a moment."
+                if raise_on_denied:
+                    raise QuotaExceededError(error) from exc
+                return False, error
+            # enforce=False: fall through to the cap read — log-only
+            # mode must not generate false denials on lock errors.
+
         # Issue #675 (epic #674 sub-A): cap = 1 (base) + users.workspace_slot_bonus.
         # The plan_resolver helper returns both numbers in a single SELECT
         # (JOIN of users + workspaces) so the gate and the dashboard read
         # consistent state.
-        #
-        # TOCTOU note: this read happens without ``WITH FOR UPDATE`` /
-        # row-level locking. Two concurrent ``POST /workspaces`` requests
-        # can both see ``count < cap`` and both succeed, briefly exceeding
-        # the cap. Mitigation (``pg_advisory_xact_lock`` on a per-user key
-        # plus the ``enforce_workspace_cap=True`` flip) is tracked in
-        # #674 sub-C (#677). Until then the gate is log-only (see flag
-        # handling below) so the race has no user-visible effect.
         workspace_count, cap = await get_user_workspace_cap_summary(self.db, user_id)
 
         if workspace_count >= cap:
@@ -261,6 +291,8 @@ class QuotaService:
                 current_owned_workspaces=workspace_count,
                 max_owned_workspaces=cap,
                 enforced=settings.enforce_workspace_cap,
+                lock_wait_ms=lock_wait_ms,
+                reason="over_cap",
             )
 
             # Issue #661 rollout gate: when the flag is off, log but allow.
@@ -272,6 +304,47 @@ class QuotaService:
             return False, error
 
         return True, None
+
+    async def _acquire_workspace_create_lock(self, user_id: str) -> int:
+        """Acquire a per-user advisory lock for workspace-creation cap gating.
+
+        Issue #677 (sub-C): serializes concurrent create paths for the
+        same user so the cap check and the caller's insert behave as
+        one critical section. The lock is xact-scoped — Postgres releases
+        it on commit/rollback, so the calling transaction must hold both
+        the cap check and the insert for the lock to fully serialize the
+        read-then-write.
+
+        ``hashtext()`` collisions across user_ids are theoretical and
+        only cause two unrelated users' create paths to briefly
+        serialize; the cap safety property holds regardless because
+        each user's cap is read under its own ``SELECT``.
+
+        ``SET LOCAL lock_timeout = '5s'`` keeps a pathologically long
+        peer transaction from stalling our worker indefinitely. On
+        timeout Postgres raises SQLSTATE 55P03 (``lock_not_available``);
+        the caller maps that to fail-closed vs fail-open via
+        ``settings.enforce_workspace_cap``.
+
+        Args:
+            user_id: User ID (OAuth ``sub`` claim).
+
+        Returns:
+            Elapsed wait time in milliseconds.
+        """
+        import time
+
+        lock_key = f"workspace_create:{user_id}"
+        start = time.monotonic()
+
+        # SET LOCAL reverts on commit/rollback so this does not bleed
+        # into other operations on the same connection after the gate.
+        await self.db.execute(text("SET LOCAL lock_timeout = '5s'"))
+        await self.db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:key))").bindparams(key=lock_key)
+        )
+
+        return int((time.monotonic() - start) * 1000)
 
     async def check_context_creation_allowed(
         self,
