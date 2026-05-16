@@ -359,20 +359,23 @@ class QuotaService:
         await self.db.execute(text("SET LOCAL lock_timeout = '5s'"))
 
         start = time.monotonic()
+        acquired = False
         try:
             await self.db.execute(
                 text("SELECT pg_advisory_xact_lock(hashtext(:key))").bindparams(key=lock_key)
             )
+            acquired = True
         finally:
             elapsed_ms = (time.monotonic() - start) * 1000
-            # On DBAPIError the tx is already in error state and any
-            # further execute would raise InFailedSqlTransaction — the
-            # caller's except branch is responsible for rolling back,
-            # which clears the lock_timeout along with the tx.
-            try:
-                await self.db.execute(text("SET LOCAL lock_timeout = '0'"))
-            except DBAPIError:
-                pass
+
+        # Reset is OUTSIDE the try/finally: we only run it on success, and
+        # we let any reset error bubble up so the caller sees the poisoned
+        # session and applies the lock-error policy (PR #686 loop 3 review).
+        # When ``acquired`` is False, the tx is in error state from the
+        # acquire failure — the caller's except branch will rollback and
+        # clear the lock_timeout setting along with it.
+        if acquired:
+            await self.db.execute(text("SET LOCAL lock_timeout = '0'"))
         return elapsed_ms
 
     async def check_context_creation_allowed(

@@ -211,16 +211,29 @@ class TestAdvisoryLockNegativeControl:
         all_read = asyncio.Barrier(_PARALLEL_ATTEMPTS)
 
         async def attempt_with_barrier() -> bool:
-            async with session_maker() as session:
-                async with session.begin():
-                    quota = QuotaService(session)
-                    can, _ = await quota.check_workspace_creation_allowed(user_with_cap_3)
-                    # All workers must have read before any of us inserts.
-                    await all_read.wait()
-                    if can:
-                        session.add(_new_workspace(user_with_cap_3))
-                        return True
-                    return False
+            try:
+                async with session_maker() as session:
+                    async with session.begin():
+                        quota = QuotaService(session)
+                        can, _ = await quota.check_workspace_creation_allowed(user_with_cap_3)
+                        # All workers must have read before any of us inserts.
+                        # If a peer failed pre-barrier and aborted, our
+                        # wait() raises BrokenBarrierError so the test fails
+                        # fast instead of hanging (PR #686 loop 3 review).
+                        await all_read.wait()
+                        if can:
+                            session.add(_new_workspace(user_with_cap_3))
+                            return True
+                        return False
+            except Exception:
+                # Any pre-barrier failure (DB error, validation, etc.) must
+                # release peer waiters so asyncio.gather does not deadlock.
+                # ``abort()`` is idempotent on an already-broken barrier.
+                try:
+                    await all_read.abort()
+                except Exception:
+                    pass
+                raise
 
         await asyncio.gather(
             *[attempt_with_barrier() for _ in range(_PARALLEL_ATTEMPTS)],
