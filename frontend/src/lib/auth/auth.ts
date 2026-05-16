@@ -81,14 +81,23 @@ export async function handleAuthCallback(
 }
 
 /**
- * Get current authenticated user information
+ * Get current authenticated user information.
+ *
+ * Public contract (depended on by `AuthContext.refetchUser`, issue #678):
+ * - 200 → returns the User
+ * - 401 → returns null (caller treats null as "session ended, go to /login")
+ * - other errors (5xx, network) → throws (caller preserves current user state)
+ *
+ * Changing the 401-returns-null branch to throw will silently break the
+ * in-session logout path in `AuthContext.refetchUser` — the catch there
+ * intentionally preserves the user on errors, so a 401 thrown instead of
+ * returned-as-null would leave a logged-out session displayed as logged-in.
  */
 export async function getCurrentUser(): Promise<User | null> {
   try {
     const response = await apiClient.get<{ user: User }>("/api/v1/auth/me");
     return response.user;
   } catch (error) {
-    // If 401 Unauthorized, user is not authenticated
     if ((error as { status?: number }).status === 401) {
       return null;
     }
