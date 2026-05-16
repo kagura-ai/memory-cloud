@@ -89,8 +89,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  /**
+   * In-session silent refresh.
+   *
+   * MUST NOT flip `isLoading` — toggling it would unmount the authenticated
+   * subtree via DashboardContent's spinner gate (layout.tsx), destroying the
+   * state of inner Contexts (WorkspaceProvider, MemoryContextProvider)
+   * mid-flow. See issue #678 for the tree-killer pattern.
+   *
+   * Transient refetch errors do NOT log the user out — a network blip should
+   * not eject a logged-in session. Real 401s still set `user` to null because
+   * `getCurrentUser` already returns null in that case (auth.ts:92-94), which
+   * triggers the normal redirect-to-login path through DashboardContent.
+   */
   const refetchUser = async () => {
-    await fetchUser();
+    try {
+      const currentUser = await getCurrentUser();
+      setUser(currentUser);
+    } catch (error) {
+      console.error("Failed to refetch user (silent):", error);
+      // Intentionally do not setUser(null) here — see the docblock above.
+    }
   };
 
   const value: AuthContextType = {
