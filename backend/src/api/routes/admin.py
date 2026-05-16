@@ -694,39 +694,53 @@ async def update_workspace_slot_bonus(
 
     target_email = target_user.email  # capture for audit before leaving the SELECT scope
 
-    # ---- Mutation phase (transaction-wrapped for rollback) ----
+    # ---- Mutation phase ----
+    # Atomic delta application — UPDATE ... RETURNING is race-free with
+    # respect to concurrent +1/-1 from another admin session.
+    #
+    # The `+ delta >= 0` guard in the WHERE clause is the race-safe form
+    # of BONUS-002: if a concurrent decrement landed between the
+    # validation phase above and this UPDATE such that the live value
+    # would go negative, the UPDATE matches zero rows instead of tripping
+    # the workspace_slot_bonus_nonneg CHECK at COMMIT (which would surface
+    # as IntegrityError → generic 500, masking the structured 400). We
+    # disambiguate 404 (user vanished) from raced-BONUS-002 (user exists,
+    # would-go-negative) via a single follow-up SELECT in the rare error
+    # path. The raise paths sit OUTSIDE db_transaction so
+    # MemoryCloudException subclasses propagate to
+    # memory_cloud_exception_handler instead of being swallowed as 500.
+    update_stmt = (
+        update(User)
+        .where(
+            User.user_id == user_id,
+            User.workspace_slot_bonus + request.delta >= 0,
+        )
+        .values(workspace_slot_bonus=User.workspace_slot_bonus + request.delta)
+        .returning(User.workspace_slot_bonus)
+    )
+    update_result = await db.execute(update_stmt)
+    returned = update_result.one_or_none()
+    if returned is None:
+        live_bonus = await db.scalar(
+            select(User.workspace_slot_bonus).where(User.user_id == user_id)
+        )
+        if live_bonus is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise BonusBelowZeroError(current=int(live_bonus), delta=request.delta)
+
+    after_value = returned.workspace_slot_bonus
+    # Derive before_value from the authoritative RETURNING result so that
+    # under concurrent +1 collisions the audit trail records the actual
+    # pre-state of THIS update, not a stale SELECT snapshot.
+    before_value = after_value - request.delta
+    final_cap = BASE_CAP + after_value
+
+    # Audit write + commit are transaction-wrapped so a failure here
+    # rolls back the staged UPDATE above (single SQLAlchemy session
+    # transaction across both operations).
     async with db_transaction(
         db, "update_workspace_slot_bonus", "Failed to update workspace slot bonus"
     ):
-        # Atomic delta application — UPDATE ... RETURNING is race-free with
-        # respect to concurrent +1/-1 from another admin session. The
-        # workspace_slot_bonus_nonneg CHECK constraint is the safety net for
-        # the narrow race where a concurrent decrement between the
-        # validation above and this UPDATE would push the value negative;
-        # such a violation surfaces here as an IntegrityError → 500. The
-        # window is small and admin operations are low-concurrency, so we
-        # accept that rare 500 rather than holding a SELECT FOR UPDATE.
-        update_stmt = (
-            update(User)
-            .where(User.user_id == user_id)
-            .values(workspace_slot_bonus=User.workspace_slot_bonus + request.delta)
-            .returning(User.workspace_slot_bonus)
-        )
-        update_result = await db.execute(update_stmt)
-        returned = update_result.one_or_none()
-        if returned is None:
-            # User row was deleted between the validation SELECT and this UPDATE.
-            # Extremely rare; treated as a 404 so the caller sees the same code
-            # they would have hit if the user did not exist when validation ran.
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-
-        after_value = returned.workspace_slot_bonus
-        # Derive before_value from the authoritative RETURNING result so that
-        # under concurrent +1 collisions the audit trail records the actual
-        # pre-state of THIS update, not a stale SELECT snapshot.
-        before_value = after_value - request.delta
-        final_cap = BASE_CAP + after_value
-
         audit = AuditLog(
             user_email=admin.get("email", actor_id),
             user_id=actor_id,
