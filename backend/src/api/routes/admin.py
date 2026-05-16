@@ -9,7 +9,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import require_admin
@@ -17,6 +17,7 @@ from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import (
     APIKey,
+    AuditLog,
     Context,
     ContextMember,
     OAuth2Client,
@@ -25,10 +26,20 @@ from models.auth import (
     WorkspaceMember,
 )
 from models.memory import Memory
+from models.schemas import (
+    UpdateWorkspaceSlotBonusRequest,
+    UpdateWorkspaceSlotBonusResponse,
+)
 from utils import db_transaction, get_user_id
 from utils.datetime import to_utc_iso
-from utils.exceptions import AuthorizationError, NotFoundException
+from utils.exceptions import (
+    AuthorizationError,
+    BonusBelowZeroError,
+    InsufficientReasonError,
+    NotFoundException,
+)
 from utils.logger import get_logger
+from utils.plan_resolver import BASE_CAP, get_user_workspace_cap_summary
 
 logger = get_logger(__name__)
 
@@ -511,8 +522,41 @@ async def get_user_detail(
             "active_api_keys": active_api_keys,
         }
 
-        # 5. Build response
-        from models.schemas import UserDetailResponse
+        # 5. Build workspace_summary (#676 admin slot bonus UI)
+        # owned_count + cap come from the canonical helper so /usage/current
+        # and this admin view never drift. owned_workspaces is filtered
+        # inline (deleted_at IS NULL) — reusing the already-fetched
+        # workspace_memberships list would conflate "owned" with "member of"
+        # since membership covers all four roles, not just owner.
+        from models.schemas import (
+            OwnedWorkspaceInfo,
+            UserDetailResponse,
+            WorkspaceSummary,
+        )
+
+        owned_count, cap = await get_user_workspace_cap_summary(db, user_id)
+        owned_ws_result = await db.execute(
+            select(Workspace.id, Workspace.name, Workspace.plan_name)
+            .where(
+                Workspace.owner_user_id == user_id,
+                Workspace.deleted_at.is_(None),  # #681 pattern: soft-delete safe
+            )
+            .order_by(Workspace.created_at.desc())
+        )
+        owned_ws_list = [
+            OwnedWorkspaceInfo(id=str(row.id), name=row.name, plan_name=row.plan_name)
+            for row in owned_ws_result.all()
+        ]
+        workspace_summary = WorkspaceSummary(
+            owned_count=owned_count,
+            workspace_slot_bonus=target_user.workspace_slot_bonus,
+            base_cap=BASE_CAP,
+            cap=cap,
+            is_at_cap=(owned_count >= cap),
+            owned_workspaces=owned_ws_list,
+        )
+
+        # 6. Build response
 
         return UserDetailResponse(
             user={
@@ -530,6 +574,7 @@ async def get_user_detail(
             workspaces=workspaces,
             accessible_contexts=accessible_contexts,
             stats=stats,
+            workspace_summary=workspace_summary,
         )
 
     except HTTPException:
@@ -587,6 +632,126 @@ async def update_user_role(
             "user_id": user_id,
             "new_role": request.role,
         }
+
+
+@router.patch(
+    "/users/{user_id}/workspace_slot_bonus",
+    response_model=UpdateWorkspaceSlotBonusResponse,
+)
+async def update_workspace_slot_bonus(
+    user_id: str,
+    request: UpdateWorkspaceSlotBonusRequest,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> UpdateWorkspaceSlotBonusResponse:
+    """Apply a signed delta to a user's workspace_slot_bonus (Admin-only).
+
+    Issue #676. Atomic via ``UPDATE ... RETURNING`` so two admins clicking
+    +1 simultaneously cannot overwrite each other (read-modify-write at the
+    ORM layer would race). The DB CHECK constraint
+    ``workspace_slot_bonus_nonneg`` is the ultimate safety net; the
+    app-level ``BonusBelowZeroError`` exists so SDK consumers receive a
+    structured 400 (``BONUS-002``) instead of a generic IntegrityError.
+
+    ``reason`` is required only when the new cap would fall below the
+    user's current owned_count — admin can still revoke bonus from users
+    not at risk of over-cap without filling in a reason every time.
+
+    All mutations write a row to ``audit_logs`` with the canonical
+    ``user_metadata`` JSON payload pattern (matches
+    ``system_admin_service.py``); SHA256 hashing of the integer values is
+    unnecessary so they are stored as plain strings in ``old_value_hash`` /
+    ``new_value_hash`` for the rare grep-by-numeric-value query.
+    """
+    actor_id = get_user_id(admin)
+
+    async with db_transaction(
+        db, "update_workspace_slot_bonus", "Failed to update workspace slot bonus"
+    ):
+        # Resolve target up-front: we need the current bonus for the
+        # destructive-op check and the email for the audit resource string.
+        target_result = await db.execute(select(User).where(User.user_id == user_id))
+        target_user = target_result.scalar_one_or_none()
+        if target_user is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+        current_bonus = target_user.workspace_slot_bonus
+        after_value = current_bonus + request.delta
+
+        if after_value < 0:
+            raise BonusBelowZeroError(current=current_bonus, delta=request.delta)
+
+        # owned_count is read before the mutation; the cap below is the
+        # *new* cap (BASE_CAP + after_value), not the value the helper
+        # would return post-mutation. Computing it locally avoids a
+        # second query and keeps the destructive-op decision deterministic.
+        owned_count, _current_cap = await get_user_workspace_cap_summary(db, user_id)
+        new_cap = BASE_CAP + after_value
+
+        reason_clean = (request.reason or "").strip() or None
+        is_destructive = request.delta < 0 and new_cap < owned_count
+        if is_destructive and reason_clean is None:
+            raise InsufficientReasonError()
+
+        # Atomic delta application — UPDATE ... RETURNING is race-free with
+        # respect to concurrent +1/-1 from another admin session.
+        update_stmt = (
+            update(User)
+            .where(User.user_id == user_id)
+            .values(workspace_slot_bonus=User.workspace_slot_bonus + request.delta)
+            .returning(User.workspace_slot_bonus)
+        )
+        update_result = await db.execute(update_stmt)
+        returned = update_result.one_or_none()
+        if returned is None:  # User vanished between SELECT and UPDATE — unreachable in practice
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+        before_value = current_bonus
+        # after_value already computed above; use the DB-returned value as
+        # the authoritative post-state in case a concurrent UPDATE landed
+        # between SELECT and UPDATE (the validation above used the
+        # pre-race snapshot but the mutation is atomic).
+        after_value = returned.workspace_slot_bonus
+        final_cap = BASE_CAP + after_value
+
+        audit = AuditLog(
+            user_email=admin.get("email", actor_id),
+            user_id=actor_id,
+            action="workspace_slot_bonus_update",
+            resource=f"user:{target_user.email}",
+            old_value_hash=str(before_value),
+            new_value_hash=str(after_value),
+            user_metadata={
+                "actor_user_id": actor_id,
+                "target_user_id": user_id,
+                "before_value": before_value,
+                "after_value": after_value,
+                "delta": request.delta,
+                "reason": reason_clean,
+            },
+        )
+        db.add(audit)
+        await db.commit()
+
+        logger.info(
+            "admin_update_workspace_slot_bonus",
+            actor_user_id=actor_id,
+            target_user_id=user_id,
+            before=before_value,
+            after=after_value,
+            delta=request.delta,
+            destructive=is_destructive,
+        )
+
+        return UpdateWorkspaceSlotBonusResponse(
+            before_value=before_value,
+            after_value=after_value,
+            owned_count=owned_count,
+            base_cap=BASE_CAP,
+            cap=final_cap,
+            is_at_cap=(owned_count >= final_cap),
+            reason=reason_clean,
+        )
 
 
 @router.delete("/users/{user_id}")
