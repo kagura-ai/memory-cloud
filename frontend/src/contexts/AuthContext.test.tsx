@@ -19,7 +19,10 @@ vi.mock("next/navigation", () => ({
 
 const mockGetCurrentUser = vi.fn();
 const mockLogout = vi.fn();
-vi.mock("@/lib/auth/auth", () => ({
+vi.mock("@/lib/auth/auth", async () => ({
+  ...(await vi.importActual<typeof import("@/lib/auth/auth")>(
+    "@/lib/auth/auth",
+  )),
   getCurrentUser: () => mockGetCurrentUser(),
   logout: () => mockLogout(),
 }));
