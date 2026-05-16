@@ -28,9 +28,11 @@ class PlanName(StrEnum):
 class PlanTier:
     """Plan tier configuration.
 
-    Issue #276 (updated by Issue #661): User-owned workspaces are capped per
-    plan tier via ``max_owned_workspaces``. Joining workspaces via invite is
-    uncapped — only ownership counts toward this limit.
+    Issue #276 (updated by Issue #661 / #675): user-owned workspace count
+    is no longer driven by this dataclass — the cap is per-user via
+    ``users.workspace_slot_bonus`` (``cap = 1 + bonus``). The plan tier
+    controls per-workspace features (memory_limit, api_quota, etc.) only.
+    Joined workspaces (via invite) are uncapped.
 
     Attributes:
         name: Plan tier name ('free', 'basic', 'pro')
@@ -39,8 +41,6 @@ class PlanTier:
         max_contexts_per_workspace: Maximum contexts per workspace
         max_members_per_workspace: Maximum members per workspace (Issue #229)
         max_resource_tokens: Maximum active resource tokens (Issue #242)
-        max_owned_workspaces: Maximum workspaces a user can own (Issue #661;
-            joined workspaces via invite are uncapped)
         memory_limit: Maximum memories per workspace
         daily_api_limit: Maximum API calls per day (legacy, kept for backward compatibility)
         weekly_api_limit: Maximum API calls per week (legacy, kept for backward compatibility)
@@ -78,9 +78,9 @@ class PlanTier:
     analysis_runs_per_day: int = 0  # Issue #494: Memory Broadlistening analyses/day
     storage_limit_bytes: int = 0  # Issue #485: File-storage hard cap per workspace
     sleep_enabled_contexts_limit: int = 0  # Issue #560: Sleep-mode contexts cap (PRO-only)
-    max_owned_workspaces: int = (
-        10  # Issue #661: Owned-workspace cap per user (default 10 for backward compat)
-    )
+    # Issue #661's ``max_owned_workspaces`` field was removed in #675 — the
+    # user-level workspace cap is now derived from ``users.workspace_slot_bonus``
+    # (``cap = 1 + bonus``), independent of the workspace's plan tier.
     allows_shared_contexts: bool = False  # Issue #271: Shared context feature (Pro only)
     features: frozenset[str] = field(default_factory=frozenset)
 
@@ -104,7 +104,6 @@ PLAN_FREE = PlanTier(
     public_calls_per_day=0,  # Free plan: no public contexts
     public_calls_per_week=0,
     storage_limit_bytes=100 * 1024 * 1024,  # Issue #485: 100 MB
-    max_owned_workspaces=1,  # Issue #661
     allows_shared_contexts=False,  # Issue #271: Private contexts only
     features=frozenset({"api_keys", "oauth"}),  # Free plan includes OAuth (App Credentials)
 )
@@ -128,7 +127,6 @@ PLAN_BASIC = PlanTier(
     public_calls_per_day=0,  # Basic plan: no public contexts (PRO only)
     public_calls_per_week=0,
     storage_limit_bytes=1 * 1024 * 1024 * 1024,  # Issue #485: 1 GiB
-    max_owned_workspaces=3,  # Issue #661
     features=frozenset({"api_keys", "reranking", "oauth"}),  # Public contexts removed (PRO only)
 )
 
@@ -154,7 +152,6 @@ PLAN_PRO = PlanTier(
     analysis_runs_per_day=3,  # Issue #494: Memory Broadlistening (Pro only; FREE/BASIC=0)
     storage_limit_bytes=10 * 1024 * 1024 * 1024,  # Issue #485: 10 GiB
     sleep_enabled_contexts_limit=3,  # Issue #560: Sleep mode (Pro only; FREE/BASIC=0)
-    max_owned_workspaces=10,  # Issue #661 (default; matches pre-#661 plan-independent cap)
     features=frozenset(
         {
             "api_keys",
@@ -209,7 +206,6 @@ def _apply_settings_overrides() -> None:
             "mcp_calls_per_day": settings.plan_free_mcp_calls_per_day,
             "storage_limit_bytes": settings.plan_free_storage_limit_bytes,
             "sleep_enabled_contexts_limit": settings.plan_free_sleep_enabled_contexts_limit,
-            "max_owned_workspaces": settings.plan_free_max_owned_workspaces,
             "display_name": settings.plan_free_display_name,
         },
         PlanName.BASIC: {
@@ -218,7 +214,6 @@ def _apply_settings_overrides() -> None:
             "mcp_calls_per_day": settings.plan_basic_mcp_calls_per_day,
             "storage_limit_bytes": settings.plan_basic_storage_limit_bytes,
             "sleep_enabled_contexts_limit": settings.plan_basic_sleep_enabled_contexts_limit,
-            "max_owned_workspaces": settings.plan_basic_max_owned_workspaces,
             "display_name": settings.plan_basic_display_name,
         },
         PlanName.PRO: {
@@ -227,7 +222,6 @@ def _apply_settings_overrides() -> None:
             "mcp_calls_per_day": settings.plan_pro_mcp_calls_per_day,
             "storage_limit_bytes": settings.plan_pro_storage_limit_bytes,
             "sleep_enabled_contexts_limit": settings.plan_pro_sleep_enabled_contexts_limit,
-            "max_owned_workspaces": settings.plan_pro_max_owned_workspaces,
             "display_name": settings.plan_pro_display_name,
         },
     }

@@ -210,7 +210,7 @@ class TestQuotaServiceWorkspaceCreationCap:
     """Test QuotaService.check_workspace_creation_allowed() — #674 sub-A, #675.
 
     Post-#675 slot-pivot semantics: the cap is ``1 + workspace_slot_bonus``
-    instead of the highest-tier ``max_owned_workspaces``. The helper
+    instead of the prior plan-tier-derived cap. The helper
     ``get_user_workspace_cap_summary`` returns ``(owned_count, slot_bonus)``
     via a single JOIN; the mock arms one ``execute()`` call returning a
     Row with attribute access for those two values.
