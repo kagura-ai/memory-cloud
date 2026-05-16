@@ -164,7 +164,8 @@ describe("AuthContext silent refresh (issue #678)", () => {
       expect(screen.getByTestId("user").textContent).toBe(USER_A.email);
     });
 
-    // getCurrentUser swallows 401 and returns null (auth.ts:92-94).
+    // getCurrentUser swallows 401 and returns null — see its public-contract
+    // docblock in lib/auth/auth.ts.
     mockGetCurrentUser.mockResolvedValueOnce(null);
 
     await act(async () => {

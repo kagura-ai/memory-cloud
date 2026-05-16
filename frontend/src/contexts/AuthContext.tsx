@@ -99,10 +99,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    *
    * Transient refetch errors do NOT log the user out — a network blip should
    * not eject a logged-in session. Real 401s still set `user` to null because
-   * `getCurrentUser` already returns null in that case (auth.ts:92-94), which
-   * triggers the normal redirect-to-login path through DashboardContent.
+   * `getCurrentUser` returns null in that case (see its public-contract
+   * docblock in `lib/auth/auth.ts`), which triggers the normal
+   * redirect-to-login path through DashboardContent.
+   *
+   * In dev mock-auth mode (`useMockAuth`), refetch is a no-op — the mock
+   * identity is static and the real `getCurrentUser` would 401 against the
+   * dev backend, clearing the mock user.
    */
   const refetchUser = async () => {
+    if (useMockAuth) {
+      return;
+    }
     try {
       const currentUser = await getCurrentUser();
       setUser(currentUser);
