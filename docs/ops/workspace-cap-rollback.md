@@ -39,20 +39,30 @@ flip 後に false-positive denial が出る代表的シナリオ:
 
 ## 3. Procedure / 即時 rollback
 
-### Step 1. フラグを `false` に戻す（deploy 不要）
+### Step 1. フラグを `false` に戻す（deploy 不要、container 再作成のみ）
 
-memory.kagura-ai.com など single-server 構成では:
+memory.kagura-ai.com の single-server 構成（systemd unit `kagura-memory.service` が docker compose stack を保持、blue/green container 名は `kagura-api-blue` / `kagura-api-green`、active 色は `/opt/kagura-memory/active-color` に記録）:
 
 ```bash
+# 0. active 色 / 環境ファイル / project dir を確認
+ACTIVE=$(cat /opt/kagura-memory/active-color)
+PROJECT_DIR=/opt/kagura-memory/src/terraform/single-server
+ENV_FILE="$PROJECT_DIR/.env.prod"
+echo "active=$ACTIVE  env_file=$ENV_FILE"
+
 # 1. .env.prod を編集
-sudo -e /opt/kagura-memory/.env.prod
+sudo -e "$ENV_FILE"
 #    ENFORCE_WORKSPACE_CAP=true  →  ENFORCE_WORKSPACE_CAP=false
 
-# 2. uvicorn worker を reload
-sudo systemctl reload kagura-api-green   # active container (blue-green の active 側)
+# 2. active container を環境変数再注入で recreate
+#    --force-recreate + --no-deps で active のみ作り直す
+#    docker compose restart では env-file 再読込が走らないので NG
+cd "$PROJECT_DIR"
+sudo docker compose -f docker-compose.prod.yml --env-file "$ENV_FILE" \
+  up -d --no-deps --force-recreate "api-${ACTIVE}"
 ```
 
-> ⚠️ **重要**: `get_settings()` は `_settings` module-level singleton をキャッシュする (`backend/src/config/settings.py:502-519`)。`uvicorn reload` で **worker process が再起動して `_settings` が再初期化される必要がある**。`systemctl reload` が SIGHUP で workers を replace するか確認。replace されない場合は `systemctl restart`。
+> ⚠️ **重要**: `get_settings()` は `_settings` module-level singleton をキャッシュする (`backend/src/config/settings.py:502-519`)。container を **recreate** することで FastAPI worker process が新しく起動し `_settings` が再初期化される。`docker compose restart` や `docker restart kagura-api-${ACTIVE}` は env-file を再読込しないため使ってはいけない。
 
 ### Step 2. `/health` 200 確認
 
@@ -71,18 +81,23 @@ curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" \
   https://memory.kagura-ai.com/admin/config 2>/dev/null | jq '.enforce_workspace_cap'
 # false
 
-# 無ければログから確認: 新規 workspace_creation_denied が出ても deny されないこと
-# 直後の workspace_creation_denied 行が enforced=false を含むはず
-journalctl -u kagura-api-green --since '1 minute ago' | grep workspace_creation_denied | tail -3
+# 無ければログから確認 (docker のログ — JSONRenderer 想定)
+# 直後の workspace_creation_denied 行が "enforced": false を含むはず
+sudo docker logs "kagura-api-${ACTIVE}" --since 1m 2>&1 \
+  | grep workspace_creation_denied | tail -3
 ```
 
 ### Step 4. false-positive denial の沈静化を観測
 
-reload 後 5 分間、`workspace_creation_denied enforced=true` の発生レートが減衰することを確認:
+reload 後 5 分間、`workspace_creation_denied` の `enforced=true` イベント発生レートが減衰することを確認。**structlog のレンダラに応じて表記が変わるので 2 パターンを OR で grep**:
+
+- JSONRenderer (production の `LOG_COLORIZE=false`): `"enforced": true`
+- ConsoleRenderer (development): `enforced=True` (Python bool repr)
 
 ```bash
-journalctl -u kagura-api-green --since '5 minutes ago' \
-  | grep -c 'workspace_creation_denied.*enforced=true'
+sudo docker logs "kagura-api-${ACTIVE}" --since 5m 2>&1 \
+  | grep workspace_creation_denied \
+  | grep -cE '"enforced":\s*true|enforced=True'
 # 期待: reload 前のレートと比べて急減（reload 直後にバッファに残った分のみ）
 ```
 
@@ -96,12 +111,24 @@ sub-B (#676 admin UI) が未 merge / 未 deploy の段階で、影響を受け�
 
 ### Step 4.1. 影響 user の特定
 
-log から `workspace_creation_denied enforced=true` を抽出して `user_id` を取り出す:
+log から `workspace_creation_denied` の `enforced=true` イベントを抽出して `user_id` を取り出す。**structlog のレンダラに合わせて 2 パターンを併記** (production = JSON、dev = console):
 
 ```bash
-journalctl -u kagura-api-green --since '15 minutes ago' \
-  | grep 'workspace_creation_denied' \
-  | grep 'enforced=true' \
+ACTIVE=$(cat /opt/kagura-memory/active-color)
+
+# JSON renderer (production の LOG_COLORIZE=false): "enforced": true, "user_id": "..."
+sudo docker logs "kagura-api-${ACTIVE}" --since 15m 2>&1 \
+  | grep workspace_creation_denied \
+  | grep -E '"enforced":\s*true' \
+  | grep -oE '"user_id":\s*"[^"]+"' \
+  | sed -E 's/"user_id":\s*"([^"]+)"/\1/' \
+  | sort -u
+
+# Console renderer (dev / LOG_COLORIZE=true): enforced=True user_id=...
+# 同じコマンドで pattern を切り替え
+sudo docker logs "kagura-api-${ACTIVE}" --since 15m 2>&1 \
+  | grep workspace_creation_denied \
+  | grep -E 'enforced=True' \
   | grep -oE 'user_id=[a-zA-Z0-9_-]+' \
   | sort -u
 # user_id=u_abc12345
@@ -126,11 +153,21 @@ SELECT
  GROUP BY u.id, u.email, u.workspace_slot_bonus;
 ```
 
-期待する `workspace_slot_bonus` は `MAX(0, owned_active - 1)`（grandfather migration の式と同じ）。実際の値と乖離していれば調整対象。
+### Step 4.2.1. 期待値 `<N>` の計算
+
+`<N>` の選び方は **意図** に依存する。cap 判定は `workspace_count >= cap` で deny するので、bonus = `owned_active - 1` だと cap = `owned_active` となり **既存の数を保持するだけで新規作成は依然不可**（PR #686 Copilot review）。新規作成を許可したいかどうかで使い分ける:
+
+| 意図 | `<N>` | 結果として cap = `1 + N` |
+|---|---|---|
+| **既存 workspace 数を維持するだけ**（grandfather 状態を復元、新規作成は依然不可） | `MAX(0, owned_active - 1)` | `owned_active`（cap == 現在数、`>=` で deny） |
+| **既存を維持しつつ新規 1 つ作成を許可**（false-positive denial の典型） | `owned_active` | `owned_active + 1` |
+| **追加 K slot を grant**（特例対応） | `owned_active - 1 + K` | `owned_active + K` |
+
+false-positive denial の rollback 用途（本 runbook の主要ケース）は **2 番目** を選ぶ。Step 4.4 の検証で「新規作成成功」を確認する以上、cap に 1 slot 余裕が必要。
 
 ### Step 4.3. 条件付き UPDATE で bonus を増やす
 
-`<user_id>` と期待値 `<N>` は Step 4.1/4.2 で確定したリテラル値に置き換える。`psql --variable` で安全に変数渡しする例も併記。**シェル文字列補間（`"... = $BONUS ..."`）は絶対に使わない** — placeholder と SQL injection 経路を混同しないため。
+`<user_id>` と期待値 `<N>` は Step 4.1/4.2.1 で確定したリテラル値に置き換える。`psql --variable` で安全に変数渡しする例も併記。**シェル文字列補間（`"... = $BONUS ..."`）は絶対に使わない** — placeholder と SQL injection 経路を混同しないため。
 
 ```sql
 -- 期待値 N を確定したうえで、現在値が N 未満の場合のみ更新

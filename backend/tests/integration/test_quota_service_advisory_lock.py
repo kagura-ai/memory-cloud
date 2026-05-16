@@ -201,11 +201,29 @@ class TestAdvisoryLockNegativeControl:
 
         session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
 
+        # Without an explicit barrier between the cap-check SELECT and the
+        # INSERT, asyncio's cooperative scheduler can interleave each task
+        # check + insert serially (later tasks observing prior commits)
+        # and the race never materializes. The barrier forces all N
+        # workers to complete the cap read BEFORE any of them inserts,
+        # which deterministically reproduces the TOCTOU when the lock
+        # is disabled (PR #686 Copilot review).
+        all_read = asyncio.Barrier(_PARALLEL_ATTEMPTS)
+
+        async def attempt_with_barrier() -> bool:
+            async with session_maker() as session:
+                async with session.begin():
+                    quota = QuotaService(session)
+                    can, _ = await quota.check_workspace_creation_allowed(user_with_cap_3)
+                    # All workers must have read before any of us inserts.
+                    await all_read.wait()
+                    if can:
+                        session.add(_new_workspace(user_with_cap_3))
+                        return True
+                    return False
+
         await asyncio.gather(
-            *[
-                _attempt_one_create(session_maker, user_with_cap_3)
-                for _ in range(_PARALLEL_ATTEMPTS)
-            ],
+            *[attempt_with_barrier() for _ in range(_PARALLEL_ATTEMPTS)],
             return_exceptions=True,
         )
 
@@ -214,9 +232,10 @@ class TestAdvisoryLockNegativeControl:
 
         assert count > _CAP, (
             f"with lock disabled, expected count > cap={_CAP}; got {count}. "
-            f"Either the parallel test setup is not actually concurrent, "
-            f"or production code has a second serialization path besides "
-            f"the advisory lock that this test does not reach."
+            f"Either the barrier did not synchronize all workers before "
+            f"the INSERT phase, or production code has a second "
+            f"serialization path besides the advisory lock that this "
+            f"test does not reach."
         )
 
 

@@ -362,3 +362,129 @@ class TestQuotaServiceWorkspaceCreationCap:
             )
         assert can_create is True
         assert error is None
+
+    # ------------------------------------------------------------------
+    # Lock-error policy (#677 sub-C, PR #686 review follow-up)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_lock_error(sqlstate: str) -> Exception:
+        """Build a SQLAlchemy DBAPIError carrying a ``sqlstate`` attribute.
+
+        The production code reads ``exc.orig.sqlstate`` / ``exc.orig.pgcode``
+        — both forms appear on different asyncpg/psycopg2 versions — to
+        identify SQLSTATE 55P03 (``lock_not_available``). A minimal
+        ``MagicMock`` orig with ``sqlstate`` set satisfies the read.
+        """
+        from sqlalchemy.exc import DBAPIError
+
+        orig = MagicMock()
+        orig.sqlstate = sqlstate
+        orig.pgcode = sqlstate
+        return DBAPIError("stmt", {}, orig)
+
+    @pytest.mark.asyncio
+    async def test_lock_timeout_enforce_true_denies(self, service, mock_db, monkeypatch):
+        """SQLSTATE 55P03 + enforce=True → fail-closed (deny + rollback)."""
+        from services import quota_service as qs
+
+        async def _raise_lock_timeout(self_, user_id):
+            raise self._make_lock_error("55P03")
+
+        monkeypatch.setattr(qs.QuotaService, "_acquire_workspace_create_lock", _raise_lock_timeout)
+        mock_db.rollback = AsyncMock()
+        warning_mock = MagicMock()
+        monkeypatch.setattr(qs.logger, "warning", warning_mock)
+
+        with self._patch_settings(enforce=True):
+            can_create, error = await service.check_workspace_creation_allowed("user-1")
+
+        assert can_create is False
+        assert error is not None
+        assert "temporarily unavailable" in error.lower()
+        mock_db.rollback.assert_awaited_once()
+        event_calls = [
+            c
+            for c in warning_mock.call_args_list
+            if c.args and c.args[0] == "workspace_create_lock_failed"
+        ]
+        assert len(event_calls) == 1
+        assert event_calls[0].kwargs.get("reason") == "lock_timeout"
+        assert event_calls[0].kwargs.get("sqlstate") == "55P03"
+        assert event_calls[0].kwargs.get("enforced") is True
+
+    @pytest.mark.asyncio
+    async def test_lock_timeout_enforce_false_allows(self, service, mock_db, monkeypatch):
+        """SQLSTATE 55P03 + enforce=False → fail-open (allow + log, no cap read)."""
+        from services import quota_service as qs
+
+        async def _raise_lock_timeout(self_, user_id):
+            raise self._make_lock_error("55P03")
+
+        monkeypatch.setattr(qs.QuotaService, "_acquire_workspace_create_lock", _raise_lock_timeout)
+        mock_db.rollback = AsyncMock()
+        warning_mock = MagicMock()
+        monkeypatch.setattr(qs.logger, "warning", warning_mock)
+
+        with self._patch_settings(enforce=False):
+            can_create, error = await service.check_workspace_creation_allowed("user-1")
+
+        assert can_create is True
+        assert error is None
+        mock_db.rollback.assert_awaited_once()
+        event_calls = [
+            c
+            for c in warning_mock.call_args_list
+            if c.args and c.args[0] == "workspace_create_lock_failed"
+        ]
+        assert len(event_calls) == 1
+        assert event_calls[0].kwargs.get("reason") == "lock_timeout"
+        assert event_calls[0].kwargs.get("enforced") is False
+
+    @pytest.mark.asyncio
+    async def test_non_timeout_dbapi_error_reason_is_lock_error(
+        self, service, mock_db, monkeypatch
+    ):
+        """Non-55P03 DBAPIError → ``reason='lock_error'`` (distinct from lock_timeout)."""
+        from services import quota_service as qs
+
+        async def _raise_other(self_, user_id):
+            raise self._make_lock_error("08006")  # connection_failure
+
+        monkeypatch.setattr(qs.QuotaService, "_acquire_workspace_create_lock", _raise_other)
+        mock_db.rollback = AsyncMock()
+        warning_mock = MagicMock()
+        monkeypatch.setattr(qs.logger, "warning", warning_mock)
+
+        with self._patch_settings(enforce=True):
+            can_create, error = await service.check_workspace_creation_allowed("user-1")
+
+        assert can_create is False
+        event_calls = [
+            c
+            for c in warning_mock.call_args_list
+            if c.args and c.args[0] == "workspace_create_lock_failed"
+        ]
+        assert len(event_calls) == 1
+        assert event_calls[0].kwargs.get("reason") == "lock_error"
+        assert event_calls[0].kwargs.get("sqlstate") == "08006"
+
+    @pytest.mark.asyncio
+    async def test_lock_error_raise_on_denied_chains_cause(self, service, mock_db, monkeypatch):
+        """raise_on_denied=True + enforce=True + lock error → QuotaExceededError chained from DBAPIError."""
+        from services import quota_service as qs
+
+        original = self._make_lock_error("55P03")
+
+        async def _raise_lock_timeout(self_, user_id):
+            raise original
+
+        monkeypatch.setattr(qs.QuotaService, "_acquire_workspace_create_lock", _raise_lock_timeout)
+        mock_db.rollback = AsyncMock()
+
+        with self._patch_settings(enforce=True):
+            with pytest.raises(QuotaExceededError) as exc_info:
+                await service.check_workspace_creation_allowed("user-1", raise_on_denied=True)
+
+        assert "temporarily unavailable" in str(exc_info.value).lower()
+        assert exc_info.value.__cause__ is original

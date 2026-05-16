@@ -14,7 +14,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, or_, select, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.plan_tiers import PLAN_TIERS, get_plan_tier, has_feature
@@ -255,10 +255,13 @@ class QuotaService:
         lock_wait_ms: float | None = None
         try:
             lock_wait_ms = await self._acquire_workspace_create_lock(user_id)
-        except OperationalError as exc:
-            # SQLSTATE 55P03 = lock_not_available (SET LOCAL lock_timeout
-            # fired). asyncpg surfaces it as ``sqlstate``; psycopg2 as
-            # ``pgcode`` — both forms appear on different driver versions.
+        except DBAPIError as exc:
+            # Catch the broader SQLAlchemy DBAPI wrapper so we cover every
+            # driver mapping for SQLSTATE 55P03 — asyncpg has historically
+            # mapped lock-cancellation to several exception subclasses, so
+            # narrowing to OperationalError would let real lock_timeouts
+            # bypass this branch (PR #686 Copilot review). asyncpg surfaces
+            # the SQLSTATE as ``sqlstate``; psycopg2 as ``pgcode``.
             sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
             reason = "lock_timeout" if sqlstate == "55P03" else "lock_error"
             logger.warning(
@@ -344,17 +347,33 @@ class QuotaService:
         """
         lock_key = f"workspace_create:{user_id}"
 
-        # SET LOCAL reverts on commit/rollback so this does not bleed
-        # into other operations on the same connection after the gate.
-        # Excluded from the timing measurement below so lock_wait_ms
-        # reflects only the advisory-lock acquire (PR #686 review).
+        # SET LOCAL applies to the rest of the current transaction, not
+        # just to the immediately-following statement. The caller's
+        # transaction continues past this helper into the workspace
+        # INSERT (and any other statements WorkspaceService.create_workspace
+        # issues), which must NOT inherit a 5s lock_timeout — without the
+        # reset below they would unexpectedly time out on any lock wait
+        # (PR #686 Copilot review). The acquire is bracketed by SET to
+        # 5s on entry and reset to '0' (no timeout, session default) on
+        # exit so the remainder of the caller's transaction is unaffected.
         await self.db.execute(text("SET LOCAL lock_timeout = '5s'"))
 
         start = time.monotonic()
-        await self.db.execute(
-            text("SELECT pg_advisory_xact_lock(hashtext(:key))").bindparams(key=lock_key)
-        )
-        return (time.monotonic() - start) * 1000
+        try:
+            await self.db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:key))").bindparams(key=lock_key)
+            )
+        finally:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            # On DBAPIError the tx is already in error state and any
+            # further execute would raise InFailedSqlTransaction — the
+            # caller's except branch is responsible for rolling back,
+            # which clears the lock_timeout along with the tx.
+            try:
+                await self.db.execute(text("SET LOCAL lock_timeout = '0'"))
+            except DBAPIError:
+                pass
+        return elapsed_ms
 
     async def check_context_creation_allowed(
         self,
