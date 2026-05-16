@@ -795,19 +795,90 @@ class UserAccessibleContext(TZAwareBaseModel):
         from_attributes = True
 
 
+class OwnedWorkspaceInfo(BaseModel):
+    """Single owned workspace row for the admin workspace_summary block (#676).
+
+    Distinct from ``UserWorkspaceInfo`` (#164): that shape carries the user's
+    *membership* role (owner/admin/member/viewer) across all workspaces they
+    can see. ``OwnedWorkspaceInfo`` is the projection used by the admin slot
+    bonus UI — owned workspaces only (Workspace.owner_user_id), no role/
+    joined_at fields, since the admin lens does not care about membership
+    role when counting against the per-user cap.
+    """
+
+    id: str
+    name: str
+    plan_name: str  # Workspace's current plan tier (free/basic/pro)
+
+
+class WorkspaceSummary(BaseModel):
+    """Per-user workspace capacity summary for admin user detail (#676).
+
+    Mirrors the fields surfaced in the "Workspace Capacity" admin UI section:
+    base_cap (always 1 today, sourced from ``plan_resolver.BASE_CAP`` so the
+    frontend does not hardcode), the configurable bonus, the effective cap,
+    and the list of currently-owned workspaces. ``is_at_cap`` is precomputed
+    so the badge variant in the UI does not have to recompute the comparison.
+    """
+
+    owned_count: int
+    workspace_slot_bonus: int
+    base_cap: int
+    cap: int
+    is_at_cap: bool
+    owned_workspaces: list[OwnedWorkspaceInfo]
+
+
 class UserDetailResponse(BaseModel):
     """Comprehensive user detail response.
 
     Issue #164: User detail page.
+    Issue #676: Adds ``workspace_summary`` for the admin slot-bonus UI.
     """
 
     user: dict  # Basic user info
     workspaces: list[UserWorkspaceInfo]
     accessible_contexts: list[UserAccessibleContext]
     stats: dict  # Usage statistics
+    workspace_summary: WorkspaceSummary | None = None  # #676
 
     class Config:
         from_attributes = True
+
+
+class UpdateWorkspaceSlotBonusRequest(BaseModel):
+    """Body for PATCH /admin/users/{user_id}/workspace_slot_bonus (#676).
+
+    ``delta`` is the signed increment to apply atomically. ``reason`` is
+    required only when the resulting cap would fall below the user's current
+    owned_count (a destructive admin operation); otherwise it may be ``None``.
+    The 500-char cap matches the audit_log payload budget.
+    """
+
+    delta: int = Field(..., description="Signed increment, e.g. +1 or -1.")
+    reason: str | None = Field(
+        None,
+        max_length=500,
+        description="Free-form reason (required for destructive over-cap ops).",
+    )
+
+
+class UpdateWorkspaceSlotBonusResponse(BaseModel):
+    """Response for PATCH /admin/users/{user_id}/workspace_slot_bonus (#676).
+
+    Returns enough state for the frontend to update its local view without a
+    refetch round-trip: the bonus before/after, plus the recomputed cap
+    summary. ``reason`` is echoed back so the optimistic UI can include it in
+    the success toast.
+    """
+
+    before_value: int
+    after_value: int
+    owned_count: int
+    base_cap: int
+    cap: int
+    is_at_cap: bool
+    reason: str | None
 
 
 # ============================================================================
