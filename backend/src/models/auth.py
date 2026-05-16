@@ -149,6 +149,11 @@ class User(Base):
     __table_args__ = (
         CheckConstraint("role IN ('admin', 'user')", name="valid_role"),
         CheckConstraint("auth_method IN ('password', 'oauth')", name="valid_auth_method"),
+        # Issue #675: keep ORM CHECK in lockstep with alembic e15_675 so
+        # ``Base.metadata.create_all()``-built schemas (used by some tests)
+        # reject negative bonus values too. tests/test_schema_drift.py
+        # verifies the SQL text matches the migration's ADD CONSTRAINT.
+        CheckConstraint("workspace_slot_bonus >= 0", name="workspace_slot_bonus_nonneg"),
     )
 
     def __repr__(self) -> str:

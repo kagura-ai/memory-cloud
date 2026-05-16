@@ -66,11 +66,12 @@ depends_on = None
 def upgrade() -> None:
     """Add workspace_slot_bonus to users, grandfather existing owners."""
     # 1. Add column idempotently. INTEGER NOT NULL DEFAULT 0 is metadata-only
-    #    in PG >= 11 (no table rewrite). CHECK CONSTRAINT enforces non-negative
-    #    values at the DB level — defense in depth against a future admin grant
-    #    API (#676) that fails to validate ``bonus >= 0``. Without this guard,
-    #    a negative bonus would compute ``cap = 1 + (-N) <= 0`` and lock the
-    #    user out of all workspace creation.
+    #    in PG >= 11 (no table rewrite). The CHECK constraint is created
+    #    separately below — keeping the constraint as its own
+    #    ``op.execute("ALTER TABLE … ADD CONSTRAINT … CHECK …")`` form so
+    #    the schema-drift detector (tests/test_schema_drift.py) sees it.
+    #    Inline column-level CHECK ("ADD COLUMN ... CHECK (…)") is NOT one
+    #    of the shapes the detector parses.
     op.execute(
         """
         DO $$
@@ -81,9 +82,26 @@ def upgrade() -> None:
                   AND column_name = 'workspace_slot_bonus'
             ) THEN
                 ALTER TABLE users
-                  ADD COLUMN workspace_slot_bonus INTEGER NOT NULL DEFAULT 0
-                    CONSTRAINT workspace_slot_bonus_nonneg CHECK (workspace_slot_bonus >= 0);
+                  ADD COLUMN workspace_slot_bonus INTEGER NOT NULL DEFAULT 0;
             END IF;
+        END $$;
+        """
+    )
+
+    # 1b. Add CHECK constraint in a shape recognized by the schema-drift
+    #     detector. Defense in depth against a future admin grant API
+    #     (#676) that fails to validate ``bonus >= 0`` — a negative bonus
+    #     would compute ``cap = 1 + (-N) <= 0`` and lock the user out.
+    #     Wrapped in a DO-EXCEPTION block for idempotency (handles re-runs
+    #     after a partial-success migration without raising duplicate_object).
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            ALTER TABLE users
+              ADD CONSTRAINT workspace_slot_bonus_nonneg
+                CHECK (workspace_slot_bonus >= 0);
+        EXCEPTION WHEN duplicate_object THEN NULL;
         END $$;
         """
     )
@@ -129,9 +147,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the workspace_slot_bonus column.
+    """Drop the CHECK constraint and the workspace_slot_bonus column.
 
     Bonus values are not preserved — they are recomputable from live
-    workspace state on re-upgrade.
+    workspace state on re-upgrade. The CHECK constraint is dropped
+    explicitly so the column drop is unconstrained.
     """
+    op.execute("ALTER TABLE users DROP CONSTRAINT IF EXISTS workspace_slot_bonus_nonneg")
     op.drop_column("users", "workspace_slot_bonus")

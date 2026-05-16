@@ -7,7 +7,7 @@
  * Used in workspace/settings page when ?create=true is set.
  */
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
@@ -38,7 +38,7 @@ export function WorkspaceCreateForm({
   const t = useTranslations("workspace");
   const tCommon = useTranslations("common");
   const router = useRouter();
-  const { refreshWorkspaces, switchWorkspace, workspaces } = useWorkspace();
+  const { refreshWorkspaces, switchWorkspace } = useWorkspace();
   const { toast } = useToast();
 
   const [name, setName] = useState("");
@@ -46,25 +46,15 @@ export function WorkspaceCreateForm({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Issue #675 (epic #674): cap is per-user (1 + workspace_slot_bonus),
-  // not a tier-derived constant. Fetch it from /api/v1/usage/current on
-  // mount. While loading the gate stays permissive — the backend remains
-  // the source of truth and rejects over-cap submits via the same
-  // "Workspace limit reached" error path.
+  // Issue #675 (epic #674) sub-A: cap is per-user (1 + workspace_slot_bonus),
+  // fetched from /api/v1/usage/current. The value is used ONLY to localize
+  // the over-cap error message after a backend rejection — we do NOT render
+  // a pre-submit hard-block UI. Sub-A's promise is "backend authoritative,
+  // log-only" (``enforce_workspace_cap=False`` until sub-C / #677 flips it),
+  // so any frontend pre-block would pre-empt that promise and lock users
+  // out before the rollout flag flips. After sub-C ships, the backend
+  // rejection will surface here via the catch block below.
   const [workspaceLimit, setWorkspaceLimit] = useState<number | null>(null);
-  const ownedWorkspaces = useMemo(
-    () => workspaces.filter((w) => w.current_user_role === "owner"),
-    [workspaces],
-  );
-  // Guard against ``workspaceLimit <= 0`` (corrupt response): a literal
-  // ``limit: 0`` from the API would otherwise make ``length >= 0`` true
-  // for every user, including users with zero owned workspaces, walling
-  // them off from ever creating one. Treat non-positive limits as
-  // "unknown" (permissive) and let the backend gate decide.
-  const isLimitReached =
-    workspaceLimit !== null &&
-    workspaceLimit > 0 &&
-    ownedWorkspaces.length >= workspaceLimit;
 
   useEffect(() => {
     let cancelled = false;
@@ -73,7 +63,9 @@ export function WorkspaceCreateForm({
         if (!cancelled) setWorkspaceLimit(response.usage.workspaces.limit);
       })
       .catch(() => {
-        // Network/auth failure: leave permissive; backend gate authoritative.
+        // Network/auth failure: leave null; we will fall back to the raw
+        // backend error message in the catch block below if the submit
+        // happens to be rejected.
       });
     return () => {
       cancelled = true;
@@ -141,46 +133,6 @@ export function WorkspaceCreateForm({
       router.back();
     }
   };
-
-  // Issue #276: Show error page if limit reached
-  if (isLimitReached) {
-    return (
-      <div className="max-w-2xl mx-auto">
-        <Card>
-          <CardHeader>
-            <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-red-100 dark:bg-red-900">
-                <Building2 className="h-6 w-6 text-red-600 dark:text-red-400" />
-              </div>
-              <div>
-                <CardTitle>
-                  {t("workspaceLimitReached", { limit: workspaceLimit ?? 0 })}
-                </CardTitle>
-                <CardDescription>
-                  {t("currentlyOwning", { count: ownedWorkspaces.length })}
-                </CardDescription>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              <p className="text-sm text-slate-600 dark:text-slate-400">
-                {t("deleteExistingToCreate")}
-              </p>
-              <Button
-                variant="outline"
-                onClick={handleCancel}
-                className="flex items-center gap-2"
-              >
-                <ArrowLeft className="h-4 w-4" />
-                {tCommon("back")}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
 
   return (
     <div className="max-w-2xl mx-auto">
