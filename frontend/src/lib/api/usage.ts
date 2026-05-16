@@ -39,12 +39,12 @@ export interface SleepContextsUsage {
 }
 
 /**
- * Owned-workspace cap usage (Issue #661).
+ * Owned-workspace cap usage (Issue #661 / #675).
  *
  * User-level: counts the caller's owned (`deleted_at IS NULL`) workspaces
- * against `PlanTier.max_owned_workspaces`. Populated unconditionally —
- * unlike `analysis` / `sleep_contexts`, this does not depend on the
- * caller's current workspace selection.
+ * against the effective cap `1 + users.workspace_slot_bonus`. Populated
+ * unconditionally — unlike `analysis` / `sleep_contexts`, this does not
+ * depend on the caller's current workspace selection.
  */
 export interface WorkspacesUsage {
   used: number;
