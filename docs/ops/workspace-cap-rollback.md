@@ -185,17 +185,26 @@ UPDATE users
 psql で実行する場合の具体例（`<user_id> = u_abc12345`, `<N> = 3` のケース）:
 
 ```bash
-# 文字列補間ではなく psql の :'var' / :var 記法で渡す（SQL injection 経路を作らない）
-psql "$PROD_DSN_READWRITE" \
-  --variable=uid="u_abc12345" \
-  --variable=n=3 \
-  -c "UPDATE users SET workspace_slot_bonus = :n
-        WHERE user_id = :'uid' AND workspace_slot_bonus < :n;"
+# psql の `:var` / `:'var'` 変数置換は **stdin/heredoc または -f file** モード
+# でのみ動作する。`-c "..."` だと literal `:` がサーバ送信されて syntax error
+# になる (PR #686 loop 5 review) — heredoc + \set で安全に渡す。
+psql "$PROD_DSN_READWRITE" <<'SQL'
+\set uid 'u_abc12345'
+\set n 3
+SELECT current_database() AS db, current_user AS who;  -- 環境取り違え防止チェック
+UPDATE users
+   SET workspace_slot_bonus = :n
+ WHERE user_id = :'uid'
+   AND workspace_slot_bonus < :n;
+SELECT user_id, workspace_slot_bonus FROM users WHERE user_id = :'uid';
+SQL
 ```
 
 > 🛡️ **条件付き UPDATE を使う理由**: 単純な `SET workspace_slot_bonus = N` だと、誰かが既に高い値を入れていた場合に **意図せず下げてしまう**。`workspace_slot_bonus < N` の WHERE 句で「下げない」を保証する。降格が必要な場面は本 runbook の対象外（別 admin 操作）。
 
-> ⚠️ **DSN の取り違え**: `$PROD_DSN_READWRITE` は production 本番用。stage / dev と読み違えると別環境の user に bonus 付与してしまう。`SELECT current_database();` を先頭に置いて目視確認を必須にする運用が望ましい。
+> ⚠️ **DSN の取り違え**: `$PROD_DSN_READWRITE` は production 本番用。stage / dev と読み違えると別環境の user に bonus 付与してしまう。上記 heredoc の冒頭で `SELECT current_database();` を実行し、結果を目視確認してから次回の oncall に進む運用が望ましい。
+
+> 🔐 **`<<'SQL'` の quote**: heredoc delimiter を `'SQL'` で quote しているのは **shell 展開を抑制する** ため。`$uid` のような shell 変数を埋め込みたくなった時に、quote 無しだと shell が先に展開して psql の `:var` 機構を bypass する事故の原因になる。psql 側の変数で完結させる。
 
 ### Step 4.4. 検証
 
