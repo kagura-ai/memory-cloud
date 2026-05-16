@@ -7,6 +7,7 @@
  * WorkspaceProvider state mid-flow.
  */
 
+import { useEffect } from "react";
 import { render, screen, act, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -43,10 +44,19 @@ const USER_B: User = {
   role: "admin",
 };
 
-/** Probe component: surfaces auth state into the DOM and exposes refetchUser. */
+/**
+ * Probe component: surfaces auth state into the DOM and exposes refetchUser.
+ *
+ * `isLoading` is recorded via `useEffect` so the log only reflects COMMITTED
+ * UI states — not render-phase side effects (which StrictMode double-renders
+ * and concurrent rendering can cancel). Recording during render would make
+ * the log non-deterministic and could mask real regressions.
+ */
 function Probe({ loadingLog }: { loadingLog: Array<boolean> }) {
   const { user, isLoading, refetchUser } = useAuth();
-  loadingLog.push(isLoading);
+  useEffect(() => {
+    loadingLog.push(isLoading);
+  }, [isLoading, loadingLog]);
   return (
     <>
       <div data-testid="user">{user ? user.email : "null"}</div>
@@ -106,12 +116,25 @@ describe("AuthContext silent refresh (issue #678)", () => {
     // Reset the log AFTER mount settles. We only care about post-mount behavior.
     log.length = 0;
 
-    // Second call returns a different user — refetchUser should swap the user
-    // without ever flipping isLoading to true.
-    mockGetCurrentUser.mockResolvedValueOnce(USER_B);
+    // Use a deferred promise so the user-update commits in a separate cycle
+    // from the click handler. Without this gap, React's automatic batching
+    // could coalesce a hypothetical setIsLoading(true) -> setIsLoading(false)
+    // into a single commit, hiding a real regression behind the batcher.
+    let resolveSecondFetch: (value: User | null) => void = () => {};
+    const deferredFetch = new Promise<User | null>((resolve) => {
+      resolveSecondFetch = resolve;
+    });
+    mockGetCurrentUser.mockReturnValueOnce(deferredFetch);
 
     await act(async () => {
       screen.getByTestId("refetch").click();
+    });
+
+    // Now resolve on a separate macrotask so the post-await `setUser` commits
+    // in its own React cycle.
+    await act(async () => {
+      resolveSecondFetch(USER_B);
+      await deferredFetch;
     });
 
     await waitFor(() => {
