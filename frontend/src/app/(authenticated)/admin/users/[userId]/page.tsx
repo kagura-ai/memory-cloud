@@ -142,8 +142,14 @@ export default function UserDetailPage() {
         `/api/v1/admin/users/${userId}`,
       );
       setUserDetail(data);
-    } catch (error: any) {
-      console.error("Failed to load user details:", error);
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : "Failed to load user details";
+      toast({
+        title: "Error",
+        description: message,
+        variant: "destructive",
+      });
     } finally {
       setLoading(false);
     }
@@ -183,10 +189,12 @@ export default function UserDetailPage() {
         currentPlan: null,
       });
       loadUserDetail();
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : "Failed to change plan";
       toast({
         title: "Error",
-        description: error.message || "Failed to change plan",
+        description: message,
         variant: "destructive",
       });
     }
@@ -195,29 +203,36 @@ export default function UserDetailPage() {
   // ---------- #676 workspace slot bonus handlers ----------
 
   /**
-   * Send PATCH and reconcile workspaceSummary with the returned state.
-   * On error, rolls userDetail back to its pre-call snapshot so the
-   * displayed numbers never drift past the server truth.
+   * Send PATCH and reconcile workspace_summary with the returned state.
+   *
+   * Uses functional setUserDetail updates so a concurrent loadUserDetail()
+   * (e.g. triggered by the change-plan flow) cannot have its result
+   * clobbered by this section's reconcile, and so a rollback restores
+   * only workspace_summary instead of overwriting the entire userDetail
+   * with a stale snapshot.
    */
   const commitBonusDelta = async (delta: number, reason: string | null) => {
     if (!userDetail?.workspace_summary) return;
-    const summary = userDetail.workspace_summary;
-    const snapshot = userDetail;
+    const summarySnapshot = userDetail.workspace_summary;
 
     // Optimistic update — render the projected state immediately so the
     // [-]/[+] feels responsive. Reconciled with the authoritative value
     // returned by the PATCH below.
-    const projectedBonus = summary.workspace_slot_bonus + delta;
-    const projectedCap = summary.base_cap + projectedBonus;
-    setUserDetail({
-      ...userDetail,
-      workspace_summary: {
-        ...summary,
-        workspace_slot_bonus: projectedBonus,
-        cap: projectedCap,
-        is_at_cap: summary.owned_count >= projectedCap,
-      },
-    });
+    const projectedBonus = summarySnapshot.workspace_slot_bonus + delta;
+    const projectedCap = summarySnapshot.base_cap + projectedBonus;
+    setUserDetail((prev) =>
+      prev && prev.workspace_summary
+        ? {
+            ...prev,
+            workspace_summary: {
+              ...prev.workspace_summary,
+              workspace_slot_bonus: projectedBonus,
+              cap: projectedCap,
+              is_at_cap: prev.workspace_summary.owned_count >= projectedCap,
+            },
+          }
+        : prev,
+    );
     setBonusPending(delta as -1 | 1);
 
     try {
@@ -225,23 +240,32 @@ export default function UserDetailPage() {
         delta,
         reason,
       });
-      setUserDetail({
-        ...snapshot,
-        workspace_summary: {
-          ...summary,
-          workspace_slot_bonus: response.after_value,
-          owned_count: response.owned_count,
-          base_cap: response.base_cap,
-          cap: response.cap,
-          is_at_cap: response.is_at_cap,
-        },
-      });
+      setUserDetail((prev) =>
+        prev && prev.workspace_summary
+          ? {
+              ...prev,
+              workspace_summary: {
+                ...prev.workspace_summary,
+                workspace_slot_bonus: response.after_value,
+                owned_count: response.owned_count,
+                base_cap: response.base_cap,
+                cap: response.cap,
+                is_at_cap: response.is_at_cap,
+              },
+            }
+          : prev,
+      );
       toast({
         title: "Updated",
         description: `Slot bonus: ${response.before_value} → ${response.after_value}.`,
       });
     } catch (error: unknown) {
-      setUserDetail(snapshot); // rollback
+      // Rollback only the workspace_summary slice — other userDetail
+      // fields may have been refreshed by a concurrent load() and we
+      // don't want to clobber them with the pre-call snapshot.
+      setUserDetail((prev) =>
+        prev ? { ...prev, workspace_summary: summarySnapshot } : prev,
+      );
       const message =
         error instanceof Error ? error.message : "Failed to update slot bonus";
       toast({

@@ -665,36 +665,47 @@ async def update_workspace_slot_bonus(
     """
     actor_id = get_user_id(admin)
 
+    # ---- Validation phase (read-only, outside db_transaction) ----
+    # db_transaction's bare `except Exception` wraps MemoryCloudException
+    # subclasses as HTTPException(500), which would convert our structured
+    # BONUS-001/002 4xx errors into generic 500s. Keeping the guard raises
+    # outside the transaction so they propagate to memory_cloud_exception_handler.
+    target_result = await db.execute(select(User).where(User.user_id == user_id))
+    target_user = target_result.scalar_one_or_none()
+    if target_user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    current_bonus = target_user.workspace_slot_bonus
+    projected_after = current_bonus + request.delta
+
+    if projected_after < 0:
+        raise BonusBelowZeroError(current=current_bonus, delta=request.delta)
+
+    # owned_count is read before the mutation; the cap below is the
+    # *new* cap (BASE_CAP + projected_after). Computing it locally avoids a
+    # second query and keeps the destructive-op decision deterministic.
+    owned_count, _current_cap = await get_user_workspace_cap_summary(db, user_id)
+    projected_cap = BASE_CAP + projected_after
+
+    reason_clean = (request.reason or "").strip() or None
+    is_destructive = request.delta < 0 and projected_cap < owned_count
+    if is_destructive and reason_clean is None:
+        raise InsufficientReasonError()
+
+    target_email = target_user.email  # capture for audit before leaving the SELECT scope
+
+    # ---- Mutation phase (transaction-wrapped for rollback) ----
     async with db_transaction(
         db, "update_workspace_slot_bonus", "Failed to update workspace slot bonus"
     ):
-        # Resolve target up-front: we need the current bonus for the
-        # destructive-op check and the email for the audit resource string.
-        target_result = await db.execute(select(User).where(User.user_id == user_id))
-        target_user = target_result.scalar_one_or_none()
-        if target_user is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-
-        current_bonus = target_user.workspace_slot_bonus
-        after_value = current_bonus + request.delta
-
-        if after_value < 0:
-            raise BonusBelowZeroError(current=current_bonus, delta=request.delta)
-
-        # owned_count is read before the mutation; the cap below is the
-        # *new* cap (BASE_CAP + after_value), not the value the helper
-        # would return post-mutation. Computing it locally avoids a
-        # second query and keeps the destructive-op decision deterministic.
-        owned_count, _current_cap = await get_user_workspace_cap_summary(db, user_id)
-        new_cap = BASE_CAP + after_value
-
-        reason_clean = (request.reason or "").strip() or None
-        is_destructive = request.delta < 0 and new_cap < owned_count
-        if is_destructive and reason_clean is None:
-            raise InsufficientReasonError()
-
         # Atomic delta application — UPDATE ... RETURNING is race-free with
-        # respect to concurrent +1/-1 from another admin session.
+        # respect to concurrent +1/-1 from another admin session. The
+        # workspace_slot_bonus_nonneg CHECK constraint is the safety net for
+        # the narrow race where a concurrent decrement between the
+        # validation above and this UPDATE would push the value negative;
+        # such a violation surfaces here as an IntegrityError → 500. The
+        # window is small and admin operations are low-concurrency, so we
+        # accept that rare 500 rather than holding a SELECT FOR UPDATE.
         update_stmt = (
             update(User)
             .where(User.user_id == user_id)
@@ -703,22 +714,24 @@ async def update_workspace_slot_bonus(
         )
         update_result = await db.execute(update_stmt)
         returned = update_result.one_or_none()
-        if returned is None:  # User vanished between SELECT and UPDATE — unreachable in practice
+        if returned is None:
+            # User row was deleted between the validation SELECT and this UPDATE.
+            # Extremely rare; treated as a 404 so the caller sees the same code
+            # they would have hit if the user did not exist when validation ran.
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-        before_value = current_bonus
-        # after_value already computed above; use the DB-returned value as
-        # the authoritative post-state in case a concurrent UPDATE landed
-        # between SELECT and UPDATE (the validation above used the
-        # pre-race snapshot but the mutation is atomic).
         after_value = returned.workspace_slot_bonus
+        # Derive before_value from the authoritative RETURNING result so that
+        # under concurrent +1 collisions the audit trail records the actual
+        # pre-state of THIS update, not a stale SELECT snapshot.
+        before_value = after_value - request.delta
         final_cap = BASE_CAP + after_value
 
         audit = AuditLog(
             user_email=admin.get("email", actor_id),
             user_id=actor_id,
             action="workspace_slot_bonus_update",
-            resource=f"user:{target_user.email}",
+            resource=f"user:{target_email}",
             old_value_hash=str(before_value),
             new_value_hash=str(after_value),
             user_metadata={
@@ -733,25 +746,25 @@ async def update_workspace_slot_bonus(
         db.add(audit)
         await db.commit()
 
-        logger.info(
-            "admin_update_workspace_slot_bonus",
-            actor_user_id=actor_id,
-            target_user_id=user_id,
-            before=before_value,
-            after=after_value,
-            delta=request.delta,
-            destructive=is_destructive,
-        )
+    logger.info(
+        "admin_update_workspace_slot_bonus",
+        actor_user_id=actor_id,
+        target_user_id=user_id,
+        before=before_value,
+        after=after_value,
+        delta=request.delta,
+        destructive=is_destructive,
+    )
 
-        return UpdateWorkspaceSlotBonusResponse(
-            before_value=before_value,
-            after_value=after_value,
-            owned_count=owned_count,
-            base_cap=BASE_CAP,
-            cap=final_cap,
-            is_at_cap=(owned_count >= final_cap),
-            reason=reason_clean,
-        )
+    return UpdateWorkspaceSlotBonusResponse(
+        before_value=before_value,
+        after_value=after_value,
+        owned_count=owned_count,
+        base_cap=BASE_CAP,
+        cap=final_cap,
+        is_at_cap=(owned_count >= final_cap),
+        reason=reason_clean,
+    )
 
 
 @router.delete("/users/{user_id}")
