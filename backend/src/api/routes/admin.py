@@ -232,7 +232,10 @@ async def list_users(
             workspace_memberships_result = await db.execute(
                 select(WorkspaceMember, Workspace)
                 .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
-                .where(WorkspaceMember.user_id.in_(user_ids))
+                .where(
+                    WorkspaceMember.user_id.in_(user_ids),
+                    Workspace.deleted_at.is_(None),  # #681: exclude soft-deleted
+                )
                 .order_by(WorkspaceMember.role.desc())
             )
             workspace_memberships = workspace_memberships_result.all()
@@ -396,7 +399,10 @@ async def get_user_detail(
         workspace_memberships_result = await db.execute(
             select(WorkspaceMember, Workspace)
             .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
-            .where(WorkspaceMember.user_id == user_id)
+            .where(
+                WorkspaceMember.user_id == user_id,
+                Workspace.deleted_at.is_(None),  # #681: exclude soft-deleted
+            )
             .order_by(WorkspaceMember.role.desc())
         )
         workspace_memberships = workspace_memberships_result.all()
