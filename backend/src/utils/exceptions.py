@@ -257,6 +257,53 @@ class UnsupportedMediaTypeError(MemoryCloudException):
         )
 
 
+# Workspace Slot Bonus Errors (Issue #676 — admin slot bonus UI)
+
+
+class InsufficientReasonError(MemoryCloudException):
+    """Admin tried to shrink workspace_slot_bonus past current owned_count without a reason (400).
+
+    The PATCH /admin/users/{id}/workspace_slot_bonus endpoint requires a non-empty
+    ``reason`` only when the operation would create an over-cap state
+    (``new_cap < current_owned``). Other deltas (any non-negative delta, or a
+    negative delta that still leaves the user at-or-under-cap) accept ``None``.
+    The constraint is mirrored in the frontend modal so the admin is informed
+    before submit.
+
+    Distinct from ``ValidationError`` (422): the request body is well-formed —
+    ``reason: null`` is a valid shape. The 400 fires because the *combination*
+    of (delta, current_owned, current_bonus) makes the missing reason a
+    business-rule violation.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Reason required: this change reduces the cap below the user's current owned count.",
+            status_code=400,
+            error_code="BONUS-001",
+        )
+
+
+class BonusBelowZeroError(MemoryCloudException):
+    """Resulting workspace_slot_bonus would be negative (400).
+
+    Defense-in-depth: the DB ``workspace_slot_bonus_nonneg`` CHECK constraint
+    will also reject this at commit time, but doing so surfaces a generic
+    IntegrityError to the client instead of a structured 400 with this
+    error_code. The app-level guard runs before the UPDATE so SDK consumers
+    can route on ``BONUS-002``.
+    """
+
+    def __init__(self, *, current: int, delta: int) -> None:
+        super().__init__(
+            f"Bonus cannot go below zero (current={current}, delta={delta}).",
+            status_code=400,
+            error_code="BONUS-002",
+            current=current,
+            delta=delta,
+        )
+
+
 # Rate Limiting & Quota Errors (429)
 
 
