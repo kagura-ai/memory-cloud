@@ -157,6 +157,33 @@ export interface UserStats {
   api_calls_week: number;
 }
 
+/**
+ * One owned workspace in the workspace_summary projection (#676).
+ * Distinct from UserWorkspace — no role / joined_at; the admin slot-bonus
+ * lens only cares about ownership, not membership granularity.
+ */
+export interface OwnedWorkspaceInfo {
+  id: string;
+  name: string;
+  plan_name: string;
+}
+
+/**
+ * Per-user workspace capacity summary for the admin slot bonus UI (#676).
+ * base_cap is surfaced explicitly so the frontend does not hardcode the
+ * formula — if BASE_CAP ever changes in plan_resolver.py, this just flows
+ * through. is_at_cap is precomputed on the backend so the badge variant
+ * does not have to recompute it.
+ */
+export interface WorkspaceSummary {
+  owned_count: number;
+  workspace_slot_bonus: number;
+  base_cap: number;
+  cap: number;
+  is_at_cap: boolean;
+  owned_workspaces: OwnedWorkspaceInfo[];
+}
+
 export interface UserDetail {
   user: {
     id: string; // Backward compatibility field (same as user_id)
@@ -173,6 +200,7 @@ export interface UserDetail {
   workspaces: UserWorkspace[];
   accessible_contexts: UserContext[];
   stats: UserStats;
+  workspace_summary?: WorkspaceSummary | null; // #676 (optional during rollout)
 }
 
 /**
@@ -181,4 +209,44 @@ export interface UserDetail {
  */
 export async function getUserDetails(userId: string): Promise<UserDetail> {
   return apiClient.get<UserDetail>(`/api/v1/admin/users/${userId}`);
+}
+
+/**
+ * Body for PATCH /admin/users/{user_id}/workspace_slot_bonus (#676).
+ * `reason` is server-required only when the delta would create an
+ * over-cap state (new_cap < current_owned). The frontend modal mirrors
+ * that rule so the admin sees the requirement before submit.
+ */
+export interface UpdateWorkspaceSlotBonusRequest {
+  delta: number;
+  reason?: string | null;
+}
+
+export interface UpdateWorkspaceSlotBonusResponse {
+  before_value: number;
+  after_value: number;
+  owned_count: number;
+  base_cap: number;
+  cap: number;
+  is_at_cap: boolean;
+  reason: string | null;
+}
+
+/**
+ * Apply a signed delta to a user's workspace_slot_bonus (Admin only).
+ *
+ * Atomic via UPDATE ... RETURNING on the backend, so two admins clicking
+ * +1 simultaneously cannot overwrite each other's update. The response
+ * carries enough state for an optimistic UI to reconcile without a refetch.
+ *
+ * Issue #676.
+ */
+export async function updateWorkspaceSlotBonus(
+  userId: string,
+  request: UpdateWorkspaceSlotBonusRequest,
+): Promise<UpdateWorkspaceSlotBonusResponse> {
+  return apiClient.patch<UpdateWorkspaceSlotBonusResponse>(
+    `/api/v1/admin/users/${userId}/workspace_slot_bonus`,
+    request,
+  );
 }
