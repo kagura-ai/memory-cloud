@@ -230,41 +230,38 @@ class QuotaService:
                 reached, AND ``settings.enforce_workspace_cap`` is True.
         """
         from config.settings import get_settings
-        from utils.plan_resolver import get_user_workspace_summary
+        from utils.plan_resolver import get_user_workspace_cap_summary
 
         settings = get_settings()
 
-        # Issue #661: fold "owned count" + "effective plan" into one SELECT.
-        # Sharing this helper with ``_build_workspaces_usage`` keeps the
-        # gate and the dashboard reading from the same source.
+        # Issue #675 (epic #674 sub-A): cap = 1 (base) + users.workspace_slot_bonus.
+        # The plan_resolver helper returns both numbers in a single SELECT
+        # (JOIN of users + workspaces) so the gate and the dashboard read
+        # consistent state.
         #
         # TOCTOU note: this read happens without ``WITH FOR UPDATE`` /
-        # row-level locking. The same race existed for the pre-#661
-        # plan-independent constant cap (Issue #276), but the new tighter
-        # Free=1 cap makes it more exploitable: two concurrent
-        # ``POST /workspaces`` requests can both see ``count=0 < cap=1``
-        # and both succeed. A follow-up should add a SELECT FOR UPDATE on
-        # a per-user sentinel row or a partial unique constraint on
-        # ``(owner_user_id) WHERE deleted_at IS NULL`` before flipping
-        # ``enforce_workspace_cap=True`` in production. Until then the
-        # gate is log-only (see flag handling below) so the race has no
-        # user-visible effect.
-        workspace_count, user_plan = await get_user_workspace_summary(self.db, user_id)
-        plan_tier = get_plan_tier(user_plan)
-        max_owned = plan_tier.max_owned_workspaces
+        # row-level locking. Two concurrent ``POST /workspaces`` requests
+        # can both see ``count < cap`` and both succeed, briefly exceeding
+        # the cap. Mitigation (``pg_advisory_xact_lock`` on a per-user key
+        # plus the ``enforce_workspace_cap=True`` flip) is tracked in
+        # #674 sub-C (#677). Until then the gate is log-only (see flag
+        # handling below) so the race has no user-visible effect.
+        workspace_count, slot_bonus = await get_user_workspace_cap_summary(self.db, user_id)
+        max_owned = 1 + slot_bonus
 
         if workspace_count >= max_owned:
             error = (
                 f"Workspace limit reached. "
-                f"Your {plan_tier.display_name} tier allows owning {max_owned} "
-                f"workspace(s). You can still join other workspaces as a member via invite."
+                f"You currently own {workspace_count} workspace(s) "
+                f"(cap: {max_owned}). You can still join other workspaces "
+                f"as a member via invite."
             )
             logger.warning(
                 "workspace_creation_denied",
                 user_id=user_id,
                 current_owned_workspaces=workspace_count,
                 max_owned_workspaces=max_owned,
-                user_plan=user_plan,
+                workspace_slot_bonus=slot_bonus,
                 enforced=settings.enforce_workspace_cap,
             )
 

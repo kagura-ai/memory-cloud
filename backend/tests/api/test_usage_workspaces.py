@@ -1,18 +1,10 @@
-"""Tests for the user-level workspace cap field in /api/v1/usage/current (Issue #661).
+"""Tests for the user-level workspace cap field in /api/v1/usage/current.
 
-Focused unit tests for ``_build_workspaces_usage`` (the helper that
-populates ``CurrentUsage.workspaces``). The helper takes an async db
-session and a user_id, and returns a ``WorkspacesUsage`` with
-``used`` (owned count), ``limit`` (tier cap), and ``remaining``.
-
-After the post-review refactor, the helper issues a single SELECT
-via ``get_user_workspace_summary`` which returns
-``(owned_count, plan_name)``. Tests mock exactly one ``execute()``
-call; ``owned_count`` is derived from ``len(plan_names)``.
-
-Tier→cap mapping (Free=1 / Basic=3 / Pro=10) is exercised through the
-real ``PLAN_TIERS`` so this file also pins that mapping for the
-user-facing /usage/current response.
+Issue #675 (epic #674 sub-A): cap is now ``1 + users.workspace_slot_bonus``.
+The helper ``_build_workspaces_usage`` issues a single SELECT via
+``get_user_workspace_cap_summary`` which returns ``(owned_count, slot_bonus)``.
+Tests mock exactly one ``execute()`` call returning a Row with those
+two attribute fields.
 """
 
 from unittest.mock import AsyncMock, MagicMock
@@ -20,31 +12,25 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from api.routes.usage import _build_workspaces_usage
-from config.plan_tiers import PlanName
 
 
-def _mock_db(plan_names: list[str]):
-    """Mock AsyncSession whose execute() returns the plan-name rows.
-
-    ``.scalars().all()`` returns ``plan_names``; the resolver derives
-    ``owned_count = len(plan_names)``.
-    """
+def _mock_db(owned_count: int, slot_bonus: int):
+    """Mock AsyncSession whose execute() returns a Row(owned_count, slot_bonus)."""
     db = MagicMock()
     db.execute = AsyncMock()
-
-    plan_scalars = MagicMock()
-    plan_scalars.all = MagicMock(return_value=plan_names)
-    plan_result = MagicMock()
-    plan_result.scalars = MagicMock(return_value=plan_scalars)
-
-    db.execute.return_value = plan_result
+    row = MagicMock()
+    row.owned_count = owned_count
+    row.workspace_slot_bonus = slot_bonus
+    result = MagicMock()
+    result.one_or_none = MagicMock(return_value=row)
+    db.execute.return_value = result
     return db
 
 
 @pytest.mark.asyncio
-async def test_free_user_zero_owned():
-    """Free default, 0 owned → used=0, limit=1, remaining=1."""
-    db = _mock_db(plan_names=[])
+async def test_zero_owned_no_bonus():
+    """0 owned, 0 bonus → used=0, limit=1, remaining=1 (base cap)."""
+    db = _mock_db(owned_count=0, slot_bonus=0)
     result = await _build_workspaces_usage(db, "user-1")
     assert result.used == 0
     assert result.limit == 1
@@ -52,9 +38,9 @@ async def test_free_user_zero_owned():
 
 
 @pytest.mark.asyncio
-async def test_free_user_at_cap():
-    """Free with 1 owned → used=1, limit=1, remaining=0."""
-    db = _mock_db(plan_names=[PlanName.FREE])
+async def test_one_owned_no_bonus_at_cap():
+    """1 owned, 0 bonus → used=1, limit=1, remaining=0."""
+    db = _mock_db(owned_count=1, slot_bonus=0)
     result = await _build_workspaces_usage(db, "user-1")
     assert result.used == 1
     assert result.limit == 1
@@ -62,9 +48,9 @@ async def test_free_user_at_cap():
 
 
 @pytest.mark.asyncio
-async def test_basic_user_partial():
-    """Basic with 2 owned → used=2, limit=3, remaining=1."""
-    db = _mock_db(plan_names=[PlanName.BASIC, PlanName.BASIC])
+async def test_two_owned_bonus_two_partial():
+    """2 owned, 2 bonus → used=2, limit=3, remaining=1."""
+    db = _mock_db(owned_count=2, slot_bonus=2)
     result = await _build_workspaces_usage(db, "user-1")
     assert result.used == 2
     assert result.limit == 3
@@ -72,48 +58,35 @@ async def test_basic_user_partial():
 
 
 @pytest.mark.asyncio
-async def test_pro_user_at_cap():
-    """Pro with 10 owned → used=10, limit=10, remaining=0."""
-    db = _mock_db(plan_names=[PlanName.PRO] * 10)
+async def test_grandfathered_five_owned_bonus_four_at_cap():
+    """Migration grandfather: 5 owned, 4 bonus → used=5, limit=5, remaining=0."""
+    db = _mock_db(owned_count=5, slot_bonus=4)
     result = await _build_workspaces_usage(db, "user-1")
-    assert result.used == 10
-    assert result.limit == 10
+    assert result.used == 5
+    assert result.limit == 5
     assert result.remaining == 0
 
 
 @pytest.mark.asyncio
-async def test_mixed_tier_uses_highest():
-    """User with 1 Basic + 1 Pro owned → cap is 10 (Pro)."""
-    db = _mock_db(plan_names=[PlanName.BASIC, PlanName.PRO])
+async def test_admin_granted_bonus_no_workspaces():
+    """Phase 1 admin pre-grant: 0 owned, 9 bonus → cap=10, all remaining."""
+    db = _mock_db(owned_count=0, slot_bonus=9)
     result = await _build_workspaces_usage(db, "user-1")
-    assert result.used == 2
+    assert result.used == 0
     assert result.limit == 10
-    assert result.remaining == 8
+    assert result.remaining == 10
 
 
 @pytest.mark.asyncio
 async def test_remaining_never_negative():
-    """Pathological over-cap state (e.g. legacy data) → remaining clamped to 0.
+    """Pathological over-cap (3 owned, 0 bonus → cap=1) clamps remaining to 0.
 
-    Documents what the dashboard surfaces if an existing Free user
-    happens to be at 3 owned workspaces when the cap was lowered to 1
-    (the pre-enforcement migration scenario Issue #661 plans for).
+    Surfaces what the dashboard shows if a user's bonus is reduced below
+    their current ownership (e.g. admin error). The cap-creation gate
+    prevents *adding* more, but display must not go negative.
     """
-    db = _mock_db(plan_names=[PlanName.FREE, PlanName.FREE, PlanName.FREE])
+    db = _mock_db(owned_count=3, slot_bonus=0)
     result = await _build_workspaces_usage(db, "user-1")
     assert result.used == 3
     assert result.limit == 1
     assert result.remaining == 0  # clamped via max(0, ...)
-
-
-@pytest.mark.asyncio
-async def test_corrupted_plan_names_fallback_to_free():
-    """Reviewer 2 [C1]: unknown plan_name corruption must NOT crash
-    the dashboard with 500. The resolver falls back to FREE so the
-    user sees a coherent (if degraded) usage card.
-    """
-    db = _mock_db(plan_names=["enterprise-legacy", "growth-bogus"])
-    result = await _build_workspaces_usage(db, "user-1")
-    assert result.used == 2  # real row count is preserved
-    assert result.limit == 1  # FREE fallback cap
-    assert result.remaining == 0  # 2 > 1 → clamped
