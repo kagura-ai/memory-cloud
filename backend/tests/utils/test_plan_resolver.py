@@ -1,129 +1,88 @@
-"""Tests for utils.plan_resolver (Issue #661).
+"""Tests for utils.plan_resolver (#674 sub-A, #675).
 
 Pure unit tests — no DB, no live settings. The single ``execute()``
-call inside ``get_user_workspace_summary`` is mocked so each test
-fully owns the (owned_count, plan_name) input/output.
+call inside ``get_user_workspace_cap_summary`` is mocked so each
+test fully owns the ``(owned_count, cap)`` output.
+
+The mock simulates ``result.one_or_none()`` on the JOIN query: it
+returns a Row-shaped object whose attribute access via
+``row.owned_count`` and ``row.workspace_slot_bonus`` matches the
+SQLAlchemy result interface used in the helper. The helper then
+computes ``cap = 1 + workspace_slot_bonus`` internally.
 """
 
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from config.plan_tiers import PlanName
-from utils.plan_resolver import get_user_workspace_summary
+from utils.plan_resolver import get_user_workspace_cap_summary
 
 
-def _mock_db(plan_names: list[str]):
-    """Mock AsyncSession whose execute().scalars().all() returns plan_names."""
+def _mock_db(owned_count: int | None, slot_bonus: int = 0):
+    """Mock AsyncSession.execute returning a Row(owned_count, slot_bonus).
+
+    Set ``owned_count=None`` to simulate the missing-user case where
+    ``one_or_none()`` returns ``None``.
+    """
     db = MagicMock()
     db.execute = AsyncMock()
-
-    scalars_result = MagicMock()
-    scalars_result.all = MagicMock(return_value=plan_names)
-
     execute_result = MagicMock()
-    execute_result.scalars = MagicMock(return_value=scalars_result)
-
+    if owned_count is None:
+        execute_result.one_or_none = MagicMock(return_value=None)
+    else:
+        row = MagicMock()
+        row.owned_count = owned_count
+        row.workspace_slot_bonus = slot_bonus
+        execute_result.one_or_none = MagicMock(return_value=row)
     db.execute.return_value = execute_result
     return db
 
 
 @pytest.mark.asyncio
-async def test_zero_workspaces_returns_count_zero_and_free():
-    """User with no owned workspaces → (0, FREE)."""
-    db = _mock_db([])
-    count, plan = await get_user_workspace_summary(db, "user-1")
+async def test_no_workspaces_no_bonus_returns_base_cap():
+    """Brand-new user: 0 owned, 0 bonus → cap = 1 (base)."""
+    db = _mock_db(owned_count=0, slot_bonus=0)
+    count, cap = await get_user_workspace_cap_summary(db, "user-1")
     assert count == 0
-    assert plan == PlanName.FREE
+    assert cap == 1
 
 
 @pytest.mark.asyncio
-async def test_single_free_workspace():
-    """Single Free owned workspace → (1, FREE)."""
-    db = _mock_db([PlanName.FREE])
-    count, plan = await get_user_workspace_summary(db, "user-1")
+async def test_one_owned_no_bonus_at_cap():
+    """Base case: 1 owned workspace, 0 bonus → count == cap."""
+    db = _mock_db(owned_count=1, slot_bonus=0)
+    count, cap = await get_user_workspace_cap_summary(db, "user-1")
     assert count == 1
-    assert plan == PlanName.FREE
+    assert cap == 1
 
 
 @pytest.mark.asyncio
-async def test_single_pro_workspace():
-    """Single Pro owned workspace → (1, PRO)."""
-    db = _mock_db([PlanName.PRO])
-    count, plan = await get_user_workspace_summary(db, "user-1")
-    assert count == 1
-    assert plan == PlanName.PRO
+async def test_grandfathered_five_owned_bonus_four_at_cap():
+    """Grandfather case: 5 owned, bonus=4 → cap = 5, at cap."""
+    db = _mock_db(owned_count=5, slot_bonus=4)
+    count, cap = await get_user_workspace_cap_summary(db, "user-1")
+    assert count == 5
+    assert cap == 5
 
 
 @pytest.mark.asyncio
-async def test_mixed_free_and_basic_returns_basic():
-    """Free + Basic owned → (2, BASIC)."""
-    db = _mock_db([PlanName.FREE, PlanName.BASIC])
-    count, plan = await get_user_workspace_summary(db, "user-1")
-    assert count == 2
-    assert plan == PlanName.BASIC
+async def test_admin_granted_bonus_no_workspaces_yet():
+    """Phase 1 admin grant before user creates: 0 owned, 3 bonus → cap 4."""
+    db = _mock_db(owned_count=0, slot_bonus=3)
+    count, cap = await get_user_workspace_cap_summary(db, "user-1")
+    assert count == 0
+    assert cap == 4
 
 
 @pytest.mark.asyncio
-async def test_mixed_basic_and_pro_returns_pro():
-    """Basic + Pro owned → (2, PRO)."""
-    db = _mock_db([PlanName.BASIC, PlanName.PRO])
-    count, plan = await get_user_workspace_summary(db, "user-1")
-    assert count == 2
-    assert plan == PlanName.PRO
+async def test_missing_user_returns_zero_owned_base_cap():
+    """Defensive: helper returns ``(0, 1)`` if the User row is not found.
 
-
-@pytest.mark.asyncio
-async def test_all_three_tiers_returns_pro():
-    """Free + Basic + Pro owned → (3, PRO)."""
-    db = _mock_db([PlanName.FREE, PlanName.BASIC, PlanName.PRO])
-    count, plan = await get_user_workspace_summary(db, "user-1")
-    assert count == 3
-    assert plan == PlanName.PRO
-
-
-@pytest.mark.asyncio
-async def test_unknown_plan_name_does_not_outrank_free():
-    """Unknown plan_name cannot silently win against FREE.
-
-    Defensive case: a corrupted/unknown plan_name (e.g. legacy
-    ``"enterprise"`` from the older UserPlan model, or a manual DB
-    edit) must NOT outrank a valid FREE workspace. The known FREE
-    still wins.
+    Theoretically unreachable because the caller has already passed
+    authentication, but a fail-safe default avoids crashing the gate
+    or the dashboard if something upstream returns a stale user_id.
     """
-    db = _mock_db(["enterprise", PlanName.FREE])
-    count, plan = await get_user_workspace_summary(db, "user-1")
-    assert count == 2
-    assert plan == PlanName.FREE
-
-
-@pytest.mark.asyncio
-async def test_only_unknown_plan_names_fallback_to_free():
-    """If ALL owned workspaces have unknown plan_names, the resolver
-    falls back to FREE rather than returning the unknown string.
-
-    The unknown string would otherwise crash ``get_plan_tier`` in
-    downstream callers (Issue #661 Reviewer 2 finding [C1]). The
-    fallback also emits a structured warn log (see resolver source);
-    we exercise the return-value path here because structlog's
-    pytest-capture behaviour depends on the global logger setup and
-    pinning on log content makes this test brittle.
-    """
-    db = _mock_db(["mystery-tier"])
-    count, plan = await get_user_workspace_summary(db, "user-1")
-    assert count == 1
-    assert plan == PlanName.FREE
-
-
-@pytest.mark.asyncio
-async def test_only_unknown_plan_names_count_reflects_real_rows():
-    """Fallback path still returns the actual owned-row count, not 0.
-
-    Important for the dashboard: a user with 3 corrupted-tier rows
-    must see ``used=3`` so they know workspaces exist, even though
-    the resolved tier degrades to FREE.
-    """
-    db = _mock_db(["mystery-1", "mystery-2", "mystery-3"])
-    count, plan = await get_user_workspace_summary(db, "user-1")
-    assert count == 3
-    assert plan == PlanName.FREE
+    db = _mock_db(owned_count=None)
+    count, cap = await get_user_workspace_cap_summary(db, "user-1")
+    assert count == 0
+    assert cap == 1

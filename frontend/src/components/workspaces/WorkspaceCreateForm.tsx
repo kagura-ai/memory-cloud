@@ -1,4 +1,4 @@
-'use client';
+"use client";
 
 /**
  * WorkspaceCreateForm Component
@@ -7,39 +7,52 @@
  * Used in workspace/settings page when ?create=true is set.
  */
 
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
-import { useTranslations } from 'next-intl';
-import { useWorkspace } from '@/contexts/WorkspaceContext';
-import { useToast } from '@/hooks/use-toast';
-import { createWorkspace, Workspace } from '@/lib/api/workspaces';
-import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
-import { Label } from '@/components/ui/label';
-import { Input } from '@/components/ui/input';
-import { Button } from '@/components/ui/button';
-import { Building2, ArrowLeft, Loader2 } from 'lucide-react';
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
+import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useToast } from "@/hooks/use-toast";
+import { createWorkspace, Workspace } from "@/lib/api/workspaces";
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+} from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Building2, ArrowLeft, Loader2 } from "lucide-react";
 
 interface WorkspaceCreateFormProps {
   onSuccess?: (workspace: Workspace) => void;
   onCancel?: () => void;
 }
 
-export function WorkspaceCreateForm({ onSuccess, onCancel }: WorkspaceCreateFormProps) {
-  const t = useTranslations('workspace');
-  const tCommon = useTranslations('common');
+export function WorkspaceCreateForm({
+  onSuccess,
+  onCancel,
+}: WorkspaceCreateFormProps) {
+  const t = useTranslations("workspace");
+  const tCommon = useTranslations("common");
   const router = useRouter();
-  const { refreshWorkspaces, switchWorkspace, workspaces } = useWorkspace();
+  const { refreshWorkspaces, switchWorkspace } = useWorkspace();
   const { toast } = useToast();
 
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Issue #276: Check workspace limit before showing form
-  const MAX_WORKSPACES = 10;
-  const ownedWorkspaces = workspaces.filter(w => w.current_user_role === 'owner');
-  const isLimitReached = ownedWorkspaces.length >= MAX_WORKSPACES;
+  // Issue #675 (epic #674) sub-A: there is no pre-submit cap fetch or
+  // hard-block UI on this form. The over-cap path surfaces the backend's
+  // authoritative error message verbatim in the catch block below — it
+  // already includes live ``current owned N (cap: M)`` data which a
+  // mount-time cached value cannot reliably match (cap can change between
+  // mount and submit via sub-B admin grants, ownership churn, etc.).
+  // Sub-A's promise is "backend authoritative, log-only"
+  // (``enforce_workspace_cap=False`` until sub-C / #677 flips it).
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -53,8 +66,8 @@ export function WorkspaceCreateForm({ onSuccess, onCancel }: WorkspaceCreateForm
       });
 
       toast({
-        title: t('workspaceCreated'),
-        description: t('workspaceCreatedDesc'),
+        title: t("workspaceCreated"),
+        description: t("workspaceCreatedDesc"),
       });
 
       // Refresh workspaces list
@@ -66,19 +79,27 @@ export function WorkspaceCreateForm({ onSuccess, onCancel }: WorkspaceCreateForm
       if (onSuccess) {
         onSuccess(workspace);
       } else {
-        router.push('/workspace/dashboard');
+        router.push("/workspace/dashboard");
       }
     } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : t('failedToCreateWorkspace');
+      const errorMessage =
+        err instanceof Error ? err.message : t("failedToCreateWorkspace");
 
-      // Parse error and show user-friendly message
-      if (errorMessage.includes('Workspace limit reached') || errorMessage.includes('limit')) {
-        setError(t('workspaceLimitReached', { limit: MAX_WORKSPACES }));
-      } else if (errorMessage.includes('validation') || errorMessage.includes('Invalid')) {
-        setError(t('validationError'));
+      if (errorMessage.includes("Workspace limit reached")) {
+        // Surface the backend's authoritative message verbatim — it
+        // includes live ``owned N (cap: M)`` data that a cached frontend
+        // value cannot reliably match. The trade-off is that ja users see
+        // the English backend message, but the alternative (cached cap +
+        // i18n) showed stale numbers in real scenarios (Copilot review #5).
+        setError(errorMessage);
+      } else if (
+        errorMessage.includes("validation") ||
+        errorMessage.includes("Invalid")
+      ) {
+        setError(t("validationError"));
       } else {
         // Show original error for debugging, but add context
-        setError(`${t('failedToCreateWorkspace')}: ${errorMessage}`);
+        setError(`${t("failedToCreateWorkspace")}: ${errorMessage}`);
       }
     } finally {
       setLoading(false);
@@ -93,40 +114,6 @@ export function WorkspaceCreateForm({ onSuccess, onCancel }: WorkspaceCreateForm
     }
   };
 
-  // Issue #276: Show error page if limit reached
-  if (isLimitReached) {
-    return (
-      <div className="max-w-2xl mx-auto">
-        <Card>
-          <CardHeader>
-            <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-red-100 dark:bg-red-900">
-                <Building2 className="h-6 w-6 text-red-600 dark:text-red-400" />
-              </div>
-              <div>
-                <CardTitle>{t('workspaceLimitReached', { limit: MAX_WORKSPACES })}</CardTitle>
-                <CardDescription>
-                  {t('currentlyOwning', { count: ownedWorkspaces.length })}
-                </CardDescription>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              <p className="text-sm text-slate-600 dark:text-slate-400">
-                {t('deleteExistingToCreate')}
-              </p>
-              <Button variant="outline" onClick={handleCancel} className="flex items-center gap-2">
-                <ArrowLeft className="h-4 w-4" />
-                {tCommon('back')}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
-
   return (
     <div className="max-w-2xl mx-auto">
       <Card>
@@ -136,10 +123,8 @@ export function WorkspaceCreateForm({ onSuccess, onCancel }: WorkspaceCreateForm
               <Building2 className="h-6 w-6 text-blue-600 dark:text-blue-400" />
             </div>
             <div>
-              <CardTitle>{t('createWorkspace')}</CardTitle>
-              <CardDescription>
-                {t('settingsDesc')}
-              </CardDescription>
+              <CardTitle>{t("createWorkspace")}</CardTitle>
+              <CardDescription>{t("settingsDesc")}</CardDescription>
             </div>
           </div>
         </CardHeader>
@@ -153,29 +138,29 @@ export function WorkspaceCreateForm({ onSuccess, onCancel }: WorkspaceCreateForm
 
             {/* Workspace Name */}
             <div className="space-y-2">
-              <Label htmlFor="name">{t('workspaceName')} *</Label>
+              <Label htmlFor="name">{t("workspaceName")} *</Label>
               <Input
                 id="name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder={t('workspaceNamePlaceholder')}
+                placeholder={t("workspaceNamePlaceholder")}
                 required
                 disabled={loading}
               />
-              <p className="text-sm text-slate-500">{t('workspaceNameHelp')}</p>
+              <p className="text-sm text-slate-500">{t("workspaceNameHelp")}</p>
             </div>
 
             {/* Description */}
             <div className="space-y-2">
-              <Label htmlFor="description">{t('workspaceDesc')}</Label>
+              <Label htmlFor="description">{t("workspaceDesc")}</Label>
               <Input
                 id="description"
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                placeholder={t('descPlaceholder')}
+                placeholder={t("descPlaceholder")}
                 disabled={loading}
               />
-              <p className="text-sm text-slate-500">{t('descHelp')}</p>
+              <p className="text-sm text-slate-500">{t("descHelp")}</p>
             </div>
 
             {/* Actions */}
@@ -186,7 +171,7 @@ export function WorkspaceCreateForm({ onSuccess, onCancel }: WorkspaceCreateForm
                 className="flex items-center gap-2"
               >
                 {loading && <Loader2 className="h-4 w-4 animate-spin" />}
-                {loading ? t('creating') : t('createWorkspace')}
+                {loading ? t("creating") : t("createWorkspace")}
               </Button>
               <Button
                 type="button"
@@ -196,7 +181,7 @@ export function WorkspaceCreateForm({ onSuccess, onCancel }: WorkspaceCreateForm
                 className="flex items-center gap-2"
               >
                 <ArrowLeft className="h-4 w-4" />
-                {t('cancel')}
+                {t("cancel")}
               </Button>
             </div>
           </form>

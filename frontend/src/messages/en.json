@@ -1753,7 +1753,7 @@
     "sleepContextsWithAddon": "Includes +{addon} from extra_sleep_contexts addon",
     "sleepContextsTier": "Plan-tier limit (PRO required to enable Sleep Maintenance)",
     "ownedWorkspaces": "Owned Workspaces",
-    "ownedWorkspacesTier": "Plan-tier owned-workspace cap (joined workspaces are uncapped)"
+    "ownedWorkspacesTier": "Owned workspace cap (joined workspaces are uncapped)"
   },
   "memoryOverview": {
     "failedToLoad": "Failed to load memory overview",

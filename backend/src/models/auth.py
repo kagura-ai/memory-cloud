@@ -131,6 +131,15 @@ class User(Base):
         String(20), nullable=True
     )  # Issue #361: google, github
 
+    # Issue #675 (epic #674): per-user workspace slot bonus.
+    # Effective owned-workspace cap = 1 (base) + workspace_slot_bonus.
+    # Grandfathered for existing users by alembic e15_675 migration.
+    # Phase 1 (#674-A): admin sets manually. Phase 2 (separate epic):
+    # Stripe-driven slot purchases will increment/decrement this column.
+    workspace_slot_bonus: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
     # Relationships
     current_workspace: Mapped["Workspace | None"] = relationship(
         "Workspace", foreign_keys=[current_workspace_id]
@@ -140,6 +149,11 @@ class User(Base):
     __table_args__ = (
         CheckConstraint("role IN ('admin', 'user')", name="valid_role"),
         CheckConstraint("auth_method IN ('password', 'oauth')", name="valid_auth_method"),
+        # Issue #675: keep ORM CHECK in lockstep with alembic e15_675 so
+        # ``Base.metadata.create_all()``-built schemas (used by some tests)
+        # reject negative bonus values too. tests/test_schema_drift.py
+        # verifies the SQL text matches the migration's ADD CONSTRAINT.
+        CheckConstraint("workspace_slot_bonus >= 0", name="workspace_slot_bonus_nonneg"),
     )
 
     def __repr__(self) -> str:

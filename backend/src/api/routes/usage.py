@@ -137,7 +137,7 @@ class WorkspacesUsage(BaseModel):
     """
 
     used: int = Field(0, description="Owned workspaces (deleted_at IS NULL)")
-    limit: int = Field(0, description="Plan tier's max_owned_workspaces")
+    limit: int = Field(0, description="Effective cap: 1 (base) + users.workspace_slot_bonus (#675)")
     remaining: int = Field(0, description="max(0, limit - used)")
 
 
@@ -412,28 +412,27 @@ async def _build_sleep_contexts_usage(
 
 
 async def _build_workspaces_usage(db: AsyncSession, user_id: str) -> "WorkspacesUsage":
-    """Build the ``workspaces`` field of /usage/current (Issue #661).
+    """Build the ``workspaces`` field of /usage/current (#674 sub-A, #675).
 
-    User-level cap: ``get_user_workspace_summary`` returns the owned
-    count and the user's effective plan tier (highest tier across
-    owned workspaces; FREE when none owned) in a single SELECT. The
-    same helper is used by ``QuotaService.check_workspace_creation_allowed``
-    so the gate and the dashboard read consistent state.
+    User-level cap: ``get_user_workspace_cap_summary`` returns the
+    owned count and the user's ``workspace_slot_bonus`` in a single
+    SELECT (JOIN of users + workspaces). The same helper is used by
+    ``QuotaService.check_workspace_creation_allowed`` so the gate and
+    the dashboard read consistent state.
+
+    Effective cap = ``1 (base) + workspace_slot_bonus``.
 
     Always returns a populated ``WorkspacesUsage`` — the cap is
     user-scoped so there is no "no current workspace" null case here.
     """
-    from config.plan_tiers import get_plan_tier
-    from utils.plan_resolver import get_user_workspace_summary
+    from utils.plan_resolver import get_user_workspace_cap_summary
 
-    owned_count, user_plan = await get_user_workspace_summary(db, user_id)
-    plan_tier = get_plan_tier(user_plan)
-    limit = plan_tier.max_owned_workspaces
+    owned_count, cap = await get_user_workspace_cap_summary(db, user_id)
 
     return WorkspacesUsage(
         used=owned_count,
-        limit=limit,
-        remaining=max(0, limit - owned_count),
+        limit=cap,
+        remaining=max(0, cap - owned_count),
     )
 
 

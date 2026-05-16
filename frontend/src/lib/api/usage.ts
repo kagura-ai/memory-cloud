@@ -4,6 +4,8 @@
  * Issue #48: Usage statistics API types
  */
 
+import { apiClient } from "./base";
+
 export interface PlanLimits {
   plan_name: string;
   memory_limit: number;
@@ -39,12 +41,12 @@ export interface SleepContextsUsage {
 }
 
 /**
- * Owned-workspace cap usage (Issue #661).
+ * Owned-workspace cap usage (Issue #661 / #675).
  *
  * User-level: counts the caller's owned (`deleted_at IS NULL`) workspaces
- * against `PlanTier.max_owned_workspaces`. Populated unconditionally —
- * unlike `analysis` / `sleep_contexts`, this does not depend on the
- * caller's current workspace selection.
+ * against the effective cap `1 + users.workspace_slot_bonus`. Populated
+ * unconditionally — unlike `analysis` / `sleep_contexts`, this does not
+ * depend on the caller's current workspace selection.
  */
 export interface WorkspacesUsage {
   used: number;
@@ -107,4 +109,15 @@ export interface UsageBreakdownResponse {
   by_endpoint: EndpointUsage[];
   total_requests: number;
   period_days: number;
+}
+
+/**
+ * Fetch the caller's user-scoped current usage. Wraps the
+ * `/api/v1/usage/current` endpoint so the URL and response type are
+ * not duplicated at each call site. Returns the full envelope (plan +
+ * usage + per-metric warnings); read ``response.usage.workspaces.limit``
+ * for the workspace cap, etc.
+ */
+export async function getCurrentUsage(): Promise<UsageCurrentResponse> {
+  return apiClient.get<UsageCurrentResponse>("/api/v1/usage/current");
 }

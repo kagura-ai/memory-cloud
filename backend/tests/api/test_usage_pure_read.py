@@ -53,8 +53,12 @@ def _mock_db_with_plan_lookup_returning(plan):
     SQLAlchemy patterns used by the handler:
     - ``result.scalar_one_or_none()`` for the UserPlan SELECT.
     - ``result.scalar()`` for ``count(...)`` queries.
+    - ``result.one_or_none()`` returning a Row with
+      ``owned_count`` and ``workspace_slot_bonus`` attributes for the
+      workspace cap helper (Issue #675's
+      ``get_user_workspace_cap_summary`` JOIN).
 
-    The same Result-shaped mock satisfies both because both methods are
+    The same Result-shaped mock satisfies all three because each method is
     stubbed to return the values the handler expects.
     """
     db = MagicMock()
@@ -66,6 +70,15 @@ def _mock_db_with_plan_lookup_returning(plan):
     count_result = MagicMock()
     count_result.scalar_one_or_none.return_value = None
     count_result.scalar.return_value = 0
+
+    # Stand-in row for the cap-summary helper's JOIN: zero owned workspaces,
+    # zero bonus → effective cap = 1 (base). Setting this on the same shared
+    # ``count_result`` lets any subsequent execute() in the chain satisfy the
+    # cap-summary call without disturbing the existing count-query consumers.
+    cap_row = MagicMock()
+    cap_row.owned_count = 0
+    cap_row.workspace_slot_bonus = 0
+    count_result.one_or_none.return_value = cap_row
 
     # First call returns the plan lookup; the headroom of 32 zero-count
     # results absorbs the 9-10 count queries the handler currently issues

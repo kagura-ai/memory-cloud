@@ -30,7 +30,35 @@ from sqlalchemy.engine.url import make_url
 
 from alembic import command
 
-from .test_alembic_migrations import _get_alembic_config, _reset_alembic_state
+from .test_alembic_migrations import (
+    _alembic_at_test_db,
+    _get_alembic_config,
+    _reset_alembic_state,
+)
+
+
+def _leave_db_at_head() -> None:
+    """Restore the test DB to alembic head after a partial-revision test.
+
+    These tests intentionally downgrade to ``a96`` mid-test and re-upgrade
+    to ``a97`` for the round-trip assertion. Without this restore, the DB
+    is left at ``a97`` (NOT at head), which breaks any subsequent
+    integration test whose ORM model has columns from migrations beyond
+    ``a97`` — e.g. ``test_role_manager_email_sync`` fails when it tries
+    to insert a ``users`` row that references ``workspace_slot_bonus``
+    (added in ``e15_675``) on the still-at-``a97`` schema.
+
+    The audit-failure test leaves the DB mid-migration (alembic's
+    transactional DDL rolls the partial migration back, but the prior
+    state may be unusual). Reset to a clean baseline first via
+    ``_reset_alembic_state()`` before upgrading, so this helper is
+    safe to call from any test's finally block regardless of how the
+    test exited.
+    """
+    _reset_alembic_state()
+    with _alembic_at_test_db():
+        command.upgrade(_get_alembic_config(), "head")
+
 
 _A96 = "a96_ctx_resource_id_unique"
 _A97 = "a97_resources_entity"
@@ -293,6 +321,7 @@ class TestA97ResourcesMigration:
                 )
         finally:
             engine.dispose()
+            _leave_db_at_head()
 
     def test_a97_audit_fails_on_orphan(self) -> None:
         """Satellite rows with no matching context must abort the migration.
@@ -337,6 +366,7 @@ class TestA97ResourcesMigration:
                 command.upgrade(config, _A97)
         finally:
             engine.dispose()
+            _leave_db_at_head()
 
     def test_a97_legacy_writes_without_resource_pk_still_work(self) -> None:
         """Phase 1 invariant: pre-a97 writer paths that only set
@@ -431,3 +461,4 @@ class TestA97ResourcesMigration:
                 )
         finally:
             engine.dispose()
+            _leave_db_at_head()

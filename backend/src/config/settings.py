@@ -321,26 +321,17 @@ class Settings(BaseSettings):
         default=None,
         description="Override PRO plan sleep-enabled contexts cap (Issue #560; default 3)",
     )
-    plan_free_max_owned_workspaces: int | None = Field(
-        default=None,
-        description="Override FREE plan owned-workspace cap (Issue #661; default 1)",
-    )
-    plan_basic_max_owned_workspaces: int | None = Field(
-        default=None,
-        description="Override BASIC plan owned-workspace cap (Issue #661; default 3)",
-    )
-    plan_pro_max_owned_workspaces: int | None = Field(
-        default=None,
-        description="Override PRO plan owned-workspace cap (Issue #661; default 10)",
-    )
+    # Issue #661's ``plan_*_max_owned_workspaces`` env overrides were removed
+    # in #675 — the cap is now per-user (``users.workspace_slot_bonus``) and
+    # no longer depends on the plan tier.
     enforce_workspace_cap: bool = Field(
         default=False,
         description=(
-            "Issue #661 rollout gate. When False (default), workspace creation "
-            "is allowed unconditionally but a structured warn log is emitted "
-            "whenever a user is over their tier's max_owned_workspaces — used "
-            "to surface affected accounts before enforcement. Flip to True "
-            "after the email-outreach cleanup window."
+            "Issue #661 / #675 rollout gate. When False (default), workspace "
+            "creation is allowed unconditionally but a structured warn log "
+            "is emitted whenever a user is over their effective cap "
+            "(1 + workspace_slot_bonus). Flip to True once the cleanup "
+            "window closes — tracked in #677 (sub-C: TOCTOU + enforce flip)."
         ),
     )
 
