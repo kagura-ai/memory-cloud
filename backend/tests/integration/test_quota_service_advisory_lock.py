@@ -293,8 +293,12 @@ class TestLockWaitMsReflectsContention:
         async def hold_lock() -> None:
             async with session_maker() as holder:
                 async with holder.begin():
+                    # Mirror the production helper's hash function so the
+                    # holder and waiter contend on the SAME advisory key.
                     await holder.execute(
-                        text("SELECT pg_advisory_xact_lock(hashtext(:k))").bindparams(k=lock_key)
+                        text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))").bindparams(
+                            k=lock_key
+                        )
                     )
                     holder_acquired.set()
                     await asyncio.sleep(HOLD_SEC)

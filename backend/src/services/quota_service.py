@@ -314,6 +314,18 @@ class QuotaService:
                 raise QuotaExceededError(error)
             return False, error
 
+        # Info-level success log so the 7-day observation window can
+        # measure lock_wait_ms p99 across normal (under-cap) creates,
+        # not just denials — without this, contention is invisible
+        # until users hit the cap (PR #686 loop 4 review).
+        logger.info(
+            "workspace_create_gate_passed",
+            user_id=user_id,
+            current_owned_workspaces=workspace_count,
+            max_owned_workspaces=cap,
+            lock_wait_ms=lock_wait_ms,
+            enforced=settings.enforce_workspace_cap,
+        )
         return True, None
 
     async def _acquire_workspace_create_lock(self, user_id: str) -> float:
@@ -331,6 +343,23 @@ class QuotaService:
         timeout Postgres raises SQLSTATE 55P03 (``lock_not_available``);
         the caller maps that to fail-closed vs fail-open via
         ``settings.enforce_workspace_cap``.
+
+        ``hashtextextended(:key, 0)`` returns a 64-bit hash matching
+        the bigint signature of single-key ``pg_advisory_xact_lock``.
+        At 64 bits the birthday-paradox collision probability is
+        negligible (~2^32 users for 50%) — vs ``hashtext`` which is
+        32-bit and would collide at ~65k users, potentially causing
+        unrelated users to block each other under load (PR #686
+        loop 4 review).
+
+        Coverage note: this helper only serializes callers of
+        ``check_workspace_creation_allowed``. The auto-create paths
+        ``WorkspaceService.ensure_personal_workspace`` and
+        ``ContextService._ensure_personal_workspace`` insert personal
+        workspaces directly without going through this gate. Closing
+        the cap on those paths is tracked separately (out of scope
+        for #677, which is the user-initiated ``POST /workspaces``
+        gate).
 
         Args:
             user_id: User ID (OAuth ``sub`` claim).
@@ -362,7 +391,9 @@ class QuotaService:
         acquired = False
         try:
             await self.db.execute(
-                text("SELECT pg_advisory_xact_lock(hashtext(:key))").bindparams(key=lock_key)
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))").bindparams(
+                    key=lock_key
+                )
             )
             acquired = True
         finally:
