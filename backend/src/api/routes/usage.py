@@ -427,13 +427,12 @@ async def _build_workspaces_usage(db: AsyncSession, user_id: str) -> "Workspaces
     """
     from utils.plan_resolver import get_user_workspace_cap_summary
 
-    owned_count, slot_bonus = await get_user_workspace_cap_summary(db, user_id)
-    limit = 1 + slot_bonus
+    owned_count, cap = await get_user_workspace_cap_summary(db, user_id)
 
     return WorkspacesUsage(
         used=owned_count,
-        limit=limit,
-        remaining=max(0, limit - owned_count),
+        limit=cap,
+        remaining=max(0, cap - owned_count),
     )
 
 

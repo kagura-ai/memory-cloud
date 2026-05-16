@@ -2,12 +2,13 @@
 
 Pure unit tests — no DB, no live settings. The single ``execute()``
 call inside ``get_user_workspace_cap_summary`` is mocked so each
-test fully owns the ``(owned_count, workspace_slot_bonus)`` output.
+test fully owns the ``(owned_count, cap)`` output.
 
 The mock simulates ``result.one_or_none()`` on the JOIN query: it
 returns a Row-shaped object whose attribute access via
 ``row.owned_count`` and ``row.workspace_slot_bonus`` matches the
-SQLAlchemy result interface used in the helper.
+SQLAlchemy result interface used in the helper. The helper then
+computes ``cap = 1 + workspace_slot_bonus`` internally.
 """
 
 from unittest.mock import AsyncMock, MagicMock
@@ -38,50 +39,50 @@ def _mock_db(owned_count: int | None, slot_bonus: int = 0):
 
 
 @pytest.mark.asyncio
-async def test_no_workspaces_no_bonus_returns_zero_zero():
-    """Brand-new user: 0 owned, 0 bonus → (0, 0). Effective cap = 1."""
+async def test_no_workspaces_no_bonus_returns_base_cap():
+    """Brand-new user: 0 owned, 0 bonus → cap = 1 (base)."""
     db = _mock_db(owned_count=0, slot_bonus=0)
-    count, bonus = await get_user_workspace_cap_summary(db, "user-1")
+    count, cap = await get_user_workspace_cap_summary(db, "user-1")
     assert count == 0
-    assert bonus == 0
+    assert cap == 1
 
 
 @pytest.mark.asyncio
-async def test_one_owned_no_bonus():
-    """Base case: 1 owned workspace, 0 bonus → cap 1, at cap."""
+async def test_one_owned_no_bonus_at_cap():
+    """Base case: 1 owned workspace, 0 bonus → count == cap."""
     db = _mock_db(owned_count=1, slot_bonus=0)
-    count, bonus = await get_user_workspace_cap_summary(db, "user-1")
+    count, cap = await get_user_workspace_cap_summary(db, "user-1")
     assert count == 1
-    assert bonus == 0
+    assert cap == 1
 
 
 @pytest.mark.asyncio
-async def test_grandfathered_five_owned_bonus_four():
-    """Grandfather case from migration: 5 owned, bonus=4 → cap 5, at cap."""
+async def test_grandfathered_five_owned_bonus_four_at_cap():
+    """Grandfather case: 5 owned, bonus=4 → cap = 5, at cap."""
     db = _mock_db(owned_count=5, slot_bonus=4)
-    count, bonus = await get_user_workspace_cap_summary(db, "user-1")
+    count, cap = await get_user_workspace_cap_summary(db, "user-1")
     assert count == 5
-    assert bonus == 4
+    assert cap == 5
 
 
 @pytest.mark.asyncio
 async def test_admin_granted_bonus_no_workspaces_yet():
     """Phase 1 admin grant before user creates: 0 owned, 3 bonus → cap 4."""
     db = _mock_db(owned_count=0, slot_bonus=3)
-    count, bonus = await get_user_workspace_cap_summary(db, "user-1")
+    count, cap = await get_user_workspace_cap_summary(db, "user-1")
     assert count == 0
-    assert bonus == 3
+    assert cap == 4
 
 
 @pytest.mark.asyncio
-async def test_missing_user_returns_zero_zero():
-    """Defensive: helper returns (0, 0) if the User row is not found.
+async def test_missing_user_returns_zero_owned_base_cap():
+    """Defensive: helper returns ``(0, 1)`` if the User row is not found.
 
     Theoretically unreachable because the caller has already passed
     authentication, but a fail-safe default avoids crashing the gate
     or the dashboard if something upstream returns a stale user_id.
     """
     db = _mock_db(owned_count=None)
-    count, bonus = await get_user_workspace_cap_summary(db, "user-1")
+    count, cap = await get_user_workspace_cap_summary(db, "user-1")
     assert count == 0
-    assert bonus == 0
+    assert cap == 1

@@ -246,22 +246,20 @@ class QuotaService:
         # plus the ``enforce_workspace_cap=True`` flip) is tracked in
         # #674 sub-C (#677). Until then the gate is log-only (see flag
         # handling below) so the race has no user-visible effect.
-        workspace_count, slot_bonus = await get_user_workspace_cap_summary(self.db, user_id)
-        max_owned = 1 + slot_bonus
+        workspace_count, cap = await get_user_workspace_cap_summary(self.db, user_id)
 
-        if workspace_count >= max_owned:
+        if workspace_count >= cap:
             error = (
                 f"Workspace limit reached. "
                 f"You currently own {workspace_count} workspace(s) "
-                f"(cap: {max_owned}). You can still join other workspaces "
+                f"(cap: {cap}). You can still join other workspaces "
                 f"as a member via invite."
             )
             logger.warning(
                 "workspace_creation_denied",
                 user_id=user_id,
                 current_owned_workspaces=workspace_count,
-                max_owned_workspaces=max_owned,
-                workspace_slot_bonus=slot_bonus,
+                max_owned_workspaces=cap,
                 enforced=settings.enforce_workspace_cap,
             )
 

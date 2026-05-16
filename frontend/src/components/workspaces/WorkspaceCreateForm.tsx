@@ -7,14 +7,13 @@
  * Used in workspace/settings page when ?create=true is set.
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useToast } from "@/hooks/use-toast";
-import { apiClient } from "@/lib/api/base";
 import { createWorkspace, Workspace } from "@/lib/api/workspaces";
-import { CurrentUsage } from "@/lib/api/usage";
+import { getCurrentUsage } from "@/lib/api/usage";
 import {
   Card,
   CardHeader,
@@ -53,8 +52,9 @@ export function WorkspaceCreateForm({
   // the source of truth and rejects over-cap submits via the same
   // "Workspace limit reached" error path.
   const [workspaceLimit, setWorkspaceLimit] = useState<number | null>(null);
-  const ownedWorkspaces = workspaces.filter(
-    (w) => w.current_user_role === "owner",
+  const ownedWorkspaces = useMemo(
+    () => workspaces.filter((w) => w.current_user_role === "owner"),
+    [workspaces],
   );
   // Guard against ``workspaceLimit <= 0`` (corrupt response): a literal
   // ``limit: 0`` from the API would otherwise make ``length >= 0`` true
@@ -68,10 +68,9 @@ export function WorkspaceCreateForm({
 
   useEffect(() => {
     let cancelled = false;
-    apiClient
-      .get<CurrentUsage>("/api/v1/usage/current")
-      .then((usage) => {
-        if (!cancelled) setWorkspaceLimit(usage.workspaces.limit);
+    getCurrentUsage()
+      .then((response) => {
+        if (!cancelled) setWorkspaceLimit(response.usage.workspaces.limit);
       })
       .catch(() => {
         // Network/auth failure: leave permissive; backend gate authoritative.
@@ -112,11 +111,7 @@ export function WorkspaceCreateForm({
       const errorMessage =
         err instanceof Error ? err.message : t("failedToCreateWorkspace");
 
-      // Parse error and show user-friendly message
-      if (
-        errorMessage.includes("Workspace limit reached") ||
-        errorMessage.includes("limit")
-      ) {
+      if (errorMessage.includes("Workspace limit reached")) {
         if (workspaceLimit !== null && workspaceLimit > 0) {
           setError(t("workspaceLimitReached", { limit: workspaceLimit }));
         } else {

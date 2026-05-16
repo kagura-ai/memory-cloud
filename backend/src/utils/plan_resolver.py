@@ -1,8 +1,8 @@
 """User-level workspace-cap resolution (#674 sub-A, #675).
 
-Returns ``(owned_count, workspace_slot_bonus)`` for a user so callers
-can compute the effective cap as ``1 + workspace_slot_bonus`` and
-compare it against ``owned_count`` (#674's slot pivot).
+Returns ``(owned_count, cap)`` for a user where
+``cap = 1 (base) + users.workspace_slot_bonus``. The formula is held
+inside this module so callers don't compute it themselves.
 
 Why a single SELECT:
     Both ``QuotaService.check_workspace_creation_allowed`` (gate) and
@@ -14,15 +14,15 @@ Why a single SELECT:
 
 Soft-delete:
     Workspaces with ``deleted_at IS NOT NULL`` are excluded from the
-    count — this matches the runtime predicate the migration uses and
-    keeps the gate from blocking owners whose remaining workspaces are
-    tombstones.
+    count — matches the runtime predicate the migration uses and
+    keeps the gate from blocking owners whose remaining workspaces
+    are tombstones.
 
 Missing user (defensive):
-    If the User row is not found, returns ``(0, 0)``. The caller has
-    already passed authentication, so this branch is theoretically
-    unreachable; treating it as "no quota, no bonus" fails safely
-    rather than crashing.
+    If the User row is not found, returns ``(0, _BASE_CAP)``. The
+    caller has already passed authentication, so this branch is
+    theoretically unreachable; treating it as "no usage, base cap"
+    fails safely rather than crashing.
 """
 
 from sqlalchemy import func, select
@@ -30,17 +30,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import User, Workspace
 
+# Every user gets one workspace for free, independent of plan tier or
+# slot purchases. Held here so the cap formula is not duplicated at
+# call sites; callers receive ``cap`` directly from the helper.
+_BASE_CAP = 1
+
 
 async def get_user_workspace_cap_summary(db: AsyncSession, user_id: str) -> tuple[int, int]:
-    """Return ``(owned_count, workspace_slot_bonus)`` for the user.
+    """Return ``(owned_count, cap)`` where ``cap = 1 + workspace_slot_bonus``.
 
     Args:
         db: Async database session.
         user_id: OAuth ``sub`` claim (string), NOT the integer ``users.id`` PK.
 
     Returns:
-        Tuple of ``(owned non-deleted workspace count, slot bonus column value)``.
-        Returns ``(0, 0)`` if the user row does not exist.
+        Tuple of ``(owned non-deleted workspace count, effective cap)``.
+        Returns ``(0, _BASE_CAP)`` if the user row does not exist.
     """
     # LEFT OUTER JOIN so a user with zero owned workspaces still produces
     # a row (with count = 0); INNER JOIN would silently drop them.
@@ -64,5 +69,5 @@ async def get_user_workspace_cap_summary(db: AsyncSession, user_id: str) -> tupl
     )
     row = (await db.execute(stmt)).one_or_none()
     if row is None:
-        return (0, 0)
-    return (row.owned_count, row.workspace_slot_bonus)
+        return (0, _BASE_CAP)
+    return (row.owned_count, _BASE_CAP + row.workspace_slot_bonus)
