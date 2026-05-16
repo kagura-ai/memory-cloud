@@ -19,7 +19,7 @@ Soft-delete:
     are tombstones.
 
 Missing user (defensive):
-    If the User row is not found, returns ``(0, _BASE_CAP)``. The
+    If the User row is not found, returns ``(0, BASE_CAP)``. The
     caller has already passed authentication, so this branch is
     theoretically unreachable; treating it as "no usage, base cap"
     fails safely rather than crashing.
@@ -33,7 +33,7 @@ from models.auth import User, Workspace
 # Every user gets one workspace for free, independent of plan tier or
 # slot purchases. Held here so the cap formula is not duplicated at
 # call sites; callers receive ``cap`` directly from the helper.
-_BASE_CAP = 1
+BASE_CAP = 1
 
 
 async def get_user_workspace_cap_summary(db: AsyncSession, user_id: str) -> tuple[int, int]:
@@ -45,7 +45,7 @@ async def get_user_workspace_cap_summary(db: AsyncSession, user_id: str) -> tupl
 
     Returns:
         Tuple of ``(owned non-deleted workspace count, effective cap)``.
-        Returns ``(0, _BASE_CAP)`` if the user row does not exist.
+        Returns ``(0, BASE_CAP)`` if the user row does not exist.
     """
     # LEFT OUTER JOIN so a user with zero owned workspaces still produces
     # a row (with count = 0); INNER JOIN would silently drop them.
@@ -69,5 +69,5 @@ async def get_user_workspace_cap_summary(db: AsyncSession, user_id: str) -> tupl
     )
     row = (await db.execute(stmt)).one_or_none()
     if row is None:
-        return (0, _BASE_CAP)
-    return (row.owned_count, _BASE_CAP + row.workspace_slot_bonus)
+        return (0, BASE_CAP)
+    return (row.owned_count, BASE_CAP + row.workspace_slot_bonus)
