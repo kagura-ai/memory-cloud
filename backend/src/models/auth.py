@@ -131,6 +131,15 @@ class User(Base):
         String(20), nullable=True
     )  # Issue #361: google, github
 
+    # Issue #675 (epic #674): per-user workspace slot bonus.
+    # Effective owned-workspace cap = 1 (base) + workspace_slot_bonus.
+    # Grandfathered for existing users by alembic e15_675 migration.
+    # Phase 1 (#674-A): admin sets manually. Phase 2 (separate epic):
+    # Stripe-driven slot purchases will increment/decrement this column.
+    workspace_slot_bonus: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
     # Relationships
     current_workspace: Mapped["Workspace | None"] = relationship(
         "Workspace", foreign_keys=[current_workspace_id]
