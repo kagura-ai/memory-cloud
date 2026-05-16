@@ -7,13 +7,12 @@
  * Used in workspace/settings page when ?create=true is set.
  */
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useToast } from "@/hooks/use-toast";
 import { createWorkspace, Workspace } from "@/lib/api/workspaces";
-import { getCurrentUsage } from "@/lib/api/usage";
 import {
   Card,
   CardHeader,
@@ -46,31 +45,14 @@ export function WorkspaceCreateForm({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Issue #675 (epic #674) sub-A: cap is per-user (1 + workspace_slot_bonus),
-  // fetched from /api/v1/usage/current. The value is used ONLY to localize
-  // the over-cap error message after a backend rejection — we do NOT render
-  // a pre-submit hard-block UI. Sub-A's promise is "backend authoritative,
-  // log-only" (``enforce_workspace_cap=False`` until sub-C / #677 flips it),
-  // so any frontend pre-block would pre-empt that promise and lock users
-  // out before the rollout flag flips. After sub-C ships, the backend
-  // rejection will surface here via the catch block below.
-  const [workspaceLimit, setWorkspaceLimit] = useState<number | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    getCurrentUsage()
-      .then((response) => {
-        if (!cancelled) setWorkspaceLimit(response.usage.workspaces.limit);
-      })
-      .catch(() => {
-        // Network/auth failure: leave null; we will fall back to the raw
-        // backend error message in the catch block below if the submit
-        // happens to be rejected.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // Issue #675 (epic #674) sub-A: there is no pre-submit cap fetch or
+  // hard-block UI on this form. The over-cap path surfaces the backend's
+  // authoritative error message verbatim in the catch block below — it
+  // already includes live ``current owned N (cap: M)`` data which a
+  // mount-time cached value cannot reliably match (cap can change between
+  // mount and submit via sub-B admin grants, ownership churn, etc.).
+  // Sub-A's promise is "backend authoritative, log-only"
+  // (``enforce_workspace_cap=False`` until sub-C / #677 flips it).
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -104,14 +86,12 @@ export function WorkspaceCreateForm({
         err instanceof Error ? err.message : t("failedToCreateWorkspace");
 
       if (errorMessage.includes("Workspace limit reached")) {
-        if (workspaceLimit !== null && workspaceLimit > 0) {
-          setError(t("workspaceLimitReached", { limit: workspaceLimit }));
-        } else {
-          // Limit unknown (fetch failed or corrupt response) — show the
-          // backend's authoritative message rather than a bogus i18n
-          // substitution with a placeholder count.
-          setError(errorMessage);
-        }
+        // Surface the backend's authoritative message verbatim — it
+        // includes live ``owned N (cap: M)`` data that a cached frontend
+        // value cannot reliably match. The trade-off is that ja users see
+        // the English backend message, but the alternative (cached cap +
+        // i18n) showed stale numbers in real scenarios (Copilot review #5).
+        setError(errorMessage);
       } else if (
         errorMessage.includes("validation") ||
         errorMessage.includes("Invalid")
