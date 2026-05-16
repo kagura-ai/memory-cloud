@@ -34,12 +34,23 @@ PRE_E15_REV = "e14_655_signup_allowlist_provider"
 
 
 def _seed_user(conn, user_id: str | None = None) -> str:
-    """Insert a minimal user row; return the user_id (OAuth sub)."""
+    """Insert a minimal user row; return the user_id (OAuth sub).
+
+    ``users.timezone``, ``users.locale``, and ``users.is_initial_admin`` are
+    NOT NULL columns without server defaults in the baseline schema
+    (see ``157247e0df86_baseline_create_all_tables_from_models.py``). The
+    raw-SQL INSERT here is below the ORM layer's Python-side defaults, so
+    omitting them would raise a NOT NULL violation before the e15 upgrade
+    runs. Supply explicit values matching the model's defaults
+    (``timezone='UTC'``, ``locale='en'``, ``is_initial_admin=false``);
+    ``auth_method`` is omitted because it has ``server_default='oauth'``.
+    """
     uid = user_id or f"u-{uuid.uuid4().hex[:12]}"
     conn.execute(
         text(
-            "INSERT INTO users (email, user_id, role, auth_method) "
-            "VALUES (:email, :uid, 'user', 'oauth')"
+            "INSERT INTO users "
+            "(email, user_id, role, timezone, locale, is_initial_admin) "
+            "VALUES (:email, :uid, 'user', 'UTC', 'en', false)"
         ),
         {"email": f"{uid}@test.example", "uid": uid},
     )

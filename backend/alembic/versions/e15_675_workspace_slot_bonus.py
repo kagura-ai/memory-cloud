@@ -66,7 +66,11 @@ depends_on = None
 def upgrade() -> None:
     """Add workspace_slot_bonus to users, grandfather existing owners."""
     # 1. Add column idempotently. INTEGER NOT NULL DEFAULT 0 is metadata-only
-    #    in PG >= 11 (no table rewrite).
+    #    in PG >= 11 (no table rewrite). CHECK CONSTRAINT enforces non-negative
+    #    values at the DB level — defense in depth against a future admin grant
+    #    API (#676) that fails to validate ``bonus >= 0``. Without this guard,
+    #    a negative bonus would compute ``cap = 1 + (-N) <= 0`` and lock the
+    #    user out of all workspace creation.
     op.execute(
         """
         DO $$
@@ -77,7 +81,8 @@ def upgrade() -> None:
                   AND column_name = 'workspace_slot_bonus'
             ) THEN
                 ALTER TABLE users
-                  ADD COLUMN workspace_slot_bonus INTEGER NOT NULL DEFAULT 0;
+                  ADD COLUMN workspace_slot_bonus INTEGER NOT NULL DEFAULT 0
+                    CONSTRAINT workspace_slot_bonus_nonneg CHECK (workspace_slot_bonus >= 0);
             END IF;
         END $$;
         """
