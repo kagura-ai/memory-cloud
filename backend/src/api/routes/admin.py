@@ -153,7 +153,10 @@ async def list_users(
         if plan:
             if not workspace_id:  # If not already joined
                 stmt = stmt.join(WorkspaceMember)
-            stmt = stmt.join(Workspace).where(Workspace.plan_name == plan)
+            stmt = stmt.join(Workspace).where(
+                Workspace.plan_name == plan,
+                Workspace.deleted_at.is_(None),  # #681: exclude soft-deleted
+            )
 
         # Get total count (with filters applied)
         count_stmt = select(func.count()).select_from(stmt.subquery())
