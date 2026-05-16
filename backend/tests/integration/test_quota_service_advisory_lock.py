@@ -35,6 +35,7 @@ contract.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -77,7 +78,7 @@ async def _count_owned(session: AsyncSession, user_id: str) -> int:
 
 
 @pytest_asyncio.fixture(loop_scope="session")
-async def user_with_cap_3(db_session: AsyncSession):
+async def user_with_cap_3(db_session: AsyncSession) -> AsyncIterator[str]:
     """Create a user with ``workspace_slot_bonus = 2`` (cap = 3) and no workspaces.
 
     Cleans up workspaces and the user after the test so repeated runs of
@@ -188,8 +189,8 @@ class TestAdvisoryLockNegativeControl:
     async def test_count_exceeds_cap_when_lock_is_noop(
         self, async_engine, user_with_cap_3, enforce_cap_on, monkeypatch
     ):
-        async def _noop(self_, user_id: str) -> int:
-            return 0
+        async def _noop(self_, user_id: str) -> float:
+            return 0.0
 
         monkeypatch.setattr(
             QuotaService,
@@ -261,8 +262,11 @@ class TestLockWaitMsRecorded:
             f"(all calls: {warning_mock.call_args_list!r})"
         )
 
+        # ``lock_wait_ms`` is now a float to preserve sub-millisecond precision —
+        # the int form would have truncated fast lock acquires to 0 even when
+        # the lock genuinely contended for fractions of a millisecond.
         wait_ms_values = [kwargs.get("lock_wait_ms") for kwargs in denied_events]
-        positive_waits = [v for v in wait_ms_values if isinstance(v, int) and v > 0]
+        positive_waits = [v for v in wait_ms_values if isinstance(v, (int, float)) and v > 0]
         assert positive_waits, (
             f"expected at least one denied event with lock_wait_ms > 0 under "
             f"{_PARALLEL_ATTEMPTS}-way parallel load. "

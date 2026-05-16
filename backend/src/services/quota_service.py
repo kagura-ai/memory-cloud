@@ -9,6 +9,7 @@ Responsibilities:
 - Provide quota status and warnings
 """
 
+import time
 from typing import Any
 from uuid import UUID
 
@@ -245,16 +246,19 @@ class QuotaService:
 
         # Issue #677 (sub-C): acquire a per-user advisory lock so the
         # subsequent count/cap read and the caller's workspace insert
-        # serialize per user_id. Hybrid fail policy applied on errors:
-        # deny when enforced (cap is the safety invariant), allow+log
-        # when not enforced (log-only must not produce false denials).
-        lock_wait_ms: int | None = None
+        # serialize per user_id. On lock_timeout / DB error the
+        # transaction is in error state and MUST be rolled back before
+        # any further statement — Postgres rejects everything until then.
+        # Hybrid fail policy: deny when enforced (cap is the safety
+        # invariant), allow when not enforced (log-only must not
+        # produce false denials).
+        lock_wait_ms: float | None = None
         try:
             lock_wait_ms = await self._acquire_workspace_create_lock(user_id)
         except OperationalError as exc:
             # SQLSTATE 55P03 = lock_not_available (SET LOCAL lock_timeout
-            # fired). Other DB errors get the same policy treatment but
-            # are logged with a distinct reason for triage.
+            # fired). asyncpg surfaces it as ``sqlstate``; psycopg2 as
+            # ``pgcode`` — both forms appear on different driver versions.
             sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
             reason = "lock_timeout" if sqlstate == "55P03" else "lock_error"
             logger.warning(
@@ -264,13 +268,17 @@ class QuotaService:
                 sqlstate=sqlstate,
                 enforced=settings.enforce_workspace_cap,
             )
+            # The session is poisoned until rollback — issue it before
+            # we either deny or fall back to allow.
+            await self.db.rollback()
             if settings.enforce_workspace_cap:
                 error = "Workspace creation temporarily unavailable. Please retry in a moment."
                 if raise_on_denied:
                     raise QuotaExceededError(error) from exc
                 return False, error
-            # enforce=False: fall through to the cap read — log-only
-            # mode must not generate false denials on lock errors.
+            # enforce=False: log-only mode must not generate false
+            # denials on infrastructure errors — allow the create.
+            return True, None
 
         # Issue #675 (epic #674 sub-A): cap = 1 (base) + users.workspace_slot_bonus.
         # The plan_resolver helper returns both numbers in a single SELECT
@@ -305,7 +313,7 @@ class QuotaService:
 
         return True, None
 
-    async def _acquire_workspace_create_lock(self, user_id: str) -> int:
+    async def _acquire_workspace_create_lock(self, user_id: str) -> float:
         """Acquire a per-user advisory lock for workspace-creation cap gating.
 
         Issue #677 (sub-C): serializes concurrent create paths for the
@@ -314,11 +322,6 @@ class QuotaService:
         it on commit/rollback, so the calling transaction must hold both
         the cap check and the insert for the lock to fully serialize the
         read-then-write.
-
-        ``hashtext()`` collisions across user_ids are theoretical and
-        only cause two unrelated users' create paths to briefly
-        serialize; the cap safety property holds regardless because
-        each user's cap is read under its own ``SELECT``.
 
         ``SET LOCAL lock_timeout = '5s'`` keeps a pathologically long
         peer transaction from stalling our worker indefinitely. On
@@ -330,10 +333,11 @@ class QuotaService:
             user_id: User ID (OAuth ``sub`` claim).
 
         Returns:
-            Elapsed wait time in milliseconds.
+            Elapsed wait time in milliseconds (float — sub-millisecond
+            precision matters when distinguishing "fast path, no
+            contention" from "lock granted immediately after queue
+            drain").
         """
-        import time
-
         lock_key = f"workspace_create:{user_id}"
         start = time.monotonic()
 
@@ -344,7 +348,7 @@ class QuotaService:
             text("SELECT pg_advisory_xact_lock(hashtext(:key))").bindparams(key=lock_key)
         )
 
-        return int((time.monotonic() - start) * 1000)
+        return (time.monotonic() - start) * 1000
 
     async def check_context_creation_allowed(
         self,

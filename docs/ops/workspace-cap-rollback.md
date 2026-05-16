@@ -130,25 +130,41 @@ SELECT
 
 ### Step 4.3. 条件付き UPDATE で bonus を増やす
 
+`<user_id>` と期待値 `<N>` は Step 4.1/4.2 で確定したリテラル値に置き換える。`psql --variable` で安全に変数渡しする例も併記。**シェル文字列補間（`"... = $BONUS ..."`）は絶対に使わない** — placeholder と SQL injection 経路を混同しないため。
+
 ```sql
 -- 期待値 N を確定したうえで、現在値が N 未満の場合のみ更新
+-- <user_id>, <N> はリテラルに置換すること
 UPDATE users
-   SET workspace_slot_bonus = :expected_bonus
+   SET workspace_slot_bonus = <N>
  WHERE user_id = '<user_id>'
-   AND workspace_slot_bonus < :expected_bonus;
+   AND workspace_slot_bonus < <N>;
 
 -- 更新行数の確認
 -- 1 row affected: 適用済み
 -- 0 rows affected: 既に >= 期待値（追加調整不要、Step 4.2 を再確認）
 ```
 
+psql で実行する場合の具体例（`<user_id> = u_abc12345`, `<N> = 3` のケース）:
+
+```bash
+# 文字列補間ではなく psql の :'var' / :var 記法で渡す（SQL injection 経路を作らない）
+psql "$PROD_DSN_READWRITE" \
+  --variable=uid="u_abc12345" \
+  --variable=n=3 \
+  -c "UPDATE users SET workspace_slot_bonus = :n
+        WHERE user_id = :'uid' AND workspace_slot_bonus < :n;"
+```
+
 > 🛡️ **条件付き UPDATE を使う理由**: 単純な `SET workspace_slot_bonus = N` だと、誰かが既に高い値を入れていた場合に **意図せず下げてしまう**。`workspace_slot_bonus < N` の WHERE 句で「下げない」を保証する。降格が必要な場面は本 runbook の対象外（別 admin 操作）。
+
+> ⚠️ **DSN の取り違え**: `$PROD_DSN_READWRITE` は production 本番用。stage / dev と読み違えると別環境の user に bonus 付与してしまう。`SELECT current_database();` を先頭に置いて目視確認を必須にする運用が望ましい。
 
 ### Step 4.4. 検証
 
 ```sql
 SELECT user_id, workspace_slot_bonus FROM users WHERE user_id = '<user_id>';
--- 期待: workspace_slot_bonus = :expected_bonus
+-- 期待: workspace_slot_bonus = <N>
 ```
 
 ユーザ側で workspace 作成が成功することも併せて確認。
