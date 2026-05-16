@@ -75,16 +75,16 @@ async def user_with_mixed_workspaces(db_session: AsyncSession) -> dict:
 
 # Route-function defaults that mirror the FastAPI Query(...) defaults so we can
 # invoke the handlers directly without the dependency-injection machinery.
-_LIST_DEFAULTS = dict(
-    limit=100,
-    offset=0,
-    include_workspaces=False,
-    search=None,
-    workspace_id=None,
-    role=None,
-    plan=None,
-    sort="created_at",
-)
+_LIST_DEFAULTS = {
+    "limit": 100,
+    "offset": 0,
+    "include_workspaces": False,
+    "search": None,
+    "workspace_id": None,
+    "role": None,
+    "plan": None,
+    "sort": "created_at",
+}
 
 
 class TestListUsersIncludeWorkspaces:
