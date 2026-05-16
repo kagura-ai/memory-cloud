@@ -336,18 +336,24 @@ class QuotaService:
             Elapsed wait time in milliseconds (float — sub-millisecond
             precision matters when distinguishing "fast path, no
             contention" from "lock granted immediately after queue
-            drain").
+            drain"). Measurement scope is the advisory-lock acquire
+            statement only — the preceding ``SET LOCAL`` round-trip is
+            excluded, so the value reflects time spent waiting for the
+            lock plus the single SELECT round-trip (typically <2 ms
+            without contention).
         """
         lock_key = f"workspace_create:{user_id}"
-        start = time.monotonic()
 
         # SET LOCAL reverts on commit/rollback so this does not bleed
         # into other operations on the same connection after the gate.
+        # Excluded from the timing measurement below so lock_wait_ms
+        # reflects only the advisory-lock acquire (PR #686 review).
         await self.db.execute(text("SET LOCAL lock_timeout = '5s'"))
+
+        start = time.monotonic()
         await self.db.execute(
             text("SELECT pg_advisory_xact_lock(hashtext(:key))").bindparams(key=lock_key)
         )
-
         return (time.monotonic() - start) * 1000
 
     async def check_context_creation_allowed(

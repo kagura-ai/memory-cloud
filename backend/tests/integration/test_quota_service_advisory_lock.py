@@ -41,7 +41,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import services.quota_service as quota_service_module
@@ -220,35 +220,63 @@ class TestAdvisoryLockNegativeControl:
         )
 
 
-class TestLockWaitMsRecorded:
-    """Under contention, ``workspace_creation_denied`` must carry ``lock_wait_ms > 0``.
+class TestLockWaitMsReflectsContention:
+    """Under a deterministic holder/blocker, ``lock_wait_ms`` reflects the wait.
 
-    Without contention, ``lock_wait_ms`` is approximately 0 for every
-    caller because ``pg_advisory_xact_lock`` is a fast path when no peer
-    holds the lock. With contention, peers queue and wait > 0 ms. The
-    test fails if every recorded ``lock_wait_ms`` is 0 — that would
-    indicate the lock isn't actually being acquired or every caller is
-    bypassing the wait.
+    A naive "any positive wait_ms proves contention" assertion fails
+    silently because the SELECT round-trip itself contributes a small
+    positive duration even when the lock is granted instantly (PR #686
+    Copilot review). This test instead sets up a holder transaction
+    that sleeps for ``HOLD_SEC``, then asserts the waiter's recorded
+    wait is at least ``MIN_EXPECTED_WAIT_MS`` (well above any
+    round-trip noise).
+
+    The helper now measures only the advisory-lock acquire (SET LOCAL
+    is excluded), so without contention the floor is the single SELECT
+    round-trip (typically <2 ms) and the assertion of >= 200 ms is a
+    clean signal that the test actually waited on the lock.
     """
 
     @pytest.mark.asyncio(loop_scope="session")
-    async def test_at_least_one_session_waits_under_parallel_load(
+    async def test_wait_ms_at_least_hold_duration(
         self, async_engine, user_with_cap_3, enforce_cap_on, monkeypatch
     ):
-        # quota_service uses structlog routed to PrintLoggerFactory, so
-        # pytest ``caplog`` does not see the events. Intercept the
-        # module logger's warning() directly to capture call kwargs.
         warning_mock = MagicMock()
         monkeypatch.setattr(quota_service_module.logger, "warning", warning_mock)
 
-        session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+        HOLD_SEC = 0.3
+        MIN_EXPECTED_WAIT_MS = 200
 
-        await asyncio.gather(
-            *[
-                _attempt_one_create(session_maker, user_with_cap_3)
-                for _ in range(_PARALLEL_ATTEMPTS)
-            ],
-            return_exceptions=True,
+        # Pre-fill to cap so the waiter takes the denial path (which is
+        # the path that logs lock_wait_ms via workspace_creation_denied).
+        async with async_sessionmaker(async_engine, expire_on_commit=False)() as pre:
+            async with pre.begin():
+                for _ in range(_CAP):
+                    pre.add(_new_workspace(user_with_cap_3))
+
+        session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+        lock_key = f"workspace_create:{user_with_cap_3}"
+        holder_acquired = asyncio.Event()
+
+        async def hold_lock() -> None:
+            async with session_maker() as holder:
+                async with holder.begin():
+                    await holder.execute(
+                        text("SELECT pg_advisory_xact_lock(hashtext(:k))").bindparams(k=lock_key)
+                    )
+                    holder_acquired.set()
+                    await asyncio.sleep(HOLD_SEC)
+                # commit on block exit releases the lock
+
+        async def waiter_attempt_create() -> bool:
+            await holder_acquired.wait()
+            return await _attempt_one_create(session_maker, user_with_cap_3)
+
+        results = await asyncio.gather(hold_lock(), waiter_attempt_create())
+        waiter_succeeded = results[1]
+
+        assert waiter_succeeded is False, (
+            "waiter should have been denied (cap pre-filled) but reported success"
         )
 
         denied_events = [
@@ -256,20 +284,16 @@ class TestLockWaitMsRecorded:
             for call in warning_mock.call_args_list
             if call.args and call.args[0] == "workspace_creation_denied"
         ]
-        assert denied_events, (
-            f"expected at least one workspace_creation_denied event under "
-            f"{_PARALLEL_ATTEMPTS}-way parallel load, got 0 "
-            f"(all calls: {warning_mock.call_args_list!r})"
+        assert len(denied_events) == 1, (
+            f"expected exactly one workspace_creation_denied event from the waiter, "
+            f"got {len(denied_events)} (all calls: {warning_mock.call_args_list!r})"
         )
 
-        # ``lock_wait_ms`` is now a float to preserve sub-millisecond precision —
-        # the int form would have truncated fast lock acquires to 0 even when
-        # the lock genuinely contended for fractions of a millisecond.
-        wait_ms_values = [kwargs.get("lock_wait_ms") for kwargs in denied_events]
-        positive_waits = [v for v in wait_ms_values if isinstance(v, (int, float)) and v > 0]
-        assert positive_waits, (
-            f"expected at least one denied event with lock_wait_ms > 0 under "
-            f"{_PARALLEL_ATTEMPTS}-way parallel load. "
-            f"Got {len(denied_events)} denied events, lock_wait_ms values: "
-            f"{wait_ms_values}"
+        wait_ms = denied_events[0].get("lock_wait_ms")
+        assert isinstance(wait_ms, (int, float)), f"lock_wait_ms must be numeric; got {wait_ms!r}"
+        assert wait_ms >= MIN_EXPECTED_WAIT_MS, (
+            f"lock_wait_ms={wait_ms:.1f}ms should be >= {MIN_EXPECTED_WAIT_MS}ms "
+            f"(holder held the lock for {HOLD_SEC * 1000:.0f}ms). A value below "
+            f"the floor means the helper either bypassed the lock or measured "
+            f"the wrong interval."
         )
