@@ -849,13 +849,20 @@ class UserDetailResponse(BaseModel):
 class UpdateWorkspaceSlotBonusRequest(BaseModel):
     """Body for PATCH /admin/users/{user_id}/workspace_slot_bonus (#676).
 
-    ``delta`` is the signed increment to apply atomically. ``reason`` is
-    required only when the resulting cap would fall below the user's current
-    owned_count (a destructive admin operation); otherwise it may be ``None``.
-    The 500-char cap matches the audit_log payload budget.
+    ``delta`` is the signed increment to apply atomically. The ±1M bound is a
+    sanity limit (frontend only sends ±1; the cap protects against admin
+    typos and against INT32 overflow on `workspace_slot_bonus + delta`).
+    ``reason`` is required only when the resulting cap would fall below the
+    user's current owned_count (a destructive admin operation); otherwise it
+    may be ``None``. The 500-char cap matches the audit_log payload budget.
     """
 
-    delta: int = Field(..., description="Signed increment, e.g. +1 or -1.")
+    delta: int = Field(
+        ...,
+        ge=-1_000_000,
+        le=1_000_000,
+        description="Signed increment (±1M sanity bound; frontend uses ±1).",
+    )
     reason: str | None = Field(
         None,
         max_length=500,

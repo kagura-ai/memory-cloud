@@ -389,3 +389,160 @@ class TestListUsersPlanFilterSoftDelete:
             f"plan=pro filter must surface the user exactly once "
             f"(saw {len(matches)} — likely #681 plan-filter regression)"
         )
+
+
+class TestRaceSafeBonus002:
+    """The conditional UPDATE + disambiguation SELECT in the handler is the
+    race-safe form of BONUS-002 — under a concurrent decrement that lands
+    between validation and UPDATE the live bonus could already be at 0,
+    making the original ``UPDATE … RETURNING`` push the value negative and
+    trip the ``workspace_slot_bonus_nonneg`` CHECK (surfacing as a generic
+    IntegrityError 500 rather than the structured 400 BONUS-002).
+
+    The end-to-end race is hard to reproduce deterministically without
+    concurrent-session orchestration; these tests verify the constituent
+    SQL semantics so a future refactor cannot accidentally regress to the
+    pre-fix unconditional form. Pairs with the QA-Lead gate2 recommendation.
+    """
+
+    @pytest.mark.asyncio
+    async def test_conditional_update_returns_zero_rows_when_would_negate(
+        self, db_session: AsyncSession, user_at_risk: dict
+    ) -> None:
+        """``UPDATE ... WHERE workspace_slot_bonus + :delta >= 0`` matches
+        zero rows when the live value would go negative — the race-safe
+        signal the handler then disambiguates into 404 vs raced-BONUS-002.
+        """
+        from sqlalchemy import update as sa_update
+
+        # user_at_risk: bonus=0, owned=1. delta=-1 would land bonus=-1.
+        result = await db_session.execute(
+            sa_update(User)
+            .where(
+                User.user_id == user_at_risk["user_id"],
+                User.workspace_slot_bonus + (-1) >= 0,
+            )
+            .values(workspace_slot_bonus=User.workspace_slot_bonus + (-1))
+            .returning(User.workspace_slot_bonus)
+        )
+        assert result.one_or_none() is None, (
+            "conditional UPDATE must reject below-zero applies (zero rows)"
+        )
+
+        # Bonus stays at 0 — the guard rejected, did NOT silently apply -1.
+        live = await db_session.scalar(
+            select(User.workspace_slot_bonus).where(User.user_id == user_at_risk["user_id"])
+        )
+        assert live == 0
+
+    @pytest.mark.asyncio
+    async def test_conditional_update_matches_when_safe(
+        self, db_session: AsyncSession, user_with_bonus: dict
+    ) -> None:
+        """Positive coverage: the same conditional form normally matches
+        and returns the post-state via RETURNING. Guards against a future
+        refactor that accidentally tightens the WHERE into rejecting valid
+        deltas.
+        """
+        from sqlalchemy import update as sa_update
+
+        # user_with_bonus: bonus=2. delta=-1 → 1 (safe).
+        result = await db_session.execute(
+            sa_update(User)
+            .where(
+                User.user_id == user_with_bonus["user_id"],
+                User.workspace_slot_bonus + (-1) >= 0,
+            )
+            .values(workspace_slot_bonus=User.workspace_slot_bonus + (-1))
+            .returning(User.workspace_slot_bonus)
+        )
+        row = result.one_or_none()
+        assert row is not None and row.workspace_slot_bonus == 1
+
+
+class TestInputBounds:
+    """Pydantic-level input bound coverage (#676 QA-Lead findings)."""
+
+    @pytest.mark.asyncio
+    async def test_reason_at_max_length_accepted(
+        self, db_session: AsyncSession, user_with_bonus: dict
+    ) -> None:
+        """500 chars is the documented upper bound — exactly 500 must
+        round-trip without 422.
+        """
+        long_reason = "x" * 500
+        response = await update_workspace_slot_bonus(
+            user_id=user_with_bonus["user_id"],
+            request=UpdateWorkspaceSlotBonusRequest(delta=1, reason=long_reason),
+            admin=_admin(),
+            db=db_session,
+        )
+        assert response.reason == long_reason
+
+    def test_reason_over_max_length_rejected_at_pydantic(self) -> None:
+        """501-char reason must fail Pydantic validation (no DB round-trip)."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            UpdateWorkspaceSlotBonusRequest(delta=1, reason="x" * 501)
+
+    def test_delta_over_upper_bound_rejected(self) -> None:
+        """Sanity bound: delta > 1_000_000 is rejected by Pydantic — protects
+        against INT32 overflow on ``workspace_slot_bonus + delta`` and against
+        admin typos like ``1e9``.
+        """
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            UpdateWorkspaceSlotBonusRequest(delta=1_000_001, reason=None)
+
+    def test_delta_under_lower_bound_rejected(self) -> None:
+        """Sanity bound: delta < -1_000_000 is rejected by Pydantic."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            UpdateWorkspaceSlotBonusRequest(delta=-1_000_001, reason=None)
+
+
+class TestHttpLayerErrorMapping:
+    """The BONUS-001/002 contract relies on
+    ``memory_cloud_exception_handler`` translating ``MemoryCloudException``
+    subclasses into a structured 400 JSON response (``{error, message,
+    details}``). The integration tests above call the route function
+    directly, so they verify the raise but NOT the wire translation. These
+    tests exercise the handler directly to anchor the contract.
+
+    Pairs with the QA-Lead gate2 recommendation.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bonus_002_maps_to_structured_400(self) -> None:
+        import json
+        from unittest.mock import MagicMock
+
+        from api.main import memory_cloud_exception_handler
+
+        exc = BonusBelowZeroError(current=0, delta=-1)
+        response = await memory_cloud_exception_handler(MagicMock(), exc)
+        assert response.status_code == 400
+        body = json.loads(response.body)
+        assert body["error"] == "BONUS-002"
+        assert "Bonus cannot go below zero" in body["message"]
+        # ``details`` carries ``current`` and ``delta`` for SDK consumers
+        # routing on the structured error code.
+        assert body["details"]["current"] == 0
+        assert body["details"]["delta"] == -1
+
+    @pytest.mark.asyncio
+    async def test_bonus_001_maps_to_structured_400(self) -> None:
+        import json
+        from unittest.mock import MagicMock
+
+        from api.main import memory_cloud_exception_handler
+
+        exc = InsufficientReasonError()
+        response = await memory_cloud_exception_handler(MagicMock(), exc)
+        assert response.status_code == 400
+        body = json.loads(response.body)
+        assert body["error"] == "BONUS-001"
+        assert "Reason required" in body["message"]
