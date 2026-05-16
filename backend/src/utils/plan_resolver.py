@@ -56,7 +56,11 @@ async def get_user_workspace_cap_summary(db: AsyncSession, user_id: str) -> tupl
             (Workspace.owner_user_id == User.user_id) & (Workspace.deleted_at.is_(None)),
         )
         .where(User.user_id == user_id)
-        .group_by(User.id, User.workspace_slot_bonus)
+        # PostgreSQL allows non-aggregated SELECT columns when grouped by
+        # the table's primary key (workspace_slot_bonus is functionally
+        # dependent on User.id). Grouping by User.id alone is sufficient
+        # and documents that the row is unique per user.
+        .group_by(User.id)
     )
     row = (await db.execute(stmt)).one_or_none()
     if row is None:

@@ -83,36 +83,42 @@ def upgrade() -> None:
         """
     )
 
-    # 2. Acquire an exclusive lock on users for the rest of this transaction.
-    #    Prevents a concurrent INSERT INTO workspaces from changing
-    #    ``owned_count`` between the sub-SELECT and the UPDATE write.
+    # 2. Acquire exclusive locks on BOTH users and workspaces for the rest
+    #    of this transaction. The users lock alone would not block a
+    #    concurrent INSERT INTO workspaces — that could change the count
+    #    we compute below. Locking both tables makes the grandfather
+    #    computation a true atomic snapshot. SHARE ROW EXCLUSIVE on
+    #    workspaces still allows concurrent reads but blocks writers.
     op.execute("LOCK TABLE users IN EXCLUSIVE MODE")
+    op.execute("LOCK TABLE workspaces IN SHARE ROW EXCLUSIVE MODE")
 
-    # 3. Grandfather backfill. The sub-SELECT mirrors plan_resolver's
-    #    runtime predicate exactly:
+    # 3. Grandfather backfill via a single CTE that computes COUNT(*)
+    #    exactly once per user. The previous form had two correlated
+    #    sub-SELECTs (outer WHERE + inner SET) which duplicated the
+    #    predicate and theoretically allowed two snapshot reads to
+    #    diverge inside one UPDATE. The CTE form is one read, one
+    #    UPDATE, no duplication.
+    #
+    #    Predicate mirrors plan_resolver's runtime exactly:
     #      - workspaces.owner_user_id = users.user_id  (OAuth sub VARCHAR join)
     #      - workspaces.deleted_at IS NULL              (soft-delete filter)
-    #    GREATEST(0, ...) is defensive (COUNT(*) can never be negative,
-    #    but keeps intent explicit if the subquery is later edited).
+    #    HAVING COUNT(*) > 1 filters out users at base cap (1 owned, no
+    #    grandfather needed); GREATEST(0, ...) is defensive even though
+    #    HAVING ensures cnt >= 2.
     #    No outer WHERE on users — the table has no deleted_at column.
     op.execute(
         """
-        UPDATE users
-        SET workspace_slot_bonus = GREATEST(
-            0,
-            (
-                SELECT COUNT(*)
-                FROM workspaces
-                WHERE workspaces.owner_user_id = users.user_id
-                  AND workspaces.deleted_at IS NULL
-            ) - 1
-        )
-        WHERE (
-            SELECT COUNT(*)
+        WITH owned_counts AS (
+            SELECT owner_user_id, COUNT(*) AS cnt
             FROM workspaces
-            WHERE workspaces.owner_user_id = users.user_id
-              AND workspaces.deleted_at IS NULL
-        ) > 1
+            WHERE deleted_at IS NULL
+            GROUP BY owner_user_id
+            HAVING COUNT(*) > 1
+        )
+        UPDATE users
+        SET workspace_slot_bonus = GREATEST(0, owned_counts.cnt - 1)
+        FROM owned_counts
+        WHERE users.user_id = owned_counts.owner_user_id
         """
     )
 

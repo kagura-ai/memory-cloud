@@ -56,8 +56,15 @@ export function WorkspaceCreateForm({
   const ownedWorkspaces = workspaces.filter(
     (w) => w.current_user_role === "owner",
   );
+  // Guard against ``workspaceLimit <= 0`` (corrupt response): a literal
+  // ``limit: 0`` from the API would otherwise make ``length >= 0`` true
+  // for every user, including users with zero owned workspaces, walling
+  // them off from ever creating one. Treat non-positive limits as
+  // "unknown" (permissive) and let the backend gate decide.
   const isLimitReached =
-    workspaceLimit !== null && ownedWorkspaces.length >= workspaceLimit;
+    workspaceLimit !== null &&
+    workspaceLimit > 0 &&
+    ownedWorkspaces.length >= workspaceLimit;
 
   useEffect(() => {
     let cancelled = false;
@@ -110,11 +117,14 @@ export function WorkspaceCreateForm({
         errorMessage.includes("Workspace limit reached") ||
         errorMessage.includes("limit")
       ) {
-        setError(
-          t("workspaceLimitReached", {
-            limit: workspaceLimit ?? ownedWorkspaces.length,
-          }),
-        );
+        if (workspaceLimit !== null && workspaceLimit > 0) {
+          setError(t("workspaceLimitReached", { limit: workspaceLimit }));
+        } else {
+          // Limit unknown (fetch failed or corrupt response) — show the
+          // backend's authoritative message rather than a bogus i18n
+          // substitution with a placeholder count.
+          setError(errorMessage);
+        }
       } else if (
         errorMessage.includes("validation") ||
         errorMessage.includes("Invalid")
