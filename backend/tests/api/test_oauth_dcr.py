@@ -345,11 +345,18 @@ class TestDcrEndpointAcceptance:
         # ``client_secret``. Returning one made Claude Code's OAuth2 stack
         # treat the registration as a confidential client and Basic-Auth the
         # token endpoint, which authlib then rejected with invalid_client 401.
-        assert body.get("client_secret") is None, (
-            "RFC 7591 §3.2.1 violation: public client got a client_secret"
+        #
+        # Pin field *absence* (not just `null`): some OAuth client libraries
+        # treat ``{"client_secret": null}`` as "confidential client with empty
+        # secret" and still Basic-Auth the token endpoint. ``response_model_exclude``
+        # makes the field absent from JSON, which is the load-bearing fix.
+        assert "client_secret" not in body, (
+            f"RFC 7591 §3.2.1 violation: public client response includes "
+            f"client_secret={body.get('client_secret')!r}"
         )
-        assert body.get("plaintext_secret") is None, (
-            "Visibility plaintext must also be omitted for public clients"
+        assert "plaintext_secret" not in body, (
+            f"Visibility plaintext must also be omitted for public clients "
+            f"(got {body.get('plaintext_secret')!r})"
         )
         assert body.get("is_visible") is False
         assert body.get("visibility_expires_at") is None

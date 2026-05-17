@@ -292,9 +292,11 @@ class TestDcrLoopbackPersistsNullOwnerId:
         assert body["owner_id"] is None
         assert body["provider"] == "claude"
         assert body["token_endpoint_auth_method"] == "none"
-        # Issue #689: public clients must not receive a usable secret.
-        assert body.get("client_secret") is None
-        assert body.get("plaintext_secret") is None
+        # Issue #689: pin field *absence*, not just null — some OAuth client
+        # libs treat ``{"client_secret": null}`` as confidential-with-empty and
+        # still Basic-Auth the token endpoint, re-triggering the bug.
+        assert "client_secret" not in body, body
+        assert "plaintext_secret" not in body, body
 
         # Confirm the row actually landed in the DB with owner_id NULL.
         client_id = body["client_id"]

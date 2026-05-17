@@ -115,9 +115,13 @@ class OAuth2ClientResponse(BaseModel):
     provider: str  # Migration 036
     created_at: str  # ISO 8601 with 'Z' (UTC)
     # Migration 034-035: Zero-knowledge visibility
-    plaintext_secret: str | None  # Only if visible + owner
+    # ``plaintext_secret`` defaults to None so it is non-required in the OpenAPI
+    # schema — the DCR ``/register`` endpoint omits it via response_model_exclude
+    # for public clients (Issue #689), and generated SDK clients must not treat
+    # the field as required.
+    plaintext_secret: str | None = None  # Only if visible + owner
     is_visible: bool
-    visibility_expires_at: str | None  # ISO 8601 with 'Z' (UTC)
+    visibility_expires_at: str | None = None  # ISO 8601 with 'Z' (UTC)
 
     class Config:
         from_attributes = True
@@ -662,7 +666,11 @@ async def dynamic_client_registration(
         data: DCR request data
 
     Returns:
-        Created client with client_secret
+        Created client metadata. Per RFC 7591 §3.2.1, public clients
+        (``token_endpoint_auth_method="none"``) do NOT receive a
+        ``client_secret`` — the field is omitted from the JSON response
+        via ``response_model_exclude`` (Issue #689). Clients authenticate
+        the token endpoint using PKCE alone.
 
     Example:
         POST /api/v1/oauth/register
@@ -674,6 +682,7 @@ async def dynamic_client_registration(
 
     Spec:
         RFC 7591 - OAuth 2.0 Dynamic Client Registration Protocol
+        RFC 7636 - PKCE (required for public clients)
         MCP Authorization Spec (2025-03-26)
     """
     # Get client IP for rate limiting
