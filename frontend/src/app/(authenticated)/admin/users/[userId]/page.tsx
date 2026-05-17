@@ -262,21 +262,15 @@ export default function UserDetailPage() {
         description: `Slot bonus: ${response.before_value} → ${response.after_value}.`,
       });
     } catch (error: unknown) {
-      // Conditional rollback: only restore ``summarySnapshot`` if the
-      // current state still reflects our optimistic write (bonus
-      // matches ``projectedBonus``). If a concurrent
-      // ``loadUserDetail()`` triggered by the change-plan flow has
-      // already replaced workspace_summary with fresher server data,
-      // leave that fresher state in place — our PATCH didn't land, so
-      // the server state is the latest truth and stomping it with the
-      // pre-call snapshot would lose the concurrent update.
-      setUserDetail((prev) => {
-        if (!prev || !prev.workspace_summary) return prev;
-        if (prev.workspace_summary.workspace_slot_bonus === projectedBonus) {
-          return { ...prev, workspace_summary: summarySnapshot };
-        }
-        return prev;
-      });
+      // Refetch authoritative state on PATCH failure. A naive
+      // ``setUserDetail(snapshot)`` rollback (or any rollback that
+      // compares only ``workspace_slot_bonus``) cannot reliably
+      // distinguish "my optimistic write is still in place" from
+      // "another admin's update happened to land on the same projected
+      // value" — both produce identical state but different rollback
+      // intents. ``loadUserDetail()`` re-reads the server, so the
+      // post-failure state always reflects truth. Extra round-trip on
+      // the rare failure path is acceptable for admin-only endpoint.
       const message =
         error instanceof Error ? error.message : "Failed to update slot bonus";
       toast({
@@ -284,6 +278,7 @@ export default function UserDetailPage() {
         description: message,
         variant: "destructive",
       });
+      void loadUserDetail();
     } finally {
       setBonusPending(null);
     }
@@ -883,11 +878,9 @@ export default function UserDetailPage() {
                 !destructiveModal.reason.trim() || destructiveModal.submitting
               }
             >
-              {destructiveModal.submitting ? (
-                <InlineSpinner />
-              ) : (
-                "Confirm decrement"
-              )}
+              {destructiveModal.submitting
+                ? "Confirming…"
+                : "Confirm decrement"}
             </Button>
           </DialogFooter>
         </DialogContent>

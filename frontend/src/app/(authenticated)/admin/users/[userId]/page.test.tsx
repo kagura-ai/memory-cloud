@@ -294,16 +294,19 @@ describe("Workspace Capacity section (#676)", () => {
   });
 
   it("rolls back optimistic update + shows destructive toast on PATCH failure", async () => {
-    mockGet.mockResolvedValueOnce(
-      detailWith({
-        owned_count: 1,
-        workspace_slot_bonus: 2,
-        base_cap: 1,
-        cap: 3,
-        is_at_cap: false,
-        owned_workspaces: [],
-      }),
-    );
+    const initialDetail = detailWith({
+      owned_count: 1,
+      workspace_slot_bonus: 2,
+      base_cap: 1,
+      cap: 3,
+      is_at_cap: false,
+      owned_workspaces: [],
+    });
+    // Initial load + refetch on failure (the failure path calls
+    // loadUserDetail() to re-read authoritative server state, which
+    // returns the same unchanged summary since the PATCH never landed).
+    mockGet.mockResolvedValueOnce(initialDetail);
+    mockGet.mockResolvedValueOnce(initialDetail);
     mockUpdateBonus.mockRejectedValueOnce(new Error("network down"));
     render(<UserDetailPage />);
     await screen.findByText(/Workspace Capacity/);
