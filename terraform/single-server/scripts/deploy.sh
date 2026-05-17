@@ -16,7 +16,8 @@
 #   ./scripts/deploy.sh --status     # show current active API color
 #   ./scripts/deploy.sh --web        # rebuild + restart kagura-web in place
 #
-# Requires: docker compose, curl, envsubst (gettext-base), timeout (coreutils)
+# Requires: docker compose, curl, envsubst (gettext-base)
+#   Additionally for --web: timeout (coreutils) — checked at invocation, not at startup
 # =============================================================================
 
 set -euo pipefail
@@ -291,7 +292,7 @@ command -v envsubst > /dev/null 2>&1 || error "envsubst not found. Install: apt-
 # validated inside cmd_deploy_web so other deploy paths remain usable on
 # environments without it.
 
-# Validate timeout values are integers
+# Validate tunable env vars (timeouts + intervals) are non-negative integers
 [[ "$READINESS_TIMEOUT" =~ ^[0-9]+$ ]] || error "READINESS_TIMEOUT must be an integer (got: $READINESS_TIMEOUT)"
 [[ "$DRAIN_TIMEOUT" =~ ^[0-9]+$ ]] || error "DRAIN_TIMEOUT must be an integer (got: $DRAIN_TIMEOUT)"
 [[ "$WEB_READINESS_TIMEOUT" =~ ^[0-9]+$ ]] || error "WEB_READINESS_TIMEOUT must be an integer (got: $WEB_READINESS_TIMEOUT)"
