@@ -60,7 +60,7 @@ def _new_context(workspace_id, created_by: str) -> Context:
 
 
 @pytest_asyncio.fixture
-async def workspace_owner_fixture(db_session: AsyncSession) -> dict:
+async def workspace_owner_no_ctx_member(db_session: AsyncSession) -> dict:
     """User is the workspace owner with no ContextMember row (full access via workspace role)."""
     user = _new_user()
     db_session.add(user)
@@ -156,14 +156,14 @@ class TestAccessibleContextRole:
     async def test_workspace_owner_displays_owner(
         self,
         db_session: AsyncSession,
-        workspace_owner_fixture: dict,
+        workspace_owner_no_ctx_member: dict,
     ) -> None:
         detail = await get_user_detail(
-            user_id=workspace_owner_fixture["user_id"],
+            user_id=workspace_owner_no_ctx_member["user_id"],
             admin=_mock_admin(),
             db=db_session,
         )
-        ctx = _pick_context(detail, workspace_owner_fixture["context_id"])
+        ctx = _pick_context(detail, workspace_owner_no_ctx_member["context_id"])
         assert ctx is not None, "test context must appear in accessible_contexts"
         assert ctx.role == "owner"
 
@@ -173,7 +173,6 @@ class TestAccessibleContextRole:
         db_session: AsyncSession,
         workspace_admin_no_ctx_member: dict,
     ) -> None:
-        """REGRESSION PIN for #699: previously displayed as 'owner'."""
         detail = await get_user_detail(
             user_id=workspace_admin_no_ctx_member["user_id"],
             admin=_mock_admin(),
