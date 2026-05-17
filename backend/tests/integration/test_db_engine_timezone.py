@@ -17,7 +17,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import text
 
-from db.base import _get_engine
+from db.base import _get_engine, _get_sync_engine
 
 
 @pytest.mark.asyncio
@@ -26,3 +26,9 @@ async def test_async_engine_session_timezone_is_utc() -> None:
     async with engine.connect() as conn:
         result = await conn.execute(text("SHOW timezone"))
         assert result.scalar() == "UTC"
+
+
+def test_sync_engine_session_timezone_is_utc() -> None:
+    """OAuth2 sync engine (psycopg2 ``-c timezone=utc``) parity check."""
+    with _get_sync_engine().connect() as conn:
+        assert conn.execute(text("SHOW timezone")).scalar() == "UTC"
