@@ -1,8 +1,14 @@
 """Timezone-safe datetime utilities.
 
 Provides utcnow() as a drop-in replacement for the deprecated
-datetime.utcnow(), returning naive UTC datetimes for compatibility
-with existing TIMESTAMP WITHOUT TIME ZONE database columns.
+datetime.utcnow(), returning naive UTC datetimes that map cleanly to the
+project's TIMESTAMP WITHOUT TIME ZONE columns.
+
+The project intentionally stores naive UTC in the DB; UTC is enforced
+explicitly by three layers (postgres container ``TZ``/``PGTZ`` env vars,
+async/sync engine ``connect_args`` pinning the session timezone, and
+Python writes via ``utcnow()`` here). See ``.claude/rules/backend.md``
+for the full convention.
 """
 
 from datetime import UTC, datetime
@@ -34,10 +40,14 @@ def utcnow() -> datetime:
     Equivalent to the deprecated datetime.utcnow() but uses the
     recommended datetime.now(UTC) internally.
 
-    Returns naive datetime for compatibility with PostgreSQL
-    TIMESTAMP WITHOUT TIME ZONE columns. When the database is
-    migrated to TIMESTAMP WITH TIME ZONE, this function should
-    be updated to return timezone-aware datetimes.
+    Returns naive datetime to match the project's TIMESTAMP WITHOUT TIME
+    ZONE columns. The "naive" value is unambiguously UTC because the
+    container OS, the PostgreSQL session, and this function all pin to
+    UTC — see ``.claude/rules/backend.md`` for the three-layer policy.
+
+    Wire-format Z-suffix for API responses is handled at the schema
+    layer by ``TZAwareBaseModel`` and ``to_utc_iso`` — do not append a
+    ``Z`` here.
 
     Returns:
         Naive datetime representing current UTC time

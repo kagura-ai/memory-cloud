@@ -25,9 +25,19 @@ paths:
 - Pool config: `pool_size=5, max_overflow=10, pool_pre_ping=True`
 
 ## Datetime / UTC
-- DB columns are TIMESTAMP WITHOUT TIME ZONE — naive UTC by convention. Until #490 migrates them, the API layer is the only place ensuring wire-format datetimes are unambiguous (#489).
-- Response Pydantic schemas with any `datetime` field MUST inherit from `models.api_base.TZAwareBaseModel` (not `BaseModel`). The base class serializes naive datetimes with a `Z` suffix; without it, JS clients parse the string as local time and JST users see times shifted by their UTC offset.
-- For `str`-typed datetime fields in handler/service code (manual ISO formatting), use `to_utc_iso(dt)` from `utils.datetime`. Never call `.isoformat()` directly on a `datetime` field that ends up in a JSON response or cached payload — `to_utc_iso` is idempotent (handles None / naive / aware UTC / aware non-UTC) so it can be applied unconditionally.
+
+**Storage (DB)** — columns are `TIMESTAMP WITHOUT TIME ZONE`, holding naive UTC. UTC is enforced explicitly at three layers, so a naive value here is unambiguous:
+1. Postgres container env: `TZ=UTC` + `PGTZ=UTC` (`docker-compose.yml`, `terraform/single-server/docker-compose.prod.yml`)
+2. SQLAlchemy engine: async `connect_args={"server_settings": {"timezone": "UTC"}}` / sync `connect_args={"options": "-c timezone=utc"}` (`db/base.py`)
+3. Python writes via `utils.datetime.utcnow()` — never bare `datetime.utcnow()` or `datetime.now()` without `tz`
+
+`ruff DTZ` blocks naive-datetime patterns in `backend/src/`. Tests are exempt via `[tool.ruff.lint.per-file-ignores]` while the fixture sweep remains a follow-up.
+
+**Wire format (API JSON)** — response Pydantic schemas with any `datetime` field MUST inherit from `models.api_base.TZAwareBaseModel` (not `BaseModel`). The base class serializes naive datetimes with a `Z` suffix; without it, JS clients parse the string as local time and JST users see times shifted by their UTC offset.
+
+For `str`-typed datetime fields in handler/service code (manual ISO formatting), use `to_utc_iso(dt)` from `utils.datetime`. Never call `.isoformat()` directly on a `datetime` field that ends up in a JSON response or cached payload — `to_utc_iso` is idempotent (handles None / naive / aware UTC / aware non-UTC) so it can be applied unconditionally.
+
+**Column-type migration was evaluated in #490 and explicitly deferred.** The full `Column(DateTime, ...) → Column(DateTime(timezone=True), ...)` sweep was scoped at 113 columns + 188 caller sites and judged hygiene-only after #489 closed the user-visible bug. The three layers above provide equivalent correctness guarantees; do not "fix" the naive columns without re-litigating the trade-off.
 
 ## Testing
 - Test files: `backend/tests/{module}/test_{name}.py`
