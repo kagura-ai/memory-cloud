@@ -67,6 +67,43 @@ export async function getAdminPlanAudit(
 }
 
 // ============================================================================
+// Plan Tiers (Issue #664)
+// ============================================================================
+
+export interface PlanTierInfo {
+  name: "free" | "basic" | "pro";
+  display_name: string;
+  price_monthly: number;
+  max_contexts_per_workspace: number;
+  max_members_per_workspace: number;
+  max_resource_tokens: number;
+  memory_limit: number;
+  mcp_calls_per_day: number;
+  mcp_calls_per_week: number;
+  rest_calls_per_day: number;
+  rest_calls_per_week: number;
+  public_calls_per_day: number;
+  public_calls_per_week: number;
+  bound_public_calls_per_minute: number;
+  analysis_runs_per_day: number;
+  storage_limit_bytes: number;
+  sleep_enabled_contexts_limit: number;
+  allows_shared_contexts: boolean;
+  features: string[];
+}
+
+/**
+ * Get all plan tier configurations in FREE → BASIC → PRO order (Admin only).
+ *
+ * Values reflect environment variable overrides applied at backend import
+ * time, so the admin tiers tab stays in sync with the true server-side
+ * configuration instead of hardcoded i18n numbers.
+ */
+export async function getAdminPlanTiers(): Promise<PlanTierInfo[]> {
+  return apiClient.get<PlanTierInfo[]>("/api/v1/admin/plans/tiers");
+}
+
+// ============================================================================
 // Workspace Quota Addon Management (Issue #325)
 // ============================================================================
 

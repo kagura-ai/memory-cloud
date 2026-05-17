@@ -251,6 +251,11 @@ async def cleanup_deleted_memories_task():
             for memory in old_deleted:
                 await memory_repo.delete(memory.id)
                 total_deleted += 1
+                # WHERE clause above filters Memory.deleted_at.isnot(None),
+                # so deleted_at is guaranteed non-None here. The assert
+                # narrows the type for pyright (which cannot infer through
+                # SQLAlchemy filter expressions).
+                assert memory.deleted_at is not None
                 logger.info(
                     "old_deleted_memory_purged",
                     memory_id=str(memory.id),

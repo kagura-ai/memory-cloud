@@ -59,21 +59,142 @@ import {
   CheckCircle,
   ChevronDown,
   Settings,
+  Info,
+  Inbox,
 } from "lucide-react";
-import { InlineSpinner } from "@/components/common/LoadingState";
+import {
+  InlineSpinner,
+  TableLoadingState,
+} from "@/components/common/LoadingState";
+import { ErrorBanner } from "@/components/common/ErrorBanner";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { EmptyState } from "@/components/ui/empty-state";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
 import {
   getAdminWorkspaces,
   getAdminPlanAudit,
+  getAdminPlanTiers,
   updateWorkspacePlan,
   getWorkspaceQuotas,
   updateWorkspaceAddons,
   type WorkspacePlanInfo as WorkspacePlan,
   type PlanChangeAuditEntry as PlanChangeAudit,
+  type PlanTierInfo,
   type WorkspaceQuotaDetail,
 } from "@/lib/api/admin";
 
 const PLAN_TABS = ["workspaces", "tiers", "audit"] as const;
+
+// ============================================================================
+// Tier comparison table — row definitions (Issue #664)
+// ============================================================================
+
+// Backend feature-flag identifiers (mirrors `PlanTier.features` strings in
+// `backend/src/config/plan_tiers.py`). Kept as a `const` map so the row
+// definitions reference symbolic names instead of bare strings — typos are
+// caught at compile time and the mapping between row and feature is auditable.
+const TIER_FEATURES = {
+  RERANKING: "reranking",
+  OAUTH: "oauth",
+  PUBLIC_CONTEXTS: "public_contexts",
+  MEMORY_ANALYSIS: "memory_analysis",
+} as const;
+
+type TierRowDef = {
+  readonly key: string;
+  readonly render: (tier: PlanTierInfo) => string;
+};
+
+const formatNumber = (value: number): string =>
+  value === 0 ? "—" : value.toLocaleString();
+const formatBool = (value: boolean): string => (value ? "✅" : "—");
+const hasFeature = (tier: PlanTierInfo, name: string): string =>
+  formatBool(tier.features.includes(name));
+const formatStorage = (bytes: number): string => {
+  if (bytes === 0) return "—";
+  const gib = bytes / 1024 ** 3;
+  if (gib >= 1) {
+    return Number.isInteger(gib) ? `${gib} GiB` : `${gib.toFixed(1)} GiB`;
+  }
+  return `${Math.round(bytes / 1024 ** 2)} MiB`;
+};
+
+// `as const satisfies` preserves literal `key` types for the derived
+// `TierRowKey` union below while still constraining each entry's shape.
+const TIER_ROW_DEFINITIONS = [
+  {
+    key: "contextsPerWorkspace",
+    render: (t: PlanTierInfo) => formatNumber(t.max_contexts_per_workspace),
+  },
+  {
+    key: "memories",
+    render: (t: PlanTierInfo) => formatNumber(t.memory_limit),
+  },
+  {
+    key: "mcpCallsPerDay",
+    render: (t: PlanTierInfo) => formatNumber(t.mcp_calls_per_day),
+  },
+  {
+    key: "analysisRuns",
+    render: (t: PlanTierInfo) => formatNumber(t.analysis_runs_per_day),
+  },
+  {
+    key: "reranking",
+    render: (t: PlanTierInfo) => hasFeature(t, TIER_FEATURES.RERANKING),
+  },
+  {
+    key: "mcpAppCredentials",
+    render: (t: PlanTierInfo) => hasFeature(t, TIER_FEATURES.OAUTH),
+  },
+  {
+    key: "storage",
+    render: (t: PlanTierInfo) => formatStorage(t.storage_limit_bytes),
+  },
+  {
+    key: "maxMembers",
+    render: (t: PlanTierInfo) => formatNumber(t.max_members_per_workspace),
+  },
+  {
+    key: "maxResourceTokens",
+    render: (t: PlanTierInfo) => formatNumber(t.max_resource_tokens),
+  },
+  {
+    key: "restCallsPerDay",
+    render: (t: PlanTierInfo) => formatNumber(t.rest_calls_per_day),
+  },
+  {
+    key: "publicCallsPerDay",
+    render: (t: PlanTierInfo) => formatNumber(t.public_calls_per_day),
+  },
+  {
+    key: "boundPublicPerMinute",
+    render: (t: PlanTierInfo) => formatNumber(t.bound_public_calls_per_minute),
+  },
+  {
+    key: "sleepContextsLimit",
+    render: (t: PlanTierInfo) => formatNumber(t.sleep_enabled_contexts_limit),
+  },
+  {
+    key: "sharedContexts",
+    render: (t: PlanTierInfo) => formatBool(t.allows_shared_contexts),
+  },
+  {
+    key: "publicContexts",
+    render: (t: PlanTierInfo) => hasFeature(t, TIER_FEATURES.PUBLIC_CONTEXTS),
+  },
+  {
+    key: "memoryAnalysis",
+    render: (t: PlanTierInfo) => hasFeature(t, TIER_FEATURES.MEMORY_ANALYSIS),
+  },
+] as const satisfies readonly TierRowDef[];
+
+type TierRowKey = (typeof TIER_ROW_DEFINITIONS)[number]["key"];
 
 export default function AdminPlansPage() {
   const t = useTranslations("admin.plans");
@@ -81,6 +202,8 @@ export default function AdminPlansPage() {
 
   const [workspaces, setWorkspaces] = useState<WorkspacePlan[]>([]);
   const [auditLog, setAuditLog] = useState<PlanChangeAudit[]>([]);
+  const [tiers, setTiers] = useState<PlanTierInfo[]>([]);
+  const [tiersError, setTiersError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [changePlanDialogOpen, setChangePlanDialogOpen] = useState(false);
   const [selectedWorkspace, setSelectedWorkspace] =
@@ -108,21 +231,43 @@ export default function AdminPlansPage() {
 
   const loadData = async () => {
     setLoading(true);
+    setTiersError(null);
     try {
-      const [workspaces, audit] = await Promise.all([
-        getAdminWorkspaces(),
-        getAdminPlanAudit(100),
-      ]);
+      // Issue #664: tier fetch is allSettled-isolated so a tier endpoint
+      // failure surfaces inline on the tiers tab via ErrorBanner without
+      // blocking the workspaces + audit fetches that drive the other tabs.
+      const [workspacesResult, auditResult, tiersResult] =
+        await Promise.allSettled([
+          getAdminWorkspaces(),
+          getAdminPlanAudit(100),
+          getAdminPlanTiers(),
+        ]);
 
-      setWorkspaces(workspaces);
-      setAuditLog(audit);
-    } catch (err) {
-      console.error("Failed to load admin data:", err);
-      toast({
-        title: tCommon("error"),
-        description: t("messages.loadError"),
-        variant: "destructive",
-      });
+      if (workspacesResult.status === "fulfilled") {
+        setWorkspaces(workspacesResult.value);
+      }
+      if (auditResult.status === "fulfilled") {
+        setAuditLog(auditResult.value);
+      }
+      if (tiersResult.status === "fulfilled") {
+        setTiers(tiersResult.value);
+      } else {
+        setTiersError(t("tiersTable.loadError"));
+      }
+
+      // Workspaces + audit share the existing toast channel (page-level
+      // failure scope). Tier failure is panel-scoped and uses ErrorBanner
+      // — emitting both would double-fire the same incident.
+      if (
+        workspacesResult.status === "rejected" ||
+        auditResult.status === "rejected"
+      ) {
+        toast({
+          title: tCommon("error"),
+          description: t("messages.loadError"),
+          variant: "destructive",
+        });
+      }
     } finally {
       setLoading(false);
     }
@@ -497,82 +642,79 @@ export default function AdminPlansPage() {
           </Card>
         </TabsContent>
 
-        {/* Plan Tiers Tab */}
+        {/* Plan Tiers Tab — Issue #664 */}
         <TabsContent value={PLAN_TABS[1]} className="mt-6">
           <Card>
             <CardHeader>
               <CardTitle>{t("tiersTable.title")}</CardTitle>
               <CardDescription>{t("tiersTable.description")}</CardDescription>
             </CardHeader>
-            <CardContent>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>{t("tiersTable.feature")}</TableHead>
-                    <TableHead>{t("tiersTable.free")}</TableHead>
-                    <TableHead>{t("tiersTable.basic")}</TableHead>
-                    <TableHead>{t("tiersTable.pro")}</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  <TableRow>
-                    <TableCell className="font-medium">
-                      {t("tiersTable.contextsPerWorkspace")}
-                    </TableCell>
-                    <TableCell>1</TableCell>
-                    <TableCell>3</TableCell>
-                    <TableCell>30</TableCell>
-                  </TableRow>
-                  <TableRow>
-                    <TableCell className="font-medium">
-                      {t("tiersTable.memories")}
-                    </TableCell>
-                    <TableCell>1,000</TableCell>
-                    <TableCell>10,000</TableCell>
-                    <TableCell>100,000</TableCell>
-                  </TableRow>
-                  <TableRow>
-                    <TableCell className="font-medium">
-                      {t("tiersTable.apiCalls")}
-                    </TableCell>
-                    <TableCell>100</TableCell>
-                    <TableCell>2,000</TableCell>
-                    <TableCell>10,000</TableCell>
-                  </TableRow>
-                  <TableRow>
-                    <TableCell className="font-medium">
-                      {t("tiersTable.analysisRuns")}
-                    </TableCell>
-                    <TableCell>-</TableCell>
-                    <TableCell>-</TableCell>
-                    <TableCell>3</TableCell>
-                  </TableRow>
-                  <TableRow>
-                    <TableCell className="font-medium">
-                      {t("tiersTable.reranking")}
-                    </TableCell>
-                    <TableCell>-</TableCell>
-                    <TableCell>✅</TableCell>
-                    <TableCell>✅</TableCell>
-                  </TableRow>
-                  <TableRow>
-                    <TableCell className="font-medium">
-                      {t("tiersTable.mcpAppCredentials")}
-                    </TableCell>
-                    <TableCell>✅</TableCell>
-                    <TableCell>✅</TableCell>
-                    <TableCell>✅</TableCell>
-                  </TableRow>
-                  <TableRow>
-                    <TableCell className="font-medium">
-                      {t("tiersTable.memoryAgent")}
-                    </TableCell>
-                    <TableCell>-</TableCell>
-                    <TableCell>-</TableCell>
-                    <TableCell>✅ {t("tiersTable.unlimited")}</TableCell>
-                  </TableRow>
-                </TableBody>
-              </Table>
+            <CardContent className="space-y-6">
+              <Alert>
+                <Info className="h-4 w-4" />
+                <AlertTitle>{t("tiersTable.infoCard.title")}</AlertTitle>
+                <AlertDescription className="space-y-2">
+                  <p>{t("tiersTable.infoCard.envOverrideBody")}</p>
+                  <p>{t("tiersTable.infoCard.addonBody")}</p>
+                  <p>{t("tiersTable.infoCard.zeroFloorBody")}</p>
+                </AlertDescription>
+              </Alert>
+
+              <ErrorBanner error={tiersError} />
+
+              {loading ? (
+                <TableLoadingState rows={TIER_ROW_DEFINITIONS.length} />
+              ) : tiersError ? null : tiers.length === 0 ? (
+                // Empty state only renders for a successful-but-empty
+                // response — fetch failures land in ErrorBanner above and
+                // must not also fire an empty-state message (frontend.md
+                // "one channel per error class").
+                <EmptyState
+                  icon={Inbox}
+                  title={t("tiersTable.emptyTitle")}
+                  description={t("tiersTable.emptyDescription")}
+                  compact
+                />
+              ) : (
+                <TooltipProvider delayDuration={200}>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>{t("tiersTable.feature")}</TableHead>
+                        {tiers.map((tier) => (
+                          <TableHead key={tier.name}>
+                            {tier.display_name}
+                          </TableHead>
+                        ))}
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {TIER_ROW_DEFINITIONS.map((row) => (
+                        <TableRow key={row.key}>
+                          <TableCell className="font-medium">
+                            <Tooltip>
+                              <TooltipTrigger
+                                className="text-left underline decoration-dotted underline-offset-4 cursor-help"
+                                type="button"
+                              >
+                                {t(`tiersTable.${row.key}`)}
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                {t(`tiersTable.${row.key}Description`)}
+                              </TooltipContent>
+                            </Tooltip>
+                          </TableCell>
+                          {tiers.map((tier) => (
+                            <TableCell key={tier.name}>
+                              {row.render(tier)}
+                            </TableCell>
+                          ))}
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </TooltipProvider>
+              )}
             </CardContent>
           </Card>
         </TabsContent>
