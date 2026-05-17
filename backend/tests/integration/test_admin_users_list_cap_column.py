@@ -191,15 +191,12 @@ class TestListUsersCapColumn:
         # 2. ``total`` counts distinct users only — it must be at least the
         #    3 fixture users (test DB may have other users from sibling
         #    fixtures, so we cannot pin equality). If the cap join had
-        #    multiplied rows, ``total`` would jump to >= 4 just from the
-        #    bonus_grant user's 2 workspace rows leaking in.
+        #    multiplied rows, ``total`` would jump to >= len(fixture_ids)+1
+        #    just from the bonus_grant user's 2 workspace rows leaking in.
+        #    Combined with assertion (1) above (per_user_count==1 for every
+        #    fixture user), this lower bound is sufficient to catch JOIN
+        #    multiplication — no need for an upper bound (``total`` is the
+        #    pre-pagination match count and can legitimately exceed ``limit``).
         assert response.total >= len(fixture_ids), (
             f"total must include at least the {len(fixture_ids)} fixture users, got {response.total}"
-        )
-        # Total reflects distinct users (no per-user duplication). The
-        # fixture adds exactly 3 distinct users beyond whatever the test DB
-        # already contained, so the delta should never exceed the user count
-        # in the response page.
-        assert response.total <= len(response.users), (
-            f"total ({response.total}) must not exceed distinct users in response ({len(response.users)})"
         )
