@@ -71,6 +71,13 @@ interface User {
   auth_provider?: string | null; // Issue #361: Registration provider
   workspaces?: WorkspaceMembership[]; // Issue #165: Workspace badges
 
+  // Issue #695: owned-workspace cap summary surfaced on the list page.
+  // Default values (0, 0, 1) are applied if backend response omits them
+  // so the cell still renders during a deploy gap.
+  owned_count?: number;
+  workspace_slot_bonus?: number;
+  effective_cap?: number;
+
   // Current context info
   current_context_id?: string | null;
   current_context_name?: string | null;
@@ -270,9 +277,12 @@ export default function AdminUsersPage() {
                 <TableHead>{t("table.user")}</TableHead>
                 <TableHead>{t("table.role")}</TableHead>
                 <TableHead>{t("table.workspaces")}</TableHead>
+                <TableHead>{t("table.cap")}</TableHead>
                 <TableHead>{t("table.memories")}</TableHead>
                 <TableHead>{t("table.lastLogin")}</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
+                <TableHead className="text-right">
+                  {t("table.actions")}
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -370,6 +380,30 @@ export default function AdminUsersPage() {
                         None
                       </span>
                     )}
+                  </TableCell>
+                  <TableCell>
+                    {/* Issue #695: owned / cap with at-cap emphasis */}
+                    {(() => {
+                      const owned = user.owned_count ?? 0;
+                      const cap = user.effective_cap ?? 1;
+                      const atCap = owned >= cap;
+                      return (
+                        <span
+                          className={
+                            atCap
+                              ? "text-amber-700 dark:text-amber-400 font-medium tabular-nums"
+                              : "tabular-nums text-sm text-gray-700 dark:text-gray-300"
+                          }
+                          title={t("table.capTooltip", {
+                            owned,
+                            cap,
+                            bonus: user.workspace_slot_bonus ?? 0,
+                          })}
+                        >
+                          {owned} / {cap}
+                        </span>
+                      );
+                    })()}
                   </TableCell>
                   <TableCell>{user.memory_count}</TableCell>
                   <TableCell className="text-sm text-gray-500">

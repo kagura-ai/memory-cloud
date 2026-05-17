@@ -57,6 +57,10 @@ class UserInfo(TZAwareBaseModel):
 
     Issue #164: Extended with workspaces field.
     Issue #175: Added timezone field for user preferences.
+    Issue #695: Added owned_count / workspace_slot_bonus / effective_cap so the
+    /admin/users list can surface each user's owned-workspace usage against
+    their cap without a follow-up per-user detail fetch. Defaults keep the
+    schema additive — older consumers that ignore these fields still work.
     """
 
     id: str
@@ -71,6 +75,13 @@ class UserInfo(TZAwareBaseModel):
     timezone: str = "UTC"  # Issue #175: User timezone preference
     auth_provider: str | None = None  # Issue #361: Registration provider
     workspaces: list[dict] = []  # Issue #164: Workspace memberships
+
+    # Issue #695: owned-workspace cap summary (mirrors WorkspaceSummary fields
+    # used in /admin/users/{id} detail). Always populated for active users so
+    # the list UI can render `owned_count / effective_cap` and an at-cap flag.
+    owned_count: int = 0
+    workspace_slot_bonus: int = 0
+    effective_cap: int = 1  # BASE_CAP default; recomputed per-user in handler
 
     # Issue #246: current_context_id removed
     # current_context_id: str | None = None
@@ -238,6 +249,40 @@ async def list_users(
                     "memory_count": row.memory_count or 0,
                 }
 
+        # Issue #695: Bulk-fetch (owned_count, workspace_slot_bonus) per user.
+        # Mirrors the per-user logic in ``plan_resolver.get_user_workspace_cap_summary``
+        # but joined for all listed users in one query — calling the per-user
+        # helper in the loop would re-introduce the N+1 pattern fixed for
+        # memory_stats above. LEFT OUTER JOIN so users with zero owned
+        # workspaces still surface (count = 0), and the join predicate
+        # excludes soft-deleted workspaces (#681 pattern: cap math counts
+        # only live workspaces).
+        cap_stats_dict: dict[str, dict[str, int]] = {}
+        if user_ids:
+            cap_stats_result = await db.execute(
+                select(
+                    User.user_id,
+                    User.workspace_slot_bonus,
+                    func.count(Workspace.id).label("owned_count"),
+                )
+                .outerjoin(
+                    Workspace,
+                    and_(
+                        Workspace.owner_user_id == User.user_id,
+                        Workspace.deleted_at.is_(None),
+                    ),
+                )
+                .where(User.user_id.in_(user_ids))
+                .group_by(User.id, User.user_id, User.workspace_slot_bonus)
+            )
+            for row in cap_stats_result.all():
+                bonus = int(row.workspace_slot_bonus or 0)
+                cap_stats_dict[row.user_id] = {
+                    "owned_count": int(row.owned_count or 0),
+                    "workspace_slot_bonus": bonus,
+                    "effective_cap": BASE_CAP + bonus,
+                }
+
         # Issue #246: current_context_id removed - skip context lookup
         # from models.auth import Context
         # context_map = {}
@@ -247,6 +292,18 @@ async def list_users(
         user_infos = []
         for u in users_list:
             stats = memory_stats_dict.get(u.user_id, {"memory_count": 0})
+            # Issue #695: cap_stats falls back to (0, 0, BASE_CAP) for users
+            # that returned no row (extremely unlikely — only if the user was
+            # deleted between the listing query and the cap query). Same
+            # shape as the User column default so the UI always has values.
+            cap = cap_stats_dict.get(
+                u.user_id,
+                {
+                    "owned_count": 0,
+                    "workspace_slot_bonus": int(u.workspace_slot_bonus or 0),
+                    "effective_cap": BASE_CAP + int(u.workspace_slot_bonus or 0),
+                },
+            )
             # Issue #246: current_context_id removed
             # context_info = context_map.get(u.user_id, {})
 
@@ -264,6 +321,9 @@ async def list_users(
                     timezone=u.timezone or "UTC",  # Issue #175: User timezone preference
                     auth_provider=u.auth_provider,  # Issue #361
                     workspaces=[],  # Will be populated below if include_workspaces=True
+                    owned_count=cap["owned_count"],  # Issue #695
+                    workspace_slot_bonus=cap["workspace_slot_bonus"],  # Issue #695
+                    effective_cap=cap["effective_cap"],  # Issue #695
                     # Issue #246: current_context_id removed
                     # current_context_id=context_info.get('context_id'),
                     # current_context_name=context_info.get('context_name'),
