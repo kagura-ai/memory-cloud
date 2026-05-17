@@ -234,7 +234,12 @@ wait_for_web_readiness() {
         # uses the same node-based probe, so we ride that contract literally.
         # `timeout 3` (coreutils) bounds the per-iteration wait; node http.get
         # would otherwise inherit the system socket timeout if the server hangs.
-        if timeout 3 dc exec -T web node -e \
+        #
+        # We call `docker compose ... exec` directly here (NOT via the dc() shell
+        # function) because `timeout` uses execvp() and cannot resolve shell
+        # functions — `timeout 3 dc ...` would fail with exit 127 "failed to run
+        # command 'dc'". Inlining the args keeps --env-file enforced.
+        if timeout 3 docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" exec -T web node -e \
                 "require('http').get('http://localhost:3000/api/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(2))" \
                 > /dev/null 2>&1; then
             log "  kagura-web is ready ($((SECONDS - start_time))s)"
