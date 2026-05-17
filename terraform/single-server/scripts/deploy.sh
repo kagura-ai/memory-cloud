@@ -16,8 +16,9 @@
 #   ./scripts/deploy.sh --status     # show current active API color
 #   ./scripts/deploy.sh --web        # rebuild + restart kagura-web in place
 #
-# Requires: docker compose, curl, envsubst (gettext-base)
-#   Additionally for --web: timeout (coreutils) — checked at invocation, not at startup
+# Requires (on host): docker compose, envsubst (gettext-base)
+#   Inside images: curl (api container), node (kagura-web container)
+#   Additionally for --web (host): timeout (coreutils) — checked at invocation, not at startup
 # =============================================================================
 
 set -euo pipefail
@@ -301,7 +302,7 @@ command -v envsubst > /dev/null 2>&1 || error "envsubst not found. Install: apt-
 [[ "$READINESS_TIMEOUT" =~ ^[0-9]+$ ]] || error "READINESS_TIMEOUT must be an integer (got: $READINESS_TIMEOUT)"
 [[ "$DRAIN_TIMEOUT" =~ ^[0-9]+$ ]] || error "DRAIN_TIMEOUT must be an integer (got: $DRAIN_TIMEOUT)"
 [[ "$WEB_READINESS_TIMEOUT" =~ ^[0-9]+$ ]] || error "WEB_READINESS_TIMEOUT must be an integer (got: $WEB_READINESS_TIMEOUT)"
-[[ "$WEB_READINESS_INTERVAL" =~ ^[0-9]+$ ]] || error "WEB_READINESS_INTERVAL must be an integer (got: $WEB_READINESS_INTERVAL)"
+[[ "$WEB_READINESS_INTERVAL" =~ ^[1-9][0-9]*$ ]] || error "WEB_READINESS_INTERVAL must be a positive integer >= 1 (got: $WEB_READINESS_INTERVAL); 0 would busy-loop the smoke check"
 
 # Ensure marker directory exists
 mkdir -p "$(dirname "$MARKER_FILE")"
