@@ -576,7 +576,7 @@ async def get_user_detail(
             # Determine user's role in this context
             ctx_role = "viewer"  # Default
             if workspace_role in ("owner", "admin"):
-                ctx_role = "owner"  # Workspace owner/admin have full access
+                ctx_role = workspace_role  # #699: preserve owner/admin distinction
             else:
                 # Check context_members for explicit role
                 ctx_member = ctx_members_by_context.get(ctx.id)
