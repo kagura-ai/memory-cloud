@@ -71,6 +71,18 @@ interface User {
   auth_provider?: string | null; // Issue #361: Registration provider
   workspaces?: WorkspaceMembership[]; // Issue #165: Workspace badges
 
+  // Issue #695: owned-workspace cap summary surfaced on the list page.
+  // Field names mirror the detail endpoint's WorkspaceSummary (cap /
+  // base_cap) so the same mental model carries across admin endpoints.
+  // All three are optional so the cell can still render during a deploy
+  // gap; the render path derives a safe fallback from base_cap + bonus
+  // rather than a literal 1, so a user with a nonzero bonus shown in the
+  // tooltip never gets a denominator that contradicts it.
+  owned_count?: number;
+  workspace_slot_bonus?: number;
+  base_cap?: number;
+  cap?: number;
+
   // Current context info
   current_context_id?: string | null;
   current_context_name?: string | null;
@@ -270,9 +282,12 @@ export default function AdminUsersPage() {
                 <TableHead>{t("table.user")}</TableHead>
                 <TableHead>{t("table.role")}</TableHead>
                 <TableHead>{t("table.workspaces")}</TableHead>
+                <TableHead>{t("table.cap")}</TableHead>
                 <TableHead>{t("table.memories")}</TableHead>
                 <TableHead>{t("table.lastLogin")}</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
+                <TableHead className="text-right">
+                  {t("table.actions")}
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -367,9 +382,40 @@ export default function AdminUsersPage() {
                       </div>
                     ) : (
                       <span className="text-xs text-gray-400 dark:text-gray-500">
-                        None
+                        {t("table.none")}
                       </span>
                     )}
+                  </TableCell>
+                  <TableCell>
+                    {/* Issue #695: owned / cap with at-cap emphasis.
+                        Fallback derives cap as base_cap + bonus rather
+                        than a literal 1 — during a mixed-version deploy
+                        (frontend ahead of backend) a user with bonus > 0
+                        would otherwise see "owned / 1" in the denominator
+                        even though the tooltip shows a nonzero bonus. */}
+                    {(() => {
+                      const owned = user.owned_count ?? 0;
+                      const bonus = user.workspace_slot_bonus ?? 0;
+                      const baseCap = user.base_cap ?? 1;
+                      const cap = user.cap ?? baseCap + bonus;
+                      const atCap = owned >= cap;
+                      return (
+                        <span
+                          className={
+                            atCap
+                              ? "text-amber-700 dark:text-amber-400 font-medium tabular-nums"
+                              : "tabular-nums text-sm text-gray-700 dark:text-gray-300"
+                          }
+                          title={t("table.capTooltip", {
+                            owned,
+                            cap,
+                            bonus,
+                          })}
+                        >
+                          {owned} / {cap}
+                        </span>
+                      );
+                    })()}
                   </TableCell>
                   <TableCell>{user.memory_count}</TableCell>
                   <TableCell className="text-sm text-gray-500">

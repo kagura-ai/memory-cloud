@@ -2202,6 +2202,8 @@
         "user": "ユーザー",
         "role": "ロール",
         "workspaces": "ワークスペース",
+        "cap": "上限",
+        "capTooltip": "ワークスペース {owned} / {cap} 所有 (ボーナス: +{bonus})",
         "memories": "メモリー",
         "storage": "ストレージ",
         "currentContext": "現在のコンテキスト",

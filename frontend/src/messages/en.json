@@ -2202,6 +2202,8 @@
         "user": "User",
         "role": "Role",
         "workspaces": "Workspaces",
+        "cap": "Cap",
+        "capTooltip": "Owns {owned} of {cap} workspaces (bonus: +{bonus})",
         "memories": "Memories",
         "storage": "Storage",
         "currentContext": "Current Context",
