@@ -1,4 +1,4 @@
-'use client';
+"use client";
 
 /**
  * User Detail Page
@@ -8,14 +8,16 @@
  * Shows comprehensive user information including workspaces, contexts, and stats.
  */
 
-import { useEffect, useState } from 'react';
-import { useParams, useRouter } from 'next/navigation';
-import { PageContainer } from '@/components/common/PageContainer';
-import { PageHeader } from '@/components/common/PageHeader';
-import { LoadingState } from '@/components/common/LoadingState';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
+import { useEffect, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { PageContainer } from "@/components/common/PageContainer";
+import { PageHeader } from "@/components/common/PageHeader";
+import { LoadingState, InlineSpinner } from "@/components/common/LoadingState";
+import { ErrorBanner } from "@/components/common/ErrorBanner";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Table,
   TableBody,
@@ -23,7 +25,7 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from '@/components/ui/table';
+} from "@/components/ui/table";
 import {
   Dialog,
   DialogContent,
@@ -31,18 +33,34 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/ui/dialog';
+} from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select';
-import { ArrowLeft, Building2, FolderOpen, BarChart2, Shield, Star, CreditCard } from 'lucide-react';
-import { apiClient } from '@/lib/api';
-import { formatDistanceToNow } from 'date-fns';
-import { useToast } from '@/hooks/use-toast';
+} from "@/components/ui/select";
+import {
+  ArrowLeft,
+  Building2,
+  FolderOpen,
+  BarChart2,
+  Shield,
+  Star,
+  CreditCard,
+  Layers,
+  Minus,
+  Plus,
+  AlertTriangle,
+} from "lucide-react";
+import { apiClient } from "@/lib/api";
+import {
+  updateWorkspaceSlotBonus,
+  type WorkspaceSummary,
+} from "@/lib/api/admin";
+import { formatDistanceToNow } from "date-fns";
+import { useToast } from "@/hooks/use-toast";
 
 interface UserDetail {
   user: {
@@ -77,6 +95,7 @@ interface UserDetail {
     persistent_memories: number;
     active_api_keys: number;
   };
+  workspace_summary?: WorkspaceSummary | null; // #676 (optional during rollout)
 }
 
 export default function UserDetailPage() {
@@ -85,13 +104,33 @@ export default function UserDetailPage() {
   const userId = params.userId as string;
   const [userDetail, setUserDetail] = useState<UserDetail | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [planDialog, setPlanDialog] = useState<{
     open: boolean;
     workspaceId: string | null;
     workspaceName: string | null;
     currentPlan: string | null;
-  }>({ open: false, workspaceId: null, workspaceName: null, currentPlan: null });
-  const [newPlan, setNewPlan] = useState<string>('');
+  }>({
+    open: false,
+    workspaceId: null,
+    workspaceName: null,
+    currentPlan: null,
+  });
+  const [newPlan, setNewPlan] = useState<string>("");
+
+  // Workspace slot bonus state (#676)
+  // `bonusPending` is the in-flight delta (so we can show a spinner on the
+  // pressed button only); `destructiveModal` defers the PATCH until the
+  // admin types a reason for over-cap operations.
+  const [bonusPending, setBonusPending] = useState<-1 | 1 | null>(null);
+  const [destructiveModal, setDestructiveModal] = useState<{
+    open: boolean;
+    delta: number;
+    reason: string;
+    warnText: string;
+    submitting: boolean;
+  }>({ open: false, delta: -1, reason: "", warnText: "", submitting: false });
+
   const { toast } = useToast();
 
   useEffect(() => {
@@ -101,49 +140,227 @@ export default function UserDetailPage() {
   const loadUserDetail = async () => {
     try {
       setLoading(true);
-      const data = await apiClient.get<UserDetail>(`/api/v1/admin/users/${userId}`);
+      setLoadError(null);
+      const data = await apiClient.get<UserDetail>(
+        `/api/v1/admin/users/${userId}`,
+      );
       setUserDetail(data);
-    } catch (error: any) {
-      console.error('Failed to load user details:', error);
+    } catch (error: unknown) {
+      // Page-level load failure → ErrorBanner (per .claude/rules/frontend.md
+      // error-surface rule). No toast for the same event — one channel per
+      // error class.
+      const message =
+        error instanceof Error ? error.message : "Failed to load user details";
+      setLoadError(message);
     } finally {
       setLoading(false);
     }
   };
 
-  const openPlanDialog = (workspace: UserDetail['workspaces'][0]) => {
+  const openPlanDialog = (workspace: UserDetail["workspaces"][0]) => {
     setPlanDialog({
       open: true,
       workspaceId: workspace.workspace_id,
       workspaceName: workspace.workspace_name,
-      currentPlan: workspace.plan_name || 'free',
+      currentPlan: workspace.plan_name || "free",
     });
-    setNewPlan(workspace.plan_name || 'free');
+    setNewPlan(workspace.plan_name || "free");
   };
 
   const handleChangePlan = async () => {
     if (!planDialog.workspaceId || !newPlan) return;
 
     try {
-      await apiClient.put(`/api/v1/admin/plans/workspaces/${planDialog.workspaceId}/plan`, {
-        plan_name: newPlan,
-        reason: 'Changed by admin via user detail page',
-      });
+      await apiClient.put(
+        `/api/v1/admin/plans/workspaces/${planDialog.workspaceId}/plan`,
+        {
+          plan_name: newPlan,
+          reason: "Changed by admin via user detail page",
+        },
+      );
 
       toast({
-        title: 'Success',
+        title: "Success",
         description: `Plan changed to ${newPlan} for ${planDialog.workspaceName}`,
       });
 
-      setPlanDialog({ open: false, workspaceId: null, workspaceName: null, currentPlan: null });
+      setPlanDialog({
+        open: false,
+        workspaceId: null,
+        workspaceName: null,
+        currentPlan: null,
+      });
       loadUserDetail();
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : "Failed to change plan";
       toast({
-        title: 'Error',
-        description: error.message || 'Failed to change plan',
-        variant: 'destructive',
+        title: "Error",
+        description: message,
+        variant: "destructive",
       });
     }
   };
+
+  // ---------- #676 workspace slot bonus handlers ----------
+
+  /**
+   * Send PATCH and reconcile workspace_summary with the returned state.
+   *
+   * Uses functional setUserDetail updates so a concurrent loadUserDetail()
+   * (e.g. triggered by the change-plan flow) cannot have its result
+   * clobbered by this section's reconcile, and so a rollback restores
+   * only workspace_summary instead of overwriting the entire userDetail
+   * with a stale snapshot.
+   */
+  const commitBonusDelta = async (delta: number, reason: string | null) => {
+    if (!userDetail?.workspace_summary) return;
+    const summarySnapshot = userDetail.workspace_summary;
+
+    // Optimistic update — render the projected state immediately so the
+    // [-]/[+] feels responsive. Reconciled with the authoritative value
+    // returned by the PATCH below.
+    const projectedBonus = summarySnapshot.workspace_slot_bonus + delta;
+    const projectedCap = summarySnapshot.base_cap + projectedBonus;
+    setUserDetail((prev) =>
+      prev && prev.workspace_summary
+        ? {
+            ...prev,
+            workspace_summary: {
+              ...prev.workspace_summary,
+              workspace_slot_bonus: projectedBonus,
+              cap: projectedCap,
+              is_at_cap: prev.workspace_summary.owned_count >= projectedCap,
+            },
+          }
+        : prev,
+    );
+    setBonusPending(delta as -1 | 1);
+
+    try {
+      const response = await updateWorkspaceSlotBonus(userId, {
+        delta,
+        reason,
+      });
+      setUserDetail((prev) =>
+        prev && prev.workspace_summary
+          ? {
+              ...prev,
+              workspace_summary: {
+                ...prev.workspace_summary,
+                workspace_slot_bonus: response.after_value,
+                owned_count: response.owned_count,
+                base_cap: response.base_cap,
+                cap: response.cap,
+                is_at_cap: response.is_at_cap,
+              },
+            }
+          : prev,
+      );
+      toast({
+        title: "Updated",
+        description: `Slot bonus: ${response.before_value} → ${response.after_value}.`,
+      });
+    } catch (error: unknown) {
+      // Refetch authoritative state on PATCH failure. A naive
+      // ``setUserDetail(snapshot)`` rollback (or any rollback that
+      // compares only ``workspace_slot_bonus``) cannot reliably
+      // distinguish "my optimistic write is still in place" from
+      // "another admin's update happened to land on the same projected
+      // value" — both produce identical state but different rollback
+      // intents. ``loadUserDetail()`` re-reads the server, so the
+      // post-failure state always reflects truth. Extra round-trip on
+      // the rare failure path is acceptable for admin-only endpoint.
+      const message =
+        error instanceof Error ? error.message : "Failed to update slot bonus";
+      toast({
+        title: "Error",
+        description: message,
+        variant: "destructive",
+      });
+      void loadUserDetail();
+    } finally {
+      setBonusPending(null);
+    }
+  };
+
+  /**
+   * Entry point for the [+] and [-] buttons. Routes destructive (-) ops
+   * through the reason modal; everything else commits immediately.
+   */
+  const handleBonusDelta = async (delta: 1 | -1) => {
+    if (!userDetail?.workspace_summary || bonusPending !== null) return;
+    const summary = userDetail.workspace_summary;
+    const projectedBonus = summary.workspace_slot_bonus + delta;
+    const projectedCap = summary.base_cap + projectedBonus;
+
+    if (projectedBonus < 0) {
+      toast({
+        title: "Cannot decrement",
+        description: "Slot bonus is already at 0.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const destructive = delta < 0 && projectedCap < summary.owned_count;
+    if (destructive) {
+      const shortfall = summary.owned_count - projectedCap;
+      setDestructiveModal({
+        open: true,
+        delta,
+        reason: "",
+        warnText:
+          `User currently owns ${summary.owned_count} workspaces. ` +
+          `Setting bonus to ${projectedBonus} caps them at ${projectedCap}. ` +
+          `They cannot create new workspaces until ${shortfall} existing ` +
+          `workspace${shortfall === 1 ? " is" : "s are"} deleted. ` +
+          `Existing workspaces are NOT removed.`,
+        submitting: false,
+      });
+      return;
+    }
+
+    await commitBonusDelta(delta, null);
+  };
+
+  const submitDestructive = async () => {
+    const reason = destructiveModal.reason.trim();
+    if (!reason) return; // Submit button is also disabled in this state
+    setDestructiveModal({ ...destructiveModal, submitting: true });
+    try {
+      await commitBonusDelta(destructiveModal.delta, reason);
+    } finally {
+      setDestructiveModal({
+        open: false,
+        delta: -1,
+        reason: "",
+        warnText: "",
+        submitting: false,
+      });
+    }
+  };
+
+  if (loadError) {
+    return (
+      <PageContainer>
+        <PageHeader
+          title="User Detail"
+          description="Failed to load user information"
+          actions={
+            <Button
+              variant="outline"
+              onClick={() => router.push("/admin/users")}
+            >
+              <ArrowLeft className="h-4 w-4 mr-2" />
+              Back to Users
+            </Button>
+          }
+        />
+        <ErrorBanner error={loadError} />
+      </PageContainer>
+    );
+  }
 
   if (loading || !userDetail) {
     return (
@@ -163,7 +380,7 @@ export default function UserDetailPage() {
         title="User Detail"
         description={`${userDetail.user.name} (${userDetail.user.email})`}
         actions={
-          <Button variant="outline" onClick={() => router.push('/admin/users')}>
+          <Button variant="outline" onClick={() => router.push("/admin/users")}>
             <ArrowLeft className="h-4 w-4 mr-2" />
             Back to Users
           </Button>
@@ -192,12 +409,21 @@ export default function UserDetailPage() {
               <h3 className="text-xl font-semibold">{userDetail.user.name}</h3>
               <p className="text-gray-500">{userDetail.user.email}</p>
               <div className="flex gap-2 mt-2">
-                <Badge variant={userDetail.user.role === 'admin' ? 'destructive' : 'default'}>
-                  {userDetail.user.role === 'admin' && <Shield className="h-3 w-3 mr-1" />}
+                <Badge
+                  variant={
+                    userDetail.user.role === "admin" ? "destructive" : "default"
+                  }
+                >
+                  {userDetail.user.role === "admin" && (
+                    <Shield className="h-3 w-3 mr-1" />
+                  )}
                   {userDetail.user.role}
                 </Badge>
                 {userDetail.user.is_initial_admin && (
-                  <Badge variant="secondary" className="bg-amber-100 text-amber-800">
+                  <Badge
+                    variant="secondary"
+                    className="bg-amber-100 text-amber-800"
+                  >
                     Initial Admin
                   </Badge>
                 )}
@@ -209,15 +435,20 @@ export default function UserDetailPage() {
             <div>
               <p className="text-gray-500">Created</p>
               <p className="font-medium">
-                {formatDistanceToNow(new Date(userDetail.user.created_at), { addSuffix: true })}
+                {formatDistanceToNow(new Date(userDetail.user.created_at), {
+                  addSuffix: true,
+                })}
               </p>
             </div>
             <div>
               <p className="text-gray-500">Last Login</p>
               <p className="font-medium">
                 {userDetail.user.last_login_at
-                  ? formatDistanceToNow(new Date(userDetail.user.last_login_at), { addSuffix: true })
-                  : 'Never'}
+                  ? formatDistanceToNow(
+                      new Date(userDetail.user.last_login_at),
+                      { addSuffix: true },
+                    )
+                  : "Never"}
               </p>
             </div>
           </div>
@@ -249,10 +480,16 @@ export default function UserDetailPage() {
                   <TableRow key={workspace.workspace_id}>
                     <TableCell>
                       <div className="flex items-center gap-2">
-                        {workspace.is_primary && <Star className="h-4 w-4 text-yellow-500" />}
-                        <span className="font-medium">{workspace.workspace_name}</span>
                         {workspace.is_primary && (
-                          <Badge variant="outline" className="text-xs">Primary</Badge>
+                          <Star className="h-4 w-4 text-yellow-500" />
+                        )}
+                        <span className="font-medium">
+                          {workspace.workspace_name}
+                        </span>
+                        {workspace.is_primary && (
+                          <Badge variant="outline" className="text-xs">
+                            Primary
+                          </Badge>
                         )}
                       </div>
                     </TableCell>
@@ -260,14 +497,24 @@ export default function UserDetailPage() {
                       <Badge>{workspace.role}</Badge>
                     </TableCell>
                     <TableCell>
-                      <Badge variant={workspace.plan_name === 'pro' ? 'destructive' : workspace.plan_name === 'basic' ? 'default' : 'secondary'}>
-                        {workspace.plan_name || 'free'}
+                      <Badge
+                        variant={
+                          workspace.plan_name === "pro"
+                            ? "destructive"
+                            : workspace.plan_name === "basic"
+                              ? "default"
+                              : "secondary"
+                        }
+                      >
+                        {workspace.plan_name || "free"}
                       </Badge>
                     </TableCell>
                     <TableCell className="text-sm text-gray-500">
                       {workspace.joined_at
-                        ? formatDistanceToNow(new Date(workspace.joined_at), { addSuffix: true })
-                        : 'N/A'}
+                        ? formatDistanceToNow(new Date(workspace.joined_at), {
+                            addSuffix: true,
+                          })
+                        : "N/A"}
                     </TableCell>
                     <TableCell className="text-right">
                       <Button
@@ -289,12 +536,129 @@ export default function UserDetailPage() {
         </CardContent>
       </Card>
 
+      {/* Workspace Capacity Card (#676) */}
+      {userDetail.workspace_summary && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Layers className="h-5 w-5" />
+              <CardTitle>Workspace Capacity</CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {(() => {
+              const summary = userDetail.workspace_summary;
+              const usage =
+                summary.cap > 0 ? summary.owned_count / summary.cap : 0;
+              const badgeVariant: "destructive" | "secondary" | "outline" =
+                usage >= 0.95
+                  ? "destructive"
+                  : usage >= 0.8
+                    ? "secondary"
+                    : "outline";
+              const usagePct = Math.round(usage * 100);
+              return (
+                <div className="space-y-4">
+                  <div className="flex items-baseline gap-3">
+                    <p className="text-sm">
+                      <span className="font-medium">
+                        Owned: {summary.owned_count}
+                      </span>{" "}
+                      / Cap: {summary.cap}
+                      <span className="text-gray-500 ml-2">
+                        ({summary.base_cap} base +{" "}
+                        {summary.workspace_slot_bonus} bonus)
+                      </span>
+                    </p>
+                    <Badge variant={badgeVariant}>
+                      {summary.is_at_cap ? "at cap" : `${usagePct}% used`}
+                    </Badge>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <span className="text-sm text-gray-500">Slot bonus:</span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      aria-label="Decrement slot bonus"
+                      onClick={() => handleBonusDelta(-1)}
+                      disabled={
+                        bonusPending !== null ||
+                        summary.workspace_slot_bonus === 0
+                      }
+                    >
+                      {bonusPending === -1 ? (
+                        <InlineSpinner />
+                      ) : (
+                        <Minus className="h-4 w-4" />
+                      )}
+                    </Button>
+                    <span className="font-mono font-medium text-lg min-w-[2ch] text-center">
+                      {summary.workspace_slot_bonus}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      aria-label="Increment slot bonus"
+                      onClick={() => handleBonusDelta(1)}
+                      disabled={bonusPending !== null}
+                    >
+                      {bonusPending === 1 ? (
+                        <InlineSpinner />
+                      ) : (
+                        <Plus className="h-4 w-4" />
+                      )}
+                    </Button>
+                  </div>
+
+                  {summary.owned_workspaces.length > 0 ? (
+                    <div>
+                      <p className="text-xs text-gray-500 mb-2">
+                        Owned workspaces ({summary.owned_workspaces.length})
+                      </p>
+                      <ul className="space-y-1">
+                        {summary.owned_workspaces.map((ws) => (
+                          <li
+                            key={ws.id}
+                            className="flex items-center justify-between text-sm"
+                          >
+                            <span className="font-medium">{ws.name}</span>
+                            <Badge
+                              variant={
+                                ws.plan_name === "pro"
+                                  ? "destructive"
+                                  : ws.plan_name === "basic"
+                                    ? "default"
+                                    : "secondary"
+                              }
+                              className="text-xs"
+                            >
+                              {ws.plan_name}
+                            </Badge>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-gray-500">
+                      User owns no workspaces.
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
+          </CardContent>
+        </Card>
+      )}
+
       {/* Accessible Contexts Card */}
       <Card>
         <CardHeader>
           <div className="flex items-center gap-2">
             <FolderOpen className="h-5 w-5" />
-            <CardTitle>Accessible Contexts ({userDetail.accessible_contexts.length})</CardTitle>
+            <CardTitle>
+              Accessible Contexts ({userDetail.accessible_contexts.length})
+            </CardTitle>
           </div>
         </CardHeader>
         <CardContent>
@@ -311,15 +675,21 @@ export default function UserDetailPage() {
               <TableBody>
                 {userDetail.accessible_contexts.map((ctx) => (
                   <TableRow key={ctx.context_id}>
-                    <TableCell className="font-medium">{ctx.context_name}</TableCell>
-                    <TableCell className="text-sm text-gray-500">{ctx.workspace_name}</TableCell>
+                    <TableCell className="font-medium">
+                      {ctx.context_name}
+                    </TableCell>
+                    <TableCell className="text-sm text-gray-500">
+                      {ctx.workspace_name}
+                    </TableCell>
                     <TableCell>
                       <Badge variant="outline">{ctx.role}</Badge>
                     </TableCell>
                     <TableCell className="text-sm text-gray-500">
                       {ctx.last_used_at
-                        ? formatDistanceToNow(new Date(ctx.last_used_at), { addSuffix: true })
-                        : 'Never'}
+                        ? formatDistanceToNow(new Date(ctx.last_used_at), {
+                            addSuffix: true,
+                          })
+                        : "Never"}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -343,21 +713,29 @@ export default function UserDetailPage() {
           <div className="grid grid-cols-2 gap-6">
             <div>
               <p className="text-sm text-gray-500">Total Memories</p>
-              <p className="text-3xl font-bold">{userDetail.stats.total_memories}</p>
+              <p className="text-3xl font-bold">
+                {userDetail.stats.total_memories}
+              </p>
               <p className="text-xs text-gray-500 mt-1">
-                Working: {userDetail.stats.working_memories} | Persistent: {userDetail.stats.persistent_memories}
+                Working: {userDetail.stats.working_memories} | Persistent:{" "}
+                {userDetail.stats.persistent_memories}
               </p>
             </div>
             <div>
               <p className="text-sm text-gray-500">Active API Keys</p>
-              <p className="text-3xl font-bold">{userDetail.stats.active_api_keys}</p>
+              <p className="text-3xl font-bold">
+                {userDetail.stats.active_api_keys}
+              </p>
             </div>
           </div>
         </CardContent>
       </Card>
 
       {/* Change Plan Dialog */}
-      <Dialog open={planDialog.open} onOpenChange={(open) => setPlanDialog({ ...planDialog, open })}>
+      <Dialog
+        open={planDialog.open}
+        onOpenChange={(open) => setPlanDialog({ ...planDialog, open })}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Change Workspace Plan</DialogTitle>
@@ -370,7 +748,11 @@ export default function UserDetailPage() {
             <div>
               <label className="text-sm font-medium">Current Plan</label>
               <div className="mt-2">
-                <Badge variant={planDialog.currentPlan === 'pro' ? 'destructive' : 'default'}>
+                <Badge
+                  variant={
+                    planDialog.currentPlan === "pro" ? "destructive" : "default"
+                  }
+                >
                   {planDialog.currentPlan}
                 </Badge>
               </div>
@@ -392,7 +774,8 @@ export default function UserDetailPage() {
 
             <div className="bg-yellow-50 border border-yellow-200 rounded p-3">
               <p className="text-sm text-yellow-800">
-                ⚠️ Plan changes take effect immediately and will update quota limits.
+                ⚠️ Plan changes take effect immediately and will update quota
+                limits.
               </p>
             </div>
           </div>
@@ -400,12 +783,104 @@ export default function UserDetailPage() {
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() => setPlanDialog({ open: false, workspaceId: null, workspaceName: null, currentPlan: null })}
+              onClick={() =>
+                setPlanDialog({
+                  open: false,
+                  workspaceId: null,
+                  workspaceName: null,
+                  currentPlan: null,
+                })
+              }
             >
               Cancel
             </Button>
-            <Button onClick={handleChangePlan} disabled={newPlan === planDialog.currentPlan}>
+            <Button
+              onClick={handleChangePlan}
+              disabled={newPlan === planDialog.currentPlan}
+            >
               Change Plan
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Destructive slot bonus modal (#676) */}
+      <Dialog
+        open={destructiveModal.open}
+        onOpenChange={(open) =>
+          !destructiveModal.submitting &&
+          setDestructiveModal({ ...destructiveModal, open })
+        }
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Reason required</DialogTitle>
+            <DialogDescription>
+              This change reduces the cap below the user&apos;s current owned
+              count.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2">
+            <div
+              role="alert"
+              className="flex gap-2 rounded border border-destructive/50 bg-destructive/10 p-3 text-sm"
+            >
+              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-destructive" />
+              <p>{destructiveModal.warnText}</p>
+            </div>
+
+            <div>
+              <label htmlFor="bonus-reason" className="text-sm font-medium">
+                Reason (required)
+              </label>
+              <Textarea
+                id="bonus-reason"
+                value={destructiveModal.reason}
+                onChange={(e) =>
+                  setDestructiveModal({
+                    ...destructiveModal,
+                    reason: e.target.value,
+                  })
+                }
+                placeholder="Why is this admin operation needed?"
+                rows={3}
+                maxLength={500}
+                disabled={destructiveModal.submitting}
+                className="mt-2"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                {destructiveModal.reason.length}/500
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() =>
+                setDestructiveModal({
+                  open: false,
+                  delta: -1,
+                  reason: "",
+                  warnText: "",
+                  submitting: false,
+                })
+              }
+              disabled={destructiveModal.submitting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={submitDestructive}
+              disabled={
+                !destructiveModal.reason.trim() || destructiveModal.submitting
+              }
+            >
+              {destructiveModal.submitting
+                ? "Confirming…"
+                : "Confirm decrement"}
             </Button>
           </DialogFooter>
         </DialogContent>

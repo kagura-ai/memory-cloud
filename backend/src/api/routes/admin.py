@@ -9,7 +9,8 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import require_admin
@@ -17,6 +18,7 @@ from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import (
     APIKey,
+    AuditLog,
     Context,
     ContextMember,
     OAuth2Client,
@@ -25,10 +27,20 @@ from models.auth import (
     WorkspaceMember,
 )
 from models.memory import Memory
+from models.schemas import (
+    UpdateWorkspaceSlotBonusRequest,
+    UpdateWorkspaceSlotBonusResponse,
+)
 from utils import db_transaction, get_user_id
 from utils.datetime import to_utc_iso
-from utils.exceptions import AuthorizationError, NotFoundException
+from utils.exceptions import (
+    AuthorizationError,
+    BonusBelowZeroError,
+    InsufficientReasonError,
+    NotFoundException,
+)
 from utils.logger import get_logger
+from utils.plan_resolver import BASE_CAP, get_user_workspace_cap_summary
 
 logger = get_logger(__name__)
 
@@ -143,17 +155,50 @@ async def list_users(
         if role:
             stmt = stmt.where(User.role == role)
 
-        # Issue #164: Apply workspace filter
+        # Issue #164: Apply workspace_id / plan filter
+        # WorkspaceMember.user_id is not a FK to User.user_id (it stores the
+        # OAuth ``sub`` claim as a plain string), so SQLAlchemy cannot infer
+        # the ON clause from the schema. Pass it explicitly — otherwise the
+        # join raises InvalidRequestError("Don't know how to join …").
+        #
+        # Both branches JOIN Workspace and filter ``deleted_at IS NULL``.
+        # WorkspaceMember rows persist after a workspace is soft-deleted
+        # (membership is preserved for tombstone visibility), so the
+        # ``workspace_id`` filter without the soft-delete predicate would
+        # surface users for a soft-deleted workspace — the same #681 class.
+        #
+        # ``.distinct()`` deduplicates: a user with N matching workspaces
+        # would otherwise produce N rows and inflate ``total`` to count
+        # workspace matches rather than distinct users, breaking pagination.
+        join_filter_applied = workspace_id is not None or plan is not None
         if workspace_id:
-            stmt = stmt.join(WorkspaceMember).where(
-                WorkspaceMember.workspace_id == UUID(workspace_id)
+            stmt = (
+                stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.user_id)
+                .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
+                .where(
+                    WorkspaceMember.workspace_id == UUID(workspace_id),
+                    Workspace.deleted_at.is_(None),  # #681 pattern: soft-delete safe
+                )
             )
 
         # Issue #164: Apply plan filter (via workspace)
         if plan:
             if not workspace_id:  # If not already joined
-                stmt = stmt.join(WorkspaceMember)
-            stmt = stmt.join(Workspace).where(Workspace.plan_name == plan)
+                stmt = stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.user_id).join(
+                    Workspace, Workspace.id == WorkspaceMember.workspace_id
+                )
+            stmt = stmt.where(
+                Workspace.plan_name == plan,
+                Workspace.deleted_at.is_(None),  # #681: exclude soft-deleted
+            )
+
+        # Deduplicate the user list / count when any JOIN-based filter is
+        # active. A user owning K matching workspaces would otherwise
+        # produce K rows in ``users_list`` and inflate ``total`` to count
+        # workspace matches rather than distinct users — breaking
+        # pagination and the admin list contract.
+        if join_filter_applied:
+            stmt = stmt.distinct()
 
         # Get total count (with filters applied)
         count_stmt = select(func.count()).select_from(stmt.subquery())
@@ -508,8 +553,41 @@ async def get_user_detail(
             "active_api_keys": active_api_keys,
         }
 
-        # 5. Build response
-        from models.schemas import UserDetailResponse
+        # 5. Build workspace_summary (#676 admin slot bonus UI)
+        # owned_count + cap come from the canonical helper so /usage/current
+        # and this admin view never drift. owned_workspaces is filtered
+        # inline (deleted_at IS NULL) — reusing the already-fetched
+        # workspace_memberships list would conflate "owned" with "member of"
+        # since membership covers all four roles, not just owner.
+        from models.schemas import (
+            OwnedWorkspaceInfo,
+            UserDetailResponse,
+            WorkspaceSummary,
+        )
+
+        owned_count, cap = await get_user_workspace_cap_summary(db, user_id)
+        owned_ws_result = await db.execute(
+            select(Workspace.id, Workspace.name, Workspace.plan_name)
+            .where(
+                Workspace.owner_user_id == user_id,
+                Workspace.deleted_at.is_(None),  # #681 pattern: soft-delete safe
+            )
+            .order_by(Workspace.created_at.desc())
+        )
+        owned_ws_list = [
+            OwnedWorkspaceInfo(id=str(row.id), name=row.name, plan_name=row.plan_name)
+            for row in owned_ws_result.all()
+        ]
+        workspace_summary = WorkspaceSummary(
+            owned_count=owned_count,
+            workspace_slot_bonus=target_user.workspace_slot_bonus,
+            base_cap=BASE_CAP,
+            cap=cap,
+            is_at_cap=(owned_count >= cap),
+            owned_workspaces=owned_ws_list,
+        )
+
+        # 6. Build response
 
         return UserDetailResponse(
             user={
@@ -527,6 +605,7 @@ async def get_user_detail(
             workspaces=workspaces,
             accessible_contexts=accessible_contexts,
             stats=stats,
+            workspace_summary=workspace_summary,
         )
 
     except HTTPException:
@@ -584,6 +663,210 @@ async def update_user_role(
             "user_id": user_id,
             "new_role": request.role,
         }
+
+
+@router.patch(
+    "/users/{user_id}/workspace_slot_bonus",
+    response_model=UpdateWorkspaceSlotBonusResponse,
+)
+async def update_workspace_slot_bonus(
+    user_id: str,
+    request: UpdateWorkspaceSlotBonusRequest,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> UpdateWorkspaceSlotBonusResponse:
+    """Apply a signed delta to a user's workspace_slot_bonus (Admin-only).
+
+    Issue #676. Atomic via ``UPDATE ... RETURNING`` so two admins clicking
+    +1 simultaneously cannot overwrite each other (read-modify-write at the
+    ORM layer would race). The DB CHECK constraint
+    ``workspace_slot_bonus_nonneg`` is the ultimate safety net; the
+    app-level ``BonusBelowZeroError`` exists so SDK consumers receive a
+    structured 400 (``BONUS-002``) instead of a generic IntegrityError.
+
+    ``reason`` is required only when the new cap would fall below the
+    user's current owned_count — admin can still revoke bonus from users
+    not at risk of over-cap without filling in a reason every time.
+
+    All mutations write a row to ``audit_logs`` with the canonical
+    ``user_metadata`` JSON payload pattern (matches
+    ``system_admin_service.py``); SHA256 hashing of the integer values is
+    unnecessary so they are stored as plain strings in ``old_value_hash`` /
+    ``new_value_hash`` for the rare grep-by-numeric-value query.
+    """
+    actor_id = get_user_id(admin)
+
+    # ---- Acquire per-user advisory lock (serializes against workspace creation) ----
+    # ``QuotaService.check_workspace_creation_allowed`` (#677 sub-C)
+    # acquires ``pg_advisory_xact_lock(hashtextextended('workspace_create:' || user_id, 0))``
+    # before counting owned workspaces. Without holding the same lock
+    # here, a concurrent workspace-create can pass its cap check while we
+    # are decrementing the bonus — ending up over-cap without the admin
+    # supplying a reason. The lock is xact-scoped: it is released when
+    # this request's transaction commits (audit phase) or rolls back
+    # (any raise path through ``get_db``).
+    #
+    # Bounded acquire mirrors quota_service.py:388 — ``SET LOCAL
+    # lock_timeout = '5s'`` keeps a pathologically long peer transaction
+    # from stalling this worker indefinitely. On SQLSTATE 55P03
+    # (``lock_not_available``) we rollback the poisoned session and
+    # surface a 503 (retriable); other DB errors propagate up. The reset
+    # to ``'0'`` after a successful acquire prevents the 5s timeout from
+    # bleeding into the subsequent SELECT/UPDATE statements.
+    await db.execute(text("SET LOCAL lock_timeout = '5s'"))
+    try:
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))").bindparams(
+                key=f"workspace_create:{user_id}"
+            )
+        )
+    except DBAPIError as exc:
+        sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+        # The session is poisoned until rollback — issue it before
+        # raising so the next request on this session is clean.
+        await db.rollback()
+        if sqlstate == "55P03":
+            logger.warning(
+                "admin_workspace_slot_bonus_lock_timeout",
+                target_user_id=user_id,
+                actor_user_id=actor_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Workspace cap lock unavailable; please retry.",
+            ) from exc
+        raise
+    await db.execute(text("SET LOCAL lock_timeout = '0'"))
+
+    # ---- Validation phase (read-only, outside db_transaction) ----
+    # db_transaction's bare `except Exception` wraps MemoryCloudException
+    # subclasses as HTTPException(500), which would convert our structured
+    # BONUS-001/002 4xx errors into generic 500s. Keeping the guard raises
+    # outside the transaction so they propagate to memory_cloud_exception_handler.
+    target_result = await db.execute(select(User).where(User.user_id == user_id))
+    target_user = target_result.scalar_one_or_none()
+    if target_user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    current_bonus = target_user.workspace_slot_bonus
+    projected_after = current_bonus + request.delta
+
+    if projected_after < 0:
+        raise BonusBelowZeroError(current=current_bonus, delta=request.delta)
+
+    # owned_count is read before the mutation; the cap below is the
+    # *new* cap (BASE_CAP + projected_after). Computing it locally avoids a
+    # second query and keeps the destructive-op decision deterministic.
+    owned_count, _current_cap = await get_user_workspace_cap_summary(db, user_id)
+    projected_cap = BASE_CAP + projected_after
+
+    reason_clean = (request.reason or "").strip() or None
+    is_destructive = request.delta < 0 and projected_cap < owned_count
+    if is_destructive and reason_clean is None:
+        raise InsufficientReasonError()
+
+    target_email = target_user.email  # capture for audit before leaving the SELECT scope
+
+    # ---- Mutation phase ----
+    # Atomic delta application — UPDATE ... RETURNING is race-free with
+    # respect to concurrent +1/-1 from another admin session.
+    #
+    # The `+ delta >= 0` guard in the WHERE clause is the race-safe form
+    # of BONUS-002: if a concurrent decrement landed between the
+    # validation phase above and this UPDATE such that the live value
+    # would go negative, the UPDATE matches zero rows instead of tripping
+    # the workspace_slot_bonus_nonneg CHECK at COMMIT (which would surface
+    # as IntegrityError → generic 500, masking the structured 400). We
+    # disambiguate 404 (user vanished) from raced-BONUS-002 (user exists,
+    # would-go-negative) via a single follow-up SELECT in the rare error
+    # path. The raise paths sit OUTSIDE db_transaction so
+    # MemoryCloudException subclasses propagate to
+    # memory_cloud_exception_handler instead of being swallowed as 500.
+    update_stmt = (
+        update(User)
+        .where(
+            User.user_id == user_id,
+            User.workspace_slot_bonus + request.delta >= 0,
+        )
+        .values(workspace_slot_bonus=User.workspace_slot_bonus + request.delta)
+        .returning(User.workspace_slot_bonus)
+    )
+    update_result = await db.execute(update_stmt)
+    returned = update_result.one_or_none()
+    if returned is None:
+        live_bonus = await db.scalar(
+            select(User.workspace_slot_bonus).where(User.user_id == user_id)
+        )
+        if live_bonus is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise BonusBelowZeroError(current=int(live_bonus), delta=request.delta)
+
+    after_value = returned.workspace_slot_bonus
+    # Derive before_value from the authoritative RETURNING result so that
+    # under concurrent +1 collisions the audit trail records the actual
+    # pre-state of THIS update, not a stale SELECT snapshot.
+    before_value = after_value - request.delta
+    final_cap = BASE_CAP + after_value
+
+    # Race-guard the destructive-op check post-UPDATE. The pre-UPDATE
+    # validation used ``current_bonus`` from a snapshot, so two admins
+    # concurrently decrementing bonus on a user at ``cap == owned`` could
+    # both pass the "not destructive yet" gate independently — but the
+    # second commit lands the user in an over-cap state without anyone
+    # supplying a reason. Re-checking against the authoritative
+    # ``after_value`` from RETURNING closes the race: if the post-state is
+    # over-cap and no reason was supplied, we raise ``BONUS-001`` here
+    # (still outside ``db_transaction``), and ``get_db``'s except handler
+    # rolls back the staged UPDATE on its way out. No audit row is
+    # written for the rolled-back attempt — admin sees a 400 and can
+    # retry with a reason.
+    if request.delta < 0 and final_cap < owned_count and reason_clean is None:
+        raise InsufficientReasonError()
+
+    # Audit write + commit are transaction-wrapped so a failure here
+    # rolls back the staged UPDATE above (single SQLAlchemy session
+    # transaction across both operations).
+    async with db_transaction(
+        db, "update_workspace_slot_bonus", "Failed to update workspace slot bonus"
+    ):
+        audit = AuditLog(
+            user_email=admin.get("email", actor_id),
+            user_id=actor_id,
+            action="workspace_slot_bonus_update",
+            resource=f"user:{target_email}",
+            old_value_hash=str(before_value),
+            new_value_hash=str(after_value),
+            user_metadata={
+                "actor_user_id": actor_id,
+                "target_user_id": user_id,
+                "before_value": before_value,
+                "after_value": after_value,
+                "delta": request.delta,
+                "reason": reason_clean,
+            },
+        )
+        db.add(audit)
+        await db.commit()
+
+    logger.info(
+        "admin_update_workspace_slot_bonus",
+        actor_user_id=actor_id,
+        target_user_id=user_id,
+        before=before_value,
+        after=after_value,
+        delta=request.delta,
+        destructive=is_destructive,
+    )
+
+    return UpdateWorkspaceSlotBonusResponse(
+        before_value=before_value,
+        after_value=after_value,
+        owned_count=owned_count,
+        base_cap=BASE_CAP,
+        cap=final_cap,
+        is_at_cap=(owned_count >= final_cap),
+        reason=reason_clean,
+    )
 
 
 @router.delete("/users/{user_id}")
