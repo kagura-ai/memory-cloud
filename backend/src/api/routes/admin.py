@@ -79,9 +79,12 @@ class UserInfo(TZAwareBaseModel):
     # Issue #695: owned-workspace cap summary (mirrors WorkspaceSummary fields
     # used in /admin/users/{id} detail). Always populated for active users so
     # the list UI can render `owned_count / effective_cap` and an at-cap flag.
+    # ``effective_cap`` defaults to ``BASE_CAP`` (not a literal ``1``) so the
+    # schema stays in sync if ``BASE_CAP`` ever changes — recomputed per-user
+    # in the handler from ``BASE_CAP + workspace_slot_bonus``.
     owned_count: int = 0
     workspace_slot_bonus: int = 0
-    effective_cap: int = 1  # BASE_CAP default; recomputed per-user in handler
+    effective_cap: int = BASE_CAP
 
     # Issue #246: current_context_id removed
     # current_context_id: str | None = None

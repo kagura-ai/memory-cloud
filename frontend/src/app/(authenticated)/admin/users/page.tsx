@@ -377,7 +377,7 @@ export default function AdminUsersPage() {
                       </div>
                     ) : (
                       <span className="text-xs text-gray-400 dark:text-gray-500">
-                        None
+                        {t("table.none")}
                       </span>
                     )}
                   </TableCell>
