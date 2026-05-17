@@ -8,6 +8,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useTranslations, useLocale } from "next-intl";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
@@ -47,7 +48,6 @@ import {
   InlineSpinner,
   TableLoadingState,
 } from "@/components/common/LoadingState";
-import { UserDetailModal } from "@/components/admin/UserDetailModal";
 
 interface WorkspaceMembership {
   workspace_id: string;
@@ -93,6 +93,7 @@ export default function AdminUsersPage() {
   const t = useTranslations("admin.users");
   const tCommon = useTranslations("admin.common");
   const locale = useLocale();
+  const router = useRouter();
 
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
@@ -100,8 +101,6 @@ export default function AdminUsersPage() {
 
   // Issue #165 Phase 5: Search and filter state
   const [searchQuery, setSearchQuery] = useState("");
-  const [showDetailModal, setShowDetailModal] = useState(false);
-  const [detailUserId, setDetailUserId] = useState<string | null>(null);
 
   // Issue #166: Count admin users for protection logic
   const adminCount = users.filter((u) => u.role === "admin").length;
@@ -140,14 +139,12 @@ export default function AdminUsersPage() {
     }
   };
 
+  // Issue #697: navigate to the dedicated detail route instead of opening
+  // a legacy modal — the modal predated #676 and lacked the slot-bonus
+  // inc/dec UI, leaving the workspace_slot_bonus admin flow unreachable
+  // from the standard list-click path.
   const handleUserClick = (userId: string) => {
-    setDetailUserId(userId);
-    setShowDetailModal(true);
-  };
-
-  const handleCloseDetailModal = () => {
-    setShowDetailModal(false);
-    setDetailUserId(null);
+    router.push(`/admin/users/${userId}`);
   };
 
   const handleRoleChange = async (userId: string, newRole: string) => {
@@ -484,14 +481,6 @@ export default function AdminUsersPage() {
           </Table>
         </div>
       </Section>
-
-      {/* User Detail Modal (Issue #165 Phase 5) */}
-      {showDetailModal && detailUserId && (
-        <UserDetailModal
-          userId={detailUserId}
-          onClose={handleCloseDetailModal}
-        />
-      )}
     </PageContainer>
   );
 }
