@@ -12,7 +12,9 @@
 
 - **目的**: TOCTOU race を `pg_advisory_xact_lock` で塞いだ上で（#677）、cap 超過を実際に deny する切替（#674 sub-C の最終段）。
 - **動作**: `False` のとき warn log のみで通す、`True` のとき deny + 5xx ではなく `QuotaExceededError` で 4xx 応答。
-- **default**: `False`（`backend/src/config/settings.py:enforce_workspace_cap`）。本番 flip は別 ops issue で 7-day log-only window 完走後に実施。
+- **default (backend code)**: `False`（`backend/src/config/settings.py:enforce_workspace_cap`）。
+- **`memory.kagura-ai.com` 本番状態**: **2026-05-17 に `True` 化済み**（`.env.prod` に `ENFORCE_WORKSPACE_CAP=true` を追記 → 当時の active container `kagura-api-blue` を `docker compose up -d --no-deps --force-recreate` で env 再注入）。flip 時点で 7 user 全員 `workspace_slot_bonus=0` / 所有 workspace 最大 1 個だったため、grandfathering 越えの false-positive denial リスクは 0 と DB で事前確認済み。flip 直後に operator 自身が新規 workspace 作成を試して `Workspace limit reached. You currently own 1 workspace(s) (cap: 1).` を実体験して deny 動作を verify。
+- **self-hosted 推奨デフォルト**: 同等の log-only 観測 window を経て安全と確認したら `true` を推奨。`.env.prod.example` にも `ENFORCE_WORKSPACE_CAP=true` を template として記載済み。
 
 flip 後に false-positive denial が出る代表的シナリオ:
 
