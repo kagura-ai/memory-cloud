@@ -10,6 +10,7 @@ Allows admins to:
 - View plan change audit log
 """
 
+import dataclasses
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -18,7 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import require_admin as auth_require_admin
-from config.plan_tiers import get_plan_tier
+from config.plan_tiers import PLAN_TIERS, PlanName, get_plan_tier
 from db.base import get_db
 from models.auth import Context, PlanChange, User, Workspace, WorkspaceInvitation, WorkspaceMember
 from models.memory import Memory
@@ -125,6 +126,34 @@ class PlanChangeAuditEntry(BaseModel):
     reason: str | None
 
 
+class PlanTierInfo(BaseModel):
+    """Plan tier configuration served to the admin tiers comparison table.
+
+    Issue #664. Reflects environment variable overrides applied at module
+    import time (see ``config.plan_tiers._apply_settings_overrides``).
+    """
+
+    name: str
+    display_name: str
+    price_monthly: int
+    max_contexts_per_workspace: int
+    max_members_per_workspace: int
+    max_resource_tokens: int
+    memory_limit: int
+    mcp_calls_per_day: int
+    mcp_calls_per_week: int
+    rest_calls_per_day: int
+    rest_calls_per_week: int
+    public_calls_per_day: int
+    public_calls_per_week: int
+    bound_public_calls_per_minute: int
+    analysis_runs_per_day: int
+    storage_limit_bytes: int
+    sleep_enabled_contexts_limit: int
+    allows_shared_contexts: bool
+    features: list[str]
+
+
 # ============================================================================
 # Admin-only Dependency
 # ============================================================================
@@ -218,6 +247,40 @@ async def list_workspaces_with_plans(
             f"Admin listed {len(workspace_infos)} workspaces", admin_user=admin_user["user_id"]
         )
         return workspace_infos
+
+
+@router.get("/tiers", response_model=list[PlanTierInfo])
+async def list_plan_tiers(
+    admin_user: dict = Depends(require_admin),
+) -> list[PlanTierInfo]:
+    """List all plan tier configurations.
+
+    Issue #664: Admin tiers tab consumes this endpoint instead of i18n
+    hardcoded values, so values stay in sync with environment overrides
+    (``PLAN_FREE_MEMORY_LIMIT`` etc.). No DB access — ``PLAN_TIERS`` is a
+    process-global registry populated at import time.
+
+    Returns:
+        List of plan tier info in canonical FREE → BASIC → PRO order.
+    """
+    # Pydantic v2 BaseModel defaults to ``extra='ignore'``, so legacy
+    # ``daily_api_limit`` / ``weekly_api_limit`` on the dataclass are
+    # silently dropped — they intentionally do not surface on the admin
+    # tiers tab (#664). ``features`` is overridden with a sorted list
+    # because ``asdict`` materializes the frozenset in arbitrary order.
+    ordered = (PlanName.FREE, PlanName.BASIC, PlanName.PRO)
+    tiers = [
+        PlanTierInfo(
+            **{
+                **dataclasses.asdict(PLAN_TIERS[plan]),
+                "features": sorted(PLAN_TIERS[plan].features),
+            }
+        )
+        for plan in ordered
+    ]
+
+    logger.info("admin_listed_plan_tiers", admin_user=admin_user["user_id"])
+    return tiers
 
 
 @router.put("/workspaces/{workspace_id}/plan")
