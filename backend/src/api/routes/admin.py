@@ -159,6 +159,15 @@ async def list_users(
         # OAuth ``sub`` claim as a plain string), so SQLAlchemy cannot infer
         # the ON clause from the schema. Pass it explicitly — otherwise the
         # join raises InvalidRequestError("Don't know how to join …").
+        #
+        # ``.distinct()`` deduplicates: a User can have multiple
+        # WorkspaceMember rows pointing at the same workspace (it cannot
+        # by table constraint, but the join still cartesian-multiplies if
+        # subsequent JOINs are added — defensive); the plan filter below
+        # is the real motivation, where a user with N matching workspaces
+        # would otherwise appear N times in the result and inflate
+        # ``total``.
+        join_filter_applied = workspace_id is not None or plan is not None
         if workspace_id:
             stmt = stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.user_id).where(
                 WorkspaceMember.workspace_id == UUID(workspace_id)
@@ -172,6 +181,14 @@ async def list_users(
                 Workspace.plan_name == plan,
                 Workspace.deleted_at.is_(None),  # #681: exclude soft-deleted
             )
+
+        # Deduplicate the user list / count when any JOIN-based filter is
+        # active. A user owning K matching workspaces would otherwise
+        # produce K rows in ``users_list`` and inflate ``total`` to count
+        # workspace matches rather than distinct users — breaking
+        # pagination and the admin list contract.
+        if join_filter_applied:
+            stmt = stmt.distinct()
 
         # Get total count (with filters applied)
         count_stmt = select(func.count()).select_from(stmt.subquery())

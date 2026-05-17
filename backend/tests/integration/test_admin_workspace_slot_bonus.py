@@ -355,6 +355,43 @@ class TestGetUserDetailWorkspaceSummary:
         assert user_with_mixed_workspaces_plan_filter["deleted_id"] not in owned_ids
 
 
+@pytest_asyncio.fixture
+async def user_with_two_pro_workspaces(db_session: AsyncSession) -> dict:
+    """User owning TWO active pro workspaces.
+
+    Exercises the plan-filter JOIN cartesian-multiplication path: without
+    ``.distinct()`` the user would appear twice in ``GET /admin/users?plan=pro``
+    and ``total`` would count workspace matches rather than distinct users.
+    """
+    user_id = f"u_{uuid4().hex[:8]}"
+    db_session.add(
+        User(
+            email=f"{user_id}@test.invalid",
+            user_id=user_id,
+            name="Two-Pro Test User",
+            role="user",
+            is_initial_admin=False,
+            auth_method="oauth",
+            auth_provider="google",
+            workspace_slot_bonus=1,  # cap = 2, can own 2 workspaces
+        )
+    )
+    await db_session.flush()
+
+    ws_a = _new_workspace(owner=user_id)
+    ws_b = _new_workspace(owner=user_id)
+    db_session.add_all([ws_a, ws_b])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            WorkspaceMember(workspace_id=ws_a.id, user_id=user_id, role="owner"),
+            WorkspaceMember(workspace_id=ws_b.id, user_id=user_id, role="owner"),
+        ]
+    )
+    await db_session.commit()
+    return {"user_id": user_id}
+
+
 class TestListUsersPlanFilterSoftDelete:
     """``GET /admin/users?plan=pro`` excludes soft-deleted workspaces in the JOIN.
 
@@ -388,6 +425,29 @@ class TestListUsersPlanFilterSoftDelete:
         assert len(matches) == 1, (
             f"plan=pro filter must surface the user exactly once "
             f"(saw {len(matches)} — likely #681 plan-filter regression)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_plan_filter_does_not_duplicate_user_with_multiple_matching_workspaces(
+        self,
+        db_session: AsyncSession,
+        user_with_two_pro_workspaces: dict,
+    ) -> None:
+        """plan-filter JOIN must DISTINCT — a user with N matching workspaces
+        appears exactly once, not N times. Pre-distinct: the JOIN
+        cartesian-multiplies User × Workspace, so two pro workspaces
+        yield two User rows and inflate ``total``.
+        """
+        response = await list_users(
+            user=_admin(),
+            db=db_session,
+            **{**_LIST_DEFAULTS, "plan": "pro"},
+        )
+        target_id = user_with_two_pro_workspaces["user_id"]
+        matches = [u for u in response.users if u.id == target_id]
+        assert len(matches) == 1, (
+            f"plan=pro filter must surface the user exactly once even with "
+            f"multiple matching workspaces (saw {len(matches)} — JOIN distinct missing)"
         )
 
 
