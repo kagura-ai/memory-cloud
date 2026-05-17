@@ -155,16 +155,20 @@ async def list_users(
             stmt = stmt.where(User.role == role)
 
         # Issue #164: Apply workspace filter
+        # WorkspaceMember.user_id is not a FK to User.user_id (it stores the
+        # OAuth ``sub`` claim as a plain string), so SQLAlchemy cannot infer
+        # the ON clause from the schema. Pass it explicitly — otherwise the
+        # join raises InvalidRequestError("Don't know how to join …").
         if workspace_id:
-            stmt = stmt.join(WorkspaceMember).where(
+            stmt = stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.user_id).where(
                 WorkspaceMember.workspace_id == UUID(workspace_id)
             )
 
         # Issue #164: Apply plan filter (via workspace)
         if plan:
             if not workspace_id:  # If not already joined
-                stmt = stmt.join(WorkspaceMember)
-            stmt = stmt.join(Workspace).where(
+                stmt = stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.user_id)
+            stmt = stmt.join(Workspace, Workspace.id == WorkspaceMember.workspace_id).where(
                 Workspace.plan_name == plan,
                 Workspace.deleted_at.is_(None),  # #681: exclude soft-deleted
             )
@@ -734,6 +738,21 @@ async def update_workspace_slot_bonus(
     # pre-state of THIS update, not a stale SELECT snapshot.
     before_value = after_value - request.delta
     final_cap = BASE_CAP + after_value
+
+    # Race-guard the destructive-op check post-UPDATE. The pre-UPDATE
+    # validation used ``current_bonus`` from a snapshot, so two admins
+    # concurrently decrementing bonus on a user at ``cap == owned`` could
+    # both pass the "not destructive yet" gate independently — but the
+    # second commit lands the user in an over-cap state without anyone
+    # supplying a reason. Re-checking against the authoritative
+    # ``after_value`` from RETURNING closes the race: if the post-state is
+    # over-cap and no reason was supplied, we raise ``BONUS-001`` here
+    # (still outside ``db_transaction``), and ``get_db``'s except handler
+    # rolls back the staged UPDATE on its way out. No audit row is
+    # written for the rolled-back attempt — admin sees a 400 and can
+    # retry with a reason.
+    if request.delta < 0 and final_cap < owned_count and reason_clean is None:
+        raise InsufficientReasonError()
 
     # Audit write + commit are transaction-wrapped so a failure here
     # rolls back the staged UPDATE above (single SQLAlchemy session

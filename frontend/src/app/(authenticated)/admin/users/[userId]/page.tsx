@@ -13,6 +13,7 @@ import { useParams, useRouter } from "next/navigation";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { LoadingState, InlineSpinner } from "@/components/common/LoadingState";
+import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -103,6 +104,7 @@ export default function UserDetailPage() {
   const userId = params.userId as string;
   const [userDetail, setUserDetail] = useState<UserDetail | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [planDialog, setPlanDialog] = useState<{
     open: boolean;
     workspaceId: string | null;
@@ -138,18 +140,18 @@ export default function UserDetailPage() {
   const loadUserDetail = async () => {
     try {
       setLoading(true);
+      setLoadError(null);
       const data = await apiClient.get<UserDetail>(
         `/api/v1/admin/users/${userId}`,
       );
       setUserDetail(data);
     } catch (error: unknown) {
+      // Page-level load failure → ErrorBanner (per .claude/rules/frontend.md
+      // error-surface rule). No toast for the same event — one channel per
+      // error class.
       const message =
         error instanceof Error ? error.message : "Failed to load user details";
-      toast({
-        title: "Error",
-        description: message,
-        variant: "destructive",
-      });
+      setLoadError(message);
     } finally {
       setLoading(false);
     }
@@ -334,6 +336,27 @@ export default function UserDetailPage() {
       });
     }
   };
+
+  if (loadError) {
+    return (
+      <PageContainer>
+        <PageHeader
+          title="User Detail"
+          description="Failed to load user information"
+          actions={
+            <Button
+              variant="outline"
+              onClick={() => router.push("/admin/users")}
+            >
+              <ArrowLeft className="h-4 w-4 mr-2" />
+              Back to Users
+            </Button>
+          }
+        />
+        <ErrorBanner error={loadError} />
+      </PageContainer>
+    );
+  }
 
   if (loading || !userDetail) {
     return (
