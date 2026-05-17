@@ -39,6 +39,12 @@ def _reset_cached_engines() -> None:
     cached after first call). To capture the construction kwargs via a
     spy, we have to dispose any cached engine and clear the module
     globals so the getter falls through to ``create_*_engine`` again.
+
+    Also clear ``async_session_factory`` / ``sync_session_factory`` —
+    those are cached separately and would otherwise stay bound to the
+    just-disposed engine, breaking subsequent tests that call
+    ``get_db()`` or ``get_sync_session()`` after this helper. Mirrors
+    the integration ``conftest._reset_db_base_state`` pattern.
     """
     for name in ("engine", "sync_engine"):
         existing = getattr(db_base, name, None)
@@ -52,6 +58,9 @@ def _reset_cached_engines() -> None:
                 pass
         if hasattr(db_base, name):
             setattr(db_base, name, None)
+    for factory_name in ("async_session_factory", "sync_session_factory"):
+        if hasattr(db_base, factory_name):
+            setattr(db_base, factory_name, None)
 
 
 @pytest.mark.asyncio
