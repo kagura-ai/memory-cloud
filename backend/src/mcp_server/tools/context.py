@@ -547,9 +547,11 @@ async def handle_list_contexts(
 
             from datetime import datetime
 
+            # ``datetime.min`` is intentionally naive: ``Memory.last_used_at``
+            # is TIMESTAMP WITHOUT TIME ZONE (.claude/rules/backend.md).
             contexts_sorted = sorted(
                 contexts,
-                key=lambda c: c.last_used_at or datetime.min,
+                key=lambda c: c.last_used_at or datetime.min,  # noqa: DTZ901
                 reverse=True,
             )
 
