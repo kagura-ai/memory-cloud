@@ -16,7 +16,7 @@
 #   ./scripts/deploy.sh --status     # show current active API color
 #   ./scripts/deploy.sh --web        # rebuild + restart kagura-web in place
 #
-# Requires: docker compose, curl, envsubst (gettext-base)
+# Requires: docker compose, curl, envsubst (gettext-base), timeout (coreutils)
 # =============================================================================
 
 set -euo pipefail
@@ -211,7 +211,7 @@ wait_for_readiness() {
 wait_for_web_readiness() {
     local start_time=$SECONDS
 
-    while (( SECONDS - start_time < WEB_READINESS_TIMEOUT )); do
+    while (( SECONDS - start_time < 10#$WEB_READINESS_TIMEOUT )); do
         # Distinguish "missing" from "stopped" so the failure mode is debuggable.
         if ! docker inspect kagura-web > /dev/null 2>&1; then
             error "kagura-web container not found. Did 'dc up -d --no-deps --force-recreate web' succeed?"
@@ -279,6 +279,7 @@ cd "$PROJECT_DIR"
 
 # Validate prerequisites
 command -v envsubst > /dev/null 2>&1 || error "envsubst not found. Install: apt-get install gettext-base"
+command -v timeout > /dev/null 2>&1 || error "timeout not found. Install GNU coreutils: apt-get install coreutils"
 [ -f "$COMPOSE_FILE" ] || error "docker-compose.prod.yml not found at $COMPOSE_FILE"
 [ -f "$ENV_FILE" ] || error ".env.prod not found at $ENV_FILE"
 
@@ -313,6 +314,7 @@ case "${1:-}" in
         echo "  READINESS_TIMEOUT      Seconds to wait for API /readiness (default: 60)"
         echo "  DRAIN_TIMEOUT          Seconds to drain old API container (default: 30)"
         echo "  WEB_READINESS_TIMEOUT  Seconds to wait for web /api/health (default: 30)"
+        echo "  WEB_READINESS_INTERVAL Seconds between web health checks (default: 2)"
         ;;
     "")
         cmd_deploy
