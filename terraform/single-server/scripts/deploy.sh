@@ -157,8 +157,14 @@ cmd_deploy() {
 }
 
 cmd_deploy_web() {
+    # `timeout` (coreutils) is only used by this command path. Gate the
+    # check here so default (API blue-green), --rollback, and --status
+    # remain usable on environments without `timeout` installed.
+    command -v timeout > /dev/null 2>&1 \
+        || error "timeout not found (required by --web). Install GNU coreutils: apt-get install coreutils"
+
     log "=== FRONTEND REBUILD (in-place) ==="
-    log "Note: brief downtime expected during Next.js rebuild + restart."
+    log "Note: brief downtime expected during container restart (build is non-blocking; the running container keeps serving until --force-recreate)."
 
     # Step 1: --no-cache — NEXT_PUBLIC_* build args are baked into the layer;
     # a cached layer would silently carry stale values from a prior build.
@@ -279,9 +285,11 @@ cd "$PROJECT_DIR"
 
 # Validate prerequisites
 command -v envsubst > /dev/null 2>&1 || error "envsubst not found. Install: apt-get install gettext-base"
-command -v timeout > /dev/null 2>&1 || error "timeout not found. Install GNU coreutils: apt-get install coreutils"
 [ -f "$COMPOSE_FILE" ] || error "docker-compose.prod.yml not found at $COMPOSE_FILE"
 [ -f "$ENV_FILE" ] || error ".env.prod not found at $ENV_FILE"
+# Note: `timeout` (coreutils) is also required, but only by --web — it is
+# validated inside cmd_deploy_web so other deploy paths remain usable on
+# environments without it.
 
 # Validate timeout values are integers
 [[ "$READINESS_TIMEOUT" =~ ^[0-9]+$ ]] || error "READINESS_TIMEOUT must be an integer (got: $READINESS_TIMEOUT)"
