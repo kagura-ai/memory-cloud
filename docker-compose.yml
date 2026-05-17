@@ -20,6 +20,10 @@ services:
       POSTGRES_DB: kagura
       POSTGRES_USER: kagura
       POSTGRES_PASSWORD: ${DB_PASSWORD:-kagura_dev_password}
+      # Pin UTC at the OS + Postgres session layer — see
+      # .claude/rules/backend.md for the three-layer policy.
+      TZ: UTC
+      PGTZ: UTC
     ports:
       - "5432:5432"
     volumes:

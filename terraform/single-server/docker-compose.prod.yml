@@ -64,6 +64,10 @@ services:
       POSTGRES_DB: kagura
       POSTGRES_USER: kagura
       POSTGRES_PASSWORD: ${DB_PASSWORD}
+      # Pin UTC at the OS + Postgres session layer — see
+      # .claude/rules/backend.md for the three-layer policy.
+      TZ: UTC
+      PGTZ: UTC
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

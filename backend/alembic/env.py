@@ -98,10 +98,16 @@ def do_run_migrations(connection) -> None:
 
 async def run_async_migrations() -> None:
     """Run migrations in 'online' mode with async engine."""
+    # Pin the migration session timezone to UTC at the engine layer, parallel
+    # to db.base._get_engine — without this, ``func.now()`` server defaults
+    # in migrations would inherit the postgres server default (which container
+    # TZ/PGTZ does NOT rewrite for an already-initialized data directory).
+    # See .claude/rules/backend.md "Datetime / UTC" for the three-layer policy.
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args={"server_settings": {"timezone": "UTC"}},
     )
 
     async with connectable.connect() as connection:

@@ -44,6 +44,10 @@ def _get_engine():
             pool_pre_ping=True,
             pool_size=5,
             max_overflow=10,
+            # Belt-and-braces against container TZ/PGTZ being dropped in
+            # a future deploy — see .claude/rules/backend.md for the
+            # three-layer UTC policy.
+            connect_args={"server_settings": {"timezone": "UTC"}},
         )
         logger.info("database_engine_created", url=redact_db_url(DATABASE_URL))
 
@@ -85,6 +89,8 @@ def _get_sync_engine():
             pool_pre_ping=True,
             pool_size=5,
             max_overflow=10,
+            # psycopg2 equivalent — see async engine above.
+            connect_args={"options": "-c timezone=utc"},
         )
         logger.info("sync_database_engine_created", note="OAuth2 only")
 
