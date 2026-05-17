@@ -1,7 +1,7 @@
 """Regression tests for #695 — admin users list surfaces per-user cap summary.
 
 Verifies ``GET /admin/users`` returns ``owned_count`` / ``workspace_slot_bonus``
-/ ``effective_cap`` for each user, computed in bulk (no N+1) and excluding
+/ ``cap`` for each user, computed in bulk (no N+1) and excluding
 soft-deleted workspaces from ``owned_count`` (same #681 class as
 ``test_admin_users_soft_delete_filter``).
 """
@@ -108,7 +108,7 @@ _LIST_DEFAULTS = {
 
 
 class TestListUsersCapColumn:
-    """``GET /admin/users`` surfaces per-user owned_count / bonus / effective_cap (#695)."""
+    """``GET /admin/users`` surfaces per-user owned_count / bonus / cap (#695)."""
 
     @pytest.mark.asyncio
     async def test_baseline_user_at_cap(
@@ -124,7 +124,7 @@ class TestListUsersCapColumn:
         assert target is not None
         assert target.owned_count == 1
         assert target.workspace_slot_bonus == 0
-        assert target.effective_cap == 1
+        assert target.cap == 1
 
     @pytest.mark.asyncio
     async def test_bonus_user_below_cap_and_soft_deleted_excluded(
@@ -141,7 +141,7 @@ class TestListUsersCapColumn:
         # Soft-deleted workspace MUST NOT count toward owned_count (#681 class).
         assert target.owned_count == 1
         assert target.workspace_slot_bonus == 2
-        assert target.effective_cap == 3
+        assert target.cap == 3
 
     @pytest.mark.asyncio
     async def test_zero_owned_user(
@@ -158,7 +158,7 @@ class TestListUsersCapColumn:
         # LEFT OUTER JOIN must surface users with zero owned workspaces.
         assert target.owned_count == 0
         assert target.workspace_slot_bonus == 0
-        assert target.effective_cap == 1
+        assert target.cap == 1
 
     @pytest.mark.asyncio
     async def test_pagination_total_unchanged_by_cap_join(
@@ -166,9 +166,40 @@ class TestListUsersCapColumn:
         db_session: AsyncSession,
         users_with_varied_cap: dict,
     ) -> None:
-        """The cap join is in a separate query, so ``total`` must not double-count."""
+        """The cap join is in a separate query, so ``total`` must not double-count.
+
+        Regression guard: if the cap join were applied to the base list query
+        instead of being a separate bulk fetch, ``bonus_grant`` (owns 1 live
+        + 1 soft-deleted = 2 join rows) would inflate ``total`` and produce
+        duplicate user rows in ``response.users``. Asserting both no
+        duplicates AND a lower-bound on ``total`` catches both failure modes.
+        """
         response = await list_users(user=_mock_admin(), db=db_session, **_LIST_DEFAULTS)
-        # The 3 fixture users are present in response.users (plus any others).
         fixture_ids = set(users_with_varied_cap.values())
-        present = {u.id for u in response.users} & fixture_ids
-        assert present == fixture_ids, "all three fixture users must appear once each"
+
+        # 1. Each fixture user appears EXACTLY once in the response page
+        #    (no JOIN row multiplication leaking into the user list).
+        per_user_count = dict.fromkeys(fixture_ids, 0)
+        for u in response.users:
+            if u.id in per_user_count:
+                per_user_count[u.id] += 1
+        expected_counts = dict.fromkeys(fixture_ids, 1)
+        assert per_user_count == expected_counts, (
+            f"each fixture user must appear exactly once, got {per_user_count}"
+        )
+
+        # 2. ``total`` counts distinct users only — it must be at least the
+        #    3 fixture users (test DB may have other users from sibling
+        #    fixtures, so we cannot pin equality). If the cap join had
+        #    multiplied rows, ``total`` would jump to >= 4 just from the
+        #    bonus_grant user's 2 workspace rows leaking in.
+        assert response.total >= len(fixture_ids), (
+            f"total must include at least the {len(fixture_ids)} fixture users, got {response.total}"
+        )
+        # Total reflects distinct users (no per-user duplication). The
+        # fixture adds exactly 3 distinct users beyond whatever the test DB
+        # already contained, so the delta should never exceed the user count
+        # in the response page.
+        assert response.total <= len(response.users), (
+            f"total ({response.total}) must not exceed distinct users in response ({len(response.users)})"
+        )

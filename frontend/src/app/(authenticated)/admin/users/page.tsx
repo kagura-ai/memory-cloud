@@ -72,11 +72,16 @@ interface User {
   workspaces?: WorkspaceMembership[]; // Issue #165: Workspace badges
 
   // Issue #695: owned-workspace cap summary surfaced on the list page.
-  // Default values (0, 0, 1) are applied if backend response omits them
-  // so the cell still renders during a deploy gap.
+  // Field names mirror the detail endpoint's WorkspaceSummary (cap /
+  // base_cap) so the same mental model carries across admin endpoints.
+  // All three are optional so the cell can still render during a deploy
+  // gap; the render path derives a safe fallback from base_cap + bonus
+  // rather than a literal 1, so a user with a nonzero bonus shown in the
+  // tooltip never gets a denominator that contradicts it.
   owned_count?: number;
   workspace_slot_bonus?: number;
-  effective_cap?: number;
+  base_cap?: number;
+  cap?: number;
 
   // Current context info
   current_context_id?: string | null;
@@ -382,10 +387,17 @@ export default function AdminUsersPage() {
                     )}
                   </TableCell>
                   <TableCell>
-                    {/* Issue #695: owned / cap with at-cap emphasis */}
+                    {/* Issue #695: owned / cap with at-cap emphasis.
+                        Fallback derives cap as base_cap + bonus rather
+                        than a literal 1 — during a mixed-version deploy
+                        (frontend ahead of backend) a user with bonus > 0
+                        would otherwise see "owned / 1" in the denominator
+                        even though the tooltip shows a nonzero bonus. */}
                     {(() => {
                       const owned = user.owned_count ?? 0;
-                      const cap = user.effective_cap ?? 1;
+                      const bonus = user.workspace_slot_bonus ?? 0;
+                      const baseCap = user.base_cap ?? 1;
+                      const cap = user.cap ?? baseCap + bonus;
                       const atCap = owned >= cap;
                       return (
                         <span
@@ -397,7 +409,7 @@ export default function AdminUsersPage() {
                           title={t("table.capTooltip", {
                             owned,
                             cap,
-                            bonus: user.workspace_slot_bonus ?? 0,
+                            bonus,
                           })}
                         >
                           {owned} / {cap}

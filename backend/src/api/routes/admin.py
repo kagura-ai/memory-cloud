@@ -57,9 +57,11 @@ class UserInfo(TZAwareBaseModel):
 
     Issue #164: Extended with workspaces field.
     Issue #175: Added timezone field for user preferences.
-    Issue #695: Added owned_count / workspace_slot_bonus / effective_cap so the
-    /admin/users list can surface each user's owned-workspace usage against
-    their cap without a follow-up per-user detail fetch. Defaults keep the
+    Issue #695: Added owned_count / workspace_slot_bonus / base_cap / cap so
+    the /admin/users list can surface each user's owned-workspace usage
+    against their cap without a follow-up per-user detail fetch. Field names
+    intentionally mirror ``WorkspaceSummary`` (the detail endpoint's payload)
+    so client code and mental models stay consistent. Defaults keep the
     schema additive — older consumers that ignore these fields still work.
     """
 
@@ -77,14 +79,17 @@ class UserInfo(TZAwareBaseModel):
     workspaces: list[dict] = []  # Issue #164: Workspace memberships
 
     # Issue #695: owned-workspace cap summary (mirrors WorkspaceSummary fields
-    # used in /admin/users/{id} detail). Always populated for active users so
-    # the list UI can render `owned_count / effective_cap` and an at-cap flag.
-    # ``effective_cap`` defaults to ``BASE_CAP`` (not a literal ``1``) so the
-    # schema stays in sync if ``BASE_CAP`` ever changes — recomputed per-user
-    # in the handler from ``BASE_CAP + workspace_slot_bonus``.
+    # used in /admin/users/{id} detail — same field names ``base_cap`` /
+    # ``cap`` so client code and mental models stay consistent across
+    # closely-related admin endpoints). Always populated for active users so
+    # the list UI can render `owned_count / cap` and an at-cap flag.
+    # ``cap`` defaults to ``BASE_CAP`` (not a literal ``1``) so the schema
+    # stays in sync if ``BASE_CAP`` ever changes — recomputed per-user in
+    # the handler from ``BASE_CAP + workspace_slot_bonus``.
     owned_count: int = 0
     workspace_slot_bonus: int = 0
-    effective_cap: int = BASE_CAP
+    base_cap: int = BASE_CAP
+    cap: int = BASE_CAP
 
     # Issue #246: current_context_id removed
     # current_context_id: str | None = None
@@ -283,7 +288,8 @@ async def list_users(
                 cap_stats_dict[row.user_id] = {
                     "owned_count": int(row.owned_count or 0),
                     "workspace_slot_bonus": bonus,
-                    "effective_cap": BASE_CAP + bonus,
+                    "base_cap": BASE_CAP,
+                    "cap": BASE_CAP + bonus,
                 }
 
         # Issue #246: current_context_id removed - skip context lookup
@@ -304,7 +310,8 @@ async def list_users(
                 {
                     "owned_count": 0,
                     "workspace_slot_bonus": int(u.workspace_slot_bonus or 0),
-                    "effective_cap": BASE_CAP + int(u.workspace_slot_bonus or 0),
+                    "base_cap": BASE_CAP,
+                    "cap": BASE_CAP + int(u.workspace_slot_bonus or 0),
                 },
             )
             # Issue #246: current_context_id removed
@@ -326,7 +333,8 @@ async def list_users(
                     workspaces=[],  # Will be populated below if include_workspaces=True
                     owned_count=cap["owned_count"],  # Issue #695
                     workspace_slot_bonus=cap["workspace_slot_bonus"],  # Issue #695
-                    effective_cap=cap["effective_cap"],  # Issue #695
+                    base_cap=cap["base_cap"],  # Issue #695
+                    cap=cap["cap"],  # Issue #695
                     # Issue #246: current_context_id removed
                     # current_context_id=context_info.get('context_id'),
                     # current_context_name=context_info.get('context_name'),
