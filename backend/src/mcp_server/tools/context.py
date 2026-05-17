@@ -545,13 +545,17 @@ async def handle_list_contexts(
                 operation_name="list_contexts",
             )
 
-            from datetime import datetime
+            from datetime import UTC, datetime
 
-            # ``datetime.min`` is intentionally naive: ``Memory.last_used_at``
-            # is TIMESTAMP WITHOUT TIME ZONE (.claude/rules/backend.md).
+            # ``Context.last_used_at`` is declared as ``DateTime(timezone=True)``
+            # (see models/auth.py) — populated values are aware. Use an aware
+            # UTC sentinel so the ``None`` branch sorts consistently; mixing a
+            # naive ``datetime.min`` with aware values raises ``TypeError`` at
+            # comparison time.
+            _UTC_MIN = datetime.min.replace(tzinfo=UTC)
             contexts_sorted = sorted(
                 contexts,
-                key=lambda c: c.last_used_at or datetime.min,  # noqa: DTZ901
+                key=lambda c: c.last_used_at or _UTC_MIN,
                 reverse=True,
             )
 

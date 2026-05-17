@@ -26,18 +26,21 @@ paths:
 
 ## Datetime / UTC
 
-**Storage (DB)** — columns are `TIMESTAMP WITHOUT TIME ZONE`, holding naive UTC. UTC is enforced explicitly at three layers, so a naive value here is unambiguous:
-1. Postgres container env: `TZ=UTC` + `PGTZ=UTC` (`docker-compose.yml`, `terraform/single-server/docker-compose.prod.yml`)
-2. SQLAlchemy engine: async `connect_args={"server_settings": {"timezone": "UTC"}}` / sync `connect_args={"options": "-c timezone=utc"}` (`db/base.py`)
-3. Python writes via `utils.datetime.utcnow()` — never bare `datetime.utcnow()` or `datetime.now()` without `tz`
+**Storage (DB) — mixed-awareness, predominantly naive UTC.** Most columns are `TIMESTAMP WITHOUT TIME ZONE` (naive UTC by convention); about a dozen columns are `TIMESTAMP WITH TIME ZONE` (aware) — for example `Context.last_used_at`, several `signup_gate.py` / erasure / neural timestamps. **Always check the model's `mapped_column(DateTime[, timezone=True])` declaration before constructing comparison sentinels or default values**, never assume naive across the board.
 
-`ruff DTZ` blocks naive-datetime patterns in `backend/src/`. Tests are exempt via `[tool.ruff.lint.per-file-ignores]` while the fixture sweep remains a follow-up.
+UTC is enforced for every SQLAlchemy session by the engine, regardless of postgres server defaults:
+
+1. **SQLAlchemy engine `connect_args` (primary guarantee for application code)** — async: `connect_args={"server_settings": {"timezone": "UTC"}}`; sync: `connect_args={"options": "-c timezone=utc"}` (`db/base.py`). Every connection runs `SET timezone='UTC'` at handshake, so any `now()` / `current_timestamp` inside the session is UTC, and naive DB values written via `utcnow()` round-trip unambiguously.
+2. **Container env `TZ=UTC` + `PGTZ=UTC`** (`docker-compose.yml`, `terraform/single-server/docker-compose.prod.yml`) — these align the *container OS clock* and *libpq client* (e.g. `psql`, `pg_isready`) with UTC, so cron / log timestamps / interactive sessions don't drift. They do **not** rewrite the postgres server's `timezone` GUC in an already-initialized `postgres_data` volume — that's set at `initdb` time. The engine layer above is what guarantees application correctness.
+3. **Python writes** — call `utils.datetime.utcnow()`, never bare `datetime.utcnow()` or `datetime.now()` without `tz`. `ruff DTZ` blocks the bare forms in `backend/src/`; tests are exempt via `[tool.ruff.lint.per-file-ignores]` while the fixture sweep remains a follow-up.
+
+When constructing a sort-key or default for a column declared `DateTime(timezone=True)`, use an **aware** sentinel (e.g. `datetime.min.replace(tzinfo=UTC)`); naive `datetime.min` will `TypeError` on comparison with aware values when the list contains both `None` and populated rows.
 
 **Wire format (API JSON)** — response Pydantic schemas with any `datetime` field MUST inherit from `models.api_base.TZAwareBaseModel` (not `BaseModel`). The base class serializes naive datetimes with a `Z` suffix; without it, JS clients parse the string as local time and JST users see times shifted by their UTC offset.
 
 For `str`-typed datetime fields in handler/service code (manual ISO formatting), use `to_utc_iso(dt)` from `utils.datetime`. Never call `.isoformat()` directly on a `datetime` field that ends up in a JSON response or cached payload — `to_utc_iso` is idempotent (handles None / naive / aware UTC / aware non-UTC) so it can be applied unconditionally.
 
-**Column-type migration was evaluated in #490 and explicitly deferred.** The full `Column(DateTime, ...) → Column(DateTime(timezone=True), ...)` sweep was scoped at 113 columns + 188 caller sites and judged hygiene-only after #489 closed the user-visible bug. The three layers above provide equivalent correctness guarantees; do not "fix" the naive columns without re-litigating the trade-off.
+**Column-type migration was evaluated in #490 and explicitly deferred.** The full `Column(DateTime, ...) → Column(DateTime(timezone=True), ...)` sweep was scoped at ~100 naive columns + caller migration and judged hygiene-only after #489 closed the user-visible bug. The engine + container + Python layers above provide equivalent correctness guarantees for the naive-column path; do not "fix" the naive columns without re-litigating the trade-off.
 
 ## Testing
 - Test files: `backend/tests/{module}/test_{name}.py`
