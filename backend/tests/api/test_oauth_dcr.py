@@ -340,10 +340,26 @@ class TestDcrEndpointAcceptance:
         body = response.json()
         assert body.get("provider") == expected_provider
         assert body.get("token_endpoint_auth_method") == "none"
-        assert "client_secret" in body
-        # DB write was attempted
+        # RFC 7591 §3.2.1 (Issue #689): public clients
+        # (``token_endpoint_auth_method="none"``) MUST NOT receive a
+        # ``client_secret``. Returning one made Claude Code's OAuth2 stack
+        # treat the registration as a confidential client and Basic-Auth the
+        # token endpoint, which authlib then rejected with invalid_client 401.
+        assert body.get("client_secret") is None, (
+            "RFC 7591 §3.2.1 violation: public client got a client_secret"
+        )
+        assert body.get("plaintext_secret") is None, (
+            "Visibility plaintext must also be omitted for public clients"
+        )
+        assert body.get("is_visible") is False
+        assert body.get("visibility_expires_at") is None
+        # The DB row stores an empty sentinel hash; no encryptor invocation.
+        added_client = fake_session.add.call_args[0][0]
+        assert added_client.client_secret_hash == ""
+        assert added_client.plaintext_secret_encrypted is None
         fake_session.add.assert_called_once()
         fake_session.commit.assert_called_once()
+        fake_encryptor.encrypt.assert_not_called()
 
 
 class TestOAuth2ClientResponseOwnerIdSerialization:

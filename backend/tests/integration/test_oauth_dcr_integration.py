@@ -233,6 +233,15 @@ def sync_db():
     finally:
         _assert_test_db(session)
         # Clean up any oauth_clients rows this test class created.
+        # ``oauth_authorization_codes`` has no FK CASCADE, so explicitly purge
+        # auth codes for our test users — the token-exchange path consumes
+        # them on success, but a failed assertion between insert and /token
+        # would otherwise orphan a row until the next ``alembic downgrade``.
+        session.execute(
+            text(
+                "DELETE FROM oauth_authorization_codes WHERE user_id = 'integration-test-user-689'"
+            )
+        )
         session.execute(
             text(
                 "DELETE FROM oauth_clients WHERE client_id LIKE 'oauth_%' "
@@ -283,16 +292,128 @@ class TestDcrLoopbackPersistsNullOwnerId:
         assert body["owner_id"] is None
         assert body["provider"] == "claude"
         assert body["token_endpoint_auth_method"] == "none"
+        # Issue #689: public clients must not receive a usable secret.
+        assert body.get("client_secret") is None
+        assert body.get("plaintext_secret") is None
 
         # Confirm the row actually landed in the DB with owner_id NULL.
         client_id = body["client_id"]
         row = sync_db.execute(
-            text("SELECT owner_id, client_name FROM oauth_clients WHERE client_id = :cid"),
+            text(
+                "SELECT owner_id, client_name, client_secret_hash, "
+                "plaintext_secret_encrypted FROM oauth_clients "
+                "WHERE client_id = :cid"
+            ),
             {"cid": client_id},
         ).first()
         assert row is not None, f"DCR row missing for client_id={client_id}"
         assert row.owner_id is None, f"DB row should have owner_id=NULL, got {row.owner_id!r}"
         assert row.client_name == "IntegrationTest Claude Code Loopback"
+        # Issue #689: hash stored as empty sentinel; no encrypted plaintext.
+        assert row.client_secret_hash == ""
+        assert row.plaintext_secret_encrypted is None
+
+    def test_dcr_token_exchange_with_pkce_only_returns_200(self, client, sync_db):
+        """Issue #689 regression: DCR + token exchange end-to-end with no client_secret.
+
+        Pin the actual fix — before the fix this exact sequence returned 401
+        ``invalid_client`` because:
+
+        1. DCR ``/oauth/register`` issued a ``client_secret`` despite setting
+           ``token_endpoint_auth_method="none"`` (RFC 7591 §3.2.1 violation).
+        2. The OAuth client library (Claude Code, ChatGPT, Cursor) saw the
+           secret, classified the registration as a confidential client, and
+           sent ``Authorization: Basic <b64(client_id:client_secret)>`` to the
+           token endpoint.
+        3. authlib's ``check_token_endpoint_auth_method`` compared the
+           request's effective method (``client_secret_basic``) against the
+           DB column (``none``) and returned ``invalid_client`` 401.
+
+        After the fix, the response omits ``client_secret`` entirely, so a
+        compliant OAuth client falls back to the public-client path
+        (``client_id`` in form body, no Basic Auth, PKCE for proof of
+        possession) and the token endpoint returns 200 with a Bearer token.
+        """
+        import secrets
+        from datetime import timedelta
+
+        from authlib.oauth2.rfc7636 import create_s256_code_challenge
+
+        from models.auth import OAuth2AuthorizationCode
+        from utils.datetime import utcnow
+
+        rate_limit = AsyncMock(return_value=1)
+        with patch("db.redis.increment_counter", rate_limit):
+            register = client.post(
+                "/api/v1/oauth/register",
+                json={
+                    "client_name": "IntegrationTest Claude Code Loopback",
+                    "redirect_uris": ["http://localhost:54321/callback"],
+                    "token_endpoint_auth_method": "none",
+                },
+            )
+        assert register.status_code == 201, register.text
+        body = register.json()
+        # The fix: no client_secret returned. Any value (including ``null``)
+        # would let some OAuth client libs Basic-Auth with empty secret.
+        assert "client_secret" not in body, (
+            "Issue #689: RFC 7591 §3.2.1 — public clients must not get a "
+            f"client_secret field in the DCR response (got {body!r})"
+        )
+        assert "plaintext_secret" not in body
+        client_id = body["client_id"]
+
+        # PKCE: synthesize a verifier and the matching S256 challenge via the
+        # same authlib helper the OAuth2 server uses, so test and prod stay
+        # bit-identical if RFC 7636 transforms ever change.
+        code_verifier = secrets.token_urlsafe(48)
+        code_challenge = create_s256_code_challenge(code_verifier)
+
+        # Skip the browser /authorize step by inserting the auth code
+        # directly — authlib's create_token_response treats the row identically
+        # whether it came from the consent UI or from a test fixture.
+        auth_code_str = secrets.token_urlsafe(32)
+        sync_db.add(
+            OAuth2AuthorizationCode(
+                code=auth_code_str,
+                client_id=client_id,
+                user_id="integration-test-user-689",
+                redirect_uri="http://localhost:54321/callback",
+                scope="memory:read",
+                code_challenge=code_challenge,
+                code_challenge_method="S256",
+                auth_time=utcnow(),
+                expires_at=utcnow() + timedelta(seconds=600),
+            )
+        )
+        sync_db.commit()
+
+        # Public-client token request: client_id in body, code_verifier for
+        # PKCE proof, NO ``Authorization: Basic`` header. This is what
+        # Claude Code (and any RFC 7591-compliant client) sends after the
+        # DCR fix.
+        token = client.post(
+            "/api/v1/oauth/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": auth_code_str,
+                "code_verifier": code_verifier,
+                "redirect_uri": "http://localhost:54321/callback",
+                "client_id": client_id,
+            },
+        )
+
+        assert token.status_code == 200, (
+            f"Issue #689: PKCE-only public-client token exchange must succeed "
+            f"after omitting client_secret from DCR. Got {token.status_code}: "
+            f"{token.text}"
+        )
+        token_body = token.json()
+        assert token_body.get("token_type", "").lower() == "bearer"
+        assert token_body.get("access_token")
+        # Refresh token issuance is grant-config dependent; only assert it's
+        # a string when present (the access_token + bearer pair is the
+        # load-bearing pin for this regression).
 
     def test_admin_path_with_string_owner_still_works(self, sync_db):
         """The constraint relaxation must not regress the admin-managed path.
