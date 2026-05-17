@@ -10,6 +10,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import require_admin
@@ -154,30 +155,39 @@ async def list_users(
         if role:
             stmt = stmt.where(User.role == role)
 
-        # Issue #164: Apply workspace filter
+        # Issue #164: Apply workspace_id / plan filter
         # WorkspaceMember.user_id is not a FK to User.user_id (it stores the
         # OAuth ``sub`` claim as a plain string), so SQLAlchemy cannot infer
         # the ON clause from the schema. Pass it explicitly — otherwise the
         # join raises InvalidRequestError("Don't know how to join …").
         #
-        # ``.distinct()`` deduplicates: a User can have multiple
-        # WorkspaceMember rows pointing at the same workspace (it cannot
-        # by table constraint, but the join still cartesian-multiplies if
-        # subsequent JOINs are added — defensive); the plan filter below
-        # is the real motivation, where a user with N matching workspaces
-        # would otherwise appear N times in the result and inflate
-        # ``total``.
+        # Both branches JOIN Workspace and filter ``deleted_at IS NULL``.
+        # WorkspaceMember rows persist after a workspace is soft-deleted
+        # (membership is preserved for tombstone visibility), so the
+        # ``workspace_id`` filter without the soft-delete predicate would
+        # surface users for a soft-deleted workspace — the same #681 class.
+        #
+        # ``.distinct()`` deduplicates: a user with N matching workspaces
+        # would otherwise produce N rows and inflate ``total`` to count
+        # workspace matches rather than distinct users, breaking pagination.
         join_filter_applied = workspace_id is not None or plan is not None
         if workspace_id:
-            stmt = stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.user_id).where(
-                WorkspaceMember.workspace_id == UUID(workspace_id)
+            stmt = (
+                stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.user_id)
+                .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
+                .where(
+                    WorkspaceMember.workspace_id == UUID(workspace_id),
+                    Workspace.deleted_at.is_(None),  # #681 pattern: soft-delete safe
+                )
             )
 
         # Issue #164: Apply plan filter (via workspace)
         if plan:
             if not workspace_id:  # If not already joined
-                stmt = stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.user_id)
-            stmt = stmt.join(Workspace, Workspace.id == WorkspaceMember.workspace_id).where(
+                stmt = stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.user_id).join(
+                    Workspace, Workspace.id == WorkspaceMember.workspace_id
+                )
+            stmt = stmt.where(
                 Workspace.plan_name == plan,
                 Workspace.deleted_at.is_(None),  # #681: exclude soft-deleted
             )
@@ -694,15 +704,39 @@ async def update_workspace_slot_bonus(
     # are decrementing the bonus — ending up over-cap without the admin
     # supplying a reason. The lock is xact-scoped: it is released when
     # this request's transaction commits (audit phase) or rolls back
-    # (any raise path through ``get_db``). The lock SQL is issued on
-    # ``db`` so the implicit session transaction picks it up — all
-    # subsequent reads and the UPDATE then run inside the same locked
-    # transaction.
-    await db.execute(
-        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))").bindparams(
-            key=f"workspace_create:{user_id}"
+    # (any raise path through ``get_db``).
+    #
+    # Bounded acquire mirrors quota_service.py:388 — ``SET LOCAL
+    # lock_timeout = '5s'`` keeps a pathologically long peer transaction
+    # from stalling this worker indefinitely. On SQLSTATE 55P03
+    # (``lock_not_available``) we rollback the poisoned session and
+    # surface a 503 (retriable); other DB errors propagate up. The reset
+    # to ``'0'`` after a successful acquire prevents the 5s timeout from
+    # bleeding into the subsequent SELECT/UPDATE statements.
+    await db.execute(text("SET LOCAL lock_timeout = '5s'"))
+    try:
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))").bindparams(
+                key=f"workspace_create:{user_id}"
+            )
         )
-    )
+    except DBAPIError as exc:
+        sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+        # The session is poisoned until rollback — issue it before
+        # raising so the next request on this session is clean.
+        await db.rollback()
+        if sqlstate == "55P03":
+            logger.warning(
+                "admin_workspace_slot_bonus_lock_timeout",
+                target_user_id=user_id,
+                actor_user_id=actor_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Workspace cap lock unavailable; please retry.",
+            ) from exc
+        raise
+    await db.execute(text("SET LOCAL lock_timeout = '0'"))
 
     # ---- Validation phase (read-only, outside db_transaction) ----
     # db_transaction's bare `except Exception` wraps MemoryCloudException

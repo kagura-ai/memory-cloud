@@ -262,12 +262,21 @@ export default function UserDetailPage() {
         description: `Slot bonus: ${response.before_value} → ${response.after_value}.`,
       });
     } catch (error: unknown) {
-      // Rollback only the workspace_summary slice — other userDetail
-      // fields may have been refreshed by a concurrent load() and we
-      // don't want to clobber them with the pre-call snapshot.
-      setUserDetail((prev) =>
-        prev ? { ...prev, workspace_summary: summarySnapshot } : prev,
-      );
+      // Conditional rollback: only restore ``summarySnapshot`` if the
+      // current state still reflects our optimistic write (bonus
+      // matches ``projectedBonus``). If a concurrent
+      // ``loadUserDetail()`` triggered by the change-plan flow has
+      // already replaced workspace_summary with fresher server data,
+      // leave that fresher state in place — our PATCH didn't land, so
+      // the server state is the latest truth and stomping it with the
+      // pre-call snapshot would lose the concurrent update.
+      setUserDetail((prev) => {
+        if (!prev || !prev.workspace_summary) return prev;
+        if (prev.workspace_summary.workspace_slot_bonus === projectedBonus) {
+          return { ...prev, workspace_summary: summarySnapshot };
+        }
+        return prev;
+      });
       const message =
         error instanceof Error ? error.message : "Failed to update slot bonus";
       toast({
