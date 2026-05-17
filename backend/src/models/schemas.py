@@ -788,7 +788,7 @@ class UserAccessibleContext(TZAwareBaseModel):
     context_name: str
     workspace_id: str
     workspace_name: str
-    role: str  # owner/editor/viewer
+    role: str  # owner/admin/editor/viewer  # #699: admin added for workspace_admin without ContextMember
     last_used_at: datetime | None
 
     class Config:

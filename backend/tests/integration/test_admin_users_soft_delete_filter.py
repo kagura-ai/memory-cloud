@@ -8,66 +8,38 @@ Hits a real Postgres test DB because the existing mock-DB tests in
 
 from __future__ import annotations
 
-from uuid import uuid4
-
 import pytest
 import pytest_asyncio
-from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes.admin import get_user_detail, list_users
-from models.auth import User, Workspace, WorkspaceMember
+from models.auth import WorkspaceMember
 
-
-def _mock_admin() -> dict:
-    return {"user_id": "admin_runner", "email": "admin@test.invalid", "role": "admin"}
-
-
-def _new_workspace(*, owner: str, soft_deleted: bool) -> Workspace:
-    return Workspace(
-        id=uuid4(),
-        name=f"{'deleted' if soft_deleted else 'active'}-{uuid4().hex[:8]}",
-        plan_name="pro",
-        owner_user_id=owner,
-        memory_limit=1000,
-        daily_api_limit=500,
-        weekly_api_limit=2500,
-        deleted_at=(func.now() if soft_deleted else None),
-    )
+from ._admin_helpers import make_user, make_workspace, mock_admin
 
 
 @pytest_asyncio.fixture
 async def user_with_mixed_workspaces(db_session: AsyncSession) -> dict:
     """One user owning two ``pro`` workspaces — one active, one soft-deleted."""
-    user_id = f"u_{uuid4().hex[:8]}"
-    db_session.add(
-        User(
-            email=f"{user_id}@test.invalid",
-            user_id=user_id,
-            name="Test User",
-            role="user",
-            is_initial_admin=False,
-            auth_method="oauth",
-            auth_provider="google",
-        )
-    )
+    user = make_user()
+    db_session.add(user)
     await db_session.flush()
 
-    active = _new_workspace(owner=user_id, soft_deleted=False)
-    deleted = _new_workspace(owner=user_id, soft_deleted=True)
+    active = make_workspace(owner_user_id=user.user_id, soft_deleted=False)
+    deleted = make_workspace(owner_user_id=user.user_id, soft_deleted=True)
     db_session.add_all([active, deleted])
     await db_session.flush()
 
     db_session.add_all(
         [
-            WorkspaceMember(workspace_id=active.id, user_id=user_id, role="owner"),
-            WorkspaceMember(workspace_id=deleted.id, user_id=user_id, role="owner"),
+            WorkspaceMember(workspace_id=active.id, user_id=user.user_id, role="owner"),
+            WorkspaceMember(workspace_id=deleted.id, user_id=user.user_id, role="owner"),
         ]
     )
     await db_session.commit()
 
     return {
-        "user_id": user_id,
+        "user_id": user.user_id,
         "active_workspace_id": str(active.id),
         "deleted_workspace_id": str(deleted.id),
     }
@@ -97,7 +69,7 @@ class TestListUsersIncludeWorkspaces:
         user_with_mixed_workspaces: dict,
     ) -> None:
         response = await list_users(
-            user=_mock_admin(),
+            user=mock_admin(),
             db=db_session,
             **{**_LIST_DEFAULTS, "include_workspaces": True},
         )
@@ -126,7 +98,7 @@ class TestGetUserDetail:
     ) -> None:
         detail = await get_user_detail(
             user_id=user_with_mixed_workspaces["user_id"],
-            admin=_mock_admin(),
+            admin=mock_admin(),
             db=db_session,
         )
 

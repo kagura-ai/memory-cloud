@@ -544,7 +544,6 @@ async def get_user_detail(
         # Critical Fix: Avoid O(N²) queries - collect all contexts first, then batch fetch ContextMembers
         all_contexts = []
         context_workspace_map = {}
-        workspace_role_map = {}
 
         for member, workspace in workspace_memberships:
             try:
@@ -552,7 +551,6 @@ async def get_user_detail(
                 for ctx in contexts:
                     all_contexts.append(ctx)
                     context_workspace_map[ctx.id] = (workspace, member.role)
-                    workspace_role_map[ctx.id] = member.role
             except (NotFoundException, AuthorizationError):
                 # Skip if no access
                 pass
@@ -576,7 +574,7 @@ async def get_user_detail(
             # Determine user's role in this context
             ctx_role = "viewer"  # Default
             if workspace_role in ("owner", "admin"):
-                ctx_role = "owner"  # Workspace owner/admin have full access
+                ctx_role = workspace_role  # #699: preserve owner/admin distinction
             else:
                 # Check context_members for explicit role
                 ctx_member = ctx_members_by_context.get(ctx.id)

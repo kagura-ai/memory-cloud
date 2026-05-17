@@ -12,12 +12,10 @@ read-modify-write loops.
 
 from __future__ import annotations
 
-from uuid import uuid4
-
 import pytest
 import pytest_asyncio
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes.admin import (
@@ -25,26 +23,11 @@ from api.routes.admin import (
     list_users,
     update_workspace_slot_bonus,
 )
-from models.auth import AuditLog, User, Workspace, WorkspaceMember
+from models.auth import AuditLog, User, WorkspaceMember
 from models.schemas import UpdateWorkspaceSlotBonusRequest
 from utils.exceptions import BonusBelowZeroError, InsufficientReasonError
 
-
-def _admin() -> dict:
-    return {"user_id": "admin_runner", "email": "admin@test.invalid", "role": "admin"}
-
-
-def _new_workspace(*, owner: str, soft_deleted: bool = False, plan: str = "pro") -> Workspace:
-    return Workspace(
-        id=uuid4(),
-        name=f"{'deleted' if soft_deleted else 'active'}-{uuid4().hex[:8]}",
-        plan_name=plan,
-        owner_user_id=owner,
-        memory_limit=1000,
-        daily_api_limit=500,
-        weekly_api_limit=2500,
-        deleted_at=(func.now() if soft_deleted else None),
-    )
+from ._admin_helpers import make_user, make_workspace, mock_admin
 
 
 @pytest_asyncio.fixture
@@ -54,28 +37,17 @@ async def user_with_bonus(db_session: AsyncSession) -> dict:
     Non-destructive baseline: owned_count=1, cap=3 → admin can decrement
     bonus by 1 without hitting the destructive-op gate (new_cap=2 ≥ owned=1).
     """
-    user_id = f"u_{uuid4().hex[:8]}"
-    db_session.add(
-        User(
-            email=f"{user_id}@test.invalid",
-            user_id=user_id,
-            name="Bonus Test User",
-            role="user",
-            is_initial_admin=False,
-            auth_method="oauth",
-            auth_provider="google",
-            workspace_slot_bonus=2,
-        )
-    )
+    user = make_user(workspace_slot_bonus=2, name="Bonus Test User")
+    db_session.add(user)
     await db_session.flush()
 
-    ws = _new_workspace(owner=user_id)
+    ws = make_workspace(owner_user_id=user.user_id)
     db_session.add(ws)
     await db_session.flush()
-    db_session.add(WorkspaceMember(workspace_id=ws.id, user_id=user_id, role="owner"))
+    db_session.add(WorkspaceMember(workspace_id=ws.id, user_id=user.user_id, role="owner"))
     await db_session.commit()
 
-    return {"user_id": user_id, "email": f"{user_id}@test.invalid", "workspace_id": str(ws.id)}
+    return {"user_id": user.user_id, "email": user.email, "workspace_id": str(ws.id)}
 
 
 @pytest_asyncio.fixture
@@ -85,28 +57,17 @@ async def user_at_risk(db_session: AsyncSession) -> dict:
     Setting delta=-0 is non-mutating; decrementing bonus past zero is rejected
     by BONUS-002. Used to exercise the below-zero guard cleanly.
     """
-    user_id = f"u_{uuid4().hex[:8]}"
-    db_session.add(
-        User(
-            email=f"{user_id}@test.invalid",
-            user_id=user_id,
-            name="At-Risk Test User",
-            role="user",
-            is_initial_admin=False,
-            auth_method="oauth",
-            auth_provider="google",
-            workspace_slot_bonus=0,
-        )
-    )
+    user = make_user(workspace_slot_bonus=0, name="At-Risk Test User")
+    db_session.add(user)
     await db_session.flush()
 
-    ws = _new_workspace(owner=user_id, plan="free")
+    ws = make_workspace(owner_user_id=user.user_id, plan_name="free")
     db_session.add(ws)
     await db_session.flush()
-    db_session.add(WorkspaceMember(workspace_id=ws.id, user_id=user_id, role="owner"))
+    db_session.add(WorkspaceMember(workspace_id=ws.id, user_id=user.user_id, role="owner"))
     await db_session.commit()
 
-    return {"user_id": user_id, "email": f"{user_id}@test.invalid"}
+    return {"user_id": user.user_id, "email": user.email}
 
 
 @pytest_asyncio.fixture
@@ -116,30 +77,19 @@ async def user_destructive(db_session: AsyncSession) -> dict:
 
     new_cap (after -1) = 3 < owned_count (4) → destructive.
     """
-    user_id = f"u_{uuid4().hex[:8]}"
-    db_session.add(
-        User(
-            email=f"{user_id}@test.invalid",
-            user_id=user_id,
-            name="Destructive Test User",
-            role="user",
-            is_initial_admin=False,
-            auth_method="oauth",
-            auth_provider="google",
-            workspace_slot_bonus=3,
-        )
-    )
+    user = make_user(workspace_slot_bonus=3, name="Destructive Test User")
+    db_session.add(user)
     await db_session.flush()
 
-    workspaces = [_new_workspace(owner=user_id) for _ in range(4)]
+    workspaces = [make_workspace(owner_user_id=user.user_id) for _ in range(4)]
     db_session.add_all(workspaces)
     await db_session.flush()
     db_session.add_all(
-        [WorkspaceMember(workspace_id=w.id, user_id=user_id, role="owner") for w in workspaces]
+        [WorkspaceMember(workspace_id=w.id, user_id=user.user_id, role="owner") for w in workspaces]
     )
     await db_session.commit()
 
-    return {"user_id": user_id, "email": f"{user_id}@test.invalid"}
+    return {"user_id": user.user_id, "email": user.email}
 
 
 @pytest_asyncio.fixture
@@ -152,33 +102,23 @@ async def user_with_mixed_workspaces_plan_filter(db_session: AsyncSession) -> di
     row (i.e. the active row should be sufficient to qualify them; we only
     want the soft-deleted row to be invisible to the filter).
     """
-    user_id = f"u_{uuid4().hex[:8]}"
-    db_session.add(
-        User(
-            email=f"{user_id}@test.invalid",
-            user_id=user_id,
-            name="Plan Filter Test User",
-            role="user",
-            is_initial_admin=False,
-            auth_method="oauth",
-            auth_provider="google",
-        )
-    )
+    user = make_user(name="Plan Filter Test User")
+    db_session.add(user)
     await db_session.flush()
 
-    active = _new_workspace(owner=user_id, soft_deleted=False)
-    deleted = _new_workspace(owner=user_id, soft_deleted=True)
+    active = make_workspace(owner_user_id=user.user_id, soft_deleted=False)
+    deleted = make_workspace(owner_user_id=user.user_id, soft_deleted=True)
     db_session.add_all([active, deleted])
     await db_session.flush()
     db_session.add_all(
         [
-            WorkspaceMember(workspace_id=active.id, user_id=user_id, role="owner"),
-            WorkspaceMember(workspace_id=deleted.id, user_id=user_id, role="owner"),
+            WorkspaceMember(workspace_id=active.id, user_id=user.user_id, role="owner"),
+            WorkspaceMember(workspace_id=deleted.id, user_id=user.user_id, role="owner"),
         ]
     )
     await db_session.commit()
 
-    return {"user_id": user_id, "active_id": str(active.id), "deleted_id": str(deleted.id)}
+    return {"user_id": user.user_id, "active_id": str(active.id), "deleted_id": str(deleted.id)}
 
 
 _LIST_DEFAULTS = {
@@ -203,7 +143,7 @@ class TestUpdateWorkspaceSlotBonus:
         response = await update_workspace_slot_bonus(
             user_id=user_with_bonus["user_id"],
             request=UpdateWorkspaceSlotBonusRequest(delta=1, reason=None),
-            admin=_admin(),
+            admin=mock_admin(),
             db=db_session,
         )
         assert response.before_value == 2
@@ -222,7 +162,7 @@ class TestUpdateWorkspaceSlotBonus:
         response = await update_workspace_slot_bonus(
             user_id=user_with_bonus["user_id"],
             request=UpdateWorkspaceSlotBonusRequest(delta=-1, reason=None),
-            admin=_admin(),
+            admin=mock_admin(),
             db=db_session,
         )
         assert response.after_value == 1
@@ -236,7 +176,7 @@ class TestUpdateWorkspaceSlotBonus:
             await update_workspace_slot_bonus(
                 user_id=user_at_risk["user_id"],
                 request=UpdateWorkspaceSlotBonusRequest(delta=-1, reason=None),
-                admin=_admin(),
+                admin=mock_admin(),
                 db=db_session,
             )
         assert exc.value.error_code == "BONUS-002"
@@ -250,7 +190,7 @@ class TestUpdateWorkspaceSlotBonus:
             await update_workspace_slot_bonus(
                 user_id=user_destructive["user_id"],
                 request=UpdateWorkspaceSlotBonusRequest(delta=-1, reason=None),
-                admin=_admin(),
+                admin=mock_admin(),
                 db=db_session,
             )
         assert exc.value.error_code == "BONUS-001"
@@ -264,7 +204,7 @@ class TestUpdateWorkspaceSlotBonus:
             request=UpdateWorkspaceSlotBonusRequest(
                 delta=-1, reason="Reducing bonus per request from finance"
             ),
-            admin=_admin(),
+            admin=mock_admin(),
             db=db_session,
         )
         assert response.before_value == 3
@@ -300,7 +240,7 @@ class TestUpdateWorkspaceSlotBonus:
             await update_workspace_slot_bonus(
                 user_id=user_destructive["user_id"],
                 request=UpdateWorkspaceSlotBonusRequest(delta=-1, reason="   "),
-                admin=_admin(),
+                admin=mock_admin(),
                 db=db_session,
             )
 
@@ -310,7 +250,7 @@ class TestUpdateWorkspaceSlotBonus:
             await update_workspace_slot_bonus(
                 user_id="u_nonexistent_xyz",
                 request=UpdateWorkspaceSlotBonusRequest(delta=1, reason=None),
-                admin=_admin(),
+                admin=mock_admin(),
                 db=db_session,
             )
         assert exc.value.status_code == 404
@@ -325,7 +265,7 @@ class TestGetUserDetailWorkspaceSummary:
     ) -> None:
         detail = await get_user_detail(
             user_id=user_with_bonus["user_id"],
-            admin=_admin(),
+            admin=mock_admin(),
             db=db_session,
         )
         assert detail.workspace_summary is not None
@@ -346,7 +286,7 @@ class TestGetUserDetailWorkspaceSummary:
         """owned_workspaces must apply the soft-delete filter (no #681 regression)."""
         detail = await get_user_detail(
             user_id=user_with_mixed_workspaces_plan_filter["user_id"],
-            admin=_admin(),
+            admin=mock_admin(),
             db=db_session,
         )
         assert detail.workspace_summary is not None
@@ -363,33 +303,22 @@ async def user_with_two_pro_workspaces(db_session: AsyncSession) -> dict:
     ``.distinct()`` the user would appear twice in ``GET /admin/users?plan=pro``
     and ``total`` would count workspace matches rather than distinct users.
     """
-    user_id = f"u_{uuid4().hex[:8]}"
-    db_session.add(
-        User(
-            email=f"{user_id}@test.invalid",
-            user_id=user_id,
-            name="Two-Pro Test User",
-            role="user",
-            is_initial_admin=False,
-            auth_method="oauth",
-            auth_provider="google",
-            workspace_slot_bonus=1,  # cap = 2, can own 2 workspaces
-        )
-    )
+    user = make_user(workspace_slot_bonus=1, name="Two-Pro Test User")  # cap = 2
+    db_session.add(user)
     await db_session.flush()
 
-    ws_a = _new_workspace(owner=user_id)
-    ws_b = _new_workspace(owner=user_id)
+    ws_a = make_workspace(owner_user_id=user.user_id)
+    ws_b = make_workspace(owner_user_id=user.user_id)
     db_session.add_all([ws_a, ws_b])
     await db_session.flush()
     db_session.add_all(
         [
-            WorkspaceMember(workspace_id=ws_a.id, user_id=user_id, role="owner"),
-            WorkspaceMember(workspace_id=ws_b.id, user_id=user_id, role="owner"),
+            WorkspaceMember(workspace_id=ws_a.id, user_id=user.user_id, role="owner"),
+            WorkspaceMember(workspace_id=ws_b.id, user_id=user.user_id, role="owner"),
         ]
     )
     await db_session.commit()
-    return {"user_id": user_id}
+    return {"user_id": user.user_id}
 
 
 class TestListUsersPlanFilterSoftDelete:
@@ -416,7 +345,7 @@ class TestListUsersPlanFilterSoftDelete:
         once.
         """
         response = await list_users(
-            user=_admin(),
+            user=mock_admin(),
             db=db_session,
             **{**_LIST_DEFAULTS, "plan": "pro"},
         )
@@ -439,7 +368,7 @@ class TestListUsersPlanFilterSoftDelete:
         yield two User rows and inflate ``total``.
         """
         response = await list_users(
-            user=_admin(),
+            user=mock_admin(),
             db=db_session,
             **{**_LIST_DEFAULTS, "plan": "pro"},
         )
@@ -534,7 +463,7 @@ class TestInputBounds:
         response = await update_workspace_slot_bonus(
             user_id=user_with_bonus["user_id"],
             request=UpdateWorkspaceSlotBonusRequest(delta=1, reason=long_reason),
-            admin=_admin(),
+            admin=mock_admin(),
             db=db_session,
         )
         assert response.reason == long_reason
