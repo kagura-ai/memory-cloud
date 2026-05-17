@@ -115,18 +115,28 @@ class OAuth2ClientResponse(BaseModel):
     provider: str  # Migration 036
     created_at: str  # ISO 8601 with 'Z' (UTC)
     # Migration 034-035: Zero-knowledge visibility
-    plaintext_secret: str | None  # Only if visible + owner
+    # ``plaintext_secret`` defaults to None so it is non-required in the OpenAPI
+    # schema — the DCR ``/register`` endpoint omits it via response_model_exclude
+    # for public clients (Issue #689), and generated SDK clients must not treat
+    # the field as required.
+    plaintext_secret: str | None = None  # Only if visible + owner
     is_visible: bool
-    visibility_expires_at: str | None  # ISO 8601 with 'Z' (UTC)
+    visibility_expires_at: str | None = None  # ISO 8601 with 'Z' (UTC)
 
     class Config:
         from_attributes = True
 
 
 class OAuth2ClientWithSecretResponse(OAuth2ClientResponse):
-    """OAuth2 Client response with client secret (only on creation)."""
+    """OAuth2 Client response with client secret (only on creation).
 
-    client_secret: str
+    ``client_secret`` is ``None`` for public clients
+    (``token_endpoint_auth_method="none"``) per RFC 7591 §3.2.1, which
+    forbids issuing a secret to clients that won't authenticate at the
+    token endpoint. Confidential clients always receive a value.
+    """
+
+    client_secret: str | None = None
 
 
 class OAuth2ClientCreateRequest(BaseModel):
@@ -628,6 +638,12 @@ def detect_dcr_provider(redirect_uri: str, client_name: str) -> str:
 @router.post(
     "/register",
     response_model=OAuth2ClientWithSecretResponse,
+    # RFC 7591 §3.2.1: DCR clients are always public
+    # (``token_endpoint_auth_method="none"``); the spec forbids issuing a
+    # ``client_secret`` to them. Returning even ``null`` lets some OAuth
+    # client libraries Basic-Auth the token endpoint with an empty secret,
+    # which authlib then rejects (Issue #689). Omit the field outright.
+    response_model_exclude={"client_secret", "plaintext_secret"},
     status_code=status.HTTP_201_CREATED,
 )
 async def dynamic_client_registration(
@@ -650,7 +666,11 @@ async def dynamic_client_registration(
         data: DCR request data
 
     Returns:
-        Created client with client_secret
+        Created client metadata. Per RFC 7591 §3.2.1, public clients
+        (``token_endpoint_auth_method="none"``) do NOT receive a
+        ``client_secret`` — the field is omitted from the JSON response
+        via ``response_model_exclude`` (Issue #689). Clients authenticate
+        the token endpoint using PKCE alone.
 
     Example:
         POST /api/v1/oauth/register
@@ -662,6 +682,7 @@ async def dynamic_client_registration(
 
     Spec:
         RFC 7591 - OAuth 2.0 Dynamic Client Registration Protocol
+        RFC 7636 - PKCE (required for public clients)
         MCP Authorization Spec (2025-03-26)
     """
     # Get client IP for rate limiting
@@ -713,25 +734,17 @@ async def dynamic_client_registration(
     db_session = get_sync_session()
 
     try:
-        # Generate client_id and client_secret
+        # See route-decorator comment above for the RFC 7591 §3.2.1 rationale.
+        # The sentinel ``client_secret_hash=""`` satisfies the NOT NULL column
+        # without storing a forgeable hash — authlib short-circuits the secret
+        # check on the "none" branch (kagura-memory 19adf25b).
         client_id = f"oauth_{secrets.token_urlsafe(16)}"
-        client_secret = secrets.token_urlsafe(32)
-        client_secret_hash = hashlib.sha256(client_secret.encode()).hexdigest()
-
-        # Migration 035: Encrypt plaintext for storage
-        from datetime import timedelta
-
-        from utils.encryption import get_encryptor
-
-        plaintext_secret_encrypted = get_encryptor().encrypt(client_secret)
-        visibility_expires_at = utcnow() + timedelta(minutes=10)
 
         scope = data.scope if data.scope else DCR_DEFAULT_SCOPE
 
-        # Create OAuth2Client (DCR: owner_id=None, workspace_id=None, auth_method=none)
         client = OAuth2Client(
             client_id=client_id,
-            client_secret_hash=client_secret_hash,
+            client_secret_hash="",  # Public client sentinel (Issue #689)
             client_name=data.client_name,
             redirect_uris=data.redirect_uris,
             grant_types=data.grant_types,
@@ -741,8 +754,8 @@ async def dynamic_client_registration(
             owner_id=None,  # DCR clients have no owner
             workspace_id=None,  # Global clients
             provider=detected_provider,
-            plaintext_secret_encrypted=plaintext_secret_encrypted,
-            visibility_expires_at=visibility_expires_at,
+            plaintext_secret_encrypted=None,  # Issue #689: no secret to store
+            visibility_expires_at=None,
         )
 
         db_session.add(client)
@@ -756,7 +769,7 @@ async def dynamic_client_registration(
             ip=client_ip,
         )
 
-        # Return response with client_secret
+        # RFC 7591 §3.2.1: public client → omit client_secret / plaintext_secret
         return OAuth2ClientWithSecretResponse(
             id=client.id,
             client_id=client.client_id,
@@ -769,10 +782,10 @@ async def dynamic_client_registration(
             owner_id=client.owner_id,
             provider=client.provider,
             created_at=to_utc_iso(client.created_at) or "",
-            client_secret=client_secret,
-            plaintext_secret=client_secret,
-            is_visible=True,
-            visibility_expires_at=to_utc_iso(visibility_expires_at),
+            client_secret=None,
+            plaintext_secret=None,
+            is_visible=False,
+            visibility_expires_at=None,
         )
 
     except Exception as e:

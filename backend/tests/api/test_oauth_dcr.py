@@ -340,10 +340,33 @@ class TestDcrEndpointAcceptance:
         body = response.json()
         assert body.get("provider") == expected_provider
         assert body.get("token_endpoint_auth_method") == "none"
-        assert "client_secret" in body
-        # DB write was attempted
+        # RFC 7591 §3.2.1 (Issue #689): public clients
+        # (``token_endpoint_auth_method="none"``) MUST NOT receive a
+        # ``client_secret``. Returning one made Claude Code's OAuth2 stack
+        # treat the registration as a confidential client and Basic-Auth the
+        # token endpoint, which authlib then rejected with invalid_client 401.
+        #
+        # Pin field *absence* (not just `null`): some OAuth client libraries
+        # treat ``{"client_secret": null}`` as "confidential client with empty
+        # secret" and still Basic-Auth the token endpoint. ``response_model_exclude``
+        # makes the field absent from JSON, which is the load-bearing fix.
+        assert "client_secret" not in body, (
+            f"RFC 7591 §3.2.1 violation: public client response includes "
+            f"client_secret={body.get('client_secret')!r}"
+        )
+        assert "plaintext_secret" not in body, (
+            f"Visibility plaintext must also be omitted for public clients "
+            f"(got {body.get('plaintext_secret')!r})"
+        )
+        assert body.get("is_visible") is False
+        assert body.get("visibility_expires_at") is None
+        # The DB row stores an empty sentinel hash; no encryptor invocation.
+        added_client = fake_session.add.call_args[0][0]
+        assert added_client.client_secret_hash == ""
+        assert added_client.plaintext_secret_encrypted is None
         fake_session.add.assert_called_once()
         fake_session.commit.assert_called_once()
+        fake_encryptor.encrypt.assert_not_called()
 
 
 class TestOAuth2ClientResponseOwnerIdSerialization:
