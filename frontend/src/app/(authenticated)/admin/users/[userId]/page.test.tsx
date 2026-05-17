@@ -88,9 +88,14 @@ describe("Workspace Capacity section (#676)", () => {
   it("does not render the section when workspace_summary is absent", async () => {
     mockGet.mockResolvedValueOnce(BASE_USER_DETAIL);
     render(<UserDetailPage />);
-    await waitFor(() => {
-      expect(screen.queryByText(/Workspace Capacity/)).not.toBeInTheDocument();
-    });
+    // Wait for the page to actually finish loading by waiting for a
+    // post-load element (the user's name from the fetched payload).
+    // Without this anchor, `queryByText(/Workspace Capacity/)` returns
+    // null both *before* the fetch resolves AND when the section is
+    // correctly absent — making the test a false positive that would
+    // pass even if the section was rendered after load.
+    await screen.findByText(BASE_USER_DETAIL.user.name);
+    expect(screen.queryByText(/Workspace Capacity/)).not.toBeInTheDocument();
   });
 
   it("renders cap formula and badge variant from workspace_summary", async () => {

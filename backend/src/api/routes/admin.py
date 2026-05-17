@@ -9,7 +9,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import require_admin
@@ -685,6 +685,24 @@ async def update_workspace_slot_bonus(
     ``new_value_hash`` for the rare grep-by-numeric-value query.
     """
     actor_id = get_user_id(admin)
+
+    # ---- Acquire per-user advisory lock (serializes against workspace creation) ----
+    # ``QuotaService.check_workspace_creation_allowed`` (#677 sub-C)
+    # acquires ``pg_advisory_xact_lock(hashtextextended('workspace_create:' || user_id, 0))``
+    # before counting owned workspaces. Without holding the same lock
+    # here, a concurrent workspace-create can pass its cap check while we
+    # are decrementing the bonus — ending up over-cap without the admin
+    # supplying a reason. The lock is xact-scoped: it is released when
+    # this request's transaction commits (audit phase) or rolls back
+    # (any raise path through ``get_db``). The lock SQL is issued on
+    # ``db`` so the implicit session transaction picks it up — all
+    # subsequent reads and the UPDATE then run inside the same locked
+    # transaction.
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))").bindparams(
+            key=f"workspace_create:{user_id}"
+        )
+    )
 
     # ---- Validation phase (read-only, outside db_transaction) ----
     # db_transaction's bare `except Exception` wraps MemoryCloudException
