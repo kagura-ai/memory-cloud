@@ -2091,7 +2091,6 @@
         "free": "S",
         "basic": "M",
         "pro": "L",
-        "unlimited": "Unlimited",
         "loadError": "Failed to load plan tier data",
         "emptyTitle": "No plan tiers configured",
         "emptyDescription": "The backend returned no tiers — check the deployment's PLAN_* configuration.",

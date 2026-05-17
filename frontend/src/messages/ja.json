@@ -2091,7 +2091,6 @@
         "free": "S",
         "basic": "M",
         "pro": "L",
-        "unlimited": "無制限",
         "loadError": "プランティア情報の取得に失敗しました",
         "emptyTitle": "プランティアが設定されていません",
         "emptyDescription": "バックエンドからティアが返されませんでした。デプロイの PLAN_* 設定を確認してください。",
