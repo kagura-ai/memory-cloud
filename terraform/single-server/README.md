@@ -324,6 +324,65 @@ Tunable environment variables:
 | `READINESS_TIMEOUT` | 60 | Seconds to wait for `/readiness` |
 | `DRAIN_TIMEOUT` | 30 | Seconds to drain old container |
 
+### Update the frontend (in-place rebuild)
+
+The API uses blue-green; the frontend (`kagura-web`) is rebuilt **in
+place** because its `NEXT_PUBLIC_*` build args (e.g. `NEXT_PUBLIC_API_URL`
+derived from `${KAGURA_DOMAIN}`) are baked into the Next.js bundle at
+build time. Blue-green doesn't apply.
+
+The full `--web` run takes roughly **3–5 minutes** on the default e2-medium
+VM — almost all of it is `npm ci` + `next build` inside the new image. The
+container restart itself, and the readiness check that follows it, complete
+in under a minute. The frontend is unavailable during the restart window
+(the API stays up).
+
+```bash
+# On the VM
+cd /opt/kagura-memory/src
+git fetch && git reset --hard origin/main
+
+cd terraform/single-server
+./scripts/deploy.sh --web    # rebuild + restart kagura-web, in-place
+```
+
+`--web` uses the same `dc()` wrapper as the API deploy, so
+`--env-file .env.prod` is always present and `${KAGURA_DOMAIN}` interpolates
+correctly into the `NEXT_PUBLIC_*_URL` build args. Forgetting `--env-file`
+when rebuilding `web` manually produced a silently broken bundle
+(`TypeError: Invalid URL` at build time — see #643 root cause); `--web`
+removes that footgun by funneling the call through `dc()`.
+
+Under the hood, `--web` runs three steps:
+
+1. `dc build --no-cache web` — fresh build, picks up source + build args
+2. `dc up -d --no-deps --force-recreate web` — restart in place;
+   `--no-deps` keeps `postgres / redis / qdrant / caddy / api-*` untouched
+3. Wait for `/api/health` from inside the container (same path as the
+   Dockerfile `HEALTHCHECK`)
+
+Tunable environment variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `WEB_READINESS_TIMEOUT` | 30 | Seconds to wait for web `/api/health` **after** `dc up` returns (does not bound the build itself) |
+| `WEB_READINESS_INTERVAL` | 2 | Seconds between health-check attempts |
+
+**Web rollback**: there is no `--web --rollback`. The frontend is
+rebuilt in place, so the previous image is no longer addressable. To
+roll back the frontend, `git revert` the offending commit and re-run
+`./scripts/deploy.sh --web`.
+
+**Regression check after `--web`** — the existing blue-green flow must
+remain untouched:
+
+1. `./scripts/deploy.sh --status` — note the current active API color
+2. `./scripts/deploy.sh --web` — rebuild the frontend
+3. `./scripts/deploy.sh --status` — confirm the active API color has
+   **not** moved (this proves `--web` did not touch the API containers)
+4. (optional) `./scripts/deploy.sh --rollback` followed by
+   `./scripts/deploy.sh` — confirm API blue-green still cycles cleanly
+
 ### Migration discipline
 
 Database migrations run **before** the Caddy switch so both old and new

@@ -5,10 +5,16 @@
 # Zero-downtime deployment for the API container. Switches between api-blue
 # and api-green while keeping Caddy routing live.
 #
+# The frontend (kagura-web) is rebuilt in place via --web; its
+# NEXT_PUBLIC_* build args are baked into the bundle at build time, so
+# blue-green doesn't apply. Funneling the rebuild through dc() guarantees
+# --env-file .env.prod is always present (root cause of #643/#672).
+#
 # Usage:
-#   ./scripts/deploy.sh              # normal deploy
-#   ./scripts/deploy.sh --rollback   # switch back to previous color
-#   ./scripts/deploy.sh --status     # show current active color
+#   ./scripts/deploy.sh              # normal API blue-green deploy
+#   ./scripts/deploy.sh --rollback   # switch back to previous API color
+#   ./scripts/deploy.sh --status     # show current active API color
+#   ./scripts/deploy.sh --web        # rebuild + restart kagura-web in place
 #
 # Requires: docker compose, curl, envsubst (gettext-base)
 # =============================================================================
@@ -29,6 +35,8 @@ ENV_FILE="$PROJECT_DIR/.env.prod"
 READINESS_TIMEOUT="${READINESS_TIMEOUT:-60}"   # seconds to wait for /readiness
 READINESS_INTERVAL=2                            # seconds between checks
 DRAIN_TIMEOUT="${DRAIN_TIMEOUT:-30}"            # seconds to drain old container
+WEB_READINESS_TIMEOUT="${WEB_READINESS_TIMEOUT:-30}"  # seconds to wait for kagura-web /api/health
+WEB_READINESS_INTERVAL="${WEB_READINESS_INTERVAL:-2}" # seconds between web checks
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -148,6 +156,30 @@ cmd_deploy() {
     log "To rollback: $0 --rollback"
 }
 
+cmd_deploy_web() {
+    log "=== FRONTEND REBUILD (in-place) ==="
+    log "Note: brief downtime expected during Next.js rebuild + restart."
+
+    # Step 1: --no-cache — NEXT_PUBLIC_* build args are baked into the layer;
+    # a cached layer would silently carry stale values from a prior build.
+    log "Step 1/3: Building kagura-web image (--no-cache, typically 3-5 min)..."
+    dc build --no-cache web
+
+    # Step 2: In-place restart. --no-deps prevents compose from recreating
+    # shared services (postgres/redis/qdrant/caddy/api-*) — see memory
+    # savepoint 9389da56 for the footgun this guards against.
+    log "Step 2/3: Restarting kagura-web (--no-deps --force-recreate)..."
+    dc up -d --no-deps --force-recreate web
+
+    # Step 3: Smoke check from inside the container — the Dockerfile
+    # HEALTHCHECK uses this same endpoint, so we ride that contract.
+    log "Step 3/3: Waiting for kagura-web readiness (timeout: ${WEB_READINESS_TIMEOUT}s)..."
+    wait_for_web_readiness
+
+    log "=== FRONTEND REBUILD COMPLETE ==="
+    log "Web rollback: git revert the offending commit, then re-run $0 --web."
+}
+
 # ---------------------------------------------------------------------------
 # Readiness check
 # ---------------------------------------------------------------------------
@@ -174,6 +206,38 @@ wait_for_readiness() {
     error "api-${color} did not become ready within ${READINESS_TIMEOUT}s. Aborting.
   The new container is running but Caddy has NOT been switched.
   Investigate: docker compose -f $COMPOSE_FILE --env-file $ENV_FILE logs api-${color}"
+}
+
+wait_for_web_readiness() {
+    local start_time=$SECONDS
+
+    while (( SECONDS - start_time < WEB_READINESS_TIMEOUT )); do
+        # Distinguish "missing" from "stopped" so the failure mode is debuggable.
+        if ! docker inspect kagura-web > /dev/null 2>&1; then
+            error "kagura-web container not found. Did 'dc up -d --no-deps --force-recreate web' succeed?"
+        fi
+        if ! docker inspect --format '{{.State.Running}}' kagura-web | grep -q "true"; then
+            error "kagura-web has stopped unexpectedly. Check logs:
+  docker compose -f $COMPOSE_FILE --env-file $ENV_FILE logs web"
+        fi
+
+        # /api/health is a dedicated 200 endpoint (frontend/src/app/api/health/route.ts).
+        # We use `node -e ...` (not curl) because the kagura-web image is
+        # node:20-alpine and ships without curl — the Dockerfile HEALTHCHECK
+        # uses the same node-based probe, so we ride that contract literally.
+        # `timeout 3` (coreutils) bounds the per-iteration wait; node http.get
+        # would otherwise inherit the system socket timeout if the server hangs.
+        if timeout 3 dc exec -T web node -e \
+                "require('http').get('http://localhost:3000/api/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(2))" \
+                > /dev/null 2>&1; then
+            log "  kagura-web is ready ($((SECONDS - start_time))s)"
+            return 0
+        fi
+        sleep "$WEB_READINESS_INTERVAL"
+    done
+
+    error "kagura-web did not become ready within ${WEB_READINESS_TIMEOUT}s. Aborting.
+  Investigate: docker compose -f $COMPOSE_FILE --env-file $ENV_FILE logs web"
 }
 
 # ---------------------------------------------------------------------------
@@ -221,6 +285,8 @@ command -v envsubst > /dev/null 2>&1 || error "envsubst not found. Install: apt-
 # Validate timeout values are integers
 [[ "$READINESS_TIMEOUT" =~ ^[0-9]+$ ]] || error "READINESS_TIMEOUT must be an integer (got: $READINESS_TIMEOUT)"
 [[ "$DRAIN_TIMEOUT" =~ ^[0-9]+$ ]] || error "DRAIN_TIMEOUT must be an integer (got: $DRAIN_TIMEOUT)"
+[[ "$WEB_READINESS_TIMEOUT" =~ ^[0-9]+$ ]] || error "WEB_READINESS_TIMEOUT must be an integer (got: $WEB_READINESS_TIMEOUT)"
+[[ "$WEB_READINESS_INTERVAL" =~ ^[0-9]+$ ]] || error "WEB_READINESS_INTERVAL must be an integer (got: $WEB_READINESS_INTERVAL)"
 
 # Ensure marker directory exists
 mkdir -p "$(dirname "$MARKER_FILE")"
@@ -232,16 +298,21 @@ case "${1:-}" in
     --status)
         cmd_status
         ;;
+    --web)
+        cmd_deploy_web
+        ;;
     --help|-h)
-        echo "Usage: $0 [--rollback|--status|--help]"
+        echo "Usage: $0 [--rollback|--status|--web|--help]"
         echo ""
-        echo "  (no args)    Deploy to the inactive color (zero-downtime)"
-        echo "  --rollback   Switch back to the previous color"
-        echo "  --status     Show current active color and container states"
+        echo "  (no args)    Deploy to the inactive API color (zero-downtime blue-green)"
+        echo "  --rollback   Switch back to the previous API color"
+        echo "  --status     Show current active API color and container states"
+        echo "  --web        Rebuild + restart kagura-web in place"
         echo ""
         echo "Environment variables:"
-        echo "  READINESS_TIMEOUT  Seconds to wait for /readiness (default: 60)"
-        echo "  DRAIN_TIMEOUT      Seconds to drain old container (default: 30)"
+        echo "  READINESS_TIMEOUT      Seconds to wait for API /readiness (default: 60)"
+        echo "  DRAIN_TIMEOUT          Seconds to drain old API container (default: 30)"
+        echo "  WEB_READINESS_TIMEOUT  Seconds to wait for web /api/health (default: 30)"
         ;;
     "")
         cmd_deploy
