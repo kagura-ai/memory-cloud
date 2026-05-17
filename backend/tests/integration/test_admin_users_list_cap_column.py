@@ -8,32 +8,15 @@ soft-deleted workspaces from ``owned_count`` (same #681 class as
 
 from __future__ import annotations
 
-from uuid import uuid4
-
 import pytest
 import pytest_asyncio
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes.admin import list_users
-from models.auth import User, Workspace
+from models.auth import User
 
-
-def _mock_admin() -> dict:
-    return {"user_id": "admin_runner", "email": "admin@test.invalid", "role": "admin"}
-
-
-def _new_workspace(*, owner: str, soft_deleted: bool) -> Workspace:
-    return Workspace(
-        id=uuid4(),
-        name=f"{'deleted' if soft_deleted else 'active'}-{uuid4().hex[:8]}",
-        plan_name="pro",
-        owner_user_id=owner,
-        memory_limit=1000,
-        daily_api_limit=500,
-        weekly_api_limit=2500,
-        deleted_at=(func.now() if soft_deleted else None),
-    )
+from ._admin_helpers import make_user, make_workspace, mock_admin
 
 
 @pytest_asyncio.fixture
@@ -44,55 +27,27 @@ async def users_with_varied_cap(db_session: AsyncSession) -> dict:
     - bonus_grant:  bonus=2, owns 1 live + 1 soft-deleted    → 1 / 3 (not at cap)
     - zero_owned:   bonus=0, owns 0                          → 0 / 1
     """
-    uids = {key: f"u_{uuid4().hex[:8]}" for key in ("baseline", "bonus_grant", "zero_owned")}
-
-    db_session.add_all(
-        [
-            User(
-                email=f"{uids['baseline']}@test.invalid",
-                user_id=uids["baseline"],
-                name="Baseline User",
-                role="user",
-                is_initial_admin=False,
-                auth_method="oauth",
-                auth_provider="google",
-                workspace_slot_bonus=0,
-            ),
-            User(
-                email=f"{uids['bonus_grant']}@test.invalid",
-                user_id=uids["bonus_grant"],
-                name="Bonus User",
-                role="user",
-                is_initial_admin=False,
-                auth_method="oauth",
-                auth_provider="google",
-                workspace_slot_bonus=2,
-            ),
-            User(
-                email=f"{uids['zero_owned']}@test.invalid",
-                user_id=uids["zero_owned"],
-                name="Zero Owned User",
-                role="user",
-                is_initial_admin=False,
-                auth_method="oauth",
-                auth_provider="google",
-                workspace_slot_bonus=0,
-            ),
-        ]
-    )
+    baseline = make_user(workspace_slot_bonus=0, name="Baseline User")
+    bonus_grant = make_user(workspace_slot_bonus=2, name="Bonus User")
+    zero_owned = make_user(workspace_slot_bonus=0, name="Zero Owned User")
+    db_session.add_all([baseline, bonus_grant, zero_owned])
     await db_session.flush()
 
     db_session.add_all(
         [
-            _new_workspace(owner=uids["baseline"], soft_deleted=False),
-            _new_workspace(owner=uids["bonus_grant"], soft_deleted=False),
-            _new_workspace(owner=uids["bonus_grant"], soft_deleted=True),
+            make_workspace(owner_user_id=baseline.user_id, soft_deleted=False),
+            make_workspace(owner_user_id=bonus_grant.user_id, soft_deleted=False),
+            make_workspace(owner_user_id=bonus_grant.user_id, soft_deleted=True),
             # zero_owned: intentionally no workspaces
         ]
     )
     await db_session.commit()
 
-    return uids
+    return {
+        "baseline": baseline.user_id,
+        "bonus_grant": bonus_grant.user_id,
+        "zero_owned": zero_owned.user_id,
+    }
 
 
 _LIST_DEFAULTS = {
@@ -116,7 +71,7 @@ class TestListUsersCapColumn:
         db_session: AsyncSession,
         users_with_varied_cap: dict,
     ) -> None:
-        response = await list_users(user=_mock_admin(), db=db_session, **_LIST_DEFAULTS)
+        response = await list_users(user=mock_admin(), db=db_session, **_LIST_DEFAULTS)
         target = next(
             (u for u in response.users if u.id == users_with_varied_cap["baseline"]),
             None,
@@ -132,7 +87,7 @@ class TestListUsersCapColumn:
         db_session: AsyncSession,
         users_with_varied_cap: dict,
     ) -> None:
-        response = await list_users(user=_mock_admin(), db=db_session, **_LIST_DEFAULTS)
+        response = await list_users(user=mock_admin(), db=db_session, **_LIST_DEFAULTS)
         target = next(
             (u for u in response.users if u.id == users_with_varied_cap["bonus_grant"]),
             None,
@@ -149,7 +104,7 @@ class TestListUsersCapColumn:
         db_session: AsyncSession,
         users_with_varied_cap: dict,
     ) -> None:
-        response = await list_users(user=_mock_admin(), db=db_session, **_LIST_DEFAULTS)
+        response = await list_users(user=mock_admin(), db=db_session, **_LIST_DEFAULTS)
         target = next(
             (u for u in response.users if u.id == users_with_varied_cap["zero_owned"]),
             None,
@@ -174,7 +129,7 @@ class TestListUsersCapColumn:
         duplicate user rows in ``response.users``. Asserting both no
         duplicates AND a lower-bound on ``total`` catches both failure modes.
         """
-        response = await list_users(user=_mock_admin(), db=db_session, **_LIST_DEFAULTS)
+        response = await list_users(user=mock_admin(), db=db_session, **_LIST_DEFAULTS)
         fixture_ids = set(users_with_varied_cap.values())
 
         # 1. Each fixture user appears EXACTLY once in the response page
