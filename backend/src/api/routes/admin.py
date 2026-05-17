@@ -544,7 +544,6 @@ async def get_user_detail(
         # Critical Fix: Avoid O(N²) queries - collect all contexts first, then batch fetch ContextMembers
         all_contexts = []
         context_workspace_map = {}
-        workspace_role_map = {}
 
         for member, workspace in workspace_memberships:
             try:
@@ -552,7 +551,6 @@ async def get_user_detail(
                 for ctx in contexts:
                     all_contexts.append(ctx)
                     context_workspace_map[ctx.id] = (workspace, member.role)
-                    workspace_role_map[ctx.id] = member.role
             except (NotFoundException, AuthorizationError):
                 # Skip if no access
                 pass
