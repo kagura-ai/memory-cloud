@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes.admin import list_users
@@ -188,15 +188,18 @@ class TestListUsersCapColumn:
             f"each fixture user must appear exactly once, got {per_user_count}"
         )
 
-        # 2. ``total`` counts distinct users only — it must be at least the
-        #    3 fixture users (test DB may have other users from sibling
-        #    fixtures, so we cannot pin equality). If the cap join had
-        #    multiplied rows, ``total`` would jump to >= len(fixture_ids)+1
-        #    just from the bonus_grant user's 2 workspace rows leaking in.
-        #    Combined with assertion (1) above (per_user_count==1 for every
-        #    fixture user), this lower bound is sufficient to catch JOIN
-        #    multiplication — no need for an upper bound (``total`` is the
-        #    pre-pagination match count and can legitimately exceed ``limit``).
-        assert response.total >= len(fixture_ids), (
-            f"total must include at least the {len(fixture_ids)} fixture users, got {response.total}"
+        # 2. ``total`` equals the **direct** distinct-user count in the DB.
+        #    A bare ``total >= len(fixture_ids)`` lower bound would silently
+        #    pass even if JOIN multiplication inflated ``total`` (an
+        #    inflated total still satisfies the lower bound). Comparing
+        #    against an independent ``SELECT COUNT(*) FROM users`` is the
+        #    only check that actually fails when ``list_users``'s count
+        #    starts double-counting bonus_grant (1 live + 1 soft-deleted
+        #    workspace = 2 join rows if the cap join leaks into the base
+        #    query). The direct count uses no joins so it cannot share the
+        #    same defect — it is the ground truth.
+        direct_count = (await db_session.execute(select(func.count(User.id)))).scalar() or 0
+        assert response.total == direct_count, (
+            f"response.total ({response.total}) must match the direct distinct user count "
+            f"({direct_count}) — a mismatch means the cap join inflated the count via row multiplication"
         )
