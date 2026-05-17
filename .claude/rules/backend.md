@@ -26,7 +26,7 @@ paths:
 
 ## Datetime / UTC
 
-**Storage (DB) — mixed-awareness, predominantly naive UTC.** Most columns are `TIMESTAMP WITHOUT TIME ZONE` (naive UTC by convention); 11 columns across 5 models are `TIMESTAMP WITH TIME ZONE` (aware): `Context.last_used_at` (auth.py), and timestamps in `bm25_drift.py`, `erasure.py`, `hub_tag.py`, and `neural.py`. **Always check the model's `mapped_column(DateTime[, timezone=True])` declaration before constructing comparison sentinels or default values**, never assume naive across the board.
+**Storage (DB) — mixed-awareness, predominantly naive UTC.** Most columns are `TIMESTAMP WITHOUT TIME ZONE` (naive UTC by convention); **13 columns across 6 models** are `TIMESTAMP WITH TIME ZONE` (aware): `Context.last_used_at` (auth.py), 2 timestamps in `config.py` (declared with `TIMESTAMP(timezone=True)` rather than `DateTime(timezone=True)`), and timestamps in `bm25_drift.py`, `erasure.py`, `hub_tag.py`, and `neural.py`. **Always check the model's `mapped_column(...)` declaration before constructing comparison sentinels or default values** — and grep both `DateTime(timezone=True)` and `TIMESTAMP(timezone=True)` since the codebase mixes both styles. Never assume naive across the board.
 
 UTC is enforced for every SQLAlchemy session by the engine, regardless of postgres server defaults:
 
