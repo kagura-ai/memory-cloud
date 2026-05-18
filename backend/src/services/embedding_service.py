@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import unicodedata
+from typing import TYPE_CHECKING
 
 import xxhash
 from openai import AsyncOpenAI
@@ -22,10 +23,17 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.redis import get_cache, set_cache
-from models.auth import ExternalAPIKey
+from models.auth import ExternalAPIKey, Workspace
 from utils.encryption import get_encryptor
-from utils.exceptions import ConfigurationError, OpenAIError
+from utils.exceptions import (
+    ConfigurationError,
+    EmbeddingSpendCapExceeded,
+    OpenAIError,
+)
 from utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from services.embedding_spend_cap_service import EmbeddingSpendCapService
 
 logger = get_logger(__name__)
 
@@ -168,6 +176,81 @@ class EmbeddingService:
             "settings, or set the OPENAI_API_KEY environment variable."
         )
 
+    async def _prepare_spend_cap_gate(
+        self,
+        workspace_id: str | None,
+    ) -> tuple[EmbeddingSpendCapService | None, Workspace | None]:
+        """Resolve the cap service + workspace and run the pre-call gate (#709).
+
+        Returns ``(None, None)`` for skip cases — Ollama (no real provider
+        cost), missing ``workspace_id`` (no caller scope), or a workspace
+        row that disappears between request entry and embed call. Otherwise
+        loads the workspace ONCE and runs ``check_cap_or_raise`` so the
+        post-call ``record_spend_from_tokens`` can reuse the row without a
+        second SELECT. Raises ``EmbeddingSpendCapExceeded`` (HTTP 429,
+        ``QUOTA-002``) when the BYOK daily / monthly cap has been reached.
+        """
+        if not workspace_id or self.provider == "ollama":
+            return None, None
+        from services.embedding_spend_cap_service import EmbeddingSpendCapService
+
+        cap_svc = EmbeddingSpendCapService(self.db)
+        cap_workspace = await cap_svc.load_workspace(workspace_id)
+        if cap_workspace is None:
+            return None, None
+        await cap_svc.check_cap_or_raise(cap_workspace)
+        return cap_svc, cap_workspace
+
+    async def resolve_paid_by(self, workspace_id: str | None) -> str:
+        """Resolve the ``LLMCallLog.paid_by`` value for this embed call (#709).
+
+        Returns ``"byok"`` when the workspace owns the credential used for
+        the call, ``"platform"`` when the call would fall back to the env
+        var (or Ollama / no workspace context). Callers must pass the
+        returned value through to ``LLMCallLogWriter.record(paid_by=...)``
+        — see ``search_service.py:200-210`` for the canonical usage.
+
+        Centralizing the resolution here keeps the ``"byok" if … else
+        "platform"`` rule in one place; downstream writers don't need to
+        know how key sourcing works.
+        """
+        from models.llm_call_log import LLM_CALL_LOG_PAID_BY_VALUES
+
+        paid_by = "byok" if await self.has_byok_key(workspace_id) else "platform"
+        assert paid_by in LLM_CALL_LOG_PAID_BY_VALUES
+        return paid_by
+
+    async def has_byok_key(self, workspace_id: str | None) -> bool:
+        """Whether the workspace has an enabled BYOK key for this provider.
+
+        Issue #709: used by writers (``search_service.py``) to set
+        ``LLMCallLog.paid_by`` accurately — ``'byok'`` when the workspace
+        owns the credential, ``'platform'`` when the call would fall back
+        to ``OPENAI_API_KEY`` env. Returns ``False`` for Ollama and when
+        no ``workspace_id`` is provided. Tolerates both UUID and string
+        ``workspace_id`` inputs.
+
+        This is a cheap existence probe (single indexed SELECT, no decrypt)
+        and lives alongside ``_get_user_api_key`` to avoid duplicating its
+        priority rules in callers.
+        """
+        from uuid import UUID
+
+        if not workspace_id or self.provider == "ollama":
+            return False
+        ws_uuid = UUID(workspace_id) if isinstance(workspace_id, str) else workspace_id
+        stmt = (
+            select(ExternalAPIKey.id)
+            .where(
+                ExternalAPIKey.workspace_id == ws_uuid,
+                ExternalAPIKey.provider == self.provider,
+                ExternalAPIKey.enabled.is_(True),
+            )
+            .limit(1)
+        )
+        result = await self.db.execute(stmt)
+        return result.scalar_one_or_none() is not None
+
     async def _get_client(
         self,
         user_id: str,
@@ -309,6 +392,9 @@ class EmbeddingService:
                 )
                 return vector, 0
 
+            # Issue #709: BYOK embedding spend cap gate.
+            cap_svc, cap_workspace = await self._prepare_spend_cap_gate(workspace_id)
+
             client = await self._get_client(user_id, context_id, workspace_id)
             response = await client.embeddings.create(
                 **self._build_embedding_kwargs(normalized_text)
@@ -340,9 +426,25 @@ class EmbeddingService:
                 cached=False,
             )
 
+            # Issue #709: post-call spend record. Reuses ``cap_workspace``
+            # from the pre-call gate so no second SELECT is issued.
+            if cap_svc is not None and cap_workspace is not None and tokens_used > 0:
+                await cap_svc.record_spend_from_tokens(
+                    cap_workspace,
+                    provider=self.provider,
+                    model=self.model,
+                    tokens=tokens_used,
+                )
+
             return vector, tokens_used
 
         except ConfigurationError:
+            raise
+
+        except EmbeddingSpendCapExceeded:
+            # Issue #709: do NOT remap the 429 cap-exceeded into a 500 OpenAIError.
+            # The cap exception must propagate so the FastAPI exception handler
+            # returns a structured QUOTA-002 / 429 response to the client.
             raise
 
         except Exception as e:
@@ -407,6 +509,10 @@ class EmbeddingService:
 
             # Generate embeddings only for uncached texts
             if uncached_texts:
+                # Issue #709: cap gate covers the whole batch — single check
+                # before the bulk API call.
+                cap_svc, cap_workspace = await self._prepare_spend_cap_gate(workspace_id)
+
                 client = await self._get_client(user_id, context_id, workspace_id)
                 response = await client.embeddings.create(
                     **self._build_embedding_kwargs(uncached_texts)
@@ -428,8 +534,31 @@ class EmbeddingService:
                     generated=len(uncached_texts),
                 )
 
+                # Issue #709: post-call record (one batch = one usage row).
+                if cap_svc is not None and cap_workspace is not None:
+                    usage = getattr(response, "usage", None)
+                    batch_tokens = 0
+                    if usage is not None:
+                        batch_tokens = (
+                            getattr(usage, "prompt_tokens", None)
+                            or getattr(usage, "total_tokens", None)
+                            or 0
+                        )
+                    if batch_tokens > 0:
+                        await cap_svc.record_spend_from_tokens(
+                            cap_workspace,
+                            provider=self.provider,
+                            model=self.model,
+                            tokens=batch_tokens,
+                        )
+
             # Return all vectors (cached + newly generated)
             return [v for v in results if v is not None]
+
+        except EmbeddingSpendCapExceeded:
+            # Issue #709: propagate 429 cap-exceeded to the FastAPI exception
+            # handler rather than wrapping in a generic 500 OpenAIError.
+            raise
 
         except Exception as e:
             logger.error("batch_embedding_failed", error=str(e), user_id=user_id)

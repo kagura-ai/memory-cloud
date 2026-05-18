@@ -17,7 +17,6 @@ from db.qdrant import search_memories_fulltext, search_memories_qdrant
 from models.llm_call_log import (
     LLM_CALL_LOG_CALL_TYPES,
     LLM_CALL_LOG_CALLERS,
-    LLM_CALL_LOG_PAID_BY_VALUES,
 )
 from repositories.config_repository import ContextSearchConfigRepository
 from services.context_routing import resolve_routing_from_config
@@ -39,10 +38,8 @@ SearchMode = Literal["hybrid", "semantic", "keyword"]
 # every future call site (lets the looser convention ossify).
 _RECALL_CALLER = "recall"
 _EMBEDDING_CALL_TYPE = "embedding"
-_PAID_BY_PLATFORM = "platform"
 assert _RECALL_CALLER in LLM_CALL_LOG_CALLERS
 assert _EMBEDDING_CALL_TYPE in LLM_CALL_LOG_CALL_TYPES
-assert _PAID_BY_PLATFORM in LLM_CALL_LOG_PAID_BY_VALUES
 
 
 class SearchService:
@@ -195,6 +192,9 @@ class SearchService:
                 # llm_call_log row (B1 pin) — the table is "API was
                 # called" event log, not cache analytics. fail_on_error
                 # is False so a writer flake never breaks recall.
+                #
+                # Issue #709: ``paid_by`` is resolved from the actual key
+                # source rather than the legacy hardcoded ``"platform"``.
                 writer = LLMCallLogWriter(self.db)
                 await writer.record(
                     caller=_RECALL_CALLER,
@@ -205,7 +205,7 @@ class SearchService:
                     workspace_id=workspace_id,
                     context_id=primary_context_id,
                     embedding_tokens=embedding_tokens,
-                    paid_by=_PAID_BY_PLATFORM,
+                    paid_by=await embed_svc.resolve_paid_by(workspace_id),
                     fail_on_error=False,
                 )
             semantic_results = await search_memories_qdrant(

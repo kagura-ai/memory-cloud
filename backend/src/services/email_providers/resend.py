@@ -183,6 +183,61 @@ class ResendEmailService:
             },
         )
 
+    async def send_embedding_spend_alert(
+        self,
+        *,
+        to_email: str,
+        workspace_id: str,
+        workspace_name: str,
+        period: str,
+        current_usd: float,
+        cap_usd: float,
+        threshold_pct: int,
+    ) -> bool:
+        # ``period`` is one of "daily" / "monthly"; the value comes from
+        # ``EmbeddingSpendCapService`` (operator-controlled, not user input)
+        # so a-priori we don't need to escape it for the plain-text body,
+        # but we still capitalize it for display.
+        period_label = period.capitalize()
+        if threshold_pct >= 100:
+            subject = f"{period_label} embedding spend cap reached — {workspace_name}"
+            headline = (
+                f"Your workspace has reached its {period} embedding spend cap.\n"
+                "New BYOK embedding requests will be rejected until the period rolls.\n"
+            )
+        else:
+            subject = f"{period_label} embedding spend at {threshold_pct}% — {workspace_name}"
+            headline = (
+                f"Your workspace has used {threshold_pct}% of its {period} embedding "
+                f"spend cap.\n"
+                "Calls will continue to succeed until 100% is reached.\n"
+            )
+        text = (
+            f"{headline}"
+            "\n"
+            f"Workspace: {workspace_name}\n"
+            f"Workspace ID: {workspace_id}\n"
+            f"Period: {period}\n"
+            f"Current spend: ${current_usd:.4f}\n"
+            f"Cap: ${cap_usd:.4f}\n"
+            "\n"
+            "Adjust the cap in the workspace admin panel, or wait for the\n"
+            "period to roll — daily resets at 00:00 UTC, monthly on the 1st.\n"
+        )
+        return await self._send(
+            to_email=to_email,
+            subject=subject,
+            text=text,
+            log_event="embedding_spend_alert_email",
+            log_context={
+                "to_email": to_email,
+                "workspace_id": workspace_id,
+                "period": period,
+                "threshold_pct": threshold_pct,
+                "template": "embedding_spend_alert",
+            },
+        )
+
     async def send_erasure_confirmation(
         self,
         *,

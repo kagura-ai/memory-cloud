@@ -88,8 +88,29 @@ export interface PlanTierInfo {
   analysis_runs_per_day: number;
   storage_limit_bytes: number;
   sleep_enabled_contexts_limit: number;
+  embedding_daily_cap_usd: number | null; // Issue #709
+  embedding_monthly_cap_usd: number | null; // Issue #709
   allows_shared_contexts: boolean;
   features: string[];
+}
+
+/**
+ * BYOK embedding spend cap breakdown for a workspace (Issue #709).
+ *
+ * - tier_default_*: from PlanTier (server-side env-override aware)
+ * - override_*: per-workspace admin override (null = inherit tier default)
+ * - effective_*: what the runtime cap check uses (override beats tier default)
+ * - current_*: actual BYOK spend so far in the current period (USD)
+ */
+export interface SpendCapValues {
+  tier_default_daily_usd: number | null;
+  tier_default_monthly_usd: number | null;
+  override_daily_usd: number | null;
+  override_monthly_usd: number | null;
+  effective_daily_usd: number | null;
+  effective_monthly_usd: number | null;
+  current_daily_usd: number;
+  current_monthly_usd: number;
 }
 
 /**
@@ -129,6 +150,7 @@ export interface WorkspaceQuotaDetail {
   };
   effective: QuotaBreakdown;
   usage: { memories: number; contexts: number; members: number };
+  spend_cap: SpendCapValues | null; // Issue #709
 }
 
 export interface UpdateAddonRequest {
@@ -137,6 +159,19 @@ export interface UpdateAddonRequest {
   addon_member_bonus: number;
   addon_context_bonus: number;
   addon_analysis_bonus: number;
+}
+
+/**
+ * Update the per-workspace embedding spend cap override (Issue #709).
+ *
+ * Setting a field to ``null`` removes the override (falls back to tier
+ * default). Setting a number (>= 0, and <= tier default) overrides the
+ * tier default for this workspace only. The backend rejects values above
+ * the tier default — admins lift caps by upgrading the plan.
+ */
+export interface UpdateSpendCapRequest {
+  embedding_daily_cap_usd: number | null;
+  embedding_monthly_cap_usd: number | null;
 }
 
 /**
@@ -159,6 +194,23 @@ export async function updateWorkspaceAddons(
 ): Promise<{ message: string }> {
   return apiClient.put<{ message: string }>(
     `/api/v1/admin/plans/workspaces/${workspaceId}/quotas`,
+    request,
+  );
+}
+
+/**
+ * Update the per-workspace embedding spend cap override (Admin only; Issue #709).
+ *
+ * The backend rejects values above the workspace's current tier default —
+ * tier-bounded edit affordance. Pass ``null`` to clear the override and
+ * fall back to the tier default.
+ */
+export async function updateWorkspaceSpendCap(
+  workspaceId: string,
+  request: UpdateSpendCapRequest,
+): Promise<{ message: string }> {
+  return apiClient.put<{ message: string }>(
+    `/api/v1/admin/plans/workspaces/${workspaceId}/spend-cap`,
     request,
   );
 }

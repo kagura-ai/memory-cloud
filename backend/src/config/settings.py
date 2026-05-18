@@ -321,6 +321,33 @@ class Settings(BaseSettings):
         default=None,
         description="Override PRO plan sleep-enabled contexts cap (Issue #560; default 3)",
     )
+    # Issue #709: Per-workspace BYOK embedding spend caps (USD). ``None`` =
+    # use the dataclass default in ``plan_tiers.py``. Float because the cap
+    # is a USD value (allows sub-dollar caps for Free tier).
+    plan_free_embedding_daily_cap_usd: float | None = Field(
+        default=None,
+        description="Override FREE plan daily embedding spend cap in USD (Issue #709; default 0.50)",
+    )
+    plan_free_embedding_monthly_cap_usd: float | None = Field(
+        default=None,
+        description="Override FREE plan monthly embedding spend cap in USD (Issue #709; default 15.0)",
+    )
+    plan_basic_embedding_daily_cap_usd: float | None = Field(
+        default=None,
+        description="Override BASIC plan daily embedding spend cap in USD (Issue #709; default 2.0)",
+    )
+    plan_basic_embedding_monthly_cap_usd: float | None = Field(
+        default=None,
+        description="Override BASIC plan monthly embedding spend cap in USD (Issue #709; default 60.0)",
+    )
+    plan_pro_embedding_daily_cap_usd: float | None = Field(
+        default=None,
+        description="Override PRO plan daily embedding spend cap in USD (Issue #709; default 10.0)",
+    )
+    plan_pro_embedding_monthly_cap_usd: float | None = Field(
+        default=None,
+        description="Override PRO plan monthly embedding spend cap in USD (Issue #709; default 300.0)",
+    )
     # Issue #661's ``plan_*_max_owned_workspaces`` env overrides were removed
     # in #675 — the cap is now per-user (``users.workspace_slot_bonus``) and
     # no longer depends on the plan tier.
