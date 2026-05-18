@@ -42,16 +42,12 @@ vi.mock("@/lib/api/workspaces", () => ({
     mockGetWorkspaceUsageBreakdown(...a),
 }));
 
-const mockApiClientGet = vi.fn();
-vi.mock("@/lib/api", () => ({
-  apiClient: { get: (...a: unknown[]) => mockApiClientGet(...a) },
-}));
-
+// Translator returns the key plus any `addon` var that this test file
+// asserts on. Other interpolations fall through to the bare key — the
+// tests query by stable key text rather than rendered numbers, so
+// `count`/`percent` branches would never be exercised.
 const stableT = (key: string, vars?: Record<string, unknown>) => {
-  if (!vars) return key;
-  if ("percent" in vars) return `${key}:${vars.percent}%`;
-  if ("addon" in vars) return `${key}:+${vars.addon}`;
-  if ("count" in vars) return `${key}:${vars.count}`;
+  if (vars && "addon" in vars) return `${key}:+${vars.addon}`;
   return key;
 };
 vi.mock("next-intl", () => ({
@@ -70,10 +66,6 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
 
 vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({ user: { id: "user-1", timezone: "UTC" } }),
-}));
-
-vi.mock("@/lib/utils/datetime", () => ({
-  formatDate: (d: string) => d,
 }));
 
 // QuotaWarning renders its own conditional UI based on quota; stub it out
@@ -191,10 +183,10 @@ const BREAKDOWN_OK = {
 beforeEach(() => {
   vi.clearAllMocks();
   mockUseWorkspace.mockReturnValue({ currentWorkspaceId: "ws-1" });
-});
-
-afterEach(() => {
-  vi.clearAllMocks();
+  // History/Breakdown are stable across all tests in this file — only
+  // the current-usage shape varies per case.
+  mockGetWorkspaceUsageHistory.mockResolvedValue(HISTORY_OK);
+  mockGetWorkspaceUsageBreakdown.mockResolvedValue(BREAKDOWN_OK);
 });
 
 // ---------- Sleep-enabled contexts card -------------------------------------
@@ -204,9 +196,6 @@ describe("UsageStats — sleep-enabled contexts card", () => {
     mockGetWorkspaceUsageCurrent.mockResolvedValue(
       makeCurrentResponse({ usage: makeUsage({ sleep_contexts: null }) }),
     );
-    mockGetWorkspaceUsageHistory.mockResolvedValue(HISTORY_OK);
-    mockGetWorkspaceUsageBreakdown.mockResolvedValue(BREAKDOWN_OK);
-
     render(<UsageStats scope="workspace" />);
 
     // Wait for the dashboard body to land (memories card is always present).
@@ -222,9 +211,6 @@ describe("UsageStats — sleep-enabled contexts card", () => {
         }),
       }),
     );
-    mockGetWorkspaceUsageHistory.mockResolvedValue(HISTORY_OK);
-    mockGetWorkspaceUsageBreakdown.mockResolvedValue(BREAKDOWN_OK);
-
     render(<UsageStats scope="workspace" />);
 
     await screen.findByText("sleepEnabledContexts");
@@ -243,30 +229,28 @@ describe("UsageStats — sleep-enabled contexts card", () => {
         }),
       }),
     );
-    mockGetWorkspaceUsageHistory.mockResolvedValue(HISTORY_OK);
-    mockGetWorkspaceUsageBreakdown.mockResolvedValue(BREAKDOWN_OK);
-
     render(<UsageStats scope="workspace" />);
 
-    // The local shadcn Progress (src/components/ui/progress.tsx) does not
-    // expose role="progressbar"; it renders the percentage as an inline
-    // `transform: translateX(-X%)` on an inner div with bg-brand-green-600.
-    // Without the clamp, used=5/limit=2 would compute 250 → transform
-    // would be translateX(150%) (off-screen positive). With the clamp,
-    // the indicator settles at translateX(-0%).
+    // The local shadcn Progress (src/components/ui/progress.tsx) renders
+    // the percentage as `transform: translateX(-${100-pct}%)` on an
+    // inner div with bg-brand-green-600 — there is no role="progressbar".
+    // Without the clamp, used=5/limit=2 would compute 250%, leaving the
+    // residual at -150 (an off-screen positive translate). The clamp
+    // must drive the residual to 0 regardless of sign convention.
     const title = await screen.findByText("sleepEnabledContexts");
-    // shadcn Card uses `rounded-xl` (src/components/ui/card.tsx). The CardTitle
-    // is two ancestors down: Card → CardHeader → CardTitle.
     const card = title.closest("div.rounded-xl");
-    expect(card).not.toBeNull();
-    const indicator = card!.querySelector("[class*='bg-brand-green-600']");
-    expect(indicator).not.toBeNull();
-    const transform = (indicator as HTMLElement).style.transform;
-    // Clamped: translateX(-0%) (the "100 - 100" residual). The earlier
-    // un-clamped path would yield a positive translateX, which we
-    // explicitly reject.
-    expect(transform).toBe("translateX(-0%)");
-    expect(transform).not.toMatch(/translateX\((?!-0).+/);
+    const indicator = card?.querySelector<HTMLElement>(
+      "[class*='bg-brand-green-600']",
+    );
+    expect(indicator).toBeTruthy();
+    const match = indicator!.style.transform.match(
+      /translateX\((-?\d+(?:\.\d+)?)%\)/,
+    );
+    expect(match).not.toBeNull();
+    // Math.abs normalizes the `Object.is(-0, +0) === false` quirk —
+    // the assertion is that the clamp drove the residual to zero,
+    // regardless of which sign convention the transform emits.
+    expect(Math.abs(Number(match![1]))).toBe(0);
   });
 
   it("shows sleepContextsWithAddon ONLY when limit > 0 AND addon_bonus > 0", async () => {
@@ -277,9 +261,6 @@ describe("UsageStats — sleep-enabled contexts card", () => {
         }),
       }),
     );
-    mockGetWorkspaceUsageHistory.mockResolvedValue(HISTORY_OK);
-    mockGetWorkspaceUsageBreakdown.mockResolvedValue(BREAKDOWN_OK);
-
     render(<UsageStats scope="workspace" />);
 
     await screen.findByText("sleepContextsWithAddon:+2");
@@ -294,9 +275,6 @@ describe("UsageStats — sleep-enabled contexts card", () => {
         }),
       }),
     );
-    mockGetWorkspaceUsageHistory.mockResolvedValue(HISTORY_OK);
-    mockGetWorkspaceUsageBreakdown.mockResolvedValue(BREAKDOWN_OK);
-
     render(<UsageStats scope="workspace" />);
 
     await screen.findByText("sleepContextsTier");
@@ -317,9 +295,6 @@ describe("UsageStats — sleep-enabled contexts card", () => {
         }),
       }),
     );
-    mockGetWorkspaceUsageHistory.mockResolvedValue(HISTORY_OK);
-    mockGetWorkspaceUsageBreakdown.mockResolvedValue(BREAKDOWN_OK);
-
     render(<UsageStats scope="workspace" />);
 
     await screen.findByText("sleepContextsTier");
@@ -334,9 +309,6 @@ describe("UsageStats — sleep-enabled contexts card", () => {
 describe("UsageStats — primary usage cards", () => {
   it("renders Memory / API Today / API This Week cards with the right numbers", async () => {
     mockGetWorkspaceUsageCurrent.mockResolvedValue(makeCurrentResponse());
-    mockGetWorkspaceUsageHistory.mockResolvedValue(HISTORY_OK);
-    mockGetWorkspaceUsageBreakdown.mockResolvedValue(BREAKDOWN_OK);
-
     render(<UsageStats scope="workspace" />);
 
     // Card titles
@@ -361,26 +333,33 @@ describe("UsageStats — primary usage cards", () => {
 // ---------- Loading and error states ----------------------------------------
 
 describe("UsageStats — loading and error states", () => {
-  it("renders loading skeletons while the first fetch is in flight", () => {
-    // Resolve never within the test — the loading branch holds until then.
-    mockGetWorkspaceUsageCurrent.mockReturnValue(new Promise(() => {}));
-    mockGetWorkspaceUsageHistory.mockReturnValue(new Promise(() => {}));
-    mockGetWorkspaceUsageBreakdown.mockReturnValue(new Promise(() => {}));
+  it("renders loading skeletons while the first fetch is in flight", async () => {
+    // Hold the current-usage fetch with a deferred promise so the loading
+    // branch is observable, then resolve before the test exits — leaving an
+    // unresolved `new Promise(() => {})` would retain worker references and
+    // contribute to vmForks teardown timeouts (memory `1961cb46`).
+    let resolveCurrent: (v: UsageCurrentResponse) => void = () => {};
+    mockGetWorkspaceUsageCurrent.mockReturnValueOnce(
+      new Promise<UsageCurrentResponse>((r) => {
+        resolveCurrent = r;
+      }),
+    );
 
     render(<UsageStats scope="workspace" />);
 
-    // The loading branch renders 3 animate-pulse blocks. We don't depend on
-    // the exact count — just that the dashboard cards have NOT rendered.
+    // Dashboard cards must NOT have rendered while the fetch is in flight.
     expect(screen.queryByText("memories")).not.toBeInTheDocument();
     expect(screen.queryByText("apiCallsToday")).not.toBeInTheDocument();
-    // And nothing crashed.
+    // Skeleton block present (component uses animate-pulse).
+    expect(document.querySelector("[class*='animate-pulse']")).not.toBeNull();
+
+    // Flush so the worker can clean up.
+    resolveCurrent(makeCurrentResponse());
+    await screen.findByText("memories");
   });
 
   it("renders the error Alert when the current-usage fetch rejects", async () => {
     mockGetWorkspaceUsageCurrent.mockRejectedValue(new Error("boom"));
-    mockGetWorkspaceUsageHistory.mockResolvedValue(HISTORY_OK);
-    mockGetWorkspaceUsageBreakdown.mockResolvedValue(BREAKDOWN_OK);
-
     render(<UsageStats scope="workspace" />);
 
     // Error message from the rejected promise lands in the Alert body.

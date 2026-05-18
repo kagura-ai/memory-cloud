@@ -111,13 +111,13 @@ function setRole(role: "owner" | "admin" | "member" | "viewer") {
   });
 }
 
-function setQuotaResponse(
+function buildQuotaResponse(
   used: number,
   limit: number,
   addon_bonus = 0,
   remaining = Math.max(0, limit - used),
 ) {
-  mockGetWorkspaceUsageCurrent.mockResolvedValue({
+  return {
     plan: {} as never,
     usage: {
       memory_count: 0,
@@ -135,7 +135,18 @@ function setQuotaResponse(
     memory_usage: {} as never,
     daily_api_usage: {} as never,
     weekly_api_usage: {} as never,
-  });
+  };
+}
+
+function setQuotaResponse(
+  used: number,
+  limit: number,
+  addon_bonus = 0,
+  remaining = Math.max(0, limit - used),
+) {
+  mockGetWorkspaceUsageCurrent.mockResolvedValue(
+    buildQuotaResponse(used, limit, addon_bonus, remaining),
+  );
 }
 
 const noop = () => {};
@@ -145,10 +156,6 @@ beforeEach(() => {
   // Default: owner with no quota constraint. Tests override as needed.
   setRole("owner");
   setQuotaResponse(0, 10);
-});
-
-afterEach(() => {
-  vi.clearAllMocks();
 });
 
 // ---------- Sleep mode section visibility -----------------------------------
@@ -259,84 +266,34 @@ describe("SettingsTabPanel — wouldExceedSleepQuota derivation", () => {
 
 describe("SettingsTabPanel — sleep quota refetched after save", () => {
   it("refetches getWorkspaceUsageCurrent after updateContext resolves", async () => {
-    // Initial fetch returns 1/3 (headroom). Post-save fetch returns 0/3
-    // (a skip→full transition would free a slot). The two distinct values
-    // let us assert the second fetch landed.
+    // Initial fetch: 1/3. Post-save fetch: 0/3 (a skip→non-skip transition
+    // would free a slot). Two distinct values let us assert the second
+    // fetch fired without polling for both side effects.
     mockGetWorkspaceUsageCurrent
-      .mockResolvedValueOnce({
-        plan: {} as never,
-        usage: {
-          memory_count: 0,
-          api_calls_today: 0,
-          api_calls_this_week: 0,
-          mcp_calls_today: 0,
-          mcp_calls_this_week: 0,
-          rest_calls_today: 0,
-          rest_calls_this_week: 0,
-          public_calls_today: 0,
-          public_calls_this_week: 0,
-          sleep_contexts: { used: 1, limit: 3, addon_bonus: 0, remaining: 2 },
-          workspaces: { used: 0, limit: 0, remaining: 0 },
-        },
-        memory_usage: {} as never,
-        daily_api_usage: {} as never,
-        weekly_api_usage: {} as never,
-      })
-      .mockResolvedValueOnce({
-        plan: {} as never,
-        usage: {
-          memory_count: 0,
-          api_calls_today: 0,
-          api_calls_this_week: 0,
-          mcp_calls_today: 0,
-          mcp_calls_this_week: 0,
-          rest_calls_today: 0,
-          rest_calls_this_week: 0,
-          public_calls_today: 0,
-          public_calls_this_week: 0,
-          sleep_contexts: { used: 0, limit: 3, addon_bonus: 0, remaining: 3 },
-          workspaces: { used: 0, limit: 0, remaining: 0 },
-        },
-        memory_usage: {} as never,
-        daily_api_usage: {} as never,
-        weekly_api_usage: {} as never,
-      });
-
+      .mockResolvedValueOnce(buildQuotaResponse(1, 3))
+      .mockResolvedValueOnce(buildQuotaResponse(0, 3));
     mockUpdateContext.mockResolvedValue(undefined);
-    // getContext is called by refreshContext after a save. Return the
-    // same context so the post-save state is well-defined.
     mockGetContext.mockResolvedValue(makeContext({ sleep_mode: "full" }));
 
-    const ctx = makeContext({ sleep_mode: "full" });
     render(
       <SettingsTabPanel
         contextId={CTX_ID}
-        context={ctx}
+        context={makeContext({ sleep_mode: "full" })}
         onContextUpdated={noop}
       />,
     );
 
-    // Wait for initial quota fetch to land.
-    await waitFor(() => {
-      expect(mockGetWorkspaceUsageCurrent).toHaveBeenCalledTimes(1);
+    // Mark dirty, then save. The save path is updateContext → refreshContext
+    // → second quota fetch — the second-fetch assertion subsumes the first.
+    fireEvent.change(screen.getByDisplayValue("Demo Context"), {
+      target: { value: "Renamed" },
     });
+    fireEvent.click(await screen.findByRole("button", { name: /saveChanges/ }));
 
-    // Mark dirty by editing display name, then save. The component's save
-    // path triggers updateContext → refreshContext → second quota fetch.
-    const displayInput = screen.getByDisplayValue("Demo Context");
-    fireEvent.change(displayInput, { target: { value: "Renamed" } });
-
-    const saveButton = await screen.findByRole("button", {
-      name: /saveChanges/,
-    });
-    fireEvent.click(saveButton);
-
-    await waitFor(() => {
-      expect(mockUpdateContext).toHaveBeenCalledTimes(1);
-    });
     await waitFor(() => {
       expect(mockGetWorkspaceUsageCurrent).toHaveBeenCalledTimes(2);
     });
+    expect(mockUpdateContext).toHaveBeenCalledTimes(1);
   });
 });
 
