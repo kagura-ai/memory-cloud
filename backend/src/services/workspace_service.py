@@ -1259,7 +1259,7 @@ class WorkspaceService:
             daily_counts_stmt = (
                 select(
                     func.date(Memory.created_at).label("date"),
-                    func.count(Memory.id).label("count"),
+                    func.count(Memory.id).label("memory_count"),
                 )
                 .where(*conditions)
                 .group_by(func.date(Memory.created_at))
@@ -1273,7 +1273,7 @@ class WorkspaceService:
         # Zero-fill missing dates for continuous timeline
         daily_counts = []
         current_date = start_date
-        counts_by_date = {row.date: row.count for row in daily_rows}
+        counts_by_date = {row.date: row.memory_count for row in daily_rows}
 
         while current_date <= end_date:
             daily_counts.append(
@@ -1379,7 +1379,7 @@ class WorkspaceService:
 
         # Timeline (daily aggregation)
         timeline_result = await self.db.execute(
-            select(UsageStats.date, func.count(UsageStats.id).label("count"))
+            select(UsageStats.date, func.count(UsageStats.id).label("event_count"))
             .where(
                 ingest_base_filter,
                 UsageStats.date >= start_date,
@@ -1390,7 +1390,7 @@ class WorkspaceService:
         )
 
         # Fill missing dates with zeros (helper: fill_timeline)
-        events_by_date = {row.date: row.count for row in timeline_result.all()}
+        events_by_date = {row.date: row.event_count for row in timeline_result.all()}
         events_timeline = [
             {"date": day.isoformat(), "count": events_by_date.get(day, 0)}
             for day in (

@@ -466,7 +466,7 @@ async def get_workspace_usage_history(
         daily_stats_result = await db.execute(
             select(
                 UsageStatsModel.date,
-                func.count(UsageStatsModel.id).label("count"),
+                func.count(UsageStatsModel.id).label("event_count"),
             )
             .where(
                 UsageStatsModel.workspace_id == workspace_id,
@@ -479,7 +479,7 @@ async def get_workspace_usage_history(
 
         # Build daily stats list
         daily_stats = [
-            DailyUsage(date=row.date.isoformat(), count=row.count)
+            DailyUsage(date=row.date.isoformat(), count=row.event_count)
             for row in daily_stats_result.all()
         ]
 
@@ -532,7 +532,7 @@ async def get_workspace_usage_breakdown(
         breakdown_result = await db.execute(
             select(
                 UsageStatsModel.endpoint,
-                func.count(UsageStatsModel.id).label("count"),
+                func.count(UsageStatsModel.id).label("event_count"),
             )
             .where(
                 UsageStatsModel.workspace_id == workspace_id,
@@ -544,14 +544,14 @@ async def get_workspace_usage_breakdown(
         )
 
         endpoint_stats = breakdown_result.all()
-        total_requests = sum(row.count for row in endpoint_stats)
+        total_requests = sum(row.event_count for row in endpoint_stats)
 
         # Build endpoint usage list with percentages
         by_endpoint = [
             EndpointUsage(
                 endpoint=row.endpoint,
-                count=row.count,
-                percentage=round((row.count / total_requests * 100), 2)
+                count=row.event_count,
+                percentage=round((row.event_count / total_requests * 100), 2)
                 if total_requests > 0
                 else 0.0,
             )
@@ -730,7 +730,7 @@ async def get_embedding_status(
     status_stmt = (
         select(
             Memory.embedding_status,
-            func.count(Memory.id).label("count"),
+            func.count(Memory.id).label("memory_count"),
         )
         .where(*conditions)
         .group_by(Memory.embedding_status)
