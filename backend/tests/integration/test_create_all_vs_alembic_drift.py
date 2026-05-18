@@ -286,7 +286,11 @@ class ConstraintRow(TypedDict):
     """One PK / UK / FK constraint, normalized for comparison.
 
     Columns are stored as a sorted tuple so multi-column constraints
-    compare order-insensitively.
+    compare order-insensitively. For FOREIGN KEY constraints,
+    ``update_rule`` and ``delete_rule`` carry the referential actions
+    (``NO ACTION`` / ``RESTRICT`` / ``CASCADE`` / ``SET NULL`` /
+    ``SET DEFAULT``) from ``information_schema.referential_constraints``;
+    these are ``None`` for PK / UK rows.
     """
 
     table: str
@@ -295,6 +299,8 @@ class ConstraintRow(TypedDict):
     columns: tuple[str, ...]
     foreign_table: str | None
     foreign_columns: tuple[str, ...] | None
+    update_rule: str | None  # FK only — ON UPDATE action
+    delete_rule: str | None  # FK only — ON DELETE action
 
 
 class IndexRow(TypedDict):
@@ -405,7 +411,9 @@ _FK_SQL = """
         kcu.column_name AS local_column,
         kcu.ordinal_position,
         ccu.table_name AS foreign_table,
-        ccu.column_name AS foreign_column
+        ccu.column_name AS foreign_column,
+        rc.update_rule,
+        rc.delete_rule
     FROM information_schema.table_constraints tc
     JOIN information_schema.key_column_usage kcu
         ON tc.constraint_name = kcu.constraint_name
@@ -413,6 +421,9 @@ _FK_SQL = """
     JOIN information_schema.constraint_column_usage ccu
         ON ccu.constraint_name = tc.constraint_name
         AND ccu.table_schema = tc.table_schema
+    JOIN information_schema.referential_constraints rc
+        ON rc.constraint_name = tc.constraint_name
+        AND rc.constraint_schema = tc.table_schema
     WHERE tc.table_schema = 'public'
         AND tc.constraint_type = 'FOREIGN KEY'
     ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position
@@ -494,6 +505,8 @@ def _introspect_pk_uk(conn: Connection) -> dict[str, ConstraintRow]:
             columns=tuple(sorted(entry["columns"])),
             foreign_table=None,
             foreign_columns=None,
+            update_rule=None,
+            delete_rule=None,
         )
     return result
 
@@ -524,6 +537,8 @@ def _introspect_fk(conn: Connection) -> dict[str, ConstraintRow]:
                 "foreign_table": row.foreign_table,
                 "local_columns": [],
                 "foreign_columns": [],
+                "update_rule": row.update_rule,
+                "delete_rule": row.delete_rule,
             },
         )
         # Avoid duplicates from constraint_column_usage's cross-join shape.
@@ -541,6 +556,8 @@ def _introspect_fk(conn: Connection) -> dict[str, ConstraintRow]:
             columns=tuple(sorted(entry["local_columns"])),
             foreign_table=entry["foreign_table"],
             foreign_columns=tuple(sorted(entry["foreign_columns"])),
+            update_rule=entry["update_rule"],
+            delete_rule=entry["delete_rule"],
         )
     return result
 
@@ -728,7 +745,14 @@ def _diff_constraints(
         row_a = a[name]
         row_b = b[name]
         diffs: list[str] = []
-        for attr in ("kind", "columns", "foreign_table", "foreign_columns"):
+        for attr in (
+            "kind",
+            "columns",
+            "foreign_table",
+            "foreign_columns",
+            "update_rule",
+            "delete_rule",
+        ):
             if row_a[attr] != row_b[attr]:
                 diffs.append(f"{attr}: create_all={row_a[attr]!r}, alembic={row_b[attr]!r}")
         if diffs:
