@@ -130,25 +130,48 @@ class SearchService:
         from services.permission_service import PermissionService
         from utils.exceptions import AuthorizationError
 
-        # Issue #708 Option A: caller's cross-workspace access has been
-        # verified at the handler layer; trust it and treat as shared so
-        # source memories are visible. Otherwise fall back to the legacy
-        # path that probes per-context ``is_context_shared`` (single-
-        # context only — list paths fall through with is_shared_context
-        # left False, matching pre-#708 behavior).
-        is_shared_context = is_shared_context_read
-        if not is_shared_context_read and not isinstance(context_id, list):
+        # ``is_shared_context`` drives the Qdrant user_id filter:
+        #   - True  → drop ``user_id == caller`` (shared context: any member can read)
+        #   - False → keep filter (private context: caller sees only their own memories)
+        #
+        # This value MUST be derived from the context's actual privacy state
+        # (``ContextService.is_context_shared``), NOT from #708's
+        # ``is_shared_context_read`` cross-workspace flag. Conflating them
+        # (loop 1 / loop 5 fix from Copilot) drops the user_id filter for a
+        # private context whose creator reads it from a different active
+        # workspace — leaking memories authored by other users into a
+        # context that was made private after being shared.
+        #
+        # The two flags are orthogonal:
+        #   - ``is_shared_context_read`` (handler-verified cross-workspace) ONLY
+        #     bypasses the redundant ``is_workspace_member`` probe below —
+        #     handler-layer ``_resolve_context_for_read`` is the authoritative
+        #     access check.
+        #   - ``is_shared_context`` is derived from privacy state and controls
+        #     the Qdrant filter independently.
+        #
+        # List-context: legacy behavior intentionally skipped the probe and
+        # left ``is_shared_context=False`` (Issue #81 conservative default).
+        # Under Option A (``is_shared_context_read=True``), we DO probe the
+        # primary context so source-workspace shared cross-context recall
+        # returns results, while a private primary still applies the filter.
+        is_shared_context = False
+        should_probe_sharing = not isinstance(context_id, list) or is_shared_context_read
+        if should_probe_sharing:
             context_service = ContextService(self.db)
-            is_shared_context = await context_service.is_context_shared(UUID(context_id))
+            is_shared_context = await context_service.is_context_shared(UUID(primary_context_id))
 
-            # For shared contexts, verify workspace membership
-            if is_shared_context:
-                perm_service = PermissionService(self.db)
-                is_member = await perm_service.is_workspace_member(user_id, UUID(workspace_id))
-                if not is_member:
-                    raise AuthorizationError(
-                        f"Access denied: not a member of workspace {workspace_id}"
-                    )
+        # Redundant workspace-membership probe — only runs for single-context
+        # same-workspace reads of a shared context. Under
+        # ``is_shared_context_read=True`` the handler already verified access,
+        # so this would just block legitimate cross-workspace callers
+        # (system_admin, ContextMember-only). List paths skip it too —
+        # source-workspace access has already been verified by the handler.
+        if is_shared_context and not is_shared_context_read and not isinstance(context_id, list):
+            perm_service = PermissionService(self.db)
+            is_member = await perm_service.is_workspace_member(user_id, UUID(workspace_id))
+            if not is_member:
+                raise AuthorizationError(f"Access denied: not a member of workspace {workspace_id}")
 
         logger.debug(
             "context_access_check",
