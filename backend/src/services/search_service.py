@@ -66,6 +66,7 @@ class SearchService:
         filters: dict[str, Any] | None = None,
         search_mode: SearchMode = "hybrid",
         include_vectors: bool = False,
+        is_shared_context_read: bool = False,
     ) -> list[dict]:
         """Search with configurable mode: hybrid, semantic, or keyword.
 
@@ -87,6 +88,19 @@ class SearchService:
             filters: Optional filters
             search_mode: Search strategy (hybrid/semantic/keyword)
             include_vectors: Return document embeddings from Qdrant (increases payload size)
+            is_shared_context_read: Issue #708 Option A. Set by ``MemoryService.recall``
+                when the caller's workspace differs from the context owner's
+                workspace AND handler-layer access has already been verified
+                (``_resolve_context_for_read``). When True, two things happen:
+                (1) the redundant ``is_workspace_member(workspace_id)`` check
+                is skipped — under Option A ``workspace_id`` is the SOURCE
+                workspace, of which the caller is not necessarily a member,
+                but their access via ``ContextMember`` / system_admin / etc.
+                was already confirmed upstream; and (2) the Qdrant filter
+                drops ``user_id == caller`` so memories authored by source
+                workspace members are visible to the cross-workspace reader.
+                Single-context and cross-context (``context_ids``) paths both
+                honor this flag.
 
         Returns:
             List of search results with scores
@@ -116,9 +130,14 @@ class SearchService:
         from services.permission_service import PermissionService
         from utils.exceptions import AuthorizationError
 
-        # Issue #81: For cross-context, skip shared-context optimization (use user_id filter)
-        is_shared_context = False
-        if not isinstance(context_id, list):
+        # Issue #708 Option A: caller's cross-workspace access has been
+        # verified at the handler layer; trust it and treat as shared so
+        # source memories are visible. Otherwise fall back to the legacy
+        # path that probes per-context ``is_context_shared`` (single-
+        # context only — list paths fall through with is_shared_context
+        # left False, matching pre-#708 behavior).
+        is_shared_context = is_shared_context_read
+        if not is_shared_context_read and not isinstance(context_id, list):
             context_service = ContextService(self.db)
             is_shared_context = await context_service.is_context_shared(UUID(context_id))
 

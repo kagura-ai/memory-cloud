@@ -1165,14 +1165,30 @@ class MemoryService:
         # + search + graph) to the context's owner workspace. Rate-limit
         # gating stays on the caller upstream — do NOT change it here.
         effective_workspace_id = current_workspace_id
-        if context_workspace_id is not None and context_workspace_id != current_workspace_id:
+        is_shared_context_read = (
+            context_workspace_id is not None and context_workspace_id != current_workspace_id
+        )
+        if is_shared_context_read:
+            effective_workspace_id = context_workspace_id  # type: ignore[assignment]
             embed_svc = EmbeddingService(self.db)
-            if not await embed_svc.has_byok_key(str(context_workspace_id)):
-                # Deny without BYOK: env fallback in `_get_user_api_key`
-                # would route through OPENAI_API_KEY uncapped (PR #711's
-                # spend cap is BYOK-only). Raise NotFoundException so the
-                # handler can surface a uniform context_not_found
-                # response (CWE-639 / OWASP A01).
+            # Only gate when the embedding API call would actually fire and
+            # produce a charge against the source workspace. ``keyword``
+            # mode skips ``embed_with_usage`` entirely (BM25-only), and
+            # Ollama is free/local (no platform-key fallback path exists).
+            # Both legitimate paths must not be denied by the H1 guard.
+            will_charge_embedding_cost = (
+                request.search_mode != "keyword" and embed_svc.provider != "ollama"
+            )
+            if will_charge_embedding_cost and not await embed_svc.has_byok_key(
+                str(context_workspace_id),
+                context_id=str(current_context_id),
+            ):
+                # H1 deny: source workspace has no BYOK key applicable to
+                # this context. Env fallback in ``_get_user_api_key`` would
+                # route through OPENAI_API_KEY uncapped (PR #711's spend
+                # cap is BYOK-only). Raise NotFoundException so the
+                # handler surfaces a uniform context_not_found response
+                # (CWE-639 / OWASP A01).
                 logger.warning(
                     "shared_context_read_no_byok_deny",
                     caller_user_id=user_id,
@@ -1182,7 +1198,6 @@ class MemoryService:
                     reason="missing_byok",
                 )
                 raise NotFoundException("Context", str(current_context_id))
-            effective_workspace_id = context_workspace_id
 
         # Check if Neural Memory is enabled
         neural_enabled = os.getenv("ENABLE_NEURAL_MEMORY", "false").lower() == "true"
@@ -1272,6 +1287,14 @@ class MemoryService:
             filters=request.filters,
             search_mode=request.search_mode,
             include_vectors=neural_enabled,
+            # #708 Option A: tell SearchService this is a cross-workspace
+            # shared-context read so it skips the redundant
+            # ``is_workspace_member(workspace_id)`` check (handler-layer
+            # ``_resolve_context_for_read`` already verified access) and
+            # treats the request as shared (drops ``user_id == caller``
+            # from the Qdrant filter, since source-workspace memories are
+            # authored by source-workspace users, not the caller).
+            is_shared_context_read=is_shared_context_read,
         )
 
         # Get full memory data from PostgreSQL

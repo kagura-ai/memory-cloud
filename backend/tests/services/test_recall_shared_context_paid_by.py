@@ -135,7 +135,10 @@ async def test_shared_context_recall_calls_has_byok_with_source_workspace_id():
             context_workspace_id=source_ws,
         )
 
-    has_byok_mock.assert_called_once_with(str(source_ws))
+    # #708 F3: probe must include context_id so the priority of
+    # ``_get_user_api_key`` is mirrored — a workspace whose ONLY BYOK
+    # row is scoped to a different context must NOT pass the gate.
+    has_byok_mock.assert_called_once_with(str(source_ws), context_id=str(context_id))
 
 
 @pytest.mark.asyncio
@@ -231,3 +234,118 @@ async def test_self_workspace_recall_skips_byok_probe():
         )
 
     has_byok_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_shared_context_keyword_mode_skips_byok_gate():
+    """#708 F1: keyword-mode search does NOT call embed_with_usage.
+
+    A BM25-only search produces no embedding cost, so the H1 BYOK gate
+    must NOT deny it even when the source workspace has no BYOK key.
+    Otherwise legitimate keyword-mode shared reads silently 404.
+    """
+    svc, _db = _make_service()
+    caller_ws = uuid4()
+    source_ws = uuid4()
+    context_id = uuid4()
+
+    with patch("services.memory_service.EmbeddingService") as embed_svc_cls:
+        has_byok_mock = AsyncMock(return_value=False)
+        embed_svc_cls.return_value.has_byok_key = has_byok_mock
+        embed_svc_cls.return_value.provider = "openai"
+
+        await svc.recall(
+            request=RecallRequest(query="test", k=5, search_mode="keyword"),
+            user_id="caller_user",
+            current_context_id=context_id,
+            current_workspace_id=caller_ws,
+            context_workspace_id=source_ws,
+        )
+
+    has_byok_mock.assert_not_called()
+    svc.search_service.hybrid_search.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_shared_context_ollama_provider_skips_byok_gate():
+    """#708 F1: Ollama provider is free/local — no platform-key fallback path exists.
+
+    ``has_byok_key`` returns False for Ollama by design (it's not a paid
+    provider). The H1 gate must NOT treat that as a denial signal —
+    Ollama-backed shared reads cost nothing to the source workspace.
+    """
+    svc, _db = _make_service()
+    caller_ws = uuid4()
+    source_ws = uuid4()
+    context_id = uuid4()
+
+    with patch("services.memory_service.EmbeddingService") as embed_svc_cls:
+        has_byok_mock = AsyncMock(return_value=False)
+        embed_svc_cls.return_value.has_byok_key = has_byok_mock
+        embed_svc_cls.return_value.provider = "ollama"
+
+        await svc.recall(
+            request=RecallRequest(query="test", k=5),
+            user_id="caller_user",
+            current_context_id=context_id,
+            current_workspace_id=caller_ws,
+            context_workspace_id=source_ws,
+        )
+
+    has_byok_mock.assert_not_called()
+    svc.search_service.hybrid_search.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_shared_context_recall_propagates_is_shared_context_read():
+    """#708 F2: SearchService must learn this is a cross-workspace Option A read.
+
+    Without the kwarg, ``SearchService.hybrid_search`` treats the request
+    as same-workspace, runs ``is_workspace_member(workspace_id=source)``
+    (which fails for the cross-workspace caller), and applies the
+    ``user_id == caller`` filter (which drops source-workspace memories
+    authored by other users — the main Option A scenario returns empty).
+    """
+    svc, _db = _make_service()
+    caller_ws = uuid4()
+    source_ws = uuid4()
+    context_id = uuid4()
+
+    with patch("services.memory_service.EmbeddingService") as embed_svc_cls:
+        embed_svc_cls.return_value.has_byok_key = AsyncMock(return_value=True)
+        embed_svc_cls.return_value.provider = "openai"
+
+        await svc.recall(
+            request=RecallRequest(query="test", k=5),
+            user_id="caller_user",
+            current_context_id=context_id,
+            current_workspace_id=caller_ws,
+            context_workspace_id=source_ws,
+        )
+
+    call_kwargs = svc.search_service.hybrid_search.call_args.kwargs
+    assert call_kwargs.get("is_shared_context_read") is True
+
+
+@pytest.mark.asyncio
+async def test_self_workspace_recall_does_not_propagate_is_shared_context_read():
+    """#708 F2 fence: same-workspace path must NOT set is_shared_context_read.
+
+    Setting it spuriously would bypass the legitimate is_workspace_member
+    check for same-workspace shared contexts where the caller IS the
+    workspace they're reading from (no need to skip the check).
+    """
+    svc, _db = _make_service()
+    workspace_id = uuid4()
+    context_id = uuid4()
+
+    await svc.recall(
+        request=RecallRequest(query="test", k=5),
+        user_id="test_user",
+        current_context_id=context_id,
+        current_workspace_id=workspace_id,
+        context_workspace_id=workspace_id,
+    )
+
+    call_kwargs = svc.search_service.hybrid_search.call_args.kwargs
+    assert call_kwargs.get("is_shared_context_read") is False

@@ -231,8 +231,12 @@ class EmbeddingService:
         assert paid_by in LLM_CALL_LOG_PAID_BY_VALUES
         return paid_by
 
-    async def has_byok_key(self, workspace_id: str | None) -> bool:
-        """Whether the workspace has an enabled BYOK key for this provider.
+    async def has_byok_key(
+        self,
+        workspace_id: str | None,
+        context_id: str | None = None,
+    ) -> bool:
+        """Whether the workspace has an enabled BYOK key applicable to this context.
 
         Issue #709: used by writers (``search_service.py``) to set
         ``LLMCallLog.paid_by`` accurately — ``'byok'`` when the workspace
@@ -241,24 +245,42 @@ class EmbeddingService:
         no ``workspace_id`` is provided. Tolerates both UUID and string
         ``workspace_id`` inputs.
 
+        Issue #708: ``context_id`` mirrors the priority rules of
+        ``_get_user_api_key`` — when supplied, the probe accepts either a
+        context-scoped key for the same context OR a workspace-wide key
+        (``context_id IS NULL``). Without this parameter the probe would
+        return True for a workspace whose ONLY BYOK is scoped to a
+        different context, causing the H1 deny guard in
+        ``MemoryService.recall`` to incorrectly pass while
+        ``_get_user_api_key`` later falls back to the env-var path. When
+        ``context_id`` is omitted the probe behaves as before (any
+        workspace-wide-or-context-scoped key).
+
         This is a cheap existence probe (single indexed SELECT, no decrypt)
         and lives alongside ``_get_user_api_key`` to avoid duplicating its
         priority rules in callers.
         """
         from uuid import UUID
 
+        from sqlalchemy import or_
+
         if not workspace_id or self.provider == "ollama":
             return False
         ws_uuid = UUID(workspace_id) if isinstance(workspace_id, str) else workspace_id
-        stmt = (
-            select(ExternalAPIKey.id)
-            .where(
-                ExternalAPIKey.workspace_id == ws_uuid,
-                ExternalAPIKey.provider == self.provider,
-                ExternalAPIKey.enabled.is_(True),
+        conditions = [
+            ExternalAPIKey.workspace_id == ws_uuid,
+            ExternalAPIKey.provider == self.provider,
+            ExternalAPIKey.enabled.is_(True),
+        ]
+        if context_id:
+            ctx_uuid = UUID(context_id) if isinstance(context_id, str) else context_id
+            conditions.append(
+                or_(
+                    ExternalAPIKey.context_id == ctx_uuid,
+                    ExternalAPIKey.context_id.is_(None),
+                )
             )
-            .limit(1)
-        )
+        stmt = select(ExternalAPIKey.id).where(*conditions).limit(1)
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none() is not None
 
