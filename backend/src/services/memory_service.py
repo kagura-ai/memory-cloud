@@ -1105,6 +1105,8 @@ class MemoryService:
         user_id: str,
         current_context_id: UUID | None = None,
         current_workspace_id: UUID | None = None,  # NEW: Workspace ID (Issue #146)
+        context_workspace_id: UUID
+        | None = None,  # Issue #708: source workspace for shared-context Option A
         context_ids: list[UUID] | None = None,  # Issue #81: cross-context recall
     ) -> RecallResponse:
         """Search memories with Hybrid Search + Neural Memory.
@@ -1120,10 +1122,27 @@ class MemoryService:
 
         Issue #82: Context-based multi-collection support.
 
+        Issue #708: shared-context reads pay against the context's owner
+        workspace ("Option A"). When ``context_workspace_id`` differs from
+        ``current_workspace_id`` (caller's), the embedding key lookup,
+        BYOK spend cap deduction, search filtering, and graph mutations
+        all route to ``context_workspace_id``. Upstream rate-limit gating
+        (``mcp_server.tools.__init__._check_rate_limit``) keeps the
+        caller's workspace as the rate-limit subject so attackers cannot
+        bypass their own RPS limit via shared-context reads.
+
         Args:
             request: Recall request
             user_id: User ID
             current_context_id: Current context UUID (Issue #82)
+            current_workspace_id: Caller's active workspace (#146).
+            context_workspace_id: Context owner workspace (#708 Option A).
+                When None or equal to ``current_workspace_id`` the caller
+                pays (self-workspace read). When different, the source
+                workspace pays — provided it has a BYOK key configured
+                (#708 H1; otherwise a uniform NotFoundException is raised
+                to avoid leaking existence + configuration state via
+                CWE-639 / OWASP A01).
 
         Returns:
             RecallResponse with search results
@@ -1141,6 +1160,19 @@ class MemoryService:
         # Single Collection Migration: Validate required parameters
         if not current_workspace_id or not current_context_id:
             raise ValueError("recall() requires current_workspace_id and current_context_id")
+
+        # #708 Option A: route embedding cost (key + spend cap + paid_by
+        # + search + graph) to the context's owner workspace. Rate-limit
+        # gating stays on the caller upstream — do NOT change it here.
+        # The H1 BYOK gate is deferred until we know hybrid_search will
+        # actually fire (after the analysis_cluster short-circuit below),
+        # so no-cost reads (empty cluster, etc.) do not get falsely 404'd.
+        effective_workspace_id = current_workspace_id
+        is_shared_context_read = (
+            context_workspace_id is not None and context_workspace_id != current_workspace_id
+        )
+        if is_shared_context_read:
+            effective_workspace_id = context_workspace_id  # type: ignore[assignment]
 
         # Check if Neural Memory is enabled
         neural_enabled = os.getenv("ENABLE_NEURAL_MEMORY", "false").lower() == "true"
@@ -1200,7 +1232,7 @@ class MemoryService:
             # circuits to empty results without leaking existence.
             cluster_memory_ids = await _analysis_query_service.get_memory_ids_in_cluster(
                 self.db,
-                workspace_id=current_workspace_id,
+                workspace_id=effective_workspace_id,
                 run_id=cluster_run_id,
                 cluster_index=cluster_index_int,
             )
@@ -1210,6 +1242,48 @@ class MemoryService:
                     results=[],
                     explore_hints=[] if request.include_explore_hints else None,
                 )
+
+        # #708 Option A H1 gate (deferred): we now know hybrid_search will
+        # actually fire (the analysis_cluster short-circuit above did not
+        # trigger). Probe the source workspace for a BYOK key applicable
+        # to this context BEFORE issuing the embedding API call, so the
+        # OPENAI_API_KEY env fallback in ``_get_user_api_key`` cannot
+        # silently bypass PR #711's BYOK-only spend cap.
+        #
+        # The probe MUST use the per-context embedding model (same source
+        # of truth ``SearchService.hybrid_search`` uses to pick its embed
+        # client at line 168). Probing with the global default would
+        # falsely deny Ollama-backed contexts (provider mismatch) and
+        # falsely pass OpenAI-backed contexts when the platform default is
+        # Ollama (gate would skip entirely).
+        if is_shared_context_read:
+            from repositories.config_repository import ContextSearchConfigRepository
+
+            ctx_config_repo = ContextSearchConfigRepository(self.db)
+            ctx_config = await ctx_config_repo.create_or_get(current_context_id)
+            byok_embed_svc = EmbeddingService(self.db, model=ctx_config.embedding_model)
+            # Only gate when the embedding API call would actually fire and
+            # produce a charge against the source workspace. ``keyword``
+            # mode skips ``embed_with_usage`` entirely (BM25-only); Ollama
+            # is free/local (no platform-key fallback path exists).
+            will_charge_embedding_cost = (
+                request.search_mode != "keyword" and byok_embed_svc.provider != "ollama"
+            )
+            if will_charge_embedding_cost and not await byok_embed_svc.has_byok_key(
+                str(context_workspace_id),
+                context_id=str(current_context_id),
+            ):
+                logger.warning(
+                    "shared_context_read_no_byok_deny",
+                    caller_user_id=user_id,
+                    caller_workspace_id=str(current_workspace_id),
+                    context_id=str(current_context_id),
+                    paid_by_workspace_id=str(context_workspace_id),
+                    embedding_model=ctx_config.embedding_model,
+                    embedding_provider=byok_embed_svc.provider,
+                    reason="missing_byok",
+                )
+                raise NotFoundException("Context", str(current_context_id))
 
         # 1. Primary Retrieval: Hybrid Search (Semantic + BM25)
         # Fetch more candidates when neural is enabled for better hybrid merge
@@ -1223,13 +1297,25 @@ class MemoryService:
         search_results = await self.search_service.hybrid_search(
             query=request.query,
             user_id=user_id,
-            workspace_id=str(current_workspace_id),
+            workspace_id=str(effective_workspace_id),
             context_id=search_context_id,
             k=candidates_k,
             use_rerank=request.use_rerank,
             filters=request.filters,
             search_mode=request.search_mode,
             include_vectors=neural_enabled,
+            # #708 Option A: tell SearchService this is a cross-workspace
+            # shared-context read. This ONLY bypasses the redundant
+            # ``is_workspace_member(workspace_id)`` check — handler-layer
+            # ``_resolve_context_for_read`` is the authoritative access
+            # check. The Qdrant ``user_id == caller`` filter is dropped
+            # only when the context's privacy state itself is shared
+            # (``ContextService.is_context_shared``); a private context
+            # read across workspaces still keeps the filter so other
+            # users' memories are not exposed. See loop-5 fix and the
+            # ``is_shared_context`` derivation in ``SearchService.
+            # hybrid_search``.
+            is_shared_context_read=is_shared_context_read,
         )
 
         # Get full memory data from PostgreSQL
@@ -1320,7 +1406,7 @@ class MemoryService:
                 graph_service = GraphService(
                     user_id=user_id,
                     db=self.db,
-                    workspace_id=str(current_workspace_id) if current_workspace_id else None,
+                    workspace_id=str(effective_workspace_id) if effective_workspace_id else None,
                     context_id=str(current_context_id) if current_context_id else None,
                 )
 
@@ -1415,7 +1501,7 @@ class MemoryService:
                     responses,
                     user_id,
                     current_context_id,
-                    current_workspace_id,
+                    effective_workspace_id,
                     neural_enabled=neural_enabled,
                 )
             except Exception as exc:

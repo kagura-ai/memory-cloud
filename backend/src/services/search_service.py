@@ -66,6 +66,7 @@ class SearchService:
         filters: dict[str, Any] | None = None,
         search_mode: SearchMode = "hybrid",
         include_vectors: bool = False,
+        is_shared_context_read: bool = False,
     ) -> list[dict]:
         """Search with configurable mode: hybrid, semantic, or keyword.
 
@@ -87,6 +88,19 @@ class SearchService:
             filters: Optional filters
             search_mode: Search strategy (hybrid/semantic/keyword)
             include_vectors: Return document embeddings from Qdrant (increases payload size)
+            is_shared_context_read: Issue #708 Option A. Set by ``MemoryService.recall``
+                when the caller's workspace differs from the context owner's
+                workspace AND handler-layer access has already been verified
+                (``_resolve_context_for_read``). When True, two things happen:
+                (1) the redundant ``is_workspace_member(workspace_id)`` check
+                is skipped — under Option A ``workspace_id`` is the SOURCE
+                workspace, of which the caller is not necessarily a member,
+                but their access via ``ContextMember`` / system_admin / etc.
+                was already confirmed upstream; and (2) the Qdrant filter
+                drops ``user_id == caller`` so memories authored by source
+                workspace members are visible to the cross-workspace reader.
+                Single-context and cross-context (``context_ids``) paths both
+                honor this flag.
 
         Returns:
             List of search results with scores
@@ -116,20 +130,48 @@ class SearchService:
         from services.permission_service import PermissionService
         from utils.exceptions import AuthorizationError
 
-        # Issue #81: For cross-context, skip shared-context optimization (use user_id filter)
+        # ``is_shared_context`` drives the Qdrant user_id filter:
+        #   - True  → drop ``user_id == caller`` (shared context: any member can read)
+        #   - False → keep filter (private context: caller sees only their own memories)
+        #
+        # This value MUST be derived from the context's actual privacy state
+        # (``ContextService.is_context_shared``), NOT from #708's
+        # ``is_shared_context_read`` cross-workspace flag. Conflating them
+        # (loop 1 / loop 5 fix from Copilot) drops the user_id filter for a
+        # private context whose creator reads it from a different active
+        # workspace — leaking memories authored by other users into a
+        # context that was made private after being shared.
+        #
+        # The two flags are orthogonal:
+        #   - ``is_shared_context_read`` (handler-verified cross-workspace) ONLY
+        #     bypasses the redundant ``is_workspace_member`` probe below —
+        #     handler-layer ``_resolve_context_for_read`` is the authoritative
+        #     access check.
+        #   - ``is_shared_context`` is derived from privacy state and controls
+        #     the Qdrant filter independently.
+        #
+        # List-context: legacy behavior intentionally skipped the probe and
+        # left ``is_shared_context=False`` (Issue #81 conservative default).
+        # Under Option A (``is_shared_context_read=True``), we DO probe the
+        # primary context so source-workspace shared cross-context recall
+        # returns results, while a private primary still applies the filter.
         is_shared_context = False
-        if not isinstance(context_id, list):
+        should_probe_sharing = not isinstance(context_id, list) or is_shared_context_read
+        if should_probe_sharing:
             context_service = ContextService(self.db)
-            is_shared_context = await context_service.is_context_shared(UUID(context_id))
+            is_shared_context = await context_service.is_context_shared(UUID(primary_context_id))
 
-            # For shared contexts, verify workspace membership
-            if is_shared_context:
-                perm_service = PermissionService(self.db)
-                is_member = await perm_service.is_workspace_member(user_id, UUID(workspace_id))
-                if not is_member:
-                    raise AuthorizationError(
-                        f"Access denied: not a member of workspace {workspace_id}"
-                    )
+        # Redundant workspace-membership probe — only runs for single-context
+        # same-workspace reads of a shared context. Under
+        # ``is_shared_context_read=True`` the handler already verified access,
+        # so this would just block legitimate cross-workspace callers
+        # (system_admin, ContextMember-only). List paths skip it too —
+        # source-workspace access has already been verified by the handler.
+        if is_shared_context and not is_shared_context_read and not isinstance(context_id, list):
+            perm_service = PermissionService(self.db)
+            is_member = await perm_service.is_workspace_member(user_id, UUID(workspace_id))
+            if not is_member:
+                raise AuthorizationError(f"Access denied: not a member of workspace {workspace_id}")
 
         logger.debug(
             "context_access_check",
@@ -184,8 +226,17 @@ class SearchService:
             # (different model than ``self.embedding_service``) — read
             # provider/model from it directly so multi-tenant pricing
             # routes correctly.
+            # #708 loop 7: under Option A (is_shared_context_read=True), this
+            # call MUST use a BYOK key — no OPENAI_API_KEY env fallback —
+            # otherwise a TOCTOU race between the preflight ``has_byok_key``
+            # probe in ``MemoryService.recall`` and this resolution could
+            # silently route to the uncapped platform key.
             query_vector, embedding_tokens = await embed_svc.embed_with_usage(
-                normalized_query, user_id, context_id=primary_context_id, workspace_id=workspace_id
+                normalized_query,
+                user_id,
+                context_id=primary_context_id,
+                workspace_id=workspace_id,
+                disallow_env_fallback=is_shared_context_read,
             )
             if embedding_tokens > 0:
                 # Cache hits return 0 tokens and intentionally produce no
@@ -205,7 +256,14 @@ class SearchService:
                     workspace_id=workspace_id,
                     context_id=primary_context_id,
                     embedding_tokens=embedding_tokens,
-                    paid_by=await embed_svc.resolve_paid_by(workspace_id),
+                    # #708 loop 4: thread context_id so paid_by reflects the
+                    # actual key ``_get_user_api_key`` selected for THIS context.
+                    # Without it, env-fallback calls on a context whose workspace
+                    # has BYOK scoped to a DIFFERENT context would be falsely
+                    # logged as "byok" — corrupts cost-grade attribution (#524).
+                    paid_by=await embed_svc.resolve_paid_by(
+                        workspace_id, context_id=primary_context_id
+                    ),
                     fail_on_error=False,
                 )
             semantic_results = await search_memories_qdrant(

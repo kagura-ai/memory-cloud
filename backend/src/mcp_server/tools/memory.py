@@ -18,10 +18,12 @@ from mcp_server.tools._helpers import (
     _error_response,
     _log_tool_usage,
     _resolve_context,
+    _resolve_context_for_read,
     _resolve_context_id,
     _validate_memory_id,
     execute_with_timeout,
 )
+from utils.exceptions import NotFoundException
 
 logger = logging.getLogger(__name__)
 
@@ -241,19 +243,51 @@ async def handle_recall(
 
     start_time = time.time()
     async for db in get_db():
+        # Bind defensively so the NotFoundException handler below can
+        # always reference a concrete context_id. In normal flow this is
+        # re-bound at lines below before any path that raises.
+        current_context_id: UUID | None = None
         try:
             # Issue #81: Cross-context recall — context_ids overrides context_id
             context_ids_arg = args.get("context_ids")
             cross_context_ids: list[UUID] | None = None
 
             if isinstance(context_ids_arg, list) and context_ids_arg:
-                # Multi-context mode
+                # Multi-context mode. Use _resolve_context_for_read so deny
+                # reasons (private non-creator, not a workspace member, etc.)
+                # surface as a uniform context_not_found (CWE-639 / OWASP A01).
                 cross_context_ids = [_resolve_context_id(cid) for cid in context_ids_arg]
                 current_context_id = cross_context_ids[0]
-                # Validate access to all contexts, keep primary context object
-                current_context = await _resolve_context(db, user_id, current_context_id)
+                current_context = await _resolve_context_for_read(db, user_id, current_context_id)
+                # #708 H3: all contexts must belong to the same workspace —
+                # Option A paid_by routing has a single source-of-truth
+                # workspace. Check inline so a mismatch short-circuits
+                # before paying further permission lookups.
+                #
+                # #708 loop 6 (Copilot): also reject MIXED privacy across
+                # the list. ``SearchService`` derives a single
+                # ``is_shared_context`` value from the primary and applies
+                # it to every context's Qdrant filter. If primary is
+                # shared and a secondary is private (which the handler
+                # permits when the caller is that private context's
+                # creator / ContextMember), dropping the ``user_id`` filter
+                # would leak memories authored by other users in the
+                # private secondary. Rejecting at API boundary mirrors
+                # the same-embedding-model invariant pattern below.
                 for cid in cross_context_ids[1:]:
-                    await _resolve_context(db, user_id, cid)
+                    cross_ctx = await _resolve_context_for_read(db, user_id, cid)
+                    if cross_ctx.workspace_id != current_context.workspace_id:
+                        return _error_response(
+                            "workspace_mismatch",
+                            "All contexts in cross-context recall must belong to "
+                            "the same workspace.",
+                        )
+                    if cross_ctx.is_private != current_context.is_private:
+                        return _error_response(
+                            "context_privacy_mismatch",
+                            "All contexts in cross-context recall must share the "
+                            "same privacy setting (all shared or all private).",
+                        )
 
                 # Validate all contexts use the same embedding model
                 from repositories.config_repository import ContextSearchConfigRepository
@@ -277,7 +311,7 @@ async def handle_recall(
                         "Missing required field: context_id (or provide context_ids with 2+ UUIDs).",
                     )
                 current_context_id = _resolve_context_id(args["context_id"])
-                current_context = await _resolve_context(db, user_id, current_context_id)
+                current_context = await _resolve_context_for_read(db, user_id, current_context_id)
 
             service = MemoryService(db)
             result = await execute_with_timeout(
@@ -286,6 +320,8 @@ async def handle_recall(
                     user_id=user_id,
                     current_context_id=current_context_id,
                     current_workspace_id=workspace_id,
+                    # #708 Option A: source workspace pays for shared-context reads.
+                    context_workspace_id=current_context.workspace_id,
                     context_ids=cross_context_ids,
                 ),
                 operation_name="recall",
@@ -338,6 +374,31 @@ async def handle_recall(
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
+        except NotFoundException:
+            # #708 H2: service raises NotFoundException("Context", ...) for
+            # shared-context reads that cannot proceed (e.g. source has no
+            # BYOK). Re-cast through _ContextNotFoundError so the response
+            # body is byte-identical to a regular deny — callers cannot
+            # distinguish "source missing BYOK" from "context does not
+            # exist for you" (CWE-639 / OWASP A01).
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "recall", start_time, 404, current_context_id, workspace_id
+            )
+            if current_context_id is None:
+                # Unreachable in practice — current_context_id is bound
+                # before any path that can raise NotFoundException — but
+                # static analysis cannot prove the invariant.
+                return _error_response(
+                    "context_not_found",
+                    "Context not found or you don't have access to it.",
+                    context_id=args.get("context_id"),
+                    help="Use list_contexts() to see contexts you have access to.",
+                )
+            return _ContextNotFoundError(
+                current_context_id,
+                "Context not found or you don't have access to it.",
+            ).to_response()
         except Exception:
             await db.rollback()
             await _log_tool_usage(
@@ -438,7 +499,10 @@ async def handle_reference(
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
-            await _resolve_context(db, user_id, current_context_id)
+            # Issue #708 bundle: migrate read paths to the CWE-639-uniform
+            # resolver so deny reasons (private non-creator, not a workspace
+            # member, etc.) cannot be distinguished by callers.
+            await _resolve_context_for_read(db, user_id, current_context_id)
 
             service = MemoryService(db)
             try:
@@ -446,16 +510,12 @@ async def handle_reference(
                     service.reference(request.memory_id, user_id=user_id),
                     operation_name="reference",
                 )
-            except Exception as e:
-                from utils.exceptions import NotFoundException
-
-                if isinstance(e, NotFoundException):
-                    return _error_response(
-                        "memory_not_found",
-                        f"Memory not found or you don't have access: {request.memory_id}",
-                        help="Use recall() to find memories you have access to.",
-                    )
-                raise
+            except NotFoundException:
+                return _error_response(
+                    "memory_not_found",
+                    f"Memory not found or you don't have access: {request.memory_id}",
+                    help="Use recall() to find memories you have access to.",
+                )
 
             reference_data = {
                 "memory_id": str(result.memory_id),
