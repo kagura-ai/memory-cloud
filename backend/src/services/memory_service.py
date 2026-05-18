@@ -1105,6 +1105,8 @@ class MemoryService:
         user_id: str,
         current_context_id: UUID | None = None,
         current_workspace_id: UUID | None = None,  # NEW: Workspace ID (Issue #146)
+        context_workspace_id: UUID
+        | None = None,  # Issue #708: source workspace for shared-context Option A
         context_ids: list[UUID] | None = None,  # Issue #81: cross-context recall
     ) -> RecallResponse:
         """Search memories with Hybrid Search + Neural Memory.
@@ -1120,10 +1122,27 @@ class MemoryService:
 
         Issue #82: Context-based multi-collection support.
 
+        Issue #708: shared-context reads pay against the context's owner
+        workspace ("Option A"). When ``context_workspace_id`` differs from
+        ``current_workspace_id`` (caller's), the embedding key lookup,
+        BYOK spend cap deduction, search filtering, and graph mutations
+        all route to ``context_workspace_id``. Upstream rate-limit gating
+        (``mcp_server.tools.__init__._check_rate_limit``) keeps the
+        caller's workspace as the rate-limit subject so attackers cannot
+        bypass their own RPS limit via shared-context reads.
+
         Args:
             request: Recall request
             user_id: User ID
             current_context_id: Current context UUID (Issue #82)
+            current_workspace_id: Caller's active workspace (#146).
+            context_workspace_id: Context owner workspace (#708 Option A).
+                When None or equal to ``current_workspace_id`` the caller
+                pays (self-workspace read). When different, the source
+                workspace pays — provided it has a BYOK key configured
+                (#708 H1; otherwise a uniform NotFoundException is raised
+                to avoid leaking existence + configuration state via
+                CWE-639 / OWASP A01).
 
         Returns:
             RecallResponse with search results
@@ -1141,6 +1160,29 @@ class MemoryService:
         # Single Collection Migration: Validate required parameters
         if not current_workspace_id or not current_context_id:
             raise ValueError("recall() requires current_workspace_id and current_context_id")
+
+        # #708 Option A: route embedding cost (key + spend cap + paid_by
+        # + search + graph) to the context's owner workspace. Rate-limit
+        # gating stays on the caller upstream — do NOT change it here.
+        effective_workspace_id = current_workspace_id
+        if context_workspace_id is not None and context_workspace_id != current_workspace_id:
+            embed_svc = EmbeddingService(self.db)
+            if not await embed_svc.has_byok_key(str(context_workspace_id)):
+                # Deny without BYOK: env fallback in `_get_user_api_key`
+                # would route through OPENAI_API_KEY uncapped (PR #711's
+                # spend cap is BYOK-only). Raise NotFoundException so the
+                # handler can surface a uniform context_not_found
+                # response (CWE-639 / OWASP A01).
+                logger.warning(
+                    "shared_context_read_no_byok_deny",
+                    caller_user_id=user_id,
+                    caller_workspace_id=str(current_workspace_id),
+                    context_id=str(current_context_id),
+                    paid_by_workspace_id=str(context_workspace_id),
+                    reason="missing_byok",
+                )
+                raise NotFoundException("Context", str(current_context_id))
+            effective_workspace_id = context_workspace_id
 
         # Check if Neural Memory is enabled
         neural_enabled = os.getenv("ENABLE_NEURAL_MEMORY", "false").lower() == "true"
@@ -1200,7 +1242,7 @@ class MemoryService:
             # circuits to empty results without leaking existence.
             cluster_memory_ids = await _analysis_query_service.get_memory_ids_in_cluster(
                 self.db,
-                workspace_id=current_workspace_id,
+                workspace_id=effective_workspace_id,
                 run_id=cluster_run_id,
                 cluster_index=cluster_index_int,
             )
@@ -1223,7 +1265,7 @@ class MemoryService:
         search_results = await self.search_service.hybrid_search(
             query=request.query,
             user_id=user_id,
-            workspace_id=str(current_workspace_id),
+            workspace_id=str(effective_workspace_id),
             context_id=search_context_id,
             k=candidates_k,
             use_rerank=request.use_rerank,
@@ -1320,7 +1362,7 @@ class MemoryService:
                 graph_service = GraphService(
                     user_id=user_id,
                     db=self.db,
-                    workspace_id=str(current_workspace_id) if current_workspace_id else None,
+                    workspace_id=str(effective_workspace_id) if effective_workspace_id else None,
                     context_id=str(current_context_id) if current_context_id else None,
                 )
 
@@ -1415,7 +1457,7 @@ class MemoryService:
                     responses,
                     user_id,
                     current_context_id,
-                    current_workspace_id,
+                    effective_workspace_id,
                     neural_enabled=neural_enabled,
                 )
             except Exception as exc:
