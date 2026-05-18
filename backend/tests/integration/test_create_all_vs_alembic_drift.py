@@ -46,11 +46,13 @@ For every user-defined table in the ``public`` schema (excluding the
   alembic for ``BIGSERIAL`` surrogates but not surfaced through
   ``information_schema``. Both snapshots see the same ``nextval(...)``
   column default, so functional equivalence is preserved.
-- **ENUM type body** — ``information_schema.columns.data_type`` returns
-  the literal string ``USER-DEFINED`` for every ENUM regardless of the
-  enum name. Both ``create_all`` and alembic produce the same string, so
-  ENUM column existence drift IS caught, but value-set drift (adding /
-  removing labels) is NOT. That belongs to its own audit.
+- **ENUM value set (label additions / removals)** —
+  ``information_schema.columns.data_type`` returns the literal string
+  ``USER-DEFINED`` for every ENUM, but ``udt_name`` carries the actual
+  ENUM type name, so type-rename drift IS now caught. **Value set
+  drift** (e.g. adding ``'pending'`` to an existing ``status_enum``)
+  requires ``pg_enum`` introspection and remains out of scope; it
+  belongs to its own audit.
 - **Function-call defaults whose Postgres normalization is non-stable**
   (e.g. ``now()`` vs ``CURRENT_TIMESTAMP``). When both paths use the
   same SQL, Postgres normalizes both to the same stored representation,
@@ -273,6 +275,13 @@ class ColumnRow(TypedDict):
     ``numeric_precision`` / ``numeric_scale``, and ``datetime_precision``
     so that drift in fully-qualified types like ``NUMERIC(14, 10)`` or
     ``TIMESTAMP(6)`` is caught — ``data_type`` alone would compare equal.
+
+    ``udt_name`` / ``udt_schema`` carry the **underlying type name** for
+    ``data_type`` values that lose information (notably ``ARRAY`` —
+    ``udt_name`` becomes ``_int4`` / ``_text`` etc. with a leading
+    underscore; and ``USER-DEFINED`` — ``udt_name`` becomes the ENUM /
+    domain type name). Comparing these catches ARRAY element-type drift
+    and ENUM type-name drift that ``data_type`` alone misses.
     """
 
     table: str
@@ -284,6 +293,8 @@ class ColumnRow(TypedDict):
     numeric_precision: int | None
     numeric_scale: int | None
     datetime_precision: int | None
+    udt_name: str
+    udt_schema: str
 
 
 class ConstraintRow(TypedDict):
@@ -318,13 +329,21 @@ class ConstraintRow(TypedDict):
 
 
 class IndexRow(TypedDict):
-    """One index excluding PK / UK auto-indexes."""
+    """One index excluding PK auto-indexes.
+
+    ``access_method`` is the index access method (``btree`` / ``gin`` /
+    ``gist`` / ``hash`` / ``brin`` / ``spgist``) from ``pg_am.amname``.
+    Comparing it catches drift where an ORM-declared ``Index`` defaults
+    to ``btree`` while alembic uses ``postgresql_using='gin'`` for the
+    same name + columns.
+    """
 
     table: str
     name: str
     columns: tuple[str, ...]
     is_unique: bool
     predicate: str | None  # WHERE clause for partial indexes
+    access_method: str  # btree | gin | gist | hash | brin | spgist
 
 
 class SchemaSnapshot(TypedDict):
@@ -396,7 +415,9 @@ _COLUMNS_SQL = """
         character_maximum_length,
         numeric_precision,
         numeric_scale,
-        datetime_precision
+        datetime_precision,
+        udt_name,
+        udt_schema
     FROM information_schema.columns
     WHERE table_schema = 'public'
     ORDER BY table_name, ordinal_position
@@ -453,6 +474,7 @@ _INDEXES_SQL = """
         i.relname AS index_name,
         ix.indisunique AS is_unique,
         ix.indisprimary AS is_primary,
+        am.amname AS access_method,
         ARRAY(
             SELECT pg_get_indexdef(ix.indexrelid, k.ord::int, true)
             FROM generate_series(1, ix.indnatts) WITH ORDINALITY AS k(_, ord)
@@ -463,6 +485,7 @@ _INDEXES_SQL = """
     JOIN pg_class i ON i.oid = ix.indexrelid
     JOIN pg_class c ON c.oid = ix.indrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_am am ON am.oid = i.relam
     WHERE n.nspname = 'public'
         AND NOT ix.indisprimary
     ORDER BY c.relname, i.relname
@@ -488,6 +511,8 @@ def _introspect_columns(conn: Connection) -> dict[tuple[str, str], ColumnRow]:
             numeric_precision=row.numeric_precision,
             numeric_scale=row.numeric_scale,
             datetime_precision=row.datetime_precision,
+            udt_name=row.udt_name,
+            udt_schema=row.udt_schema,
         )
     return result
 
@@ -609,6 +634,7 @@ def _introspect_indexes(conn: Connection) -> dict[str, IndexRow]:
             columns=tuple(row.columns),  # ordinal order preserved
             is_unique=row.is_unique,
             predicate=row.predicate,
+            access_method=row.access_method,
         )
     return result
 
@@ -711,6 +737,8 @@ def _diff_columns(
             "numeric_precision",
             "numeric_scale",
             "datetime_precision",
+            "udt_name",
+            "udt_schema",
         ):
             if row_a[attr] != row_b[attr]:
                 diffs.append(f"{attr}: create_all={row_a[attr]!r}, alembic={row_b[attr]!r}")
@@ -820,7 +848,7 @@ def _diff_indexes(
         row_a = a[name]
         row_b = b[name]
         diffs: list[str] = []
-        for attr in ("columns", "is_unique", "predicate"):
+        for attr in ("columns", "is_unique", "predicate", "access_method"):
             if row_a[attr] != row_b[attr]:
                 diffs.append(f"{attr}: create_all={row_a[attr]!r}, alembic={row_b[attr]!r}")
         if diffs:
