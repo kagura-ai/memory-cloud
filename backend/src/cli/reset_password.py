@@ -139,6 +139,7 @@ def reset_password():
 
                     try:
                         import qrcode
+                        import qrcode.constants
 
                         qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L)
                         qr.add_data(uri)

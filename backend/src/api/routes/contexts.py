@@ -199,41 +199,51 @@ class ContextResponse(TZAwareBaseModel):
 
     id: UUID = Field(..., description="Context UUID")
     name: str = Field(..., description="Context name")
-    display_name: str | None = Field(None, description="Human-readable display name")
-    description: str | None = Field(None, description="Context description")
-    summary: str | None = Field(None, description="LLM-oriented context summary")
-    usage_guide: str | None = Field(None, description="LLM-oriented usage guidelines")
+    display_name: str | None = Field(default=None, description="Human-readable display name")
+    description: str | None = Field(default=None, description="Context description")
+    summary: str | None = Field(default=None, description="LLM-oriented context summary")
+    usage_guide: str | None = Field(default=None, description="LLM-oriented usage guidelines")
     is_default: bool = Field(..., description="Whether this is the default context")
     # Issue #246: is_current removed (context always explicit from Frontend URL)
-    is_private: bool = Field(True, description="Privacy: TRUE=private, FALSE=shared")  # Issue #165
+    is_private: bool = Field(
+        default=True, description="Privacy: TRUE=private, FALSE=shared"
+    )  # Issue #165
     is_public: bool = Field(
-        False, description="Public: TRUE=external API access, FALSE=internal"
+        default=False, description="Public: TRUE=external API access, FALSE=internal"
     )  # Issue #238
     resource_id: str | None = Field(
-        None, description="Resource ID for public contexts"
+        default=None, description="Resource ID for public contexts"
     )  # Issue #238
-    is_locked: bool = Field(False, description="When true, deletion is prevented until unlocked")
-    sleep_mode: SleepMode = Field(
-        "skip", description="Sleep maintenance mode: full, edges_only, or skip"
+    is_locked: bool = Field(
+        default=False, description="When true, deletion is prevented until unlocked"
     )
-    created_by: str | None = Field(None, description="Creator user ID")  # Issue #165
-    created_by_name: str | None = Field(None, description="Creator name")
+    sleep_mode: SleepMode = Field(
+        default="skip", description="Sleep maintenance mode: full, edges_only, or skip"
+    )
+    created_by: str | None = Field(default=None, description="Creator user ID")  # Issue #165
+    created_by_name: str | None = Field(default=None, description="Creator name")
     created_at: datetime = Field(..., description="Creation timestamp")
-    updated_at: datetime | None = Field(None, description="Last update timestamp")
+    updated_at: datetime | None = Field(default=None, description="Last update timestamp")
     # Issue #217: Search config summary for context card display
-    use_rerank: bool | None = Field(None, description="Reranking enabled (Basic+ only)")
-    reranker_provider: str | None = Field(None, description="Reranker provider: voyage/cohere")
+    use_rerank: bool | None = Field(default=None, description="Reranking enabled (Basic+ only)")
+    reranker_provider: str | None = Field(
+        default=None, description="Reranker provider: voyage/cohere"
+    )
     # Embedding model info (Issue #49)
-    embedding_model: str | None = Field(None, description="Embedding model used for this context")
-    embedding_dimensions: int | None = Field(None, description="Embedding vector dimensions")
+    embedding_model: str | None = Field(
+        default=None, description="Embedding model used for this context"
+    )
+    embedding_dimensions: int | None = Field(
+        default=None, description="Embedding vector dimensions"
+    )
     # Context members count (workspace members with access + explicit context members)
     member_count: int | None = Field(
-        None, description="Number of members with access to this context"
+        default=None, description="Number of members with access to this context"
     )
     # Issue #187: Memory count and last activity for contexts table redesign
     memory_count: int = Field(default=0, description="Number of active memories in this context")
     last_activity_at: datetime | None = Field(
-        None, description="Most recent memory activity (max of updated_at across memories)"
+        default=None, description="Most recent memory activity (max of updated_at across memories)"
     )
 
     model_config = {"from_attributes": True}
@@ -583,14 +593,13 @@ async def create_context(
             or "unique_workspace" in str(e)
             or "resource_id" in str(e)
         ):
-            if request.resource_id and workspace_id:
-                await _handle_resource_id_duplicate_error(
-                    service.db, request.resource_id, workspace_id
-                )
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, detail="Resource ID conflict detected."
-                ) from e
+            # ContextCreate has no resource_id field, so the integrity error
+            # here is the (workspace_id, name) uniqueness constraint, not a
+            # caller-supplied resource_id duplicate. Surface as 400.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Resource ID conflict detected.",
+            ) from e
         raise
 
 

@@ -31,7 +31,7 @@ References:
 
 import secrets
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 from authlib.oauth2 import OAuth2Request
 from authlib.oauth2.rfc6749 import grants
@@ -105,8 +105,9 @@ def save_token(token: dict[str, Any], request: OAuth2Request, session: Session) 
         request: OAuth2 request object
         session: SQLAlchemy session
     """
-    # Extract client and user from request
-    client_id = request.client.client_id
+    # Extract client and user from request. Authlib types request.client as
+    # ClientMixin; the runtime object is our OAuth2Client.
+    client_id = cast(OAuth2Client, request.client).client_id
     user_id = request.user.user_id if hasattr(request, "user") else None
 
     # For refresh token grant, user comes from existing token
@@ -245,8 +246,8 @@ class AuthorizationCodeGrant(grants.AuthorizationCodeGrant):
         Returns:
             Saved OAuth2AuthorizationCode instance
         """
-        # Extract data from request
-        client_id = request.client.client_id
+        # Extract data from request (Authlib ClientMixin → OAuth2Client narrow).
+        client_id = cast(OAuth2Client, request.client).client_id
         user_id = request.user.user_id if hasattr(request, "user") else None
         redirect_uri = request.redirect_uri
         scope = request.scope
@@ -624,6 +625,11 @@ class OAuth2AuthorizationServer:
 
         # Create custom AuthorizationServer that implements create_oauth2_request
         class CustomAuthorizationServer(AuthorizationServer):
+            # Authlib uses runtime-attached attributes for db_session and the
+            # query_client / save_token hooks. Declared here so static analyzers
+            # see them; Authlib's behavior is unchanged.
+            db_session: Any = None
+
             def create_oauth2_request(self, request):
                 """Convert FastAPI/Starlette Request to OAuth2Request.
 
@@ -703,8 +709,12 @@ class OAuth2AuthorizationServer:
                 logger.debug(f"OAuth2 signal: {name}, kwargs={list(kwargs.keys())}")
                 return
 
-        # Create query_client function
-        def query_client_func(client_id: str) -> OAuth2Client | None:
+        # Create query_client function. Authlib's ClientMixin contract is
+        # duck-typed here — OAuth2Client implements the methods Authlib needs
+        # but does not formally inherit from ClientMixin (avoiding SQLAlchemy
+        # Base × Authlib mixin metaclass conflict). Returning `Any` keeps the
+        # assignment to AuthorizationServer.query_client well-typed.
+        def query_client_func(client_id: str) -> Any:
             return query_client(session, client_id)
 
         # Create save_token function
@@ -820,7 +830,10 @@ class OAuth2AuthorizationServer:
         Returns:
             Grant object for rendering consent screen
         """
-        return self.server.validate_consent_request(request)
+        # AuthorizationServer.validate_consent_request is provided by Authlib
+        # at runtime but missing from the type stub. Use cast to silence
+        # static check while preserving behavior.
+        return cast(Any, self.server).validate_consent_request(request)
 
 
 def create_authorization_server(session: Session) -> OAuth2AuthorizationServer:

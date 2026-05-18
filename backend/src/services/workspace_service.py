@@ -1314,15 +1314,28 @@ class WorkspaceService:
         """
         from datetime import timedelta
 
-        from sqlalchemy import and_, case, func
+        from sqlalchemy import and_, case, func, select
 
+        from models.auth import Context
         from models.resource import ResourceToken
+        from utils.exceptions import NotFoundException, ValidationError
 
-        # Validate context exists and is public
-        context = await self.get_context(workspace_id, context_id)
+        # Validate context exists and is public. Previously this called
+        # self.get_context(...) which did not exist on WorkspaceService —
+        # the route was raising AttributeError at runtime. Query directly
+        # against the workspace-scoped Context row to keep the boundary check
+        # in one statement without pulling in ContextService here.
+        ctx_result = await self.db.execute(
+            select(Context).where(
+                Context.id == context_id,
+                Context.workspace_id == workspace_id,
+                Context.deleted_at.is_(None),
+            )
+        )
+        context = ctx_result.scalar_one_or_none()
+        if context is None:
+            raise NotFoundException(f"Context {context_id} not found in workspace {workspace_id}")
         if not context.is_public:
-            from utils.exceptions import ValidationError
-
             raise ValidationError("Context is not public")
 
         # Calculate date range

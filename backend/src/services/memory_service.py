@@ -581,11 +581,13 @@ class MemoryService:
 
         if normalized_summary is not None:
             memory.summary = normalized_summary
-        if "content" in provided_fields:
+        # content / type / importance are NOT NULL on the Memory model; silently
+        # skip an explicit null in the payload (Mapped[str|float] rejects None).
+        if "content" in provided_fields and request.content is not None:
             memory.content = request.content
-        if "type" in provided_fields:
+        if "type" in provided_fields and request.type is not None:
             memory.type = request.type
-        if "importance" in provided_fields:
+        if "importance" in provided_fields and request.importance is not None:
             memory.importance = request.importance
         if "tags" in provided_fields:
             memory.tags = request.tags
@@ -667,9 +669,12 @@ class MemoryService:
             payload_updates: dict[str, object] = {}
             if "tags" in provided_fields:
                 payload_updates["tags"] = request.tags
-            if "importance" in provided_fields:
+            # Mirror the PG-side None-guard above: explicit-null for
+            # NOT-NULL columns (importance/type) is silently skipped on
+            # both sides to keep PG ↔ Qdrant payloads consistent.
+            if "importance" in provided_fields and request.importance is not None:
                 payload_updates["importance"] = request.importance
-            if "type" in provided_fields:
+            if "type" in provided_fields and request.type is not None:
                 payload_updates["type"] = request.type
 
             if payload_updates:

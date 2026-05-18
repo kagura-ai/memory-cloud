@@ -49,6 +49,16 @@ class LLMProvider(ABC):
 
     provider_name: str
 
+    def __init__(self, api_key: str) -> None:
+        """Initialize the provider with an API key.
+
+        Subclasses override to accept variations (e.g. ``base_url`` for
+        Ollama). Declared on the base so ``provider_cls(api_key)`` in
+        :class:`LLMService._instantiate_provider` type-checks against
+        ``type[LLMProvider]``.
+        """
+        ...
+
     @abstractmethod
     async def complete_json(
         self,

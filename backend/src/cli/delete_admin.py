@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from sqlalchemy import create_engine, func, select  # noqa: E402
+from sqlalchemy import create_engine, delete, func, select  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from cli.db import get_sync_database_url  # noqa: E402
@@ -47,7 +47,7 @@ def delete_admin():
                 print("  Cancelled.")
                 sys.exit(0)
 
-            db.execute(APIKey.__table__.delete().where(APIKey.user_id == admin.user_id))
+            db.execute(delete(APIKey).where(APIKey.user_id == admin.user_id))
             db.delete(admin)
             db.commit()
 
@@ -58,11 +58,9 @@ def delete_admin():
                 print("  Cancelled.")
                 sys.exit(0)
 
-            db.execute(APIKey.__table__.delete().where(APIKey.user_id == admin.user_id))
-            db.execute(
-                WorkspaceMember.__table__.delete().where(WorkspaceMember.user_id == admin.user_id)
-            )
-            db.execute(Workspace.__table__.delete().where(Workspace.owner_user_id == admin.user_id))
+            db.execute(delete(APIKey).where(APIKey.user_id == admin.user_id))
+            db.execute(delete(WorkspaceMember).where(WorkspaceMember.user_id == admin.user_id))
+            db.execute(delete(Workspace).where(Workspace.owner_user_id == admin.user_id))
             db.delete(admin)
             db.commit()
 

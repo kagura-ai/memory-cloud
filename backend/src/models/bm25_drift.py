@@ -63,6 +63,12 @@ class Bm25IdfDriftLog(Base):
     num_terms: Mapped[int] = mapped_column(Integer, nullable=False)
     top_divergent_terms: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
 
+    # Response-shape attributes — populated by api/routes/bm25_drift.py to
+    # avoid N+1 lookups, not DB-backed. Declared as non-Mapped class defaults
+    # so SQLAlchemy ignores them and pyright knows they exist.
+    context_name: str | None = None
+    context_deleted: bool = False
+
     __table_args__ = (
         CheckConstraint(
             "psi_status IN ('insufficient_data', 'stable', 'minor_drift', 'significant_drift')",

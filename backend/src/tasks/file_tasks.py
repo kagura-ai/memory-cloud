@@ -25,11 +25,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from typing import Any, cast
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import delete, select
+from sqlalchemy.engine import CursorResult
 
 from db.base import get_db
 from models.file_objects import FileObject
@@ -256,7 +258,7 @@ async def sweep_soft_deleted_files() -> dict[str, int]:
                 .where(FileObject.id == f.id)
                 .where(FileObject.deleted_at.isnot(None))
             )
-            del_result = await db.execute(del_stmt)
+            del_result = cast(CursorResult[Any], await db.execute(del_stmt))
             await db.commit()
             if del_result.rowcount > 0:
                 counts["swept"] += 1

@@ -187,21 +187,21 @@ reportMissingTypeStubs = false
 #   ----  --------                     -------------------  ------
 #   A     reportAssignmentType                4             re-enabled (#599)
 #   A     reportReturnType                    5             re-enabled (#599)
-#   B     reportCallIssue                    22             deferred
-#   B     reportAttributeAccessIssue         36             deferred
+#   B     reportCallIssue                    17             re-enabled (#612)
+#   B     reportAttributeAccessIssue         54             re-enabled (#612)
 #   C     reportArgumentType                163             deferred
 #   D     reportGeneralTypeIssues             ?             deferred
 #   D     reportOptionalMemberAccess          ?             deferred
 #   D     reportIndexIssue                    ?             deferred
 #   D     reportOptionalOperand               ?             deferred
-# Tier A — explicitly enabled (robust against future typeCheckingMode shifts):
+# Tiers A & B — explicitly enabled (robust against future typeCheckingMode shifts):
 reportAssignmentType = true
 reportReturnType = true
-# Tiers B/C/D — explicitly disabled:
+reportAttributeAccessIssue = true
+reportCallIssue = true
+# Tiers C/D — explicitly disabled:
 reportArgumentType = false
-reportAttributeAccessIssue = false
 reportGeneralTypeIssues = false
-reportCallIssue = false
 reportOptionalMemberAccess = false
 reportIndexIssue = false
 reportOptionalOperand = false

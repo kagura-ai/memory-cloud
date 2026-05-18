@@ -68,34 +68,35 @@ class RememberRequest(BaseModel):
     summary: str = Field(..., min_length=10, max_length=500, description="検索用サマリー")
 
     # Layer 2: 文脈説明 (推奨)
-    context_summary: str | None = Field(None, max_length=2000, description="背景・文脈説明")
+    context_summary: str | None = Field(default=None, max_length=2000, description="背景・文脈説明")
 
     # Layer 3: 完全詳細
     content: str = Field(..., min_length=1, description="基本内容")
-    details: dict | None = Field(None, description="完全詳細（JSONB）")
+    details: dict | None = Field(default=None, description="完全詳細（JSONB）")
 
     # メタデータ
     type: str = Field(..., min_length=1, max_length=50, description="メモリタイプ")
-    importance: float = Field(0.5, ge=0.0, le=1.0, description="重要度 (0.0-1.0)")
+    importance: float = Field(default=0.5, ge=0.0, le=1.0, description="重要度 (0.0-1.0)")
     tags: list[str] = Field(default_factory=list, description="タグ")
-    context: dict | None = Field(None, description="コンテキスト情報")
+    context: dict | None = Field(default=None, description="コンテキスト情報")
 
     # Issue #213: Origin tracking for external integration
     source_uri: str | None = Field(
-        None,
+        default=None,
         max_length=2048,
         description="Origin URI: file://, http(s)://, vault://, obsidian://",
     )
     source_type: Literal["file", "url", "vault", "api", "manual"] | None = Field(
-        None, description="Origin type"
+        default=None, description="Origin type"
     )
 
     # Issue #215: Explicit links (declared_link edges)
     linked_memory_ids: list[UUID] | None = Field(
-        None, description="Explicit links to existing memories (creates declared_link edges)"
+        default=None,
+        description="Explicit links to existing memories (creates declared_link edges)",
     )
     linked_source_uris: list[str] | None = Field(
-        None,
+        default=None,
         description="Explicit links by source_uri (resolved at remember time, unresolved silently skipped)",
     )
 
@@ -150,16 +151,16 @@ class RecallRequest(BaseModel):
     """
 
     query: str = Field(..., min_length=1, description="検索クエリ")
-    k: int = Field(5, ge=1, le=100, description="返却結果数")
-    use_rerank: bool = Field(False, description="Reranking (Voyage/Cohere)を使用")
-    filters: dict | None = Field(None, description="オプショナルフィルタ")
+    k: int = Field(default=5, ge=1, le=100, description="返却結果数")
+    use_rerank: bool = Field(default=False, description="Reranking (Voyage/Cohere)を使用")
+    filters: dict | None = Field(default=None, description="オプショナルフィルタ")
     search_mode: str = Field(
-        "hybrid",
+        default="hybrid",
         pattern="^(hybrid|semantic|keyword)$",
         description="Search mode: hybrid (default), semantic (vector only), keyword (BM25 only)",
     )
     include_explore_hints: bool = Field(
-        False,
+        default=False,
         description="Include up to 3 explore_hints in response suggesting good seeds for explore()",
     )
 
@@ -286,9 +287,9 @@ class ReferenceResponse(TZAwareBaseModel):
 class ForgetRequest(BaseModel):
     """Request schema for forget() API."""
 
-    memory_id: UUID | None = Field(None, description="削除するメモリID")
-    query: str | None = Field(None, description="削除する検索クエリ")
-    k: int = Field(10, ge=1, le=100, description="削除する結果数（query指定時）")
+    memory_id: UUID | None = Field(default=None, description="削除するメモリID")
+    query: str | None = Field(default=None, description="削除する検索クエリ")
+    k: int = Field(default=10, ge=1, le=100, description="削除する結果数（query指定時）")
 
 
 class ForgetResponse(BaseModel):

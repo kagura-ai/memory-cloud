@@ -145,7 +145,7 @@ class OAuth2ClientCreateRequest(BaseModel):
     client_name: str = Field(
         ..., min_length=1, max_length=100, description="Human-readable client name"
     )
-    redirect_uris: list[str] = Field(..., min_items=1, description="Allowed redirect URIs")
+    redirect_uris: list[str] = Field(..., min_length=1, description="Allowed redirect URIs")
     provider: str = Field(
         default="custom",
         pattern="^(claude|chatgpt|cursor|custom)$",  # Add cursor
@@ -179,7 +179,7 @@ class DynamicClientRegistrationRequest(BaseModel):
     client_name: str = Field(
         default="MCP Client", min_length=1, max_length=100, description="Client name"
     )
-    redirect_uris: list[str] = Field(..., min_items=1, description="Redirect URIs")
+    redirect_uris: list[str] = Field(..., min_length=1, description="Redirect URIs")
     grant_types: list[str] = Field(
         default=["authorization_code", "refresh_token"], description="Grant types"
     )
@@ -199,7 +199,7 @@ class OAuth2ClientUpdateRequest(BaseModel):
     """OAuth2 Client update request."""
 
     client_name: str | None = Field(None, min_length=1, max_length=100)
-    redirect_uris: list[str] | None = Field(None, min_items=1)
+    redirect_uris: list[str] | None = Field(None, min_length=1)
     scope: str | None = None
     token_endpoint_auth_method: str | None = Field(
         None,

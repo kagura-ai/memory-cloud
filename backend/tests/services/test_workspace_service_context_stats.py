@@ -105,3 +105,51 @@ class TestGetCollectionMemoryStats:
         )
 
         assert result[str(other_user_private.id)] == (3, 0)
+
+
+class TestGetContextPublicApiStatsGuards:
+    """Pre-stats guard checks for get_context_public_api_stats.
+
+    Issue #612 (Tier B pyright re-enable) replaced a broken
+    ``self.get_context(...)`` call (AttributeError at runtime) with a
+    direct workspace-scoped Context query. These two tests lock in the
+    new pre-stats guards so the dead-code state cannot return.
+    """
+
+    @pytest.fixture
+    def mock_db(self):
+        return AsyncMock()
+
+    @pytest.fixture
+    def service(self, mock_db):
+        return WorkspaceService(mock_db)
+
+    @pytest.mark.asyncio
+    async def test_raises_not_found_when_context_missing(self, service, mock_db):
+        from utils.exceptions import NotFoundException
+
+        missing_result = MagicMock()
+        missing_result.scalar_one_or_none.return_value = None
+        mock_db.execute.return_value = missing_result
+
+        with pytest.raises(NotFoundException):
+            await service.get_context_public_api_stats(
+                workspace_id=uuid4(), context_id=uuid4(), days=7
+            )
+
+    @pytest.mark.asyncio
+    async def test_raises_validation_when_context_not_public(self, service, mock_db):
+        from utils.exceptions import ValidationError
+
+        private_ctx = MagicMock()
+        private_ctx.is_public = False
+        private_ctx.resource_id = None
+
+        ctx_result = MagicMock()
+        ctx_result.scalar_one_or_none.return_value = private_ctx
+        mock_db.execute.return_value = ctx_result
+
+        with pytest.raises(ValidationError, match="not public"):
+            await service.get_context_public_api_stats(
+                workspace_id=uuid4(), context_id=uuid4(), days=7
+            )

@@ -139,11 +139,13 @@ async def get_workspace_stats(
                 plan_name="free",
             )
 
-        user, workspace = row
+        db_user, workspace = row
 
         contexts_result = await db.execute(
             select(Context)
-            .where(Context.workspace_id == user.current_workspace_id, Context.deleted_at.is_(None))
+            .where(
+                Context.workspace_id == db_user.current_workspace_id, Context.deleted_at.is_(None)
+            )
             .order_by(Context.created_at)
         )
         contexts_list = contexts_result.scalars().all()
@@ -629,7 +631,7 @@ async def get_workspace_member_usage(
             )
             .group_by(Memory.user_id)
         )
-        memory_counts = dict(memory_counts_result.all())
+        memory_counts: dict[str, int] = {row[0]: row[1] for row in memory_counts_result.all()}
 
         # API calls today per user (batch query)
         api_today_result = await db.execute(
@@ -640,7 +642,7 @@ async def get_workspace_member_usage(
             )
             .group_by(UsageStatsModel.user_id)
         )
-        api_today = dict(api_today_result.all())
+        api_today: dict[str, int] = {row[0]: row[1] for row in api_today_result.all()}
 
         # API calls this week per user (batch query)
         api_week_result = await db.execute(
@@ -651,7 +653,7 @@ async def get_workspace_member_usage(
             )
             .group_by(UsageStatsModel.user_id)
         )
-        api_week = dict(api_week_result.all())
+        api_week: dict[str, int] = {row[0]: row[1] for row in api_week_result.all()}
 
         entries = [
             MemberUsageEntry(

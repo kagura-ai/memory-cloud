@@ -6,10 +6,12 @@ Issue #106: Refactored to use consolidated utilities
 """
 
 from datetime import datetime
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
-from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -991,22 +993,20 @@ async def delete_user(
         api_key_count = api_key_count_result.scalar() or 0
 
         # Delete memories and API keys
-        await db.execute(Memory.__table__.delete().where(Memory.user_id == user_id))
-        await db.execute(APIKey.__table__.delete().where(APIKey.user_id == user_id))
+        await db.execute(delete(Memory).where(Memory.user_id == user_id))
+        await db.execute(delete(APIKey).where(APIKey.user_id == user_id))
 
         # Delete OAuth2 clients owned by the user
-        await db.execute(OAuth2Client.__table__.delete().where(OAuth2Client.owner_id == user_id))
+        await db.execute(delete(OAuth2Client).where(OAuth2Client.owner_id == user_id))
 
         # Delete contexts owned by the user
-        await db.execute(Context.__table__.delete().where(Context.created_by == user_id))
+        await db.execute(delete(Context).where(Context.created_by == user_id))
 
         # Remove user from workspace memberships
-        await db.execute(
-            WorkspaceMember.__table__.delete().where(WorkspaceMember.user_id == user_id)
-        )
+        await db.execute(delete(WorkspaceMember).where(WorkspaceMember.user_id == user_id))
 
         # Delete workspaces owned by the user
-        await db.execute(Workspace.__table__.delete().where(Workspace.owner_user_id == user_id))
+        await db.execute(delete(Workspace).where(Workspace.owner_user_id == user_id))
 
         # Note: Qdrant points are automatically cleaned up via context deletion cascade
         # No need for legacy collection-per-user deletion
@@ -1171,7 +1171,7 @@ async def retry_failed_embeddings(
     stmt = (
         update(Memory).where(*conditions).values(embedding_status="pending", embedding_error=None)
     )
-    result = await db.execute(stmt)
+    result = cast(CursorResult[Any], await db.execute(stmt))
     await db.commit()
 
     reset_count = result.rowcount
