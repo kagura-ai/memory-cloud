@@ -397,6 +397,75 @@ async def test_shared_context_byok_gate_uses_per_context_embedding_model():
 
 
 @pytest.mark.asyncio
+async def test_cross_context_recall_rejects_mixed_privacy():
+    """#708 loop 6 (Copilot): cross-context recall MUST reject mixed privacy.
+
+    SearchService derives one ``is_shared_context`` value from the
+    primary context and applies it to every context's Qdrant filter.
+    Mixed privacy in the list would either drop the user_id filter
+    for a private secondary (leaking other users' memories) or keep
+    it for a shared primary (returning empty for legitimate readers).
+    Hard-reject at the API boundary mirrors the H3 (workspace_mismatch)
+    + same-embedding-model invariant pattern.
+    """
+    import json
+
+    from mcp_server.tools.memory import handle_recall
+
+    workspace_id = uuid4()
+    shared_ctx_id = uuid4()
+    private_ctx_id = uuid4()
+
+    # Two contexts, same workspace, MIXED privacy.
+    shared_ctx = MagicMock()
+    shared_ctx.id = shared_ctx_id
+    shared_ctx.workspace_id = workspace_id
+    shared_ctx.is_private = False
+    shared_ctx.name = "shared"
+    shared_ctx.display_name = "Shared"
+    shared_ctx.is_locked = False
+    private_ctx = MagicMock()
+    private_ctx.id = private_ctx_id
+    private_ctx.workspace_id = workspace_id
+    private_ctx.is_private = True
+    private_ctx.name = "private"
+    private_ctx.display_name = "Private"
+    private_ctx.is_locked = False
+
+    resolve_mock = AsyncMock(side_effect=[shared_ctx, private_ctx])
+
+    async def _fake_get_db():
+        yield AsyncMock()
+
+    # ``get_db`` and ``_resolve_context_for_read`` are lazy-imported inside
+    # ``handle_recall``; patching at the source module is required.
+    with (
+        patch("db.base.get_db", _fake_get_db),
+        patch(
+            "mcp_server.tools._helpers._resolve_context_for_read",
+            resolve_mock,
+        ),
+        patch("mcp_server.tools.memory._resolve_context_for_read", resolve_mock),
+    ):
+        result = await handle_recall(
+            args={
+                "query": "test",
+                "context_ids": [str(shared_ctx_id), str(private_ctx_id)],
+                "k": 5,
+            },
+            user_id="caller_user",
+            workspace_id=workspace_id,
+        )
+
+    # Response is a list with one TextContent — parse it.
+    assert len(result) == 1
+    body = json.loads(result[0].text)
+    assert body["status"] == "error"
+    assert body["error"] == "context_privacy_mismatch"
+    assert "privacy" in body["message"].lower()
+
+
+@pytest.mark.asyncio
 async def test_shared_context_byok_gate_deferred_past_empty_cluster_short_circuit():
     """#708 F5 (Copilot loop 2): empty cluster → no embedding call → no gate.
 

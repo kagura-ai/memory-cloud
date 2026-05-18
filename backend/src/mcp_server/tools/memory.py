@@ -263,6 +263,17 @@ async def handle_recall(
                 # Option A paid_by routing has a single source-of-truth
                 # workspace. Check inline so a mismatch short-circuits
                 # before paying further permission lookups.
+                #
+                # #708 loop 6 (Copilot): also reject MIXED privacy across
+                # the list. ``SearchService`` derives a single
+                # ``is_shared_context`` value from the primary and applies
+                # it to every context's Qdrant filter. If primary is
+                # shared and a secondary is private (which the handler
+                # permits when the caller is that private context's
+                # creator / ContextMember), dropping the ``user_id`` filter
+                # would leak memories authored by other users in the
+                # private secondary. Rejecting at API boundary mirrors
+                # the same-embedding-model invariant pattern below.
                 for cid in cross_context_ids[1:]:
                     cross_ctx = await _resolve_context_for_read(db, user_id, cid)
                     if cross_ctx.workspace_id != current_context.workspace_id:
@@ -270,6 +281,12 @@ async def handle_recall(
                             "workspace_mismatch",
                             "All contexts in cross-context recall must belong to "
                             "the same workspace.",
+                        )
+                    if cross_ctx.is_private != current_context.is_private:
+                        return _error_response(
+                            "context_privacy_mismatch",
+                            "All contexts in cross-context recall must share the "
+                            "same privacy setting (all shared or all private).",
                         )
 
                 # Validate all contexts use the same embedding model
