@@ -59,6 +59,12 @@ def _fake_embed_svc(tokens_used: int) -> MagicMock:
     svc.provider = "openai"
     svc.model = "text-embedding-3-small"
     svc.embed_with_usage = AsyncMock(return_value=([0.1] * 8, tokens_used))
+    # Issue #709: ``search_service`` now awaits ``embed_svc.resolve_paid_by(...)``
+    # to set the ``LLMCallLog.paid_by`` value dynamically (replaces the legacy
+    # hardcoded ``"platform"``). The mock returns ``"platform"`` so existing
+    # assertions on the paid_by column stay unchanged. AsyncMock is required —
+    # a plain ``MagicMock`` attribute can't be awaited.
+    svc.resolve_paid_by = AsyncMock(return_value="platform")
     return svc
 
 
