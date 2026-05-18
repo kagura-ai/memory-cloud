@@ -28,6 +28,7 @@ from utils.encryption import get_encryptor
 from utils.exceptions import (
     ConfigurationError,
     EmbeddingSpendCapExceeded,
+    NotFoundException,
     OpenAIError,
 )
 from utils.logger import get_logger
@@ -168,15 +169,16 @@ class EmbeddingService:
         # explicitly required a BYOK key (disallow_env_fallback=True), do NOT
         # silently route to the platform key — that would defeat PR #711's
         # BYOK-only spend cap and bypass the H1 preflight guard via TOCTOU.
-        if not disallow_env_fallback:
-            env_key = os.getenv("OPENAI_API_KEY")
-            if env_key:
-                logger.debug(
-                    "openai_api_key_from_env",
-                    user_id=user_id,
-                )
-                return env_key
-        else:
+        #
+        # #708 loop 8 (Copilot): when the disallow path fires we must NOT
+        # fall through to the ``ConfigurationError`` below — it would
+        # interpolate the source ``workspace_id`` into its message and the
+        # MCP exception serializer would leak that workspace UUID to the
+        # caller, defeating the H2 uniform-disclosure contract
+        # (CWE-639 / OWASP A01). Raise ``NotFoundException("Context")``
+        # instead so the recall handler maps it to the same uniform
+        # ``context_not_found`` response shape as a regular deny.
+        if disallow_env_fallback:
             logger.warning(
                 "openai_api_key_env_fallback_disallowed",
                 user_id=user_id,
@@ -184,6 +186,15 @@ class EmbeddingService:
                 context_id=context_id,
                 reason="option_a_shared_context_read",
             )
+            raise NotFoundException("Context")
+
+        env_key = os.getenv("OPENAI_API_KEY")
+        if env_key:
+            logger.debug(
+                "openai_api_key_from_env",
+                user_id=user_id,
+            )
+            return env_key
 
         if workspace_id:
             raise ConfigurationError(

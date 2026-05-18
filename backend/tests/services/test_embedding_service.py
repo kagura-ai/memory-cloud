@@ -361,12 +361,20 @@ class TestDisallowEnvFallback:
         return EmbeddingService(_make_mock_db())
 
     @pytest.mark.asyncio
-    async def test_disallow_env_fallback_raises_instead_of_env(self, service, monkeypatch):
-        """When ``disallow_env_fallback=True`` and no DB key found, raise.
+    async def test_disallow_env_fallback_raises_notfound_not_configerror(
+        self, service, monkeypatch
+    ):
+        """Loop 8 fix: TOCTOU deny path MUST raise ``NotFoundException``,
+        NOT ``ConfigurationError`` — the latter's message interpolates the
+        source ``workspace_id`` and the MCP exception serializer would
+        leak it (CWE-639 / OWASP A01).
 
-        Even with ``OPENAI_API_KEY`` set in the environment, the env
-        fallback path MUST be skipped for Option A reads.
+        Even with ``OPENAI_API_KEY`` set, the env fallback is skipped for
+        Option A reads. The raised ``NotFoundException`` is then mapped
+        by the handler to the uniform ``context_not_found`` response.
         """
+        from utils.exceptions import NotFoundException
+
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-platform-key")
 
         # Mock DB: no key found
@@ -374,13 +382,25 @@ class TestDisallowEnvFallback:
         execute_result.scalar_one_or_none.return_value = None
         service.db.execute = AsyncMock(return_value=execute_result)
 
-        with pytest.raises(ConfigurationError):
+        source_ws = "00000000-0000-0000-0000-000000000001"
+
+        with pytest.raises(NotFoundException) as exc_info:
             await service._get_user_api_key(
                 user_id="caller",
                 context_id="00000000-0000-0000-0000-000000000002",
-                workspace_id="00000000-0000-0000-0000-000000000001",
+                workspace_id=source_ws,
                 disallow_env_fallback=True,
             )
+
+        # Defense-in-depth: even though the handler crafts the response
+        # body (not the exception), assert the exception message does
+        # NOT include the source workspace_id in case it ever surfaces.
+        assert source_ws not in exc_info.value.message
+        assert source_ws not in str(exc_info.value.details)
+        # The exception type itself triggers the uniform mapping at the
+        # MCP handler — assert that's what we raised.
+        assert isinstance(exc_info.value, NotFoundException)
+        assert not isinstance(exc_info.value, ConfigurationError)
 
     @pytest.mark.asyncio
     async def test_default_allows_env_fallback(self, service, monkeypatch):
