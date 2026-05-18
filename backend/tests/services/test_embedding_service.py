@@ -262,3 +262,81 @@ class TestEmbeddingService:
 
                 # All users should use the same API key (from env)
                 assert mock_client.embeddings.create.call_count == len(users)
+
+
+class TestContextAwareBYOKThreading:
+    """#708 loop 4: context_id MUST thread through the BYOK probe chain.
+
+    ``_prepare_spend_cap_gate`` and ``resolve_paid_by`` both call
+    ``has_byok_key`` to decide whether the embedding cost is BYOK-billed.
+    Without ``context_id``, a workspace whose only BYOK row is scoped to
+    a DIFFERENT context would be falsely treated as having BYOK — the
+    cap would be applied to env-fallback calls and ``paid_by`` would log
+    "byok" for actually-platform-billed calls. These fences keep the
+    accounting check aligned with ``_get_user_api_key``'s key selection.
+    """
+
+    @pytest.fixture
+    def service(self):
+        """EmbeddingService with mock DB."""
+        return EmbeddingService(_make_mock_db())
+
+    @pytest.mark.asyncio
+    async def test_prepare_spend_cap_gate_passes_context_id_to_has_byok_key(self, service):
+        """``_prepare_spend_cap_gate`` MUST forward ``context_id`` to ``has_byok_key``."""
+        service.has_byok_key = AsyncMock(
+            return_value=False
+        )  # returns early; we only care about the call
+
+        ws_id = "00000000-0000-0000-0000-000000000001"
+        ctx_id = "00000000-0000-0000-0000-000000000002"
+
+        await service._prepare_spend_cap_gate(ws_id, context_id=ctx_id)
+
+        service.has_byok_key.assert_called_once_with(ws_id, context_id=ctx_id)
+
+    @pytest.mark.asyncio
+    async def test_resolve_paid_by_passes_context_id_to_has_byok_key(self, service):
+        """``resolve_paid_by`` MUST forward ``context_id`` to ``has_byok_key``."""
+        service.has_byok_key = AsyncMock(return_value=True)
+
+        ws_id = "00000000-0000-0000-0000-000000000001"
+        ctx_id = "00000000-0000-0000-0000-000000000002"
+
+        result = await service.resolve_paid_by(ws_id, context_id=ctx_id)
+
+        service.has_byok_key.assert_called_once_with(ws_id, context_id=ctx_id)
+        assert result == "byok"
+
+    @pytest.mark.asyncio
+    async def test_resolve_paid_by_returns_platform_when_byok_not_applicable(self, service):
+        """``resolve_paid_by`` returns "platform" when context-aware probe misses.
+
+        Regression fence: a workspace with BYOK scoped to a DIFFERENT
+        context (probe returns False) MUST log as "platform", matching
+        what ``_get_user_api_key`` will actually do (env fallback).
+        """
+        service.has_byok_key = AsyncMock(return_value=False)
+
+        result = await service.resolve_paid_by(
+            "00000000-0000-0000-0000-000000000001",
+            context_id="00000000-0000-0000-0000-000000000002",
+        )
+
+        assert result == "platform"
+
+    @pytest.mark.asyncio
+    async def test_prepare_spend_cap_gate_context_id_optional_for_backward_compat(self, service):
+        """``context_id`` defaults to None so legacy callers continue to compile.
+
+        The probe still mirrors ``_get_user_api_key``'s legacy behavior
+        when ``context_id`` is None — accepts any workspace-wide or
+        context-scoped key.
+        """
+        service.has_byok_key = AsyncMock(return_value=False)
+
+        await service._prepare_spend_cap_gate("00000000-0000-0000-0000-000000000001")
+
+        service.has_byok_key.assert_called_once_with(
+            "00000000-0000-0000-0000-000000000001", context_id=None
+        )

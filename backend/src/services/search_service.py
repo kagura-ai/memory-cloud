@@ -224,7 +224,14 @@ class SearchService:
                     workspace_id=workspace_id,
                     context_id=primary_context_id,
                     embedding_tokens=embedding_tokens,
-                    paid_by=await embed_svc.resolve_paid_by(workspace_id),
+                    # #708 loop 4: thread context_id so paid_by reflects the
+                    # actual key ``_get_user_api_key`` selected for THIS context.
+                    # Without it, env-fallback calls on a context whose workspace
+                    # has BYOK scoped to a DIFFERENT context would be falsely
+                    # logged as "byok" — corrupts cost-grade attribution (#524).
+                    paid_by=await embed_svc.resolve_paid_by(
+                        workspace_id, context_id=primary_context_id
+                    ),
                     fail_on_error=False,
                 )
             semantic_results = await search_memories_qdrant(

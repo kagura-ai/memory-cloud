@@ -179,6 +179,7 @@ class EmbeddingService:
     async def _prepare_spend_cap_gate(
         self,
         workspace_id: str | None,
+        context_id: str | None = None,
     ) -> tuple[EmbeddingSpendCapService | None, Workspace | None]:
         """Resolve the cap service + workspace and run the pre-call gate (#709).
 
@@ -198,10 +199,17 @@ class EmbeddingService:
         the post-call ``record_spend_from_tokens`` can reuse the row without a
         second SELECT. Raises ``EmbeddingSpendCapExceeded`` (HTTP 429,
         ``QUOTA-002``) when the BYOK daily / monthly cap has been reached.
+
+        Issue #708 loop 4: ``context_id`` mirrors ``has_byok_key``'s priority
+        so the cap gate fires only when ``_get_user_api_key`` would actually
+        select a BYOK row for THIS context — not for a key scoped to some
+        OTHER context in the same workspace. Without this parameter, a
+        workspace whose only BYOK is scoped to context_X would have the
+        cap incorrectly applied to env-fallback calls on context_Y.
         """
         if not workspace_id or self.provider == "ollama":
             return None, None
-        if not await self.has_byok_key(workspace_id):
+        if not await self.has_byok_key(workspace_id, context_id=context_id):
             return None, None
         from services.embedding_spend_cap_service import EmbeddingSpendCapService
 
@@ -212,7 +220,11 @@ class EmbeddingService:
         await cap_svc.check_cap_or_raise(cap_workspace)
         return cap_svc, cap_workspace
 
-    async def resolve_paid_by(self, workspace_id: str | None) -> str:
+    async def resolve_paid_by(
+        self,
+        workspace_id: str | None,
+        context_id: str | None = None,
+    ) -> str:
         """Resolve the ``LLMCallLog.paid_by`` value for this embed call (#709).
 
         Returns ``"byok"`` when the workspace owns the credential used for
@@ -224,10 +236,19 @@ class EmbeddingService:
         Centralizing the resolution here keeps the ``"byok" if … else
         "platform"`` rule in one place; downstream writers don't need to
         know how key sourcing works.
+
+        Issue #708 loop 4: ``context_id`` mirrors ``has_byok_key``'s
+        priority so the recorded ``paid_by`` matches what
+        ``_get_user_api_key`` actually returned. Without this parameter, a
+        workspace whose only BYOK is scoped to a different context would
+        have env-fallback calls falsely logged as ``"byok"`` — corrupting
+        billing analytics and the #524 cost-grade attribution path.
         """
         from models.llm_call_log import LLM_CALL_LOG_PAID_BY_VALUES
 
-        paid_by = "byok" if await self.has_byok_key(workspace_id) else "platform"
+        paid_by = (
+            "byok" if await self.has_byok_key(workspace_id, context_id=context_id) else "platform"
+        )
         assert paid_by in LLM_CALL_LOG_PAID_BY_VALUES
         return paid_by
 
@@ -426,7 +447,11 @@ class EmbeddingService:
                 return vector, 0
 
             # Issue #709: BYOK embedding spend cap gate.
-            cap_svc, cap_workspace = await self._prepare_spend_cap_gate(workspace_id)
+            # #708 loop 4: thread ``context_id`` so the gate's BYOK probe
+            # mirrors the same priority ``_get_user_api_key`` uses below.
+            cap_svc, cap_workspace = await self._prepare_spend_cap_gate(
+                workspace_id, context_id=context_id
+            )
 
             client = await self._get_client(user_id, context_id, workspace_id)
             response = await client.embeddings.create(
@@ -544,7 +569,11 @@ class EmbeddingService:
             if uncached_texts:
                 # Issue #709: cap gate covers the whole batch — single check
                 # before the bulk API call.
-                cap_svc, cap_workspace = await self._prepare_spend_cap_gate(workspace_id)
+                # #708 loop 4: thread ``context_id`` so the gate's BYOK probe
+                # mirrors the same priority ``_get_user_api_key`` uses below.
+                cap_svc, cap_workspace = await self._prepare_spend_cap_gate(
+                    workspace_id, context_id=context_id
+                )
 
                 client = await self._get_client(user_id, context_id, workspace_id)
                 response = await client.embeddings.create(
