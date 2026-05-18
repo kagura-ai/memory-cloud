@@ -81,6 +81,37 @@ class EmailService(Protocol):
         """
         ...
 
+    async def send_embedding_spend_alert(
+        self,
+        *,
+        to_email: str,
+        workspace_id: str,
+        workspace_name: str,
+        period: str,
+        current_usd: float,
+        cap_usd: float,
+        threshold_pct: int,
+    ) -> bool:
+        """Notify the workspace owner that an embedding-spend threshold was crossed (#709).
+
+        Args:
+            to_email: Workspace owner's email address (resolved by
+                ``EmbeddingSpendCapService`` from ``workspace.owner_user_id``).
+            workspace_id: Workspace UUID (string form) for cross-reference.
+            workspace_name: Display name for the email body.
+            period: ``"daily"`` or ``"monthly"`` — selects window vocabulary
+                in the message.
+            current_usd: BYOK embedding spend so far in the current period.
+            cap_usd: The effective cap (tier default or per-workspace override).
+            threshold_pct: ``80`` (warning) or ``100`` (cap reached;
+                future BYOK calls will be rejected until the period rolls).
+
+        Returns:
+            True on delivery (or successful log fallback), False on hard
+            failure. Implementations MUST NOT raise.
+        """
+        ...
+
     async def send_erasure_confirmation(
         self,
         *,
@@ -178,6 +209,31 @@ class LoggingEmailService:
             request_id=request_id,
             email_dispatch_required=True,
             template="erasure_confirmation",
+        )
+        return True
+
+    async def send_embedding_spend_alert(
+        self,
+        *,
+        to_email: str,
+        workspace_id: str,
+        workspace_name: str,
+        period: str,
+        current_usd: float,
+        cap_usd: float,
+        threshold_pct: int,
+    ) -> bool:
+        logger.info(
+            "embedding_spend_alert_email",
+            to_email=to_email,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            period=period,
+            current_usd=round(current_usd, 4),
+            cap_usd=round(cap_usd, 4),
+            threshold_pct=threshold_pct,
+            email_dispatch_required=True,
+            template="embedding_spend_alert",
         )
         return True
 

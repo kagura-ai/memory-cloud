@@ -19,6 +19,7 @@ import secrets
 import uuid
 from datetime import date as date_type
 from datetime import datetime
+from decimal import Decimal
 from functools import cached_property
 from typing import Any
 
@@ -32,6 +33,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     func,
@@ -1357,6 +1359,14 @@ class Workspace(Base):
         Integer, nullable=False, server_default="0"
     )  # Issue #560: Sleep-enabled contexts addon (PRO-only)
 
+    # Issue #709: Per-workspace embedding spend caps (USD, BYOK-only). NULL =
+    # "inherit tier default from ``PlanTier.embedding_*_cap_usd``"; non-NULL =
+    # admin-set override. These are **override** columns (REPLACE the tier
+    # default), not addons (ADD to it) — the cap is a ceiling, not a quota
+    # that addons expand. CHECK ``>= 0`` enforced in migration ``e16_709``.
+    embedding_daily_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 6), nullable=True)
+    embedding_monthly_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 6), nullable=True)
+
     # Issue #494: per-workspace default + quality model selection for
     # Memory Broadlistening analyses. Both nullable — analysis is gated
     # by a separate allowlist; until a workspace is opted-in there's no
@@ -1494,6 +1504,46 @@ class Workspace(Base):
             self._plan_tier.sleep_enabled_contexts_limit,
             self.addon_sleep_contexts_bonus,
         )
+
+    @property
+    def effective_embedding_daily_cap_usd(self) -> Decimal | None:
+        """Daily embedding spend cap (USD, BYOK-only): override or tier default.
+
+        Resolution order (#709):
+
+        1. If ``Workspace.embedding_daily_cap_usd`` is set (admin override),
+           use that value verbatim.
+        2. Else if ``PlanTier.embedding_daily_cap_usd`` is set, use that.
+        3. Else return ``None`` — no cap configured, pass-through.
+
+        Unlike addon quotas, this is an **override** not an addition: an
+        admin lowering the cap for a single workspace REPLACES the tier
+        default rather than stacking with it. ``None`` means "uncapped" —
+        distinct from ``0`` which would mean "no embedding spend allowed"
+        and is rejected at the ``CHECK (... >= 0)`` constraint anyway only
+        when the value is explicitly written (NULL bypasses the check).
+        """
+        # The Workspace column is ``Mapped[Decimal | None]`` (NUMERIC(10,6)),
+        # so the override value is already Decimal — no str round-trip.
+        # The PlanTier field is ``float | None``, so the tier-default branch
+        # uses ``Decimal(str(...))`` to avoid float-repr precision loss.
+        if self.embedding_daily_cap_usd is not None:
+            return self.embedding_daily_cap_usd
+        tier_cap = self._plan_tier.embedding_daily_cap_usd
+        return Decimal(str(tier_cap)) if tier_cap is not None else None
+
+    @property
+    def effective_embedding_monthly_cap_usd(self) -> Decimal | None:
+        """Monthly embedding spend cap (USD, BYOK-only): override or tier default.
+
+        Same resolution order and semantics as
+        ``effective_embedding_daily_cap_usd`` — workspace override beats
+        tier default; ``None`` means uncapped. (#709)
+        """
+        if self.embedding_monthly_cap_usd is not None:
+            return self.embedding_monthly_cap_usd
+        tier_cap = self._plan_tier.embedding_monthly_cap_usd
+        return Decimal(str(tier_cap)) if tier_cap is not None else None
 
     # Stripe billing (Issue #351)
     stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)

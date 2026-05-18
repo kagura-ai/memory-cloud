@@ -342,6 +342,47 @@ class QuotaExceededError(MemoryCloudException):
         )
 
 
+class EmbeddingSpendCapExceeded(QuotaExceededError):
+    """BYOK embedding spend cap reached (429).
+
+    Issue #709: raised when a workspace's daily or monthly embedding spend
+    (summed from ``LLMCallLog.cost_usd WHERE paid_by='byok'`` via the Redis
+    counter) has reached the effective cap for that workspace. Used as the
+    pre-call gate in ``EmbeddingService._get_client`` so the actual external
+    API call never fires for over-cap requests — protecting workspace owners
+    from runaway BYOK costs (the #708 Option A "Embedding Drain Attack"
+    threat).
+
+    ``period`` is ``"daily"`` or ``"monthly"`` so the frontend can render the
+    right message and link to the right settings panel. Concrete USD figures
+    are kept in ``details`` so structured logs / responses can show the
+    operator how far over the cap they are without leaking other workspace
+    state.
+    """
+
+    def __init__(
+        self,
+        message: str = "Embedding spend cap exceeded",
+        *,
+        period: str,
+        cap_usd: float,
+        current_usd: float,
+        workspace_id: str | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            quota_type=f"embedding_spend_{period}",
+            period=period,
+            cap_usd=cap_usd,
+            current_usd=current_usd,
+            workspace_id=workspace_id,
+        )
+        # QUOTA-002 distinguishes the embedding cap from the generic quota
+        # error so client-side error handlers can branch (e.g. show a
+        # "raise your cap" CTA instead of "upgrade your plan").
+        self.error_code = "QUOTA-002"
+
+
 class FeatureNotAvailableError(MemoryCloudException):
     """Feature not available on current plan tier (403)."""
 

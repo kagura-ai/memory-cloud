@@ -11,6 +11,7 @@ Allows admins to:
 """
 
 import dataclasses
+from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -91,6 +92,25 @@ class UsageValues(BaseModel):
     members: int
 
 
+class SpendCapValues(BaseModel):
+    """BYOK embedding spend cap values (Issue #709).
+
+    All amounts are USD floats; ``None`` means "uncapped". Both the override
+    (per-workspace, on ``Workspace``) and the tier default (on ``PlanTier``)
+    are surfaced so the admin UI can render "override / tier default /
+    effective" the same way the addon breakdown does for additive quotas.
+    """
+
+    tier_default_daily_usd: float | None = None
+    tier_default_monthly_usd: float | None = None
+    override_daily_usd: float | None = None
+    override_monthly_usd: float | None = None
+    effective_daily_usd: float | None = None
+    effective_monthly_usd: float | None = None
+    current_daily_usd: float = 0.0
+    current_monthly_usd: float = 0.0
+
+
 class WorkspaceQuotaDetail(BaseModel):
     """Detailed quota breakdown for a workspace."""
 
@@ -101,6 +121,7 @@ class WorkspaceQuotaDetail(BaseModel):
     addon: AddonValues
     effective: QuotaBreakdown
     usage: UsageValues
+    spend_cap: SpendCapValues | None = None  # Issue #709
 
 
 class UpdateAddonRequest(BaseModel):
@@ -111,6 +132,24 @@ class UpdateAddonRequest(BaseModel):
     addon_member_bonus: int = Field(0, ge=0)
     addon_context_bonus: int = Field(0, ge=0)
     addon_analysis_bonus: int = Field(0, ge=0)
+
+
+class UpdateSpendCapRequest(BaseModel):
+    """Request to update the per-workspace embedding spend cap (Issue #709).
+
+    Both fields are optional: ``None`` means "remove the per-workspace
+    override and fall back to the tier default" (NOT "uncap"). To genuinely
+    uncap a workspace below its tier default, an admin would need to bump
+    the workspace to a tier with no default cap (or override the tier's
+    cap via ``plan_*_embedding_*_cap_usd`` env vars).
+
+    Values are bounded ``>= 0`` (CHECK constraint enforces same on the DB);
+    the route handler additionally rejects values above the workspace's
+    current tier default to keep tier-bounded edit affordance honest.
+    """
+
+    embedding_daily_cap_usd: float | None = Field(None, ge=0)
+    embedding_monthly_cap_usd: float | None = Field(None, ge=0)
 
 
 class PlanChangeAuditEntry(BaseModel):
@@ -150,6 +189,8 @@ class PlanTierInfo(BaseModel):
     analysis_runs_per_day: int
     storage_limit_bytes: int
     sleep_enabled_contexts_limit: int
+    embedding_daily_cap_usd: float | None = None  # Issue #709
+    embedding_monthly_cap_usd: float | None = None  # Issue #709
     allows_shared_contexts: bool
     features: list[str]
 
@@ -513,6 +554,37 @@ async def get_workspace_quotas(
         )
         member_count = (member_count_result.scalar() or 0) + (pending_invite_result.scalar() or 0)
 
+        # Issue #709: BYOK embedding spend cap breakdown + current spend.
+        # Spend reads from Redis counters via ``EmbeddingSpendCapService``;
+        # Redis miss returns 0 (admin UI should treat 0 as "unknown" when
+        # paired with an out-of-band Redis alert).
+        from services.embedding_spend_cap_service import EmbeddingSpendCapService
+
+        spend_cap_svc = EmbeddingSpendCapService(db)
+        current_daily, current_monthly = await spend_cap_svc.get_current_spend(ws_uuid)
+        effective_daily = workspace.effective_embedding_daily_cap_usd
+        effective_monthly = workspace.effective_embedding_monthly_cap_usd
+        spend_cap_payload = SpendCapValues(
+            tier_default_daily_usd=plan_tier.embedding_daily_cap_usd,
+            tier_default_monthly_usd=plan_tier.embedding_monthly_cap_usd,
+            override_daily_usd=(
+                float(workspace.embedding_daily_cap_usd)
+                if workspace.embedding_daily_cap_usd is not None
+                else None
+            ),
+            override_monthly_usd=(
+                float(workspace.embedding_monthly_cap_usd)
+                if workspace.embedding_monthly_cap_usd is not None
+                else None
+            ),
+            effective_daily_usd=float(effective_daily) if effective_daily is not None else None,
+            effective_monthly_usd=(
+                float(effective_monthly) if effective_monthly is not None else None
+            ),
+            current_daily_usd=float(current_daily),
+            current_monthly_usd=float(current_monthly),
+        )
+
         return WorkspaceQuotaDetail(
             workspace_id=workspace_id,
             workspace_name=workspace.name,
@@ -543,6 +615,7 @@ async def get_workspace_quotas(
                 contexts=context_count,
                 members=member_count,
             ),
+            spend_cap=spend_cap_payload,
         )
 
 
@@ -636,3 +709,102 @@ async def update_workspace_quotas(
         )
 
         return {"message": f"Quota addons updated for workspace {workspace.name}"}
+
+
+def _reject_above_tier(
+    field_name: str,
+    requested: float | None,
+    tier_default: float | None,
+) -> None:
+    """Raise HTTP 400 if ``requested`` exceeds the tier default (Issue #709).
+
+    ``None`` on ``requested`` (clear override) is always allowed; ``None``
+    on ``tier_default`` (uncapped tier) makes the override unbounded by
+    design. Shared by both daily and monthly cap fields in
+    ``update_workspace_spend_cap`` so the error wording stays identical.
+    """
+    if requested is None or tier_default is None:
+        return
+    if requested > tier_default:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{field_name} ({requested}) exceeds tier default ({tier_default}) — "
+                "upgrade the plan or adjust the tier env override to lift this ceiling"
+            ),
+        )
+
+
+@router.put("/workspaces/{workspace_id}/spend-cap")
+async def update_workspace_spend_cap(
+    workspace_id: str,
+    request: UpdateSpendCapRequest,
+    admin_user: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update the per-workspace embedding spend cap override (Issue #709).
+
+    Setting a field to ``None`` removes the override and falls back to the
+    tier default. Setting a numeric value (>= 0) overrides the tier default
+    for THIS workspace only. The handler rejects override values above the
+    workspace's current tier default — admins lift the cap by upgrading the
+    plan tier (or via ``plan_*_embedding_*_cap_usd`` env vars), not by
+    raising individual workspaces past their tier ceiling.
+
+    Concrete values are written through the SQLAlchemy ORM; the underlying
+    ``CHECK (embedding_*_cap_usd >= 0)`` constraint in migration
+    ``e16_709`` is the database-level backstop should the route validation
+    ever be bypassed.
+    """
+    ws_uuid = UUID(workspace_id)
+
+    async with db_transaction(db, "update_workspace_spend_cap", "Failed to update spend cap"):
+        result = await db.execute(select(Workspace).where(Workspace.id == ws_uuid))
+        workspace = result.scalar_one_or_none()
+        if not workspace:
+            raise HTTPException(status_code=404, detail="Workspace not found")
+
+        plan_tier = get_plan_tier(workspace.plan_name)
+
+        # Tier-bounded edit: refuse to set an override above the tier default.
+        # ``None`` (clearing the override) is always allowed.
+        _reject_above_tier(
+            "embedding_daily_cap_usd",
+            request.embedding_daily_cap_usd,
+            plan_tier.embedding_daily_cap_usd,
+        )
+        _reject_above_tier(
+            "embedding_monthly_cap_usd",
+            request.embedding_monthly_cap_usd,
+            plan_tier.embedding_monthly_cap_usd,
+        )
+
+        old_daily = workspace.embedding_daily_cap_usd
+        old_monthly = workspace.embedding_monthly_cap_usd
+
+        workspace.embedding_daily_cap_usd = (
+            Decimal(str(request.embedding_daily_cap_usd))
+            if request.embedding_daily_cap_usd is not None
+            else None
+        )
+        workspace.embedding_monthly_cap_usd = (
+            Decimal(str(request.embedding_monthly_cap_usd))
+            if request.embedding_monthly_cap_usd is not None
+            else None
+        )
+
+        await db.commit()
+
+        logger.info(
+            "workspace_spend_cap_updated",
+            workspace_id=workspace_id,
+            admin_user=admin_user["user_id"],
+            changes={
+                "embedding_daily_cap_usd": (f"{old_daily} -> {request.embedding_daily_cap_usd}"),
+                "embedding_monthly_cap_usd": (
+                    f"{old_monthly} -> {request.embedding_monthly_cap_usd}"
+                ),
+            },
+        )
+
+        return {"message": f"Spend cap updated for workspace {workspace.name}"}

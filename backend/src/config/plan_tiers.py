@@ -78,6 +78,12 @@ class PlanTier:
     analysis_runs_per_day: int = 0  # Issue #494: Memory Broadlistening analyses/day
     storage_limit_bytes: int = 0  # Issue #485: File-storage hard cap per workspace
     sleep_enabled_contexts_limit: int = 0  # Issue #560: Sleep-mode contexts cap (PRO-only)
+    # Issue #709: Per-workspace BYOK embedding spend cap (USD). ``None`` means
+    # "no tier-default cap" — uncapped unless an admin sets a per-workspace
+    # override. ``Workspace.embedding_*_cap_usd`` (when set) takes precedence
+    # over these tier defaults; see ``Workspace.effective_embedding_*_cap_usd``.
+    embedding_daily_cap_usd: float | None = None
+    embedding_monthly_cap_usd: float | None = None
     # Issue #661's ``max_owned_workspaces`` field was removed in #675 — the
     # user-level workspace cap is now derived from ``users.workspace_slot_bonus``
     # (``cap = 1 + bonus``), independent of the workspace's plan tier.
@@ -104,6 +110,8 @@ PLAN_FREE = PlanTier(
     public_calls_per_day=0,  # Free plan: no public contexts
     public_calls_per_week=0,
     storage_limit_bytes=100 * 1024 * 1024,  # Issue #485: 100 MB
+    embedding_daily_cap_usd=0.50,  # Issue #709: conservative drain-attack guard
+    embedding_monthly_cap_usd=15.0,  # Issue #709
     allows_shared_contexts=False,  # Issue #271: Private contexts only
     features=frozenset({"api_keys", "oauth"}),  # Free plan includes OAuth (App Credentials)
 )
@@ -127,6 +135,8 @@ PLAN_BASIC = PlanTier(
     public_calls_per_day=0,  # Basic plan: no public contexts (PRO only)
     public_calls_per_week=0,
     storage_limit_bytes=1 * 1024 * 1024 * 1024,  # Issue #485: 1 GiB
+    embedding_daily_cap_usd=2.0,  # Issue #709: intermediate paid-tier cap
+    embedding_monthly_cap_usd=60.0,  # Issue #709
     features=frozenset({"api_keys", "reranking", "oauth"}),  # Public contexts removed (PRO only)
 )
 
@@ -152,6 +162,8 @@ PLAN_PRO = PlanTier(
     analysis_runs_per_day=3,  # Issue #494: Memory Broadlistening (Pro only; FREE/BASIC=0)
     storage_limit_bytes=10 * 1024 * 1024 * 1024,  # Issue #485: 10 GiB
     sleep_enabled_contexts_limit=3,  # Issue #560: Sleep mode (Pro only; FREE/BASIC=0)
+    embedding_daily_cap_usd=10.0,  # Issue #709: PRO ceiling, conservative
+    embedding_monthly_cap_usd=300.0,  # Issue #709
     features=frozenset(
         {
             "api_keys",
@@ -199,13 +211,15 @@ def _apply_settings_overrides() -> None:
 
     settings = get_settings()
 
-    override_map: dict[str, dict[str, int | str | None]] = {
+    override_map: dict[str, dict[str, int | float | str | None]] = {
         PlanName.FREE: {
             "max_contexts_per_workspace": settings.plan_free_max_contexts,
             "memory_limit": settings.plan_free_memory_limit,
             "mcp_calls_per_day": settings.plan_free_mcp_calls_per_day,
             "storage_limit_bytes": settings.plan_free_storage_limit_bytes,
             "sleep_enabled_contexts_limit": settings.plan_free_sleep_enabled_contexts_limit,
+            "embedding_daily_cap_usd": settings.plan_free_embedding_daily_cap_usd,
+            "embedding_monthly_cap_usd": settings.plan_free_embedding_monthly_cap_usd,
             "display_name": settings.plan_free_display_name,
         },
         PlanName.BASIC: {
@@ -214,6 +228,8 @@ def _apply_settings_overrides() -> None:
             "mcp_calls_per_day": settings.plan_basic_mcp_calls_per_day,
             "storage_limit_bytes": settings.plan_basic_storage_limit_bytes,
             "sleep_enabled_contexts_limit": settings.plan_basic_sleep_enabled_contexts_limit,
+            "embedding_daily_cap_usd": settings.plan_basic_embedding_daily_cap_usd,
+            "embedding_monthly_cap_usd": settings.plan_basic_embedding_monthly_cap_usd,
             "display_name": settings.plan_basic_display_name,
         },
         PlanName.PRO: {
@@ -222,6 +238,8 @@ def _apply_settings_overrides() -> None:
             "mcp_calls_per_day": settings.plan_pro_mcp_calls_per_day,
             "storage_limit_bytes": settings.plan_pro_storage_limit_bytes,
             "sleep_enabled_contexts_limit": settings.plan_pro_sleep_enabled_contexts_limit,
+            "embedding_daily_cap_usd": settings.plan_pro_embedding_daily_cap_usd,
+            "embedding_monthly_cap_usd": settings.plan_pro_embedding_monthly_cap_usd,
             "display_name": settings.plan_pro_display_name,
         },
     }
