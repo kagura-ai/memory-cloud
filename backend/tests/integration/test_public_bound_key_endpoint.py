@@ -172,9 +172,22 @@ def stub_search_service(monkeypatch):
 
 @pytest_asyncio.fixture
 async def client():
-    """ASGI httpx client. Lifespan startup is skipped because
-    ``get_redis_client()`` and ``db.base``'s engine factory are lazy — they
-    cold-start on first use.
+    """ASGI httpx client.
+
+    ``httpx.ASGITransport`` does **not** dispatch ASGI ``lifespan.startup`` /
+    ``lifespan.shutdown`` events to the wrapped app — it handles only the
+    ``http.request`` / ``http.response.*`` scope (verified against httpx
+    0.28 ``_transports/asgi.py``). This is the desired behavior here: the
+    repo's ``api/main.py`` lifespan starts APScheduler with ~9 task families
+    (neural, mcp, credentials, embedding, resource_indexer, sleep, bm25_drift,
+    erasure, file), which would otherwise leak background work into the
+    pytest event loop. Module-level resources required by the route
+    (``get_redis_client()``, ``db.base`` engine factory) are lazy and
+    cold-start on first use, so skipping lifespan is safe for the
+    request-level contract this file exercises.
+
+    If a future test needs lifespan-started resources, switch to
+    ``asgi_lifespan.LifespanManager`` rather than relying on ASGITransport.
     """
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
