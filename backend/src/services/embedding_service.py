@@ -182,15 +182,26 @@ class EmbeddingService:
     ) -> tuple[EmbeddingSpendCapService | None, Workspace | None]:
         """Resolve the cap service + workspace and run the pre-call gate (#709).
 
-        Returns ``(None, None)`` for skip cases — Ollama (no real provider
-        cost), missing ``workspace_id`` (no caller scope), or a workspace
-        row that disappears between request entry and embed call. Otherwise
-        loads the workspace ONCE and runs ``check_cap_or_raise`` so the
-        post-call ``record_spend_from_tokens`` can reuse the row without a
+        Returns ``(None, None)`` for skip cases:
+
+        - **Ollama** — no real provider cost; cap is irrelevant.
+        - **Missing ``workspace_id``** — no caller scope to resolve a cap against.
+        - **No BYOK credential** — the cap is **BYOK-scoped by design** (#708
+          drain-attack mitigation). A call falling back to ``OPENAI_API_KEY`` env
+          is platform-paid; capping it would rate-limit dev/demo workspaces that
+          were never the threat model. Matches the contract asserted by
+          ``EmbeddingSpendCapExceeded`` (``utils/exceptions.py``) and the cap
+          service module docstring (``embedding_spend_cap_service.py``).
+        - **Workspace row missing** — disappeared between request entry and embed.
+
+        Otherwise loads the workspace ONCE and runs ``check_cap_or_raise`` so
+        the post-call ``record_spend_from_tokens`` can reuse the row without a
         second SELECT. Raises ``EmbeddingSpendCapExceeded`` (HTTP 429,
         ``QUOTA-002``) when the BYOK daily / monthly cap has been reached.
         """
         if not workspace_id or self.provider == "ollama":
+            return None, None
+        if not await self.has_byok_key(workspace_id):
             return None, None
         from services.embedding_spend_cap_service import EmbeddingSpendCapService
 
