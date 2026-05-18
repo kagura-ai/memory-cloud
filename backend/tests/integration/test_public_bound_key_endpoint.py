@@ -1,7 +1,5 @@
 """Route-level integration tests for the public-bound API key flow.
 
-Issue #630 — closes the gate2 QA Lead yellow verdict from #626 / PR #628.
-
 Exercises the composition layer that unit tests miss: header parsing →
 pre-auth bucket → IDOR guard → context lookup → per-key bucket →
 UsageStats attribution → response — end-to-end via ``httpx.AsyncClient``
@@ -13,9 +11,8 @@ Each test seeds a unique ``uuid4()`` context_id, so the Redis bucket keys
 ``public_bound_key:{key_id}:minute``) never collide across tests — no
 ``flushdb`` and no order coupling.
 
-``API_KEY_SECRET`` is already set deterministically by
-``backend/tests/integration/conftest.py:42`` (``setdefault`` to an ephemeral
-test secret); no per-test monkeypatch needed.
+``API_KEY_SECRET`` is set deterministically by the integration ``conftest.py``
+(``setdefault`` to an ephemeral test secret); no per-test monkeypatch needed.
 """
 
 from __future__ import annotations
@@ -31,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.main import app
 from auth.api_keys import APIKeyManager
 from db.redis import get_redis_client
-from models.auth import Context, UsageStats, Workspace, WorkspaceMember
+from models.auth import Context, UsageStats, WorkspaceMember
 
 from ._admin_helpers import make_user, make_workspace
 
@@ -40,10 +37,8 @@ from ._admin_helpers import make_user, make_workspace
 # ---------------------------------------------------------------------------
 
 
-async def _seed_public_context(
-    db: AsyncSession, *, is_public: bool = True
-) -> tuple[Workspace, Context, str]:
-    """Seed User + Workspace (pro plan) + Context, return ``(ws, ctx, user_id)``.
+async def _seed_public_context(db: AsyncSession) -> tuple[Context, str]:
+    """Seed User + Workspace (pro plan) + Context, return ``(ctx, owner_user_id)``.
 
     Pro plan is required because ``bound_public_calls_per_minute > 0`` is
     a precondition for bound-key minting / per-key bucket assertions.
@@ -64,12 +59,11 @@ async def _seed_public_context(
         name=f"pub-{uuid4().hex[:8]}",
         created_by=user.user_id,
         is_private=False,
-        is_public=is_public,
+        is_public=True,
     )
     db.add(ctx)
     await db.commit()
-
-    return ws, ctx, user.user_id
+    return ctx, user.user_id
 
 
 async def _mint_bound_key(
@@ -89,11 +83,16 @@ async def _mint_bound_key(
     return plaintext, row.id
 
 
-async def _mint_owner_key(db: AsyncSession, user_id: str, *, name: str = "owner-key") -> str:
+async def _mint_owner_key(db: AsyncSession, user_id: str) -> str:
     """Create an owner-scoped (non-bound, non-workspace) API key. Returns plaintext."""
-    plaintext, _ = await APIKeyManager(db).create_key(name=name, user_id=user_id)
+    plaintext, _ = await APIKeyManager(db).create_key(name="owner-key", user_id=user_id)
     await db.commit()
     return plaintext
+
+
+# ---------------------------------------------------------------------------
+# Redis assertion helpers
+# ---------------------------------------------------------------------------
 
 
 async def _bucket_count(redis_key: str) -> int:
@@ -104,12 +103,14 @@ async def _bucket_count(redis_key: str) -> int:
 
 
 async def _bucket_reset(*redis_keys: str) -> None:
-    """Delete the given Redis keys so per-key bucket assertions start from a
-    clean baseline. The unique-``uuid4()`` context_id strategy already isolates
-    the ``public_search:{ctx}:minute`` and ``public_search_pre_auth:{ctx}:minute``
-    buckets, but ``public_bound_key:{key_id}:minute`` keys on the integer
-    ``api_keys.id`` — which can collide with stale Redis state from a prior run
-    when the test DB is recreated with ``TRUNCATE ... RESTART IDENTITY``.
+    """Delete the given Redis keys so per-key bucket assertions start clean.
+
+    Unique-``uuid4()`` context_ids already isolate the
+    ``public_search:{ctx}:minute`` and ``public_search_pre_auth:{ctx}:minute``
+    buckets. But ``public_bound_key:{key_id}:minute`` keys on the integer
+    ``api_keys.id``, which can collide with stale Redis state (60s TTL) from
+    a prior run after the test DB is recreated with
+    ``TRUNCATE ... RESTART IDENTITY``.
     """
     if not redis_keys:
         return
@@ -117,16 +118,34 @@ async def _bucket_reset(*redis_keys: str) -> None:
     await client.delete(*redis_keys)
 
 
-def _error_detail(response_json: dict) -> str:
-    """Return the human-readable error detail across both response shapes.
+async def _assert_buckets(
+    ctx_id: UUID,
+    *,
+    anon: int | None = None,
+    pre_auth: int | None = None,
+    key_id: int | None = None,
+    bound: int | None = None,
+) -> None:
+    """Assert Redis bucket counters in one call.
 
-    ``HTTPException`` (used by ``_resolve_public_attribution``) emits
-    ``{"detail": "..."}``. ``MemoryCloudException`` subclasses
-    (``AuthorizationError``, ``NotFoundException``) flow through
-    ``memory_cloud_exception_handler`` which emits
-    ``{"error": ..., "message": ..., "details": {}}``. Tests assert on
-    semantic content rather than wire shape — this helper centralizes
-    the dispatch so a single error-handler refactor doesn't ripple
+    Args left as ``None`` are not asserted. ``bound`` is paired with
+    ``key_id`` — both required to assert the per-key bucket.
+    """
+    if anon is not None:
+        assert await _bucket_count(f"public_search:{ctx_id}:minute") == anon
+    if pre_auth is not None:
+        assert await _bucket_count(f"public_search_pre_auth:{ctx_id}:minute") == pre_auth
+    if key_id is not None and bound is not None:
+        assert await _bucket_count(f"public_bound_key:{key_id}:minute") == bound
+
+
+def _error_detail(response_json: dict) -> str:
+    """Return the error detail across both response shapes.
+
+    ``HTTPException`` emits ``{"detail": "..."}``. ``MemoryCloudException``
+    subclasses flow through ``memory_cloud_exception_handler`` which emits
+    ``{"error": ..., "message": ..., "details": {}}``. Centralizing the
+    dispatch here keeps a single error-handler refactor from rippling
     across every case.
     """
     return response_json.get("detail") or response_json.get("message") or ""
@@ -139,20 +158,15 @@ def _error_detail(response_json: dict) -> str:
 
 @pytest.fixture
 def stub_search_service(monkeypatch):
-    """Replace ``SearchService.hybrid_search`` with a no-op returning ``[]``.
-
-    Lets the 200-path tests reach ``log_usage`` and ``PublicSearchResponse``
-    without a live Qdrant / embedding-service dependency. Tests that need
-    payload-shape assertions can override this via further patching.
+    """Replace ``SearchService.hybrid_search`` with a no-op returning ``[]``
+    so 200-path tests reach ``log_usage`` and ``PublicSearchResponse`` without
+    a live Qdrant / embedding-service dependency.
     """
 
     async def _stub(self, **kwargs):  # noqa: ARG001 — signature mirrors caller
         return []
 
-    monkeypatch.setattr(
-        "services.search_service.SearchService.hybrid_search",
-        _stub,
-    )
+    monkeypatch.setattr("services.search_service.SearchService.hybrid_search", _stub)
     return _stub
 
 
@@ -160,8 +174,7 @@ def stub_search_service(monkeypatch):
 async def client():
     """ASGI httpx client. Lifespan startup is skipped because
     ``get_redis_client()`` and ``db.base``'s engine factory are lazy — they
-    cold-start on first use, which is sufficient for the request-level
-    contract exercised here.
+    cold-start on first use.
     """
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
@@ -179,10 +192,10 @@ async def test_case1_anonymous_public_search_increments_anonymous_bucket(
     db_session: AsyncSession,
     stub_search_service,
 ):
-    """No Authorization + public ctx → 200, ``public_search:{ctx}:minute``
-    incremented; pre-auth bucket NOT touched (header absent).
+    """No Authorization + public ctx → 200, anonymous bucket incremented;
+    pre-auth bucket NOT touched (header absent).
     """
-    _, ctx, _ = await _seed_public_context(db_session)
+    ctx, _ = await _seed_public_context(db_session)
 
     response = await client.post(
         f"/api/v1/public/{ctx.id}/search",
@@ -196,8 +209,7 @@ async def test_case1_anonymous_public_search_increments_anonymous_bucket(
     assert body["count"] == 0
     assert body["results"] == []
 
-    assert await _bucket_count(f"public_search:{ctx.id}:minute") == 1
-    assert await _bucket_count(f"public_search_pre_auth:{ctx.id}:minute") == 0
+    await _assert_buckets(ctx.id, anon=1, pre_auth=0)
 
 
 # ---------------------------------------------------------------------------
@@ -210,11 +222,11 @@ async def test_case2_invalid_bearer_increments_pre_auth_bucket(
     client: AsyncClient,
     db_session: AsyncSession,
 ):
-    """Bearer invalid + public ctx → 401. Pre-auth bucket is incremented
+    """Bearer invalid + public ctx → 401. The pre-auth bucket is incremented
     BEFORE ``verify_key`` runs — protects the DB from invalid-key flood
     amplification and prevents the endpoint from acting as a key oracle.
     """
-    _, ctx, _ = await _seed_public_context(db_session)
+    ctx, _ = await _seed_public_context(db_session)
 
     response = await client.post(
         f"/api/v1/public/{ctx.id}/search",
@@ -225,9 +237,7 @@ async def test_case2_invalid_bearer_increments_pre_auth_bucket(
     assert response.status_code == 401
     assert "Invalid or expired API key" in _error_detail(response.json())
 
-    assert await _bucket_count(f"public_search_pre_auth:{ctx.id}:minute") == 1
-    # Anonymous bucket is untouched — Authorization header was present.
-    assert await _bucket_count(f"public_search:{ctx.id}:minute") == 0
+    await _assert_buckets(ctx.id, anon=0, pre_auth=1)
 
 
 # ---------------------------------------------------------------------------
@@ -243,9 +253,10 @@ async def test_case3_owner_scoped_key_rejected_with_not_bound_403(
     """Owner-scoped valid key on public endpoint → 403 ``not bound``.
 
     The error detail must NOT leak the Bearer material or key prefix
-    (#115 leak-prevention contract).
+    (leak-prevention contract — preserves the principle that error
+    responses are not credential side-channels).
     """
-    _, ctx, user_id = await _seed_public_context(db_session)
+    ctx, user_id = await _seed_public_context(db_session)
     plaintext = await _mint_owner_key(db_session, user_id)
 
     response = await client.post(
@@ -278,12 +289,9 @@ async def test_case4_bound_key_matching_succeeds_with_per_key_bucket_and_attribu
     deplete the shared anonymous bucket). UsageStats writes the key id so
     attribution survives key deletion via soft reference.
     """
-    _, ctx, user_id = await _seed_public_context(db_session)
+    ctx, user_id = await _seed_public_context(db_session)
     plaintext, key_id = await _mint_bound_key(db_session, user_id, ctx.id)
 
-    # Clear any stale per-key bucket state from a prior run that wrote to
-    # the same auto-increment id (TRUNCATE ... RESTART IDENTITY on the
-    # test DB resets api_keys.id but Redis state has a 60s TTL).
     await _bucket_reset(
         f"public_bound_key:{key_id}:minute",
         f"public_search_pre_auth:{ctx.id}:minute",
@@ -299,21 +307,14 @@ async def test_case4_bound_key_matching_succeeds_with_per_key_bucket_and_attribu
     body = response.json()
     assert body["context_id"] == str(ctx.id)
 
-    # Per-key bucket charged exactly once.
-    assert await _bucket_count(f"public_bound_key:{key_id}:minute") == 1
-    # Anonymous bucket NOT charged — attributed callers use their own bucket.
-    assert await _bucket_count(f"public_search:{ctx.id}:minute") == 0
-    # Pre-auth bucket charged once (every Authorization header pays this).
-    assert await _bucket_count(f"public_search_pre_auth:{ctx.id}:minute") == 1
+    await _assert_buckets(ctx.id, anon=0, pre_auth=1, key_id=key_id, bound=1)
 
-    # UsageStats row written with api_key_id attribution.
     result = await db_session.execute(select(UsageStats).where(UsageStats.api_key_id == key_id))
     row = result.scalar_one()
     assert row.status_code == 200
     assert row.endpoint == f"/api/v1/public/{ctx.id}/search"
-    # UsageStats.context_id is a UUID column — log_usage receives ``str`` and
-    # SQLAlchemy coerces it to UUID on insert. Compare via str() so the assertion
-    # is robust regardless of which side does the cast.
+    # UsageStats.context_id is a UUID column; log_usage receives str. Compare
+    # via str() so the assertion is robust regardless of which side casts.
     assert str(row.context_id) == str(ctx.id)
     assert row.user_id == user_id
 
@@ -329,13 +330,15 @@ async def test_case5_bound_key_mismatching_returns_bound_scope_violation(
     db_session: AsyncSession,
 ):
     """Bound key minted for ctx_A → request hits ctx_B (both public) → 403
-    ``BOUND_SCOPE_VIOLATION``. The response body must NOT leak the bound
-    context id or the key material — leakage would re-introduce the
-    side-channel the IDOR guard exists to block.
+    ``BOUND_SCOPE_VIOLATION``. The response must NOT leak the bound context
+    id or the key material — leakage would re-introduce the side-channel
+    the IDOR guard exists to block.
     """
-    _, ctx_a, user_id = await _seed_public_context(db_session)
-    _, ctx_b, _ = await _seed_public_context(db_session)
+    ctx_a, user_id = await _seed_public_context(db_session)
+    ctx_b, _ = await _seed_public_context(db_session)
     plaintext, key_id = await _mint_bound_key(db_session, user_id, ctx_a.id, name="key-a")
+
+    await _bucket_reset(f"public_bound_key:{key_id}:minute")
 
     response = await client.post(
         f"/api/v1/public/{ctx_b.id}/search",
@@ -344,19 +347,16 @@ async def test_case5_bound_key_mismatching_returns_bound_scope_violation(
     )
 
     assert response.status_code == 403
-    detail = response.json()["detail"]
+    detail = _error_detail(response.json())
     assert "BOUND_SCOPE_VIOLATION" in detail
-    # Leak-prevention: the response must not name ctx_a (the bound context).
     assert str(ctx_a.id) not in detail
-    # And must not echo the key plaintext / prefix.
     assert plaintext[:16] not in detail
     assert "Bearer" not in detail
 
-    # Per-key bucket NOT incremented — denied at the IDOR gate, before
+    # Per-key bucket is NOT incremented — denied at the IDOR gate, before
     # ``check_bound_key_rate_limit``. The pre-auth bucket IS incremented
     # (any Authorization header pays for it, regardless of validity).
-    assert await _bucket_count(f"public_bound_key:{key_id}:minute") == 0
-    assert await _bucket_count(f"public_search_pre_auth:{ctx_b.id}:minute") == 1
+    await _assert_buckets(ctx_b.id, pre_auth=1, key_id=key_id, bound=0)
 
 
 # ---------------------------------------------------------------------------
@@ -369,16 +369,15 @@ async def test_case6_is_public_flipped_false_post_creation_denies(
     client: AsyncClient,
     db_session: AsyncSession,
 ):
-    """Bound key minted while ctx public → ctx.is_public flipped false →
+    """Bound key minted while ctx public → ``ctx.is_public`` flipped false →
     subsequent request returns 403 ``not public``.
 
     The binding row STAYS so the owner can re-enable later; access is
     blocked while ``is_public`` is false.
     """
-    _, ctx, user_id = await _seed_public_context(db_session)
+    ctx, user_id = await _seed_public_context(db_session)
     plaintext, _ = await _mint_bound_key(db_session, user_id, ctx.id)
 
-    # Flip is_public to False after key mint.
     ctx_row = await db_session.get(Context, ctx.id)
     assert ctx_row is not None
     ctx_row.is_public = False
@@ -405,16 +404,16 @@ async def test_case7_context_vanishes_mid_request_returns_4xx(
     db_session: AsyncSession,
     monkeypatch,
 ):
-    """Bound key valid + context row vanishes between the IDOR auth phase
-    and the route's ``db.get(Context, ...)`` lookup.
+    """A context row that vanishes between the IDOR auth phase and the
+    route's ``db.get(Context, ...)`` lookup must yield a 4xx — never a 5xx,
+    never a 200 with a stale schema.
 
-    Simulated via monkeypatch on ``AsyncSession.get``: the auth phase calls
-    ``APIKeyManager.verify_key`` which only reads ``APIKey`` by hash (NOT
-    via ``db.get``), so the patch only fires when the route reaches step 2
-    (context lookup). The contract: a row that disappears after the IDOR
-    check must yield a 4xx — never a 5xx, never a 200 with a stale schema.
+    The simulation patches ``AsyncSession.get`` only when ``entity is Context``,
+    so the bound-key auth phase (``APIKeyManager.verify_key`` reads ``APIKey``
+    by hash, not via ``db.get``) is unaffected and the simulated race fires
+    only at the route's context lookup.
     """
-    _, ctx, user_id = await _seed_public_context(db_session)
+    ctx, user_id = await _seed_public_context(db_session)
     plaintext, _ = await _mint_bound_key(db_session, user_id, ctx.id)
 
     import sqlalchemy.ext.asyncio as _async_module
@@ -434,9 +433,9 @@ async def test_case7_context_vanishes_mid_request_returns_4xx(
         json={"query": "hello"},
     )
 
-    # NotFoundException → 404 via the MemoryCloudException handler. 403 is
-    # also acceptable; what matters is the 4xx class — bound-key callers
-    # must NOT see a 5xx (or a 200) when the context disappears mid-request.
+    # The 4xx-class assertion is the real contract; the (403, 404) check
+    # pins current behaviour so a future change to a different 4xx code
+    # surfaces as a deliberate update rather than a silent drift.
     assert 400 <= response.status_code < 500, response.text
     assert response.status_code in (403, 404), response.text
 
@@ -457,8 +456,8 @@ async def test_info_endpoint_mismatching_bound_key_returns_bound_scope_violation
     guard on ``/info`` (no rate-limit / no attribution → easier to miss)
     while ``/search`` stays correct.
     """
-    _, ctx_a, user_id = await _seed_public_context(db_session)
-    _, ctx_b, _ = await _seed_public_context(db_session)
+    ctx_a, user_id = await _seed_public_context(db_session)
+    ctx_b, _ = await _seed_public_context(db_session)
     plaintext, _ = await _mint_bound_key(db_session, user_id, ctx_a.id, name="info-key-a")
 
     response = await client.get(
