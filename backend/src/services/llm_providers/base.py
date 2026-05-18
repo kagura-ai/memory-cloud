@@ -53,10 +53,13 @@ class LLMProvider(ABC):
         """Initialize the provider with an API key.
 
         Subclasses override to accept variations (e.g. ``base_url`` for
-        Ollama). Declared on the base so ``provider_cls(api_key)`` in
-        :class:`LLMService._instantiate_provider` type-checks against
-        ``type[LLMProvider]``.
+        Ollama) and typically do NOT call ``super().__init__`` — the stored
+        attribute here is a default in case they do. The base body is what
+        lets ``provider_cls(api_key)`` in :class:`LLMService._instantiate_provider`
+        type-check against ``type[LLMProvider]`` without ruff's B027 firing
+        on an empty ABC method.
         """
+        self.api_key = api_key
 
     @abstractmethod
     async def complete_json(
