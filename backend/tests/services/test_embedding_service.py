@@ -327,11 +327,15 @@ class TestContextAwareBYOKThreading:
 
     @pytest.mark.asyncio
     async def test_prepare_spend_cap_gate_context_id_optional_for_backward_compat(self, service):
-        """``context_id`` defaults to None so legacy callers continue to compile.
+        """``context_id`` defaults to None for legacy callers.
 
-        The probe still mirrors ``_get_user_api_key``'s legacy behavior
-        when ``context_id`` is None — accepts any workspace-wide or
-        context-scoped key.
+        Loop 7 fix: when ``context_id`` is None, ``has_byok_key`` matches
+        ONLY workspace-wide keys (``ExternalAPIKey.context_id IS NULL``)
+        — mirroring ``_get_user_api_key``'s legacy priority exactly.
+        Pre-loop-7 the probe accepted any context-scoped key in the
+        workspace, which diverged from the key-lookup it claimed to
+        mirror and reintroduced the accounting drift this gate exists
+        to prevent.
         """
         service.has_byok_key = AsyncMock(return_value=False)
 
@@ -340,3 +344,127 @@ class TestContextAwareBYOKThreading:
         service.has_byok_key.assert_called_once_with(
             "00000000-0000-0000-0000-000000000001", context_id=None
         )
+
+
+class TestDisallowEnvFallback:
+    """#708 loop 7: ``disallow_env_fallback`` propagation for Option A reads.
+
+    Closes a TOCTOU race between the preflight ``has_byok_key`` probe
+    and the actual ``_get_user_api_key`` call. Without this guard, a
+    BYOK key disabled between the probe and the embed call would route
+    silently through ``OPENAI_API_KEY`` env — bypassing both the H1
+    Option A guard and PR #711's BYOK-only spend cap.
+    """
+
+    @pytest.fixture
+    def service(self):
+        return EmbeddingService(_make_mock_db())
+
+    @pytest.mark.asyncio
+    async def test_disallow_env_fallback_raises_instead_of_env(self, service, monkeypatch):
+        """When ``disallow_env_fallback=True`` and no DB key found, raise.
+
+        Even with ``OPENAI_API_KEY`` set in the environment, the env
+        fallback path MUST be skipped for Option A reads.
+        """
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-platform-key")
+
+        # Mock DB: no key found
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none.return_value = None
+        service.db.execute = AsyncMock(return_value=execute_result)
+
+        with pytest.raises(ConfigurationError):
+            await service._get_user_api_key(
+                user_id="caller",
+                context_id="00000000-0000-0000-0000-000000000002",
+                workspace_id="00000000-0000-0000-0000-000000000001",
+                disallow_env_fallback=True,
+            )
+
+    @pytest.mark.asyncio
+    async def test_default_allows_env_fallback(self, service, monkeypatch):
+        """Regression fence: default ``disallow_env_fallback=False`` still uses env."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-platform-key")
+
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none.return_value = None
+        service.db.execute = AsyncMock(return_value=execute_result)
+
+        result = await service._get_user_api_key(
+            user_id="caller",
+            context_id="00000000-0000-0000-0000-000000000002",
+            workspace_id="00000000-0000-0000-0000-000000000001",
+            # disallow_env_fallback omitted → False
+        )
+
+        assert result == "sk-test-platform-key"
+
+    @pytest.mark.asyncio
+    async def test_disallow_env_fallback_does_not_block_db_key(self, service, monkeypatch):
+        """``disallow_env_fallback=True`` MUST NOT block a legitimate DB key.
+
+        The flag only affects priority-3 env fallback. When a BYOK row
+        exists at priority 1 or 2, the lookup should still return it.
+        """
+        # The env is set but should not be consulted
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-must-not-be-used")
+
+        # Mock DB: BYOK key found
+        api_key_entry = MagicMock()
+        api_key_entry.encrypted_value = "encrypted-byok-key-data"
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none.return_value = api_key_entry
+        service.db.execute = AsyncMock(return_value=execute_result)
+
+        # Patch the encryptor to return a known plaintext
+        with patch("services.embedding_service.get_encryptor") as enc:
+            enc.return_value.decrypt.return_value = "sk-actual-byok-key"
+
+            result = await service._get_user_api_key(
+                user_id="caller",
+                context_id="00000000-0000-0000-0000-000000000002",
+                workspace_id="00000000-0000-0000-0000-000000000001",
+                disallow_env_fallback=True,
+            )
+
+        assert result == "sk-actual-byok-key"
+        assert result != "sk-must-not-be-used"
+
+    @pytest.mark.asyncio
+    async def test_embed_with_usage_propagates_disallow_env_fallback(self, service, monkeypatch):
+        """``embed_with_usage(disallow_env_fallback=True)`` MUST propagate to ``_get_client``."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+        captured_kwargs: dict = {}
+
+        async def _fake_get_client(user_id, context_id, workspace_id, **kwargs):
+            captured_kwargs.update(kwargs)
+            # Return a dummy client whose embeddings.create returns a vector
+            client = MagicMock()
+            client.embeddings = MagicMock()
+            client.embeddings.create = AsyncMock(
+                return_value=MagicMock(
+                    data=[MagicMock(embedding=[0.1] * 512)],
+                    usage=MagicMock(prompt_tokens=10, total_tokens=10),
+                )
+            )
+            return client
+
+        service._get_client = _fake_get_client
+        service._prepare_spend_cap_gate = AsyncMock(return_value=(None, None))
+
+        # patch cache to skip the hit path
+        with (
+            patch("services.embedding_service.get_cache", new=AsyncMock(return_value=None)),
+            patch("services.embedding_service.set_cache", new=AsyncMock(return_value=None)),
+        ):
+            await service.embed_with_usage(
+                "test",
+                user_id="caller",
+                context_id="00000000-0000-0000-0000-000000000002",
+                workspace_id="00000000-0000-0000-0000-000000000001",
+                disallow_env_fallback=True,
+            )
+
+        assert captured_kwargs.get("disallow_env_fallback") is True

@@ -583,3 +583,64 @@ class TestSharedContextReadFlag:
             )
 
         mock_ctx_svc.is_context_shared.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_flag_true_propagates_disallow_env_fallback_to_embed(
+        self, service, default_search_config
+    ):
+        """#708 loop 7: ``is_shared_context_read=True`` MUST forward
+        ``disallow_env_fallback=True`` to ``embed_svc.embed_with_usage``.
+
+        Without this, a TOCTOU race between the H1 preflight
+        ``has_byok_key`` probe in ``MemoryService.recall`` and the actual
+        ``_get_user_api_key`` call here could route Option A reads
+        through ``OPENAI_API_KEY`` env fallback — bypassing the BYOK-only
+        spend cap (PR #711) the H1 gate is meant to enforce.
+        """
+        service._get_search_config = AsyncMock(return_value=default_search_config)
+
+        # Capture the kwargs embed_with_usage receives.
+        embed_calls: list[dict] = []
+
+        async def _capture_embed(*args, **kwargs):
+            embed_calls.append(kwargs)
+            return ([0.1] * 512, 10)  # (vector, tokens)
+
+        mock_embed_svc = MagicMock()
+        mock_embed_svc.embed_with_usage = _capture_embed
+        mock_embed_svc.provider = "openai"
+        mock_embed_svc.model = "text-embedding-3-small"
+        mock_embed_svc.resolve_paid_by = AsyncMock(return_value="byok")
+
+        mock_ctx_svc = MagicMock()
+        mock_ctx_svc.is_context_shared = AsyncMock(return_value=True)
+
+        with (
+            patch(
+                "services.search_service.search_memories_qdrant",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "services.search_service.search_memories_fulltext",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "services.search_service.resolve_routing_from_config",
+                return_value=("kagura_memories", mock_embed_svc),
+            ),
+            patch("services.context_service.ContextService", return_value=mock_ctx_svc),
+        ):
+            await service.hybrid_search(
+                query="test",
+                user_id="caller_user",
+                workspace_id="00000000-0000-0000-0000-000000000001",
+                context_id="00000000-0000-0000-0000-000000000002",
+                k=5,
+                is_shared_context_read=True,
+            )
+
+        # Exactly one embed call (semantic path), and it received the flag.
+        assert len(embed_calls) == 1
+        assert embed_calls[0].get("disallow_env_fallback") is True, (
+            "Option A reads MUST forward disallow_env_fallback=True"
+        )

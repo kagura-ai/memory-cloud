@@ -84,6 +84,7 @@ class EmbeddingService:
         user_id: str,
         context_id: str | None = None,
         workspace_id: str | None = None,  # Issue #146
+        disallow_env_fallback: bool = False,
     ) -> str:
         """Resolve the OpenAI API key for the calling user's workspace context.
 
@@ -104,12 +105,19 @@ class EmbeddingService:
             context_id: Optional context UUID (#82: context-scoped keys take priority).
             workspace_id: Workspace UUID (#146); when omitted the DB lookup is skipped
                 and only the env-var fallback can satisfy the request.
+            disallow_env_fallback: Issue #708 loop 7. When True, skip the
+                ``OPENAI_API_KEY`` env-var fallback at priority 3 and raise
+                ``ConfigurationError`` instead. Set by the Option A shared-context
+                read path so a TOCTOU race between the preflight ``has_byok_key``
+                probe and this resolution cannot silently route to the uncapped
+                platform key. Has no effect when a DB key is found.
 
         Returns:
             Decrypted OpenAI API key.
 
         Raises:
-            ConfigurationError: If neither a DB key nor an env var is available.
+            ConfigurationError: If neither a DB key nor an env var is available
+                (or when ``disallow_env_fallback`` is True and no DB key was found).
         """
         from uuid import UUID
 
@@ -155,14 +163,27 @@ class EmbeddingService:
             )
             return api_key
 
-        # Fallback to environment variable (development / env-only deployments).
-        env_key = os.getenv("OPENAI_API_KEY")
-        if env_key:
-            logger.debug(
-                "openai_api_key_from_env",
+        # Fallback to environment variable (development / env-only deployments),
+        # gated by the Option A shared-context contract: when the caller has
+        # explicitly required a BYOK key (disallow_env_fallback=True), do NOT
+        # silently route to the platform key — that would defeat PR #711's
+        # BYOK-only spend cap and bypass the H1 preflight guard via TOCTOU.
+        if not disallow_env_fallback:
+            env_key = os.getenv("OPENAI_API_KEY")
+            if env_key:
+                logger.debug(
+                    "openai_api_key_from_env",
+                    user_id=user_id,
+                )
+                return env_key
+        else:
+            logger.warning(
+                "openai_api_key_env_fallback_disallowed",
                 user_id=user_id,
+                workspace_id=workspace_id,
+                context_id=context_id,
+                reason="option_a_shared_context_read",
             )
-            return env_key
 
         if workspace_id:
             raise ConfigurationError(
@@ -266,16 +287,20 @@ class EmbeddingService:
         no ``workspace_id`` is provided. Tolerates both UUID and string
         ``workspace_id`` inputs.
 
-        Issue #708: ``context_id`` mirrors the priority rules of
-        ``_get_user_api_key`` — when supplied, the probe accepts either a
-        context-scoped key for the same context OR a workspace-wide key
-        (``context_id IS NULL``). Without this parameter the probe would
-        return True for a workspace whose ONLY BYOK is scoped to a
-        different context, causing the H1 deny guard in
-        ``MemoryService.recall`` to incorrectly pass while
-        ``_get_user_api_key`` later falls back to the env-var path. When
-        ``context_id`` is omitted the probe behaves as before (any
-        workspace-wide-or-context-scoped key).
+        Issue #708 (loop 1 + loop 7 fix): ``context_id`` mirrors the
+        priority rules of ``_get_user_api_key`` exactly:
+
+        - When ``context_id`` is supplied, the probe matches either a
+          context-scoped key for the same context OR a workspace-wide
+          key (``context_id IS NULL``).
+        - When ``context_id`` is omitted, the probe matches ONLY
+          workspace-wide keys (``context_id IS NULL``) — same as
+          ``_get_user_api_key(..., context_id=None)``. Without this
+          symmetric default, the probe would return True for a
+          workspace whose only BYOK is scoped to some context X, while
+          a no-context call to ``_get_user_api_key`` later would not
+          select that key and fall back to env — re-introducing the
+          accounting drift the context-aware probe is meant to close.
 
         This is a cheap existence probe (single indexed SELECT, no decrypt)
         and lives alongside ``_get_user_api_key`` to avoid duplicating its
@@ -301,6 +326,10 @@ class EmbeddingService:
                     ExternalAPIKey.context_id.is_(None),
                 )
             )
+        else:
+            # Symmetric with ``_get_user_api_key``: with no context_id, only
+            # workspace-wide keys count.
+            conditions.append(ExternalAPIKey.context_id.is_(None))
         stmt = select(ExternalAPIKey.id).where(*conditions).limit(1)
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none() is not None
@@ -310,6 +339,7 @@ class EmbeddingService:
         user_id: str,
         context_id: str | None = None,
         workspace_id: str | None = None,
+        disallow_env_fallback: bool = False,
     ) -> AsyncOpenAI:
         """Get the appropriate OpenAI-compatible client for the configured provider.
 
@@ -317,6 +347,9 @@ class EmbeddingService:
             user_id: User ID (for API key retrieval)
             context_id: Optional context ID
             workspace_id: Optional workspace ID
+            disallow_env_fallback: Forwarded to ``_get_user_api_key``. Issue
+                #708 loop 7: when True (Option A shared-context reads), no
+                ``OPENAI_API_KEY`` env fallback is allowed at key lookup.
 
         Returns:
             AsyncOpenAI client configured for the provider
@@ -344,7 +377,12 @@ class EmbeddingService:
                 api_key="ollama",  # Ollama doesn't require a real key
             )
         # OpenAI (default)
-        api_key = await self._get_user_api_key(user_id, context_id, workspace_id)
+        api_key = await self._get_user_api_key(
+            user_id,
+            context_id,
+            workspace_id,
+            disallow_env_fallback=disallow_env_fallback,
+        )
         return AsyncOpenAI(api_key=api_key)
 
     def _build_embedding_kwargs(self, input_data: str | list[str]) -> dict:
@@ -399,6 +437,7 @@ class EmbeddingService:
         user_id: str,
         context_id: str | None = None,
         workspace_id: str | None = None,
+        disallow_env_fallback: bool = False,
     ) -> tuple[list[float], int]:
         """Generate embedding and return token usage for cost tracking (#471).
 
@@ -420,6 +459,13 @@ class EmbeddingService:
             user_id: User ID for API key lookup.
             context_id: Optional context ID for scoped API key.
             workspace_id: Optional workspace ID for scoped API key.
+            disallow_env_fallback: Issue #708 loop 7. Forwarded to
+                ``_get_user_api_key`` — when True the call MUST use a BYOK
+                key from the DB or fail; the ``OPENAI_API_KEY`` env-var
+                fallback is disabled. Set by Option A shared-context reads
+                so a TOCTOU race between the preflight ``has_byok_key``
+                probe and this call cannot silently route to the platform
+                key (which would bypass PR #711's BYOK-only spend cap).
 
         Returns:
             ``(vector, tokens_used)``. ``tokens_used`` is 0 for cache
@@ -453,7 +499,12 @@ class EmbeddingService:
                 workspace_id, context_id=context_id
             )
 
-            client = await self._get_client(user_id, context_id, workspace_id)
+            client = await self._get_client(
+                user_id,
+                context_id,
+                workspace_id,
+                disallow_env_fallback=disallow_env_fallback,
+            )
             response = await client.embeddings.create(
                 **self._build_embedding_kwargs(normalized_text)
             )
@@ -515,6 +566,7 @@ class EmbeddingService:
         user_id: str,
         context_id: str | None = None,
         workspace_id: str | None = None,  # NEW: Workspace ID (Issue #146)
+        disallow_env_fallback: bool = False,
     ) -> list[list[float]]:
         """Generate embeddings for multiple texts with Redis caching.
 
@@ -523,6 +575,9 @@ class EmbeddingService:
             user_id: User ID
             context_id: Optional project ID (Issue #82: context-scoped keys)
             workspace_id: Optional workspace ID (Issue #146: workspace-scoped keys)
+            disallow_env_fallback: Issue #708 loop 7. Forwarded to
+                ``_get_user_api_key`` — no ``OPENAI_API_KEY`` env fallback
+                when True. Used by Option A shared-context reads.
 
         Returns:
             List of embedding vectors
@@ -575,7 +630,12 @@ class EmbeddingService:
                     workspace_id, context_id=context_id
                 )
 
-                client = await self._get_client(user_id, context_id, workspace_id)
+                client = await self._get_client(
+                    user_id,
+                    context_id,
+                    workspace_id,
+                    disallow_env_fallback=disallow_env_fallback,
+                )
                 response = await client.embeddings.create(
                     **self._build_embedding_kwargs(uncached_texts)
                 )

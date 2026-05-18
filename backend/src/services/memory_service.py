@@ -1305,12 +1305,16 @@ class MemoryService:
             search_mode=request.search_mode,
             include_vectors=neural_enabled,
             # #708 Option A: tell SearchService this is a cross-workspace
-            # shared-context read so it skips the redundant
-            # ``is_workspace_member(workspace_id)`` check (handler-layer
-            # ``_resolve_context_for_read`` already verified access) and
-            # treats the request as shared (drops ``user_id == caller``
-            # from the Qdrant filter, since source-workspace memories are
-            # authored by source-workspace users, not the caller).
+            # shared-context read. This ONLY bypasses the redundant
+            # ``is_workspace_member(workspace_id)`` check — handler-layer
+            # ``_resolve_context_for_read`` is the authoritative access
+            # check. The Qdrant ``user_id == caller`` filter is dropped
+            # only when the context's privacy state itself is shared
+            # (``ContextService.is_context_shared``); a private context
+            # read across workspaces still keeps the filter so other
+            # users' memories are not exposed. See loop-5 fix and the
+            # ``is_shared_context`` derivation in ``SearchService.
+            # hybrid_search``.
             is_shared_context_read=is_shared_context_read,
         )
 

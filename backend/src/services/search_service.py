@@ -226,8 +226,17 @@ class SearchService:
             # (different model than ``self.embedding_service``) — read
             # provider/model from it directly so multi-tenant pricing
             # routes correctly.
+            # #708 loop 7: under Option A (is_shared_context_read=True), this
+            # call MUST use a BYOK key — no OPENAI_API_KEY env fallback —
+            # otherwise a TOCTOU race between the preflight ``has_byok_key``
+            # probe in ``MemoryService.recall`` and this resolution could
+            # silently route to the uncapped platform key.
             query_vector, embedding_tokens = await embed_svc.embed_with_usage(
-                normalized_query, user_id, context_id=primary_context_id, workspace_id=workspace_id
+                normalized_query,
+                user_id,
+                context_id=primary_context_id,
+                workspace_id=workspace_id,
+                disallow_env_fallback=is_shared_context_read,
             )
             if embedding_tokens > 0:
                 # Cache hits return 0 tokens and intentionally produce no
