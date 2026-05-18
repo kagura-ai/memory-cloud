@@ -7,7 +7,7 @@ Issue #248: SSE transport removed (deprecated in MCP spec 2025-03-26).
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 from starlette.responses import Response
@@ -303,8 +303,11 @@ async def handle_streamable_http_post(
         # After body is sent, wait for disconnect
         return await receive()
 
-    # Use existing transport handler with replayed body
-    await session.transport.handle_post_message(modified_scope, replay_receive, send)
+    # Use existing transport handler with replayed body.
+    # MCPSession (post Issue #248 SSE removal) does not formally declare a
+    # `transport` attribute on its dataclass — the fallthrough path in
+    # Streamable HTTP relies on a runtime attribute attached elsewhere.
+    await cast(Any, session).transport.handle_post_message(modified_scope, replay_receive, send)
 
 
 async def handle_streamable_http_get(

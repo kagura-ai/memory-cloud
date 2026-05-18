@@ -8,10 +8,11 @@ Implements:
 - Permission-based management (Owner/Admin/Member hierarchy)
 """
 
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import (
@@ -113,8 +114,11 @@ class MemberCredentialsService:
         if hasattr(model_class, "workspace_id"):
             filters.append(model_class.workspace_id == workspace_id)
 
-        result = await self.db.execute(
-            update(model_class).where(and_(*filters)).values({filter_field: owner_id})
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                update(model_class).where(and_(*filters)).values({filter_field: owner_id})
+            ),
         )
 
         count = result.rowcount
@@ -323,10 +327,13 @@ class MemberCredentialsService:
         """
         # 1. Delete API keys (bulk operation)
         # Issue #200: Use rowcount for efficient counting without loading data
-        api_keys_result = await self.db.execute(
-            delete(APIKey).where(
-                and_(APIKey.user_id == user_id, APIKey.workspace_id == workspace_id)
-            )
+        api_keys_result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                delete(APIKey).where(
+                    and_(APIKey.user_id == user_id, APIKey.workspace_id == workspace_id)
+                )
+            ),
         )
         api_keys_count = api_keys_result.rowcount
 
@@ -347,32 +354,38 @@ class MemberCredentialsService:
         if client_ids:
             # Issue #200: Use rowcount for efficient counting without loading data
             now = utcnow()
-            tokens_result = await self.db.execute(
-                update(OAuth2Token)
-                .where(
-                    and_(
-                        OAuth2Token.client_id.in_(client_ids),
-                        OAuth2Token.revoked == False,  # noqa: E712
+            tokens_result = cast(
+                CursorResult[Any],
+                await self.db.execute(
+                    update(OAuth2Token)
+                    .where(
+                        and_(
+                            OAuth2Token.client_id.in_(client_ids),
+                            OAuth2Token.revoked == False,  # noqa: E712
+                        )
                     )
-                )
-                .values(
-                    revoked=True,
-                    access_token_revoked_at=now,
-                    refresh_token_revoked_at=now,
-                )
+                    .values(
+                        revoked=True,
+                        access_token_revoked_at=now,
+                        refresh_token_revoked_at=now,
+                    )
+                ),
             )
             tokens_count = tokens_result.rowcount
         else:
             tokens_count = 0
 
         # 4. Delete workspace-scoped ExternalAPIKeys (Issue #275)
-        ext_keys_result = await self.db.execute(
-            delete(ExternalAPIKey).where(
-                and_(
-                    ExternalAPIKey.user_id == user_id,
-                    ExternalAPIKey.workspace_id == workspace_id,
+        ext_keys_result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                delete(ExternalAPIKey).where(
+                    and_(
+                        ExternalAPIKey.user_id == user_id,
+                        ExternalAPIKey.workspace_id == workspace_id,
+                    )
                 )
-            )
+            ),
         )
         ext_keys_count = ext_keys_result.rowcount
 
@@ -420,13 +433,16 @@ class MemberCredentialsService:
 
         # Delete context members (bulk operation)
         if context_ids:
-            context_members_result = await self.db.execute(
-                delete(ContextMember).where(
-                    and_(
-                        ContextMember.context_id.in_(context_ids),
-                        ContextMember.user_id == user_id,
+            context_members_result = cast(
+                CursorResult[Any],
+                await self.db.execute(
+                    delete(ContextMember).where(
+                        and_(
+                            ContextMember.context_id.in_(context_ids),
+                            ContextMember.user_id == user_id,
+                        )
                     )
-                )
+                ),
             )
             context_members_count = context_members_result.rowcount
         else:
@@ -575,15 +591,18 @@ class MemberCredentialsService:
 
         # Transfer resource tokens only for this workspace's resource_ids
         if resource_ids:
-            result = await self.db.execute(
-                update(ResourceToken)
-                .where(
-                    and_(
-                        ResourceToken.created_by == user_id,
-                        ResourceToken.resource_id.in_(resource_ids),  # ✅ Workspace boundary
+            result = cast(
+                CursorResult[Any],
+                await self.db.execute(
+                    update(ResourceToken)
+                    .where(
+                        and_(
+                            ResourceToken.created_by == user_id,
+                            ResourceToken.resource_id.in_(resource_ids),  # ✅ Workspace boundary
+                        )
                     )
-                )
-                .values(created_by=owner_id)
+                    .values(created_by=owner_id)
+                ),
             )
             count = result.rowcount
         else:
@@ -616,14 +635,17 @@ class MemberCredentialsService:
         from models.auth import WorkspaceInvitation
 
         # Delete invitations created by this member (pending only)
-        result = await self.db.execute(
-            delete(WorkspaceInvitation).where(
-                and_(
-                    WorkspaceInvitation.workspace_id == workspace_id,
-                    WorkspaceInvitation.invited_by == user_id,
-                    WorkspaceInvitation.accepted_at.is_(None),  # Pending invitations only
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                delete(WorkspaceInvitation).where(
+                    and_(
+                        WorkspaceInvitation.workspace_id == workspace_id,
+                        WorkspaceInvitation.invited_by == user_id,
+                        WorkspaceInvitation.accepted_at.is_(None),  # Pending invitations only
+                    )
                 )
-            )
+            ),
         )
 
         logger.info(

@@ -12,10 +12,12 @@ Key Features:
 
 from __future__ import annotations
 
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import and_, case, delete, desc, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import EDGE_TYPE_DECLARED_LINK, Memory, NeuralMemoryEdge
@@ -739,7 +741,7 @@ class NeuralEdgeRepository:
             )
         )
 
-        result = await self.db.execute(stmt)
+        result = cast(CursorResult[Any], await self.db.execute(stmt))
         deleted_count = result.rowcount or 0
 
         logger.info(
@@ -978,7 +980,7 @@ class NeuralEdgeRepository:
 
         stmt = delete(NeuralMemoryEdge).where(and_(*conditions))
 
-        result = await self.db.execute(stmt)
+        result = cast(CursorResult[Any], await self.db.execute(stmt))
         deleted = (result.rowcount or 0) > 0
 
         if deleted:
@@ -1028,7 +1030,7 @@ class NeuralEdgeRepository:
 
         stmt = delete(NeuralMemoryEdge).where(and_(*conditions))
 
-        result = await self.db.execute(stmt)
+        result = cast(CursorResult[Any], await self.db.execute(stmt))
         deleted_count = result.rowcount or 0
 
         logger.info(
@@ -1162,7 +1164,7 @@ class NeuralEdgeRepository:
         """
         stmt = delete(NeuralMemoryEdge).where(NeuralMemoryEdge.user_id == user_id)
 
-        result = await self.db.execute(stmt)
+        result = cast(CursorResult[Any], await self.db.execute(stmt))
         deleted_count = result.rowcount or 0
 
         logger.warning("all_edges_deleted", user_id=user_id, count=deleted_count)

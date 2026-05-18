@@ -322,6 +322,7 @@ def create_admin(skip_mcp_json: bool = False):
 
             try:
                 import qrcode
+                import qrcode.constants
 
                 qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L)
                 qr.add_data(uri)

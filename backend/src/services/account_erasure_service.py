@@ -35,10 +35,11 @@ import asyncio
 import hmac
 import secrets
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -629,13 +630,16 @@ class AccountErasureService:
         # grace so we don't race a user who just clicked confirm but
         # whose Redis SETEX is in flight.
         pending_token_expired_cutoff = now - timedelta(hours=1, minutes=5)
-        stale_pending_result = await self.db.execute(
-            update(ErasureRequest)
-            .where(
-                (ErasureRequest.status == STATUS_PENDING)
-                & (ErasureRequest.requested_at <= pending_token_expired_cutoff)
-            )
-            .values(status=STATUS_CANCELLED, cancelled_at=now)
+        stale_pending_result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                update(ErasureRequest)
+                .where(
+                    (ErasureRequest.status == STATUS_PENDING)
+                    & (ErasureRequest.requested_at <= pending_token_expired_cutoff)
+                )
+                .values(status=STATUS_CANCELLED, cancelled_at=now)
+            ),
         )
         if (stale_pending_result.rowcount or 0) > 0:
             logger.info(
@@ -1011,7 +1015,10 @@ class AccountErasureService:
         Single round-trip: PostgreSQL returns ``rowcount`` from ``DELETE``
         directly, so we don't need a separate ``SELECT count()``.
         """
-        result = await self.db.execute(delete(model).where(where_clause))
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(delete(model).where(where_clause)),
+        )
         return result.rowcount or 0
 
     async def _pseudonymize_field(self, model: Any, column: Any, user_id: str) -> int:
@@ -1022,8 +1029,11 @@ class AccountErasureService:
         not.
         """
         pseudonym = sha256_hex(user_id, salt=_audit_salt())
-        result = await self.db.execute(
-            update(model).where(column == user_id).values({column: pseudonym})
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                update(model).where(column == user_id).values({column: pseudonym})
+            ),
         )
         return result.rowcount or 0
 
@@ -1073,14 +1083,17 @@ class AccountErasureService:
             (AuditLog.user_email == email, email_pseudonym),
             else_=AuditLog.user_email,
         )
-        result = await self.db.execute(
-            update(AuditLog)
-            .where(AuditLog.user_id == user_id)
-            .values(
-                user_id=user_pseudonym,
-                user_email=conditional_email,
-                resource=scrubbed_resource,
-            )
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                update(AuditLog)
+                .where(AuditLog.user_id == user_id)
+                .values(
+                    user_id=user_pseudonym,
+                    user_email=conditional_email,
+                    resource=scrubbed_resource,
+                )
+            ),
         )
         return result.rowcount or 0
 

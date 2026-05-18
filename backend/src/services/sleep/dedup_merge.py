@@ -420,7 +420,8 @@ class DedupMergePhase:
         ids = [m.id for m in cluster_memories]
         for i, id_a in enumerate(ids):
             for id_b in ids[i + 1 :]:
-                key = tuple(sorted([id_a, id_b], key=str))
+                sorted_ids = sorted([id_a, id_b], key=str)
+                key = (sorted_ids[0], sorted_ids[1])
                 score = pair_scores.get(key, 0.0)
                 pair_lines.append(
                     f"  ({id_to_label[id_a]}, {id_to_label[id_b]}): similarity={score:.3f}"
@@ -499,7 +500,8 @@ class DedupMergePhase:
 
         for i, id_a in enumerate(ids):
             for id_b in ids[i + 1 :]:
-                key = tuple(sorted([id_a, id_b], key=str))
+                sorted_ids = sorted([id_a, id_b], key=str)
+                key = (sorted_ids[0], sorted_ids[1])
                 score = pair_scores.get(key, 0.0)
                 if score >= AUTO_MERGE_THRESHOLD:
                     # Keep the one with higher importance or more content

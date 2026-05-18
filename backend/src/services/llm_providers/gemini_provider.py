@@ -41,7 +41,7 @@ class GeminiProvider(LLMProvider):
         if self._client is not None:
             return self._client
         try:
-            from google import genai
+            from google import genai  # type: ignore[attr-defined]
         except ImportError as exc:
             raise ConfigurationError(
                 "Google GenAI SDK not installed. Install with: pip install google-genai"

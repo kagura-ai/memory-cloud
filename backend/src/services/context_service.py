@@ -9,10 +9,11 @@ Contexts are owned by workspaces, not individual users.
 """
 
 import re
-from typing import Literal, get_args
+from typing import Any, Literal, cast, get_args
 from uuid import UUID
 
 from sqlalchemy import and_, delete, func, select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
@@ -627,13 +628,16 @@ class ContextService:
         if not old_is_private and new_is_private:
             from sqlalchemy import and_, delete
 
-            result = await self.db.execute(
-                delete(ContextMember).where(
-                    and_(
-                        ContextMember.context_id == context.id,
-                        ContextMember.user_id != owner_id,
+            result = cast(
+                CursorResult[Any],
+                await self.db.execute(
+                    delete(ContextMember).where(
+                        and_(
+                            ContextMember.context_id == context.id,
+                            ContextMember.user_id != owner_id,
+                        )
                     )
-                )
+                ),
             )
 
             removed_count = result.rowcount

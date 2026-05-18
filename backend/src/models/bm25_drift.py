@@ -44,6 +44,13 @@ class Bm25IdfDriftLog(Base):
     """
 
     __tablename__ = "bm25_idf_drift_log"
+    # Tell SQLAlchemy 2.0 Annotated Declarative to ignore non-Mapped[]
+    # annotations on this class (see context_name / context_deleted below).
+    # ClassVar[] is the typing-canonical alternative but pyright rejects
+    # instance-level assignment to ClassVar; the route handler at
+    # api/routes/bm25_drift.py assigns instance-level, so we use the
+    # SQLAlchemy escape hatch instead.
+    __allow_unmapped__ = True
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     context_id: Mapped[uuid.UUID] = mapped_column(
@@ -62,6 +69,13 @@ class Bm25IdfDriftLog(Base):
     r_resource_points: Mapped[int] = mapped_column(Integer, nullable=False)
     num_terms: Mapped[int] = mapped_column(Integer, nullable=False)
     top_divergent_terms: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
+
+    # Response-shape attributes — populated by api/routes/bm25_drift.py to
+    # avoid N+1 lookups, not DB-backed. Survives ORM column inference thanks
+    # to `__allow_unmapped__ = True` on the class above; route handlers
+    # assign instance-level (`r.context_name = ...`) at runtime.
+    context_name: str | None = None
+    context_deleted: bool = False
 
     __table_args__ = (
         CheckConstraint(

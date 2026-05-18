@@ -147,21 +147,23 @@ class CurrentUsage(BaseModel):
     memory_count: int = Field(..., description="Current memory count")
     api_calls_today: int = Field(..., description="API calls today (all APIs)")
     api_calls_this_week: int = Field(..., description="API calls this week (all APIs)")
-    mcp_calls_today: int = Field(0, description="MCP calls today")
-    mcp_calls_this_week: int = Field(0, description="MCP calls this week")
-    rest_calls_today: int = Field(0, description="REST API calls today (non-public)")
-    rest_calls_this_week: int = Field(0, description="REST API calls this week (non-public)")
-    public_calls_today: int = Field(0, description="Public REST API calls today")
-    public_calls_this_week: int = Field(0, description="Public REST API calls this week")
+    mcp_calls_today: int = Field(default=0, description="MCP calls today")
+    mcp_calls_this_week: int = Field(default=0, description="MCP calls this week")
+    rest_calls_today: int = Field(default=0, description="REST API calls today (non-public)")
+    rest_calls_this_week: int = Field(
+        default=0, description="REST API calls this week (non-public)"
+    )
+    public_calls_today: int = Field(default=0, description="Public REST API calls today")
+    public_calls_this_week: int = Field(default=0, description="Public REST API calls this week")
     analysis: AnalysisUsage | None = Field(
-        None,
+        default=None,
         description=(
             "Memory broadlistening daily quota stats (Issue #496). "
             "NULL when the caller has no current workspace selected."
         ),
     )
     sleep_contexts: SleepContextsUsage | None = Field(
-        None,
+        default=None,
         description=(
             "Sleep-enabled contexts quota stats (Issue #560). "
             "NULL when the caller has no current workspace selected."

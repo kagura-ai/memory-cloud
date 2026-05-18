@@ -26,7 +26,13 @@ class NotAuthenticatedError(AuthenticationError):
 class TokenRefreshError(AuthenticationError):
     """Failed to refresh access token."""
 
-    pass
+    def __init__(self, provider: str, *, reason: str | None = None) -> None:
+        self.provider = provider
+        self.reason = reason
+        msg = f"Token refresh failed for {provider}"
+        if reason:
+            msg = f"{msg}: {reason}"
+        super().__init__(msg)
 
 
 class SessionExpiredError(AuthenticationError):

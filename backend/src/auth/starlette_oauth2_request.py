@@ -8,6 +8,7 @@ https://github.com/authlib/authlib/blob/master/authlib/integrations/django_oauth
 """
 
 from collections import defaultdict
+from typing import Any, cast
 
 from authlib.oauth2.rfc6749 import OAuth2Request
 from starlette.requests import Request
@@ -135,9 +136,12 @@ class StarletteOAuth2Request(OAuth2Request):
             headers=dict(request.headers),
         )
 
-        # Set payload explicitly (required for Authlib 1.6.5)
-        # This is the key difference from manually created OAuth2Request
-        self.payload = StarletteOAuth2Payload(request)
+        # Set payload explicitly (required for Authlib 1.6.5).
+        # Authlib's OAuth2Request types `payload` as `None` initially, then
+        # mutates it at runtime — the assignment here is a contract Authlib
+        # documents but the type stub does not capture. Cast keeps the
+        # narrowing local to this constructor.
+        self.payload = cast(Any, StarletteOAuth2Payload(request))
         self._request = request
 
     @property
