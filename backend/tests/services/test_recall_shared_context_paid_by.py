@@ -22,6 +22,7 @@ Verifies the four guardrails identified during gate1 design review for
 
 from __future__ import annotations
 
+import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -42,6 +43,34 @@ def _make_service():
     svc.search_service.hybrid_search = AsyncMock(return_value=[])
     svc.memory_repo = MagicMock()
     return svc, db
+
+
+@contextlib.contextmanager
+def _patch_byok_gate(
+    *,
+    has_key: bool = True,
+    provider: str = "openai",
+    embedding_model: str = "text-embedding-3-small",
+):
+    """Patch BOTH EmbeddingService AND ContextSearchConfigRepository.
+
+    The H1 gate in ``MemoryService.recall`` (#708 F4 / loop 2) loads the
+    context's ``ContextSearchConfig`` to derive the per-context embedding
+    model + provider before constructing ``EmbeddingService``. Tests that
+    exercise the gate must mock both dependencies in lock-step.
+
+    Yields the ``has_byok_key`` AsyncMock so tests can assert call args.
+    """
+    with (
+        patch("services.memory_service.EmbeddingService") as embed_cls,
+        patch("repositories.config_repository.ContextSearchConfigRepository") as repo_cls,
+    ):
+        embed_cls.return_value.has_byok_key = AsyncMock(return_value=has_key)
+        embed_cls.return_value.provider = provider
+        config_mock = MagicMock()
+        config_mock.embedding_model = embedding_model
+        repo_cls.return_value.create_or_get = AsyncMock(return_value=config_mock)
+        yield embed_cls.return_value.has_byok_key
 
 
 @pytest.mark.asyncio
@@ -97,10 +126,7 @@ async def test_shared_context_recall_routes_to_source_workspace():
     source_ws = uuid4()
     context_id = uuid4()
 
-    # Patch EmbeddingService so the BYOK probe returns True (source has key).
-    with patch("services.memory_service.EmbeddingService") as embed_svc_cls:
-        embed_svc_cls.return_value.has_byok_key = AsyncMock(return_value=True)
-
+    with _patch_byok_gate(has_key=True):
         await svc.recall(
             request=RecallRequest(query="test", k=5),
             user_id="caller_user",
@@ -123,10 +149,7 @@ async def test_shared_context_recall_calls_has_byok_with_source_workspace_id():
     source_ws = uuid4()
     context_id = uuid4()
 
-    with patch("services.memory_service.EmbeddingService") as embed_svc_cls:
-        has_byok_mock = AsyncMock(return_value=True)
-        embed_svc_cls.return_value.has_byok_key = has_byok_mock
-
+    with _patch_byok_gate(has_key=True) as has_byok_mock:
         await svc.recall(
             request=RecallRequest(query="test", k=5),
             user_id="caller_user",
@@ -154,9 +177,7 @@ async def test_shared_context_recall_denies_when_source_no_byok():
     source_ws = uuid4()
     context_id = uuid4()
 
-    with patch("services.memory_service.EmbeddingService") as embed_svc_cls:
-        embed_svc_cls.return_value.has_byok_key = AsyncMock(return_value=False)
-
+    with _patch_byok_gate(has_key=False):
         with pytest.raises(NotFoundException) as exc_info:
             await svc.recall(
                 request=RecallRequest(query="test", k=5),
@@ -192,9 +213,7 @@ async def test_shared_context_recall_uniform_error_does_not_leak_source_workspac
     source_ws = uuid4()
     context_id = uuid4()
 
-    with patch("services.memory_service.EmbeddingService") as embed_svc_cls:
-        embed_svc_cls.return_value.has_byok_key = AsyncMock(return_value=False)
-
+    with _patch_byok_gate(has_key=False):
         with pytest.raises(NotFoundException) as exc_info:
             await svc.recall(
                 request=RecallRequest(query="test", k=5),
@@ -249,11 +268,7 @@ async def test_shared_context_keyword_mode_skips_byok_gate():
     source_ws = uuid4()
     context_id = uuid4()
 
-    with patch("services.memory_service.EmbeddingService") as embed_svc_cls:
-        has_byok_mock = AsyncMock(return_value=False)
-        embed_svc_cls.return_value.has_byok_key = has_byok_mock
-        embed_svc_cls.return_value.provider = "openai"
-
+    with _patch_byok_gate(has_key=False, provider="openai") as has_byok_mock:
         await svc.recall(
             request=RecallRequest(query="test", k=5, search_mode="keyword"),
             user_id="caller_user",
@@ -279,11 +294,7 @@ async def test_shared_context_ollama_provider_skips_byok_gate():
     source_ws = uuid4()
     context_id = uuid4()
 
-    with patch("services.memory_service.EmbeddingService") as embed_svc_cls:
-        has_byok_mock = AsyncMock(return_value=False)
-        embed_svc_cls.return_value.has_byok_key = has_byok_mock
-        embed_svc_cls.return_value.provider = "ollama"
-
+    with _patch_byok_gate(has_key=False, provider="ollama") as has_byok_mock:
         await svc.recall(
             request=RecallRequest(query="test", k=5),
             user_id="caller_user",
@@ -311,10 +322,7 @@ async def test_shared_context_recall_propagates_is_shared_context_read():
     source_ws = uuid4()
     context_id = uuid4()
 
-    with patch("services.memory_service.EmbeddingService") as embed_svc_cls:
-        embed_svc_cls.return_value.has_byok_key = AsyncMock(return_value=True)
-        embed_svc_cls.return_value.provider = "openai"
-
+    with _patch_byok_gate(has_key=True, provider="openai"):
         await svc.recall(
             request=RecallRequest(query="test", k=5),
             user_id="caller_user",
@@ -349,3 +357,81 @@ async def test_self_workspace_recall_does_not_propagate_is_shared_context_read()
 
     call_kwargs = svc.search_service.hybrid_search.call_args.kwargs
     assert call_kwargs.get("is_shared_context_read") is False
+
+
+@pytest.mark.asyncio
+async def test_shared_context_byok_gate_uses_per_context_embedding_model():
+    """#708 F4 (Copilot loop 2): gate must use context's configured model.
+
+    The H1 BYOK probe constructs ``EmbeddingService`` from the context's
+    ``ContextSearchConfig.embedding_model``, not the platform default. A
+    context configured with one provider (e.g. Voyage) running on a
+    platform whose default is OpenAI would otherwise be denied
+    incorrectly, because ``has_byok_key`` would probe for OpenAI keys.
+    """
+    svc, _db = _make_service()
+    caller_ws = uuid4()
+    source_ws = uuid4()
+    context_id = uuid4()
+
+    with (
+        patch("services.memory_service.EmbeddingService") as embed_cls,
+        patch("repositories.config_repository.ContextSearchConfigRepository") as repo_cls,
+    ):
+        embed_cls.return_value.has_byok_key = AsyncMock(return_value=True)
+        embed_cls.return_value.provider = "openai"  # derived from model
+        config_mock = MagicMock()
+        config_mock.embedding_model = "voyage-3-large"
+        repo_cls.return_value.create_or_get = AsyncMock(return_value=config_mock)
+
+        await svc.recall(
+            request=RecallRequest(query="test", k=5),
+            user_id="caller_user",
+            current_context_id=context_id,
+            current_workspace_id=caller_ws,
+            context_workspace_id=source_ws,
+        )
+
+    # EmbeddingService MUST be constructed with the context's model, not the default.
+    embed_cls.assert_called_once_with(svc.db, model="voyage-3-large")
+
+
+@pytest.mark.asyncio
+async def test_shared_context_byok_gate_deferred_past_empty_cluster_short_circuit():
+    """#708 F5 (Copilot loop 2): empty cluster → no embedding call → no gate.
+
+    When ``analysis_cluster`` filter pre-resolves to an empty/unknown
+    cluster, ``MemoryService.recall`` returns ``results=[]`` immediately
+    without calling ``hybrid_search`` or generating any embedding. The
+    H1 gate must not fire on this path — otherwise a no-cost filtered
+    read becomes a misleading ``context_not_found`` error.
+    """
+    svc, _db = _make_service()
+    caller_ws = uuid4()
+    source_ws = uuid4()
+    context_id = uuid4()
+    run_id = uuid4()
+
+    with (
+        _patch_byok_gate(has_key=False) as has_byok_mock,
+        patch(
+            "services.analysis.query_service.get_memory_ids_in_cluster",
+            AsyncMock(return_value=[]),  # empty cluster — short-circuit fires
+        ),
+    ):
+        response = await svc.recall(
+            request=RecallRequest(
+                query="test",
+                k=5,
+                filters={"analysis_cluster": {"run_id": str(run_id), "cluster_index": 0}},
+            ),
+            user_id="caller_user",
+            current_context_id=context_id,
+            current_workspace_id=caller_ws,
+            context_workspace_id=source_ws,
+        )
+
+    assert response.results == []
+    # No embedding cost was charged → gate must NOT have fired.
+    has_byok_mock.assert_not_called()
+    svc.search_service.hybrid_search.assert_not_called()

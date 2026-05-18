@@ -1164,40 +1164,15 @@ class MemoryService:
         # #708 Option A: route embedding cost (key + spend cap + paid_by
         # + search + graph) to the context's owner workspace. Rate-limit
         # gating stays on the caller upstream — do NOT change it here.
+        # The H1 BYOK gate is deferred until we know hybrid_search will
+        # actually fire (after the analysis_cluster short-circuit below),
+        # so no-cost reads (empty cluster, etc.) do not get falsely 404'd.
         effective_workspace_id = current_workspace_id
         is_shared_context_read = (
             context_workspace_id is not None and context_workspace_id != current_workspace_id
         )
         if is_shared_context_read:
             effective_workspace_id = context_workspace_id  # type: ignore[assignment]
-            embed_svc = EmbeddingService(self.db)
-            # Only gate when the embedding API call would actually fire and
-            # produce a charge against the source workspace. ``keyword``
-            # mode skips ``embed_with_usage`` entirely (BM25-only), and
-            # Ollama is free/local (no platform-key fallback path exists).
-            # Both legitimate paths must not be denied by the H1 guard.
-            will_charge_embedding_cost = (
-                request.search_mode != "keyword" and embed_svc.provider != "ollama"
-            )
-            if will_charge_embedding_cost and not await embed_svc.has_byok_key(
-                str(context_workspace_id),
-                context_id=str(current_context_id),
-            ):
-                # H1 deny: source workspace has no BYOK key applicable to
-                # this context. Env fallback in ``_get_user_api_key`` would
-                # route through OPENAI_API_KEY uncapped (PR #711's spend
-                # cap is BYOK-only). Raise NotFoundException so the
-                # handler surfaces a uniform context_not_found response
-                # (CWE-639 / OWASP A01).
-                logger.warning(
-                    "shared_context_read_no_byok_deny",
-                    caller_user_id=user_id,
-                    caller_workspace_id=str(current_workspace_id),
-                    context_id=str(current_context_id),
-                    paid_by_workspace_id=str(context_workspace_id),
-                    reason="missing_byok",
-                )
-                raise NotFoundException("Context", str(current_context_id))
 
         # Check if Neural Memory is enabled
         neural_enabled = os.getenv("ENABLE_NEURAL_MEMORY", "false").lower() == "true"
@@ -1267,6 +1242,48 @@ class MemoryService:
                     results=[],
                     explore_hints=[] if request.include_explore_hints else None,
                 )
+
+        # #708 Option A H1 gate (deferred): we now know hybrid_search will
+        # actually fire (the analysis_cluster short-circuit above did not
+        # trigger). Probe the source workspace for a BYOK key applicable
+        # to this context BEFORE issuing the embedding API call, so the
+        # OPENAI_API_KEY env fallback in ``_get_user_api_key`` cannot
+        # silently bypass PR #711's BYOK-only spend cap.
+        #
+        # The probe MUST use the per-context embedding model (same source
+        # of truth ``SearchService.hybrid_search`` uses to pick its embed
+        # client at line 168). Probing with the global default would
+        # falsely deny Ollama-backed contexts (provider mismatch) and
+        # falsely pass OpenAI-backed contexts when the platform default is
+        # Ollama (gate would skip entirely).
+        if is_shared_context_read:
+            from repositories.config_repository import ContextSearchConfigRepository
+
+            ctx_config_repo = ContextSearchConfigRepository(self.db)
+            ctx_config = await ctx_config_repo.create_or_get(current_context_id)
+            byok_embed_svc = EmbeddingService(self.db, model=ctx_config.embedding_model)
+            # Only gate when the embedding API call would actually fire and
+            # produce a charge against the source workspace. ``keyword``
+            # mode skips ``embed_with_usage`` entirely (BM25-only); Ollama
+            # is free/local (no platform-key fallback path exists).
+            will_charge_embedding_cost = (
+                request.search_mode != "keyword" and byok_embed_svc.provider != "ollama"
+            )
+            if will_charge_embedding_cost and not await byok_embed_svc.has_byok_key(
+                str(context_workspace_id),
+                context_id=str(current_context_id),
+            ):
+                logger.warning(
+                    "shared_context_read_no_byok_deny",
+                    caller_user_id=user_id,
+                    caller_workspace_id=str(current_workspace_id),
+                    context_id=str(current_context_id),
+                    paid_by_workspace_id=str(context_workspace_id),
+                    embedding_model=ctx_config.embedding_model,
+                    embedding_provider=byok_embed_svc.provider,
+                    reason="missing_byok",
+                )
+                raise NotFoundException("Context", str(current_context_id))
 
         # 1. Primary Retrieval: Hybrid Search (Semantic + BM25)
         # Fetch more candidates when neural is enabled for better hybrid merge
