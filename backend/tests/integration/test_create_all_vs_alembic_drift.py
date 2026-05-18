@@ -24,8 +24,13 @@ For every user-defined table in the ``public`` schema (excluding the
 4. **Foreign keys** — keyed by constraint name, comparing local columns,
    referenced table, and referenced columns.
 5. **Indexes** — keyed by index name, comparing the column list +
-   uniqueness + partial-index predicate. PK / UK auto-indexes are
-   filtered out because they are already covered by sections 2 + 3.
+   uniqueness + partial-index predicate. **PK auto-indexes are filtered
+   out** (already covered by section 2). UK auto-indexes ARE kept,
+   because their column ordering and partial predicates carry drift
+   signal that the constraint-level (section 3) comparison cannot
+   surface — see ``_introspect_indexes`` docstring for details. As a
+   consequence, UK constraints can appear in BOTH the index map and
+   the constraints map; that pairing is by design.
 
 **What this detector explicitly does NOT cover**
 
@@ -110,6 +115,7 @@ _MODEL_MODULES: tuple[str, ...] = (
     "models.erasure",
     "models.file_objects",
     "models.hub_tag",
+    "models.llm_call_log",
     "models.llm_pricing",
     "models.memory",
     "models.neural",
@@ -220,27 +226,30 @@ _KNOWN_DRIFT: frozenset[str] = frozenset(
         "oauth_device_codes.oauth_device_codes_device_code_key.index.alembic_only",
         "oauth_device_codes.oauth_device_codes_user_code_key.index.alembic_only",
         "contexts.ux_contexts_resource_id_active.index.alembic_only",
-        # ─── Cat E: uniqueness mismatch (3 entries — investigate) ───────
-        # The ORM and alembic disagree on the uniqueness or column set of
-        # indexes that share a name. These are NOT pure naming drift;
-        # they represent a genuine semantic divergence and at least one
-        # side is wrong:
+        # ─── Cat E: uniqueness / expression drift (3 entries — fix ORM side) ───
+        # The ORM and alembic disagree on the uniqueness flag or column
+        # expression of indexes that share a name. Production (alembic)
+        # is the canonical truth; the fix is to align the ORM model.
         #   * ix_oauth_device_codes_device_code (is_unique=True/False)
         #   * ix_oauth_device_codes_user_code   (is_unique=True/False)
-        #     → ORM declares ``unique=True, index=True``, alembic emits
-        #       only ``op.create_index(unique=False)``. Decide which is
-        #       correct (the device/user code MUST be unique for OAuth
-        #       device-code grant correctness, so the ORM side appears
-        #       right — alembic likely needs a fix).
-        #   * uq_file_objects_workspace_sha256_active (columns differ)
-        #     → ORM has ``(workspace_id, sha256)``; alembic has
-        #       ``(workspace_id,)`` only. Single-column unique on
-        #       workspace_id would mean "one file per workspace" which
-        #       is clearly wrong — alembic side needs a migration fix
-        #       OR the index was created with a partial predicate that
-        #       collapses to workspace_id at the catalog level (verify).
-        # Follow-up: uniqueness drift investigation Cat E (potential
-        # data-integrity bug, especially the file_objects case).
+        #     → ORM declares ``unique=True, index=True``; alembic emits
+        #       ``op.create_index(unique=False)``. The device/user code
+        #       MUST be unique for OAuth device-code grant correctness,
+        #       so alembic appears to need a fix — but verify against
+        #       the device_code grant semantics before changing.
+        #   * uq_file_objects_workspace_sha256_active (column expression)
+        #     → ORM declares UNIQUE ``(workspace_id, sha256)``
+        #       (case-sensitive). Alembic produces UNIQUE
+        #       ``(workspace_id, lower(sha256::text))`` (case-insensitive,
+        #       per migration ``e07_556_sha256_lowercase_index`` — #556
+        #       follow-up). NOT a data-integrity bug: production correctly
+        #       enforces case-insensitive sha256 dedup. The drift is that
+        #       the ORM ``UniqueConstraint`` declaration didn't migrate
+        #       alongside the index change. Fix: declare
+        #       ``UniqueConstraint('workspace_id', func.lower(sha256), ...)``
+        #       on the model.
+        # Follow-up: uniqueness / expression drift fix Cat E (alignment,
+        # not data-integrity correction).
         "oauth_device_codes.ix_oauth_device_codes_device_code.index.value_mismatch",
         "oauth_device_codes.ix_oauth_device_codes_user_code.index.value_mismatch",
         "file_objects.uq_file_objects_workspace_sha256_active.index.value_mismatch",
@@ -254,7 +263,13 @@ _KNOWN_DRIFT: frozenset[str] = frozenset(
 
 
 class ColumnRow(TypedDict):
-    """One column's introspected shape from ``information_schema.columns``."""
+    """One column's introspected shape from ``information_schema.columns``.
+
+    Beyond ``data_type``, the snapshot carries ``character_maximum_length``,
+    ``numeric_precision`` / ``numeric_scale``, and ``datetime_precision``
+    so that drift in fully-qualified types like ``NUMERIC(14, 10)`` or
+    ``TIMESTAMP(6)`` is caught — ``data_type`` alone would compare equal.
+    """
 
     table: str
     column: str
@@ -262,6 +277,9 @@ class ColumnRow(TypedDict):
     is_nullable: str  # "YES" | "NO"
     column_default: str | None
     character_maximum_length: int | None
+    numeric_precision: int | None
+    numeric_scale: int | None
+    datetime_precision: int | None
 
 
 class ConstraintRow(TypedDict):
@@ -355,7 +373,10 @@ _COLUMNS_SQL = """
         data_type,
         is_nullable,
         column_default,
-        character_maximum_length
+        character_maximum_length,
+        numeric_precision,
+        numeric_scale,
+        datetime_precision
     FROM information_schema.columns
     WHERE table_schema = 'public'
     ORDER BY table_name, ordinal_position
@@ -408,10 +429,8 @@ _INDEXES_SQL = """
         ix.indisunique AS is_unique,
         ix.indisprimary AS is_primary,
         ARRAY(
-            SELECT a.attname
-            FROM unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord)
-            JOIN pg_attribute a
-                ON a.attrelid = c.oid AND a.attnum = k.attnum
+            SELECT pg_get_indexdef(ix.indexrelid, k.ord::int, true)
+            FROM generate_series(1, ix.indnatts) WITH ORDINALITY AS k(_, ord)
             ORDER BY k.ord
         ) AS columns,
         pg_get_expr(ix.indpred, ix.indrelid) AS predicate
@@ -441,6 +460,9 @@ def _introspect_columns(conn: Connection) -> dict[tuple[str, str], ColumnRow]:
             is_nullable=row.is_nullable,
             column_default=_strip_type_cast(row.column_default),
             character_maximum_length=row.character_maximum_length,
+            numeric_precision=row.numeric_precision,
+            numeric_scale=row.numeric_scale,
+            datetime_precision=row.datetime_precision,
         )
     return result
 
@@ -532,6 +554,15 @@ def _introspect_indexes(conn: Connection) -> dict[str, IndexRow]:
     match the constraint name, so their presence here is harmless
     duplication with the UK section, and their absence here would mask
     real drift in unique-index predicates.
+
+    **Expression-aware columns**: ``columns`` is built by calling
+    ``pg_get_indexdef(indexrelid, position, true)`` for each position
+    1..``indnatts``. This returns the column name for regular columns
+    AND the rendered expression text (e.g. ``lower(sha256)``) for
+    functional indexes. The earlier ``unnest(indkey) JOIN pg_attribute``
+    form silently dropped expression columns because Postgres represents
+    them with ``indkey.attnum = 0`` and stores the expression separately
+    in ``pg_index.indexprs``.
     """
     result: dict[str, IndexRow] = {}
     rows = conn.execute(text(_INDEXES_SQL))
@@ -643,6 +674,9 @@ def _diff_columns(
             "is_nullable",
             "column_default",
             "character_maximum_length",
+            "numeric_precision",
+            "numeric_scale",
+            "datetime_precision",
         ):
             if row_a[attr] != row_b[attr]:
                 diffs.append(f"{attr}: create_all={row_a[attr]!r}, alembic={row_b[attr]!r}")
