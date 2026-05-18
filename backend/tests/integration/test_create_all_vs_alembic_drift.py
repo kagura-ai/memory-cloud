@@ -17,10 +17,14 @@ For every user-defined table in the ``public`` schema (excluding the
 ``alembic_version`` bookkeeping table), the detector compares:
 
 1. **Columns** — name, data type, nullability, normalized ``column_default``.
-2. **Primary keys** — column membership (order-insensitive, since PK
-   columns are inherently unordered as a set).
-3. **Unique constraints** — keyed by constraint name, compared as
-   column frozensets.
+2. **Primary keys** — column membership AND column order. Although the
+   uniqueness property itself is set-based, column order matters for the
+   B-tree index that backs the PK (prefix-scan plans differ between
+   ``PK (a, b)`` and ``PK (b, a)``), so composite PK order is treated
+   as drift-significant.
+3. **Unique constraints** — keyed by constraint name, columns in
+   ordinal-position order (same rationale as section 2 for composite
+   UKs).
 4. **Foreign keys** — keyed by constraint name, comparing local columns,
    referenced table, and referenced columns.
 5. **Indexes** — keyed by index name, comparing the column list +
@@ -285,9 +289,19 @@ class ColumnRow(TypedDict):
 class ConstraintRow(TypedDict):
     """One PK / UK / FK constraint, normalized for comparison.
 
-    Columns are stored as a sorted tuple so multi-column constraints
-    compare order-insensitively. For FOREIGN KEY constraints,
-    ``update_rule`` and ``delete_rule`` carry the referential actions
+    Column order is **preserved** for PK and UK constraints (sorted by
+    ``information_schema.key_column_usage.ordinal_position``) so that
+    composite PKs and UKs with different column order on the two sides
+    surface as drift — column order matters for B-tree prefix scans
+    even though the uniqueness property itself is set-based.
+
+    For FOREIGN KEY constraints, ``information_schema.constraint_column_usage``
+    returns a Cartesian product per constraint, so positional order is
+    not reliable; ``_introspect_fk`` accepts this as a known limitation
+    (no multi-column FKs in the current schema; see ``_introspect_fk``
+    docstring for the fix plan when needed).
+
+    ``update_rule`` / ``delete_rule`` carry the FK referential actions
     (``NO ACTION`` / ``RESTRICT`` / ``CASCADE`` / ``SET NULL`` /
     ``SET DEFAULT``) from ``information_schema.referential_constraints``;
     these are ``None`` for PK / UK rows.
@@ -498,11 +512,14 @@ def _introspect_pk_uk(conn: Connection) -> dict[str, ConstraintRow]:
 
     result: dict[str, ConstraintRow] = {}
     for name, entry in raw.items():
+        # Preserve ordinal_position order from the SQL ORDER BY — column
+        # order matters for composite PK / UK B-tree prefix scans, so
+        # do NOT sort here.
         result[name] = ConstraintRow(
             table=entry["table"],
             name=name,
             kind=entry["kind"],
-            columns=tuple(sorted(entry["columns"])),
+            columns=tuple(entry["columns"]),
             foreign_table=None,
             foreign_columns=None,
             update_rule=None,
