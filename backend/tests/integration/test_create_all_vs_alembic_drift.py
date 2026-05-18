@@ -239,10 +239,18 @@ _KNOWN_DRIFT: frozenset[str] = frozenset(
         #   * ix_oauth_device_codes_device_code (is_unique=True/False)
         #   * ix_oauth_device_codes_user_code   (is_unique=True/False)
         #     → ORM declares ``unique=True, index=True``; alembic emits
-        #       ``op.create_index(unique=False)``. The device/user code
-        #       MUST be unique for OAuth device-code grant correctness,
-        #       so alembic appears to need a fix — but verify against
-        #       the device_code grant semantics before changing.
+        #       ``op.create_index(unique=False)``. **Not a correctness
+        #       gap** — migration ``d08_536_device_code_grant`` already
+        #       declares ``device_code`` / ``user_code`` columns with
+        #       ``unique=True``, so uniqueness is enforced via the
+        #       implicit UNIQUE constraint + backing unique index. The
+        #       drift is index redundancy: the ORM's ``unique=True,
+        #       index=True`` produces two distinct unique indexes per
+        #       column, while alembic emits one unique-backing + one
+        #       non-unique secondary. Fix: drop ``unique=True`` from
+        #       the ORM ``mapped_column`` (keep ``index=True`` only)
+        #       so it matches alembic's "lookup index over an already-
+        #       unique column" intent.
         #   * uq_file_objects_workspace_sha256_active (column expression)
         #     → ORM declares UNIQUE ``(workspace_id, sha256)``
         #       (case-sensitive). Alembic produces UNIQUE
@@ -647,11 +655,16 @@ def _introspect_indexes(conn: Connection) -> dict[str, IndexRow]:
 def _capture_schema(conn: Connection) -> SchemaSnapshot:
     """Capture the full schema state of the public schema.
 
-    Combines per-category introspection into one snapshot. PK and UK
-    constraints share one map (keyed by constraint name); FK is a
-    separate map; indexes are a third map. The (kind, name) pair is
-    unique because postgres enforces constraint-name uniqueness within
-    a schema and index-name uniqueness within a schema.
+    Combines per-category introspection into one snapshot:
+
+    - ``columns`` — keyed by ``(table, column)``
+    - ``constraints`` — **single merged map** of PK + UK + FK, keyed by
+      constraint name. Merging is safe because postgres enforces
+      constraint-name uniqueness within a schema, so no PK / UK / FK
+      can share a name. Comparison is per-attribute (see
+      ``ConstraintRow``), so the merge does not cause kind drift to
+      surface as anything other than the intended ``kind`` mismatch.
+    - ``indexes`` — keyed by index name (also schema-unique in postgres)
     """
     pk_uk = _introspect_pk_uk(conn)
     fk = _introspect_fk(conn)
