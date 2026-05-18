@@ -608,7 +608,7 @@ async def list_members(
         # API Keys
         api_keys_result = await db.execute(
             select(
-                func.count(APIKey.id).label("count"),
+                func.count(APIKey.id).label("api_key_count"),
                 func.bool_or(APIKey.hidden_at.is_(None)).label("any_visible"),
             ).where(
                 and_(
@@ -619,7 +619,9 @@ async def list_members(
             )
         )
         api_key_stats = api_keys_result.one_or_none()
-        api_key_count = api_key_stats.count if api_key_stats and api_key_stats.count else 0
+        api_key_count = (
+            api_key_stats.api_key_count if api_key_stats and api_key_stats.api_key_count else 0
+        )
         api_key_visible = (
             bool(api_key_stats.any_visible)
             if api_key_stats and api_key_stats.any_visible is not None

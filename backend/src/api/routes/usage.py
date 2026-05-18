@@ -660,7 +660,7 @@ async def get_usage_history(
         result = await db.execute(
             select(
                 UsageStats.date,
-                func.count(UsageStats.id).label("count"),
+                func.count(UsageStats.id).label("event_count"),
             )
             .where(
                 usage_filter,
@@ -671,7 +671,7 @@ async def get_usage_history(
             .order_by(UsageStats.date)
         )
 
-        daily_stats_dict = {row.date: row.count for row in result.all()}
+        daily_stats_dict = {row.date: row.event_count for row in result.all()}
 
         # Fill in missing dates with 0
         daily_stats = []
@@ -736,7 +736,7 @@ async def get_usage_breakdown(
         result = await db.execute(
             select(
                 UsageStats.endpoint,
-                func.count(UsageStats.id).label("count"),
+                func.count(UsageStats.id).label("event_count"),
             )
             .where(usage_filter, UsageStats.date >= start_date)
             .group_by(UsageStats.endpoint)
@@ -744,13 +744,13 @@ async def get_usage_breakdown(
         )
 
         endpoint_stats = result.all()
-        total_requests = sum(row.count for row in endpoint_stats)
+        total_requests = sum(row.event_count for row in endpoint_stats)
 
         by_endpoint = [
             EndpointUsage(
                 endpoint=row.endpoint,
-                count=row.count,
-                percentage=round((row.count / total_requests * 100), 2)
+                count=row.event_count,
+                percentage=round((row.event_count / total_requests * 100), 2)
                 if total_requests > 0
                 else 0.0,
             )
