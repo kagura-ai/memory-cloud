@@ -588,17 +588,24 @@ async def create_context(
         # Issue #276: Catch IntegrityError for resource_id duplication
         from sqlalchemy.exc import IntegrityError
 
+        err_str = str(e)
         if isinstance(e, IntegrityError) and (
-            "unique_context_resource_id" in str(e)
-            or "unique_workspace" in str(e)
-            or "resource_id" in str(e)
+            "unique_context_resource_id" in err_str
+            or "unique_workspace" in err_str
+            or "resource_id" in err_str
         ):
-            # ContextCreate has no resource_id field, so the integrity error
-            # here is the (workspace_id, name) uniqueness constraint, not a
-            # caller-supplied resource_id duplicate. Surface as 400.
+            # ContextCreate has no resource_id field today, so in practice the
+            # (workspace_id, name) uniqueness constraint is what fires here —
+            # surface that case with a name-collision message and keep the
+            # generic resource_id message as a defensive fallback for the
+            # other constraint substrings the outer filter accepts.
+            if "unique_workspace" in err_str and "unique_context_resource_id" not in err_str:
+                detail = "A context with this name already exists in this workspace."
+            else:
+                detail = "Resource ID conflict detected."
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Resource ID conflict detected.",
+                detail=detail,
             ) from e
         raise
 

@@ -1334,7 +1334,9 @@ class WorkspaceService:
         )
         context = ctx_result.scalar_one_or_none()
         if context is None:
-            raise NotFoundException(f"Context {context_id} not found in workspace {workspace_id}")
+            # NotFoundException builds "<resource> not found[: <id>]" — workspace_id
+            # is also in the URL path so we keep the resource label short.
+            raise NotFoundException("Context", str(context_id))
         if not context.is_public:
             raise ValidationError("Context is not public")
 

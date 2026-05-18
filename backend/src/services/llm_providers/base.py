@@ -57,7 +57,6 @@ class LLMProvider(ABC):
         :class:`LLMService._instantiate_provider` type-checks against
         ``type[LLMProvider]``.
         """
-        ...
 
     @abstractmethod
     async def complete_json(
