@@ -377,3 +377,156 @@ class TestSearchServiceMergeResults:
         result = service._merge_results(semantic, [])
         scores = [r["hybrid_score"] for r in result]
         assert scores == sorted(scores, reverse=True)
+
+
+class TestSharedContextReadFlag:
+    """Test ``is_shared_context_read`` flag behavior in ``hybrid_search`` (#708 F2).
+
+    The flag controls an authorization-sensitive bypass and the Qdrant
+    user filter, so its semantics must be directly verified at the
+    SearchService layer (not only at the MemoryService.recall caller).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _routing(self, _patch_routing):
+        """Activate the module-level routing patch for every test in this class."""
+
+    @pytest.fixture
+    def mock_db(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def service(self, mock_db):
+        return SearchService(mock_db)
+
+    @pytest.fixture
+    def default_search_config(self):
+        return type(
+            "DefaultConfig",
+            (),
+            {
+                "semantic_weight": 0.6,
+                "bm25_weight": 0.4,
+                "fetch_factor": 3,
+                "use_rerank": False,
+                "embedding_model": "text-embedding-3-small",
+                "embedding_dimensions": 512,
+            },
+        )()
+
+    @pytest.mark.asyncio
+    async def test_flag_true_skips_context_and_permission_probes(
+        self, service, default_search_config
+    ):
+        """``is_shared_context_read=True`` MUST skip both probes.
+
+        Handler-layer ``_resolve_context_for_read`` already verified
+        access; the redundant ``is_context_shared`` + ``is_workspace_member``
+        SELECTs would (a) waste a round-trip and (b) raise
+        AuthorizationError for cross-workspace callers (system_admin,
+        ContextMember-only) even though the handler granted access. This
+        test fences both anti-behaviors.
+        """
+        service._get_search_config = AsyncMock(return_value=default_search_config)
+
+        mock_ctx_svc = MagicMock()
+        mock_ctx_svc.is_context_shared = AsyncMock(return_value=False)
+        mock_perm_svc = MagicMock()
+        mock_perm_svc.is_workspace_member = AsyncMock(return_value=False)
+
+        with (
+            patch(
+                "services.search_service.search_memories_qdrant",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "services.search_service.search_memories_fulltext",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch("services.context_service.ContextService", return_value=mock_ctx_svc),
+            patch("services.permission_service.PermissionService", return_value=mock_perm_svc),
+        ):
+            await service.hybrid_search(
+                query="test",
+                user_id="caller_user",
+                workspace_id="00000000-0000-0000-0000-000000000001",
+                context_id="00000000-0000-0000-0000-000000000002",
+                k=5,
+                is_shared_context_read=True,
+            )
+
+        mock_ctx_svc.is_context_shared.assert_not_called()
+        mock_perm_svc.is_workspace_member.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_flag_true_propagates_to_both_qdrant_calls(self, service, default_search_config):
+        """``is_shared_context_read=True`` MUST forward ``is_shared_context=True``
+        to BOTH the semantic and the keyword/BM25 Qdrant call sites.
+
+        Either call missing the propagation would re-introduce the
+        ``user_id == caller`` filter and silently drop source-workspace
+        memories authored by other users — the Option A scenario would
+        return empty results despite the routing fix.
+        """
+        service._get_search_config = AsyncMock(return_value=default_search_config)
+
+        mock_qdrant = AsyncMock(return_value=[])
+        mock_fulltext = AsyncMock(return_value=[])
+
+        with (
+            patch("services.search_service.search_memories_qdrant", new=mock_qdrant),
+            patch("services.search_service.search_memories_fulltext", new=mock_fulltext),
+        ):
+            await service.hybrid_search(
+                query="test",
+                user_id="caller_user",
+                workspace_id="00000000-0000-0000-0000-000000000001",
+                context_id="00000000-0000-0000-0000-000000000002",
+                k=5,
+                is_shared_context_read=True,
+            )
+
+        assert mock_qdrant.call_args.kwargs["is_shared_context"] is True, (
+            "Semantic Qdrant call MUST receive is_shared_context=True"
+        )
+        assert mock_fulltext.call_args.kwargs["is_shared_context"] is True, (
+            "Keyword Qdrant call MUST receive is_shared_context=True"
+        )
+
+    @pytest.mark.asyncio
+    async def test_flag_false_runs_legacy_probe(self, service, default_search_config):
+        """Default (flag=False): legacy ``is_context_shared`` probe still runs.
+
+        Regression fence: the bypass MUST be opt-in. Same-workspace reads
+        (the dominant path) must continue to call ``is_context_shared``
+        + ``is_workspace_member`` so callers who legitimately need the
+        check still get it. Without this fence, any operator who flips
+        the default to True would silently disable the legacy
+        authorization probe for every recall.
+        """
+        service._get_search_config = AsyncMock(return_value=default_search_config)
+
+        mock_ctx_svc = MagicMock()
+        mock_ctx_svc.is_context_shared = AsyncMock(return_value=False)
+
+        with (
+            patch(
+                "services.search_service.search_memories_qdrant",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "services.search_service.search_memories_fulltext",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch("services.context_service.ContextService", return_value=mock_ctx_svc),
+        ):
+            await service.hybrid_search(
+                query="test",
+                user_id="caller_user",
+                workspace_id="00000000-0000-0000-0000-000000000001",
+                context_id="00000000-0000-0000-0000-000000000002",
+                k=5,
+                # is_shared_context_read omitted (defaults to False)
+            )
+
+        mock_ctx_svc.is_context_shared.assert_called_once()
