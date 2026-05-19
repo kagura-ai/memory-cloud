@@ -302,16 +302,33 @@ async def _main(args: argparse.Namespace) -> int:
             context_ids = [UUID(str(row.context_id)) for row in q.all()]
 
         n_contexts = len(context_ids)
+        context_errors = 0
         for ctx_id in context_ids:
-            result = await backfill_context(
-                db,
-                qdrant,
-                ctx_id,
-                min_memories=args.min_memories,
-                sim_threshold=args.sim_threshold,
-                top_k=args.top_k,
-                dry_run=args.dry_run,
-            )
+            try:
+                result = await backfill_context(
+                    db,
+                    qdrant,
+                    ctx_id,
+                    min_memories=args.min_memories,
+                    sim_threshold=args.sim_threshold,
+                    top_k=args.top_k,
+                    dry_run=args.dry_run,
+                )
+            except Exception as exc:
+                # Roll the aborted transaction back so the next iteration starts
+                # clean; record and continue so one bad context doesn't halt the
+                # whole sweep (per-edge errors are already savepoint-caught).
+                context_errors += 1
+                logger.exception(
+                    "backfill_context_failed",
+                    context_id=str(ctx_id),
+                    error=str(exc),
+                )
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+                continue
             total_contexts += 1
             if result.get("skipped"):
                 skipped += 1
@@ -324,6 +341,7 @@ async def _main(args: argparse.Namespace) -> int:
     print(f"\n=== semantic edge backfill ({mode}) ===")
     print(f"  Contexts processed:  {total_contexts}")
     print(f"  Contexts skipped:    {skipped}")
+    print(f"  Contexts errored:    {context_errors}")
     if args.dry_run:
         print(
             f"  Dry run: {total_would_insert} edges would be inserted across {n_contexts} contexts"
