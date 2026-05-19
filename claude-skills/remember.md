@@ -19,14 +19,15 @@ If only one context exists, use it. If multiple, pick the one most relevant to t
 ### 2. Parse the input
 
 - Extract a clear summary (first sentence or line, 10-500 chars)
-- Determine the appropriate type:
-  - `pattern`: Implementation patterns, code examples
-  - `troubleshooting`: Error fixes, debugging solutions
-  - `decision`: Design decisions, architecture choices
-  - `learning`: General learnings
-  - `bug-fix`: Bug fix details
+- Determine the appropriate type. The `type` field is a free-form string, but standardize on this vocabulary so `recall(filters={"type": ...})` keeps working:
+  - `decision`: Design decisions, architecture choices, rejected alternatives with WHY
+  - `pattern`: Implementation patterns, reusable approaches, code examples
+  - `bug-fix`: Bug fix details, root-cause notes
+  - `troubleshooting`: Error fixes, workarounds, environment-specific gotchas
+  - `learning`: General learnings, benchmark results, tool limitations
+  - `note`: Status updates, milestone notes, roadmap changes
 - Set importance based on impact (default: 0.8, design decisions: 0.9, core principles: 1.0)
-- Generate relevant tags (technology, domain, feature area)
+- Generate relevant tags (technology, domain, feature area). **Call `list_tags(context_id=...)` first** to discover existing tag spellings so you reuse them instead of inventing drift (e.g. `troubleshoot` vs `troubleshooting`).
 
 ### 3. Save
 
