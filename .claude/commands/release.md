@@ -42,11 +42,12 @@ The canonical runtime version is `APP_VERSION` in `backend/src/config/constants.
 - `backend/src/__init__.py` — `__version__ = "X.Y.Z"` (compat alias; must stay in sync with `APP_VERSION`)
 - `frontend/package.json` — `"version": "X.Y.Z"`
 - `frontend/package-lock.json` — run `cd frontend && npm install` to sync lock file
+- `.claude-plugin/plugin.json` — `"version": "X.Y.Z"` (kagura-memory plugin manifest; kept in lockstep so marketplace consumers see the same version as the backend)
 
 ### 5. Commit and tag
 
 ```bash
-git add backend/pyproject.toml backend/src/config/constants.py backend/src/__init__.py frontend/package.json frontend/package-lock.json
+git add backend/pyproject.toml backend/src/config/constants.py backend/src/__init__.py frontend/package.json frontend/package-lock.json .claude-plugin/plugin.json
 git commit -m "chore(release): vX.Y.Z"
 git tag vX.Y.Z
 ```

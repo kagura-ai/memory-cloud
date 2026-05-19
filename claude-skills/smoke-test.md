@@ -3,8 +3,13 @@ description: Run comprehensive smoke test of all MCP tools via live MCP connecti
 ---
 
 Verify MCP tools work correctly by executing them in sequence against temporary test contexts.
-Tests 33 non-resource tools (excludes `analyze_context` which requires billing, BYOK, workspace owner role, and Pro-tier feature access).
-Optionally tests 5 resource tools (6 PRO-only rows including delete_context cleanup) if the workspace has a PRO plan.
+Exercises 35 non-resource test rows covering the core memory/edge/context/tag/analysis/sleep tools.
+Optionally exercises 6 PRO-only rows for resource tools (setup_resource, ingest_events, get_resource_impact, get_resource_schema, list_resource_tokens, plus delete_context cleanup) if the workspace has a PRO plan.
+
+Excluded by design:
+- `analyze_context` — requires billing, BYOK, workspace owner role, and Pro-tier feature access.
+- File-upload tools (`init_file_upload`, `complete_file_upload`, `get_file_download_url`, `delete_file`, `list_files`) — require multipart S3/R2 upload flows that can't be exercised inline; cover them separately.
+
 Use this after deployments, tool description changes, or MCP server updates.
 
 **Prerequisite:** MCP server must be running and connected.
@@ -122,6 +127,17 @@ update_edge(context_id=..., source_id=<memory_id>, target_id=<memory_id_2>, weig
 
 delete_edge(context_id=..., source_id=<memory_id>, target_id=<memory_id_2>)
 -> Verify: success response (edge deleted)
+```
+
+### 6.5. Tag discovery
+
+```
+list_tags(context_id=...)
+-> Verify: returns {status: "success", tags: [...], total: N} with N >= 1
+-> Verify: at least one entry has tag="smoke-test" (created via remember in step 3)
+
+list_tags(context_id=..., prefix="smoke")
+-> Verify: every returned tag starts with "smoke"
 ```
 
 ### 7. Merge & usage tools
@@ -269,27 +285,29 @@ Print a summary table:
 | 18 | list_edges | List edges | PASS/FAIL |
 | 19 | update_edge | Update edge weight | PASS/FAIL |
 | 20 | delete_edge | Delete edge | PASS/FAIL |
-| 21 | create_context | Create merge target context | PASS/FAIL |
-| 22 | merge_contexts | Merge source into target | PASS/FAIL |
-| 23 | get_usage | Get workspace usage | PASS/FAIL |
-| 24 | delete_context | Soft-delete merge target and its memories | PASS/FAIL |
-| 25 | forget | Delete memory 2 | PASS/FAIL |
-| 26 | delete_context | Delete source context | PASS/FAIL |
-| 27 | setup_resource | Create resource context + token (PRO only) | PASS/FAIL/SKIP |
-| 28 | ingest_events | Batch ingest 2 test events (PRO only) | PASS/FAIL/SKIP |
-| 29 | get_resource_impact | Get resource stats (PRO only) | PASS/FAIL/SKIP |
-| 30 | get_resource_schema | Get schema (expect not_found) (PRO only) | PASS/FAIL/SKIP |
-| 31 | list_resource_tokens | List tokens for resource (PRO only) | PASS/FAIL/SKIP |
-| 32 | delete_context | Delete resource context (PRO only) | PASS/FAIL/SKIP |
-| 33 | list_analyses | List analysis runs | PASS/FAIL |
-| 34 | get_active_analysis | Get latest succeeded analysis | PASS/FAIL |
-| 35 | get_analysis | Get analysis by run_id (fake ID, error handling) | PASS/FAIL |
-| 36 | get_cluster | Get cluster detail (fake run_id, error handling) | PASS/FAIL |
-| 37 | get_sleep_history | Get sleep maintenance history | PASS/FAIL |
-| 38 | get_sleep_report | Get sleep report (fake ID, error handling) | PASS/FAIL |
-| 39 | rollback_sleep_run | Rollback sleep run (fake ID, error handling) | PASS/FAIL |
+| 21 | list_tags | List tags in context | PASS/FAIL |
+| 22 | list_tags | List tags with prefix filter | PASS/FAIL |
+| 23 | create_context | Create merge target context | PASS/FAIL |
+| 24 | merge_contexts | Merge source into target | PASS/FAIL |
+| 25 | get_usage | Get workspace usage | PASS/FAIL |
+| 26 | delete_context | Soft-delete merge target and its memories | PASS/FAIL |
+| 27 | forget | Delete memory 2 | PASS/FAIL |
+| 28 | delete_context | Delete source context | PASS/FAIL |
+| 29 | setup_resource | Create resource context + token (PRO only) | PASS/FAIL/SKIP |
+| 30 | ingest_events | Batch ingest 2 test events (PRO only) | PASS/FAIL/SKIP |
+| 31 | get_resource_impact | Get resource stats (PRO only) | PASS/FAIL/SKIP |
+| 32 | get_resource_schema | Get schema (expect not_found) (PRO only) | PASS/FAIL/SKIP |
+| 33 | list_resource_tokens | List tokens for resource (PRO only) | PASS/FAIL/SKIP |
+| 34 | delete_context | Delete resource context (PRO only) | PASS/FAIL/SKIP |
+| 35 | list_analyses | List analysis runs | PASS/FAIL |
+| 36 | get_active_analysis | Get latest succeeded analysis | PASS/FAIL |
+| 37 | get_analysis | Get analysis by run_id (fake ID, error handling) | PASS/FAIL |
+| 38 | get_cluster | Get cluster detail (fake run_id, error handling) | PASS/FAIL |
+| 39 | get_sleep_history | Get sleep maintenance history | PASS/FAIL |
+| 40 | get_sleep_report | Get sleep report (fake ID, error handling) | PASS/FAIL |
+| 41 | rollback_sleep_run | Rollback sleep run (fake ID, error handling) | PASS/FAIL |
 
-**Result: N/33 passed** (+ N/6 resource tools passed, or skipped if not PRO)
+**Result: N/35 passed** (+ N/6 resource tools passed, or skipped if not PRO)
 
 Test context: smoke-test-{timestamp} (cleaned up)
 

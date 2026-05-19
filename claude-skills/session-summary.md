@@ -16,16 +16,16 @@ Review the conversation and collect all GitHub issue numbers that were worked on
 
 ### 2. Identify what to remember
 
-Review the conversation and categorize knowledge into:
+Review the conversation and categorize knowledge into one of the six canonical types (see `remember` skill for the full vocabulary):
 
 | Type | What to capture | Importance |
 |------|----------------|------------|
 | `decision` | Architecture decisions, approach choices, rejected alternatives with WHY | 0.8-1.0 |
 | `pattern` | Implementation patterns, technical solutions, reusable approaches | 0.7-0.9 |
 | `bug-fix` | Root cause analysis, regression lessons, "never do this again" | 0.8-0.9 |
-| `note` | Milestone status, roadmap changes, issue relationships | 0.6-0.8 |
-| `learning` | SDK benchmark results, performance findings, tool limitations | 0.6-0.8 |
 | `troubleshooting` | Error solutions, workarounds, environment-specific fixes | 0.5-0.7 |
+| `learning` | SDK benchmark results, performance findings, tool limitations | 0.6-0.8 |
+| `note` | Milestone status, roadmap changes, issue relationships | 0.6-0.8 |
 
 ### 3. Get the target context
 
