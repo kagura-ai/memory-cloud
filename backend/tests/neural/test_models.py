@@ -3,7 +3,16 @@
 from datetime import datetime
 
 import pytest
+from sqlalchemy import inspect
+from sqlalchemy.exc import IntegrityError
 
+from models.memory import (
+    _ALL_EDGE_ORIGINS,
+    EDGE_ORIGIN_DECLARED,
+    EDGE_ORIGIN_HEBBIAN,
+    EDGE_ORIGIN_SEMANTIC,
+    NeuralMemoryEdge,
+)
 from neural.models import (
     ActivationState,
     CoActivationRecord,
@@ -187,3 +196,80 @@ class TestRecallResult:
             components={"semantic": 0.9, "recency": 0.7},
         )
         assert result.components["semantic"] == 0.9
+
+
+# ---------------------------------------------------------------------------
+# NeuralMemoryEdge.origin column tests (Issue #722)
+# ---------------------------------------------------------------------------
+
+
+def test_origin_column_present_with_default_hebbian():
+    cols = {c.name: c for c in inspect(NeuralMemoryEdge).columns}
+    assert "origin" in cols
+    assert cols["origin"].nullable is False
+    assert cols["origin"].default.arg == EDGE_ORIGIN_HEBBIAN
+
+
+def test_all_edge_origins_constants():
+    assert _ALL_EDGE_ORIGINS == (
+        EDGE_ORIGIN_HEBBIAN,
+        EDGE_ORIGIN_SEMANTIC,
+        EDGE_ORIGIN_DECLARED,
+    )
+
+
+@pytest.mark.asyncio
+async def test_invalid_origin_rejected_by_check_constraint(db_session, sample_memory_pair):
+    src, dst = sample_memory_pair
+    bad = NeuralMemoryEdge(
+        user_id=src.user_id,
+        src_id=src.id,
+        dst_id=dst.id,
+        workspace_id=src.workspace_id,
+        context_id=src.context_id,
+        edge_type="neural_association",
+        weight=0.1,
+        confidence=1.0,
+        origin="bogus",
+    )
+    db_session.add(bad)
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+    await db_session.rollback()
+
+
+def test_valid_edge_origin_check_constraint_matches_migration_literal():
+    """``valid_edge_origin`` CHECK constraint text is byte-identical to e17_722.
+
+    Mirrors ``test_valid_edge_type_check_constraint_matches_migration_literal``
+    in ``tests/test_edge_type_constants.py`` for the new origin discriminator.
+
+    The CHECK constraint is derived from ``_ALL_EDGE_ORIGINS`` via f-string.
+    This test pins the *exact* output string against the literal that
+    ``e17_722_neural_edge_origin.py`` installs on production via its
+    ``op.execute(...)`` block. Two reasons:
+
+    1. ``Base.metadata.create_all()`` (used by tests + fresh dev DBs) must
+       produce a CHECK constraint identical to the alembic head, so test
+       fixtures and prod schema stay in sync.
+    2. ``alembic revision --autogenerate`` compares the model's CheckConstraint
+       string against the migration head; any textual divergence (sorted vs
+       registration order, whitespace, quote style) generates a spurious
+       no-op migration. This test catches such drift before it lands.
+
+    If a future PR legitimately changes the CHECK string (adds a new origin,
+    reorders, etc.), update this expected literal AND write the accompanying
+    alembic migration in the same PR.
+    """
+    expected = "origin IN ('hebbian', 'semantic', 'declared')"
+
+    valid_edge_origin_check = next(
+        c
+        for c in NeuralMemoryEdge.__table_args__
+        if getattr(c, "name", None) == "valid_edge_origin"
+    )
+    # Use ``.text`` (raw TextClause attribute) instead of ``str()`` which
+    # would route through SQLAlchemy compilation and could shift across
+    # SQLAlchemy/dialect versions. ``.text`` is the original CheckConstraint
+    # string, so byte-identical comparison stays stable across upgrades.
+    assert valid_edge_origin_check.sqltext.text == expected

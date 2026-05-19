@@ -272,8 +272,14 @@ class TestEdgeDiscoveryPhase:
         assert result.details["edges_created"] == 1
         edge_phase.edge_repo.create_or_update_edge.assert_called_once()
         call_kwargs = edge_phase.edge_repo.create_or_update_edge.call_args[1]
-        assert call_kwargs["weight"] == DISCOVERY_EDGE_WEIGHT
-        assert call_kwargs["edge_type"] == "related_to"
+        # weight is the cosine score from the batch tuple (0.75), not the
+        # fixed DISCOVERY_EDGE_WEIGHT constant; origin is tagged 'semantic'
+        # so DecayManager's only_origin='hebbian' filter leaves it alone.
+        from models.memory import EDGE_ORIGIN_SEMANTIC, EDGE_TYPE_RELATED_TO
+
+        assert call_kwargs["weight"] == pytest.approx(0.75)
+        assert call_kwargs["origin"] == EDGE_ORIGIN_SEMANTIC
+        assert call_kwargs["edge_type"] == EDGE_TYPE_RELATED_TO
         # #306: auto-accept path increments `auto_accepted`, not `llm_accepted`.
         # avg_confidence / edge_type_dist / histogram stay zero (no pollution).
         assert result.details["auto_accepted"] == 1

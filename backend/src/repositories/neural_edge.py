@@ -20,7 +20,13 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.memory import EDGE_TYPE_DECLARED_LINK, Memory, NeuralMemoryEdge
+from models.memory import (
+    EDGE_ORIGIN_HEBBIAN,
+    EDGE_ORIGIN_SEMANTIC,
+    EDGE_TYPE_DECLARED_LINK,
+    Memory,
+    NeuralMemoryEdge,
+)
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -133,6 +139,8 @@ class NeuralEdgeRepository:
         context_id: str | None = None,
         protect_declared_link: bool = False,
         return_fresh_edge: bool = True,
+        *,
+        origin: str = EDGE_ORIGIN_HEBBIAN,
     ) -> NeuralMemoryEdge:
         """Create or update an edge (upsert) with 3-level isolation.
 
@@ -160,6 +168,10 @@ class NeuralEdgeRepository:
                 RETURNING actually wrote (Issue #458). Hot-path callers that
                 discard the return value (Hebbian via GraphService.add_edge,
                 Sleep edge_discovery) pass False to skip the extra SELECT.
+            origin: Edge origin (``EDGE_ORIGIN_HEBBIAN`` default). On upsert,
+                non-hebbian origins are preserved — only ``hebbian`` rows can
+                be overwritten. Sleep/declared writers should pass the explicit
+                enum value.
 
         Returns:
             Created or updated edge. When ``return_fresh_edge=False`` the
@@ -191,6 +203,7 @@ class NeuralEdgeRepository:
             edge_metadata=edge_metadata,
             workspace_id=ws_uuid,  # Required for 3-level isolation
             context_id=ctx_uuid,  # Required for 3-level isolation
+            origin=origin,
             created_at=utcnow(),
             last_updated=utcnow(),
         )
@@ -210,7 +223,15 @@ class NeuralEdgeRepository:
         else:
             edge_type_set = stmt.excluded.edge_type
 
-        # ON CONFLICT: Update existing edge
+        # Sticky origin (mirrors protect_declared_link CASE above): semantic
+        # and declared edges survive a Hebbian co-recall upsert; only existing
+        # hebbian rows can be overwritten. Without this, a runtime co-recall
+        # would silently demote sleep-discovered edges back into the decay loop.
+        origin_set = case(
+            (NeuralMemoryEdge.origin != EDGE_ORIGIN_HEBBIAN, NeuralMemoryEdge.origin),
+            else_=stmt.excluded.origin,
+        )
+
         stmt = stmt.on_conflict_do_update(
             constraint="unique_edge",  # (user_id, src_id, dst_id)
             set_={
@@ -218,6 +239,7 @@ class NeuralEdgeRepository:
                 "weight": stmt.excluded.weight,
                 "confidence": stmt.excluded.confidence,
                 "metadata": stmt.excluded.metadata,
+                "origin": origin_set,
                 "last_updated": utcnow(),
             },
         ).returning(NeuralMemoryEdge)
@@ -255,6 +277,8 @@ class NeuralEdgeRepository:
         confidence: float = 1.0,
         workspace_id: str | None = None,
         context_id: str | None = None,
+        *,
+        origin: str = EDGE_ORIGIN_HEBBIAN,
     ) -> NeuralMemoryEdge | None:
         """Create an edge only if no edge exists for (user_id, src_id, dst_id).
 
@@ -291,6 +315,7 @@ class NeuralEdgeRepository:
                 confidence=confidence,
                 workspace_id=ws_uuid,
                 context_id=ctx_uuid,
+                origin=origin,
                 created_at=utcnow(),
                 last_updated=utcnow(),
             )
@@ -697,12 +722,21 @@ class NeuralEdgeRepository:
     # Bulk Operations
     # ========================================================================
 
-    async def bulk_decay_weights(self, user_id: str, decay_factor: float = 0.95) -> int:
+    async def bulk_decay_weights(
+        self,
+        user_id: str,
+        decay_factor: float = 0.95,
+        *,
+        only_origin: str | None = None,
+    ) -> int:
         """Apply exponential decay to all edge weights (Issue #84 Phase 1).
 
         Args:
             user_id: User identifier
             decay_factor: Multiplicative decay (0.95 = 5% decay)
+            only_origin: When set, only edges with this origin are decayed.
+                Pass ``EDGE_ORIGIN_HEBBIAN`` to skip semantic edges during
+                Hebbian maintenance cycles.
 
         Returns:
             Number of edges updated
@@ -710,7 +744,10 @@ class NeuralEdgeRepository:
         Formula:
             w_new = w_old * decay_factor
         """
-        stmt = select(NeuralMemoryEdge).where(NeuralMemoryEdge.user_id == user_id).with_for_update()
+        stmt = select(NeuralMemoryEdge).where(NeuralMemoryEdge.user_id == user_id)
+        if only_origin is not None:
+            stmt = stmt.where(NeuralMemoryEdge.origin == only_origin)
+        stmt = stmt.with_for_update()
 
         result = await self.db.execute(stmt)
         edges = list(result.scalars().all())
@@ -721,25 +758,37 @@ class NeuralEdgeRepository:
             edge.last_updated = utcnow()
             count += 1
 
-        logger.info("bulk_decay_applied", user_id=user_id, edges_updated=count)
+        logger.info(
+            "bulk_decay_applied", user_id=user_id, edges_updated=count, only_origin=only_origin
+        )
         return count
 
-    async def prune_weak_edges(self, user_id: str, weight_threshold: float = 0.01) -> int:
+    async def prune_weak_edges(
+        self,
+        user_id: str,
+        weight_threshold: float = 0.01,
+        *,
+        only_origin: str | None = None,
+    ) -> int:
         """Remove edges below weight threshold.
 
         Args:
             user_id: User identifier
             weight_threshold: Minimum weight to keep
+            only_origin: When set, only edges with this origin are pruned.
+                Pass ``EDGE_ORIGIN_HEBBIAN`` to preserve semantic edges
+                during Hebbian maintenance cycles.
 
         Returns:
             Number of edges deleted
         """
-        stmt = delete(NeuralMemoryEdge).where(
-            and_(
-                NeuralMemoryEdge.user_id == user_id,
-                NeuralMemoryEdge.weight < weight_threshold,
-            )
-        )
+        conds = [
+            NeuralMemoryEdge.user_id == user_id,
+            NeuralMemoryEdge.weight < weight_threshold,
+        ]
+        if only_origin is not None:
+            conds.append(NeuralMemoryEdge.origin == only_origin)
+        stmt = delete(NeuralMemoryEdge).where(and_(*conds))
 
         result = cast(CursorResult[Any], await self.db.execute(stmt))
         deleted_count = result.rowcount or 0
@@ -749,6 +798,7 @@ class NeuralEdgeRepository:
             user_id=user_id,
             threshold=weight_threshold,
             deleted=deleted_count,
+            only_origin=only_origin,
         )
 
         return deleted_count
@@ -1152,6 +1202,48 @@ class NeuralEdgeRepository:
         )
 
         return transferred
+
+    async def delete_semantic_edges_for_dead_pairs(self) -> int:
+        """Delete origin='semantic' edges whose src or dst memory is soft-deleted.
+
+        Monthly hygiene for semantic edges, which are exempt from the Hebbian
+        decay/prune loop and so need their own dead-endpoint sweep. Iterates
+        per user_id so the DELETE transaction stays scoped to one tenant at a
+        time, bounding lock width on multi-tenant deployments. The
+        ``memories.deleted_at`` column is unindexed — Postgres falls back to a
+        sequential scan, tolerable at monthly cadence below ~1M rows.
+
+        Returns:
+            Total number of edges deleted across all users.
+        """
+        user_ids = (
+            (
+                await self.db.execute(
+                    select(NeuralMemoryEdge.user_id)
+                    .where(NeuralMemoryEdge.origin == EDGE_ORIGIN_SEMANTIC)
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        total = 0
+        for user_id in user_ids:
+            sub_dead = select(Memory.id).where(Memory.deleted_at.is_not(None)).scalar_subquery()
+            stmt = delete(NeuralMemoryEdge).where(
+                and_(
+                    NeuralMemoryEdge.user_id == user_id,
+                    NeuralMemoryEdge.origin == EDGE_ORIGIN_SEMANTIC,
+                    or_(
+                        NeuralMemoryEdge.src_id.in_(sub_dead),
+                        NeuralMemoryEdge.dst_id.in_(sub_dead),
+                    ),
+                )
+            )
+            result = cast(CursorResult[Any], await self.db.execute(stmt))
+            total += result.rowcount or 0
+        return total
 
     async def delete_all_edges(self, user_id: str) -> int:
         """Delete all edges for a user (graph reset).
