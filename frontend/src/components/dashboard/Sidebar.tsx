@@ -392,6 +392,18 @@ export function Sidebar() {
 
   const SidebarContent = () => (
     <>
+      {/* Kagura Logo (formerly in Header) */}
+      <Link
+        href="/workspace/dashboard"
+        className={utilCn(
+          "flex items-center px-4 py-3 hover:opacity-80",
+          transitions.default,
+        )}
+        onClick={() => setIsOpen(false)}
+      >
+        <KaguraLogo className="h-8 w-auto" />
+      </Link>
+
       {/* Workspace Switcher at Top - Minimal padding */}
       <div className="px-2 py-2">
         <WorkspaceSwitcher />
