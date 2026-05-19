@@ -52,14 +52,22 @@ When enabled, the response includes up to 3 `explore_hints` — each with a `mem
 ```
 recall(context_id=..., query="...", k=10, filters={"type": "decision"})
 recall(context_id=..., query="...", k=10, filters={"tags": ["python", "fastapi"]})
+recall(context_id=..., query="...", k=10, filters={"tags": ["python", "fastapi"], "tags_match": "all"})
 recall(context_id=..., query="...", k=10, filters={"importance": {"gte": 0.8}})
 recall(context_id=..., query="...", k=10, filters={"created_after": "2026-01-01T00:00:00Z"})
 recall(context_id=..., query="...", k=10, filters={"source_uri_prefix": "vault://my-vault/"})
 recall(context_id=..., query="...", k=10, filters={"source_type": "file"})
 ```
 
+- `tags`: matches **ANY** of the listed tags by default (OR). Add `"tags_match": "all"` to require all tags (AND). Before building a tag filter, call `list_tags(context_id=...)` to discover the actual tag spellings in this context — `troubleshoot` vs `troubleshooting` drift silently kills tag filters.
 - `source_uri_prefix`: Filter by origin URI prefix (e.g. `"file://"`, `"vault://my-vault/"`). Useful for querying memories from a specific vault or directory.
 - `source_type`: Filter by origin type — `"file"` | `"url"` | `"vault"` | `"api"` | `"manual"`.
+
+**Cross-context search** — to query 2-20 contexts at once (all must share the same embedding model), use `context_ids` instead of `context_id`:
+
+```
+recall(context_ids=["<uuid-1>", "<uuid-2>"], query="...", k=10)
+```
 
 Filters can be combined:
 
