@@ -12,6 +12,7 @@ import math
 from datetime import datetime, timedelta
 from typing import Any
 
+from models.memory import EDGE_ORIGIN_HEBBIAN
 from src.services.graph_service import GraphService as GraphMemory
 from utils.datetime import utcnow
 
@@ -67,12 +68,15 @@ class DecayManager:
             return {"edges_decayed": 0, "edges_pruned": 0}
 
         # Apply decay to all edges (Issue #84: SQL backend bulk operation)
+        # Issue #722: semantic edges are decay-exempt; only Hebbian edges are decayed/pruned
         decay_factor = math.exp(-self.config.decay_rate * delta_seconds)
-        edges_decayed = await self.graph.edge_repo.bulk_decay_weights(user_id, decay_factor)
+        edges_decayed = await self.graph.edge_repo.bulk_decay_weights(
+            user_id, decay_factor, only_origin=EDGE_ORIGIN_HEBBIAN
+        )
 
         # Prune weak edges
         edges_pruned = await self.graph.edge_repo.prune_weak_edges(
-            user_id, self.config.prune_threshold
+            user_id, self.config.prune_threshold, only_origin=EDGE_ORIGIN_HEBBIAN
         )
 
         self._last_decay_time = current_time
@@ -102,7 +106,9 @@ class DecayManager:
         threshold = threshold if threshold is not None else self.config.prune_threshold
 
         # SQL backend: use bulk prune (Issue #84)
-        pruned_count = await self.graph.edge_repo.prune_weak_edges(user_id, threshold)
+        pruned_count = await self.graph.edge_repo.prune_weak_edges(
+            user_id, threshold, only_origin=EDGE_ORIGIN_HEBBIAN
+        )
 
         logger.info(f"Pruned {pruned_count} weak edges (threshold={threshold:.4f})")
 

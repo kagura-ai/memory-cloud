@@ -4,6 +4,7 @@ import math
 
 import pytest
 
+from models.memory import EDGE_ORIGIN_HEBBIAN
 from neural.config import NeuralMemoryConfig
 from neural.decay import DecayManager
 
@@ -60,7 +61,7 @@ class TestDecayManager:
         # Verify decay factor calculated correctly
         expected_factor = math.exp(-0.01 * 60)
         mock_graph.edge_repo.bulk_decay_weights.assert_called_once_with(
-            "test_user", expected_factor
+            "test_user", expected_factor, only_origin=EDGE_ORIGIN_HEBBIAN
         )
 
     @pytest.mark.asyncio
@@ -85,20 +86,26 @@ class TestDecayManager:
     async def test_apply_decay_prunes_weak_edges(self, manager, mock_graph):
         """Test that weak edges are pruned after decay."""
         await manager.apply_decay("test_user")
-        mock_graph.edge_repo.prune_weak_edges.assert_called_once_with("test_user", 0.1)
+        mock_graph.edge_repo.prune_weak_edges.assert_called_once_with(
+            "test_user", 0.1, only_origin=EDGE_ORIGIN_HEBBIAN
+        )
 
     @pytest.mark.asyncio
     async def test_prune_weak_edges(self, manager, mock_graph):
         """Test direct pruning of weak edges."""
         result = await manager.prune_weak_edges("test_user")
         assert result == 2
-        mock_graph.edge_repo.prune_weak_edges.assert_called_with("test_user", 0.1)
+        mock_graph.edge_repo.prune_weak_edges.assert_called_with(
+            "test_user", 0.1, only_origin=EDGE_ORIGIN_HEBBIAN
+        )
 
     @pytest.mark.asyncio
     async def test_prune_weak_edges_custom_threshold(self, manager, mock_graph):
         """Test pruning with custom threshold."""
         await manager.prune_weak_edges("test_user", threshold=0.5)
-        mock_graph.edge_repo.prune_weak_edges.assert_called_with("test_user", 0.5)
+        mock_graph.edge_repo.prune_weak_edges.assert_called_with(
+            "test_user", 0.5, only_origin=EDGE_ORIGIN_HEBBIAN
+        )
 
     @pytest.mark.asyncio
     async def test_consolidate_deprecated(self, manager):
