@@ -8,7 +8,7 @@ covered by the integration suite under ``backend/tests/integration/``.
 
 from __future__ import annotations
 
-from sqlalchemy.dialects.postgresql import BYTEA, UUID
+from sqlalchemy.dialects.postgresql import UUID
 
 from models.file_objects import FileObject, WorkspaceStorageUsage
 
@@ -21,16 +21,11 @@ class TestFileObjectModel:
         cols = {c.name for c in FileObject.__table__.columns}
         # Identity + workspace + content
         assert {"id", "workspace_id", "sha256", "size_bytes", "filename", "content_type"} <= cols
-        # Storage routing (R1 / R2)
-        assert {"storage_backend", "storage_key", "inline_bytes"} <= cols
+        # Storage routing (R2-only after #616 dropped pg_inline scaffolding)
+        assert {"storage_backend", "storage_key"} <= cols
+        assert "inline_bytes" not in cols
         # Upload state machine (R3)
         assert {"status", "expires_at", "uploaded_at", "deleted_at"} <= cols
-
-    def test_inline_bytes_column_is_bytea(self):
-        """Phase 1 reserves ``inline_bytes`` for Phase 1.5 use."""
-        col = FileObject.__table__.c.inline_bytes
-        assert isinstance(col.type, BYTEA)
-        assert col.nullable is True
 
     def test_id_is_uuid(self):
         col = FileObject.__table__.c.id
