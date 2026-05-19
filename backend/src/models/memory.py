@@ -322,6 +322,20 @@ _ALL_EDGE_TYPES: tuple[str, ...] = (
     EDGE_TYPE_TAG_COOCCURRENCE,
 )
 
+# Edge origin discriminator (Issue #722).
+# 'hebbian' = runtime co-activation (HebbianLearner) — decays
+# 'semantic' = sleep edge_discovery (cosine-similarity-derived) — does not decay
+# 'declared' = user-asserted links — does not decay
+EDGE_ORIGIN_HEBBIAN = "hebbian"
+EDGE_ORIGIN_SEMANTIC = "semantic"
+EDGE_ORIGIN_DECLARED = "declared"
+
+_ALL_EDGE_ORIGINS: tuple[str, ...] = (
+    EDGE_ORIGIN_HEBBIAN,
+    EDGE_ORIGIN_SEMANTIC,
+    EDGE_ORIGIN_DECLARED,
+)
+
 
 class NeuralMemoryEdge(Base):
     """Neural Memory edge model (Issue #84 Phase 1).
@@ -364,6 +378,10 @@ class NeuralMemoryEdge(Base):
     )
     weight: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    # Edge origin (Issue #722). Decay/prune skip origin != 'hebbian'.
+    origin: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=EDGE_ORIGIN_HEBBIAN, server_default=EDGE_ORIGIN_HEBBIAN
+    )
 
     # Metadata (flexible JSONB for future extensions)
     # Note: 'metadata' is reserved in SQLAlchemy, use edge_metadata
@@ -406,6 +424,16 @@ class NeuralMemoryEdge(Base):
             "workspace_id IS NOT NULL AND context_id IS NOT NULL",
             name="ck_neural_memory_edges_ws_ctx_not_null",
         ),
+        # Issue #722: CHECK constraint derived from ``_ALL_EDGE_ORIGINS``.
+        # Adding a new origin requires THREE coordinated edits (caught by the
+        # regression test if any are missed): (1) add ``EDGE_ORIGIN_NEW`` to the
+        # constants block above, (2) append it to ``_ALL_EDGE_ORIGINS``, (3) update
+        # the expected literal in ``test_valid_edge_origin_check_constraint_matches_migration_literal``,
+        # plus a corresponding alembic migration that ALTERs the prod CHECK.
+        CheckConstraint(
+            f"origin IN ({', '.join(repr(o) for o in _ALL_EDGE_ORIGINS)})",
+            name="valid_edge_origin",
+        ),
         Index("idx_edges_user_src", "user_id", "src_id"),
         Index("idx_edges_user_dst", "user_id", "dst_id"),
         # Issue #383: composite indexes matching the new PermissionService-driven
@@ -414,6 +442,7 @@ class NeuralMemoryEdge(Base):
         # shared-context visualization without relying on ``user_id``.
         Index("idx_edges_ws_ctx_src", "workspace_id", "context_id", "src_id"),
         Index("idx_edges_ws_ctx_dst", "workspace_id", "context_id", "dst_id"),
+        Index("idx_edges_origin", "origin"),
     )
 
     def __repr__(self) -> str:
