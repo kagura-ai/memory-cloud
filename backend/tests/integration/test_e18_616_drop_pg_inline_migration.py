@@ -19,7 +19,6 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
 from alembic import command
-
 from tests.integration.test_alembic_migrations import (
     _alembic_at_test_db,
     _get_alembic_config,
