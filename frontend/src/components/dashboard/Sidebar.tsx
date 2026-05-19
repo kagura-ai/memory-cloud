@@ -908,7 +908,7 @@ export function Sidebar() {
       <button
         onClick={() => setIsOpen(!isOpen)}
         className={cn(
-          "fixed top-4 left-4 z-[100] p-2 rounded-lg md:hidden",
+          "fixed top-2 left-2 z-[100] p-1.5 rounded-lg md:hidden",
           "text-slate-700 dark:text-slate-200",
           colors.bg.card,
           colors.border.default,
@@ -916,7 +916,7 @@ export function Sidebar() {
         )}
         aria-label={t("toggleMenu")}
       >
-        {isOpen ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
+        {isOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
       </button>
 
       {/* Mobile: Overlay */}
