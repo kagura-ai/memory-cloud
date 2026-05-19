@@ -38,21 +38,19 @@ from sqlalchemy import func, select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from db.base import _get_session_factory  # noqa: E402
-from models.memory import EDGE_ORIGIN_SEMANTIC, Memory  # noqa: E402
+from models.memory import (  # noqa: E402
+    EDGE_ORIGIN_SEMANTIC,
+    EDGE_TYPE_RELATED_TO,
+    Memory,
+)
 from repositories.neural_edge import NeuralEdgeRepository  # noqa: E402
 from utils.logger import get_logger  # noqa: E402
 
 logger = get_logger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Qdrant neighbour protocol — decouples backfill_context() from the real
-# Qdrant client so the tests can pass a simple MagicMock.
-# ---------------------------------------------------------------------------
-
-
 class QdrantNeighborClient(Protocol):
-    """Minimal interface required by backfill_context()."""
+    """Decouples backfill_context from the real Qdrant client (tests pass a mock)."""
 
     async def query_neighbors(
         self,
@@ -64,11 +62,6 @@ class QdrantNeighborClient(Protocol):
     ) -> list[tuple[UUID, float]]:
         """Return up to top_k (neighbor_uuid, cosine_score) pairs for memory_id."""
         ...
-
-
-# ---------------------------------------------------------------------------
-# Real Qdrant adapter
-# ---------------------------------------------------------------------------
 
 
 class RealQdrantNeighborClient:
@@ -139,11 +132,6 @@ class RealQdrantNeighborClient:
         return out
 
 
-# ---------------------------------------------------------------------------
-# Core backfill logic (pure — uses the protocol, not the real client)
-# ---------------------------------------------------------------------------
-
-
 async def backfill_context(
     db: AsyncSession,
     qdrant: QdrantNeighborClient,
@@ -170,7 +158,6 @@ async def backfill_context(
         Dict with keys: skipped, reason (on skip), memory_count,
         pairs_evaluated, edges_inserted, edges_failed, pairs_would_insert, dry_run.
     """
-    # ---- 1. Count alive memories in this context --------------------------
     count_q = await db.execute(
         select(func.count(Memory.id)).where(
             Memory.context_id == context_id,
@@ -187,7 +174,6 @@ async def backfill_context(
             "memory_count": memory_count,
         }
 
-    # ---- 2. Load alive memories (need user_id + workspace_id per memory) --
     mem_q = await db.execute(
         select(Memory.id, Memory.user_id, Memory.workspace_id).where(
             Memory.context_id == context_id,
@@ -197,7 +183,6 @@ async def backfill_context(
     )
     memories = mem_q.all()
 
-    # ---- 3. Iterate memories, query neighbours, build deduplicated pairs ---
     edge_repo = NeuralEdgeRepository(db)
     seen_pairs: set[tuple[UUID, UUID]] = set()
     pairs_evaluated = 0
@@ -245,7 +230,7 @@ async def backfill_context(
                         user_id=user_id,
                         src_id=a,
                         dst_id=b,
-                        edge_type="related_to",
+                        edge_type=EDGE_TYPE_RELATED_TO,
                         weight=score,
                         confidence=1.0,
                         workspace_id=str(workspace_id),
@@ -287,11 +272,6 @@ async def backfill_context(
         "pairs_would_insert": pairs_would_insert,
         "dry_run": dry_run,
     }
-
-
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
 
 
 async def _main(args: argparse.Namespace) -> int:

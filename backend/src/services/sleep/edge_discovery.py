@@ -574,10 +574,14 @@ class EdgeDiscoveryPhase:
         Returns:
             Number of edges successfully created or updated.
         """
-        score_by_pair = {(s, d): score for s, d, score in batch}
+        # Canonical pair key: undirected `related_to` edges may come back from the
+        # LLM with src/dst swapped relative to the input batch (see _llm_judge_batch
+        # frozenset hallucination guard). Match `dedup_merge.py` keying so the
+        # cosine lookup survives the swap.
+        score_by_pair = {tuple(sorted([s, d], key=str)): score for s, d, score in batch}
         created = 0
         for edge in confirmed:
-            pair = (edge.src_id, edge.dst_id)
+            pair = tuple(sorted([edge.src_id, edge.dst_id], key=str))
             if pair in score_by_pair:
                 cosine = score_by_pair[pair]
             else:
@@ -599,13 +603,14 @@ class EdgeDiscoveryPhase:
                     confidence=edge.confidence,
                     workspace_id=workspace_id,
                     context_id=context_id,
-                    edge_metadata={"source": "sleep_edge_discovery", "cosine": cosine},
+                    edge_metadata={"source": "sleep_edge_discovery"},
                     # Issue #457: automated writer; preserve declared_link.
                     protect_declared_link=True,
                     # Sleep edge_discovery discards the return; skip the
                     # post-upsert SELECT for the same reason as Hebbian.
                     return_fresh_edge=False,
-                    # Issue #722: tag as semantic so decay carve-out skips it.
+                    # Tag as semantic so DecayManager's only_origin='hebbian'
+                    # filter leaves these edges alone.
                     origin=EDGE_ORIGIN_SEMANTIC,
                 )
                 created += 1

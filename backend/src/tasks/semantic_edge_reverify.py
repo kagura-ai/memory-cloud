@@ -2,10 +2,8 @@
 
 Semantic edges are exempt from the Hebbian decay/prune loop because they
 represent a static property (cosine similarity) rather than a usage trace.
-This task runs monthly to:
-
-* Delete edges whose src or dst memory has been soft-deleted.
-* (Future) Re-verify cosine similarity has not drifted below threshold.
+This task runs monthly to delete edges whose src or dst memory has been
+soft-deleted.
 """
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler

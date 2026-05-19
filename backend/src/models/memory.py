@@ -424,12 +424,8 @@ class NeuralMemoryEdge(Base):
             "workspace_id IS NOT NULL AND context_id IS NOT NULL",
             name="ck_neural_memory_edges_ws_ctx_not_null",
         ),
-        # Issue #722: CHECK constraint derived from ``_ALL_EDGE_ORIGINS``.
-        # Adding a new origin requires THREE coordinated edits (caught by the
-        # regression test if any are missed): (1) add ``EDGE_ORIGIN_NEW`` to the
-        # constants block above, (2) append it to ``_ALL_EDGE_ORIGINS``, (3) update
-        # the expected literal in ``test_valid_edge_origin_check_constraint_matches_migration_literal``,
-        # plus a corresponding alembic migration that ALTERs the prod CHECK.
+        # Drift between this CHECK and the e17_722 migration literal is pinned
+        # by test_valid_edge_origin_check_constraint_matches_migration_literal.
         CheckConstraint(
             f"origin IN ({', '.join(repr(o) for o in _ALL_EDGE_ORIGINS)})",
             name="valid_edge_origin",
