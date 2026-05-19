@@ -50,6 +50,7 @@ from models.auth import ExternalAPIKey, User, Workspace  # noqa: E402
 from services import email_service as email_module  # noqa: E402
 from services.embedding_service import EmbeddingService  # noqa: E402
 from services.embedding_spend_cap_service import _MICRO_USD  # noqa: E402
+from utils.encryption import get_encryptor  # noqa: E402
 from utils.exceptions import EmbeddingSpendCapExceeded  # noqa: E402
 
 
@@ -132,12 +133,12 @@ def mock_email_service():
     """Swap the email singleton with a ``MagicMock`` for alert assertions."""
     fake = MagicMock()
     fake.send_embedding_spend_alert = AsyncMock(return_value=True)
-    prev = email_module._email_service
-    email_module._email_service = fake
+    prev = email_module._default_email_service
+    email_module._default_email_service = fake
     try:
         yield fake
     finally:
-        email_module._email_service = prev
+        email_module._default_email_service = prev
 
 
 # --- DB rows --------------------------------------------------------------
@@ -191,10 +192,11 @@ async def _commit_byok_key(
     context_id=None,
     provider: str = "openai",
 ) -> ExternalAPIKey:
+    encrypted = get_encryptor().encrypt("sk-test-fake-byok-key")
     key = ExternalAPIKey(
         key_name=f"k_{uuid4().hex[:8]}",
         provider=provider,
-        encrypted_value="fernet:placeholder",
+        encrypted_value=encrypted,
         user_id=user_id,
         workspace_id=workspace_id,
         context_id=context_id,
@@ -239,3 +241,44 @@ async def unbound_workspace(db_session: AsyncSession):
     await db_session.commit()
     yield ws
     await db_session.rollback()
+
+
+# --- Tests ----------------------------------------------------------------
+
+
+class TestEmbedWithUsageCapGate:
+    """Integration tests for embed_with_usage → cap_service chain (#714)."""
+
+    @pytest.mark.asyncio
+    async def test_byok_under_cap_passes_and_records_spend(
+        self,
+        db_session: AsyncSession,
+        byok_workspace_with_cap: Workspace,
+        fake_redis: FakeRedis,
+        patch_openai,
+        patch_pricing,
+        mock_email_service,
+    ):
+        """BYOK workspace, $10 daily cap, no prior spend → first call succeeds,
+        counter rises to $0.50 (5% of cap), no alert fires."""
+        svc = EmbeddingService(db_session)
+        vector, tokens = await svc.embed_with_usage(
+            text="hello world",
+            user_id=byok_workspace_with_cap.owner_user_id,
+            workspace_id=str(byok_workspace_with_cap.id),
+        )
+
+        assert len(vector) == 512
+        assert tokens == 100
+
+        # OpenAI was actually called (gate did not short-circuit)
+        patch_openai.embeddings.create.assert_awaited_once()
+
+        # Counter reflects $0.50 (= 500_000 micro-USD)
+        counter_key_prefix = f"embed_spend:{byok_workspace_with_cap.id}:daily:"
+        keys = [k async for k in fake_redis.scan_iter(match=f"{counter_key_prefix}*")]
+        assert len(keys) == 1
+        assert int(await fake_redis.get(keys[0])) == int(Decimal("0.5") * _MICRO_USD)
+
+        # 5% is below the 80% threshold → no alert
+        mock_email_service.send_embedding_spend_alert.assert_not_called()
