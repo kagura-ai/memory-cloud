@@ -117,13 +117,14 @@ If you're setting up Kagura Memory Cloud plugin in a new project or on another m
 
 **Option A: Marketplace install (recommended)**
 
-Inside Claude Code, run:
+Inside Claude Code, register the marketplace first (skip this line if it's already registered — `/plugin marketplace list` shows what's there), then install:
 
 ```
+/plugin marketplace add kagura-ai/memory-cloud
 /plugin install kagura-memory@kagura-memory-cloud
 ```
 
-The argument is `<plugin-name>@<marketplace-name>` — the plugin is `kagura-memory` and it lives in the `kagura-memory-cloud` marketplace.
+The install argument is `<plugin-name>@<marketplace-name>` — the plugin is `kagura-memory` and it lives in the `kagura-memory-cloud` marketplace.
 
 After install, the plugin skills (`/kagura-memory:*`) become available. Proceed to Step 2 above to configure the MCP server connection.
 

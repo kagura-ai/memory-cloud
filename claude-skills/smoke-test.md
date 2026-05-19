@@ -137,7 +137,9 @@ list_tags(context_id=...)
 -> Verify: at least one entry has tag="smoke-test" (created via remember in step 3)
 
 list_tags(context_id=..., prefix="smoke")
--> Verify: every returned tag starts with "smoke"
+-> Verify: every returned tag, lowercased, starts with "smoke" (the prefix
+   filter is case-insensitive per the MCP schema, so this stays correct even
+   if a tag was stored as "Smoke-Foo")
 ```
 
 ### 7. Merge & usage tools
