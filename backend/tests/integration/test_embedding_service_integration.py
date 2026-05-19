@@ -370,3 +370,42 @@ class TestEmbedWithUsageCapGate:
 
         # Counter is untouched (still $10).
         assert int(await fake_redis.get(counter_key)) == int(Decimal("10.0") * _MICRO_USD)
+
+    @pytest.mark.asyncio
+    async def test_platform_fallback_skips_cap_path(
+        self,
+        db_session: AsyncSession,
+        unbound_workspace: Workspace,
+        fake_redis: FakeRedis,
+        patch_openai,
+        patch_pricing,
+        mock_email_service,
+        monkeypatch,
+    ):
+        """Workspace WITHOUT a BYOK row → ``has_byok_key`` returns False →
+        ``_prepare_spend_cap_gate`` returns (None, None) → embed succeeds
+        using OPENAI_API_KEY env, no counter increment, no alert.
+
+        This is the BYOK-only-cap contract documented in
+        ``_prepare_spend_cap_gate`` (issue #708 drain-attack mitigation):
+        platform-key fallback is NOT subject to the per-workspace cap.
+        """
+        monkeypatch.setenv("OPENAI_API_KEY", "test-env-key")
+
+        svc = EmbeddingService(db_session)
+        vector, _ = await svc.embed_with_usage(
+            text="platform call",
+            user_id=unbound_workspace.owner_user_id,
+            workspace_id=str(unbound_workspace.id),
+        )
+
+        assert len(vector) == 512
+        patch_openai.embeddings.create.assert_awaited_once()
+
+        # No counter key created — cap path was never entered.
+        counter_prefix = f"embed_spend:{unbound_workspace.id}:"
+        keys = [k async for k in fake_redis.scan_iter(match=f"{counter_prefix}*")]
+        assert keys == []
+
+        # And no alert.
+        mock_email_service.send_embedding_spend_alert.assert_not_called()
