@@ -19,14 +19,16 @@ from tests.neural.conftest import sample_memory_pair  # noqa: F401
 
 @pytest_asyncio.fixture
 async def two_edges_one_hebbian_one_semantic(db_session, sample_memory_pair):
-    """Create two edges: one hebbian, one semantic, in opposite directions.
-
-    Uses opposite src/dst direction so both satisfy the unique_edge constraint
-    (user_id, src_id, dst_id) which does not allow duplicate (src, dst) pairs.
+    """Create two edges (hebbian + semantic, opposite directions) under a
+    unique user_id so per-test bulk operations are immune to leaked data
+    from earlier tests.
     """
+    from uuid import uuid4
+
     src, dst = sample_memory_pair
+    unique_user = f"edge-isolate-{uuid4().hex[:8]}"
     hebbian = NeuralMemoryEdge(
-        user_id=src.user_id,
+        user_id=unique_user,
         src_id=src.id,
         dst_id=dst.id,
         workspace_id=src.workspace_id,
@@ -37,8 +39,8 @@ async def two_edges_one_hebbian_one_semantic(db_session, sample_memory_pair):
         origin=EDGE_ORIGIN_HEBBIAN,
     )
     semantic = NeuralMemoryEdge(
-        user_id=src.user_id,
-        src_id=dst.id,  # opposite direction — unique_edge constraint safe
+        user_id=unique_user,
+        src_id=dst.id,  # reversed direction to satisfy unique_edge constraint
         dst_id=src.id,
         workspace_id=src.workspace_id,
         context_id=src.context_id,

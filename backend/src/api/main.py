@@ -76,6 +76,7 @@ async def lifespan(app: FastAPI):
         schedule_mcp_tasks,
         schedule_neural_tasks,
         schedule_resource_indexer_jobs,
+        schedule_semantic_edge_reverify_tasks,
         schedule_sleep_tasks,
         start_scheduler,
     )
@@ -90,6 +91,7 @@ async def lifespan(app: FastAPI):
     schedule_bm25_drift_tasks(scheduler)
     schedule_erasure_tasks(scheduler)
     schedule_file_tasks(scheduler)
+    schedule_semantic_edge_reverify_tasks(scheduler)
     start_scheduler()
     logger.info("background_tasks_scheduled")
 

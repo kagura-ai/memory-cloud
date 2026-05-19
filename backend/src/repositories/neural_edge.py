@@ -1197,6 +1197,38 @@ class NeuralEdgeRepository:
 
         return transferred
 
+    async def delete_semantic_edges_for_dead_pairs(self) -> int:
+        """Delete origin='semantic' edges whose src or dst memory is soft-deleted.
+
+        Issue #722: monthly hygiene for semantic edges, which are exempt from
+        the Hebbian decay/prune loop and so need their own dead-endpoint sweep.
+
+        Note:
+            The ``memories.deleted_at`` column is not indexed; this subquery
+            falls back to a sequential scan. Tolerable at monthly cadence for
+            current scale (≤1M memory rows). Add a partial index
+            (``WHERE deleted_at IS NOT NULL``) before this query is run more
+            frequently or on much larger tables.
+
+        Returns:
+            Number of edges deleted.
+        """
+        from models.memory import EDGE_ORIGIN_SEMANTIC, Memory
+
+        sub_dead = select(Memory.id).where(Memory.deleted_at.is_not(None)).scalar_subquery()
+
+        stmt = delete(NeuralMemoryEdge).where(
+            and_(
+                NeuralMemoryEdge.origin == EDGE_ORIGIN_SEMANTIC,
+                or_(
+                    NeuralMemoryEdge.src_id.in_(sub_dead),
+                    NeuralMemoryEdge.dst_id.in_(sub_dead),
+                ),
+            )
+        )
+        result = cast(CursorResult[Any], await self.db.execute(stmt))
+        return result.rowcount or 0
+
     async def delete_all_edges(self, user_id: str) -> int:
         """Delete all edges for a user (graph reset).
 
