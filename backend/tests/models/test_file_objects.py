@@ -39,12 +39,17 @@ class TestFileObjectModel:
         assert "valid_file_storage_shape" in names
 
     def test_partial_unique_index_declared(self):
-        """The (workspace_id, sha256) WHERE deleted_at IS NULL AND
-        status != 'failed' partial unique index is the dedup gate."""
+        """The (workspace_id, lower(sha256)) WHERE deleted_at IS NULL AND
+        status != 'failed' case-insensitive partial unique index is the
+        dedup gate (mirrors alembic e07_556_sha256_lowercase_index #556)."""
         for arg in FileObject.__table_args__:
             if hasattr(arg, "name") and arg.name == "uq_file_objects_workspace_sha256_active":
-                # Index objects expose `unique` and `dialect_options`
                 assert arg.unique is True
+                # Expression-based: column 0 = workspace_id, column 1 = lower(sha256)
+                exprs = [str(c) for c in arg.expressions]
+                assert exprs[0] == "workspace_id"
+                assert "lower(" in exprs[1]
+                assert "sha256" in exprs[1]
                 # Partial WHERE clause stored as a dialect-specific option
                 where = arg.dialect_options.get("postgresql", {}).get("where")
                 assert where is not None

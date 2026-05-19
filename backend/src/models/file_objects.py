@@ -114,12 +114,13 @@ class FileObject(Base):
         # Active dedup: a workspace can hold one row per sha256 at a time;
         # soft-deleted and failed rows are excluded so a redo upload
         # of a previously-deleted file is allowed.
+        # Case-insensitive lower(sha256) mirrors alembic e07_556_sha256_lowercase_index (#556).
         Index(
             "uq_file_objects_workspace_sha256_active",
-            "workspace_id",
-            "sha256",
+            text("workspace_id"),
+            text("lower(sha256)"),
             unique=True,
-            postgresql_where=("deleted_at IS NULL AND status <> 'failed'"),
+            postgresql_where="deleted_at IS NULL AND status <> 'failed'",
         ),
         # Orphan sweep helper: only matters for in-flight reservations.
         Index(
