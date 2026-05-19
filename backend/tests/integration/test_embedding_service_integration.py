@@ -252,39 +252,44 @@ class TestEmbedWithUsageCapGate:
         """Pre-seed $7.50 spent (75% of $10 cap), one call → $8 (80%) →
         alert fires exactly once. Second call same day → no second alert
         (Redis SETNX dedup)."""
-        bucket = datetime.now(UTC).strftime("%Y-%m-%d")
-        counter_key = f"embed_spend:{byok_workspace_with_cap.id}:daily:{bucket}"
-        await fake_redis.set(counter_key, str(int(Decimal("7.5") * _MICRO_USD)))
+        frozen_now = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+        with patch(
+            "services.embedding_spend_cap_service.utcnow",
+            return_value=frozen_now,
+        ):
+            bucket = frozen_now.strftime("%Y-%m-%d")
+            counter_key = f"embed_spend:{byok_workspace_with_cap.id}:daily:{bucket}"
+            await fake_redis.set(counter_key, str(int(Decimal("7.5") * _MICRO_USD)))
 
-        svc = EmbeddingService(db_session)
+            svc = EmbeddingService(db_session)
 
-        # First call lands at exactly 80% → alert
-        await svc.embed_with_usage(
-            text="call-1",
-            user_id=byok_workspace_with_cap.owner_user_id,
-            workspace_id=str(byok_workspace_with_cap.id),
-        )
-        assert int(await fake_redis.get(counter_key)) == int(Decimal("8.0") * _MICRO_USD)
-        mock_email_service.send_embedding_spend_alert.assert_awaited_once()
-        kwargs = mock_email_service.send_embedding_spend_alert.await_args.kwargs
-        assert kwargs["threshold_pct"] == 80
-        assert kwargs["period"] == "daily"
+            # First call lands at exactly 80% → alert
+            await svc.embed_with_usage(
+                text="call-1",
+                user_id=byok_workspace_with_cap.owner_user_id,
+                workspace_id=str(byok_workspace_with_cap.id),
+            )
+            assert int(await fake_redis.get(counter_key)) == int(Decimal("8.0") * _MICRO_USD)
+            mock_email_service.send_embedding_spend_alert.assert_awaited_once()
+            kwargs = mock_email_service.send_embedding_spend_alert.await_args.kwargs
+            assert kwargs["threshold_pct"] == 80
+            assert kwargs["period"] == "daily"
 
-        # Second call same day lands at 85% — still ≥80% but SETNX has
-        # already claimed the dedup key, so no second alert.
-        await svc.embed_with_usage(
-            text="call-2",
-            user_id=byok_workspace_with_cap.owner_user_id,
-            workspace_id=str(byok_workspace_with_cap.id),
-        )
-        assert int(await fake_redis.get(counter_key)) == int(Decimal("8.5") * _MICRO_USD)
-        # Still exactly one alert send across both calls
-        assert mock_email_service.send_embedding_spend_alert.await_count == 1
+            # Second call same day lands at 85% — still ≥80% but SETNX has
+            # already claimed the dedup key, so no second alert.
+            await svc.embed_with_usage(
+                text="call-2",
+                user_id=byok_workspace_with_cap.owner_user_id,
+                workspace_id=str(byok_workspace_with_cap.id),
+            )
+            assert int(await fake_redis.get(counter_key)) == int(Decimal("8.5") * _MICRO_USD)
+            # Still exactly one alert send across both calls
+            assert mock_email_service.send_embedding_spend_alert.await_count == 1
 
-        # Dedup key exists with TTL > 0
-        dedup_key = f"embed_spend_alert:{byok_workspace_with_cap.id}:daily:{bucket}:80"
-        assert await fake_redis.get(dedup_key) == "1"
-        assert await fake_redis.ttl(dedup_key) > 0
+            # Dedup key exists with TTL > 0
+            dedup_key = f"embed_spend_alert:{byok_workspace_with_cap.id}:daily:{bucket}:80"
+            assert await fake_redis.get(dedup_key) == "1"
+            assert await fake_redis.ttl(dedup_key) > 0
 
     @pytest.mark.asyncio
     async def test_byok_at_cap_raises_before_api_call(
