@@ -218,41 +218,7 @@ _KNOWN_DRIFT: frozenset[str] = frozenset(
         "oauth_device_codes.oauth_device_codes_device_code_key.index.alembic_only",
         "oauth_device_codes.oauth_device_codes_user_code_key.index.alembic_only",
         "contexts.ux_contexts_resource_id_active.index.alembic_only",
-        # ─── Cat E: uniqueness / expression drift (3 entries — fix ORM side) ───
-        # The ORM and alembic disagree on the uniqueness flag or column
-        # expression of indexes that share a name. Production (alembic)
-        # is the canonical truth; the fix is to align the ORM model.
-        #   * ix_oauth_device_codes_device_code (is_unique=True/False)
-        #   * ix_oauth_device_codes_user_code   (is_unique=True/False)
-        #     → ORM declares ``unique=True, index=True``; alembic emits
-        #       ``op.create_index(unique=False)``. **Not a correctness
-        #       gap** — migration ``d08_536_device_code_grant`` already
-        #       declares ``device_code`` / ``user_code`` columns with
-        #       ``unique=True``, so uniqueness is enforced via the
-        #       implicit UNIQUE constraint + backing unique index. The
-        #       drift is index redundancy: the ORM's ``unique=True,
-        #       index=True`` produces two distinct unique indexes per
-        #       column, while alembic emits one unique-backing + one
-        #       non-unique secondary. Fix: drop ``unique=True`` from
-        #       the ORM ``mapped_column`` (keep ``index=True`` only)
-        #       so it matches alembic's "lookup index over an already-
-        #       unique column" intent.
-        #   * uq_file_objects_workspace_sha256_active (column expression)
-        #     → ORM declares UNIQUE ``(workspace_id, sha256)``
-        #       (case-sensitive). Alembic produces UNIQUE
-        #       ``(workspace_id, lower(sha256::text))`` (case-insensitive,
-        #       per migration ``e07_556_sha256_lowercase_index`` — #556
-        #       follow-up). NOT a data-integrity bug: production correctly
-        #       enforces case-insensitive sha256 dedup. The drift is that
-        #       the ORM ``UniqueConstraint`` declaration didn't migrate
-        #       alongside the index change. Fix: declare
-        #       ``UniqueConstraint('workspace_id', func.lower(sha256), ...)``
-        #       on the model.
-        # Follow-up: uniqueness / expression drift fix Cat E (alignment,
-        # not data-integrity correction).
-        "oauth_device_codes.ix_oauth_device_codes_device_code.index.value_mismatch",
-        "oauth_device_codes.ix_oauth_device_codes_user_code.index.value_mismatch",
-        "file_objects.uq_file_objects_workspace_sha256_active.index.value_mismatch",
+        # Cat E: uniqueness / expression drift — RESOLVED (this PR / issue #613 Cat E).
     }
 )
 

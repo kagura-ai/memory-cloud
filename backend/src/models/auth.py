@@ -817,8 +817,8 @@ class OAuth2DeviceCode(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
-    device_code: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
-    user_code: Mapped[str] = mapped_column(String(8), nullable=False, unique=True, index=True)
+    device_code: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    user_code: Mapped[str] = mapped_column(String(8), nullable=False, index=True)
     client_id: Mapped[str] = mapped_column(
         String(48),
         ForeignKey("oauth_clients.client_id", ondelete="CASCADE"),
