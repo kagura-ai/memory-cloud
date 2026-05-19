@@ -90,12 +90,11 @@ def test_e18_upgrade_drops_inline_bytes_and_rewrites_checks() -> None:
                         "(workspace_id, sha256, size_bytes, content_type, "
                         " filename, storage_backend, storage_key, status, "
                         " created_by) VALUES "
-                        f"('{_WS_ID}', "
-                        " 'd' || repeat('e', 62), 1, 'text/plain', "
+                        "(:ws, 'd' || repeat('e', 62), 1, 'text/plain', "
                         " 'y.txt', 'pg_inline', NULL, 'uploaded', 'tester')"
-                    )
+                    ),
+                    {"ws": _WS_ID},
                 )
-                conn.commit()
 
         # Smoke check on the structural side: inline_bytes column is gone.
         with engine.connect() as conn:
@@ -157,11 +156,9 @@ def test_e18_downgrade_restores_inline_bytes_and_checks() -> None:
                 ),
                 {"ws": _WS_ID, "blob": b"hello"},
             )
-            # Verify the INSERT succeeded (no exception above), then roll back
-            # so the pg_inline row is gone before we re-upgrade to head.
-            conn.execute(text("SAVEPOINT before_pg_inline_check"))
-            conn.execute(text("ROLLBACK TO SAVEPOINT before_pg_inline_check"))
-            # Clean up seeded rows so _leave_db_at_head() upgrade proceeds cleanly.
+            # Clean up: DELETE FROM workspaces cascades to the pg_inline file_objects
+            # row via ``workspaces.id ON DELETE CASCADE``, so the row is gone before
+            # _leave_db_at_head() re-upgrades to e18 (which rejects pg_inline).
             conn.execute(text("DELETE FROM workspaces WHERE id = :id"), {"id": _WS_ID})
             conn.execute(text("DELETE FROM users WHERE user_id = :uid"), {"uid": _USER_ID})
     finally:
