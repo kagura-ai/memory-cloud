@@ -8,7 +8,7 @@
  * Issue #31: Frontend Redesign Phase 5
  */
 
-import { useState, useEffect, Fragment } from "react";
+import { useState, useEffect, Fragment, useTransition } from "react";
 import Link from "next/link";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
@@ -33,6 +33,9 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubTrigger,
+  DropdownMenuSubContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -55,7 +58,21 @@ import {
   Moon,
   ShieldCheck,
   DollarSign,
+  Info,
+  Globe,
+  ExternalLink,
+  Check,
 } from "lucide-react";
+import {
+  useLocale,
+  locales,
+  localeNames,
+  localeFlags,
+  type Locale,
+} from "@/i18n";
+import { updateUserProfile } from "@/lib/api/base";
+import { toast } from "sonner";
+import { APP_VERSION } from "@/lib/version";
 // Issue #246: ContextSelector removed - use /contexts link instead
 import { WorkspaceSwitcher } from "@/components/workspaces/WorkspaceSwitcher";
 
@@ -264,7 +281,7 @@ export function Sidebar() {
   const searchParams = useSearchParams();
   const currentTab = searchParams.get("tab");
   const router = useRouter();
-  const { user, logout } = useAuth();
+  const { user, logout, isAuthenticated } = useAuth();
 
   // Load context count on mount / workspace switch.
   // Reset to null on each run so the warning icon does not show a stale
@@ -384,6 +401,35 @@ export function Sidebar() {
       return `${names[0][0]}${names[1][0]}`.toUpperCase();
     }
     return user.name.substring(0, 2).toUpperCase();
+  };
+
+  // Locale switching (inlined from LanguageSelector for cohesive submenu UI)
+  const { locale, setLocale } = useLocale();
+  const [isLocaleSwitching, startLocaleTransition] = useTransition();
+
+  const handleLocaleChange = (newLocale: Locale) => {
+    if (newLocale === locale) return;
+    startLocaleTransition(async () => {
+      try {
+        setLocale(newLocale);
+        if (isAuthenticated && user) {
+          try {
+            await updateUserProfile({ locale: newLocale });
+          } catch (error) {
+            console.error("Failed to update user locale:", error);
+          }
+        }
+        toast.success(
+          newLocale === "ja" ? "言語を変更しました" : "Language changed",
+        );
+        window.location.reload();
+      } catch (error) {
+        console.error("Failed to change locale:", error);
+        toast.error(
+          locale === "ja" ? "エラーが発生しました" : "An error occurred",
+        );
+      }
+    });
   };
 
   const handleLogout = async () => {
@@ -740,22 +786,7 @@ export function Sidebar() {
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent className="w-56" align="end" side="top">
-              <DropdownMenuLabel className="font-normal">
-                <div className="flex flex-col space-y-1">
-                  <p className="text-sm font-medium leading-none">
-                    {user.name}
-                  </p>
-                  <p className="text-xs leading-none text-slate-500 dark:text-slate-400">
-                    {user.email}
-                  </p>
-                  {user.role === "admin" && (
-                    <p className="text-xs font-medium leading-none text-red-600 dark:text-red-400 mt-1">
-                      🛡️ SYSTEM ADMIN
-                    </p>
-                  )}
-                </div>
-              </DropdownMenuLabel>
-              <DropdownMenuSeparator />
+              {/* Profile Settings */}
               <DropdownMenuItem
                 onClick={() => {
                   router.push("/profile");
@@ -765,7 +796,99 @@ export function Sidebar() {
                 <UserCircle className="mr-2 h-4 w-4" />
                 <span>{t("profileSettings")}</span>
               </DropdownMenuItem>
+
+              {/* Language submenu */}
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger>
+                  <Globe className="mr-2 h-4 w-4" />
+                  <span>{t("language")}</span>
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className="w-40">
+                  {locales.map((loc) => (
+                    <DropdownMenuItem
+                      key={loc}
+                      onClick={() => handleLocaleChange(loc)}
+                      className="flex items-center justify-between cursor-pointer"
+                      disabled={isLocaleSwitching}
+                    >
+                      <span className="flex items-center gap-2">
+                        <span>{localeFlags[loc]}</span>
+                        <span>{localeNames[loc]}</span>
+                      </span>
+                      {locale === loc && (
+                        <Check className="h-4 w-4 text-emerald-600" />
+                      )}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+
               <DropdownMenuSeparator />
+
+              {/* View Details submenu */}
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger>
+                  <Info className="mr-2 h-4 w-4" />
+                  <span>{t("viewDetails")}</span>
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className="w-64">
+                  <DropdownMenuItem asChild>
+                    <a
+                      href="https://www.kagura-ai.com/terms"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center cursor-pointer"
+                    >
+                      <span className="flex-1">{t("termsOfService")}</span>
+                      <ExternalLink className="ml-2 h-3.5 w-3.5 opacity-60" />
+                    </a>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem asChild>
+                    <a
+                      href="https://www.kagura-ai.com/privacy"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center cursor-pointer"
+                    >
+                      <span className="flex-1">{t("privacyPolicy")}</span>
+                      <ExternalLink className="ml-2 h-3.5 w-3.5 opacity-60" />
+                    </a>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem asChild>
+                    <a
+                      href={`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"}/redoc`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center cursor-pointer"
+                    >
+                      <span className="flex-1">{t("apiDocumentation")}</span>
+                      <ExternalLink className="ml-2 h-3.5 w-3.5 opacity-60" />
+                    </a>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem asChild>
+                    <a
+                      href="https://www.kagura-ai.com"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center cursor-pointer"
+                    >
+                      <span className="flex-1">{t("aboutKagura")}</span>
+                      <ExternalLink className="ml-2 h-3.5 w-3.5 opacity-60" />
+                    </a>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel className="text-xs font-normal text-slate-500 dark:text-slate-400">
+                    {t("copyright", { year: new Date().getFullYear() })}
+                  </DropdownMenuLabel>
+                  <DropdownMenuLabel className="text-xs font-normal text-slate-500 dark:text-slate-400 pt-0">
+                    {t("version", { version: APP_VERSION })}
+                  </DropdownMenuLabel>
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+
+              <DropdownMenuSeparator />
+
+              {/* Log Out */}
               <DropdownMenuItem
                 onClick={handleLogout}
                 className="text-red-600 dark:text-red-400"
