@@ -493,3 +493,49 @@ class TestEmbedWithUsageCapGate:
         assert keys == []
         # Call still succeeded against the mocked OpenAI
         patch_openai.embeddings.create.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_redis_outage_during_check_fails_open(
+        self,
+        db_session: AsyncSession,
+        byok_workspace_with_cap: Workspace,
+        fake_redis: FakeRedis,
+        patch_openai,
+        patch_pricing,
+        mock_email_service,
+    ):
+        """``check_cap_or_raise`` swallows any Redis read error and treats
+        spend as 0 — the embed must succeed even if Redis is down at the
+        moment of the cap check. The post-call INCRBY may also fail but
+        does not raise either; the chain must remain non-raising.
+
+        Patch ``get_cache`` on the cap-service module so the pre-check
+        side errors out, and patch ``incrby_counter`` to error so the
+        post-call record is also exercised on the failure path.
+        """
+        from utils.exceptions import RedisError
+
+        with (
+            patch(
+                "services.embedding_spend_cap_service.get_cache",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("redis down"),
+            ),
+            patch(
+                "services.embedding_spend_cap_service.incrby_counter",
+                new_callable=AsyncMock,
+                side_effect=RedisError("redis down"),
+            ),
+        ):
+            svc = EmbeddingService(db_session)
+            vector, _ = await svc.embed_with_usage(
+                text="redis-out call",
+                user_id=byok_workspace_with_cap.owner_user_id,
+                workspace_id=str(byok_workspace_with_cap.id),
+            )
+
+        assert len(vector) == 512
+        # OpenAI was called (fail-open: cap check failed → treat as $0 spend)
+        patch_openai.embeddings.create.assert_awaited_once()
+        # No alert (record failed → no threshold computation)
+        mock_email_service.send_embedding_spend_alert.assert_not_called()
