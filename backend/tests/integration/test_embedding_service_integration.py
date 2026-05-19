@@ -31,7 +31,7 @@ Real surface (do not mock):
 
 from __future__ import annotations
 
-import os
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -41,17 +41,15 @@ import pytest_asyncio
 from fakeredis.aioredis import FakeRedis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# Test-only API_KEY_SECRET so any ExternalAPIKey decrypt path that falls back
-# to Fernet has a stable key (mirrors backend/tests/integration/conftest.py:42).
-os.environ.setdefault("API_KEY_SECRET", "integration-test-api-key-secret-not-for-prod")
+from db import redis as redis_module
+from models.auth import ExternalAPIKey, Workspace
+from services import email_service as email_module
+from services.embedding_service import EmbeddingService
+from services.embedding_spend_cap_service import _MICRO_USD
+from utils.encryption import get_encryptor
+from utils.exceptions import EmbeddingSpendCapExceeded, RedisError
 
-from db import redis as redis_module  # noqa: E402
-from models.auth import ExternalAPIKey, User, Workspace  # noqa: E402
-from services import email_service as email_module  # noqa: E402
-from services.embedding_service import EmbeddingService  # noqa: E402
-from services.embedding_spend_cap_service import _MICRO_USD  # noqa: E402
-from utils.encryption import get_encryptor  # noqa: E402
-from utils.exceptions import EmbeddingSpendCapExceeded  # noqa: E402
+from ._admin_helpers import make_user
 
 # --- Redis ----------------------------------------------------------------
 
@@ -143,90 +141,48 @@ def mock_email_service():
 # --- DB rows --------------------------------------------------------------
 
 
-async def _commit_user(db: AsyncSession, *, user_id: str | None = None) -> User:
-    uid = user_id or f"u_{uuid4().hex[:8]}"
-    user = User(
-        email=f"{uid}@test.invalid",
-        user_id=uid,
-        name="Cap Test User",
-        role="user",
-        is_initial_admin=False,
-        auth_method="oauth",
-        auth_provider="google",
-    )
-    db.add(user)
-    await db.flush()
-    return user
-
-
-async def _commit_workspace(
-    db: AsyncSession,
+def _build_workspace(
     *,
     owner_user_id: str,
-    plan_name: str = "free",
     embedding_daily_cap_usd: Decimal | None = None,
-    embedding_monthly_cap_usd: Decimal | None = None,
 ) -> Workspace:
-    ws = Workspace(
+    return Workspace(
         id=uuid4(),
         name=f"ws-{uuid4().hex[:8]}",
-        plan_name=plan_name,
+        plan_name="free",
         owner_user_id=owner_user_id,
         memory_limit=1000,
         daily_api_limit=500,
         weekly_api_limit=2500,
         embedding_daily_cap_usd=embedding_daily_cap_usd,
-        embedding_monthly_cap_usd=embedding_monthly_cap_usd,
     )
-    db.add(ws)
-    await db.flush()
-    return ws
 
 
-async def _commit_byok_key(
-    db: AsyncSession,
-    *,
-    workspace_id,
-    user_id: str,
-    context_id=None,
-    provider: str = "openai",
-) -> ExternalAPIKey:
-    encrypted = get_encryptor().encrypt("sk-test-fake-byok-key")
-    key = ExternalAPIKey(
+def _build_byok_key(*, workspace_id, user_id: str) -> ExternalAPIKey:
+    return ExternalAPIKey(
         key_name=f"k_{uuid4().hex[:8]}",
-        provider=provider,
-        encrypted_value=encrypted,
+        provider="openai",
+        encrypted_value=get_encryptor().encrypt("sk-test-fake-byok-key"),
         user_id=user_id,
         workspace_id=workspace_id,
-        context_id=context_id,
         enabled=True,
     )
-    db.add(key)
-    await db.flush()
-    return key
-
-
-@pytest_asyncio.fixture
-async def byok_workspace(db_session: AsyncSession):
-    """Workspace + BYOK key, no cap configured (uncapped)."""
-    user = await _commit_user(db_session)
-    ws = await _commit_workspace(db_session, owner_user_id=user.user_id)
-    await _commit_byok_key(db_session, workspace_id=ws.id, user_id=user.user_id)
-    await db_session.commit()
-    yield ws
-    await db_session.rollback()
 
 
 @pytest_asyncio.fixture
 async def byok_workspace_with_cap(db_session: AsyncSession):
     """Workspace + BYOK key with a $10 daily cap, no monthly cap."""
-    user = await _commit_user(db_session)
-    ws = await _commit_workspace(
-        db_session,
+    user = make_user()
+    ws = _build_workspace(
         owner_user_id=user.user_id,
         embedding_daily_cap_usd=Decimal("10.000000"),
     )
-    await _commit_byok_key(db_session, workspace_id=ws.id, user_id=user.user_id)
+    db_session.add_all([user, ws])
+    # FK dep: external_api_keys.workspace_id → workspaces.id. The FK uses a
+    # raw UUID value (no SQLAlchemy relationship), so UoW can't sort the
+    # INSERTs — flush the parent first.
+    await db_session.flush()
+    db_session.add(_build_byok_key(workspace_id=ws.id, user_id=user.user_id))
     await db_session.commit()
     yield ws
     await db_session.rollback()
@@ -235,8 +191,9 @@ async def byok_workspace_with_cap(db_session: AsyncSession):
 @pytest_asyncio.fixture
 async def unbound_workspace(db_session: AsyncSession):
     """Workspace without any ``ExternalAPIKey`` row — platform-fallback path."""
-    user = await _commit_user(db_session)
-    ws = await _commit_workspace(db_session, owner_user_id=user.user_id)
+    user = make_user()
+    ws = _build_workspace(owner_user_id=user.user_id)
+    db_session.add_all([user, ws])
     await db_session.commit()
     yield ws
     await db_session.rollback()
@@ -295,8 +252,6 @@ class TestEmbedWithUsageCapGate:
         """Pre-seed $7.50 spent (75% of $10 cap), one call → $8 (80%) →
         alert fires exactly once. Second call same day → no second alert
         (Redis SETNX dedup)."""
-        from datetime import UTC, datetime
-
         bucket = datetime.now(UTC).strftime("%Y-%m-%d")
         counter_key = f"embed_spend:{byok_workspace_with_cap.id}:daily:{bucket}"
         await fake_redis.set(counter_key, str(int(Decimal("7.5") * _MICRO_USD)))
@@ -344,8 +299,6 @@ class TestEmbedWithUsageCapGate:
         """Pre-seed $10 spent (100% of $10 cap). Call must raise
         EmbeddingSpendCapExceeded BEFORE any OpenAI call, and the
         counter must NOT have been incremented past 100%."""
-        from datetime import UTC, datetime
-
         bucket = datetime.now(UTC).strftime("%Y-%m-%d")
         counter_key = f"embed_spend:{byok_workspace_with_cap.id}:daily:{bucket}"
         await fake_redis.set(counter_key, str(int(Decimal("10.0") * _MICRO_USD)))
@@ -512,8 +465,6 @@ class TestEmbedWithUsageCapGate:
         side errors out, and patch ``incrby_counter`` to error so the
         post-call record is also exercised on the failure path.
         """
-        from utils.exceptions import RedisError
-
         with (
             patch(
                 "services.embedding_spend_cap_service.get_cache",
