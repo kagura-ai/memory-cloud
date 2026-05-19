@@ -1,5 +1,7 @@
 # Semantic Edge Origin Rollout (Issue #722)
 
+> **Related**: [Neural Memory § Edge Origins](../concepts.md#edge-origins) (reader framing) · [Neural Memory Engine § Edge Origins](../architecture.md#edge-origins) (schema and background jobs)
+
 Operator runbook for shipping the semantic / Hebbian edge split. The PR makes sleep-discovered edges survive the decay loop; this runbook covers the deploy steps and the one-shot backfill that restores edges previously erased by decay.
 
 ## What changed
