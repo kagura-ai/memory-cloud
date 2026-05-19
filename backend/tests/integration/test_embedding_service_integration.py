@@ -53,7 +53,6 @@ from services.embedding_spend_cap_service import _MICRO_USD  # noqa: E402
 from utils.encryption import get_encryptor  # noqa: E402
 from utils.exceptions import EmbeddingSpendCapExceeded  # noqa: E402
 
-
 # --- Redis ----------------------------------------------------------------
 
 
