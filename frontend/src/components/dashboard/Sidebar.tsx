@@ -395,6 +395,7 @@ export function Sidebar() {
       {/* Kagura Logo (formerly in Header) */}
       <Link
         href="/workspace/dashboard"
+        aria-label="Kagura Memory Cloud"
         className={utilCn(
           "flex items-center px-4 py-3 hover:opacity-80",
           transitions.default,
