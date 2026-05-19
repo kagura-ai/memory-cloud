@@ -70,7 +70,18 @@
     "profileSettings": "プロフィール設定",
     "logOut": "ログアウト",
     "toggleMenu": "メニュー切替",
-    "signupGate": "サインアップゲート"
+    "signupGate": "サインアップゲート",
+    "language": "言語",
+    "viewDetails": "詳細を見る",
+    "termsOfService": "利用規約",
+    "privacyPolicy": "プライバシーポリシー",
+    "apiDocumentation": "API ドキュメント",
+    "aboutKagura": "Kaguraについて",
+    "copyright": "© 2024〜{year} Kagura AI 株式会社",
+    "version": "v{version}",
+    "kaguraLogoAria": "Kagura Memory Cloud",
+    "languageChanged": "言語を変更しました",
+    "languageChangeError": "言語の変更中にエラーが発生しました"
   },
   "auth": {
     "signIn": "サインイン",
@@ -666,7 +677,6 @@
       "backToHome": "ホームに戻る"
     },
     "footer": {
-      "copyright": "© 2025 Kagura AI v0.9.0",
       "privacyPolicy": "プライバシーポリシー",
       "termsOfService": "利用規約"
     }
@@ -756,7 +766,6 @@
       "backToHome": "ホームに戻る"
     },
     "footer": {
-      "copyright": "© 2025 Kagura AI v0.9.0",
       "privacyPolicy": "プライバシーポリシー",
       "termsOfService": "利用規約"
     }

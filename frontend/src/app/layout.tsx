@@ -26,9 +26,9 @@ export const metadata: Metadata = {
     "Qdrant",
     "vector database",
   ],
-  authors: [{ name: "Kagura AI" }],
-  creator: "Kagura AI",
-  publisher: "Kagura AI",
+  authors: [{ name: "Kagura AI, Inc." }],
+  creator: "Kagura AI, Inc.",
+  publisher: "Kagura AI, Inc.",
   openGraph: {
     type: "website",
     locale: "en_US",
