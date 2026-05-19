@@ -157,15 +157,7 @@ _EXCLUDED_TABLES: frozenset[str] = frozenset({"alembic_version"})
 # regression. Format: ``<table>.<name>.<kind>.<side>``.
 _KNOWN_DRIFT: frozenset[str] = frozenset(
     {
-        # ─── Cat A: server_default drift (3 columns) ────────────────────
-        # ORM models declare the column without ``server_default=...``
-        # while the alembic migration emits a literal default. Same class
-        # of bug as PR #610 (which fixed 16 columns on models/sleep.py).
-        # Each entry below should be eliminated by adding the missing
-        # ``server_default=...`` to the matching ORM mapped_column.
-        # Follow-up: server_default audit Cat A (see #613 PR body).
-        "users.auth_method.column.value_mismatch",
-        "users.totp_enabled.column.value_mismatch",
+        # Cat A: server_default drift — RESOLVED (PR #728 #616 + PR-B #613 Cat A residual).
         # ─── Cat B: FK naming-convention drift (14 entries / 7 pairs) ───
         # SQLAlchemy auto-names FK constraints ``<table>_<col>_fkey``
         # while the alembic migrations assigned explicit ``fk_<table>_*``

@@ -116,10 +116,12 @@ class User(Base):
     )
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     auth_method: Mapped[str] = mapped_column(
-        String(20), nullable=False, default="oauth", index=True
+        String(20), nullable=False, default="oauth", server_default=text("'oauth'"), index=True
     )
     totp_secret: Mapped[str | None] = mapped_column(String(255), nullable=True)  # Fernet-encrypted
-    totp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    totp_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
