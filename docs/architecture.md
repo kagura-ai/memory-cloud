@@ -131,12 +131,12 @@ Neural Memory edges carry an `origin` discriminator (`neural_memory_edges.origin
 | | **`hebbian`** | **`semantic`** | **`declared`** |
 |---|---|---|---|
 | Source | runtime co-activation in `HebbianLearner` (write side of `recall()` — see Issue #120) | sleep `edge_discovery` (cosine sim ≥ 0.5) | user-asserted via MCP `create_edge` |
-| Weight rule | `weight(A,B) += learning_rate * activation(A) * activation(B)`, clamped 0.0–3.0 | `cosine_sim` at creation (0.5–1.0); never modified by decay | user-supplied (default 1.0) |
+| Weight rule | see [§ Formulas](#formulas) — `Δw_ij ← η · (a_i · C_i) · (a_j · C_j) − λ · w_ij`, clamped 0.0–3.0 | `cosine_sim` at creation (0.5–1.0); never modified by decay | user-supplied (default 1.0) |
 | Decays | yes — nightly `DecayManager.bulk_decay_weights(only_origin='hebbian')` | no | no |
 | Pruned | yes — `DecayManager.prune_weak_edges(only_origin='hebbian')` below `prune_threshold` | no | no |
 | Re-verified | n/a | monthly `semantic_edge_reverify` cron drops rows whose endpoint memory has been soft-deleted | n/a |
 
-**Sticky-upsert invariant**: the `create_or_update_edge` upsert path is one-way — a runtime Hebbian co-recall can **promote** a missing or existing `hebbian` edge to a `semantic` or `declared` origin, but it cannot **demote** an existing `semantic` or `declared` edge back to `hebbian`. This guarantees that user-asserted or sleep-discovered associations cannot be silently downgraded by access patterns.
+**Sticky-upsert invariant**: the `create_or_update_edge` upsert path is one-way — a runtime Hebbian co-recall write (which always carries `origin='hebbian'`) **cannot demote** an existing `semantic` or `declared` edge back to `hebbian`. The origin is set by the caller, not derived inside the upsert, so promotion happens only when a non-Hebbian writer chooses a non-Hebbian origin. Non-Hebbian origins are produced by exactly two writers: the Sleep maintenance `edge_discovery` phase (`backend/src/services/sleep/edge_discovery.py`) writes `origin='semantic'`, and the MCP `create_edge` tool (`backend/src/mcp_server/tools/edge.py`) writes `origin='declared'`. Runtime Hebbian co-recall never picks a non-Hebbian origin, so it can only leave existing non-Hebbian edges alone — the invariant is "no demotion", not "bidirectional promotion".
 
 **Background jobs maintaining `neural_memory_edges`**:
 
