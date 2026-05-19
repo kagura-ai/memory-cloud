@@ -27,6 +27,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -438,7 +439,11 @@ class NeuralMemoryEdge(Base):
         # shared-context visualization without relying on ``user_id``.
         Index("idx_edges_ws_ctx_src", "workspace_id", "context_id", "src_id"),
         Index("idx_edges_ws_ctx_dst", "workspace_id", "context_id", "dst_id"),
-        Index("idx_edges_origin", "origin"),
+        Index(
+            "idx_edges_origin",
+            "origin",
+            postgresql_where=text("origin = 'semantic'"),
+        ),
     )
 
     def __repr__(self) -> str:

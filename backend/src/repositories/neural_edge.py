@@ -1207,26 +1207,43 @@ class NeuralEdgeRepository:
         """Delete origin='semantic' edges whose src or dst memory is soft-deleted.
 
         Monthly hygiene for semantic edges, which are exempt from the Hebbian
-        decay/prune loop and so need their own dead-endpoint sweep. The
+        decay/prune loop and so need their own dead-endpoint sweep. Iterates
+        per user_id so the DELETE transaction stays scoped to one tenant at a
+        time, bounding lock width on multi-tenant deployments. The
         ``memories.deleted_at`` column is unindexed — Postgres falls back to a
         sequential scan, tolerable at monthly cadence below ~1M rows.
 
         Returns:
-            Number of edges deleted.
+            Total number of edges deleted across all users.
         """
-        sub_dead = select(Memory.id).where(Memory.deleted_at.is_not(None)).scalar_subquery()
-
-        stmt = delete(NeuralMemoryEdge).where(
-            and_(
-                NeuralMemoryEdge.origin == EDGE_ORIGIN_SEMANTIC,
-                or_(
-                    NeuralMemoryEdge.src_id.in_(sub_dead),
-                    NeuralMemoryEdge.dst_id.in_(sub_dead),
-                ),
+        user_ids = (
+            (
+                await self.db.execute(
+                    select(NeuralMemoryEdge.user_id)
+                    .where(NeuralMemoryEdge.origin == EDGE_ORIGIN_SEMANTIC)
+                    .distinct()
+                )
             )
+            .scalars()
+            .all()
         )
-        result = cast(CursorResult[Any], await self.db.execute(stmt))
-        return result.rowcount or 0
+
+        total = 0
+        for user_id in user_ids:
+            sub_dead = select(Memory.id).where(Memory.deleted_at.is_not(None)).scalar_subquery()
+            stmt = delete(NeuralMemoryEdge).where(
+                and_(
+                    NeuralMemoryEdge.user_id == user_id,
+                    NeuralMemoryEdge.origin == EDGE_ORIGIN_SEMANTIC,
+                    or_(
+                        NeuralMemoryEdge.src_id.in_(sub_dead),
+                        NeuralMemoryEdge.dst_id.in_(sub_dead),
+                    ),
+                )
+            )
+            result = cast(CursorResult[Any], await self.db.execute(stmt))
+            total += result.rowcount or 0
+        return total
 
     async def delete_all_edges(self, user_id: str) -> int:
         """Delete all edges for a user (graph reset).

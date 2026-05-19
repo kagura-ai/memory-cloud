@@ -52,6 +52,7 @@ def upgrade() -> None:
         "idx_edges_origin",
         "neural_memory_edges",
         ["origin"],
+        postgresql_where=sa.text("origin = 'semantic'"),
     )
 
 

@@ -46,7 +46,9 @@ async def _scheduled_entrypoint() -> None:
                     "semantic_edge_reverify_completed",
                     semantic_edges_deleted=result["semantic_edges_deleted"],
                 )
-                return  # break the async for so get_db's auto-commit on clean exit is a no-op
+                return  # exiting the async-for here sends GeneratorExit into get_db at the yield,
+                # so get_db's post-yield commit() never runs — our explicit commit above is
+                # the only one that executes.
             except Exception:
                 logger.exception("semantic_edge_reverify_failed")
                 await db.rollback()

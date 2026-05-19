@@ -31,7 +31,6 @@ from typing import Any, Protocol
 from uuid import UUID
 
 _HERE = Path(__file__).parent
-sys.path.insert(0, str(_HERE.parent))  # backend/  → enables `from src.X`
 sys.path.insert(0, str(_HERE.parent / "src"))  # backend/src/ → enables `from X`
 
 from sqlalchemy import func, select  # noqa: E402
@@ -61,7 +60,7 @@ class QdrantNeighborClient(Protocol):
         top_k: int,
     ) -> list[tuple[UUID, float]]:
         """Return up to top_k (neighbor_uuid, cosine_score) pairs for memory_id."""
-        ...
+        pass
 
 
 class RealQdrantNeighborClient:
@@ -326,8 +325,12 @@ async def _main(args: argparse.Namespace) -> int:
                 )
                 try:
                     await db.rollback()
-                except Exception:
-                    pass
+                except Exception as rollback_exc:
+                    logger.warning(
+                        "backfill_rollback_failed",
+                        context_id=str(ctx_id),
+                        error=str(rollback_exc),
+                    )
                 continue
             total_contexts += 1
             if result.get("skipped"):
