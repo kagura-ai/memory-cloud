@@ -450,3 +450,46 @@ class TestEmbedWithUsageCapGate:
         keys = [k async for k in fake_redis.scan_iter(match=f"{counter_prefix}*")]
         assert keys == []
         mock_email_service.send_embedding_spend_alert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_workspace_disappears_mid_call_falls_through(
+        self,
+        db_session: AsyncSession,
+        byok_workspace_with_cap: Workspace,
+        fake_redis: FakeRedis,
+        patch_openai,
+        patch_pricing,
+        mock_email_service,
+    ):
+        """Race: BYOK probe sees the workspace row, then the row is deleted
+        before ``load_workspace`` runs. The gate must return (None, None)
+        and embed must proceed — the call is no longer attributable to a
+        capped workspace, but should not 500.
+
+        The race can't be reproduced via real DELETE because
+        ``ExternalAPIKey.workspace_id`` has ``ondelete=CASCADE`` — the
+        BYOK row would vanish with the workspace. So we patch
+        ``load_workspace`` to return None for one call, simulating the
+        narrow window where the BYOK SELECT and the Workspace SELECT
+        are both real but the row vanished between them.
+        """
+        with patch(
+            "services.embedding_spend_cap_service.EmbeddingSpendCapService.load_workspace",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_load:
+            svc = EmbeddingService(db_session)
+            vector, _ = await svc.embed_with_usage(
+                text="raced call",
+                user_id=byok_workspace_with_cap.owner_user_id,
+                workspace_id=str(byok_workspace_with_cap.id),
+            )
+
+        assert len(vector) == 512
+        mock_load.assert_awaited_once()
+        # No spend recorded because cap_workspace is None
+        counter_prefix = f"embed_spend:{byok_workspace_with_cap.id}:"
+        keys = [k async for k in fake_redis.scan_iter(match=f"{counter_prefix}*")]
+        assert keys == []
+        # Call still succeeded against the mocked OpenAI
+        patch_openai.embeddings.create.assert_awaited_once()
