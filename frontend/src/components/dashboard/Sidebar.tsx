@@ -443,7 +443,7 @@ export function Sidebar() {
         href="/workspace/dashboard"
         aria-label="Kagura Memory Cloud"
         className={utilCn(
-          "flex items-center justify-center py-1 hover:opacity-80",
+          "flex items-center justify-center py-2 hover:opacity-80",
           transitions.default,
         )}
         onClick={() => setIsOpen(false)}
