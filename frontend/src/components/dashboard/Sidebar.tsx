@@ -8,7 +8,7 @@
  * Issue #31: Frontend Redesign Phase 5
  */
 
-import { useState, useEffect, Fragment, useTransition } from "react";
+import { useState, useEffect, Fragment } from "react";
 import Link from "next/link";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
@@ -403,33 +403,37 @@ export function Sidebar() {
     return user.name.substring(0, 2).toUpperCase();
   };
 
-  // Locale switching (inlined from LanguageSelector for cohesive submenu UI)
+  // Locale switching (inlined from LanguageSelector for cohesive submenu UI).
+  // Uses plain useState (not useTransition) because the async profile update +
+  // page reload must keep `isLocaleSwitching` true for the full duration to
+  // prevent double-clicks; React useTransition only tracks the synchronous
+  // portion of a callback (Copilot review on PR #742).
   const { locale, setLocale } = useLocale();
-  const [isLocaleSwitching, startLocaleTransition] = useTransition();
+  const [isLocaleSwitching, setIsLocaleSwitching] = useState(false);
 
-  const handleLocaleChange = (newLocale: Locale) => {
+  const handleLocaleChange = async (newLocale: Locale) => {
     if (newLocale === locale) return;
-    startLocaleTransition(async () => {
-      try {
-        setLocale(newLocale);
-        if (isAuthenticated && user) {
-          try {
-            await updateUserProfile({ locale: newLocale });
-          } catch (error) {
+    setIsLocaleSwitching(true);
+    try {
+      setLocale(newLocale);
+      if (isAuthenticated && user) {
+        try {
+          await updateUserProfile({ locale: newLocale });
+        } catch (error) {
+          if (process.env.NODE_ENV === "development") {
             console.error("Failed to update user locale:", error);
           }
         }
-        toast.success(
-          newLocale === "ja" ? "言語を変更しました" : "Language changed",
-        );
-        window.location.reload();
-      } catch (error) {
-        console.error("Failed to change locale:", error);
-        toast.error(
-          locale === "ja" ? "エラーが発生しました" : "An error occurred",
-        );
       }
-    });
+      toast.success(t("languageChanged"));
+      window.location.reload();
+    } catch (error) {
+      if (process.env.NODE_ENV === "development") {
+        console.error("Failed to change locale:", error);
+      }
+      toast.error(t("languageChangeError"));
+      setIsLocaleSwitching(false);
+    }
   };
 
   const handleLogout = async () => {
@@ -441,7 +445,7 @@ export function Sidebar() {
       {/* Kagura Logo (formerly in Header) */}
       <Link
         href="/workspace/dashboard"
-        aria-label="Kagura Memory Cloud"
+        aria-label={t("kaguraLogoAria")}
         className={utilCn(
           "flex items-center justify-center py-2 hover:opacity-80",
           transitions.default,

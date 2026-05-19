@@ -78,7 +78,10 @@
     "apiDocumentation": "API Documentation",
     "aboutKagura": "About Kagura",
     "copyright": "© 2024–{year} Kagura AI, Inc.",
-    "version": "v{version}"
+    "version": "v{version}",
+    "kaguraLogoAria": "Kagura Memory Cloud",
+    "languageChanged": "Language changed",
+    "languageChangeError": "An error occurred while changing the language"
   },
   "auth": {
     "signIn": "Sign In",
