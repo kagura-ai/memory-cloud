@@ -250,8 +250,6 @@ _KNOWN_DRIFT: frozenset[str] = frozenset(
         #       on the model.
         # Follow-up: uniqueness / expression drift fix Cat E (alignment,
         # not data-integrity correction).
-        "oauth_device_codes.ix_oauth_device_codes_device_code.index.value_mismatch",
-        "oauth_device_codes.ix_oauth_device_codes_user_code.index.value_mismatch",
         "file_objects.uq_file_objects_workspace_sha256_active.index.value_mismatch",
     }
 )
