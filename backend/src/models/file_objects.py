@@ -10,13 +10,10 @@ Two tables:
   checks read a single hot row instead of online ``SUM()`` (same lesson
   as #50 / #136 / #198 around effective quota centralization).
 
-Phase 1 only writes ``storage_backend='r2'`` rows. ``inline_bytes`` /
-``pg_inline`` is reserved Phase 1.5; the CHECK constraint already
-covers both shapes so no ALTER is needed when the inline path lands.
-
-Phase 2 BYO bucket support (``byo_s3`` / ``byo_gcs``) does NOT add rows
-here — those references live directly in ``Memory.details.external_blob``
-with ``backend='byo_*'`` and ``ref=<bucket URI>``.
+Phase 1 + 1.5 ship R2-only. Phase 2 BYO bucket support
+(``byo_s3`` / ``byo_gcs``) does NOT add rows here — those references
+live directly in ``Memory.details.external_blob`` with
+``backend='byo_*'`` and ``ref=<bucket URI>``.
 """
 
 from __future__ import annotations
@@ -33,8 +30,9 @@ from sqlalchemy import (
     Integer,
     String,
     func,
+    text,
 )
-from sqlalchemy.dialects.postgresql import BYTEA, UUID
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
@@ -57,7 +55,12 @@ class FileObject(Base):
 
     __tablename__ = "file_objects"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),
@@ -73,10 +76,9 @@ class FileObject(Base):
         String(20),
         nullable=False,
         server_default="r2",
-        comment="'r2' (Phase 1), 'pg_inline' (reserved Phase 1.5)",
+        comment="'r2' (only backend in this column's enum CHECK)",
     )
     storage_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
-    inline_bytes: Mapped[bytes | None] = mapped_column(BYTEA, nullable=True)
 
     status: Mapped[str] = mapped_column(
         String(20),
@@ -95,26 +97,18 @@ class FileObject(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "storage_backend IN ('r2', 'pg_inline')",
+            "storage_backend IN ('r2')",
             name="valid_file_storage_backend",
         ),
         CheckConstraint(
             "status IN ('reserved', 'uploaded', 'failed')",
             name="valid_file_status",
         ),
-        # Phase-coherent shape: r2 rows must have a key; pg_inline rows must
-        # have inline bytes; reserved rows are exempt because the client may
-        # not have completed the PUT yet (storage_key NULL is normal in flight).
+        # Phase-coherent shape: r2 rows must have a key; reserved rows are
+        # exempt because the client may not have completed the PUT yet
+        # (storage_key NULL is normal in flight).
         CheckConstraint(
-            (
-                "(status = 'reserved') "
-                "OR (storage_backend = 'r2' "
-                "    AND storage_key IS NOT NULL "
-                "    AND inline_bytes IS NULL) "
-                "OR (storage_backend = 'pg_inline' "
-                "    AND storage_key IS NULL "
-                "    AND inline_bytes IS NOT NULL)"
-            ),
+            "(status = 'reserved') OR (storage_backend = 'r2' AND storage_key IS NOT NULL)",
             name="valid_file_storage_shape",
         ),
         # Active dedup: a workspace can hold one row per sha256 at a time;
