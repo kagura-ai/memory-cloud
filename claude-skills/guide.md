@@ -78,7 +78,7 @@ Use `source_uri` and `source_type` with `remember` to track where knowledge orig
 
 ### 4. Optional: SessionStart hook
 
-To automatically remind yourself to restore session context, add this hook to your project's `.claude/settings.json`:
+To automatically remind yourself to restore session context, add this hook to your project's `.claude/settings.json`. Substitute `{server_url}` with the same URL you put in `.mcp.json` (e.g. `https://memory.kagura-ai.com` for the hosted service or `http://localhost:8080` for a local instance):
 
 ```json
 {
@@ -89,7 +89,7 @@ To automatically remind yourself to restore session context, add this hook to yo
         "hooks": [
           {
             "type": "command",
-            "command": "curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Kagura Memory Cloud is connected. Run /kagura-memory:session-start to restore previous session context.' || true"
+            "command": "curl -sf {server_url}/health >/dev/null 2>&1 && echo 'Kagura Memory Cloud is connected. Run /kagura-memory:session-start to restore previous session context.' || true"
           }
         ]
       }
@@ -117,20 +117,23 @@ If you're setting up Kagura Memory Cloud plugin in a new project or on another m
 
 **Option A: Marketplace install (recommended)**
 
-Run `/install-plugin` in Claude Code and search for `kagura-memory`, or install directly:
+Inside Claude Code, run:
 
-```bash
-claude /install-plugin kagura-memory-cloud
 ```
+/plugin install kagura-memory@kagura-memory-cloud
+```
+
+The argument is `<plugin-name>@<marketplace-name>` — the plugin is `kagura-memory` and it lives in the `kagura-memory-cloud` marketplace.
 
 After install, the plugin skills (`/kagura-memory:*`) become available. Proceed to Step 2 above to configure the MCP server connection.
 
 **Option B: Local install (from this repository)**
 
-If you have the `memory-cloud` repo cloned locally:
+If you have the `memory-cloud` repo cloned locally, first add it as a local marketplace, then install:
 
-```bash
-claude /install-plugin /path/to/memory-cloud
+```
+/plugin marketplace add /path/to/memory-cloud
+/plugin install kagura-memory@kagura-memory-cloud
 ```
 
 This installs the plugin from `.claude-plugin/plugin.json` and `claude-skills/` in the repo.
