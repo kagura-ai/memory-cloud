@@ -45,9 +45,11 @@ class TestFileObjectModel:
         for arg in FileObject.__table_args__:
             if hasattr(arg, "name") and arg.name == "uq_file_objects_workspace_sha256_active":
                 assert arg.unique is True
-                # Expression-based: column 0 = workspace_id, column 1 = lower(sha256)
+                # Expression-based: column 0 = workspace_id (bare column ref,
+                # SQLAlchemy resolves to ``file_objects.workspace_id``),
+                # column 1 = lower(sha256) functional expression.
                 exprs = [str(c) for c in arg.expressions]
-                assert exprs[0] == "workspace_id"
+                assert "workspace_id" in exprs[0]
                 assert "lower(" in exprs[1]
                 assert "sha256" in exprs[1]
                 # Partial WHERE clause stored as a dialect-specific option

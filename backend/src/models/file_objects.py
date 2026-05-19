@@ -117,7 +117,7 @@ class FileObject(Base):
         # Case-insensitive lower(sha256) mirrors alembic e07_556_sha256_lowercase_index (#556).
         Index(
             "uq_file_objects_workspace_sha256_active",
-            text("workspace_id"),
+            "workspace_id",
             text("lower(sha256)"),
             unique=True,
             postgresql_where="deleted_at IS NULL AND status <> 'failed'",
