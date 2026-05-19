@@ -15,7 +15,6 @@ import { useAuth } from "@/contexts/AuthContext";
 import { WorkspaceProvider, useWorkspace } from "@/contexts/WorkspaceContext";
 import { MemoryContextProvider } from "@/contexts/MemoryContextContext";
 import { Sidebar } from "@/components/dashboard/Sidebar";
-import { Header } from "@/components/dashboard/Header";
 import { WorkspaceSelectionScreen } from "@/components/workspaces/WorkspaceSelectionScreen";
 
 /**
@@ -224,27 +223,9 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
                 </div>
               )}
 
-              {/* Header */}
-              <Header />
-
               {/* Page Content */}
               <main className="flex-1 overflow-y-auto bg-slate-50 dark:bg-slate-900">
                 <div className="container mx-auto p-6">{children}</div>
-
-                {/* Footer */}
-                <footer className="border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 px-6 py-4 mt-8">
-                  <div className="container mx-auto flex items-center justify-between text-sm text-slate-600 dark:text-slate-400">
-                    <p>© 2025 Kagura Memory Cloud</p>
-                    <a
-                      href={`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"}/redoc`}
-                      className="hover:text-brand-green-600 transition-colors underline"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      API Documentation
-                    </a>
-                  </div>
-                </footer>
               </main>
             </div>
           </div>
