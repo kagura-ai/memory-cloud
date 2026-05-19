@@ -272,7 +272,10 @@ class TestEdgeDiscoveryPhase:
         assert result.details["edges_created"] == 1
         edge_phase.edge_repo.create_or_update_edge.assert_called_once()
         call_kwargs = edge_phase.edge_repo.create_or_update_edge.call_args[1]
-        assert call_kwargs["weight"] == DISCOVERY_EDGE_WEIGHT
+        # Issue #722: weight is now the cosine score from the batch tuple (0.75),
+        # not the fixed DISCOVERY_EDGE_WEIGHT constant.
+        assert call_kwargs["weight"] == pytest.approx(0.75)
+        assert call_kwargs["origin"] == "semantic"
         assert call_kwargs["edge_type"] == "related_to"
         # #306: auto-accept path increments `auto_accepted`, not `llm_accepted`.
         # avg_confidence / edge_type_dist / histogram stay zero (no pollution).

@@ -35,7 +35,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import search_memories_qdrant
-from models.memory import Memory, NeuralMemoryEdge
+from models.memory import EDGE_ORIGIN_SEMANTIC, Memory, NeuralMemoryEdge
 from repositories.neural_edge import NeuralEdgeRepository
 from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService
@@ -476,45 +476,15 @@ class EdgeDiscoveryPhase:
                 ]
                 auto_accepted += len(confirmed)
 
-            for edge in confirmed:
-                try:
-                    await self.edge_repo.create_or_update_edge(
-                        user_id=user_id,
-                        src_id=edge.src_id,
-                        dst_id=edge.dst_id,
-                        edge_type=edge.edge_type,
-                        weight=DISCOVERY_EDGE_WEIGHT,
-                        confidence=edge.confidence,
-                        workspace_id=workspace_id,
-                        context_id=context_id,
-                        edge_metadata={"source": "sleep_edge_discovery"},
-                        # Issue #457: automated writer; preserve declared_link.
-                        protect_declared_link=True,
-                        # Sleep edge_discovery discards the return; skip the
-                        # post-upsert SELECT for the same reason as Hebbian.
-                        return_fresh_edge=False,
-                    )
-                    edges_created += 1
-                    if reporter and report_id:
-                        await reporter.add_action(
-                            report_id=report_id,
-                            phase="edge_discovery",
-                            action_type="create_edge",
-                            memory_id=edge.src_id,
-                            target_id=edge.dst_id,
-                            details={
-                                "edge_type": edge.edge_type,
-                                "confidence": edge.confidence,
-                                "weight": DISCOVERY_EDGE_WEIGHT,
-                            },
-                        )
-                except Exception as e:
-                    logger.warning(
-                        "edge_creation_failed",
-                        src=str(edge.src_id),
-                        dst=str(edge.dst_id),
-                        error=str(e),
-                    )
+            edges_created += await self._persist_confirmed_edges(
+                confirmed=confirmed,
+                batch=batch,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                context_id=context_id,
+                reporter=reporter,
+                report_id=report_id,
+            )
 
         confidence_summary = _summarize_confidences(agg.confidences)
         confidence_histogram = _build_confidence_histogram(agg.confidences)
@@ -574,6 +544,93 @@ class EdgeDiscoveryPhase:
         )
 
         return result
+
+    async def _persist_confirmed_edges(
+        self,
+        confirmed: list[ConfirmedEdge],
+        batch: list[tuple[UUID, UUID, float]],
+        user_id: str,
+        workspace_id: str | None,
+        context_id: str | None,
+        reporter: "SleepReporter | None",
+        report_id: "UUID | None",
+    ) -> int:
+        """Persist sleep-discovered edges with origin='semantic' and weight=cosine.
+
+        Issue #722: previously wrote a fixed DISCOVERY_EDGE_WEIGHT (0.5) that was
+        immediately attacked by the Hebbian decay loop. Now writes the cosine
+        similarity directly as weight and tags origin='semantic' so the decay
+        carve-out in DecayManager skips it.
+
+        Args:
+            confirmed: Post-LLM edges with src_id, dst_id, edge_type, confidence.
+            batch: Raw Qdrant tuples (src_id, dst_id, cosine_score) for this batch.
+            user_id: Owning user.
+            workspace_id: Owning workspace (may be None).
+            context_id: Owning context (may be None).
+            reporter: Optional SleepReporter for audit log entries.
+            report_id: Report UUID required when reporter is provided.
+
+        Returns:
+            Number of edges successfully created or updated.
+        """
+        score_by_pair = {(s, d): score for s, d, score in batch}
+        created = 0
+        for edge in confirmed:
+            pair = (edge.src_id, edge.dst_id)
+            if pair in score_by_pair:
+                cosine = score_by_pair[pair]
+            else:
+                cosine = DISCOVERY_EDGE_WEIGHT
+                logger.warning(
+                    "edge_score_missing_in_batch",
+                    src=str(edge.src_id),
+                    dst=str(edge.dst_id),
+                    fallback_weight=cosine,
+                    edge_type=edge.edge_type,
+                )
+            try:
+                await self.edge_repo.create_or_update_edge(
+                    user_id=user_id,
+                    src_id=edge.src_id,
+                    dst_id=edge.dst_id,
+                    edge_type=edge.edge_type,
+                    weight=cosine,
+                    confidence=edge.confidence,
+                    workspace_id=workspace_id,
+                    context_id=context_id,
+                    edge_metadata={"source": "sleep_edge_discovery", "cosine": cosine},
+                    # Issue #457: automated writer; preserve declared_link.
+                    protect_declared_link=True,
+                    # Sleep edge_discovery discards the return; skip the
+                    # post-upsert SELECT for the same reason as Hebbian.
+                    return_fresh_edge=False,
+                    # Issue #722: tag as semantic so decay carve-out skips it.
+                    origin=EDGE_ORIGIN_SEMANTIC,
+                )
+                created += 1
+                if reporter and report_id:
+                    await reporter.add_action(
+                        report_id=report_id,
+                        phase="edge_discovery",
+                        action_type="create_edge",
+                        memory_id=edge.src_id,
+                        target_id=edge.dst_id,
+                        details={
+                            "edge_type": edge.edge_type,
+                            "confidence": edge.confidence,
+                            "weight": cosine,
+                            "origin": EDGE_ORIGIN_SEMANTIC,
+                        },
+                    )
+            except Exception as e:
+                logger.warning(
+                    "edge_creation_failed",
+                    src=str(edge.src_id),
+                    dst=str(edge.dst_id),
+                    error=str(e),
+                )
+        return created
 
     async def _sample_memories(
         self,
