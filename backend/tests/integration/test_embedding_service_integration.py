@@ -409,3 +409,44 @@ class TestEmbedWithUsageCapGate:
 
         # And no alert.
         mock_email_service.send_embedding_spend_alert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ollama_provider_skips_cap_path(
+        self,
+        db_session: AsyncSession,
+        byok_workspace_with_cap: Workspace,
+        fake_redis: FakeRedis,
+        patch_openai,
+        patch_pricing,
+        mock_email_service,
+    ):
+        """``provider=ollama`` short-circuits the cap gate regardless of BYOK
+        row presence — Ollama is local, no real provider cost.
+
+        Use ``EmbeddingService(db, provider="ollama")`` and assert the
+        gate returns (None, None) and the counter never moves.
+        """
+        svc = EmbeddingService(db_session)
+        # ``provider`` is derived from the model in __init__; override it
+        # directly so we exercise the Ollama branch without needing a
+        # model registry entry.
+        svc.provider = "ollama"
+        # Bypass the Ollama HTTP probe that runs on first use of _get_client.
+        svc._ollama_verified = True
+
+        # The shared patch_openai fixture replaced ``AsyncOpenAI``, so the
+        # Ollama branch's ``AsyncOpenAI(base_url=..., api_key="ollama")``
+        # call returns the same stub. That's intentional — we don't run a
+        # real Ollama in tests.
+        vector, _ = await svc.embed_with_usage(
+            text="ollama call",
+            user_id=byok_workspace_with_cap.owner_user_id,
+            workspace_id=str(byok_workspace_with_cap.id),
+        )
+        assert len(vector) == 512
+
+        # No counter key — cap path was skipped before any Redis op.
+        counter_prefix = f"embed_spend:{byok_workspace_with_cap.id}:"
+        keys = [k async for k in fake_redis.scan_iter(match=f"{counter_prefix}*")]
+        assert keys == []
+        mock_email_service.send_embedding_spend_alert.assert_not_called()
