@@ -18,7 +18,7 @@ from tests.neural.conftest import sample_memory_pair  # noqa: F401
 
 
 @pytest_asyncio.fixture
-async def two_edges_one_hebbian_one_semantic(db_session, sample_memory_pair):
+async def two_edges_one_hebbian_one_semantic(db_session, sample_memory_pair):  # noqa: F811
     """Create two edges (hebbian + semantic, opposite directions) under a
     unique user_id so per-test bulk operations are immune to leaked data
     from earlier tests.

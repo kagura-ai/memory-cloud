@@ -2,7 +2,7 @@
 
 import pytest
 
-from models.memory import EDGE_ORIGIN_HEBBIAN, EDGE_ORIGIN_SEMANTIC, NeuralMemoryEdge
+from models.memory import NeuralMemoryEdge
 from tasks.semantic_edge_reverify import semantic_edge_reverify_run
 from utils.datetime import utcnow
 

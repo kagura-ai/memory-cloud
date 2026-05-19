@@ -7,11 +7,11 @@ from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 
 from models.memory import (
+    _ALL_EDGE_ORIGINS,
     EDGE_ORIGIN_DECLARED,
     EDGE_ORIGIN_HEBBIAN,
     EDGE_ORIGIN_SEMANTIC,
     NeuralMemoryEdge,
-    _ALL_EDGE_ORIGINS,
 )
 from neural.models import (
     ActivationState,

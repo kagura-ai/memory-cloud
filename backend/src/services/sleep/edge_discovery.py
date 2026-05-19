@@ -552,8 +552,8 @@ class EdgeDiscoveryPhase:
         user_id: str,
         workspace_id: str | None,
         context_id: str | None,
-        reporter: "SleepReporter | None",
-        report_id: "UUID | None",
+        reporter: SleepReporter | None,
+        report_id: UUID | None,
     ) -> int:
         """Persist sleep-discovered edges with origin='semantic' and weight=cosine.
 
