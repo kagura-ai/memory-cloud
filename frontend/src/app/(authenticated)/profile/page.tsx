@@ -35,6 +35,7 @@ import { User, Moon, Sun, Save, RefreshCw } from "lucide-react";
 import { COMMON_TIMEZONES } from "@/lib/utils/datetime";
 import { apiClient, ApiError } from "@/lib/api/base";
 import type { User as AuthUser } from "@/lib/auth/auth";
+import { PageContainer } from "@/components/common/PageContainer";
 
 /**
  * Issue #514: derive the i18n label for the user's sign-in method.
@@ -222,7 +223,7 @@ export default function ProfilePage() {
   };
 
   return (
-    <div className="space-y-6 max-w-4xl">
+    <PageContainer>
       {/* Page Header */}
       <div>
         <h1 className="text-3xl font-bold tracking-tight">{t("title")}</h1>
@@ -437,6 +438,6 @@ export default function ProfilePage() {
           </div>
         </CardContent>
       </Card>
-    </div>
+    </PageContainer>
   );
 }

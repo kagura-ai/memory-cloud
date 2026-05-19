@@ -443,7 +443,7 @@ export function Sidebar() {
         href="/workspace/dashboard"
         aria-label="Kagura Memory Cloud"
         className={utilCn(
-          "flex items-center px-4 py-3 hover:opacity-80",
+          "flex items-center justify-center py-1 hover:opacity-80",
           transitions.default,
         )}
         onClick={() => setIsOpen(false)}
@@ -877,10 +877,9 @@ export function Sidebar() {
                     </a>
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
-                  <DropdownMenuLabel className="text-xs font-normal text-slate-500 dark:text-slate-400">
+                  <DropdownMenuLabel className="text-[10px] font-normal text-slate-500 dark:text-slate-400">
                     {t("copyright", { year: new Date().getFullYear() })}
-                  </DropdownMenuLabel>
-                  <DropdownMenuLabel className="text-xs font-normal text-slate-500 dark:text-slate-400 pt-0">
+                    {" · "}
                     {t("version", { version: APP_VERSION })}
                   </DropdownMenuLabel>
                 </DropdownMenuSubContent>
