@@ -16,9 +16,9 @@ Mock surface (intentional, minimal):
       response with ``usage.prompt_tokens = 100``.
     * ``services.llm_pricing_service.LLMPricingService.compute_cost_usd`` —
       returns ``0.5`` USD per call so cap-trip math is deterministic.
-    * ``services.email_service._email_service`` singleton — replaced with
-      a ``MagicMock`` whose ``send_embedding_spend_alert`` is an
-      ``AsyncMock`` we can assert against.
+    * ``services.email_service._default_email_service`` singleton —
+      replaced with a ``MagicMock`` whose ``send_embedding_spend_alert``
+      is an ``AsyncMock`` we can assert against.
 
 Real surface (do not mock):
     * ``EmbeddingService._prepare_spend_cap_gate``, ``has_byok_key``,
@@ -375,8 +375,9 @@ class TestEmbedWithUsageCapGate:
         """``provider=ollama`` short-circuits the cap gate regardless of BYOK
         row presence — Ollama is local, no real provider cost.
 
-        Use ``EmbeddingService(db, provider="ollama")`` and assert the
-        gate returns (None, None) and the counter never moves.
+        ``EmbeddingService.__init__`` derives ``provider`` from the model
+        registry, so we override ``svc.provider`` post-construction to
+        exercise the Ollama branch without registering a fake model.
         """
         svc = EmbeddingService(db_session)
         # ``provider`` is derived from the model in __init__; override it
