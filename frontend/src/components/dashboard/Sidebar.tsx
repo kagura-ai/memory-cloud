@@ -452,7 +452,7 @@ export function Sidebar() {
       </Link>
 
       {/* Workspace Switcher at Top - Minimal padding */}
-      <div className="px-2 py-2">
+      <div className="px-2 pt-0 pb-1">
         <WorkspaceSwitcher />
       </div>
 
@@ -909,6 +909,7 @@ export function Sidebar() {
         onClick={() => setIsOpen(!isOpen)}
         className={cn(
           "fixed top-4 left-4 z-[100] p-2 rounded-lg md:hidden",
+          "text-slate-700 dark:text-slate-200",
           colors.bg.card,
           colors.border.default,
           "border shadow-lg",
