@@ -140,9 +140,10 @@ def test_e18_downgrade_restores_inline_bytes_and_checks() -> None:
             assert col_row.is_nullable == "YES"
 
         # Semantic check: after downgrade the restored CHECK accepts pg_inline.
-        # Use a transaction that we explicitly roll back so no pg_inline row
-        # survives into _leave_db_at_head() (which re-upgrades to e18, which
-        # rejects pg_inline via its tightened CHECK).
+        # Cleanup at the bottom of the block DELETEs the workspace, which
+        # cascades to the pg_inline file_objects row — leaving the DB clean
+        # for _leave_db_at_head() to re-upgrade to e18 (which rejects
+        # pg_inline via its tightened CHECK).
         with engine.begin() as conn:
             _seed_workspace(conn)
             conn.execute(
