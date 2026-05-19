@@ -57,6 +57,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -122,7 +123,12 @@ class LLMPricing(Base):
     # lower bound). ``context_max_tokens`` is nullable for "no upper bound";
     # most rows have NULL here. Gemini 2.5 Pro is the canonical multi-tier
     # case in the 2026-04-28 seed.
-    context_min_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    context_min_tokens: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
     context_max_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # NUMERIC(14, 10) gives 4 digits before the decimal and 10 after — enough
@@ -136,12 +142,22 @@ class LLMPricing(Base):
     )
 
     price_per_unit: Mapped[Decimal] = mapped_column(Numeric(14, 10), nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    currency: Mapped[str] = mapped_column(
+        String(3),
+        nullable=False,
+        default="USD",
+        server_default=text("'USD'"),
+    )
 
     # Bridges per-1M-tokens (1_000_000) and per-1k-search-units (1_000)
     # so both fit the same row shape. Default 1_000_000 matches the
     # majority-case (token-based providers).
-    unit_denominator: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1_000_000)
+    unit_denominator: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=1_000_000,
+        server_default=text("1000000"),
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
