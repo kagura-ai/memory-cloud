@@ -166,7 +166,6 @@ _KNOWN_DRIFT: frozenset[str] = frozenset(
         # Follow-up: server_default audit Cat A (see #613 PR body).
         "erasure_requests.is_self_service.column.value_mismatch",
         "erasure_requests.status.column.value_mismatch",
-        "file_objects.id.column.value_mismatch",
         "llm_pricing.context_min_tokens.column.value_mismatch",
         "llm_pricing.currency.column.value_mismatch",
         "llm_pricing.unit_denominator.column.value_mismatch",
