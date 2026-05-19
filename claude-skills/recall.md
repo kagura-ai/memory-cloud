@@ -63,11 +63,16 @@ recall(context_id=..., query="...", k=10, filters={"source_type": "file"})
 - `source_uri_prefix`: Filter by origin URI prefix (e.g. `"file://"`, `"vault://my-vault/"`). Useful for querying memories from a specific vault or directory.
 - `source_type`: Filter by origin type — `"file"` | `"url"` | `"vault"` | `"api"` | `"manual"`.
 
-**Cross-context search** — to query 2-20 contexts at once (all must share the same embedding model), use `context_ids` instead of `context_id`:
+**Cross-context search** — to query 2-20 contexts at once, use `context_ids` instead of `context_id`:
 
 ```
 recall(context_ids=["<uuid-1>", "<uuid-2>"], query="...", k=10)
 ```
+
+All listed contexts must:
+- belong to the **same workspace** (otherwise `workspace_mismatch`)
+- share the **same privacy setting** — all private *or* all shared, not mixed (otherwise `context_privacy_mismatch`)
+- use the **same embedding model** (otherwise `embedding_model_mismatch`)
 
 Filters can be combined:
 
