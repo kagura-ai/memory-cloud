@@ -7,6 +7,11 @@ layer (NeuralEdgeRepository.create_or_update_edge refreshes the returned
 ORM after RETURNING), so this handler-level test pins only the contract
 the MCP tool exposes: whatever ORM the repo returns is what the response
 serializes.
+
+Issue #738: handle_create_edge must pin origin='declared' and default
+weight=1.0 so user-asserted edges via MCP `create_edge` are exempt from
+`DecayManager` (which only touches `origin='hebbian'`) — see PR #735
+follow-up.
 """
 
 import json
@@ -16,7 +21,8 @@ from uuid import uuid4
 
 import pytest
 
-from mcp_server.tools.edge import handle_update_edge
+from mcp_server.tools.edge import handle_create_edge, handle_update_edge
+from models.memory import EDGE_ORIGIN_DECLARED
 
 
 def _mock_edge(src_id, dst_id, *, edge_type="neural_association", weight=0.5):
@@ -172,3 +178,143 @@ class TestUpdateEdgeResponsePayload:
         assert data["status"] == "error"
         assert data["error"] == "edge_not_found"
         mock_repo.create_or_update_edge.assert_not_awaited()
+
+
+class TestCreateEdgeOriginAndWeight:
+    """Issue #738: MCP `create_edge` is the user-assertion path — rows MUST be
+    written with `origin='declared'` so they survive the nightly Hebbian
+    decay loop, and the default weight MUST be 1.0 (full confidence)
+    rather than the prior 0.5 carryover. PR #735 documented this contract
+    in concepts.md / architecture.md; this test pair pins it at the
+    handler layer.
+    """
+
+    @pytest.fixture
+    def user_id(self):
+        return "test_user_738"
+
+    @pytest.fixture
+    def workspace_id(self):
+        return uuid4()
+
+    @pytest.fixture
+    def context_id(self):
+        return uuid4()
+
+    @pytest.mark.asyncio
+    async def test_writes_declared_origin(self, user_id, workspace_id, context_id):
+        """handle_create_edge MUST pass origin='declared' to the repository."""
+        src_id = uuid4()
+        dst_id = uuid4()
+        created = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0)
+
+        mock_db = AsyncMock()
+        mock_db.commit = AsyncMock()
+        mock_db.rollback = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        mock_repo = MagicMock()
+        mock_repo.create_or_update_edge = AsyncMock(return_value=created)
+
+        mock_ctx = MagicMock()
+        mock_ctx.id = context_id
+        mock_ctx.workspace_id = workspace_id
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "mcp_server.tools.edge._resolve_context",
+                new_callable=AsyncMock,
+                return_value=mock_ctx,
+            ),
+            patch(
+                "mcp_server.tools.edge._check_viewer_permission",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "mcp_server.tools.edge._log_tool_usage",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await handle_create_edge(
+                {
+                    "source_id": str(src_id),
+                    "target_id": str(dst_id),
+                    "context_id": str(context_id),
+                },
+                user_id,
+                workspace_id,
+            )
+
+        data = json.loads(result[0].text)
+        assert data["status"] == "success"
+        mock_repo.create_or_update_edge.assert_awaited_once()
+        kwargs = mock_repo.create_or_update_edge.await_args.kwargs
+        assert kwargs["origin"] == EDGE_ORIGIN_DECLARED
+        assert kwargs["origin"] == "declared"  # pin the literal as a drift guard
+
+    @pytest.mark.asyncio
+    async def test_default_weight_is_1(self, user_id, workspace_id, context_id):
+        """When `weight` is omitted from args, handler MUST default to 1.0."""
+        src_id = uuid4()
+        dst_id = uuid4()
+        created = _mock_edge(src_id, dst_id, edge_type="related_to", weight=1.0)
+
+        mock_db = AsyncMock()
+        mock_db.commit = AsyncMock()
+        mock_db.rollback = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        mock_repo = MagicMock()
+        mock_repo.create_or_update_edge = AsyncMock(return_value=created)
+
+        mock_ctx = MagicMock()
+        mock_ctx.id = context_id
+        mock_ctx.workspace_id = workspace_id
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "mcp_server.tools.edge._resolve_context",
+                new_callable=AsyncMock,
+                return_value=mock_ctx,
+            ),
+            patch(
+                "mcp_server.tools.edge._check_viewer_permission",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "mcp_server.tools.edge._log_tool_usage",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await handle_create_edge(
+                {
+                    "source_id": str(src_id),
+                    "target_id": str(dst_id),
+                    "context_id": str(context_id),
+                    # weight intentionally omitted
+                },
+                user_id,
+                workspace_id,
+            )
+
+        data = json.loads(result[0].text)
+        assert data["status"] == "success"
+        mock_repo.create_or_update_edge.assert_awaited_once()
+        kwargs = mock_repo.create_or_update_edge.await_args.kwargs
+        assert kwargs["weight"] == 1.0

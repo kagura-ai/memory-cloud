@@ -23,6 +23,7 @@ from mcp_server.tools._helpers import (
     execute_with_timeout,
 )
 from models.memory import (
+    EDGE_ORIGIN_DECLARED,
     EDGE_TYPE_DECLARED_LINK,
     EDGE_TYPE_DEPENDS_ON,
     EDGE_TYPE_LEARNED_FROM,
@@ -218,7 +219,11 @@ async def handle_create_edge(
             f"edge_type must be one of: {', '.join(sorted(VALID_EDGE_TYPES))}",
         )
 
-    weight, error = _parse_float(args.get("weight"), "weight", 0.0, 3.0, 0.5)
+    # Issue #738: MCP `create_edge` is the explicit user-assertion path, so
+    # default weight is 1.0 (full confidence) rather than the prior 0.5
+    # (Hebbian-era simplified default) and origin is pinned to 'declared' so
+    # the row is exempt from `DecayManager` (which only touches `origin='hebbian'`).
+    weight, error = _parse_float(args.get("weight"), "weight", 0.0, 3.0, 1.0)
     if error:
         return error
 
@@ -253,6 +258,7 @@ async def handle_create_edge(
                     confidence=confidence,
                     workspace_id=ws_id,
                     context_id=ctx_id,
+                    origin=EDGE_ORIGIN_DECLARED,
                 ),
                 operation_name="create_edge",
             )
