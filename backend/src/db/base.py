@@ -9,7 +9,7 @@ Note:
 
 from collections.abc import AsyncGenerator
 
-from sqlalchemy import create_engine
+from sqlalchemy import MetaData, create_engine
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -19,9 +19,30 @@ from utils.url_redact import redact_db_url
 logger = get_logger(__name__)
 
 
+# Keep ``Base.metadata.create_all`` and alembic-authored DDL in sync on
+# auto-generated constraint names (issue #613). Without a convention,
+# SQLAlchemy emits anonymous ``Column(unique=True)`` and inline
+# ``ForeignKey(...)`` declarations, letting PostgreSQL pick defaults that
+# diverge wherever an alembic migration assigns an explicit name.
+#
+# ``ix`` is required when ``uq`` is set: ``Column(unique=True)``
+# instantiates BOTH an unnamed UniqueConstraint and an unnamed backing
+# Index, and the Index needs a name token or SQLAlchemy raises
+# ``AssertionError: name is not None`` at DDL compile time.
+#
+# ``ck`` and ``pk`` are intentionally omitted — every CHECK constraint
+# is explicitly named, and PostgreSQL's ``<table>_pkey`` default already
+# matches alembic-side primary keys.
+NAMING_CONVENTION: dict[str, str] = {
+    "fk": "fk_%(table_name)s_%(column_0_name)s",
+    "uq": "%(table_name)s_%(column_0_name)s_key",
+    "ix": "ix_%(column_0_label)s",
+}
+
+
 # SQLAlchemy Base for models
 class Base(DeclarativeBase):
-    pass
+    metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
 # Lazy initialization (to avoid import-time errors)

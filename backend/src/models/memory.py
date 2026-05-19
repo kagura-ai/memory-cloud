@@ -204,6 +204,21 @@ class Memory(Base):
         Index("idx_last_used", "last_used_at"),
         # JSONB index for context_id
         Index("idx_context", func.cast(context["context_id"], String)),
+        # Issue #213 partial B-tree (migration a95_source_uri_declared_link).
+        Index(
+            "idx_memories_source_uri",
+            "source_uri",
+            postgresql_where=text("source_uri IS NOT NULL"),
+        ),
+        # Issue #223 GIN index on tags array (migration b05_223_tag_cooccurrence).
+        Index("idx_memories_tags_gin", "tags", postgresql_using="gin"),
+        # Issue #485 partial B-tree on the generated external_blob_ref column
+        # (migration e03_485_file_objects).
+        Index(
+            "idx_memories_external_blob_ref",
+            "external_blob_ref",
+            postgresql_where=text("external_blob_ref IS NOT NULL"),
+        ),
     )
 
     def __repr__(self) -> str:

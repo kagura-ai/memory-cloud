@@ -157,68 +157,23 @@ _EXCLUDED_TABLES: frozenset[str] = frozenset({"alembic_version"})
 # regression. Format: ``<table>.<name>.<kind>.<side>``.
 _KNOWN_DRIFT: frozenset[str] = frozenset(
     {
-        # Cat A: server_default drift — RESOLVED (PR #728 / issue #616 + this PR / issue #613 Cat A residual).
-        # ─── Cat B: FK naming-convention drift (14 entries / 7 pairs) ───
-        # SQLAlchemy auto-names FK constraints ``<table>_<col>_fkey``
-        # while the alembic migrations assigned explicit ``fk_<table>_*``
-        # names. Both sides describe the SAME foreign key relationship,
-        # but the names differ, so the detector reports each as a
-        # create_all_only / alembic_only pair. Root fix: configure
-        # ``Base.metadata.naming_convention`` to match the alembic
-        # convention so SQLAlchemy and alembic emit identical names.
-        # Follow-up: FK naming-convention unification Cat B.
-        "api_keys.api_keys_bound_context_id_fkey.constraint.create_all_only",
-        "indexer_state.indexer_state_resource_pk_fkey.constraint.create_all_only",
-        "oauth_device_codes.oauth_device_codes_client_id_fkey.constraint.create_all_only",
-        "resource_events.resource_events_resource_pk_fkey.constraint.create_all_only",
-        "resource_schemas.resource_schemas_resource_pk_fkey.constraint.create_all_only",
-        "resource_tokens.resource_tokens_resource_pk_fkey.constraint.create_all_only",
-        "resource_tokens.resource_tokens_workspace_id_fkey.constraint.create_all_only",
-        "api_keys.fk_api_keys_bound_context_id.constraint.alembic_only",
-        "indexer_state.fk_indexer_state_resource_pk.constraint.alembic_only",
-        "oauth_device_codes.fk_oauth_device_codes_client_id.constraint.alembic_only",
-        "resource_events.fk_resource_events_resource_pk.constraint.alembic_only",
-        "resource_schemas.fk_resource_schemas_resource_pk.constraint.alembic_only",
-        "resource_tokens.fk_resource_tokens_resource_pk.constraint.alembic_only",
+        # Cat A: server_default drift — RESOLVED (PR #728 / issue #616).
+        # Cat B: FK naming-convention drift — RESOLVED in #718 via
+        # ``Base.metadata.naming_convention`` in ``db/base.py``. The two
+        # entries below are the ``resource_tokens.workspace_id`` legacy
+        # pair: alembic uses ``fk_resource_tokens_workspace`` (no ``_id``)
+        # while the convention generates ``fk_resource_tokens_workspace_id``.
+        # Same FK, two names — rename via follow-up migration when scope allows.
+        "resource_tokens.fk_resource_tokens_workspace_id.constraint.create_all_only",
         "resource_tokens.fk_resource_tokens_workspace.constraint.alembic_only",
-        # ─── Cat C: UK naming drift (2 entries) ─────────────────────────
-        # Same root cause as Cat B but for UNIQUE constraints on
-        # ``oauth_device_codes``. Alembic emits explicit named UK
-        # constraints; the ORM only declares ``unique=True`` on the
-        # column, which Postgres records as an implicit unique index
-        # with no named UK constraint. Resolution: declare an explicit
-        # ``UniqueConstraint(...)`` in the ORM model OR drop the named
-        # UK from alembic when the naming-convention work in Cat B
-        # makes the constraint names match.
-        # Follow-up: UK naming alignment Cat C (likely folds into Cat B).
-        "oauth_device_codes.oauth_device_codes_device_code_key.constraint.alembic_only",
-        "oauth_device_codes.oauth_device_codes_user_code_key.constraint.alembic_only",
-        # ─── Cat D: migration-only indexes (7 entries) ──────────────────
-        # Indexes that alembic creates but ``Base.metadata.create_all``
-        # does not. Causes (per index):
-        #   * idx_memories_external_blob_ref: partial WHERE clause not
-        #     declared in the ORM Index() call (or no Index() at all)
-        #   * idx_memories_source_uri: same partial-WHERE gap
-        #   * idx_memories_tags_gin: GIN access method not declared in
-        #     the ORM via ``postgresql_using='gin'``
-        #   * idx_memory_analysis_assignments_analysis_cluster: composite
-        #     index missing from ORM
-        #   * oauth_device_codes_*_key (×2): UK auto-indexes paired with
-        #     the Cat C UK names; resolved with Cat C
-        #   * ux_contexts_resource_id_active: partial UNIQUE with
-        #     compound WHERE not declared in the ORM
-        # Resolution: declare matching ``Index(...)`` / ``UniqueConstraint``
-        # entries in the ORM models, or accept these as migration-only
-        # and document them as such in the model docstring.
-        # Follow-up: ORM index parity audit Cat D.
-        "memories.idx_memories_external_blob_ref.index.alembic_only",
-        "memories.idx_memories_source_uri.index.alembic_only",
-        "memories.idx_memories_tags_gin.index.alembic_only",
-        "memory_analysis_assignments.idx_memory_analysis_assignments_analysis_cluster.index.alembic_only",
-        "oauth_device_codes.oauth_device_codes_device_code_key.index.alembic_only",
-        "oauth_device_codes.oauth_device_codes_user_code_key.index.alembic_only",
-        "contexts.ux_contexts_resource_id_active.index.alembic_only",
-        # Cat E: uniqueness / expression drift — RESOLVED (this PR / issue #613 Cat E).
+        # Cat C: oauth_device_codes UK naming — RESOLVED in #718/#719 by
+        # adding ``unique=True`` to ``OAuth2DeviceCode.device_code`` and
+        # ``OAuth2DeviceCode.user_code``. The Cat D companion entries
+        # (UK auto-indexes with the same names) clear from this fix too.
+        # Cat D: migration-only indexes — RESOLVED in #719 by declaring
+        # matching ``Index(...)`` entries in models/memory.py,
+        # models/analysis.py, and models/auth.py (Context).
+        # Cat E: uniqueness / expression drift — RESOLVED (PR #733).
     }
 )
 

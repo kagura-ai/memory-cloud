@@ -285,6 +285,13 @@ class MemoryAnalysisAssignment(Base):
             "idx_memory_analysis_assignments_cluster",
             "cluster_id",
         ),
+        # Composite for the recall analysis_cluster filter
+        # (migration d08_496_analyses_cancellation).
+        Index(
+            "idx_memory_analysis_assignments_analysis_cluster",
+            "analysis_id",
+            "cluster_id",
+        ),
     )
 
     def __repr__(self) -> str:
