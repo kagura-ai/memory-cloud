@@ -100,12 +100,22 @@ class ErasureRequest(Base):
     # Self user_id (self-service) or admin user_id (admin force-erase).
     initiated_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    is_self_service: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_self_service: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
 
     reason_code: Mapped[str] = mapped_column(String(50), nullable=False)
     reason_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default=STATUS_PENDING)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=STATUS_PENDING,
+        server_default=text(f"'{STATUS_PENDING}'"),
+    )
 
     # SHA256 of the one-time token; raw token in Redis only. Size is
     # exact (SHA256 hex = 64 chars) so the column does not imply a
