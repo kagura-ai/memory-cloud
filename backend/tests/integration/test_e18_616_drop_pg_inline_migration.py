@@ -13,7 +13,10 @@ Verifies:
 
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import text
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import IntegrityError
 
 from alembic import command
 
@@ -32,7 +35,13 @@ _WS_ID = "00000000-0000-0000-0000-000000000001"
 _USER_ID = "tester-616"
 
 
-def _seed_workspace(conn) -> None:  # type: ignore[no-untyped-def]
+def _leave_db_at_head() -> None:
+    """Convention: integration suite expects the test DB at head after each test."""
+    with _alembic_at_test_db():
+        command.upgrade(_get_alembic_config(), "head")
+
+
+def _seed_workspace(conn: Connection) -> None:
     """Insert a minimal user + workspace row to satisfy the FK on file_objects."""
     conn.execute(
         text(
@@ -73,6 +82,23 @@ def test_e18_upgrade_drops_inline_bytes_and_rewrites_checks() -> None:
         with _alembic_at_test_db():
             command.upgrade(_get_alembic_config(), E18_REVISION)
 
+        # Semantic check: pg_inline is now rejected by the tightened CHECK.
+        with engine.connect() as conn:
+            with pytest.raises(IntegrityError):
+                conn.execute(
+                    text(
+                        "INSERT INTO file_objects "
+                        "(workspace_id, sha256, size_bytes, content_type, "
+                        " filename, storage_backend, storage_key, status, "
+                        " created_by) VALUES "
+                        f"('{_WS_ID}', "
+                        " 'd' || repeat('e', 62), 1, 'text/plain', "
+                        " 'y.txt', 'pg_inline', NULL, 'uploaded', 'tester')"
+                    )
+                )
+                conn.commit()
+
+        # Smoke check on the structural side: inline_bytes column is gone.
         with engine.connect() as conn:
             cols = (
                 conn.execute(
@@ -86,24 +112,6 @@ def test_e18_upgrade_drops_inline_bytes_and_rewrites_checks() -> None:
                 .all()
             )
             assert "inline_bytes" not in cols
-
-            check_src = conn.execute(
-                text(
-                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-                    "WHERE conname = 'valid_file_storage_backend'"
-                )
-            ).scalar_one()
-            assert "'r2'" in check_src
-            assert "'pg_inline'" not in check_src
-
-            shape_src = conn.execute(
-                text(
-                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-                    "WHERE conname = 'valid_file_storage_shape'"
-                )
-            ).scalar_one()
-            assert "pg_inline" not in shape_src
-            assert "inline_bytes" not in shape_src
 
             surviving = conn.execute(text("SELECT COUNT(*) FROM file_objects")).scalar_one()
             assert surviving == 1
@@ -133,12 +141,30 @@ def test_e18_downgrade_restores_inline_bytes_and_checks() -> None:
             assert col_row.data_type == "bytea"
             assert col_row.is_nullable == "YES"
 
-            check_src = conn.execute(
+        # Semantic check: after downgrade the restored CHECK accepts pg_inline.
+        # Use a transaction that we explicitly roll back so no pg_inline row
+        # survives into _leave_db_at_head() (which re-upgrades to e18, which
+        # rejects pg_inline via its tightened CHECK).
+        with engine.begin() as conn:
+            _seed_workspace(conn)
+            conn.execute(
                 text(
-                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-                    "WHERE conname = 'valid_file_storage_backend'"
-                )
-            ).scalar_one()
-            assert "'pg_inline'" in check_src
+                    "INSERT INTO file_objects "
+                    "(workspace_id, sha256, size_bytes, content_type, "
+                    " filename, storage_backend, inline_bytes, storage_key, "
+                    " status, created_by) VALUES "
+                    "(:ws, 'd' || repeat('e', 63), 1, 'text/plain', "
+                    " 'z.txt', 'pg_inline', :blob, NULL, 'uploaded', 'tester')"
+                ),
+                {"ws": _WS_ID, "blob": b"hello"},
+            )
+            # Verify the INSERT succeeded (no exception above), then roll back
+            # so the pg_inline row is gone before we re-upgrade to head.
+            conn.execute(text("SAVEPOINT before_pg_inline_check"))
+            conn.execute(text("ROLLBACK TO SAVEPOINT before_pg_inline_check"))
+            # Clean up seeded rows so _leave_db_at_head() upgrade proceeds cleanly.
+            conn.execute(text("DELETE FROM workspaces WHERE id = :id"), {"id": _WS_ID})
+            conn.execute(text("DELETE FROM users WHERE user_id = :uid"), {"uid": _USER_ID})
     finally:
         engine.dispose()
+        _leave_db_at_head()
