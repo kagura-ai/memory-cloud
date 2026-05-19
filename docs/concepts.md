@@ -106,11 +106,34 @@ When you search with `recall()`, Kagura uses **Hybrid Search** combining two app
 
 **Neural Memory** creates automatic relationships between memories using brain-inspired algorithms.
 
-### Hebbian Learning
+### Edge Origins
 
-> "Neurons that fire together, wire together."
+Neural Memory edges are tagged with one of three **origins**, each with different lifetime semantics. This mirrors the **complementary learning systems** view from cognitive neuroscience — short-lived episodic associations vs durable content-based associations vs user-pinned ones.
 
-When memories are accessed together (e.g., recalled in the same session), a connection (edge) is created or strengthened between them. Edge weights range from 0.0 to 3.0.
+| | **Hebbian** (hippocampus-like) | **Semantic** (cortex-like) | **Declared** |
+|---|---|---|---|
+| Encodes | "fired together recently" — episodic co-activation | "about similar things" — content neighborhood | "I'm telling you these are related" — explicit user assertion |
+| Created by | runtime `recall()` co-activation | sleep `edge_discovery` (cosine sim ≥ 0.5) | MCP `create_edge` tool |
+| Weight | 0.0–3.0 co-activation amplitude | `cosine_sim` at creation (0.5–1.0) | user-supplied (default 1.0) |
+| Decays? | yes — strengthens with co-recall, fades without | **no** — content similarity is a static property | **no** — user-asserted, never auto-removed |
+| Maintenance | nightly Hebbian decay + prune below threshold | monthly `semantic_edge_reverify` drops edges with deleted endpoints | none — lives until the user deletes it |
+
+> This is a **pedagogical analogy, not an implementation claim**. The system does not model the hippocampus or cortex directly — the parallel is in lifetime semantics: episodic-decay vs static-content vs user-pinned.
+
+### Why three origins?
+
+Conflating "recently co-recalled" with "content-similar" causes edge survival to scale as ~1/N² with context size — every doubled context loses a disproportionate share of its semantic edges to decay. The `origin` discriminator lets the decay loop touch only `hebbian` edges while `semantic` and `declared` survive as long as their endpoints exist.
+
+### Edge origin vs memory scope
+
+Edge `origin` and `Memory.scope` (`working` / `persistent`) are **two independent axes** managed by different subsystems:
+
+- **`origin`** controls *edge* lifetime — see the table above.
+- **`scope`** controls *memory node* lifetime — `working` memories are promoted to `persistent` (or archived) by the Sleep Consolidation phase based on access patterns and LLM judgment. See [Sleep Maintenance](sleep-maintenance.md).
+
+Hebbian edges supply *signal* to consolidation (a working memory that gets reinforced via co-recall is more likely to be promoted), but Hebbian learning itself does not look at `scope` — `HebbianLearner.queue_update` creates edges between any co-activated pair regardless of whether the endpoints are `working` or `persistent`. In the neuroscience analogy, this is a two-level consolidation: edge consolidation (Hebbian → Semantic) and node consolidation (working → persistent) happen on different timescales and via different mechanisms.
+
+For the migration history (PR #726 / Issue #722) and operator runbook, see [`docs/operations/semantic-edge-rollout.md`](operations/semantic-edge-rollout.md). For schema-level details, formulas, and the edge lifecycle flowchart, see [Neural Memory Engine § Edge Origins](architecture.md#edge-origins) in the architecture doc.
 
 ### Activation Spreading
 

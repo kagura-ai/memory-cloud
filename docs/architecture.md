@@ -124,18 +124,90 @@ Results A       Results B
 
 ## Neural Memory Engine
 
-### Hebbian Learning
-Automatic relationship learning based on co-activation:
+### Edge Origins
 
-```python
-# When memories A and B are accessed together
-weight(A, B) += learning_rate * activation(A) * activation(B)
+Neural Memory edges carry an `origin` discriminator (`neural_memory_edges.origin`, `VARCHAR(20)`, CHECK constraint `valid_edge_origin`) that controls their lifetime. Three values exist:
+
+| | **`hebbian`** | **`semantic`** | **`declared`** |
+|---|---|---|---|
+| Source | runtime co-activation in `HebbianLearner` (write side of `recall()` — see Issue #120) | sleep `edge_discovery` (cosine sim ≥ 0.5) | user-asserted via MCP `create_edge` |
+| Weight rule | `weight(A,B) += learning_rate * activation(A) * activation(B)`, clamped 0.0–3.0 | `cosine_sim` at creation (0.5–1.0); never modified by decay | user-supplied (default 1.0) |
+| Decays | yes — nightly `DecayManager.bulk_decay_weights(only_origin='hebbian')` | no | no |
+| Pruned | yes — `DecayManager.prune_weak_edges(only_origin='hebbian')` below `prune_threshold` | no | no |
+| Re-verified | n/a | monthly `semantic_edge_reverify` cron drops rows whose endpoint memory has been soft-deleted | n/a |
+
+**Sticky-upsert invariant**: the `create_or_update_edge` upsert path is one-way — a runtime Hebbian co-recall can **promote** a missing or existing `hebbian` edge to a `semantic` or `declared` origin, but it cannot **demote** an existing `semantic` or `declared` edge back to `hebbian`. This guarantees that user-asserted or sleep-discovered associations cannot be silently downgraded by access patterns.
+
+**Background jobs maintaining `neural_memory_edges`**:
+
+- **`DecayManager`** (nightly) — applies exponential decay and prune-below-threshold to `origin='hebbian'` rows only. `semantic` and `declared` rows are skipped.
+- **`semantic_edge_reverify`** (monthly, 04:15 UTC on the 1st) — walks `origin='semantic'` rows and deletes any whose endpoint memory has been soft-deleted. Cost is O(edges), not O(memory²), so it stays cheap as contexts grow.
+
+#### Formulas
+
+**Hebbian update** (`backend/src/neural/hebbian.py` — applied per `recall()` for co-activated pairs that pass the semantic-gating threshold `min_similarity_for_edge`):
+
+```
+Δw_ij ← η · (a_i · C_i) · (a_j · C_j) − λ · w_ij
 ```
 
-**Features**:
-- Decays over time (forgetting curve)
-- Strengthens with repeated co-access
-- Creates knowledge graph automatically
+- `η` — learning rate (`config.learning_rate`)
+- `a_i, a_j` — activation strengths of the co-activated nodes
+- `C_i, C_j` — confidence / trust scores of each node (poisoning defense — low-trust nodes contribute less)
+- `λ` — L2 decay coefficient applied per update (prevents weight explosion; separate from the nightly time-based decay below)
+- `w_ij` — current edge weight, clamped to `[0.0, 3.0]`
+
+**Time-based decay** (`backend/src/neural/decay.py` — applied nightly to `origin='hebbian'` only):
+
+```
+w_ij(t + Δt) = w_ij(t) · exp(−decay_rate · Δt)
+```
+
+After decay, any row with `w_ij < prune_threshold` is removed by `prune_weak_edges`. `semantic` and `declared` rows are decay-exempt by construction (`only_origin='hebbian'` filter), so they survive arbitrarily long Δt — which is the load-bearing property for content-based edge survival as N grows.
+
+#### Edge lifecycle
+
+```
+hebbian
+  recall() co-activation                 reinforced by next co-recall
+  + semantic gating passed         ┌─► weight rises (Δw_ij update)
+       │                           │
+       ▼                           │
+  create_or_update_edge ───────────┘
+  (origin='hebbian')               not reinforced
+       │                          ┌─► nightly DecayManager
+       ▼                          │   weight *= exp(−decay_rate · Δt)
+  edge exists ────────────────────┘
+       │                          weight < prune_threshold
+       └──────────────────────────► prune_weak_edges() removes row
+
+semantic
+  sleep edge_discovery
+  + cosine_sim ≥ min_similarity_for_edge
+       │
+       ▼
+  create_or_update_edge ──► edge exists (origin='semantic')
+  (origin='semantic',           │
+   weight=cosine_sim)           │   endpoint memory soft-deleted
+                                └─► monthly semantic_edge_reverify removes row
+                                    (never touched by DecayManager)
+
+declared
+  MCP create_edge tool
+       │
+       ▼
+  create_or_update_edge ──► edge exists (origin='declared')
+  (origin='declared')           │
+                                │   MCP delete_edge / update_edge
+                                └─► row removed or weight updated
+                                    (never touched by DecayManager or reverify)
+```
+
+**Sticky-upsert detail**: when a co-recall triggers `create_or_update_edge` on a pair that already has a `semantic` or `declared` edge, the existing row's `origin` is **preserved** (no demotion). The weight may still be modified by the Hebbian formula, but the row will continue to be exempt from the nightly decay loop.
+
+For the reader-friendly framing (hippocampus / cortex analogy and the `1/N²` motivation), see [Neural Memory § Edge Origins](concepts.md#edge-origins) in the concepts doc. For the migration history, deploy runbook, and backfill procedure, see [`docs/operations/semantic-edge-rollout.md`](operations/semantic-edge-rollout.md). For the `Memory.scope` (`working` / `persistent`) lifecycle — which is **orthogonal** to edge origin and managed by Sleep Consolidation — see [Sleep Maintenance](sleep-maintenance.md).
+
+> **Note**: the schema documented above reflects the shipped state as of v0.16.x. A richer two-axis provenance schema (relation × origin × frozen flag) is in design as RFC #84 and may extend this taxonomy in a future release.
 
 ### Activation Spreading
 Graph-based exploration from seed memory:
