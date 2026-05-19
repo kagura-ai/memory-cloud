@@ -331,3 +331,42 @@ class TestEmbedWithUsageCapGate:
         dedup_key = f"embed_spend_alert:{byok_workspace_with_cap.id}:daily:{bucket}:80"
         assert await fake_redis.get(dedup_key) == "1"
         assert await fake_redis.ttl(dedup_key) > 0
+
+    @pytest.mark.asyncio
+    async def test_byok_at_cap_raises_before_api_call(
+        self,
+        db_session: AsyncSession,
+        byok_workspace_with_cap: Workspace,
+        fake_redis: FakeRedis,
+        patch_openai,
+        patch_pricing,
+        mock_email_service,
+    ):
+        """Pre-seed $10 spent (100% of $10 cap). Call must raise
+        EmbeddingSpendCapExceeded BEFORE any OpenAI call, and the
+        counter must NOT have been incremented past 100%."""
+        from datetime import UTC, datetime
+
+        bucket = datetime.now(UTC).strftime("%Y-%m-%d")
+        counter_key = f"embed_spend:{byok_workspace_with_cap.id}:daily:{bucket}"
+        await fake_redis.set(counter_key, str(int(Decimal("10.0") * _MICRO_USD)))
+
+        svc = EmbeddingService(db_session)
+        with pytest.raises(EmbeddingSpendCapExceeded) as exc_info:
+            await svc.embed_with_usage(
+                text="over-cap",
+                user_id=byok_workspace_with_cap.owner_user_id,
+                workspace_id=str(byok_workspace_with_cap.id),
+            )
+
+        # The exception carries the structured fields the route handler
+        # uses to render a QUOTA-002 / 429 response.
+        assert exc_info.value.details["period"] == "daily"
+        assert exc_info.value.details["cap_usd"] == 10.0
+        assert exc_info.value.status_code == 429
+
+        # OpenAI was never called — the gate fired first.
+        patch_openai.embeddings.create.assert_not_called()
+
+        # Counter is untouched (still $10).
+        assert int(await fake_redis.get(counter_key)) == int(Decimal("10.0") * _MICRO_USD)
