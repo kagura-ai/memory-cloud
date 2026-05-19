@@ -157,7 +157,7 @@ _EXCLUDED_TABLES: frozenset[str] = frozenset({"alembic_version"})
 # regression. Format: ``<table>.<name>.<kind>.<side>``.
 _KNOWN_DRIFT: frozenset[str] = frozenset(
     {
-        # Cat A: server_default drift — RESOLVED (PR #728 #616 + PR-B #613 Cat A residual).
+        # Cat A: server_default drift — RESOLVED (PR #728 / issue #616 + this PR / issue #613 Cat A residual).
         # ─── Cat B: FK naming-convention drift (14 entries / 7 pairs) ───
         # SQLAlchemy auto-names FK constraints ``<table>_<col>_fkey``
         # while the alembic migrations assigned explicit ``fk_<table>_*``
