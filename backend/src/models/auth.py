@@ -847,8 +847,8 @@ class OAuth2DeviceCode(Base):
     # Redundant secondary indexes from migration d08_536: the UK auto-indexes
     # from ``unique=True`` already cover equality lookups, but production has
     # them as separate objects so the ORM mirrors them for create_all parity.
-    # TODO(v0.16.x follow-up): drop both ``ix_*`` indexes in one migration
-    # and remove these two lines.
+    # TODO(#737): drop both ``ix_*`` indexes in one migration and remove
+    # these two lines.
     __table_args__ = (
         Index("ix_oauth_device_codes_device_code", "device_code"),
         Index("ix_oauth_device_codes_user_code", "user_code"),
