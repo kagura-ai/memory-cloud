@@ -103,6 +103,7 @@ describe("Sidebar", () => {
     // The logo is wrapped in a Link to /workspace/dashboard
     const link = logo.closest("a");
     expect(link).toHaveAttribute("href", "/workspace/dashboard");
+    expect(link).toHaveAttribute("aria-label", "Kagura Memory Cloud");
   });
 
   it("user menu trigger button shows user name", () => {
