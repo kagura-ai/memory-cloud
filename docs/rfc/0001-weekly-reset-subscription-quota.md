@@ -109,14 +109,14 @@ This RFC's transport contract uses **dedicated endpoints**, not the Resource Fou
 
 The table's *Must resolve before* column captures the gating relationship; resolution can come later but the issue must exist:
 
-| # | Item | Rationale | Must resolve before |
+| # | Issue | Item | Must resolve before |
 |---|---|---|---|
-| F1 | **Tier resolution TTL spec** | Worker `config_version` + `valid_until` semantics; tier change immediacy (mid-week downgrade behavior, key re-issuance on tier change) | Phase 3 config endpoint implementation |
-| F2 | **Key rotation grace window** | In-flight requests must not race with revoke. LiteLLM-side feature verification required. Default proposal: 5-minute grace | Phase 3 LiteLLM deploy |
-| F3 | **`summary_id` uniqueness scope = workspace** | Idempotency key `(connector_id, summary_id)` requires `summary_id` to be workspace-unique. Avoids the scope-mismatch pattern seen in past Redis-quota bugs | ai-worker `#24` (billing emit) |
-| F4 | **LiteLLM proxy 5xx degradation policy** | "Stop ingest" vs "fallback to direct provider". Direct-fallback bypasses spend tracking. v1 decision: **stop ingest** (favor quota correctness over availability); customers see worker-paused signal. Per-tier override (Max = direct-fallback with reconciliation) is a deferred enhancement | v1 launch |
-| F5 | **Worker self-enforcement responsibility** | RFC must document that cold-start guardrail (≤70% weekly) is worker-side, server cannot enforce. Prevents future misattribution of overruns | RFC merge (documentation-only) |
-| F6 | **Chat ingest = Resource Foundation reuse epic** | Separate epic: workspace_connectors table + connector profile + 1:1 mapping to `resources` row. Includes idempotency key `connector_id` prefix requirement | ai-worker Phase 3 |
+| F1 | [#750](https://github.com/kagura-ai/memory-cloud/issues/750) | Tier resolution TTL spec (`config_version` + `valid_until` semantics; mid-week tier change immediacy) | Phase 3 config endpoint implementation |
+| F2 | [#751](https://github.com/kagura-ai/memory-cloud/issues/751) | LiteLLM virtual key rotation grace window (in-flight requests must not race with revoke; 5-min default) | Phase 3 LiteLLM deploy |
+| F3 | [#752](https://github.com/kagura-ai/memory-cloud/issues/752) | `summary_id` workspace-uniqueness contract (idempotency key scope) | ai-worker `#24` (billing emit) |
+| F4 | [#753](https://github.com/kagura-ai/memory-cloud/issues/753) | LiteLLM proxy 5xx degradation policy (v1: stop ingest; Max-tier direct-fallback deferred) | v1 launch |
+| F5 | [#754](https://github.com/kagura-ai/memory-cloud/issues/754) | Worker self-enforcement responsibility (cold-start guardrail is worker-side; documentation-only) | RFC merge |
+| F6 | [#755](https://github.com/kagura-ai/memory-cloud/issues/755) | Chat ingest = Resource Foundation reuse epic (`workspace_connectors` + 1:1 mapping to `resources`) | ai-worker Phase 3 |
 
 ## Acceptance criteria for this RFC
 
@@ -127,7 +127,7 @@ The table's *Must resolve before* column captures the gating relationship; resol
 - [x] Usage reporting endpoint specified (`/api/v1/workspaces/{id}/usage/events`, merging into `sleep_reports` cost rows)
 - [x] Open questions resolved or explicitly deferred with rationale
 - [x] Hybrid design boundary specified (dedicated endpoints for config + usage, Resource Foundation for chat ingest)
-- [ ] Follow-up issues F1–F6 filed in GitHub (gating RFC merge)
+- [x] Follow-up issues F1–F6 filed in GitHub (#750–#755)
 
 ## Out of scope (separate issues)
 
