@@ -111,7 +111,7 @@ On `POST /api/v1/workspaces/{id}/usage/events`, the server:
 1. Resolves the calling worker's `connector_id` and `workspace_id` from the auth context (`X-Resource-API-Key` → `workspace_connectors` row).
 2. Checks `llm_call_log` for an existing row matching `(workspace_id, summary_id, caller='ai-worker')`.
 3. If found and `connector_id` matches → idempotent replay; respond `200 OK` with the original row's id (no double-write).
-4. If found and `connector_id` differs → scope collision; respond `409 Conflict` with body matching the canonical `MemoryCloudException` shape: `{"error": "summary_id_collision", "message": "summary_id already used by a different connector in this workspace", "details": {"connector_id": "<calling-connector-id>", "existing_connector_id": "<owner-connector-id>", "summary_id": "<colliding-id>"}}`. The collision is a worker-side bug (UUID v7 collision is astronomically unlikely; this almost always means two workers misconfigured to share `summary_id` generation state).
+4. If found and `connector_id` differs → scope collision; respond `409 Conflict` with body matching the canonical `MemoryCloudException` shape: `{"error": "summary_id_collision", "message": "summary_id already used by a different connector in this workspace", "details": {"caller_connector_id": "<calling-connector-id>", "existing_connector_id": "<owner-connector-id>", "summary_id": "<colliding-id>"}}`. The collision is a worker-side bug (UUID v7 collision is astronomically unlikely; this almost always means two workers misconfigured to share `summary_id` generation state).
 5. If not found → insert new row, respond `201 Created`.
 
 The dedupe check is enforced by a partial unique index on `llm_call_log(workspace_id, summary_id) WHERE caller = 'ai-worker'`. The `summary_id` column itself is also new to `llm_call_log` (the current schema, per `backend/src/models/llm_call_log.py`, does not have this column). Both the column addition and the partial unique index are part of the prerequisite migration filed alongside the `caller` CHECK-constraint extension (separate follow-up; see Transport boundary section's note on the `'ai-worker'` value addition).
@@ -154,16 +154,16 @@ The 5-minute steady-state poll is a ceiling, not a guarantee — the worker MAY 
 
 ### `valid_until` semantics
 
-`valid_until` is an ISO-8601 UTC timestamp indicating **the latest time at which the worker MAY safely treat its cached config as fresh without re-polling**. After `valid_until`, the worker MUST refresh before issuing further LiteLLM calls (see [Worker refresh cadence](#worker-refresh-cadence)).
+`valid_until` is an ISO-8601 UTC timestamp indicating **the time after which the worker MUST refresh its cached config before issuing further LiteLLM calls**. Before this time, the server guarantees the cached config remains fresh under normal rotation; after this time, the worker MUST poll (see [Worker refresh cadence](#worker-refresh-cadence)) before any further LiteLLM call.
 
 The current `litellm_virtual_key` is NOT guaranteed to remain accepted until `valid_until` — it MAY be revoked earlier under any of the following events, all of which the worker only learns about via the next config poll or via a 401/403 from LiteLLM:
 
-1. **Manual key rotation** (operator action, security incident).
-2. **Mid-week tier downgrade** with immediate revocation policy (see below).
-3. **Workspace deletion or connector unlink** (key revoked at action time).
-4. **Weekly cron rotation at the ISO-week boundary** (the routine case; see [Virtual key rotation and grace window](#virtual-key-rotation-and-grace-window)).
+1. **Weekly cron rotation at the ISO-week boundary** (the routine case; see [Virtual key rotation and grace window](#virtual-key-rotation-and-grace-window)).
+2. **Manual key rotation** (operator action, security incident).
+3. **Mid-week tier downgrade** with immediate revocation policy (see below).
+4. **Workspace deletion or connector unlink** (key revoked at action time).
 
-Typically `valid_until` equals the next ISO-week boundary (next Mon 00:00 UTC). Worker behavior on early invalidation is governed by the grace window described in F2.
+Typically `valid_until` equals the next ISO-week boundary (next Mon 00:00 UTC). Worker behavior on early invalidation is governed by the grace window described in [Virtual key rotation and grace window](#virtual-key-rotation-and-grace-window).
 
 ### Mid-week tier change immediacy
 
@@ -195,7 +195,9 @@ async def get_worker_config(
 ) -> WorkerConfigResponse:
     # IDOR guard: authenticate_worker validates the key but not the path-vs-key
     # alignment. Without this check, a valid key for connector A could request
-    # config for connector B by varying the path placeholder.
+    # config for connector B by varying the path placeholder. Defense-in-depth;
+    # the preferred long-term fix is to validate the path/key alignment inside
+    # the authenticate_worker dependency itself, eliminating the post-auth gap.
     if connector.id != connector_id:
         raise AuthorizationError("connector_id does not match authenticated connector")
 
@@ -300,7 +302,7 @@ When in `paused_proxy_5xx`, the worker polls `GET /api/v1/workers/{connector_id}
 ### Customer-visible signals
 
 - **Admin UI**: the workspace connector row surfaces `status` with the human-readable label "Paused — LLM provider degraded" and a tooltip describing the auto-recovery behavior.
-- **Worker NDJSON stream**: emits `{"v": 1, "ts": "<ISO-8601>", "stage": "proxy_health", "kind": "warning", "msg": "paused: proxy 5xx", "detail": {...}}` on entry to `paused_proxy_5xx`, and `{"v": 1, "ts": "<ISO-8601>", "stage": "proxy_health", "kind": "success", "msg": "resumed", "detail": {...}}` on recovery. The minimal NDJSON event schema used here: `v` (schema version, required; consumers MUST reject unknown versions), `ts` (ISO-8601 UTC timestamp, required), `stage` (non-exclusive identifier of the operational stage emitting the event, required), `kind` (closed enum `action` / `detail` / `success` / `warning` / `error` / `debug`, required; `success` and `error` are terminal-event kinds), `msg` (human-readable, optional), `detail` (structured payload, optional). Each pause/resume cycle is a separate stage instance (e.g., `proxy_health_1`, `proxy_health_2`); the schema's "one terminal event per stage" rule is preserved by per-cycle stage IDs, not by suppressing repeat pauses.
+- **Worker NDJSON stream**: emits `{"v": 1, "ts": "<ISO-8601>", "stage": "proxy_health", "kind": "warning", "msg": "paused: proxy 5xx", "detail": {...}}` on entry to `paused_proxy_5xx`, and `{"v": 1, "ts": "<ISO-8601>", "stage": "proxy_health", "kind": "success", "msg": "resumed", "detail": {...}}` on recovery. The minimal NDJSON event schema used here: `v` (schema version, required; consumers SHOULD reject unknown versions, or degrade gracefully by logging and skipping), `ts` (ISO-8601 UTC timestamp, required), `stage` (non-exclusive identifier of the operational stage emitting the event, required), `kind` (closed enum `action` / `detail` / `success` / `warning` / `error` / `debug`, required; `success` and `error` are terminal-event kinds — at most one terminal event per stage instance, after which the consumer treats the stage as closed), `msg` (human-readable, optional), `detail` (structured payload, optional). Each pause/resume cycle is a separate stage instance (e.g., `proxy_health_1`, `proxy_health_2`); the schema's "one terminal event per stage" rule is preserved by per-cycle stage IDs, not by suppressing repeat pauses.
 - **No customer email** in v1 (would be noisy during multi-tenant incidents); deferred to a customer-comms follow-up.
 
 ### Per-tier override (deferred)
