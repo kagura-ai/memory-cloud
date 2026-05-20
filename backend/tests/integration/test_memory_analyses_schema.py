@@ -366,7 +366,7 @@ async def test_workspace_addon_check_still_rejects_unknown(
                 reason=(
                     "Baseline-skip for #721 (backend-integration CI activation). "
                     "Only the [free-2-2] variant fails on main; siblings pass. "
-                    "Tracked in #766 — remove this skip-mark once that PR lands."
+                    "Tracked in #766."
                 )
             ),
             id="free-2-2",

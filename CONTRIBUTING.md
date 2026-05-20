@@ -109,15 +109,15 @@ CI runs via `.github/workflows/ci.yml` on pull requests against `main`, on tag p
 
 ### Jobs
 
-| Job | When it runs | Services | Command |
-|---|---|---|---|
-| `lint` | All triggers | none | `ruff check`, `ruff format --check`, `make lint-models-no-column` |
-| `backend-unit` | All triggers | redis | `pytest --ignore=tests/e2e --ignore=tests/integration --ignore=tests/smoke/test_all_routes.py -v --maxfail=5` |
-| `frontend` | All triggers | none | `tsc --noEmit`, `npm run build` |
-| `detect-changes` | PRs only | none | `dorny/paths-filter@v3` outputs `backend-integration: true\|false` |
-| `backend-integration` | `detect-changes` match **or** `force-integration` label **or** `workflow_dispatch` **or** tag push | postgres + redis | `pytest tests/integration/ tests/smoke/test_all_routes.py -v --timeout=120 --maxfail=5` |
+| Job | When it runs | Services |
+|---|---|---|
+| `lint` | All triggers | none |
+| `backend-unit` | All triggers | redis |
+| `frontend` | All triggers | none |
+| `detect-changes` | PRs only | none |
+| `backend-integration` | `detect-changes` match **or** `force-integration` label **or** `workflow_dispatch` **or** tag push | postgres + redis |
 
-`backend-integration` declares `needs: [detect-changes, backend-unit]`, so unit-failing PRs never pay the integration-suite cost.
+`backend-integration` declares `needs: [detect-changes, backend-unit]`, so unit-failing PRs never pay the integration-suite cost. See `.github/workflows/ci.yml` for exact commands.
 
 ### Triggering integration tests on a PR
 

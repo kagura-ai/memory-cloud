@@ -190,8 +190,7 @@ async def test_lookup_miss_returns_none(db_session):
 @pytest.mark.skip(
     reason=(
         "Baseline-skip for #721 (backend-integration CI activation). "
-        "Fails on main; root cause TBD. "
-        "Tracked in #765 — remove this skip-mark once that PR lands."
+        "Fails on main; root cause TBD. Tracked in #765."
     )
 )
 @pytest.mark.asyncio
@@ -283,8 +282,7 @@ async def test_compute_cost_usd_per_million_tokens(db_session):
 @pytest.mark.skip(
     reason=(
         "Baseline-skip for #721 (backend-integration CI activation). "
-        "Fails on main; root cause TBD. "
-        "Tracked in #765 — remove this skip-mark once that PR lands."
+        "Fails on main; root cause TBD. Tracked in #765."
     )
 )
 @pytest.mark.asyncio

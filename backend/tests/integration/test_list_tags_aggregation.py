@@ -111,7 +111,7 @@ def _memory(
         "Baseline-skip for #721 (backend-integration CI activation). "
         "All 12 tests in this class fail on main with "
         "fk_contexts_workspace_id violation inside _seed_workspace_context. "
-        "Fix tracked in #764 — remove this skip-mark once that PR lands."
+        "Tracked in #764."
     )
 )
 @pytest.mark.asyncio

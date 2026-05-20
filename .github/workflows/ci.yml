@@ -112,11 +112,9 @@ jobs:
               - 'backend/pyproject.toml'
               - '.github/workflows/ci.yml'
 
-  # Integration tests + the all-routes smoke test — both require a live DB
-  # and Redis. Closes the CI gap originally noted in the backend-unit
-  # comment ("Phase 2 territory — it belongs with the backend-integration
-  # job"). Runs only when detect-changes matches, when the PR carries the
-  # `force-integration` label, on workflow_dispatch, or on tag push.
+  # Integration tests + the all-routes smoke test — both require a live
+  # DB and Redis. Gated by detect-changes path filter, `force-integration`
+  # label, workflow_dispatch, or tag push.
   backend-integration:
     runs-on: ubuntu-latest
     needs: [detect-changes, backend-unit]
@@ -164,4 +162,4 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test
           REDIS_URL: redis://localhost:6379
-        run: cd backend && pytest tests/integration/ tests/smoke/test_all_routes.py -v --timeout=120 --maxfail=5
+        run: cd backend && pytest tests/integration/ tests/smoke/test_all_routes.py -v --timeout=120 --maxfail=3

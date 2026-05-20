@@ -319,7 +319,7 @@ class TestDcrLoopbackPersistsNullOwnerId:
         reason=(
             "Baseline-skip for #721 (backend-integration CI activation). "
             "Fails on main; root cause TBD (last touched by #689 543b0970). "
-            "Tracked in #767 — remove this skip-mark once that PR lands."
+            "Tracked in #767."
         )
     )
     def test_dcr_token_exchange_with_pkce_only_returns_200(self, client, sync_db):
