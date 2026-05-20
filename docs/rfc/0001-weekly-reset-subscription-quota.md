@@ -205,6 +205,48 @@ async def get_worker_config(
 
 Schema and migration for `workspace_connectors` (`current_virtual_key`, `config_version`, `virtual_key_valid_until`) are out of scope for this RFC and filed as a Phase 3 implementation issue.
 
+## Virtual key rotation and grace window
+
+Weekly cron rotates each workspace's virtual key on the ISO-week boundary (Mon 00:00 UTC). To prevent in-flight requests from racing with revocation, the **old key remains valid for a 5-minute grace window** after rotation.
+
+### Grace window duration
+
+**Fixed at 5 minutes in v1.** Per-tier configurability is deferred to v2; the worker's poll cadence (5 min steady-state, see [Config TTL](#config-ttl-and-tier-change-immediacy)) means any tier's worker will pick up the new key within the grace window under normal operation.
+
+### Rotation sequence
+
+At T-0 (cron fires, e.g., Mon 00:00:00 UTC for ISO week 23):
+
+1. Call `POST /key/sk-{old_key_hash}/regenerate` against the LiteLLM proxy with `grace_period: "5m"`. LiteLLM atomically issues a new key `wk_<workspace>_2026W23` with the tier's `max_budget` and keeps the old key valid for 5 minutes. (See [LiteLLM key regeneration docs](https://docs.litellm.ai/docs/proxy/virtual_keys). **Requires LiteLLM Enterprise tier**; if the deployment runs the community edition, the rotation falls back to the wrapper-based dual-key approach described in F2's open question — see below.)
+2. Update `workspace_connectors.current_virtual_key` (to the regenerated key) and bump `config_version` in the same database transaction.
+3. At T+5min, LiteLLM begins rejecting requests on the old key. The exact rejection status code is upstream-defined (most likely 401 per LiteLLM expiry behavior, but the worker treats any 401/403/429 as a refresh signal per [Config TTL](#config-ttl-and-tier-change-immediacy)'s cadence rules, so the precise code does not affect worker correctness).
+
+### Worker-side behavior during grace
+
+- Worker's cached key remains valid for steady-state calls until next poll picks up the new key.
+- On the first poll AFTER T-0 (worst case T+5min minus 30s skew), worker observes `config_version` bumped and switches to the new key.
+- If worker receives 401 on the old key (i.e., its poll missed the rotation), it MUST force-refresh config immediately and retry the call once with the new key. Repeated 401 after refresh = legitimate auth failure, surfaced to operator.
+- Worker MUST NOT pre-fetch the new key before T-0; the new key's spend would charge against the prior week's budget if the server's `valid_until` updates lag the actual rotation.
+
+### Configuration
+
+| Setting | Value | Where |
+|---|---|---|
+| Grace window duration | 5 minutes | Kagura rotation-cron config; passed as `grace_period: "5m"` to LiteLLM's `/key/regenerate` API (or to the wrapper described in the Open question below) |
+| Rotation cron schedule | `0 0 * * 1` (Mon 00:00 UTC) | Server-side scheduler (k8s CronJob or equivalent) |
+| Per-tier override | Not supported in v1 | Deferred to v2 |
+
+### Open question (community-tier LiteLLM fallback)
+
+The atomic `regenerate` + `grace_period` flow described above is a LiteLLM Enterprise feature. If Kagura's production deployment uses the community edition (e.g., during early testing), the rotation must fall back to a Kagura-side dual-key wrapper:
+
+1. At T-0, issue the new key via `POST /key/generate` (community-tier supports this with `duration` for initial expiry).
+2. Record the old key as `previous_virtual_key` on `workspace_connectors` with `previous_valid_until = T+5min`.
+3. All worker requests pass through a Kagura wrapper that accepts either `current_virtual_key` or (`previous_virtual_key` AND `now < previous_valid_until`).
+4. At T+5min, the wrapper rejects `previous_virtual_key`; the old key in LiteLLM is deleted in a background job.
+
+This fallback adds operational complexity (wrapper service in front of LiteLLM). Filed as a separate decision (Enterprise vs community + wrapper) in the deployment ops issue (see [Deferred open questions](#deferred-open-questions)).
+
 ## Transport boundary (hybrid design clarification)
 
 This RFC's transport contract uses **dedicated endpoints**, not the Resource Foundation surface. The boundary matters because both layers exist in this codebase and an unintentional conflation creates real semantic damage.
@@ -234,7 +276,7 @@ The table's *Must resolve before* column captures the gating relationship; resol
 | # | Issue | Item | Must resolve before |
 |---|---|---|---|
 | F1 | [#750](https://github.com/kagura-ai/memory-cloud/issues/750) | Tier resolution TTL spec (`config_version` + `valid_until` semantics; mid-week tier change immediacy) — see [Config TTL and tier-change immediacy](#config-ttl-and-tier-change-immediacy) | Phase 3 config endpoint implementation ✓ |
-| F2 | [#751](https://github.com/kagura-ai/memory-cloud/issues/751) | LiteLLM virtual key rotation grace window (in-flight requests must not race with revoke; 5-min default) | Phase 3 LiteLLM deploy |
+| F2 | [#751](https://github.com/kagura-ai/memory-cloud/issues/751) | LiteLLM virtual key rotation grace window (in-flight requests must not race with revoke; 5-min default) — see [Virtual key rotation and grace window](#virtual-key-rotation-and-grace-window) | Phase 3 LiteLLM deploy ✓ |
 | F3 | [#752](https://github.com/kagura-ai/memory-cloud/issues/752) | `summary_id` workspace-uniqueness contract (idempotency key scope) — see [Usage event idempotency](#usage-event-idempotency) | ai-worker `#24` (billing emit) ✓ |
 | F4 | [#753](https://github.com/kagura-ai/memory-cloud/issues/753) | LiteLLM proxy 5xx degradation policy (v1: stop ingest; Max-tier direct-fallback deferred) | v1 launch |
 | F5 | [#754](https://github.com/kagura-ai/memory-cloud/issues/754) | Worker self-enforcement responsibility (cold-start guardrail is worker-side; documentation-only) — see [Worker self-enforcement](#worker-self-enforcement) | RFC merge ✓ |
@@ -252,6 +294,7 @@ The table's *Must resolve before* column captures the gating relationship; resol
 - [x] Worker self-enforcement contract documented (cold-start guardrail; F5)
 - [x] Usage event idempotency contract specified (`summary_id` workspace-scope; F3)
 - [x] Config TTL and tier-change immediacy specified (`config_version`, `valid_until`, mid-week upgrade/downgrade; F1)
+- [x] Virtual key rotation grace window specified (5-min fixed; rotation sequence; dual-key behavior; F2)
 - [x] Follow-up issues F1–F6 filed in GitHub (#750–#755)
 
 ## Out of scope (separate issues)
