@@ -79,7 +79,7 @@ Tier ladder (free / starter / pro / max or equivalent) — names and pricing liv
 }
 ```
 
-Worker reports usage via `POST /api/v1/workspaces/{id}/usage/events`. See F3 for idempotency-key scope and F5 for the worker self-enforcement contract.
+Worker reports usage via `POST /api/v1/workspaces/{id}/usage/events`. See [Usage event idempotency](#usage-event-idempotency) for the `(connector_id, summary_id)` key scope and [Worker self-enforcement](#worker-self-enforcement) for the cold-start guardrail responsibility split.
 
 **Relationship to existing `get_usage` MCP tool**: the new REST endpoint and the existing `get_usage` MCP tool ([docs/concepts.md](../concepts.md)) serve different consumers and read from different backends. `get_usage` reports workspace quota counts (memories, contexts, members, MCP calls) sourced from the `memories` / `contexts` / `workspace_members` tables. `/api/v1/workspaces/{id}/usage/events` is the worker→server write path for cost events; those rows land in `llm_call_log` (the event-shaped LLM cost ledger from [#474](https://github.com/kagura-ai/memory-cloud/issues/474)) with `caller='ai-worker'`. Dashboard cost surfacing happens via [#472](https://github.com/kagura-ai/memory-cloud/issues/472)'s UNION ALL of `sleep_reports` (run-shaped Sleep cost) and `llm_call_log` (event-shaped non-Sleep cost), so the per-table split is invisible at the aggregation layer.
 
@@ -93,6 +93,39 @@ The cold-start budget guardrail — cold-start backfill MUST consume ≤70% of t
 - **Misattribution risk**: if cold-start exhausts more than 70% (e.g., a bug in the worker's accounting), the worker burns its own steady-state runway and degrades into 429-driven throttle for the remainder of the week. This is documented worker behavior, not a server bug, and not a refund condition.
 
 **Consumer-side ratification**: `kagura-memory-ai-worker` README MUST echo this contract from the consumer side. To be filed as a follow-up against the ai-worker repo (cross-repo edit out of scope for this PR).
+
+## Usage event idempotency
+
+Worker reports usage via `POST /api/v1/workspaces/{id}/usage/events`. The idempotency key is the tuple `(connector_id, summary_id)`.
+
+### `summary_id` scope
+
+`summary_id` MUST be **unique within a workspace, across all `connector_id` values**. Workspace-scoped uniqueness, NOT global.
+
+**Rationale**: workspace-scoped uniqueness on the idempotency key matches the scope of the enforcement boundary (`llm_call_log` rows are per-workspace) and prevents the class of bug where a key unique at a different scope (e.g., global or per-connector) can collide or replay across workspaces. The match between key scope and storage scope is the load-bearing property; widening the key (global) loses workspace isolation, and narrowing it (per-connector) reopens the cross-connector replay path.
+
+### Server-side validation
+
+On `POST /api/v1/workspaces/{id}/usage/events`, the server:
+
+1. Resolves the calling worker's `connector_id` and `workspace_id` from the auth context (`X-Resource-API-Key` → `workspace_connectors` row).
+2. Checks `llm_call_log` for an existing row matching `(workspace_id, summary_id, caller='ai-worker')`.
+3. If found and `connector_id` matches → idempotent replay; respond `200 OK` with the original row's id (no double-write).
+4. If found and `connector_id` differs → scope collision; respond `409 Conflict` with body `{"error": "summary_id_collision", "detail": "summary_id already used by a different connector in this workspace"}`. The collision is a worker-side bug (UUID v7 collision is astronomically unlikely; this almost always means two workers misconfigured to share `summary_id` generation state).
+5. If not found → insert new row, respond `201 Created`.
+
+The dedupe check is enforced by a partial unique index on `llm_call_log(workspace_id, summary_id) WHERE caller = 'ai-worker'`. The `summary_id` column itself is also new to `llm_call_log` (the current schema, per `backend/src/models/llm_call_log.py`, does not have this column). Both the column addition and the partial unique index are part of the prerequisite migration filed alongside the `caller` CHECK-constraint extension (separate follow-up; see Transport boundary section's note on the `'ai-worker'` value addition).
+
+### Worker SDK guidance
+
+The reference SDK (`kagura-memory-python-sdk`) MUST generate `summary_id` as **UUID v7** (time-ordered, 128-bit, monotonic-per-process, globally unique).
+
+Rejected alternatives:
+
+- **Deterministic hash of payload** (e.g., SHA-256 of message body): ties `summary_id` to content, breaking idempotent retries when the worker enriches a payload between attempts (e.g., adding parent-message context). Two retries of the same logical event with differing payload content would compute different hashes, breaking idempotency.
+- **Per-connector counter**: requires stateful counter persistence on the worker (durable to crashes, monotonic across instances). UUID v7 is stateless and gives the same time-ordering benefit without the durability burden.
+
+A reference helper will live in `kagura-memory-python-sdk` as `kagura_memory.usage.new_summary_id() -> str` once the SDK adds the `report_usage` method (tracked outside this RFC).
 
 ## Transport boundary (hybrid design clarification)
 
@@ -124,7 +157,7 @@ The table's *Must resolve before* column captures the gating relationship; resol
 |---|---|---|---|
 | F1 | [#750](https://github.com/kagura-ai/memory-cloud/issues/750) | Tier resolution TTL spec (`config_version` + `valid_until` semantics; mid-week tier change immediacy) | Phase 3 config endpoint implementation |
 | F2 | [#751](https://github.com/kagura-ai/memory-cloud/issues/751) | LiteLLM virtual key rotation grace window (in-flight requests must not race with revoke; 5-min default) | Phase 3 LiteLLM deploy |
-| F3 | [#752](https://github.com/kagura-ai/memory-cloud/issues/752) | `summary_id` workspace-uniqueness contract (idempotency key scope) | ai-worker `#24` (billing emit) |
+| F3 | [#752](https://github.com/kagura-ai/memory-cloud/issues/752) | `summary_id` workspace-uniqueness contract (idempotency key scope) — see [Usage event idempotency](#usage-event-idempotency) | ai-worker `#24` (billing emit) ✓ |
 | F4 | [#753](https://github.com/kagura-ai/memory-cloud/issues/753) | LiteLLM proxy 5xx degradation policy (v1: stop ingest; Max-tier direct-fallback deferred) | v1 launch |
 | F5 | [#754](https://github.com/kagura-ai/memory-cloud/issues/754) | Worker self-enforcement responsibility (cold-start guardrail is worker-side; documentation-only) — see [Worker self-enforcement](#worker-self-enforcement) | RFC merge ✓ |
 | F6 | [#755](https://github.com/kagura-ai/memory-cloud/issues/755) | Chat ingest = Resource Foundation reuse epic (`workspace_connectors` + 1:1 mapping to `resources`) | ai-worker Phase 3 |
@@ -139,6 +172,7 @@ The table's *Must resolve before* column captures the gating relationship; resol
 - [x] Open questions resolved or explicitly deferred with rationale
 - [x] Hybrid design boundary specified (dedicated endpoints for config + usage, Resource Foundation for chat ingest)
 - [x] Worker self-enforcement contract documented (cold-start guardrail; F5)
+- [x] Usage event idempotency contract specified (`summary_id` workspace-scope; F3)
 - [x] Follow-up issues F1–F6 filed in GitHub (#750–#755)
 
 ## Out of scope (separate issues)
