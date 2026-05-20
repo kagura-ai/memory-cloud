@@ -127,6 +127,84 @@ Rejected alternatives:
 
 A reference helper will live in `kagura-memory-python-sdk` as `kagura_memory.usage.new_summary_id() -> str` once the SDK adds the `report_usage` method (tracked outside this RFC).
 
+## Config TTL and tier-change immediacy
+
+This section specifies the semantics of `config_version` / `valid_until` from the worker contract response and the timing rules for mid-week tier changes.
+
+### Worker refresh cadence
+
+The worker MUST refresh `GET /api/v1/workers/{connector_id}/config`:
+
+1. **On startup**, before any LiteLLM call.
+2. **Every 5 minutes** during steady-state operation (lightweight poll; the endpoint reads from a single `workspace_connectors` row).
+3. **Immediately on receipt of `401` / `403` / `429` from the LiteLLM proxy**, treating those as a hint that the cached virtual key may have been rotated or revoked between polls.
+4. **Immediately when the cached `valid_until` is reached**, with a 30-second skew tolerance to absorb clock drift.
+
+The 5-minute steady-state poll is a ceiling, not a guarantee — the worker MAY poll more frequently if it observes its own elevated error rate. The server MUST tolerate a poll-per-second rate per connector without throttling. The 1 Hz per-connector tolerance MUST is sized for Phase 3's expected connector cardinality (≤100 connectors total in v1); rate-limit policy MAY be revised once connector counts exceed that.
+
+### `config_version` semantics
+
+`config_version` is a **monotonic non-decreasing integer**, scoped per `connector_id`. Server bumps it whenever ANY field in the response changes: `tier`, `weekly_budget_usd`, `litellm_virtual_key`, `overage_policy`, or `valid_until`.
+
+- Worker SHOULD compare incoming `config_version` against cached value; if equal, no state change needed.
+- Worker MUST NOT use `config_version` as a security boundary (it is not signed). It is a freshness hint only.
+- Server-side implementation: monotonic counter on `workspace_connectors.config_version`, incremented in the same transaction as any update to the row.
+
+### `valid_until` semantics
+
+`valid_until` is an ISO-8601 UTC timestamp indicating the earliest time the current `litellm_virtual_key` may be revoked. Typically this is the next ISO-week boundary (next Mon 00:00 UTC), but it can be sooner under three conditions:
+
+1. **Manual key rotation** (operator action, security incident).
+2. **Mid-week tier downgrade** with immediate revocation policy (see below).
+3. **Workspace deletion or connector unlink** (key revoked at action time).
+
+Worker MUST treat `valid_until` as an upper bound on cache freshness, not as a "key works until this time" guarantee — the grace window (F2) governs the actual revocation timeline.
+
+### Mid-week tier change immediacy
+
+| Direction | Server behavior | Worker-visible effect |
+|---|---|---|
+| **Downgrade (Pro → Free)** | Revoke old virtual key immediately; issue new key with **`max_budget = tier.weekly_budget_usd − already_consumed_usd`** (carry-over enforced at key-creation time, so the new key inherits the prior week's spend). `config_version` bumps. `valid_until` updates to next week boundary as normal. | On next poll (≤5 min) the worker reads the new lower `weekly_budget_usd` and either: continues with already-consumed spend counted against the lower budget (likely already over → 429s until reset), OR if under the new budget, continues normally. |
+| **Upgrade (Free → Pro)** | Revoke old virtual key immediately; issue new key with **`max_budget = pro_tier.weekly_budget_usd − already_consumed_usd`** (carry-over enforced at key-creation time; the upgrade increases the cap but does not refund consumed spend). `config_version` bumps. | On next poll the worker reads the higher `weekly_budget_usd` and gains immediate runway. |
+
+**Rationale**: customer-initiated tier changes are intentional admin actions; honoring them at the next week boundary creates a confusing "I upgraded but it didn't help" gap. Both directions take effect at the next worker poll (worst case 5 min delay), but server-side revocation is immediate so the old key cannot continue spending against the wrong budget.
+
+### Cache TTL split
+
+- **Server-side**: no read-through cache. The config endpoint reads `workspace_connectors` direct on every request. The row is single-PK lookup, sub-millisecond — caching adds invalidation complexity for negligible latency gain.
+- **Worker-side**: cache the full response with TTL = `min(valid_until - now, 5 minutes)`. Force-refresh on any LiteLLM error per the cadence rules above.
+
+### Reference implementation outline
+
+The server-side endpoint will live at `backend/src/api/routes/workers.py` (new file, follows the pattern of `backend/src/api/routes/resource_ingest.py`). The following outline references names that do not exist yet — `WorkerConfigResponse`, `TierDefinition`, and `authenticate_worker` are aspirational; today's nearest equivalents are the `PlanTier` dataclass + `get_plan_tier(plan_name)` lookup in `backend/src/config/plan_tiers.py` (`weekly_budget_usd` / `overage_policy` are Phase 3 field additions) and the `verify_resource_token` dependency in `resource_ingest.py` (the worker variant will need its own connector-scoped resolver):
+
+```python
+@router.get(
+    "/api/v1/workers/{connector_id}/config",
+    response_model=WorkerConfigResponse,
+)
+async def get_worker_config(
+    connector_id: str,
+    db: AsyncSession = Depends(get_db),
+    connector: WorkspaceConnector = Depends(authenticate_worker),  # X-Resource-API-Key path
+) -> WorkerConfigResponse:
+    # connector is already loaded + auth-validated by the dependency
+    workspace = await db.get(Workspace, connector.workspace_id)
+    tier = TierDefinition.for_plan(workspace.plan)  # lookup against tier table
+
+    return WorkerConfigResponse(
+        litellm_endpoint=settings.LITELLM_ENDPOINT,
+        litellm_virtual_key=connector.current_virtual_key,
+        tier=tier.identifier,
+        weekly_budget_usd=tier.weekly_budget_usd,
+        overage_policy=tier.overage_policy,
+        config_version=connector.config_version,
+        valid_until=connector.virtual_key_valid_until,
+    )
+```
+
+Schema and migration for `workspace_connectors` (`current_virtual_key`, `config_version`, `virtual_key_valid_until`) are out of scope for this RFC and filed as a Phase 3 implementation issue.
+
 ## Transport boundary (hybrid design clarification)
 
 This RFC's transport contract uses **dedicated endpoints**, not the Resource Foundation surface. The boundary matters because both layers exist in this codebase and an unintentional conflation creates real semantic damage.
@@ -155,7 +233,7 @@ The table's *Must resolve before* column captures the gating relationship; resol
 
 | # | Issue | Item | Must resolve before |
 |---|---|---|---|
-| F1 | [#750](https://github.com/kagura-ai/memory-cloud/issues/750) | Tier resolution TTL spec (`config_version` + `valid_until` semantics; mid-week tier change immediacy) | Phase 3 config endpoint implementation |
+| F1 | [#750](https://github.com/kagura-ai/memory-cloud/issues/750) | Tier resolution TTL spec (`config_version` + `valid_until` semantics; mid-week tier change immediacy) — see [Config TTL and tier-change immediacy](#config-ttl-and-tier-change-immediacy) | Phase 3 config endpoint implementation ✓ |
 | F2 | [#751](https://github.com/kagura-ai/memory-cloud/issues/751) | LiteLLM virtual key rotation grace window (in-flight requests must not race with revoke; 5-min default) | Phase 3 LiteLLM deploy |
 | F3 | [#752](https://github.com/kagura-ai/memory-cloud/issues/752) | `summary_id` workspace-uniqueness contract (idempotency key scope) — see [Usage event idempotency](#usage-event-idempotency) | ai-worker `#24` (billing emit) ✓ |
 | F4 | [#753](https://github.com/kagura-ai/memory-cloud/issues/753) | LiteLLM proxy 5xx degradation policy (v1: stop ingest; Max-tier direct-fallback deferred) | v1 launch |
@@ -173,6 +251,7 @@ The table's *Must resolve before* column captures the gating relationship; resol
 - [x] Hybrid design boundary specified (dedicated endpoints for config + usage, Resource Foundation for chat ingest)
 - [x] Worker self-enforcement contract documented (cold-start guardrail; F5)
 - [x] Usage event idempotency contract specified (`summary_id` workspace-scope; F3)
+- [x] Config TTL and tier-change immediacy specified (`config_version`, `valid_until`, mid-week upgrade/downgrade; F1)
 - [x] Follow-up issues F1–F6 filed in GitHub (#750–#755)
 
 ## Out of scope (separate issues)
