@@ -205,6 +205,38 @@ async def get_worker_config(
 
 Schema and migration for `workspace_connectors` (`current_virtual_key`, `config_version`, `virtual_key_valid_until`) are out of scope for this RFC and filed as a Phase 3 implementation issue.
 
+## Virtual key rotation and grace window
+
+Weekly cron rotates each workspace's virtual key on the ISO-week boundary (Mon 00:00 UTC). To prevent in-flight requests from racing with revocation, the **old key remains valid for a 5-minute grace window** after rotation.
+
+### Grace window duration
+
+**Fixed at 5 minutes in v1.** Per-tier configurability is deferred to v2; the worker's poll cadence (5 min steady-state, see [Config TTL](#config-ttl-and-tier-change-immediacy)) means any tier's worker will pick up the new key within the grace window under normal operation.
+
+### Rotation sequence
+
+At T-0 (cron fires, e.g., Mon 00:00:00 UTC for ISO week 23):
+
+1. Issue new virtual key `wk_<workspace>_2026W23` with the tier's `max_budget`.
+2. Update `workspace_connectors.current_virtual_key` and bump `config_version` in the same transaction.
+3. Set the previous key's `expires_at = T+5min` via LiteLLM's key-management API. (LiteLLM verified to support `expires_at` natively — see [proxy/virtual_keys docs](https://docs.litellm.ai/docs/proxy/virtual_keys).)
+4. At T+5min, LiteLLM rejects requests on the old key with HTTP 401 (per LiteLLM's expiry behavior).
+
+### Worker-side behavior during grace
+
+- Worker's cached key remains valid for steady-state calls until next poll picks up the new key.
+- On the first poll AFTER T-0 (worst case T+5min minus 30s skew), worker observes `config_version` bumped and switches to the new key.
+- If worker receives 401 on the old key (i.e., its poll missed the rotation), it MUST force-refresh config immediately and retry the call once with the new key. Repeated 401 after refresh = legitimate auth failure, surfaced to operator.
+- Worker MUST NOT pre-fetch the new key before T-0; the new key's spend would charge against the prior week's budget if the server's `valid_until` updates lag the actual rotation.
+
+### Configuration
+
+| Setting | Value | Where |
+|---|---|---|
+| Grace window duration | 5 minutes | `settings.LITELLM_GRACE_WINDOW_SECONDS = 300`, server-side env |
+| Rotation cron schedule | `0 0 * * 1` (Mon 00:00 UTC) | Server-side scheduler (k8s CronJob or equivalent) |
+| Per-tier override | Not supported in v1 | Deferred to v2 |
+
 ## Transport boundary (hybrid design clarification)
 
 This RFC's transport contract uses **dedicated endpoints**, not the Resource Foundation surface. The boundary matters because both layers exist in this codebase and an unintentional conflation creates real semantic damage.
@@ -234,7 +266,7 @@ The table's *Must resolve before* column captures the gating relationship; resol
 | # | Issue | Item | Must resolve before |
 |---|---|---|---|
 | F1 | [#750](https://github.com/kagura-ai/memory-cloud/issues/750) | Tier resolution TTL spec (`config_version` + `valid_until` semantics; mid-week tier change immediacy) — see [Config TTL and tier-change immediacy](#config-ttl-and-tier-change-immediacy) | Phase 3 config endpoint implementation ✓ |
-| F2 | [#751](https://github.com/kagura-ai/memory-cloud/issues/751) | LiteLLM virtual key rotation grace window (in-flight requests must not race with revoke; 5-min default) | Phase 3 LiteLLM deploy |
+| F2 | [#751](https://github.com/kagura-ai/memory-cloud/issues/751) | LiteLLM virtual key rotation grace window (in-flight requests must not race with revoke; 5-min default) — see [Virtual key rotation and grace window](#virtual-key-rotation-and-grace-window) | Phase 3 LiteLLM deploy ✓ |
 | F3 | [#752](https://github.com/kagura-ai/memory-cloud/issues/752) | `summary_id` workspace-uniqueness contract (idempotency key scope) — see [Usage event idempotency](#usage-event-idempotency) | ai-worker `#24` (billing emit) ✓ |
 | F4 | [#753](https://github.com/kagura-ai/memory-cloud/issues/753) | LiteLLM proxy 5xx degradation policy (v1: stop ingest; Max-tier direct-fallback deferred) | v1 launch |
 | F5 | [#754](https://github.com/kagura-ai/memory-cloud/issues/754) | Worker self-enforcement responsibility (cold-start guardrail is worker-side; documentation-only) — see [Worker self-enforcement](#worker-self-enforcement) | RFC merge ✓ |
@@ -252,6 +284,7 @@ The table's *Must resolve before* column captures the gating relationship; resol
 - [x] Worker self-enforcement contract documented (cold-start guardrail; F5)
 - [x] Usage event idempotency contract specified (`summary_id` workspace-scope; F3)
 - [x] Config TTL and tier-change immediacy specified (`config_version`, `valid_until`, mid-week upgrade/downgrade; F1)
+- [x] Virtual key rotation grace window specified (5-min fixed; rotation sequence; dual-key behavior; F2)
 - [x] Follow-up issues F1–F6 filed in GitHub (#750–#755)
 
 ## Out of scope (separate issues)
