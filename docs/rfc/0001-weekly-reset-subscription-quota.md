@@ -217,10 +217,9 @@ Weekly cron rotates each workspace's virtual key on the ISO-week boundary (Mon 0
 
 At T-0 (cron fires, e.g., Mon 00:00:00 UTC for ISO week 23):
 
-1. Issue new virtual key `wk_<workspace>_2026W23` with the tier's `max_budget`.
-2. Update `workspace_connectors.current_virtual_key` and bump `config_version` in the same transaction.
-3. Set the previous key's `expires_at = T+5min` via LiteLLM's key-management API. (LiteLLM verified to support `expires_at` natively — see [proxy/virtual_keys docs](https://docs.litellm.ai/docs/proxy/virtual_keys).)
-4. At T+5min, LiteLLM rejects requests on the old key with HTTP 401 (per LiteLLM's expiry behavior).
+1. Call `POST /key/sk-{old_key_hash}/regenerate` against the LiteLLM proxy with `grace_period: "5m"`. LiteLLM atomically issues a new key `wk_<workspace>_2026W23` with the tier's `max_budget` and keeps the old key valid for 5 minutes. (See [LiteLLM key regeneration docs](https://docs.litellm.ai/docs/proxy/virtual_keys). **Requires LiteLLM Enterprise tier**; if the deployment runs the community edition, the rotation falls back to the wrapper-based dual-key approach described in F2's open question — see below.)
+2. Update `workspace_connectors.current_virtual_key` (to the regenerated key) and bump `config_version` in the same database transaction.
+3. At T+5min, LiteLLM begins rejecting requests on the old key. The exact rejection status code is upstream-defined (most likely 401 per LiteLLM expiry behavior, but the worker treats any 401/403/429 as a refresh signal per [Config TTL](#config-ttl-and-tier-change-immediacy)'s cadence rules, so the precise code does not affect worker correctness).
 
 ### Worker-side behavior during grace
 
@@ -233,9 +232,20 @@ At T-0 (cron fires, e.g., Mon 00:00:00 UTC for ISO week 23):
 
 | Setting | Value | Where |
 |---|---|---|
-| Grace window duration | 5 minutes | `settings.LITELLM_GRACE_WINDOW_SECONDS = 300`, server-side env |
+| Grace window duration | 5 minutes | Kagura rotation-cron config; passed as `grace_period: "5m"` to LiteLLM's `/key/regenerate` API (or to the wrapper described in the Open question below) |
 | Rotation cron schedule | `0 0 * * 1` (Mon 00:00 UTC) | Server-side scheduler (k8s CronJob or equivalent) |
 | Per-tier override | Not supported in v1 | Deferred to v2 |
+
+### Open question (community-tier LiteLLM fallback)
+
+The atomic `regenerate` + `grace_period` flow described above is a LiteLLM Enterprise feature. If Kagura's production deployment uses the community edition (e.g., during early testing), the rotation must fall back to a Kagura-side dual-key wrapper:
+
+1. At T-0, issue the new key via `POST /key/generate` (community-tier supports this with `duration` for initial expiry).
+2. Record the old key as `previous_virtual_key` on `workspace_connectors` with `previous_valid_until = T+5min`.
+3. All worker requests pass through a Kagura wrapper that accepts either `current_virtual_key` or (`previous_virtual_key` AND `now < previous_valid_until`).
+4. At T+5min, the wrapper rejects `previous_virtual_key`; the old key in LiteLLM is deleted in a background job.
+
+This fallback adds operational complexity (wrapper service in front of LiteLLM). Filed as a separate decision (Enterprise vs community + wrapper) in the deployment ops issue (see [Deferred open questions](#deferred-open-questions)).
 
 ## Transport boundary (hybrid design clarification)
 
