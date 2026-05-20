@@ -214,7 +214,22 @@ def client():
     # this test pins) instead of having TestClient re-raise the underlying
     # exception. Matches the convention used by other integration tests
     # in this repo.
-    with TestClient(app, raise_server_exceptions=False) as c:
+    #
+    # ``base_url="http://localhost:8080"`` makes the request URL pass
+    # authlib's ``is_secure_transport`` guard
+    # (``authlib.common.security.is_secure_transport``) — authlib rejects
+    # plain ``http://`` URIs at ``OAuth2Request.__init__`` with
+    # ``InsecureTransportError`` unless the URI starts with ``https://``,
+    # ``http://localhost:``, or ``http://127.0.0.1:`` (note the trailing
+    # colon: an explicit port is required). TestClient's default
+    # ``http://testserver`` URL fails that check and the ``/oauth/token``
+    # exchange in ``test_dcr_token_exchange_with_pkce_only_returns_200``
+    # would otherwise return ``500 server_error`` before ever reaching the
+    # grant handler. In production this is handled by the
+    # ``X-Forwarded-Proto: https`` rewrite in ``StarletteOAuth2Request``
+    # (Caddy → API container), so this localhost base_url is a test-only
+    # transport concern, not an auth-stack regression. (#767)
+    with TestClient(app, base_url="http://localhost:8080", raise_server_exceptions=False) as c:
         yield c
 
 
@@ -315,13 +330,6 @@ class TestDcrLoopbackPersistsNullOwnerId:
         assert row.client_secret_hash == ""
         assert row.plaintext_secret_encrypted is None
 
-    @pytest.mark.skip(
-        reason=(
-            "Baseline-skip for #721 (backend-integration CI activation). "
-            "Fails on main; root cause TBD (last touched by #689 543b0970). "
-            "Tracked in #767."
-        )
-    )
     def test_dcr_token_exchange_with_pkce_only_returns_200(self, client, sync_db):
         """Issue #689 regression: DCR + token exchange end-to-end with no client_secret.
 
