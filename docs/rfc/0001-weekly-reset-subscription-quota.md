@@ -111,10 +111,12 @@ On `POST /api/v1/workspaces/{id}/usage/events`, the server:
 1. Resolves the calling worker's `connector_id` and `workspace_id` from the auth context (`X-Resource-API-Key` → `workspace_connectors` row).
 2. Checks `llm_call_log` for an existing row matching `(workspace_id, summary_id, caller='ai-worker')`.
 3. If found and `connector_id` matches → idempotent replay; respond `200 OK` with the original row's id (no double-write).
-4. If found and `connector_id` differs → scope collision; respond `409 Conflict` with body `{"error": "summary_id_collision", "detail": "summary_id already used by a different connector in this workspace"}`. The collision is a worker-side bug (UUID v7 collision is astronomically unlikely; this almost always means two workers misconfigured to share `summary_id` generation state).
+4. If found and `connector_id` differs → scope collision; respond `409 Conflict` with body matching the canonical `MemoryCloudException` shape: `{"error": "summary_id_collision", "message": "summary_id already used by a different connector in this workspace", "details": {"connector_id": "<calling-connector-id>", "existing_connector_id": "<owner-connector-id>", "summary_id": "<colliding-id>"}}`. The collision is a worker-side bug (UUID v7 collision is astronomically unlikely; this almost always means two workers misconfigured to share `summary_id` generation state).
 5. If not found → insert new row, respond `201 Created`.
 
 The dedupe check is enforced by a partial unique index on `llm_call_log(workspace_id, summary_id) WHERE caller = 'ai-worker'`. The `summary_id` column itself is also new to `llm_call_log` (the current schema, per `backend/src/models/llm_call_log.py`, does not have this column). Both the column addition and the partial unique index are part of the prerequisite migration filed alongside the `caller` CHECK-constraint extension (separate follow-up; see Transport boundary section's note on the `'ai-worker'` value addition).
+
+**Concurrency**: the 5-step sequence above is descriptive of the worker-visible semantics, NOT the prescribed implementation. The check-then-insert pattern (SELECT in step 2, then INSERT in step 5) races under concurrent requests with the same `(workspace_id, summary_id)`; implementations MUST rely on the partial unique index for atomicity instead. The canonical pattern is `INSERT ... ON CONFLICT (workspace_id, summary_id) WHERE caller = 'ai-worker' DO NOTHING RETURNING id` followed by a SELECT on RETURNING-null to retrieve the existing row and branch on `connector_id` per steps 3–4. The equivalent try/except `IntegrityError` pattern is also acceptable. Either way: the unique index is the load-bearing primitive, the explicit SELECT is the contract narrative.
 
 ### Worker SDK guidance
 
@@ -152,13 +154,16 @@ The 5-minute steady-state poll is a ceiling, not a guarantee — the worker MAY 
 
 ### `valid_until` semantics
 
-`valid_until` is an ISO-8601 UTC timestamp indicating the earliest time the current `litellm_virtual_key` may be revoked. Typically this is the next ISO-week boundary (next Mon 00:00 UTC), but it can be sooner under three conditions:
+`valid_until` is an ISO-8601 UTC timestamp indicating **the latest time at which the worker MAY safely treat its cached config as fresh without re-polling**. After `valid_until`, the worker MUST refresh before issuing further LiteLLM calls (see [Worker refresh cadence](#worker-refresh-cadence)).
+
+The current `litellm_virtual_key` is NOT guaranteed to remain accepted until `valid_until` — it MAY be revoked earlier under any of the following events, all of which the worker only learns about via the next config poll or via a 401/403 from LiteLLM:
 
 1. **Manual key rotation** (operator action, security incident).
 2. **Mid-week tier downgrade** with immediate revocation policy (see below).
 3. **Workspace deletion or connector unlink** (key revoked at action time).
+4. **Weekly cron rotation at the ISO-week boundary** (the routine case; see [Virtual key rotation and grace window](#virtual-key-rotation-and-grace-window)).
 
-Worker MUST treat `valid_until` as an upper bound on cache freshness, not as a "key works until this time" guarantee — the grace window (F2) governs the actual revocation timeline.
+Typically `valid_until` equals the next ISO-week boundary (next Mon 00:00 UTC). Worker behavior on early invalidation is governed by the grace window described in F2.
 
 ### Mid-week tier change immediacy
 
@@ -188,7 +193,12 @@ async def get_worker_config(
     db: AsyncSession = Depends(get_db),
     connector: WorkspaceConnector = Depends(authenticate_worker),  # X-Resource-API-Key path
 ) -> WorkerConfigResponse:
-    # connector is already loaded + auth-validated by the dependency
+    # IDOR guard: authenticate_worker validates the key but not the path-vs-key
+    # alignment. Without this check, a valid key for connector A could request
+    # config for connector B by varying the path placeholder.
+    if connector.id != connector_id:
+        raise AuthorizationError("connector_id does not match authenticated connector")
+
     workspace = await db.get(Workspace, connector.workspace_id)
     tier = TierDefinition.for_plan(workspace.plan)  # lookup against tier table
 
@@ -278,7 +288,7 @@ State transitions:
 | From | To | Trigger |
 |---|---|---|
 | `running` | `paused_proxy_5xx` | ≥3 consecutive 5xx responses in 60s window (counter resets on any 2xx) |
-| `paused_proxy_5xx` | `running` | First 200 OK from `GET /workers/{id}/config` after pause |
+| `paused_proxy_5xx` | `running` | First 200 OK from `GET /api/v1/workers/{connector_id}/config` after pause |
 | `running` | `paused_quota_exhausted` | LiteLLM 429 with response body containing `"type": "budget_exceeded"` (per `litellm.exceptions.BudgetExceededError`); other 429 bodies (provider rate-limit, `tpm`/`rpm`) trigger config force-refresh per F1 cadence, NOT this transition |
 | `paused_quota_exhausted` | `running` | Next ISO-week boundary (`valid_until` reached) |
 | any | `paused_manual` | Operator action via admin UI |
@@ -290,7 +300,7 @@ When in `paused_proxy_5xx`, the worker polls `GET /api/v1/workers/{connector_id}
 ### Customer-visible signals
 
 - **Admin UI**: the workspace connector row surfaces `status` with the human-readable label "Paused — LLM provider degraded" and a tooltip describing the auto-recovery behavior.
-- **Worker NDJSON stream**: emits `{"v": 1, "ts": "...", "stage": "proxy_health", "kind": "warning", "msg": "paused: proxy 5xx", "detail": {...}}` on entry to `paused_proxy_5xx`, and `kind=success msg="resumed"` on recovery (see NDJSON schema in kagura memory `52828624`). Each pause/resume cycle is a separate stage instance (e.g., `proxy_health_1`, `proxy_health_2`); the schema's "one terminal event per stage" rule is preserved by per-cycle stage IDs, not by suppressing repeat pauses.
+- **Worker NDJSON stream**: emits `{"v": 1, "ts": "<ISO-8601>", "stage": "proxy_health", "kind": "warning", "msg": "paused: proxy 5xx", "detail": {...}}` on entry to `paused_proxy_5xx`, and `{"v": 1, "ts": "<ISO-8601>", "stage": "proxy_health", "kind": "success", "msg": "resumed", "detail": {...}}` on recovery. The minimal NDJSON event schema used here: `v` (schema version, required; consumers MUST reject unknown versions), `ts` (ISO-8601 UTC timestamp, required), `stage` (non-exclusive identifier of the operational stage emitting the event, required), `kind` (closed enum `action` / `detail` / `success` / `warning` / `error` / `debug`, required; `success` and `error` are terminal-event kinds), `msg` (human-readable, optional), `detail` (structured payload, optional). Each pause/resume cycle is a separate stage instance (e.g., `proxy_health_1`, `proxy_health_2`); the schema's "one terminal event per stage" rule is preserved by per-cycle stage IDs, not by suppressing repeat pauses.
 - **No customer email** in v1 (would be noisy during multi-tenant incidents); deferred to a customer-comms follow-up.
 
 ### Per-tier override (deferred)
