@@ -140,7 +140,7 @@ The worker MUST refresh `GET /api/v1/workers/{connector_id}/config`:
 3. **Immediately on receipt of `401` / `403` / `429` from the LiteLLM proxy**, treating those as a hint that the cached virtual key may have been rotated or revoked between polls.
 4. **Immediately when the cached `valid_until` is reached**, with a 30-second skew tolerance to absorb clock drift.
 
-The 5-minute steady-state poll is a ceiling, not a guarantee — the worker MAY poll more frequently if it observes its own elevated error rate. The server MUST tolerate a poll-per-second rate per connector without throttling.
+The 5-minute steady-state poll is a ceiling, not a guarantee — the worker MAY poll more frequently if it observes its own elevated error rate. The server MUST tolerate a poll-per-second rate per connector without throttling. The 1 Hz per-connector tolerance MUST is sized for Phase 3's expected connector cardinality (≤100 connectors total in v1); rate-limit policy MAY be revised once connector counts exceed that.
 
 ### `config_version` semantics
 
@@ -164,8 +164,8 @@ Worker MUST treat `valid_until` as an upper bound on cache freshness, not as a "
 
 | Direction | Server behavior | Worker-visible effect |
 |---|---|---|
-| **Downgrade (Pro → Free)** | Revoke old virtual key immediately; issue new key with the Free tier's `max_budget`. `config_version` bumps. `valid_until` updates to next week boundary as normal. | On next poll (≤5 min) the worker reads the new lower `weekly_budget_usd` and either: continues with already-consumed spend counted against the lower budget (likely already over → 429s until reset), OR if under the new budget, continues normally. |
-| **Upgrade (Free → Pro)** | Revoke old virtual key immediately; issue new key with Pro tier's higher `max_budget`. Already-consumed spend carries over (does not reset). `config_version` bumps. | On next poll the worker reads the higher `weekly_budget_usd` and gains immediate runway. |
+| **Downgrade (Pro → Free)** | Revoke old virtual key immediately; issue new key with **`max_budget = tier.weekly_budget_usd − already_consumed_usd`** (carry-over enforced at key-creation time, so the new key inherits the prior week's spend). `config_version` bumps. `valid_until` updates to next week boundary as normal. | On next poll (≤5 min) the worker reads the new lower `weekly_budget_usd` and either: continues with already-consumed spend counted against the lower budget (likely already over → 429s until reset), OR if under the new budget, continues normally. |
+| **Upgrade (Free → Pro)** | Revoke old virtual key immediately; issue new key with **`max_budget = pro_tier.weekly_budget_usd − already_consumed_usd`** (carry-over enforced at key-creation time; the upgrade increases the cap but does not refund consumed spend). `config_version` bumps. | On next poll the worker reads the higher `weekly_budget_usd` and gains immediate runway. |
 
 **Rationale**: customer-initiated tier changes are intentional admin actions; honoring them at the next week boundary creates a confusing "I upgraded but it didn't help" gap. Both directions take effect at the next worker poll (worst case 5 min delay), but server-side revocation is immediate so the old key cannot continue spending against the wrong budget.
 
@@ -176,7 +176,7 @@ Worker MUST treat `valid_until` as an upper bound on cache freshness, not as a "
 
 ### Reference implementation outline
 
-The server-side endpoint will live at `backend/src/api/routes/workers.py` (new file, follows the pattern of `backend/src/api/routes/resource_ingest.py`):
+The server-side endpoint will live at `backend/src/api/routes/workers.py` (new file, follows the pattern of `backend/src/api/routes/resource_ingest.py`). The following outline references names that do not exist yet — `WorkerConfigResponse`, `TierDefinition`, and `authenticate_worker` are aspirational; today's nearest equivalents are the `PlanTier` dataclass + `get_plan_tier(plan_name)` lookup in `backend/src/config/plan_tiers.py` (`weekly_budget_usd` / `overage_policy` are Phase 3 field additions) and the `verify_resource_token` dependency in `resource_ingest.py` (the worker variant will need its own connector-scoped resolver):
 
 ```python
 @router.get(
