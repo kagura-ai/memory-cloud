@@ -219,9 +219,10 @@ def client():
     # authlib's ``is_secure_transport`` guard
     # (``authlib.common.security.is_secure_transport``) — authlib rejects
     # plain ``http://`` URIs at ``OAuth2Request.__init__`` with
-    # ``InsecureTransportError`` unless the URI starts with ``https://``,
-    # ``http://localhost:``, or ``http://127.0.0.1:`` (note the trailing
-    # colon: an explicit port is required). TestClient's default
+    # ``InsecureTransportError`` unless the URI starts with ``https://``
+    # or ``http://localhost:`` (note the trailing colon: an explicit port
+    # is required; ``127.0.0.1`` is NOT in authlib's allowlist — see
+    # ``authlib/common/security.py``). TestClient's default
     # ``http://testserver`` URL fails that check and the ``/oauth/token``
     # exchange in ``test_dcr_token_exchange_with_pkce_only_returns_200``
     # would otherwise return ``500 server_error`` before ever reaching the
