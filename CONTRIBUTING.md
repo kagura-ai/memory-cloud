@@ -114,7 +114,7 @@ CI runs via `.github/workflows/ci.yml` on pull requests against `main`, on tag p
 | `lint` | All triggers | none |
 | `backend-unit` | All triggers | redis |
 | `frontend` | All triggers | none |
-| `detect-changes` | PRs only | none |
+| `detect-changes` | All triggers | none |
 | `backend-integration` | `detect-changes` match **or** `force-integration` label **or** `workflow_dispatch` **or** tag push | postgres + redis |
 
 `backend-integration` declares `needs: [detect-changes, backend-unit]`, so unit-failing PRs never pay the integration-suite cost. See `.github/workflows/ci.yml` for exact commands.

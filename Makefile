@@ -134,7 +134,7 @@ test-e2e:
 .PHONY: test-integration
 test-integration:
 	@echo "Running integration tests..."
-	cd $(BACKEND_DIR) && pytest tests/integration/ tests/smoke/test_all_routes.py -v --timeout=120
+	cd $(BACKEND_DIR) && pytest tests/integration/ tests/smoke/test_all_routes.py -v --timeout=120 --maxfail=3
 	@echo "Integration tests complete."
 
 .PHONY: test-urls

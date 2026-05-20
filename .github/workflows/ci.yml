@@ -93,7 +93,9 @@ jobs:
   # Detect which paths changed so backend-integration only runs when
   # relevant. GHA does not expose `github.event.pull_request.changed_files`
   # — this is the standard monorepo path-gating pattern via
-  # dorny/paths-filter outputs.
+  # dorny/paths-filter outputs. Runs on all triggers (no `if:` guard) so
+  # backend-integration's `needs:` dependency resolves on every event;
+  # backend-integration's own `if:` gate decides whether to run.
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
@@ -118,9 +120,15 @@ jobs:
   backend-integration:
     runs-on: ubuntu-latest
     needs: [detect-changes, backend-unit]
+    # The label-contains check is guarded by event-name so non-PR events
+    # (workflow_dispatch / tag push) don't depend on PR-only context — GHA
+    # treats undefined `pull_request` as null-coercible to an empty list, so
+    # the bare contains() is safe in practice, but the explicit guard makes
+    # the intent unambiguous to future readers.
     if: |
       needs.detect-changes.outputs.backend-integration == 'true' ||
-      contains(github.event.pull_request.labels.*.name, 'force-integration') ||
+      (github.event_name == 'pull_request' &&
+        contains(github.event.pull_request.labels.*.name, 'force-integration')) ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'push'
     services:
