@@ -215,21 +215,12 @@ def client():
     # exception. Matches the convention used by other integration tests
     # in this repo.
     #
-    # ``base_url="http://localhost:8080"`` makes the request URL pass
-    # authlib's ``is_secure_transport`` guard
-    # (``authlib.common.security.is_secure_transport``) — authlib rejects
-    # plain ``http://`` URIs at ``OAuth2Request.__init__`` with
-    # ``InsecureTransportError`` unless the URI starts with ``https://``
-    # or ``http://localhost:`` (note the trailing colon: an explicit port
-    # is required; ``127.0.0.1`` is NOT in authlib's allowlist — see
-    # ``authlib/common/security.py``). TestClient's default
-    # ``http://testserver`` URL fails that check and the ``/oauth/token``
-    # exchange in ``test_dcr_token_exchange_with_pkce_only_returns_200``
-    # would otherwise return ``500 server_error`` before ever reaching the
-    # grant handler. In production this is handled by the
-    # ``X-Forwarded-Proto: https`` rewrite in ``StarletteOAuth2Request``
-    # (Caddy → API container), so this localhost base_url is a test-only
-    # transport concern, not an auth-stack regression. (#767)
+    # ``base_url="http://localhost:8080"`` satisfies authlib's
+    # ``is_secure_transport`` allowlist (``http://localhost:`` with an
+    # explicit port, or ``https://``; ``127.0.0.1`` and TestClient's default
+    # ``http://testserver`` both fail the check and the ``/oauth/token``
+    # exchange returns 500 before reaching the grant handler — see
+    # ``authlib/common/security.py``).
     with TestClient(app, base_url="http://localhost:8080", raise_server_exceptions=False) as c:
         yield c
 
