@@ -15,7 +15,7 @@ Inspired by Claude Code's Pro/Max subscription model (flat monthly + weekly cap)
 
 - **Reset cadence**: fixed weekly window at UTC Mon 00:00 (not rolling 7-day)
 - **Transport**: dedicated endpoints for config + usage; chat ingest reuses Resource Foundation as a **separate epic**
-- **Cost ledger**: usage events merge into [`sleep_reports`](sleep-maintenance.md) cost rows via [#523](https://github.com/kagura-ai/memory-cloud/issues/523) `source` / `paid_by` columns (single SoT)
+- **Cost ledger**: usage events merge into [`sleep_reports`](../sleep-maintenance.md) cost rows via [#523](https://github.com/kagura-ai/memory-cloud/issues/523) `source` / `paid_by` columns (single SoT)
 - **BYOK**: minimum gating = connector seat cap (no Kagura token quota)
 - **Gating items**: F1–F6 follow-up issues must be filed before RFC merge
 
@@ -67,13 +67,13 @@ Tier ladder (free / starter / pro / max or equivalent) — names and pricing liv
 
 `GET /api/v1/workers/{connector_id}/config` returns:
 
-```json
+```jsonc
 {
   "litellm_endpoint": "https://litellm.kagura.ai/v1",
   "litellm_virtual_key": "wk_<workspace>_<isoweek>",
   "tier": "<tier-identifier>",
   "weekly_budget_usd": 25.0,
-  "overage_policy": "soft_throttle" | "hard_cap",
+  "overage_policy": "soft_throttle",  // enum: "soft_throttle" | "hard_cap"
   "config_version": "<monotonic-int>",
   "valid_until": "<UTC ISO-8601, next rotation boundary>"
 }
