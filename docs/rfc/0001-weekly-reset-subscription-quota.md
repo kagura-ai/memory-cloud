@@ -15,7 +15,7 @@ Inspired by Claude Code's Pro/Max subscription model (flat monthly + weekly cap)
 
 - **Reset cadence**: fixed weekly window at UTC Mon 00:00 (not rolling 7-day)
 - **Transport**: dedicated endpoints for config + usage; chat ingest reuses Resource Foundation as a **separate epic**
-- **Cost ledger**: usage events merge into [`sleep_reports`](../sleep-maintenance.md) cost rows via [#523](https://github.com/kagura-ai/memory-cloud/issues/523) `source` / `paid_by` columns (single SoT)
+- **Cost ledger**: usage events are **event-shaped**, written to [`llm_call_log`](https://github.com/kagura-ai/memory-cloud/issues/474) with `caller='ai-worker'`. Run-shaped Sleep cost stays in `sleep_reports`; dashboard surfacing UNIONs both via [#472](https://github.com/kagura-ai/memory-cloud/issues/472) (per-shape SoT, unified aggregation)
 - **BYOK**: minimum gating = connector seat cap (no Kagura token quota)
 - **Gating items**: F1–F6 follow-up issues must be filed before RFC merge
 
@@ -81,7 +81,7 @@ Tier ladder (free / starter / pro / max or equivalent) — names and pricing liv
 
 Worker reports usage via `POST /api/v1/workspaces/{id}/usage/events`. See F3 for idempotency-key scope and F5 for the worker self-enforcement contract.
 
-**Relationship to existing `get_usage` MCP tool**: the new REST endpoint and the existing `get_usage` MCP tool ([docs/concepts.md](../concepts.md)) serve different consumers and read from different backends. `get_usage` reports workspace quota counts (memories, contexts, members, MCP calls) sourced from the `memories` / `contexts` / `workspace_members` tables. `/api/v1/workspaces/{id}/usage/events` is the worker→server write path for cost events; those rows land in `sleep_reports` cost rows via the `source`/`paid_by` ledger pattern. The two surfaces are independent in v1 — no shared backend, no convergence required.
+**Relationship to existing `get_usage` MCP tool**: the new REST endpoint and the existing `get_usage` MCP tool ([docs/concepts.md](../concepts.md)) serve different consumers and read from different backends. `get_usage` reports workspace quota counts (memories, contexts, members, MCP calls) sourced from the `memories` / `contexts` / `workspace_members` tables. `/api/v1/workspaces/{id}/usage/events` is the worker→server write path for cost events; those rows land in `llm_call_log` (the event-shaped LLM cost ledger from [#474](https://github.com/kagura-ai/memory-cloud/issues/474)) with `caller='ai-worker'`. Dashboard cost surfacing happens via [#472](https://github.com/kagura-ai/memory-cloud/issues/472)'s UNION ALL of `sleep_reports` (run-shaped Sleep cost) and `llm_call_log` (event-shaped non-Sleep cost), so the per-table split is invisible at the aggregation layer.
 
 ## Transport boundary (hybrid design clarification)
 
@@ -90,7 +90,7 @@ This RFC's transport contract uses **dedicated endpoints**, not the Resource Fou
 | Concern | Backend | Why not Resource API |
 |---|---|---|
 | Config delivery (`/api/v1/workers/{connector_id}/config`) | Dedicated endpoint reading from `workspace_connectors` row | `resource_schemas.field_definitions` is payload field-type metadata, not runtime config values. Forcing runtime config into schemas would create monotonic version inflation on every tier change, requires session-cookie auth (worker cannot self-bootstrap), and abuses the immutable-per-version contract |
-| Usage reporting (`/api/v1/workspaces/{id}/usage/events`) | Dedicated endpoint writing to **`sleep_reports` cost rows** (proposed `source='ai-worker'`, reusing [#523](https://github.com/kagura-ai/memory-cloud/issues/523) `source` / `paid_by` columns). **Prerequisite migration required**: #523's migration (`d05_523_costgrade_source_paid_by.py`) currently constrains `source IN ('sleep', 'analysis')`. Extending the CHECK constraint to include `'ai-worker'` is part of the F6 implementation epic (or filed as a standalone db migration follow-up at that time). | `resource_events` is indexer-bound business state (Slack messages, Jira tickets), not operational metering. Routing token cost through it either pollutes the indexer pipeline or requires per-event skip logic. A unified cost ledger (single SoT) matches the existing memory-analysis / sleep-maintenance pattern |
+| Usage reporting (`/api/v1/workspaces/{id}/usage/events`) | Dedicated endpoint writing **event-shaped rows** to [`llm_call_log`](https://github.com/kagura-ai/memory-cloud/issues/474) with `caller='ai-worker'` (and `paid_by` mirroring the existing platform/byok axis). Run-shaped Sleep cost continues to live in `sleep_reports`; [#472](https://github.com/kagura-ai/memory-cloud/issues/472) UNIONs both for dashboard aggregation. **Prerequisite migration**: extend `llm_call_log.caller` CHECK constraint (currently `'recall' \| 'rerank' \| 'ask' \| 'admin' \| 'sleep'` per `backend/src/models/llm_call_log.py`) to include `'ai-worker'`, and add the corresponding writer-side assertion in `services/llm_call_log_writer.py`. Scoped under F6 (or filed as a standalone db migration follow-up at implementation time). | `resource_events` is indexer-bound business state (Slack messages, Jira tickets), not operational metering. Routing token cost through it either pollutes the indexer pipeline or requires per-event skip logic. The event-shaped vs run-shaped split (`llm_call_log` vs `sleep_reports`) is already the canonical pattern (#474 docstring), unified at the dashboard layer via #472 |
 | Chat ingest (Slack/Discord/Teams message ingestion) | **Resource Foundation** (`resources` / `resource_events` / `resource_schemas` / `resource_tokens` / `indexer_state`) — to be implemented as a separate epic | Chat messages ARE business state. The 80% overlap with Resource Foundation makes reuse the right call here. This is out of scope for #693 (transport contract) and will be tracked as a separate epic when ai-worker reaches that phase |
 
 ## Resolved open questions
@@ -124,7 +124,7 @@ The table's *Must resolve before* column captures the gating relationship; resol
 - [x] Reset semantics decided (fixed weekly UTC)
 - [x] LiteLLM virtual-key issuance and rotation flow specified (with F2 deferred)
 - [x] Worker contract response schema specified
-- [x] Usage reporting endpoint specified (`/api/v1/workspaces/{id}/usage/events`, merging into `sleep_reports` cost rows)
+- [x] Usage reporting endpoint specified (`/api/v1/workspaces/{id}/usage/events`, writing event-shaped rows to `llm_call_log` with `caller='ai-worker'`)
 - [x] Open questions resolved or explicitly deferred with rationale
 - [x] Hybrid design boundary specified (dedicated endpoints for config + usage, Resource Foundation for chat ingest)
 - [x] Follow-up issues F1–F6 filed in GitHub (#750–#755)
@@ -141,6 +141,7 @@ The table's *Must resolve before* column captures the gating relationship; resol
 ## Related
 
 - `kagura-ai/kagura-memory-ai-worker` (consumer worker; #2 LiteLLM migration deferred pending this RFC, see savepoint memory)
-- [#523](https://github.com/kagura-ai/memory-cloud/issues/523) `sleep_reports.source/paid_by` columns (cost ledger pattern reused)
+- [#474](https://github.com/kagura-ai/memory-cloud/issues/474) `llm_call_log` event-shaped LLM cost ledger (write target for ai-worker usage events)
+- [#472](https://github.com/kagura-ai/memory-cloud/issues/472) Cost dashboard UNION ALL of `sleep_reports` + `llm_call_log` (unified aggregation surface)
 - LiteLLM docs: https://docs.litellm.ai
 - Claude Code subscription model (reference inspiration)
