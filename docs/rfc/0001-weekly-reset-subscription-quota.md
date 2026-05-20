@@ -263,7 +263,7 @@ When the worker observes sustained 5xx from the LiteLLM proxy, it **stops ingest
 
 ### Worker status enum
 
-The worker exposes its operational state via the existing `workspace_connectors.status` column. The enum extends as follows:
+The worker exposes its operational state via the `workspace_connectors.status` column. The enum extends as follows:
 
 ```python
 class WorkerStatus(str, Enum):
@@ -277,20 +277,20 @@ State transitions:
 
 | From | To | Trigger |
 |---|---|---|
-| `running` | `paused_proxy_5xx` | ≥3 consecutive 5xx responses in 60s window |
+| `running` | `paused_proxy_5xx` | ≥3 consecutive 5xx responses in 60s window (counter resets on any 2xx) |
 | `paused_proxy_5xx` | `running` | First 200 OK from `GET /workers/{id}/config` after pause |
-| `running` | `paused_quota_exhausted` | LiteLLM 429 with budget-exhausted body |
+| `running` | `paused_quota_exhausted` | LiteLLM 429 with response body containing `"type": "budget_exceeded"` (per `litellm.exceptions.BudgetExceededError`); other 429 bodies (provider rate-limit, `tpm`/`rpm`) trigger config force-refresh per F1 cadence, NOT this transition |
 | `paused_quota_exhausted` | `running` | Next ISO-week boundary (`valid_until` reached) |
 | any | `paused_manual` | Operator action via admin UI |
 
 ### Recovery cadence
 
-When in `paused_proxy_5xx`, the worker polls `GET /api/v1/workers/{connector_id}/config` every **60 seconds** (instead of the 5-minute steady-state cadence). The config endpoint is independent of LiteLLM, so its availability is the primary recovery signal. First successful response → transition to `running`, retry the in-flight ingest item.
+When in `paused_proxy_5xx`, the worker polls `GET /api/v1/workers/{connector_id}/config` every **60 seconds** (instead of the 5-minute steady-state cadence). The config endpoint is independent of LiteLLM, so its availability is the primary recovery signal. First successful response → transition to `running`, retry the in-flight ingest item. The 200-OK-from-config recovery trigger applies ONLY to `paused_proxy_5xx`. A worker in `paused_quota_exhausted` MUST NOT exit that state on a 200 OK from config — quota recovery is solely `valid_until`-driven (i.e., next ISO-week boundary), regardless of config endpoint health.
 
 ### Customer-visible signals
 
 - **Admin UI**: the workspace connector row surfaces `status` with the human-readable label "Paused — LLM provider degraded" and a tooltip describing the auto-recovery behavior.
-- **Worker NDJSON stream**: emits `{"v": 1, "ts": "...", "stage": "proxy_health", "kind": "warning", "msg": "paused: proxy 5xx", "detail": {...}}` on entry to `paused_proxy_5xx`, and `kind=success msg="resumed"` on recovery (see NDJSON schema in kagura memory `52828624`).
+- **Worker NDJSON stream**: emits `{"v": 1, "ts": "...", "stage": "proxy_health", "kind": "warning", "msg": "paused: proxy 5xx", "detail": {...}}` on entry to `paused_proxy_5xx`, and `kind=success msg="resumed"` on recovery (see NDJSON schema in kagura memory `52828624`). Each pause/resume cycle is a separate stage instance (e.g., `proxy_health_1`, `proxy_health_2`); the schema's "one terminal event per stage" rule is preserved by per-cycle stage IDs, not by suppressing repeat pauses.
 - **No customer email** in v1 (would be noisy during multi-tenant incidents); deferred to a customer-comms follow-up.
 
 ### Per-tier override (deferred)
@@ -299,7 +299,7 @@ Max tier may eventually receive a `degradation_policy: "direct_fallback"` capabi
 
 ### Alerting / dashboard
 
-- **Operator alert**: PagerDuty triggers when the cluster-wide LiteLLM 5xx rate exceeds 5% over a 5-minute window. Threshold tuned during initial deploy; revisited after first incident.
+- **Operator alert**: PagerDuty triggers when the cluster-wide LiteLLM 5xx rate exceeds 5% over a 5-minute window. Threshold tuned during initial deploy; revisited after first incident. Per-tenant alerting is deferred to v2 — the cluster-wide threshold is conservative and will miss low-cardinality single-customer incidents that don't move the global rate.
 - **Customer-facing dashboard**: usage page shows a banner if the workspace has any connector in `paused_proxy_5xx`. Banner auto-clears within ~60s of recovery.
 - **Cost dashboard impact**: paused workers emit no `llm_call_log` rows, so the usage chart shows a visible gap (helpful as a post-incident artifact).
 
