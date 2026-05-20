@@ -103,6 +103,34 @@ cd backend && pytest --cov=src --cov-report=html
 - Mock auth with `app.dependency_overrides[get_current_user]`
 - Target coverage: 90%+
 
+## Continuous Integration
+
+CI runs via `.github/workflows/ci.yml` on pull requests against `main`, on tag pushes (`v*`), and via manual `workflow_dispatch`.
+
+### Jobs
+
+| Job | When it runs | Services | Command |
+|---|---|---|---|
+| `lint` | All triggers | none | `ruff check`, `ruff format --check`, `make lint-models-no-column` |
+| `backend-unit` | All triggers | redis | `pytest --ignore=tests/e2e --ignore=tests/integration --ignore=tests/smoke/test_all_routes.py -v --maxfail=5` |
+| `frontend` | All triggers | none | `tsc --noEmit`, `npm run build` |
+| `detect-changes` | PRs only | none | `dorny/paths-filter@v3` outputs `backend-integration: true\|false` |
+| `backend-integration` | `detect-changes` match **or** `force-integration` label **or** `workflow_dispatch` **or** tag push | postgres + redis | `pytest tests/integration/ tests/smoke/test_all_routes.py -v --timeout=120 --maxfail=5` |
+
+`backend-integration` declares `needs: [detect-changes, backend-unit]`, so unit-failing PRs never pay the integration-suite cost.
+
+### Triggering integration tests on a PR
+
+Integration tests run automatically when the PR changes paths matching the `detect-changes` filter (`backend/src/**`, `backend/alembic/versions/**`, `backend/tests/integration/**`, `backend/tests/smoke/test_all_routes.py`, `backend/pyproject.toml`, or `.github/workflows/ci.yml`).
+
+To force-run integration tests on a PR that doesn't touch those paths, add the `force-integration` label.
+
+For local pre-PR verification, `make test-integration` runs the same suite against your Docker services and is the canonical pre-PR check for ORM/migration changes.
+
+### Manual run
+
+Use the GitHub **Actions** tab → **CI** → **Run workflow** (the `workflow_dispatch` trigger). `backend-integration` runs unconditionally in this mode.
+
 ## Branch Strategy
 
 ```
