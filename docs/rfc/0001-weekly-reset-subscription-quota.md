@@ -247,6 +247,62 @@ The atomic `regenerate` + `grace_period` flow described above is a LiteLLM Enter
 
 This fallback adds operational complexity (wrapper service in front of LiteLLM). Filed as a separate decision (Enterprise vs community + wrapper) in the deployment ops issue (see [Deferred open questions](#deferred-open-questions)).
 
+## Proxy degradation policy
+
+Specifies worker behavior when the LiteLLM proxy returns HTTP 5xx (proxy or upstream provider failure), distinct from HTTP 429 (quota exhausted), which has its own per-tier overage policy.
+
+### v1 decision: stop ingest
+
+When the worker observes sustained 5xx from the LiteLLM proxy, it **stops ingest** and emits a paused signal. This favors quota correctness over availability: bypassing LiteLLM with a direct provider call would skip spend tracking and corrupt the weekly budget enforcement.
+
+**Direct-fallback (worker → provider direct) is explicitly rejected for v1.** It would:
+
+- Bypass `max_budget` enforcement → unbounded customer spend during incidents.
+- Skip the `llm_call_log` event-shaped ledger → cost dashboards under-report.
+- Require post-incident reconciliation logic that doesn't exist yet.
+
+### Worker status enum
+
+The worker exposes its operational state via the `workspace_connectors.status` column. The enum extends as follows:
+
+```python
+class WorkerStatus(str, Enum):
+    RUNNING = "running"
+    PAUSED_PROXY_5XX = "paused_proxy_5xx"
+    PAUSED_QUOTA_EXHAUSTED = "paused_quota_exhausted"
+    PAUSED_MANUAL = "paused_manual"
+```
+
+State transitions:
+
+| From | To | Trigger |
+|---|---|---|
+| `running` | `paused_proxy_5xx` | ≥3 consecutive 5xx responses in 60s window (counter resets on any 2xx) |
+| `paused_proxy_5xx` | `running` | First 200 OK from `GET /workers/{id}/config` after pause |
+| `running` | `paused_quota_exhausted` | LiteLLM 429 with response body containing `"type": "budget_exceeded"` (per `litellm.exceptions.BudgetExceededError`); other 429 bodies (provider rate-limit, `tpm`/`rpm`) trigger config force-refresh per F1 cadence, NOT this transition |
+| `paused_quota_exhausted` | `running` | Next ISO-week boundary (`valid_until` reached) |
+| any | `paused_manual` | Operator action via admin UI |
+
+### Recovery cadence
+
+When in `paused_proxy_5xx`, the worker polls `GET /api/v1/workers/{connector_id}/config` every **60 seconds** (instead of the 5-minute steady-state cadence). The config endpoint is independent of LiteLLM, so its availability is the primary recovery signal. First successful response → transition to `running`, retry the in-flight ingest item. The 200-OK-from-config recovery trigger applies ONLY to `paused_proxy_5xx`. A worker in `paused_quota_exhausted` MUST NOT exit that state on a 200 OK from config — quota recovery is solely `valid_until`-driven (i.e., next ISO-week boundary), regardless of config endpoint health.
+
+### Customer-visible signals
+
+- **Admin UI**: the workspace connector row surfaces `status` with the human-readable label "Paused — LLM provider degraded" and a tooltip describing the auto-recovery behavior.
+- **Worker NDJSON stream**: emits `{"v": 1, "ts": "...", "stage": "proxy_health", "kind": "warning", "msg": "paused: proxy 5xx", "detail": {...}}` on entry to `paused_proxy_5xx`, and `kind=success msg="resumed"` on recovery (see NDJSON schema in kagura memory `52828624`). Each pause/resume cycle is a separate stage instance (e.g., `proxy_health_1`, `proxy_health_2`); the schema's "one terminal event per stage" rule is preserved by per-cycle stage IDs, not by suppressing repeat pauses.
+- **No customer email** in v1 (would be noisy during multi-tenant incidents); deferred to a customer-comms follow-up.
+
+### Per-tier override (deferred)
+
+Max tier may eventually receive a `degradation_policy: "direct_fallback"` capability for higher availability at the cost of post-incident reconciliation. Out of scope for v1; tracked as a separate enhancement issue once Max tier is commercially defined.
+
+### Alerting / dashboard
+
+- **Operator alert**: PagerDuty triggers when the cluster-wide LiteLLM 5xx rate exceeds 5% over a 5-minute window. Threshold tuned during initial deploy; revisited after first incident. Per-tenant alerting is deferred to v2 — the cluster-wide threshold is conservative and will miss low-cardinality single-customer incidents that don't move the global rate.
+- **Customer-facing dashboard**: usage page shows a banner if the workspace has any connector in `paused_proxy_5xx`. Banner auto-clears within ~60s of recovery.
+- **Cost dashboard impact**: paused workers emit no `llm_call_log` rows, so the usage chart shows a visible gap (helpful as a post-incident artifact).
+
 ## Transport boundary (hybrid design clarification)
 
 This RFC's transport contract uses **dedicated endpoints**, not the Resource Foundation surface. The boundary matters because both layers exist in this codebase and an unintentional conflation creates real semantic damage.
@@ -278,7 +334,7 @@ The table's *Must resolve before* column captures the gating relationship; resol
 | F1 | [#750](https://github.com/kagura-ai/memory-cloud/issues/750) | Tier resolution TTL spec (`config_version` + `valid_until` semantics; mid-week tier change immediacy) — see [Config TTL and tier-change immediacy](#config-ttl-and-tier-change-immediacy) | Phase 3 config endpoint implementation ✓ |
 | F2 | [#751](https://github.com/kagura-ai/memory-cloud/issues/751) | LiteLLM virtual key rotation grace window (in-flight requests must not race with revoke; 5-min default) — see [Virtual key rotation and grace window](#virtual-key-rotation-and-grace-window) | Phase 3 LiteLLM deploy ✓ |
 | F3 | [#752](https://github.com/kagura-ai/memory-cloud/issues/752) | `summary_id` workspace-uniqueness contract (idempotency key scope) — see [Usage event idempotency](#usage-event-idempotency) | ai-worker `#24` (billing emit) ✓ |
-| F4 | [#753](https://github.com/kagura-ai/memory-cloud/issues/753) | LiteLLM proxy 5xx degradation policy (v1: stop ingest; Max-tier direct-fallback deferred) | v1 launch |
+| F4 | [#753](https://github.com/kagura-ai/memory-cloud/issues/753) | LiteLLM proxy 5xx degradation policy (v1: stop ingest; Max-tier direct-fallback deferred) — see [Proxy degradation policy](#proxy-degradation-policy) | v1 launch ✓ |
 | F5 | [#754](https://github.com/kagura-ai/memory-cloud/issues/754) | Worker self-enforcement responsibility (cold-start guardrail is worker-side; documentation-only) — see [Worker self-enforcement](#worker-self-enforcement) | RFC merge ✓ |
 | F6 | [#755](https://github.com/kagura-ai/memory-cloud/issues/755) | Chat ingest = Resource Foundation reuse epic (`workspace_connectors` + 1:1 mapping to `resources`) | ai-worker Phase 3 |
 
@@ -295,6 +351,7 @@ The table's *Must resolve before* column captures the gating relationship; resol
 - [x] Usage event idempotency contract specified (`summary_id` workspace-scope; F3)
 - [x] Config TTL and tier-change immediacy specified (`config_version`, `valid_until`, mid-week upgrade/downgrade; F1)
 - [x] Virtual key rotation grace window specified (5-min fixed; rotation sequence; dual-key behavior; F2)
+- [x] Proxy 5xx degradation policy specified (stop ingest, worker status enum, recovery cadence, alerting; F4)
 - [x] Follow-up issues F1–F6 filed in GitHub (#750–#755)
 
 ## Out of scope (separate issues)
