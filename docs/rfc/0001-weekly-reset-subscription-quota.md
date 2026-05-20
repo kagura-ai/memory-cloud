@@ -92,7 +92,7 @@ The cold-start budget guardrail — cold-start backfill MUST consume ≤70% of t
 - The 70/30 split is enforced by the worker, before the LiteLLM call, using local accounting (token count × per-model unit price = USD estimate).
 - **Misattribution risk**: if cold-start exhausts more than 70% (e.g., a bug in the worker's accounting), the worker burns its own steady-state runway and degrades into 429-driven throttle for the remainder of the week. This is documented worker behavior, not a server bug, and not a refund condition.
 
-**Consumer-side ratification**: `kagura-memory-ai-worker` README MUST echo this contract from the consumer side. Filed as a follow-up against the ai-worker repo (cross-repo edit out of scope for this PR).
+**Consumer-side ratification**: `kagura-memory-ai-worker` README MUST echo this contract from the consumer side. To be filed as a follow-up against the ai-worker repo (cross-repo edit out of scope for this PR).
 
 ## Transport boundary (hybrid design clarification)
 
