@@ -102,7 +102,7 @@ Worker reports usage via `POST /api/v1/workspaces/{id}/usage/events`. The idempo
 
 `summary_id` MUST be **unique within a workspace, across all `connector_id` values**. Workspace-scoped uniqueness, NOT global.
 
-**Rationale**: prior Redis-quota bugs (#332, #328) caused scope-mismatch leaks where a globally-unique key paired with workspace-scoped storage allowed cross-workspace replay. Workspace-scoped uniqueness on the idempotency key, matching workspace-scoped storage on `llm_call_log`, eliminates that class of bug.
+**Rationale**: workspace-scoped uniqueness on the idempotency key matches the scope of the enforcement boundary (`llm_call_log` rows are per-workspace) and prevents the class of bug where a key unique at a different scope (e.g., global or per-connector) can collide or replay across workspaces. The match between key scope and storage scope is the load-bearing property; widening the key (global) loses workspace isolation, and narrowing it (per-connector) reopens the cross-connector replay path.
 
 ### Server-side validation
 
@@ -114,7 +114,7 @@ On `POST /api/v1/workspaces/{id}/usage/events`, the server:
 4. If found and `connector_id` differs → scope collision; respond `409 Conflict` with body `{"error": "summary_id_collision", "detail": "summary_id already used by a different connector in this workspace"}`. The collision is a worker-side bug (UUID v7 collision is astronomically unlikely; this almost always means two workers misconfigured to share `summary_id` generation state).
 5. If not found → insert new row, respond `201 Created`.
 
-The dedupe check is enforced by a partial unique index on `llm_call_log(workspace_id, summary_id) WHERE caller = 'ai-worker'`. This index is a prerequisite migration filed alongside the `caller` CHECK-constraint extension (separate follow-up; see Transport boundary section's note on the `'ai-worker'` value addition).
+The dedupe check is enforced by a partial unique index on `llm_call_log(workspace_id, summary_id) WHERE caller = 'ai-worker'`. The `summary_id` column itself is also new to `llm_call_log` (the current schema, per `backend/src/models/llm_call_log.py`, does not have this column). Both the column addition and the partial unique index are part of the prerequisite migration filed alongside the `caller` CHECK-constraint extension (separate follow-up; see Transport boundary section's note on the `'ai-worker'` value addition).
 
 ### Worker SDK guidance
 
@@ -122,7 +122,7 @@ The reference SDK (`kagura-memory-python-sdk`) MUST generate `summary_id` as **U
 
 Rejected alternatives:
 
-- **Deterministic hash of payload** (e.g., SHA-256 of message body): ties `summary_id` to content, breaking idempotent retries when the worker enriches a payload between attempts (e.g., adding parent-message context). Two semantically-identical retries would compute different hashes.
+- **Deterministic hash of payload** (e.g., SHA-256 of message body): ties `summary_id` to content, breaking idempotent retries when the worker enriches a payload between attempts (e.g., adding parent-message context). Two retries of the same logical event with differing payload content would compute different hashes, breaking idempotency.
 - **Per-connector counter**: requires stateful counter persistence on the worker (durable to crashes, monotonic across instances). UUID v7 is stateless and gives the same time-ordering benefit without the durability burden.
 
 A reference helper will live in `kagura-memory-python-sdk` as `kagura_memory.usage.new_summary_id() -> str` once the SDK adds the `report_usage` method (tracked outside this RFC).
