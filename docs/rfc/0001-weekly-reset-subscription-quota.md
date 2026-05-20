@@ -83,6 +83,17 @@ Worker reports usage via `POST /api/v1/workspaces/{id}/usage/events`. See F3 for
 
 **Relationship to existing `get_usage` MCP tool**: the new REST endpoint and the existing `get_usage` MCP tool ([docs/concepts.md](../concepts.md)) serve different consumers and read from different backends. `get_usage` reports workspace quota counts (memories, contexts, members, MCP calls) sourced from the `memories` / `contexts` / `workspace_members` tables. `/api/v1/workspaces/{id}/usage/events` is the worker→server write path for cost events; those rows land in `llm_call_log` (the event-shaped LLM cost ledger from [#474](https://github.com/kagura-ai/memory-cloud/issues/474)) with `caller='ai-worker'`. Dashboard cost surfacing happens via [#472](https://github.com/kagura-ai/memory-cloud/issues/472)'s UNION ALL of `sleep_reports` (run-shaped Sleep cost) and `llm_call_log` (event-shaped non-Sleep cost), so the per-table split is invisible at the aggregation layer.
 
+## Worker self-enforcement
+
+The cold-start budget guardrail — cold-start backfill MUST consume ≤70% of the weekly budget, leaving ≥30% headroom for steady-state ingest — is **worker-side self-enforcement**, not server-enforced.
+
+- The server (LiteLLM proxy + memory-cloud API) cannot distinguish cold-start from steady-state at the LLM-call layer. From the proxy's perspective, every call is identical: a virtual-key-authenticated request against `max_budget`.
+- Server enforcement is limited to the `max_budget` cap on the weekly virtual key. LiteLLM returns HTTP 429 only when the full weekly budget is exhausted, not when the 70% cold-start sub-cap is crossed.
+- The 70/30 split is enforced by the worker, before the LiteLLM call, using local accounting (token count × per-model unit price = USD estimate).
+- **Misattribution risk**: if cold-start exhausts more than 70% (e.g., a bug in the worker's accounting), the worker burns its own steady-state runway and degrades into 429-driven throttle for the remainder of the week. This is documented worker behavior, not a server bug, and not a refund condition.
+
+**Consumer-side ratification**: `kagura-memory-ai-worker` README MUST echo this contract from the consumer side. Filed as a follow-up against the ai-worker repo (cross-repo edit out of scope for this PR).
+
 ## Transport boundary (hybrid design clarification)
 
 This RFC's transport contract uses **dedicated endpoints**, not the Resource Foundation surface. The boundary matters because both layers exist in this codebase and an unintentional conflation creates real semantic damage.
@@ -115,7 +126,7 @@ The table's *Must resolve before* column captures the gating relationship; resol
 | F2 | [#751](https://github.com/kagura-ai/memory-cloud/issues/751) | LiteLLM virtual key rotation grace window (in-flight requests must not race with revoke; 5-min default) | Phase 3 LiteLLM deploy |
 | F3 | [#752](https://github.com/kagura-ai/memory-cloud/issues/752) | `summary_id` workspace-uniqueness contract (idempotency key scope) | ai-worker `#24` (billing emit) |
 | F4 | [#753](https://github.com/kagura-ai/memory-cloud/issues/753) | LiteLLM proxy 5xx degradation policy (v1: stop ingest; Max-tier direct-fallback deferred) | v1 launch |
-| F5 | [#754](https://github.com/kagura-ai/memory-cloud/issues/754) | Worker self-enforcement responsibility (cold-start guardrail is worker-side; documentation-only) | RFC merge |
+| F5 | [#754](https://github.com/kagura-ai/memory-cloud/issues/754) | Worker self-enforcement responsibility (cold-start guardrail is worker-side; documentation-only) — see [Worker self-enforcement](#worker-self-enforcement) | RFC merge ✓ |
 | F6 | [#755](https://github.com/kagura-ai/memory-cloud/issues/755) | Chat ingest = Resource Foundation reuse epic (`workspace_connectors` + 1:1 mapping to `resources`) | ai-worker Phase 3 |
 
 ## Acceptance criteria for this RFC
@@ -127,6 +138,7 @@ The table's *Must resolve before* column captures the gating relationship; resol
 - [x] Usage reporting endpoint specified (`/api/v1/workspaces/{id}/usage/events`, writing event-shaped rows to `llm_call_log` with `caller='ai-worker'`)
 - [x] Open questions resolved or explicitly deferred with rationale
 - [x] Hybrid design boundary specified (dedicated endpoints for config + usage, Resource Foundation for chat ingest)
+- [x] Worker self-enforcement contract documented (cold-start guardrail; F5)
 - [x] Follow-up issues F1–F6 filed in GitHub (#750–#755)
 
 ## Out of scope (separate issues)
