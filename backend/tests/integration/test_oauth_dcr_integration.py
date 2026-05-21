@@ -214,7 +214,14 @@ def client():
     # this test pins) instead of having TestClient re-raise the underlying
     # exception. Matches the convention used by other integration tests
     # in this repo.
-    with TestClient(app, raise_server_exceptions=False) as c:
+    #
+    # ``base_url="http://localhost:8080"`` satisfies authlib's
+    # ``is_secure_transport`` allowlist (``http://localhost:`` with an
+    # explicit port, or ``https://``; ``127.0.0.1`` and TestClient's default
+    # ``http://testserver`` both fail the check and the ``/oauth/token``
+    # exchange returns 500 before reaching the grant handler — see
+    # ``authlib/common/security.py``).
+    with TestClient(app, base_url="http://localhost:8080", raise_server_exceptions=False) as c:
         yield c
 
 
@@ -315,13 +322,6 @@ class TestDcrLoopbackPersistsNullOwnerId:
         assert row.client_secret_hash == ""
         assert row.plaintext_secret_encrypted is None
 
-    @pytest.mark.skip(
-        reason=(
-            "Baseline-skip for #721 (backend-integration CI activation). "
-            "Fails on main; root cause TBD (last touched by #689 543b0970). "
-            "Tracked in #767."
-        )
-    )
     def test_dcr_token_exchange_with_pkce_only_returns_200(self, client, sync_db):
         """Issue #689 regression: DCR + token exchange end-to-end with no client_secret.
 
