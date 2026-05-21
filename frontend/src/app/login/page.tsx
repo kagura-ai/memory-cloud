@@ -26,6 +26,7 @@ import {
   verifyMfa,
   type AuthConfig,
 } from "@/lib/auth/auth";
+import { safeReturnTo } from "@/lib/auth/safeReturnTo";
 import { ArrowRight, AlertCircle, Sparkles, Shield, Zap } from "lucide-react";
 import { KaguraLogo } from "@/components/icons/KaguraLogo";
 import { LanguageSelector } from "@/components/LanguageSelector";
@@ -54,7 +55,10 @@ function LoginContent() {
   // re-renders. A ref flag is set/read atomically within the same tick.
   const submittingMfaRef = useRef(false);
 
-  const returnTo = searchParams.get("return_to") ?? undefined;
+  const returnTo = safeReturnTo(
+    searchParams.get("return_to"),
+    typeof window !== "undefined" ? window.location.origin : "",
+  );
 
   const isMockAuth =
     process.env.NODE_ENV === "development" &&

@@ -39,10 +39,16 @@ vi.mock("next-intl", () => ({
   },
 }));
 
+const mockRouterReplace = vi.fn();
 const mockSearchParams = new URLSearchParams();
 vi.mock("next/navigation", () => ({
-  useRouter: vi.fn(),
+  useRouter: () => ({ replace: mockRouterReplace, push: vi.fn() }),
   useSearchParams: () => mockSearchParams,
+}));
+
+const mockUseAuth = vi.fn();
+vi.mock("@/contexts/AuthContext", () => ({
+  useAuth: () => mockUseAuth(),
 }));
 
 // ---------- Helpers ----------------------------------------------------------
@@ -60,6 +66,21 @@ function typeCode(code: string) {
 beforeEach(() => {
   mockVerifyDeviceCode.mockReset();
   mockConfirmDevice.mockReset();
+  mockRouterReplace.mockReset();
+  // Default: authenticated user. Override per-test with mockUseAuth.mockReturnValue({...}).
+  mockUseAuth.mockReturnValue({
+    user: {
+      id: "u1",
+      email: "test@example.com",
+      name: "Test",
+      picture: "",
+      role: "user" as const,
+    },
+    isLoading: false,
+    isAuthenticated: true,
+    logout: vi.fn(),
+    refetchUser: vi.fn(),
+  });
   // Clear URL params between tests
   for (const key of [...mockSearchParams.keys()]) {
     mockSearchParams.delete(key);
@@ -257,6 +278,61 @@ describe("DevicePage", () => {
 
     await waitFor(() => {
       expect(screen.getByText("device.successTitle")).toBeDefined();
+    });
+  });
+
+  // --- Auth guard tests (#772) ---
+
+  describe("auth guard", () => {
+    it("(a) redirects to login with encoded return_to when unauthenticated and user_code is present", async () => {
+      mockUseAuth.mockReturnValue({ user: null, isLoading: false });
+      mockSearchParams.set("user_code", "ABC12345");
+
+      render(<DevicePage />);
+
+      await waitFor(() => {
+        expect(mockRouterReplace).toHaveBeenCalledWith(
+          "/login?return_to=%2Fdevice%3Fuser_code%3DABC12345",
+        );
+      });
+      expect(mockVerifyDeviceCode).not.toHaveBeenCalled();
+    });
+
+    it("(b) redirects to login with bare /device return_to when unauthenticated and no user_code", async () => {
+      mockUseAuth.mockReturnValue({ user: null, isLoading: false });
+      // No user_code set in mockSearchParams (cleared in beforeEach)
+
+      render(<DevicePage />);
+
+      await waitFor(() => {
+        expect(mockRouterReplace).toHaveBeenCalledWith(
+          "/login?return_to=%2Fdevice",
+        );
+      });
+      expect(mockVerifyDeviceCode).not.toHaveBeenCalled();
+    });
+
+    it("(c) shows spinner and does not redirect or verify while auth is resolving", async () => {
+      mockUseAuth.mockReturnValue({ user: null, isLoading: true });
+
+      const { container } = render(<DevicePage />);
+
+      // SpinnerLoading renders a div with the `animate-spin` CSS class — assert
+      // it is actually present so the test fails if the component returns null
+      // instead of a spinner (negative assertion alone would not catch that).
+      expect(container.querySelector('[class*="animate-spin"]')).not.toBeNull();
+      // The code input form must be absent while auth is resolving.
+      expect(screen.queryByLabelText("device.codeLabel")).toBeNull();
+      expect(mockVerifyDeviceCode).not.toHaveBeenCalled();
+      expect(mockRouterReplace).not.toHaveBeenCalled();
+    });
+
+    it("(d) authed user sees the code input form and verify works normally", async () => {
+      // Default beforeEach already sets authenticated user — confirm behavior preserved.
+      render(<DevicePage />);
+
+      expect(screen.getByLabelText("device.codeLabel")).toBeDefined();
+      expect(mockRouterReplace).not.toHaveBeenCalled();
     });
   });
 

@@ -59,6 +59,10 @@ beforeEach(() => {
   mockLoginWithPassword.mockReset();
   mockVerifyMfa.mockReset();
   mockPush.mockReset();
+  // Clear URL params between tests so return_to from one test doesn't bleed
+  for (const key of [...mockSearchParams.keys()]) {
+    mockSearchParams.delete(key);
+  }
 
   mockGetAuthConfig.mockResolvedValue({
     password_login_enabled: true,
@@ -73,6 +77,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
 });
 
 /** Drive password → MFA-required transition and return the totp Input. */
@@ -91,7 +96,11 @@ async function reachMfaForm(): Promise<HTMLInputElement> {
   fireEvent.change(passwordInput, { target: { value: "hunter2" } });
 
   // Tick the terms checkbox (sign-in button is gated on it).
-  const termsCheckbox = screen.getByRole("checkbox") as HTMLInputElement;
+  // Use name-scoped query to survive future renders that add a second checkbox
+  // (e.g. the OAuth-path terms checkbox in the same component tree).
+  const termsCheckbox = screen.getByRole("checkbox", {
+    name: /agreeToTerms/i,
+  }) as HTMLInputElement;
   fireEvent.click(termsCheckbox);
 
   // Submit password form.
@@ -154,5 +163,82 @@ describe("LoginPage MFA form — Enter key submit (#484)", () => {
     expect(mockVerifyMfa).toHaveBeenCalledTimes(1);
 
     resolveVerify({ redirect_url: null });
+  });
+});
+
+// ---------- return_to integration — safeReturnTo validation (#772) -----------
+
+/**
+ * Drive the password login form to submission and return the call args passed
+ * to mockLoginWithPassword. The caller is responsible for setting up
+ * mockSearchParams and mockLoginWithPassword before calling this helper.
+ */
+async function submitPasswordLogin(): Promise<unknown[]> {
+  render(<LoginPage />);
+
+  const loginIdInput = (await screen.findByLabelText(
+    "loginId",
+  )) as HTMLInputElement;
+  const passwordInput = (await screen.findByLabelText(
+    "password",
+  )) as HTMLInputElement;
+
+  fireEvent.change(loginIdInput, { target: { value: "user@example.com" } });
+  fireEvent.change(passwordInput, { target: { value: "password123" } });
+
+  // Use name-scoped query for resilience against multiple checkboxes.
+  const termsCheckbox = screen.getByRole("checkbox", {
+    name: /agreeToTerms/i,
+  }) as HTMLInputElement;
+  fireEvent.click(termsCheckbox);
+
+  const signInButton = screen.getByRole("button", { name: "signIn" });
+  fireEvent.click(signInButton);
+
+  await waitFor(() => {
+    expect(mockLoginWithPassword).toHaveBeenCalledTimes(1);
+  });
+
+  return mockLoginWithPassword.mock.calls[0];
+}
+
+describe("LoginPage return_to sanitisation via safeReturnTo (#772)", () => {
+  it("strips a cross-origin return_to before passing to loginWithPassword", async () => {
+    // safeReturnTo should reject the cross-origin URL; loginWithPassword receives undefined.
+    mockSearchParams.set("return_to", "https://evil.com/x");
+    mockLoginWithPassword.mockResolvedValue({ mfa_required: false });
+
+    const args = await submitPasswordLogin();
+    // args: [loginId, password, returnTo]
+    expect(args[2]).toBeUndefined();
+  });
+
+  it("passes a safe relative return_to through to loginWithPassword", async () => {
+    mockSearchParams.set("return_to", "/device?user_code=ABC");
+    mockLoginWithPassword.mockResolvedValue({ mfa_required: false });
+
+    const args = await submitPasswordLogin();
+    expect(args[2]).toBe("/device?user_code=ABC");
+  });
+
+  it("forwards a safe return_to through the MFA path to verifyMfa", async () => {
+    mockSearchParams.set("return_to", "/device?user_code=ABC");
+    mockVerifyMfa.mockResolvedValue({ redirect_url: null });
+
+    const totpInput = await reachMfaForm();
+    fireEvent.change(totpInput, { target: { value: "123456" } });
+    fireEvent.keyDown(totpInput, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(mockVerifyMfa).toHaveBeenCalledTimes(1);
+    });
+    expect(mockVerifyMfa).toHaveBeenCalledWith(
+      SESSION_TOKEN,
+      "123456",
+      "/device?user_code=ABC",
+    );
+    expect(mockLoginWithPassword.mock.calls[0][2]).toBe(
+      "/device?user_code=ABC",
+    );
   });
 });
