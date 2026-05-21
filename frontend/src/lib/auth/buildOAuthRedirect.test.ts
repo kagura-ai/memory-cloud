@@ -123,3 +123,36 @@ describe("buildOAuthRedirect — both providers", () => {
     expect(new URL(url).pathname).toBe("/api/v1/auth/github/login");
   });
 });
+
+describe("buildOAuthRedirect — returnTo validation (CWE-601 defense)", () => {
+  it("throws TypeError on a cross-origin http URL", () => {
+    expect(() => buildOAuthRedirect("google", "https://evil.com/x")).toThrow(
+      TypeError,
+    );
+  });
+
+  it("throws TypeError on a protocol-relative URL (resolves cross-origin)", () => {
+    expect(() => buildOAuthRedirect("google", "//evil.com/x")).toThrow(
+      TypeError,
+    );
+  });
+
+  it("throws TypeError on a javascript: scheme", () => {
+    expect(() => buildOAuthRedirect("google", "javascript:alert(1)")).toThrow(
+      TypeError,
+    );
+  });
+
+  it("throws TypeError on a data: scheme", () => {
+    expect(() =>
+      buildOAuthRedirect("google", "data:text/html,<script>alert(1)</script>"),
+    ).toThrow(TypeError);
+  });
+
+  it("accepts an already-validated same-origin absolute URL", () => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
+    expect(() =>
+      buildOAuthRedirect("google", `${FRONTEND_ORIGIN}/invite/abc`),
+    ).not.toThrow();
+  });
+});

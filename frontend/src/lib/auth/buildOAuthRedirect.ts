@@ -21,10 +21,15 @@
  *     end with one or more trailing slashes (e.g. `https://api.example.com/`
  *     or `///`). Collapsing them keeps the concatenated path well-formed.
  *
- * Caller must ensure `returnTo` is same-origin-safe — either by passing a
- * value constructed from same-origin parts (e.g. `window.location.pathname +
- * search`) or by pre-validating an external value via safeReturnTo (#772).
- * This helper trusts the input and does not re-validate.
+ * `returnTo` is validated: after absolute-ization, it must have an http(s)
+ * scheme and the same origin as the current document. Cross-origin URLs and
+ * non-http(s) schemes (`javascript:`, `data:`, …) throw `TypeError`. This
+ * matters because the backend redirects to `return_to` verbatim on some
+ * callback paths (auth.py:607, 1016), so an unvalidated value flowing
+ * through here is a CWE-601 open-redirect surface. The validation is the
+ * same shape as safeReturnTo (#772) but inlined so the helper is safe by
+ * default — callers can pass either a relative same-origin path
+ * (`/invite/abc?x=1`) or an already-validated absolute URL.
  */
 export type OAuthProvider = "google" | "github";
 
@@ -32,11 +37,20 @@ export function buildOAuthRedirect(
   provider: OAuthProvider,
   returnTo: string,
 ): string {
-  const absoluteReturnTo = new URL(returnTo, window.location.origin).toString();
+  const absoluteReturnTo = new URL(returnTo, window.location.origin);
+  if (
+    absoluteReturnTo.origin !== window.location.origin ||
+    (absoluteReturnTo.protocol !== "http:" &&
+      absoluteReturnTo.protocol !== "https:")
+  ) {
+    throw new TypeError(
+      `buildOAuthRedirect: returnTo must resolve to a same-origin http(s) URL (got ${absoluteReturnTo.protocol}//${absoluteReturnTo.host || "(opaque)"})`,
+    );
+  }
   const apiBaseUrl = (
     process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"
   )
     .replace(/\/api\/v1\/*$/, "")
     .replace(/\/+$/, "");
-  return `${apiBaseUrl}/api/v1/auth/${provider}/login?return_to=${encodeURIComponent(absoluteReturnTo)}`;
+  return `${apiBaseUrl}/api/v1/auth/${provider}/login?return_to=${encodeURIComponent(absoluteReturnTo.toString())}`;
 }
