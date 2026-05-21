@@ -46,22 +46,9 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => mockSearchParams,
 }));
 
-// Default: authenticated user. Override per-test with mockUseAuth.set() when needed.
-const mockUseAuth = {
-  user: {
-    id: "u1",
-    email: "test@example.com",
-    name: "Test",
-    picture: "",
-    role: "user" as const,
-  },
-  isLoading: false,
-  isAuthenticated: true,
-  logout: vi.fn(),
-  refetchUser: vi.fn(),
-};
+const mockUseAuth = vi.fn();
 vi.mock("@/contexts/AuthContext", () => ({
-  useAuth: () => mockUseAuth,
+  useAuth: () => mockUseAuth(),
 }));
 
 // ---------- Helpers ----------------------------------------------------------
@@ -80,16 +67,20 @@ beforeEach(() => {
   mockVerifyDeviceCode.mockReset();
   mockConfirmDevice.mockReset();
   mockRouterReplace.mockReset();
-  // Reset auth to authenticated user state for each test
-  mockUseAuth.user = {
-    id: "u1",
-    email: "test@example.com",
-    name: "Test",
-    picture: "",
-    role: "user" as const,
-  };
-  mockUseAuth.isLoading = false;
-  mockUseAuth.isAuthenticated = true;
+  // Default: authenticated user. Override per-test with mockUseAuth.mockReturnValue({...}).
+  mockUseAuth.mockReturnValue({
+    user: {
+      id: "u1",
+      email: "test@example.com",
+      name: "Test",
+      picture: "",
+      role: "user" as const,
+    },
+    isLoading: false,
+    isAuthenticated: true,
+    logout: vi.fn(),
+    refetchUser: vi.fn(),
+  });
   // Clear URL params between tests
   for (const key of [...mockSearchParams.keys()]) {
     mockSearchParams.delete(key);

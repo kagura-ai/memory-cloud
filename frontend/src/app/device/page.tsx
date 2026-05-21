@@ -65,10 +65,11 @@ function DevicePageInner() {
     // Auth guard: do nothing while auth state is resolving.
     if (authLoading) return;
 
+    const codeFromUrl = searchParams.get("user_code");
+
     // Auth guard: redirect unauthenticated users to login, preserving the
     // user_code in return_to so the code is not burned before authentication.
     if (!user) {
-      const codeFromUrl = searchParams.get("user_code");
       const returnPath = codeFromUrl
         ? `/device?user_code=${encodeURIComponent(codeFromUrl)}`
         : "/device";
@@ -77,7 +78,6 @@ function DevicePageInner() {
     }
 
     // Authenticated: auto-verify if a valid user_code is present in the URL.
-    const codeFromUrl = searchParams.get("user_code");
     if (codeFromUrl && codeFromUrl.length === 8) {
       setUserCode(codeFromUrl);
       verifyCode(codeFromUrl);
