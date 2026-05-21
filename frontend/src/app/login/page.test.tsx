@@ -237,7 +237,6 @@ describe("LoginPage return_to sanitisation via safeReturnTo (#772)", () => {
       "123456",
       "/device?user_code=ABC",
     );
-    // Password handler also received the sanitised value
     expect(mockLoginWithPassword.mock.calls[0][2]).toBe(
       "/device?user_code=ABC",
     );
