@@ -56,6 +56,19 @@ describe("buildOAuthRedirect — /api/v1 suffix strip on NEXT_PUBLIC_API_URL", (
     expect(url).not.toContain("/api/v1/api/v1/");
   });
 
+  it("strips a trailing /api/v1 followed by multiple slashes", () => {
+    // Regression guard for the Copilot-caught bug: prior regex `\/api\/v1\/?$`
+    // only allowed 0 or 1 trailing slash, so `/api/v1///` slipped past and the
+    // subsequent trailing-slash collapse left `/api/v1` intact → double-prefix
+    // in the final URL.
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com/api/v1///");
+    const url = buildOAuthRedirect("google", "/x");
+    expect(
+      url.startsWith("https://api.example.com/api/v1/auth/google/login"),
+    ).toBe(true);
+    expect(url).not.toContain("/api/v1/api/v1/");
+  });
+
   it("leaves a non-suffix /api/v1 in the middle of the path alone", () => {
     // Hypothetical edge case: /api/v1 is part of the path, not at the end
     vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com/api/v1/proxy");

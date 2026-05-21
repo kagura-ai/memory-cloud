@@ -13,8 +13,9 @@
  *  2. **`/api/v1` suffix duplication**: some deployments set
  *     `NEXT_PUBLIC_API_URL=https://api.example.com/api/v1` with the version
  *     suffix baked in. Naively appending `/api/v1/auth/...` would produce
- *     `/api/v1/api/v1/auth/...`. Strip a trailing `/api/v1` (with or without
- *     trailing slash) before appending.
+ *     `/api/v1/api/v1/auth/...`. Strip a trailing `/api/v1` followed by any
+ *     number of slashes (so `/api/v1`, `/api/v1/`, and `/api/v1///` all
+ *     normalize to no suffix) before appending.
  *
  *  3. **Trailing-slash collapse**: independently of trap 2, the env var may
  *     end with one or more trailing slashes (e.g. `https://api.example.com/`
@@ -35,7 +36,7 @@ export function buildOAuthRedirect(
   const apiBaseUrl = (
     process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"
   )
-    .replace(/\/api\/v1\/?$/, "")
+    .replace(/\/api\/v1\/*$/, "")
     .replace(/\/+$/, "");
   return `${apiBaseUrl}/api/v1/auth/${provider}/login?return_to=${encodeURIComponent(absoluteReturnTo)}`;
 }
