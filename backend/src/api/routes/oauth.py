@@ -1994,6 +1994,7 @@ async def device_audit_unauth(request: Request, body: DeviceUnauthAuditRequest) 
         user_code_prefix=body.user_code_prefix,
         ip=client_ip,
         user_agent=user_agent,
+        timestamp_utc=to_utc_iso(utcnow()),
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

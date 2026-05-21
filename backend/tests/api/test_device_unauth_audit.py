@@ -82,6 +82,12 @@ class TestDeviceUnauthAuditEndpoint:
         assert call.kwargs.get("user_code_prefix") == "ABCD"
         assert call.kwargs.get("user_agent") == "TestAgent/1.0"
         assert "ip" in call.kwargs
+        # UTC timestamp contract (docstring): structlog's TimeStamper is configured
+        # with utc=False project-wide, so the route emits an explicit ISO-8601 Z-suffixed field.
+        ts = call.kwargs.get("timestamp_utc")
+        assert isinstance(ts, str) and ts.endswith("Z"), (
+            f"expected timestamp_utc to be an ISO-8601 string with Z suffix, got: {ts!r}"
+        )
 
     def test_rate_limit_path_logs_warning_not_info(self):
         with (
