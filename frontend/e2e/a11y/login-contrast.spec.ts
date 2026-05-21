@@ -28,15 +28,25 @@ async function assertNoColorContrastViolations(
 test.describe("/login color-contrast (#780 scaffold)", () => {
   test("light mode has no color-contrast violations", async ({ page }) => {
     await page.emulateMedia({ colorScheme: "light" });
-    await page.goto("/login");
-    await page.waitForLoadState("networkidle");
+    await page.goto("/login", { waitUntil: "domcontentloaded" });
+    // `networkidle` is unreliable against `next dev` because the HMR websocket
+    // keeps the network busy indefinitely. Wait on a stable DOM signal instead.
+    await page.locator("h1, form, main button").first().waitFor({
+      state: "visible",
+      timeout: 15_000,
+    });
     await assertNoColorContrastViolations(page);
   });
 
   test("dark mode has no color-contrast violations", async ({ page }) => {
     await page.emulateMedia({ colorScheme: "dark" });
-    await page.goto("/login");
-    await page.waitForLoadState("networkidle");
+    await page.goto("/login", { waitUntil: "domcontentloaded" });
+    // `networkidle` is unreliable against `next dev` because the HMR websocket
+    // keeps the network busy indefinitely. Wait on a stable DOM signal instead.
+    await page.locator("h1, form, main button").first().waitFor({
+      state: "visible",
+      timeout: 15_000,
+    });
     await assertNoColorContrastViolations(page);
   });
 });
