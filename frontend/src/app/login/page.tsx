@@ -174,7 +174,7 @@ function LoginContent() {
     setLoadingAction("google");
     setError(null);
     try {
-      const authUrl = await getAuthUrl();
+      const authUrl = await getAuthUrl(returnTo);
       window.location.href = authUrl;
     } catch (err) {
       setLoadingAction(null);
@@ -186,7 +186,7 @@ function LoginContent() {
     setLoadingAction("github");
     setError(null);
     try {
-      const authUrl = await getGitHubAuthUrl();
+      const authUrl = await getGitHubAuthUrl(returnTo);
       window.location.href = authUrl;
     } catch (err) {
       setLoadingAction(null);

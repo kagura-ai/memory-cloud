@@ -27,13 +27,18 @@ export interface AuthResponse {
 }
 
 /**
- * Get the Google OAuth2 authorization URL
- * Redirects to Google OAuth2 consent screen
+ * Get the Google OAuth2 authorization URL.
+ *
+ * When `returnTo` is provided, the backend stores it under the OAuth state
+ * (5 min TTL in Redis) and redirects there after the callback. Caller must
+ * pre-validate `returnTo` via safeReturnTo (#772) — the value travels through
+ * the OAuth round-trip and must already be same-origin safe.
  */
-export async function getAuthUrl(): Promise<string> {
+export async function getAuthUrl(returnTo?: string): Promise<string> {
   try {
+    const params = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
     const response = await apiClient.get<{ authorization_url: string }>(
-      "/api/v1/auth/google/login",
+      `/api/v1/auth/google/login${params}`,
     );
     return response.authorization_url;
   } catch (error) {
@@ -43,13 +48,15 @@ export async function getAuthUrl(): Promise<string> {
 }
 
 /**
- * Get the GitHub OAuth2 authorization URL
- * Issue #315: GitHub OAuth2 Authentication
+ * Get the GitHub OAuth2 authorization URL.
+ * Issue #315: GitHub OAuth2 Authentication.
+ * See `getAuthUrl` for `returnTo` semantics.
  */
-export async function getGitHubAuthUrl(): Promise<string> {
+export async function getGitHubAuthUrl(returnTo?: string): Promise<string> {
   try {
+    const params = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
     const response = await apiClient.get<{ authorization_url: string }>(
-      "/api/v1/auth/github/login",
+      `/api/v1/auth/github/login${params}`,
     );
     return response.authorization_url;
   } catch (error) {
