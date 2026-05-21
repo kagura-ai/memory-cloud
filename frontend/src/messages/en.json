@@ -2029,6 +2029,7 @@
       "message": "Please log in to accept this invitation",
       "messageTo": "to",
       "loginButton": "Continue with Google",
+      "continueWithGitHub": "Continue with GitHub",
       "noAccount": "Don't have an account? Logging in will create one automatically."
     },
     "emailMismatch": {

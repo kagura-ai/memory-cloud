@@ -27,9 +27,13 @@ import {
   InvitationInfo,
 } from "@/lib/api/invitations";
 import { apiClient, ApiError } from "@/lib/api/base";
+import {
+  buildOAuthRedirect,
+  type OAuthProvider,
+} from "@/lib/auth/buildOAuthRedirect";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { LanguageSelector } from "@/components/LanguageSelector";
-import { Check, AlertCircle, LogIn, Mail } from "lucide-react";
+import { Check, AlertCircle, Github, LogIn, Mail } from "lucide-react";
 
 type PageState =
   | "loading"
@@ -165,13 +169,9 @@ export default function AcceptInvitationPage({
     }
   };
 
-  const handleLogin = () => {
-    const currentUrl = window.location.href;
-    // Get backend API URL (defaults to localhost:8080 in dev)
-    const apiBaseUrl =
-      process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
-    // Redirect to backend OAuth endpoint with full URL
-    window.location.href = `${apiBaseUrl}/api/v1/auth/google/login?return_to=${encodeURIComponent(currentUrl)}`;
+  const startOAuthLogin = (provider: OAuthProvider) => {
+    const returnTo = window.location.pathname + window.location.search;
+    window.location.href = buildOAuthRedirect(provider, returnTo);
   };
 
   const handleLogout = async () => {
@@ -264,11 +264,19 @@ export default function AcceptInvitationPage({
             </p>
 
             <button
-              onClick={handleLogin}
-              className="w-full px-6 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-lg font-medium mb-4"
+              onClick={() => startOAuthLogin("google")}
+              className="w-full px-6 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-lg font-medium mb-3"
             >
               <LogIn className="w-5 h-5" />
               {t("loginRequired.loginButton")}
+            </button>
+
+            <button
+              onClick={() => startOAuthLogin("github")}
+              className="w-full px-6 py-3 bg-gray-900 text-white rounded-md hover:bg-gray-800 transition-colors flex items-center justify-center gap-2 text-lg font-medium mb-4"
+            >
+              <Github className="w-5 h-5" />
+              {t("loginRequired.continueWithGitHub")}
             </button>
 
             <p className="text-xs text-center text-gray-500 dark:text-gray-400">
