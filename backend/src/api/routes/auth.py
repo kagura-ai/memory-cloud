@@ -601,15 +601,11 @@ async def google_callback(
                 # Delete after use (one-time)
                 _session_manager._redis.delete(f"oauth2_return_to:{state}")
 
-        # Determine redirect destination
-        if return_to_url:
-            # Return to original OAuth authorize flow
-            redirect_url = return_to_url
-        else:
-            # Default: frontend workspace overview
-            # Issue #258: Redirect to /workspace/dashboard after login
-            frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-            redirect_url = f"{frontend_url}/workspace/dashboard"
+        # Determine redirect destination. _safe_redirect_url handles the
+        # None/empty case (defaults to FRONTEND_URL/workspace/dashboard per
+        # Issue #258) AND validates the Redis-sourced value server-side
+        # (Issue #776 — defense-in-depth for CWE-601 open redirect).
+        redirect_url = _safe_redirect_url(return_to_url)
 
         redirect = RedirectResponse(url=redirect_url, status_code=303)
         # Issue #115: Cookie name changed from 'session_id' to 'kagura_session'
@@ -1012,8 +1008,10 @@ async def github_callback(
         if return_to_url:
             _session_manager._redis.delete(f"oauth2_return_to:{state}")
 
-        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-        redirect_url = return_to_url or f"{frontend_url}/workspace/dashboard"
+        # _safe_redirect_url validates the Redis-sourced value server-side
+        # and falls back to FRONTEND_URL/workspace/dashboard for empty /
+        # unsafe inputs (Issue #776 — CWE-601 defense-in-depth).
+        redirect_url = _safe_redirect_url(return_to_url)
 
         redirect = RedirectResponse(url=redirect_url, status_code=303)
         redirect.set_cookie(
@@ -1143,8 +1141,31 @@ def _set_session_cookie(response: Response, session_id: str) -> None:
     )
 
 
+_ALLOWED_REDIRECT_SCHEMES = ("http", "https")
+# Reject any byte that lets an attacker confuse the URL parser vs. the
+# browser (backslash → / normalisation) or smuggle a header (CR/LF/NUL/TAB)
+# or sneak past leading-whitespace checks in client-side handling.
+_FORBIDDEN_REDIRECT_CHARS = ("\\", "\n", "\r", "\t", "\x00")
+
+
 def _safe_redirect_url(return_to: str | None) -> str:
-    """Validate return_to to prevent open redirect attacks."""
+    """Validate ``return_to`` to prevent CWE-601 open-redirect attacks.
+
+    Layered defense (Issue #776):
+
+    1. Allow only ``http``/``https`` schemes (or no scheme at all for
+       relative paths). Rejects ``javascript:``, ``data:``, ``vbscript:``,
+       ``file:``, etc.
+    2. Reject any forbidden character (``\\``, CR, LF, TAB, NUL) and any
+       leading whitespace — these enable backslash-trick navigation and
+       header-injection style smuggling.
+    3. Allow only same-origin absolute URLs (matched against
+       ``FRONTEND_URL``/``API_URL`` host or the dev localhost ports).
+
+    Any input that fails the checks above resolves to the configured
+    frontend dashboard so the user lands somewhere sane instead of being
+    routed to an attacker-controlled origin.
+    """
     from urllib.parse import urlparse
 
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
@@ -1153,10 +1174,27 @@ def _safe_redirect_url(return_to: str | None) -> str:
     if not return_to:
         return default
 
+    # Forbidden chars (backslash, CR/LF/TAB/NUL) and any leading/trailing
+    # whitespace. Strict ``strip()`` symmetry mirrors the frontend
+    # ``safeReturnTo`` rejection model (#773) and matches the function's
+    # "be strict at the boundary" intent.
+    if any(ch in return_to for ch in _FORBIDDEN_REDIRECT_CHARS):
+        return default
+    if return_to != return_to.strip():
+        return default
+
     parsed = urlparse(return_to)
-    # Allow relative paths or same-origin URLs
+
+    # Scheme allow-list. urlparse lowercases ``scheme`` so case-variant
+    # attacks (``JAVASCRIPT:``) land in the same branch.
+    if parsed.scheme and parsed.scheme not in _ALLOWED_REDIRECT_SCHEMES:
+        return default
+
+    # Relative path (no netloc) and scheme-clean → safe.
     if not parsed.netloc:
         return return_to
+
+    # Same-origin absolute URLs only.
     frontend_host = urlparse(frontend_url).netloc
     api_host = urlparse(os.getenv("API_URL", "http://localhost:8080")).netloc
     if parsed.netloc in (frontend_host, api_host, "localhost:8080", "localhost:3000"):
