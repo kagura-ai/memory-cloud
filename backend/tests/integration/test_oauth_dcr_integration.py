@@ -280,7 +280,7 @@ class TestDcrLoopbackPersistsNullOwnerId:
         # Mock the rate-limit counter so this test doesn't share quota with
         # adjacent runs. The DB session and encryptor are real.
         rate_limit = AsyncMock(return_value=1)
-        with patch("db.redis.increment_counter", rate_limit):
+        with patch("api.routes.oauth.increment_counter", rate_limit):
             response = client.post(
                 "/api/v1/oauth/register",
                 json={
@@ -352,7 +352,7 @@ class TestDcrLoopbackPersistsNullOwnerId:
         from utils.datetime import utcnow
 
         rate_limit = AsyncMock(return_value=1)
-        with patch("db.redis.increment_counter", rate_limit):
+        with patch("api.routes.oauth.increment_counter", rate_limit):
             register = client.post(
                 "/api/v1/oauth/register",
                 json={

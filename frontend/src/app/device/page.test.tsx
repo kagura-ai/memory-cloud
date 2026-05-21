@@ -467,4 +467,26 @@ describe("device page audit ping on unauth (#779)", () => {
 
     mockSearchParams.delete("user_code");
   });
+
+  it("normalizes user_code_prefix: uppercases and strips non-alphanumeric characters", async () => {
+    // user_code is uppercase alphanumeric (RFC 8628). A malformed/attacker-supplied
+    // URL like `/device?user_code=ab<cd&ef` must not write garbage to audit logs.
+    mockUseAuth.mockReturnValue({
+      user: null,
+      isLoading: false,
+      isAuthenticated: false,
+    });
+    mockSearchParams.set("user_code", "ab<cd&ef");
+
+    render(<DevicePage />);
+
+    await waitFor(() => {
+      expect(mockApiClientPost).toHaveBeenCalledWith(
+        "/api/v1/oauth/device/audit-unauth",
+        { user_code_prefix: "ABCD" },
+      );
+    });
+
+    mockSearchParams.delete("user_code");
+  });
 });

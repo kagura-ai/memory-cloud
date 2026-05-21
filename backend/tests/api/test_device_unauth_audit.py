@@ -53,6 +53,20 @@ class TestDeviceUnauthAuditEndpoint:
         body = resp.json()
         assert any("too_long" in (err.get("type", "") or "") for err in body.get("detail", []))
 
+    def test_rejects_prefix_with_disallowed_characters(self):
+        # user_code is uppercase alphanumeric (RFC 8628). Anything outside
+        # [A-Z0-9] is either malformed input or a log-injection attempt; reject
+        # at the schema boundary rather than writing it to structlog.
+        client = TestClient(app)
+        for bad_prefix in ("abcd", "AB<C", "a&b", "AB\n", " ABC"):
+            resp = client.post(
+                "/api/v1/oauth/device/audit-unauth",
+                json={"user_code_prefix": bad_prefix},
+            )
+            assert resp.status_code == 422, (
+                f"expected 422 for prefix={bad_prefix!r}, got {resp.status_code}"
+            )
+
     def test_silently_drops_above_rate_limit_but_still_returns_204(self):
         # 31st request from same IP — should NOT 429; should silently drop the log
         # and still return 204 so the client never learns about rate-limit state.

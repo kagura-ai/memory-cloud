@@ -73,10 +73,16 @@ function DevicePageInner() {
       // Fire-and-forget audit ping BEFORE redirecting away — backend has no
       // visibility into unauth hits otherwise. Prefix-only (4 chars) per
       // RFC 8628 §5.2: full user_code is auth material within the TTL.
-      // Issue #779.
+      // user_code is uppercase alphanumeric only; normalize before sending
+      // so malformed/attacker-supplied URLs don't write garbage to audit logs
+      // (the backend Pydantic model also enforces ^[A-Z0-9]*$). Issue #779.
+      const userCodePrefix = (codeFromUrl ?? "")
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "")
+        .slice(0, 4);
       apiClient
         .post("/api/v1/oauth/device/audit-unauth", {
-          user_code_prefix: codeFromUrl?.slice(0, 4) ?? "",
+          user_code_prefix: userCodePrefix,
         })
         .catch(() => {});
 

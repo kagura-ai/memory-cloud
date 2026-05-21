@@ -294,12 +294,14 @@ class DeviceUnauthAuditRequest(BaseModel):
     unauthenticated user to /login. The backend otherwise has no visibility
     into device-code spraying or bot traffic on the /device route.
 
-    Security: user_code_prefix is capped at 4 chars — the full 8-char user_code
-    is OAuth bearer material within the 5-10 min TTL (RFC 8628 §5.2) and must
-    never be logged.
+    Security: user_code_prefix is capped at 4 chars (the full 8-char user_code
+    is OAuth bearer material within the 5-10 min TTL per RFC 8628 §5.2 and must
+    never be logged) AND constrained to [A-Z0-9] only — `user_code` is defined
+    as uppercase alphanumeric, so anything outside that set is either malformed
+    input or a log-injection attempt and is rejected at the schema boundary.
     """
 
-    user_code_prefix: str = Field("", max_length=4)
+    user_code_prefix: str = Field("", max_length=4, pattern=r"^[A-Z0-9]*$")
 
 
 # ============================================================================
