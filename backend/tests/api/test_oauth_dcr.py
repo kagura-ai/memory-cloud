@@ -234,7 +234,7 @@ class TestDcrEndpointRejection:
         self, client, redirect_uri: str, client_name: str, case_label: str
     ):
         rate_limit, _, _ = _patch_dcr_dependencies()
-        with patch("db.redis.increment_counter", rate_limit):
+        with patch("api.routes.oauth.increment_counter", rate_limit):
             response = client.post(
                 "/api/v1/oauth/register",
                 json={
@@ -275,7 +275,7 @@ class TestDcrEndpointRejection:
         rate-limit specifics).
         """
         rate_limit_over = AsyncMock(return_value=6)
-        with patch("db.redis.increment_counter", rate_limit_over):
+        with patch("api.routes.oauth.increment_counter", rate_limit_over):
             response = client.post(
                 "/api/v1/oauth/register",
                 json={
@@ -320,7 +320,7 @@ class TestDcrEndpointAcceptance:
     ):
         rate_limit, fake_session, fake_encryptor = _patch_dcr_dependencies()
         with (
-            patch("db.redis.increment_counter", rate_limit),
+            patch("api.routes.oauth.increment_counter", rate_limit),
             patch("api.routes.oauth.get_sync_session", return_value=fake_session),
             patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
         ):

@@ -92,7 +92,7 @@ class TestDcrFallbackScopeNoDrift:
     def test_dcr_default_scope_matches_canonical(self, client: TestClient) -> None:
         rate_limit, fake_session, fake_encryptor = self._patched_dcr_session()
         with (
-            patch("db.redis.increment_counter", rate_limit),
+            patch("api.routes.oauth.increment_counter", rate_limit),
             patch("api.routes.oauth.get_sync_session", return_value=fake_session),
             patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
         ):
@@ -135,7 +135,7 @@ class TestDcrFallbackScopeNoDrift:
         """
         rate_limit, fake_session, fake_encryptor = self._patched_dcr_session()
         with (
-            patch("db.redis.increment_counter", rate_limit),
+            patch("api.routes.oauth.increment_counter", rate_limit),
             patch("api.routes.oauth.get_sync_session", return_value=fake_session),
             patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
         ):

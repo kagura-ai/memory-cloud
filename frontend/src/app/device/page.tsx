@@ -22,6 +22,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { ApiError } from "@/lib/api";
+import { apiClient } from "@/lib/api/base";
 import {
   verifyDeviceCode,
   confirmDevice,
@@ -69,6 +70,22 @@ function DevicePageInner() {
     // Preserve user_code in return_to so the device code is not burned before
     // the unauthenticated user reaches the consent page.
     if (!user) {
+      // Fire-and-forget audit ping BEFORE redirecting away — backend has no
+      // visibility into unauth hits otherwise. Prefix-only (4 chars) per
+      // RFC 8628 §5.2: full user_code is auth material within the TTL.
+      // user_code is uppercase alphanumeric only; normalize before sending
+      // so malformed/attacker-supplied URLs don't write garbage to audit logs
+      // (the backend Pydantic model also enforces ^[A-Z0-9]*$). Issue #779.
+      const userCodePrefix = (codeFromUrl ?? "")
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "")
+        .slice(0, 4);
+      apiClient
+        .post("/api/v1/oauth/device/audit-unauth", {
+          user_code_prefix: userCodePrefix,
+        })
+        .catch(() => {});
+
       const returnPath = codeFromUrl
         ? `/device?user_code=${encodeURIComponent(codeFromUrl)}`
         : "/device";
