@@ -16,8 +16,10 @@
  *     `/api/v1/api/v1/auth/...`. Strip any trailing `/api/v1` and slashes
  *     before appending.
  *
- * Caller must pre-validate `returnTo` via safeReturnTo (#772) — this helper
- * trusts the value is already same-origin-safe.
+ * Caller must ensure `returnTo` is same-origin-safe — either by passing a
+ * value constructed from same-origin parts (e.g. `window.location.pathname +
+ * search`) or by pre-validating an external value via safeReturnTo (#772).
+ * This helper trusts the input and does not re-validate.
  */
 export type OAuthProvider = "google" | "github";
 

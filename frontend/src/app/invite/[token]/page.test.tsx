@@ -92,6 +92,10 @@ beforeEach(() => {
     email_restricted: false,
   });
   mockApiClientGet.mockRejectedValue(new Error("Not authenticated"));
+  // Note: per-test `vi.stubEnv("NEXT_PUBLIC_API_URL", ...)` is intentionally
+  // called *after* render. Safe today because buildOAuthRedirect reads
+  // process.env at click time, not render time. If the helper ever memoizes
+  // its URL at render, move the stub into beforeEach.
 });
 
 afterEach(() => {
