@@ -220,4 +220,26 @@ describe("LoginPage return_to sanitisation via safeReturnTo (#772)", () => {
     const args = await submitPasswordLogin();
     expect(args[2]).toBe("/device?user_code=ABC");
   });
+
+  it("forwards a safe return_to through the MFA path to verifyMfa", async () => {
+    mockSearchParams.set("return_to", "/device?user_code=ABC");
+    mockVerifyMfa.mockResolvedValue({ redirect_url: null });
+
+    const totpInput = await reachMfaForm();
+    fireEvent.change(totpInput, { target: { value: "123456" } });
+    fireEvent.keyDown(totpInput, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(mockVerifyMfa).toHaveBeenCalledTimes(1);
+    });
+    expect(mockVerifyMfa).toHaveBeenCalledWith(
+      SESSION_TOKEN,
+      "123456",
+      "/device?user_code=ABC",
+    );
+    // Password handler also received the sanitised value
+    expect(mockLoginWithPassword.mock.calls[0][2]).toBe(
+      "/device?user_code=ABC",
+    );
+  });
 });
