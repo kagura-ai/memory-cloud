@@ -27,7 +27,7 @@ from datetime import timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
@@ -38,6 +38,7 @@ from auth.mcp_scopes import DCR_DEFAULT_SCOPE
 from auth.oauth2_server import _OAuthUser, create_authorization_server
 from config.settings import get_settings
 from db.base import get_db, get_sync_session
+from db.redis import increment_counter
 from models.api_base import TZAwareBaseModel
 from models.auth import OAuth2Client, OAuth2DeviceCode, OAuth2Token, User, generate_user_code
 from models.schemas import TokenIntrospectionResponse
@@ -91,6 +92,11 @@ async def preload_form(request: Request):
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/oauth", tags=["oauth2-server"])
+
+# Per-IP rate limit for /device/audit-unauth (#779). Generous because legitimate
+# users routinely land on /device unauthenticated; the cap is to bound log spam
+# from device-code spraying attempts, not to throttle real users.
+_DEVICE_UNAUTH_AUDIT_RATE_LIMIT = 30
 
 
 # ============================================================================
@@ -279,6 +285,21 @@ class DeviceConfirmResponse(TZAwareBaseModel):
 
     status: str  # "approved" or "denied"
     user_code: str
+
+
+class DeviceUnauthAuditRequest(BaseModel):
+    """Fire-and-forget audit payload for unauthenticated /device hits (Issue #779).
+
+    The frontend auth guard pings this endpoint BEFORE redirecting an
+    unauthenticated user to /login. The backend otherwise has no visibility
+    into device-code spraying or bot traffic on the /device route.
+
+    Security: user_code_prefix is capped at 4 chars — the full 8-char user_code
+    is OAuth bearer material within the 5-10 min TTL (RFC 8628 §5.2) and must
+    never be logged.
+    """
+
+    user_code_prefix: str = Field("", max_length=4)
 
 
 # ============================================================================
@@ -689,8 +710,6 @@ async def dynamic_client_registration(
     client_ip = request.client.host if request.client else "unknown"
 
     # Check rate limit (5 registrations per minute per IP)
-    from db.redis import increment_counter
-
     rate_limit_key = f"dcr_rate_limit:{client_ip}"
     count = await increment_counter(rate_limit_key, ttl=60)
 
@@ -1925,6 +1944,58 @@ async def device_verify(body: DeviceVerifyRequest) -> DeviceVerifyResponse:
         raise
     finally:
         db_session.close()
+
+
+@router.post(
+    "/device/audit-unauth",
+    status_code=status.HTTP_204_NO_CONTENT,
+    include_in_schema=False,
+)
+async def device_audit_unauth(request: Request, body: DeviceUnauthAuditRequest) -> Response:
+    """Audit-log unauthenticated /device page hits for monitoring (Issue #779).
+
+    Called fire-and-forget by the frontend auth guard BEFORE redirecting an
+    unauthenticated user away from /device. Logs prefix-only user_code, IP,
+    User-Agent, and UTC timestamp via structlog.
+
+    Rate-limited per-IP (30/min) to prevent log spam. On overflow, the request
+    silently drops the audit entry but still returns 204 — the client never
+    learns the rate-limit state.
+
+    No authentication required: the act of being on the unauth /device page
+    is itself the signal we want to record.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+
+    rate_limit_key = f"device_unauth_audit:{client_ip}"
+    try:
+        count = await increment_counter(rate_limit_key, ttl=60)
+    except Exception as e:  # noqa: BLE001 - fire-and-forget: must never 500
+        # Redis outage degrades audit observability but must not break the
+        # /device redirect flow that pings this endpoint.
+        logger.warning(
+            "device_unauth_audit_redis_failure",
+            ip=client_ip,
+            error=str(e),
+        )
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    if count > _DEVICE_UNAUTH_AUDIT_RATE_LIMIT:
+        logger.warning(
+            "device_unauth_audit_rate_limited",
+            ip=client_ip,
+            count=count,
+        )
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    user_agent = request.headers.get("user-agent", "unknown")
+    logger.info(
+        "device_unauth_hit",
+        user_code_prefix=body.user_code_prefix,
+        ip=client_ip,
+        user_agent=user_agent,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 def _get_user_from_session(request: Request) -> dict | None:
