@@ -19,12 +19,21 @@ Covers:
 from __future__ import annotations
 
 from datetime import datetime
+from uuid import uuid4
 
 import pytest
 from sqlalchemy.exc import IntegrityError
 
 from models.llm_pricing import LLMPricing
 from services.llm_pricing_service import LLMPricingService
+
+# NOTE: the two ``rerank_search_units`` tests below use unique synthetic
+# ``(provider, model)`` names to avoid colliding with seed migration rows.
+# ``e13_474_pricing_seeds`` inserts ``(cohere, rerank-3.5, rerank_search_units,
+# 2026-04-28)`` which previously made the schema-miss assertion return a row
+# and the per-1k-SU INSERT raise on ``uq_llm_pricing_lookup_key``. Other tests
+# in this file use the ``effective_from`` offset trick instead — both
+# strategies are valid; pick whichever fits the assertion shape.
 
 
 def _make_row(
@@ -187,24 +196,25 @@ async def test_lookup_miss_returns_none(db_session):
     assert result is None
 
 
-@pytest.mark.skip(
-    reason=(
-        "Baseline-skip for #721 (backend-integration CI activation). "
-        "Fails on main; root cause TBD. Tracked in #765."
-    )
-)
 @pytest.mark.asyncio
 async def test_lookup_rerank_search_units_schema_supports_no_rows(db_session):
-    """The rerank_search_units enum exists in #471 but no rows are seeded.
+    """The ``rerank_search_units`` enum value is accepted by lookup even
+    when no row matches the requested ``(provider, model)``.
 
     This verifies the schema accepts the enum value without breaking
-    token-based queries — #474 will seed actual rerank rows. The lookup
-    must return ``None`` cleanly, not raise.
+    token-based queries. The lookup must return ``None`` cleanly, not raise.
+
+    Uses ``exotic`` + a uuid4-suffixed model rather than the real
+    ``cohere``/``rerank-3.5`` so the assertion is not invalidated by the
+    seed migration ``e13_474_pricing_seeds`` (which inserts the real
+    Cohere row at ``effective_from=2026-04-28``). The uuid4 suffix is
+    belt-and-suspenders against any future seed that names a literal
+    ``never-seeded-rerank`` row.
     """
     svc = LLMPricingService(db_session)
     result = await svc.lookup(
-        provider="cohere",
-        model="rerank-3.5",
+        provider="exotic",
+        model=f"never-seeded-rerank-{uuid4().hex[:8]}",
         unit_type="rerank_search_units",
         started_at=datetime(
             2026,
@@ -279,19 +289,21 @@ async def test_compute_cost_usd_per_million_tokens(db_session):
     assert cost_full == pytest.approx(3.00)
 
 
-@pytest.mark.skip(
-    reason=(
-        "Baseline-skip for #721 (backend-integration CI activation). "
-        "Fails on main; root cause TBD. Tracked in #765."
-    )
-)
 @pytest.mark.asyncio
 async def test_compute_cost_usd_per_thousand_search_units(db_session):
-    """Cohere-shaped per-1k-SU pricing: 500 search units at $2/1k → $1.00."""
+    """Cohere-shaped per-1k-SU pricing: 500 search units at $2/1k → $1.00.
+
+    Uses a unique synthetic ``model`` name so the INSERT does not collide
+    with the seed migration ``e13_474_pricing_seeds`` row
+    ``(cohere, rerank-3.5, rerank_search_units, 2026-04-28)`` on
+    ``uq_llm_pricing_lookup_key``. The cost math is independent of the
+    model identifier.
+    """
+    unique_model = f"rerank-test-{uuid4().hex[:8]}"
     db_session.add(
         _make_row(
             provider="cohere",
-            model="rerank-3.5",
+            model=unique_model,
             unit_type="rerank_search_units",
             effective_from=datetime(
                 2026,
@@ -307,7 +319,7 @@ async def test_compute_cost_usd_per_thousand_search_units(db_session):
     svc = LLMPricingService(db_session)
     cost = await svc.compute_cost_usd(
         provider="cohere",
-        model="rerank-3.5",
+        model=unique_model,
         unit_type="rerank_search_units",
         started_at=datetime(
             2026,
