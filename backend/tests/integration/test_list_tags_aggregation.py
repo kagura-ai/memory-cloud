@@ -53,6 +53,12 @@ async def _seed_workspace_context(
 
     All UUIDs are random so each test run is isolated within the shared
     session-scoped ``db_session`` fixture.
+
+    Flush between workspace and its children: ``WorkspaceMember.workspace_id``
+    and ``Context.workspace_id`` are column-level FKs with no ``relationship()``
+    to drive insert order, so a single flush can attempt the child rows before
+    the parent and raise ``fk_contexts_workspace_id`` /
+    ``fk_workspace_members_workspace_id``.
     """
     ws = Workspace(
         id=uuid4(),
@@ -63,6 +69,9 @@ async def _seed_workspace_context(
         daily_api_limit=50_000,
         weekly_api_limit=250_000,
     )
+    db.add(ws)
+    await db.flush()
+
     member = WorkspaceMember(
         workspace_id=ws.id,
         user_id=user_id,
@@ -75,7 +84,7 @@ async def _seed_workspace_context(
         created_by=user_id,
         is_private=is_private,
     )
-    db.add_all([ws, member, ctx])
+    db.add_all([member, ctx])
     await db.flush()
     return ws, ctx
 
@@ -106,14 +115,6 @@ def _memory(
     )
 
 
-@pytest.mark.skip(
-    reason=(
-        "Baseline-skip for #721 (backend-integration CI activation). "
-        "All 12 tests in this class fail on main with "
-        "fk_contexts_workspace_id violation inside _seed_workspace_context. "
-        "Tracked in #764."
-    )
-)
 @pytest.mark.asyncio
 class TestAggregateTagsCTE:
     async def test_empty_context_returns_empty_list(self, db_session, now):
