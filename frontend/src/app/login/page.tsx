@@ -173,8 +173,18 @@ function LoginContent() {
   const handleGoogleLogin = async () => {
     setLoadingAction("google");
     setError(null);
+    // The backend /api/v1/auth/{provider}/login endpoint switches modes on
+    // the return_to query param: without it, JSON; with it, 303 to the IdP.
+    // apiClient.get() can't handle the redirect mode, so route return_to
+    // through direct browser navigation. Matches /invite/[token]/page.tsx:174.
+    if (returnTo) {
+      const apiBaseUrl =
+        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+      window.location.href = `${apiBaseUrl}/api/v1/auth/google/login?return_to=${encodeURIComponent(returnTo)}`;
+      return;
+    }
     try {
-      const authUrl = await getAuthUrl(returnTo);
+      const authUrl = await getAuthUrl();
       window.location.href = authUrl;
     } catch (err) {
       setLoadingAction(null);
@@ -185,8 +195,14 @@ function LoginContent() {
   const handleGitHubLogin = async () => {
     setLoadingAction("github");
     setError(null);
+    if (returnTo) {
+      const apiBaseUrl =
+        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+      window.location.href = `${apiBaseUrl}/api/v1/auth/github/login?return_to=${encodeURIComponent(returnTo)}`;
+      return;
+    }
     try {
-      const authUrl = await getGitHubAuthUrl(returnTo);
+      const authUrl = await getGitHubAuthUrl();
       window.location.href = authUrl;
     } catch (err) {
       setLoadingAction(null);

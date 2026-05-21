@@ -250,14 +250,11 @@ describe("LoginPage return_to sanitisation via safeReturnTo (#772)", () => {
 // ---------- OAuth return_to forwarding (#774) -------------------------------
 
 /**
- * Click an OAuth provider button and return the args passed to its
- * getAuthUrl/getGitHubAuthUrl mock. Caller sets up mockSearchParams +
- * mockGetAuthUrl/mockGetGitHubAuthUrl.mockResolvedValue() before calling.
+ * Render LoginPage, tick the terms checkbox, click the OAuth provider button.
+ * Caller asserts on mockGetAuthUrl / mockGetGitHubAuthUrl + window.location.href
+ * after the click. Caller sets up mockSearchParams + mocks beforehand.
  */
-async function clickOAuthButton(
-  provider: "google" | "github",
-): Promise<unknown[]> {
-  // Enable the OAuth path in the auth config.
+async function clickOAuthButton(provider: "google" | "github"): Promise<void> {
   mockGetAuthConfig.mockResolvedValue({
     password_login_enabled: true,
     google_oauth_enabled: provider === "google",
@@ -270,54 +267,95 @@ async function clickOAuthButton(
     provider === "google" ? /continueWithGoogle/i : /continueWithGitHub/i;
   const button = await screen.findByRole("button", { name: buttonName });
 
-  // Terms checkbox gates the OAuth buttons; check it before clicking the provider button.
   const termsCheckbox = screen.getByRole("checkbox", {
     name: /agreeToTerms/i,
   }) as HTMLInputElement;
   fireEvent.click(termsCheckbox);
 
   fireEvent.click(button);
-
-  const mock = provider === "google" ? mockGetAuthUrl : mockGetGitHubAuthUrl;
-  await waitFor(() => {
-    expect(mock).toHaveBeenCalledTimes(1);
-  });
-  return mock.mock.calls[0];
 }
 
 describe("LoginPage OAuth return_to forwarding (#774)", () => {
-  it("forwards a safe relative return_to to getAuthUrl (Google)", async () => {
-    mockSearchParams.set("return_to", "/device?user_code=ABC");
-    mockGetAuthUrl.mockResolvedValue("https://accounts.google.com/oauth/auth");
+  // Capture window.location.href assignments. Backend switches /api/v1/auth/
+  // {provider}/login between JSON (no return_to) and 303 redirect (with
+  // return_to), so the frontend must NOT route the redirect mode through
+  // apiClient.get() — it goes through direct browser navigation instead.
+  let hrefAssignments: string[];
+  const originalLocation = window.location;
+  const originalOrigin = window.location.origin;
 
-    const args = await clickOAuthButton("google");
-    expect(args[0]).toBe("/device?user_code=ABC");
+  beforeEach(() => {
+    hrefAssignments = [];
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: {
+        get origin() {
+          return originalOrigin;
+        },
+        get href() {
+          return hrefAssignments[hrefAssignments.length - 1] || "";
+        },
+        set href(val: string) {
+          hrefAssignments.push(val);
+        },
+      },
+    });
   });
 
-  it("forwards a safe relative return_to to getGitHubAuthUrl (GitHub)", async () => {
+  afterEach(() => {
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: originalLocation,
+    });
+  });
+
+  it("with safe relative return_to, navigates directly to backend (Google)", async () => {
     mockSearchParams.set("return_to", "/device?user_code=ABC");
-    mockGetGitHubAuthUrl.mockResolvedValue(
-      "https://github.com/login/oauth/authorize",
+    await clickOAuthButton("google");
+
+    // Direct browser navigation — apiClient JSON path bypassed.
+    await waitFor(() => {
+      expect(hrefAssignments.length).toBeGreaterThan(0);
+    });
+    expect(hrefAssignments[0]).toMatch(
+      /\/api\/v1\/auth\/google\/login\?return_to=%2Fdevice%3Fuser_code%3DABC$/,
     );
-
-    const args = await clickOAuthButton("github");
-    expect(args[0]).toBe("/device?user_code=ABC");
+    expect(mockGetAuthUrl).not.toHaveBeenCalled();
   });
 
-  it("strips a cross-origin return_to before passing to getAuthUrl (Google)", async () => {
-    // safeReturnTo should reject the cross-origin URL; getAuthUrl receives undefined.
+  it("with safe relative return_to, navigates directly to backend (GitHub)", async () => {
+    mockSearchParams.set("return_to", "/device?user_code=ABC");
+    await clickOAuthButton("github");
+
+    await waitFor(() => {
+      expect(hrefAssignments.length).toBeGreaterThan(0);
+    });
+    expect(hrefAssignments[0]).toMatch(
+      /\/api\/v1\/auth\/github\/login\?return_to=%2Fdevice%3Fuser_code%3DABC$/,
+    );
+    expect(mockGetGitHubAuthUrl).not.toHaveBeenCalled();
+  });
+
+  it("with cross-origin return_to, sanitizes to undefined and uses JSON path (Google)", async () => {
+    // safeReturnTo strips the cross-origin URL → returnTo is undefined →
+    // we take the JSON path with no args (existing behavior).
     mockSearchParams.set("return_to", "https://evil.com/x");
     mockGetAuthUrl.mockResolvedValue("https://accounts.google.com/oauth/auth");
+    await clickOAuthButton("google");
 
-    const args = await clickOAuthButton("google");
-    expect(args[0]).toBeUndefined();
+    await waitFor(() => {
+      expect(mockGetAuthUrl).toHaveBeenCalledTimes(1);
+    });
+    expect(mockGetAuthUrl).toHaveBeenCalledWith();
   });
 
-  it("passes undefined when no return_to is present (Google)", async () => {
-    // No mockSearchParams.set → returnTo is undefined → getAuthUrl(undefined).
+  it("with no return_to, uses JSON path with no args (Google)", async () => {
     mockGetAuthUrl.mockResolvedValue("https://accounts.google.com/oauth/auth");
+    await clickOAuthButton("google");
 
-    const args = await clickOAuthButton("google");
-    expect(args[0]).toBeUndefined();
+    await waitFor(() => {
+      expect(mockGetAuthUrl).toHaveBeenCalledTimes(1);
+    });
+    expect(mockGetAuthUrl).toHaveBeenCalledWith();
   });
 });

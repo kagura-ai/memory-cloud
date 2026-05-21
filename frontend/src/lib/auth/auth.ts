@@ -32,17 +32,20 @@ export interface AuthResponse {
 }
 
 /**
- * Get the Google OAuth2 authorization URL.
+ * Get the Google OAuth2 authorization URL (JSON-mode, API-client path).
  *
- * When `returnTo` is provided, the backend stores it under the OAuth state
- * (5 min TTL in Redis) and redirects there after the callback. Caller must
- * pre-validate `returnTo` via safeReturnTo (#772) — the value travels through
- * the OAuth round-trip and must already be same-origin safe.
+ * **Important**: this function MUST be called WITHOUT `return_to`. The backend
+ * endpoint switches modes on that param: without it, returns JSON
+ * `{authorization_url}`; with it, returns a 303 RedirectResponse to Google.
+ * `apiClient.get()` cannot handle the redirect mode (CORS + non-JSON), so the
+ * `return_to` flow goes through direct browser navigation instead — see the
+ * `if (returnTo)` branch in `handleGoogleLogin` / `handleGitHubLogin` of
+ * `/app/login/page.tsx` for the canonical pattern.
  */
-export async function getAuthUrl(returnTo?: string): Promise<string> {
+export async function getAuthUrl(): Promise<string> {
   try {
     const response = await apiClient.get<{ authorization_url: string }>(
-      `/api/v1/auth/google/login${returnToParam(returnTo)}`,
+      "/api/v1/auth/google/login",
     );
     return response.authorization_url;
   } catch (error) {
@@ -52,14 +55,14 @@ export async function getAuthUrl(returnTo?: string): Promise<string> {
 }
 
 /**
- * Get the GitHub OAuth2 authorization URL.
+ * Get the GitHub OAuth2 authorization URL (JSON-mode, API-client path).
  * Issue #315: GitHub OAuth2 Authentication.
- * See `getAuthUrl` for `returnTo` semantics.
+ * See `getAuthUrl` for the `return_to` mode-switch contract.
  */
-export async function getGitHubAuthUrl(returnTo?: string): Promise<string> {
+export async function getGitHubAuthUrl(): Promise<string> {
   try {
     const response = await apiClient.get<{ authorization_url: string }>(
-      `/api/v1/auth/github/login${returnToParam(returnTo)}`,
+      "/api/v1/auth/github/login",
     );
     return response.authorization_url;
   } catch (error) {
