@@ -204,15 +204,17 @@ async def test_lookup_rerank_search_units_schema_supports_no_rows(db_session):
     This verifies the schema accepts the enum value without breaking
     token-based queries. The lookup must return ``None`` cleanly, not raise.
 
-    Uses ``exotic``/``never-seeded-rerank`` rather than the real
+    Uses ``exotic`` + a uuid4-suffixed model rather than the real
     ``cohere``/``rerank-3.5`` so the assertion is not invalidated by the
     seed migration ``e13_474_pricing_seeds`` (which inserts the real
-    Cohere row at ``effective_from=2026-04-28``).
+    Cohere row at ``effective_from=2026-04-28``). The uuid4 suffix is
+    belt-and-suspenders against any future seed that names a literal
+    ``never-seeded-rerank`` row.
     """
     svc = LLMPricingService(db_session)
     result = await svc.lookup(
         provider="exotic",
-        model="never-seeded-rerank",
+        model=f"never-seeded-rerank-{uuid4().hex[:8]}",
         unit_type="rerank_search_units",
         started_at=datetime(
             2026,
