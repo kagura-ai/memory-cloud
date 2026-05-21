@@ -51,6 +51,20 @@ vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => mockUseAuth(),
 }));
 
+const mockApiClientPost = vi.fn();
+
+vi.mock("@/lib/api/base", async () => {
+  const actual =
+    await vi.importActual<typeof import("@/lib/api/base")>("@/lib/api/base");
+  return {
+    ...actual,
+    apiClient: {
+      get: vi.fn(),
+      post: (...args: unknown[]) => mockApiClientPost(...args),
+    },
+  };
+});
+
 // ---------- Helpers ----------------------------------------------------------
 
 function typeCode(code: string) {
@@ -85,6 +99,8 @@ beforeEach(() => {
   for (const key of [...mockSearchParams.keys()]) {
     mockSearchParams.delete(key);
   }
+  mockApiClientPost.mockReset();
+  mockApiClientPost.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -387,5 +403,68 @@ describe("DevicePage", () => {
     await waitFor(() => {
       expect(screen.getByText("device.deniedTitle")).toBeDefined();
     });
+  });
+});
+
+describe("device page audit ping on unauth (#779)", () => {
+  it("fires POST /api/v1/oauth/device/audit-unauth with prefix before redirecting unauth user", async () => {
+    mockUseAuth.mockReturnValue({
+      user: null,
+      isLoading: false,
+      isAuthenticated: false,
+    });
+    mockSearchParams.set("user_code", "ABCD1234");
+
+    render(<DevicePage />);
+
+    await waitFor(() => {
+      expect(mockApiClientPost).toHaveBeenCalledWith(
+        "/api/v1/oauth/device/audit-unauth",
+        { user_code_prefix: "ABCD" },
+      );
+    });
+    expect(mockRouterReplace).toHaveBeenCalledWith(
+      "/login?return_to=%2Fdevice%3Fuser_code%3DABCD1234",
+    );
+
+    mockSearchParams.delete("user_code");
+  });
+
+  it("sends empty user_code_prefix when no code in URL", async () => {
+    mockUseAuth.mockReturnValue({
+      user: null,
+      isLoading: false,
+      isAuthenticated: false,
+    });
+    mockSearchParams.delete("user_code");
+
+    render(<DevicePage />);
+
+    await waitFor(() => {
+      expect(mockApiClientPost).toHaveBeenCalledWith(
+        "/api/v1/oauth/device/audit-unauth",
+        { user_code_prefix: "" },
+      );
+    });
+  });
+
+  it("still redirects even if audit ping rejects (fire-and-forget)", async () => {
+    mockUseAuth.mockReturnValue({
+      user: null,
+      isLoading: false,
+      isAuthenticated: false,
+    });
+    mockApiClientPost.mockRejectedValueOnce(new Error("network down"));
+    mockSearchParams.set("user_code", "WXYZ5678");
+
+    render(<DevicePage />);
+
+    await waitFor(() => {
+      expect(mockRouterReplace).toHaveBeenCalledWith(
+        "/login?return_to=%2Fdevice%3Fuser_code%3DWXYZ5678",
+      );
+    });
+
+    mockSearchParams.delete("user_code");
   });
 });
