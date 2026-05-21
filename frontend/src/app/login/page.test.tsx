@@ -270,7 +270,7 @@ async function clickOAuthButton(
     provider === "google" ? /continueWithGoogle/i : /continueWithGitHub/i;
   const button = await screen.findByRole("button", { name: buttonName });
 
-  // Terms checkbox gates the OAuth buttons too (line 410 / 468 of /login/page.tsx).
+  // Terms checkbox gates the OAuth buttons; check it before clicking the provider button.
   const termsCheckbox = screen.getByRole("checkbox", {
     name: /agreeToTerms/i,
   }) as HTMLInputElement;

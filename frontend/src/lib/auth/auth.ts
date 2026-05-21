@@ -6,6 +6,11 @@
 
 import { apiClient } from "../api/base";
 
+/** Build a `?return_to=<encoded>` query string, or "" when returnTo is absent. */
+function returnToParam(returnTo?: string): string {
+  return returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
+}
+
 export interface User {
   id: string;
   email: string;
@@ -36,9 +41,8 @@ export interface AuthResponse {
  */
 export async function getAuthUrl(returnTo?: string): Promise<string> {
   try {
-    const params = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
     const response = await apiClient.get<{ authorization_url: string }>(
-      `/api/v1/auth/google/login${params}`,
+      `/api/v1/auth/google/login${returnToParam(returnTo)}`,
     );
     return response.authorization_url;
   } catch (error) {
@@ -54,9 +58,8 @@ export async function getAuthUrl(returnTo?: string): Promise<string> {
  */
 export async function getGitHubAuthUrl(returnTo?: string): Promise<string> {
   try {
-    const params = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
     const response = await apiClient.get<{ authorization_url: string }>(
-      `/api/v1/auth/github/login${params}`,
+      `/api/v1/auth/github/login${returnToParam(returnTo)}`,
     );
     return response.authorization_url;
   } catch (error) {
@@ -171,11 +174,13 @@ export async function loginWithPassword(
   password: string,
   returnTo?: string,
 ): Promise<PasswordLoginResult> {
-  const params = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
-  return apiClient.post<PasswordLoginResult>(`/api/v1/auth/login${params}`, {
-    login_id: loginId,
-    password,
-  });
+  return apiClient.post<PasswordLoginResult>(
+    `/api/v1/auth/login${returnToParam(returnTo)}`,
+    {
+      login_id: loginId,
+      password,
+    },
+  );
 }
 
 /**
@@ -186,9 +191,8 @@ export async function verifyMfa(
   totpCode: string,
   returnTo?: string,
 ): Promise<PasswordLoginResult> {
-  const params = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
   return apiClient.post<PasswordLoginResult>(
-    `/api/v1/auth/mfa/verify${params}`,
+    `/api/v1/auth/mfa/verify${returnToParam(returnTo)}`,
     { mfa_session_token: mfaSessionToken, totp_code: totpCode },
   );
 }
