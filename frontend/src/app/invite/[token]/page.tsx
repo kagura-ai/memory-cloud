@@ -267,7 +267,7 @@ export default function AcceptInvitationPage({
             <Button
               onClick={() => startOAuthLogin("google")}
               size="lg"
-              className="w-full mb-3"
+              className="w-full mb-3 text-base [&_svg]:size-5"
             >
               <LogIn />
               {t("loginRequired.loginButton")}
@@ -277,7 +277,7 @@ export default function AcceptInvitationPage({
               onClick={() => startOAuthLogin("github")}
               variant="outline"
               size="lg"
-              className="w-full mb-4"
+              className="w-full mb-4 text-base [&_svg]:size-5"
             >
               <Github />
               {t("loginRequired.continueWithGitHub")}
@@ -345,7 +345,11 @@ export default function AcceptInvitationPage({
               </div>
             </div>
 
-            <Button onClick={handleLogout} size="lg" className="w-full mb-4">
+            <Button
+              onClick={handleLogout}
+              size="lg"
+              className="w-full mb-4 text-base [&_svg]:size-5"
+            >
               <LogIn />
               {t("emailMismatch.logoutButton")}
             </Button>
