@@ -12,7 +12,7 @@ Contract:
 
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 _BACKEND_SRC = Path(__file__).resolve().parents[2] / "src"
 if str(_BACKEND_SRC) not in sys.path:
@@ -25,7 +25,7 @@ from api.main import app  # noqa: E402
 
 class TestDeviceUnauthAuditEndpoint:
     def test_returns_204_with_valid_prefix(self):
-        with patch("api.routes.oauth.increment_counter", return_value=1):
+        with patch("api.routes.oauth.increment_counter", AsyncMock(return_value=1)):
             client = TestClient(app)
             resp = client.post(
                 "/api/v1/oauth/device/audit-unauth",
@@ -35,7 +35,7 @@ class TestDeviceUnauthAuditEndpoint:
         assert resp.content == b""
 
     def test_returns_204_with_empty_prefix(self):
-        with patch("api.routes.oauth.increment_counter", return_value=1):
+        with patch("api.routes.oauth.increment_counter", AsyncMock(return_value=1)):
             client = TestClient(app)
             resp = client.post(
                 "/api/v1/oauth/device/audit-unauth",
@@ -70,7 +70,7 @@ class TestDeviceUnauthAuditEndpoint:
     def test_silently_drops_above_rate_limit_but_still_returns_204(self):
         # 31st request from same IP — should NOT 429; should silently drop the log
         # and still return 204 so the client never learns about rate-limit state.
-        with patch("api.routes.oauth.increment_counter", return_value=31):
+        with patch("api.routes.oauth.increment_counter", AsyncMock(return_value=31)):
             client = TestClient(app)
             resp = client.post(
                 "/api/v1/oauth/device/audit-unauth",
@@ -80,7 +80,7 @@ class TestDeviceUnauthAuditEndpoint:
 
     def test_logs_device_unauth_hit_with_prefix_ip_and_user_agent(self):
         with (
-            patch("api.routes.oauth.increment_counter", return_value=1),
+            patch("api.routes.oauth.increment_counter", AsyncMock(return_value=1)),
             patch("api.routes.oauth.logger") as mock_logger,
         ):
             client = TestClient(app)
@@ -105,7 +105,7 @@ class TestDeviceUnauthAuditEndpoint:
 
     def test_rate_limit_path_logs_warning_not_info(self):
         with (
-            patch("api.routes.oauth.increment_counter", return_value=31),
+            patch("api.routes.oauth.increment_counter", AsyncMock(return_value=31)),
             patch("api.routes.oauth.logger") as mock_logger,
         ):
             client = TestClient(app)
@@ -125,7 +125,7 @@ class TestDeviceUnauthAuditEndpoint:
         with (
             patch(
                 "api.routes.oauth.increment_counter",
-                side_effect=RuntimeError("redis down"),
+                AsyncMock(side_effect=RuntimeError("redis down")),
             ),
             patch("api.routes.oauth.logger") as mock_logger,
         ):
