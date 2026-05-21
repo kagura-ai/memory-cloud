@@ -31,6 +31,7 @@ import {
   buildOAuthRedirect,
   type OAuthProvider,
 } from "@/lib/auth/buildOAuthRedirect";
+import { Button } from "@/components/ui/button";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { LanguageSelector } from "@/components/LanguageSelector";
 import { Check, AlertCircle, Github, LogIn, Mail } from "lucide-react";
@@ -263,21 +264,24 @@ export default function AcceptInvitationPage({
               )}
             </p>
 
-            <button
+            <Button
               onClick={() => startOAuthLogin("google")}
-              className="w-full px-6 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-lg font-medium mb-3"
+              size="lg"
+              className="w-full mb-3 text-base [&_svg]:size-5"
             >
-              <LogIn className="w-5 h-5" />
+              <LogIn />
               {t("loginRequired.loginButton")}
-            </button>
+            </Button>
 
-            <button
+            <Button
               onClick={() => startOAuthLogin("github")}
-              className="w-full px-6 py-3 bg-gray-900 text-white rounded-md hover:bg-gray-800 transition-colors flex items-center justify-center gap-2 text-lg font-medium mb-4"
+              variant="outline"
+              size="lg"
+              className="w-full mb-4 text-base [&_svg]:size-5"
             >
-              <Github className="w-5 h-5" />
+              <Github />
               {t("loginRequired.continueWithGitHub")}
-            </button>
+            </Button>
 
             <p className="text-xs text-center text-gray-500 dark:text-gray-400">
               {t("loginRequired.noAccount")}
@@ -341,13 +345,14 @@ export default function AcceptInvitationPage({
               </div>
             </div>
 
-            <button
+            <Button
               onClick={handleLogout}
-              className="w-full px-6 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-lg font-medium mb-4"
+              size="lg"
+              className="w-full mb-4 text-base [&_svg]:size-5"
             >
-              <LogIn className="w-5 h-5" />
+              <LogIn />
               {t("emailMismatch.logoutButton")}
-            </button>
+            </Button>
 
             <p className="text-xs text-center text-gray-500 dark:text-gray-400">
               {t("emailMismatch.returnNote")}
@@ -437,12 +442,13 @@ export default function AcceptInvitationPage({
               </ul>
             </div>
 
-            <button
+            <Button
               onClick={() => router.push("/workspace/dashboard")}
-              className="w-full px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 transition-colors"
+              variant="secondary"
+              className="w-full"
             >
               {t("error.goToDashboard")}
-            </button>
+            </Button>
           </div>
         </div>
       </div>
