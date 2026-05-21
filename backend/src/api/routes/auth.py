@@ -601,10 +601,8 @@ async def google_callback(
                 # Delete after use (one-time)
                 _session_manager._redis.delete(f"oauth2_return_to:{state}")
 
-        # Determine redirect destination. _safe_redirect_url handles the
-        # None/empty case (defaults to FRONTEND_URL/workspace/dashboard per
-        # Issue #258) AND validates the Redis-sourced value server-side
-        # (Issue #776 — defense-in-depth for CWE-601 open redirect).
+        # Issue #776: server-side validation of the Redis-sourced return_to
+        # (CWE-601 defense-in-depth). See _safe_redirect_url docstring.
         redirect_url = _safe_redirect_url(return_to_url)
 
         redirect = RedirectResponse(url=redirect_url, status_code=303)
@@ -1008,9 +1006,8 @@ async def github_callback(
         if return_to_url:
             _session_manager._redis.delete(f"oauth2_return_to:{state}")
 
-        # _safe_redirect_url validates the Redis-sourced value server-side
-        # and falls back to FRONTEND_URL/workspace/dashboard for empty /
-        # unsafe inputs (Issue #776 — CWE-601 defense-in-depth).
+        # Issue #776: server-side validation of the Redis-sourced return_to
+        # (CWE-601 defense-in-depth). See _safe_redirect_url docstring.
         redirect_url = _safe_redirect_url(return_to_url)
 
         redirect = RedirectResponse(url=redirect_url, status_code=303)
@@ -1174,10 +1171,9 @@ def _safe_redirect_url(return_to: str | None) -> str:
     if not return_to:
         return default
 
-    # Forbidden chars (backslash, CR/LF/TAB/NUL) and any leading/trailing
-    # whitespace. Strict ``strip()`` symmetry mirrors the frontend
-    # ``safeReturnTo`` rejection model (#773) and matches the function's
-    # "be strict at the boundary" intent.
+    # Reject backslash + control bytes anywhere in the string (browser
+    # \-to-/ normalisation, header smuggling) AND any leading/trailing
+    # whitespace (strict strip() symmetry with frontend safeReturnTo #773).
     if any(ch in return_to for ch in _FORBIDDEN_REDIRECT_CHARS):
         return default
     if return_to != return_to.strip():
