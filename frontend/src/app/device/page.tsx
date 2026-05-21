@@ -62,13 +62,12 @@ function DevicePageInner() {
   const submittingRef = useRef(false);
 
   useEffect(() => {
-    // Auth guard: do nothing while auth state is resolving.
     if (authLoading) return;
 
     const codeFromUrl = searchParams.get("user_code");
 
-    // Auth guard: redirect unauthenticated users to login, preserving the
-    // user_code in return_to so the code is not burned before authentication.
+    // Preserve user_code in return_to so the device code is not burned before
+    // the unauthenticated user reaches the consent page.
     if (!user) {
       const returnPath = codeFromUrl
         ? `/device?user_code=${encodeURIComponent(codeFromUrl)}`
@@ -77,7 +76,6 @@ function DevicePageInner() {
       return;
     }
 
-    // Authenticated: auto-verify if a valid user_code is present in the URL.
     if (codeFromUrl && codeFromUrl.length === 8) {
       setUserCode(codeFromUrl);
       verifyCode(codeFromUrl);
