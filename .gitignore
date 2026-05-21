@@ -263,3 +263,8 @@ backend/uv.lock
 .playwright-mcp/
 .superpowers/
 docs/superpowers/
+
+# Playwright (#780)
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
