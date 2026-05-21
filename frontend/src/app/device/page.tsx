@@ -5,11 +5,15 @@
  *
  * User enters an 8-character user_code displayed in their CLI, then approves
  * or denies the device authorization request on the consent screen.
+ *
+ * Auth guard: unauthenticated users are redirected to /login with a return_to
+ * param that preserves the user_code so the code is NOT burned before the user
+ * logs in. See issue #772.
  */
 
 import { useEffect, useRef, useState, Suspense } from "react";
 import { useTranslations } from "next-intl";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -23,6 +27,7 @@ import {
   confirmDevice,
   type DeviceVerifyResponse,
 } from "@/lib/auth/auth";
+import { useAuth } from "@/contexts/AuthContext";
 import { AlertCircle, CheckCircle2, XCircle, Monitor } from "lucide-react";
 
 type Phase =
@@ -45,6 +50,8 @@ const SCOPE_LABEL_MAP: Record<string, string> = {
 function DevicePageInner() {
   const t = useTranslations();
   const searchParams = useSearchParams();
+  const router = useRouter();
+  const { user, isLoading: authLoading } = useAuth();
 
   const [phase, setPhase] = useState<Phase>("input");
   const [userCode, setUserCode] = useState(searchParams.get("user_code") ?? "");
@@ -55,13 +62,28 @@ function DevicePageInner() {
   const submittingRef = useRef(false);
 
   useEffect(() => {
+    // Auth guard: do nothing while auth state is resolving.
+    if (authLoading) return;
+
+    // Auth guard: redirect unauthenticated users to login, preserving the
+    // user_code in return_to so the code is not burned before authentication.
+    if (!user) {
+      const codeFromUrl = searchParams.get("user_code");
+      const returnPath = codeFromUrl
+        ? `/device?user_code=${encodeURIComponent(codeFromUrl)}`
+        : "/device";
+      router.replace(`/login?return_to=${encodeURIComponent(returnPath)}`);
+      return;
+    }
+
+    // Authenticated: auto-verify if a valid user_code is present in the URL.
     const codeFromUrl = searchParams.get("user_code");
     if (codeFromUrl && codeFromUrl.length === 8) {
       setUserCode(codeFromUrl);
       verifyCode(codeFromUrl);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams]);
+  }, [authLoading, user, searchParams, router]);
 
   async function verifyCode(code: string) {
     if (submittingRef.current) return;
@@ -158,6 +180,16 @@ function DevicePageInner() {
               </Badge>
             );
           })}
+      </div>
+    );
+  }
+
+  // Show spinner while auth state is resolving or while redirecting unauth users.
+  // This prevents a flash of the empty input form before redirect fires.
+  if (authLoading || !user) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
+        <SpinnerLoading size="lg" />
       </div>
     );
   }
