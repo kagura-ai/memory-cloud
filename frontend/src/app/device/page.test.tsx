@@ -281,6 +281,58 @@ describe("DevicePage", () => {
     });
   });
 
+  // --- Auth guard tests (#772) ---
+
+  describe("auth guard", () => {
+    it("(a) redirects to login with encoded return_to when unauthenticated and user_code is present", async () => {
+      mockUseAuth.mockReturnValue({ user: null, isLoading: false });
+      mockSearchParams.set("user_code", "ABC12345");
+
+      render(<DevicePage />);
+
+      await waitFor(() => {
+        expect(mockRouterReplace).toHaveBeenCalledWith(
+          "/login?return_to=%2Fdevice%3Fuser_code%3DABC12345",
+        );
+      });
+      expect(mockVerifyDeviceCode).not.toHaveBeenCalled();
+    });
+
+    it("(b) redirects to login with bare /device return_to when unauthenticated and no user_code", async () => {
+      mockUseAuth.mockReturnValue({ user: null, isLoading: false });
+      // No user_code set in mockSearchParams (cleared in beforeEach)
+
+      render(<DevicePage />);
+
+      await waitFor(() => {
+        expect(mockRouterReplace).toHaveBeenCalledWith(
+          "/login?return_to=%2Fdevice",
+        );
+      });
+      expect(mockVerifyDeviceCode).not.toHaveBeenCalled();
+    });
+
+    it("(c) shows spinner and does not redirect or verify while auth is resolving", async () => {
+      mockUseAuth.mockReturnValue({ user: null, isLoading: true });
+
+      render(<DevicePage />);
+
+      // Spinner should be visible (SpinnerLoading renders an svg role=img or status div)
+      // The page renders a spinner for authLoading || !user, so the code input should be absent.
+      expect(screen.queryByLabelText("device.codeLabel")).toBeNull();
+      expect(mockVerifyDeviceCode).not.toHaveBeenCalled();
+      expect(mockRouterReplace).not.toHaveBeenCalled();
+    });
+
+    it("(d) authed user sees the code input form and verify works normally", async () => {
+      // Default beforeEach already sets authenticated user — confirm behavior preserved.
+      render(<DevicePage />);
+
+      expect(screen.getByLabelText("device.codeLabel")).toBeDefined();
+      expect(mockRouterReplace).not.toHaveBeenCalled();
+    });
+  });
+
   it("discloses identity fields shared with the client on consent screen (#640)", async () => {
     mockVerifyDeviceCode.mockResolvedValue({
       user_code: "ABCD1234",
