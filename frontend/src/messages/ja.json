@@ -2029,6 +2029,7 @@
       "message": "この招待を受け入れるにはログインしてください",
       "messageTo": "への招待",
       "loginButton": "Googleでログイン",
+      "continueWithGitHub": "GitHubでログイン",
       "noAccount": "アカウントをお持ちでない場合でも、ログインすると自動的にアカウントが作成されます。"
     },
     "emailMismatch": {
