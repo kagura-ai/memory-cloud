@@ -307,33 +307,77 @@ describe("LoginPage OAuth return_to forwarding (#774)", () => {
       configurable: true,
       value: originalLocation,
     });
+    vi.unstubAllEnvs();
   });
 
-  it("with safe relative return_to, navigates directly to backend (Google)", async () => {
+  it("with safe relative return_to, navigates directly to backend with absolute same-origin return_to (Google)", async () => {
     mockSearchParams.set("return_to", "/device?user_code=ABC");
     await clickOAuthButton("google");
 
     // Direct browser navigation — apiClient JSON path bypassed.
+    // return_to is sent as an absolute same-origin URL (not the raw relative path)
+    // so backend's verbatim RedirectResponse resolves against the frontend origin,
+    // not the API origin. See buildOAuthRedirect JSDoc in page.tsx for the trap.
     await waitFor(() => {
       expect(hrefAssignments.length).toBeGreaterThan(0);
     });
-    expect(hrefAssignments[0]).toMatch(
-      /\/api\/v1\/auth\/google\/login\?return_to=%2Fdevice%3Fuser_code%3DABC$/,
+    const expectedReturnTo = encodeURIComponent(
+      new URL("/device?user_code=ABC", originalOrigin).toString(),
     );
+    expect(hrefAssignments[0]).toMatch(
+      new RegExp(`/api/v1/auth/google/login\\?return_to=${expectedReturnTo}$`),
+    );
+    // Guard against the /api/v1 double-prefix trap — verify the URL has
+    // exactly one /api/v1/ segment, not two.
+    expect(hrefAssignments[0]).not.toMatch(/\/api\/v1\/api\/v1\//);
     expect(mockGetAuthUrl).not.toHaveBeenCalled();
   });
 
-  it("with safe relative return_to, navigates directly to backend (GitHub)", async () => {
+  it("with safe relative return_to, navigates directly to backend with absolute same-origin return_to (GitHub)", async () => {
     mockSearchParams.set("return_to", "/device?user_code=ABC");
     await clickOAuthButton("github");
 
     await waitFor(() => {
       expect(hrefAssignments.length).toBeGreaterThan(0);
     });
-    expect(hrefAssignments[0]).toMatch(
-      /\/api\/v1\/auth\/github\/login\?return_to=%2Fdevice%3Fuser_code%3DABC$/,
+    const expectedReturnTo = encodeURIComponent(
+      new URL("/device?user_code=ABC", originalOrigin).toString(),
     );
+    expect(hrefAssignments[0]).toMatch(
+      new RegExp(`/api/v1/auth/github/login\\?return_to=${expectedReturnTo}$`),
+    );
+    expect(hrefAssignments[0]).not.toMatch(/\/api\/v1\/api\/v1\//);
     expect(mockGetGitHubAuthUrl).not.toHaveBeenCalled();
+  });
+
+  it("normalizes NEXT_PUBLIC_API_URL when it includes a trailing /api/v1 suffix", async () => {
+    // Some deployments bake the version suffix into the env var. The helper
+    // must strip it so the result is .../api/v1/auth/... not .../api/v1/api/v1/auth/...
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com/api/v1");
+    mockSearchParams.set("return_to", "/device?user_code=ABC");
+    await clickOAuthButton("google");
+
+    await waitFor(() => {
+      expect(hrefAssignments.length).toBeGreaterThan(0);
+    });
+    expect(hrefAssignments[0]).toMatch(
+      /^https:\/\/api\.example\.com\/api\/v1\/auth\/google\/login\?return_to=/,
+    );
+    expect(hrefAssignments[0]).not.toMatch(/\/api\/v1\/api\/v1\//);
+  });
+
+  it("normalizes NEXT_PUBLIC_API_URL with a trailing slash", async () => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com/");
+    mockSearchParams.set("return_to", "/device?user_code=ABC");
+    await clickOAuthButton("google");
+
+    await waitFor(() => {
+      expect(hrefAssignments.length).toBeGreaterThan(0);
+    });
+    expect(hrefAssignments[0]).toMatch(
+      /^https:\/\/api\.example\.com\/api\/v1\/auth\/google\/login\?return_to=/,
+    );
+    expect(hrefAssignments[0]).not.toMatch(/\/\/api\/v1/);
   });
 
   it("with cross-origin return_to, sanitizes to undefined and uses JSON path (Google)", async () => {
