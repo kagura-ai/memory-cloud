@@ -188,23 +188,23 @@ function DevicePageInner() {
   // This prevents a flash of the empty input form before redirect fires.
   if (authLoading || !user) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
+      <div className="flex min-h-screen items-center justify-center bg-background px-4">
         <SpinnerLoading size="lg" />
       </div>
     );
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
+    <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <Card className="w-full max-w-md">
         <CardContent className="pt-8 pb-8 space-y-6">
           {phase === "success" && (
             <div className="text-center space-y-4">
               <CheckCircle2 className="mx-auto h-12 w-12 text-green-500" />
-              <h1 className="text-xl font-semibold text-gray-900">
+              <h1 className="text-xl font-semibold text-foreground">
                 {t("device.successTitle")}
               </h1>
-              <p className="text-sm text-gray-600">
+              <p className="text-sm text-muted-foreground">
                 {t("device.successMessage")}
               </p>
             </div>
@@ -213,10 +213,10 @@ function DevicePageInner() {
           {phase === "denied" && (
             <div className="text-center space-y-4">
               <XCircle className="mx-auto h-12 w-12 text-red-500" />
-              <h1 className="text-xl font-semibold text-gray-900">
+              <h1 className="text-xl font-semibold text-foreground">
                 {t("device.deniedTitle")}
               </h1>
-              <p className="text-sm text-gray-600">
+              <p className="text-sm text-muted-foreground">
                 {t("device.deniedMessage")}
               </p>
               <Button variant="outline" onClick={resetToInput} className="mt-4">
@@ -229,18 +229,18 @@ function DevicePageInner() {
             phase === "verifying" ||
             phase === "error") && (
             <div className="text-center space-y-4">
-              <Monitor className="mx-auto h-10 w-10 text-gray-400" />
+              <Monitor className="mx-auto h-10 w-10 text-muted-foreground" />
               <div>
-                <h1 className="text-xl font-semibold text-gray-900">
+                <h1 className="text-xl font-semibold text-foreground">
                   {t("device.title")}
                 </h1>
-                <p className="mt-1 text-sm text-gray-600">
+                <p className="mt-1 text-sm text-muted-foreground">
                   {t("device.description")}
                 </p>
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="userCode" className="text-gray-700">
+                <Label htmlFor="userCode" className="text-foreground">
                   {t("device.codeLabel")}
                 </Label>
                 <Input
@@ -251,7 +251,7 @@ function DevicePageInner() {
                   onChange={(e) => handleCodeChange(e.target.value)}
                   onKeyDown={handleKeyDown}
                   placeholder={t("device.codePlaceholder")}
-                  className="bg-white text-gray-900 text-center text-2xl tracking-[0.3em]"
+                  className="text-center text-2xl tracking-[0.3em]"
                   autoFocus
                   autoComplete="off"
                   disabled={phase === "verifying"}
@@ -259,7 +259,9 @@ function DevicePageInner() {
               </div>
 
               {phase === "verifying" && (
-                <p className="text-sm text-gray-500">{t("device.verifying")}</p>
+                <p className="text-sm text-muted-foreground">
+                  {t("device.verifying")}
+                </p>
               )}
 
               {phase === "error" && error && (
@@ -280,27 +282,27 @@ function DevicePageInner() {
           {(phase === "consent" || phase === "submitting") && deviceInfo && (
             <div className="text-center space-y-4">
               <div>
-                <h1 className="text-xl font-semibold text-gray-900">
+                <h1 className="text-xl font-semibold text-foreground">
                   {t("device.consentTitle")}
                 </h1>
-                <p className="mt-2 text-sm text-gray-600">
+                <p className="mt-2 text-sm text-muted-foreground">
                   {t("device.consentDescription")}
                 </p>
               </div>
 
-              <p className="text-lg font-medium text-gray-900">
+              <p className="text-lg font-medium text-foreground">
                 {deviceInfo.client_name}
               </p>
 
               <div className="space-y-2">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
                   {t("device.permissionsLabel")}
                 </p>
                 {renderScopeBadges(deviceInfo.scope)}
               </div>
 
               <div className="space-y-2">
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
                   {t("device.identityShareLabel")}
                 </p>
                 <div className="flex flex-wrap gap-2 justify-center">
