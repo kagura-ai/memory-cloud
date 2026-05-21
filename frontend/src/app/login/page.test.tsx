@@ -96,7 +96,11 @@ async function reachMfaForm(): Promise<HTMLInputElement> {
   fireEvent.change(passwordInput, { target: { value: "hunter2" } });
 
   // Tick the terms checkbox (sign-in button is gated on it).
-  const termsCheckbox = screen.getByRole("checkbox") as HTMLInputElement;
+  // Use name-scoped query to survive future renders that add a second checkbox
+  // (e.g. the OAuth-path terms checkbox in the same component tree).
+  const termsCheckbox = screen.getByRole("checkbox", {
+    name: /agreeToTerms/i,
+  }) as HTMLInputElement;
   fireEvent.click(termsCheckbox);
 
   // Submit password form.
@@ -182,7 +186,10 @@ async function submitPasswordLogin(): Promise<unknown[]> {
   fireEvent.change(loginIdInput, { target: { value: "user@example.com" } });
   fireEvent.change(passwordInput, { target: { value: "password123" } });
 
-  const termsCheckbox = screen.getByRole("checkbox") as HTMLInputElement;
+  // Use name-scoped query for resilience against multiple checkboxes.
+  const termsCheckbox = screen.getByRole("checkbox", {
+    name: /agreeToTerms/i,
+  }) as HTMLInputElement;
   fireEvent.click(termsCheckbox);
 
   const signInButton = screen.getByRole("button", { name: "signIn" });

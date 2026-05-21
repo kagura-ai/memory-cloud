@@ -315,10 +315,13 @@ describe("DevicePage", () => {
     it("(c) shows spinner and does not redirect or verify while auth is resolving", async () => {
       mockUseAuth.mockReturnValue({ user: null, isLoading: true });
 
-      render(<DevicePage />);
+      const { container } = render(<DevicePage />);
 
-      // Spinner should be visible (SpinnerLoading renders an svg role=img or status div)
-      // The page renders a spinner for authLoading || !user, so the code input should be absent.
+      // SpinnerLoading renders a div with the `animate-spin` CSS class — assert
+      // it is actually present so the test fails if the component returns null
+      // instead of a spinner (negative assertion alone would not catch that).
+      expect(container.querySelector('[class*="animate-spin"]')).not.toBeNull();
+      // The code input form must be absent while auth is resolving.
       expect(screen.queryByLabelText("device.codeLabel")).toBeNull();
       expect(mockVerifyDeviceCode).not.toHaveBeenCalled();
       expect(mockRouterReplace).not.toHaveBeenCalled();
