@@ -1,7 +1,7 @@
 /**
  * Build a direct-browser-navigation URL to the backend OAuth login endpoint.
  *
- * Two non-obvious traps the helper guards against:
+ * Three non-obvious traps the helper guards against:
  *
  *  1. **Cross-origin redirect resolve**: backend uses `RedirectResponse(url=
  *     return_to_url)` verbatim in some callback paths (auth.py:607, 1016), so
@@ -10,11 +10,15 @@
  *     .com` vs frontend on `https://app.example.com`). Send an absolute
  *     same-origin URL instead — `new URL(returnTo, window.location.origin)`.
  *
- *  2. **`/api/v1` double prefix**: some deployments set
+ *  2. **`/api/v1` suffix duplication**: some deployments set
  *     `NEXT_PUBLIC_API_URL=https://api.example.com/api/v1` with the version
  *     suffix baked in. Naively appending `/api/v1/auth/...` would produce
- *     `/api/v1/api/v1/auth/...`. Strip any trailing `/api/v1` and slashes
- *     before appending.
+ *     `/api/v1/api/v1/auth/...`. Strip a trailing `/api/v1` (with or without
+ *     trailing slash) before appending.
+ *
+ *  3. **Trailing-slash collapse**: independently of trap 2, the env var may
+ *     end with one or more trailing slashes (e.g. `https://api.example.com/`
+ *     or `///`). Collapsing them keeps the concatenated path well-formed.
  *
  * Caller must ensure `returnTo` is same-origin-safe — either by passing a
  * value constructed from same-origin parts (e.g. `window.location.pathname +
