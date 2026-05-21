@@ -27,13 +27,13 @@ from sqlalchemy.exc import IntegrityError
 from models.llm_pricing import LLMPricing
 from services.llm_pricing_service import LLMPricingService
 
-# NOTE: established provider+model combinations (e.g. ``cohere``/``rerank-3.5``,
-# ``anthropic``/``claude-sonnet-4-6``) may collide with seed migration rows
-# inserted by ``e13_474_pricing_seeds`` and ``c03_471_seed_pricing`` when
-# the integration suite runs ``test_alembic_migrations`` before this module.
-# Tests that need to assert a *miss* or INSERT a fresh pricing row use
-# unique synthetic ``(provider, model)`` names to avoid colliding with the
-# ``uq_llm_pricing_lookup_key`` UNIQUE constraint.
+# NOTE: the two ``rerank_search_units`` tests below use unique synthetic
+# ``(provider, model)`` names to avoid colliding with seed migration rows.
+# ``e13_474_pricing_seeds`` inserts ``(cohere, rerank-3.5, rerank_search_units,
+# 2026-04-28)`` which previously made the schema-miss assertion return a row
+# and the per-1k-SU INSERT raise on ``uq_llm_pricing_lookup_key``. Other tests
+# in this file use the ``effective_from`` offset trick instead — both
+# strategies are valid; pick whichever fits the assertion shape.
 
 
 def _make_row(

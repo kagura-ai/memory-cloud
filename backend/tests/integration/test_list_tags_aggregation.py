@@ -56,9 +56,9 @@ async def _seed_workspace_context(
 
     Flush between workspace and its children: ``WorkspaceMember.workspace_id``
     and ``Context.workspace_id`` are column-level FKs with no ``relationship()``
-    to drive insert order, so a single flush can attempt the child rows before
-    the parent and raise ``fk_contexts_workspace_id`` /
-    ``fk_workspace_members_workspace_id``.
+    to drive insert order. Without the intermediate flush SQLAlchemy may emit
+    the child INSERTs before the parent, deterministically violating the
+    workspace FK.
     """
     ws = Workspace(
         id=uuid4(),
