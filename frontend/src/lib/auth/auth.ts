@@ -6,6 +6,11 @@
 
 import { apiClient } from "../api/base";
 
+/** Build a `?return_to=<encoded>` query string, or "" when returnTo is absent. */
+function returnToParam(returnTo?: string): string {
+  return returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
+}
+
 export interface User {
   id: string;
   email: string;
@@ -27,8 +32,15 @@ export interface AuthResponse {
 }
 
 /**
- * Get the Google OAuth2 authorization URL
- * Redirects to Google OAuth2 consent screen
+ * Get the Google OAuth2 authorization URL (JSON-mode, API-client path).
+ *
+ * **Important**: this function MUST be called WITHOUT `return_to`. The backend
+ * endpoint switches modes on that param: without it, returns JSON
+ * `{authorization_url}`; with it, returns a 303 RedirectResponse to Google.
+ * `apiClient.get()` cannot handle the redirect mode (CORS + non-JSON), so the
+ * `return_to` flow goes through direct browser navigation instead — see the
+ * `if (returnTo)` branch in `handleGoogleLogin` / `handleGitHubLogin` of
+ * `/app/login/page.tsx` for the canonical pattern.
  */
 export async function getAuthUrl(): Promise<string> {
   try {
@@ -43,8 +55,9 @@ export async function getAuthUrl(): Promise<string> {
 }
 
 /**
- * Get the GitHub OAuth2 authorization URL
- * Issue #315: GitHub OAuth2 Authentication
+ * Get the GitHub OAuth2 authorization URL (JSON-mode, API-client path).
+ * Issue #315: GitHub OAuth2 Authentication.
+ * See `getAuthUrl` for the `return_to` mode-switch contract.
  */
 export async function getGitHubAuthUrl(): Promise<string> {
   try {
@@ -164,11 +177,13 @@ export async function loginWithPassword(
   password: string,
   returnTo?: string,
 ): Promise<PasswordLoginResult> {
-  const params = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
-  return apiClient.post<PasswordLoginResult>(`/api/v1/auth/login${params}`, {
-    login_id: loginId,
-    password,
-  });
+  return apiClient.post<PasswordLoginResult>(
+    `/api/v1/auth/login${returnToParam(returnTo)}`,
+    {
+      login_id: loginId,
+      password,
+    },
+  );
 }
 
 /**
@@ -179,9 +194,8 @@ export async function verifyMfa(
   totpCode: string,
   returnTo?: string,
 ): Promise<PasswordLoginResult> {
-  const params = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
   return apiClient.post<PasswordLoginResult>(
-    `/api/v1/auth/mfa/verify${params}`,
+    `/api/v1/auth/mfa/verify${returnToParam(returnTo)}`,
     { mfa_session_token: mfaSessionToken, totp_code: totpCode },
   );
 }

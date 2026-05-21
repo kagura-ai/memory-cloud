@@ -23,10 +23,12 @@ import LoginPage from "./page";
 const mockGetAuthConfig = vi.fn();
 const mockLoginWithPassword = vi.fn();
 const mockVerifyMfa = vi.fn();
+const mockGetAuthUrl = vi.fn();
+const mockGetGitHubAuthUrl = vi.fn();
 
 vi.mock("@/lib/auth/auth", () => ({
-  getAuthUrl: vi.fn(),
-  getGitHubAuthUrl: vi.fn(),
+  getAuthUrl: (...args: unknown[]) => mockGetAuthUrl(...args),
+  getGitHubAuthUrl: (...args: unknown[]) => mockGetGitHubAuthUrl(...args),
   getAuthConfig: (...args: unknown[]) => mockGetAuthConfig(...args),
   loginWithPassword: (...args: unknown[]) => mockLoginWithPassword(...args),
   verifyMfa: (...args: unknown[]) => mockVerifyMfa(...args),
@@ -58,6 +60,8 @@ beforeEach(() => {
   mockGetAuthConfig.mockReset();
   mockLoginWithPassword.mockReset();
   mockVerifyMfa.mockReset();
+  mockGetAuthUrl.mockReset();
+  mockGetGitHubAuthUrl.mockReset();
   mockPush.mockReset();
   // Clear URL params between tests so return_to from one test doesn't bleed
   for (const key of [...mockSearchParams.keys()]) {
@@ -240,5 +244,162 @@ describe("LoginPage return_to sanitisation via safeReturnTo (#772)", () => {
     expect(mockLoginWithPassword.mock.calls[0][2]).toBe(
       "/device?user_code=ABC",
     );
+  });
+});
+
+// ---------- OAuth return_to forwarding (#774) -------------------------------
+
+/**
+ * Render LoginPage, tick the terms checkbox, click the OAuth provider button.
+ * Caller asserts on mockGetAuthUrl / mockGetGitHubAuthUrl + window.location.href
+ * after the click. Caller sets up mockSearchParams + mocks beforehand.
+ */
+async function clickOAuthButton(provider: "google" | "github"): Promise<void> {
+  mockGetAuthConfig.mockResolvedValue({
+    password_login_enabled: true,
+    google_oauth_enabled: provider === "google",
+    github_oauth_enabled: provider === "github",
+  });
+
+  render(<LoginPage />);
+
+  const buttonName =
+    provider === "google" ? /continueWithGoogle/i : /continueWithGitHub/i;
+  const button = await screen.findByRole("button", { name: buttonName });
+
+  const termsCheckbox = screen.getByRole("checkbox", {
+    name: /agreeToTerms/i,
+  }) as HTMLInputElement;
+  fireEvent.click(termsCheckbox);
+
+  fireEvent.click(button);
+}
+
+describe("LoginPage OAuth return_to forwarding (#774)", () => {
+  // Capture window.location.href assignments. Backend switches /api/v1/auth/
+  // {provider}/login between JSON (no return_to) and 303 redirect (with
+  // return_to), so the frontend must NOT route the redirect mode through
+  // apiClient.get() — it goes through direct browser navigation instead.
+  let hrefAssignments: string[];
+  const originalLocation = window.location;
+  const originalOrigin = window.location.origin;
+
+  beforeEach(() => {
+    hrefAssignments = [];
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: {
+        get origin() {
+          return originalOrigin;
+        },
+        get href() {
+          return hrefAssignments[hrefAssignments.length - 1] || "";
+        },
+        set href(val: string) {
+          hrefAssignments.push(val);
+        },
+      },
+    });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: originalLocation,
+    });
+    vi.unstubAllEnvs();
+  });
+
+  it("with safe relative return_to, navigates directly to backend with absolute same-origin return_to (Google)", async () => {
+    mockSearchParams.set("return_to", "/device?user_code=ABC");
+    await clickOAuthButton("google");
+
+    // Direct browser navigation — apiClient JSON path bypassed.
+    // return_to is sent as an absolute same-origin URL (not the raw relative path)
+    // so backend's verbatim RedirectResponse resolves against the frontend origin,
+    // not the API origin. See buildOAuthRedirect JSDoc in page.tsx for the trap.
+    await waitFor(() => {
+      expect(hrefAssignments.length).toBeGreaterThan(0);
+    });
+    const expectedReturnTo = encodeURIComponent(
+      new URL("/device?user_code=ABC", originalOrigin).toString(),
+    );
+    expect(hrefAssignments[0]).toMatch(
+      new RegExp(`/api/v1/auth/google/login\\?return_to=${expectedReturnTo}$`),
+    );
+    // Guard against the /api/v1 double-prefix trap — verify the URL has
+    // exactly one /api/v1/ segment, not two.
+    expect(hrefAssignments[0]).not.toMatch(/\/api\/v1\/api\/v1\//);
+    expect(mockGetAuthUrl).not.toHaveBeenCalled();
+  });
+
+  it("with safe relative return_to, navigates directly to backend with absolute same-origin return_to (GitHub)", async () => {
+    mockSearchParams.set("return_to", "/device?user_code=ABC");
+    await clickOAuthButton("github");
+
+    await waitFor(() => {
+      expect(hrefAssignments.length).toBeGreaterThan(0);
+    });
+    const expectedReturnTo = encodeURIComponent(
+      new URL("/device?user_code=ABC", originalOrigin).toString(),
+    );
+    expect(hrefAssignments[0]).toMatch(
+      new RegExp(`/api/v1/auth/github/login\\?return_to=${expectedReturnTo}$`),
+    );
+    expect(hrefAssignments[0]).not.toMatch(/\/api\/v1\/api\/v1\//);
+    expect(mockGetGitHubAuthUrl).not.toHaveBeenCalled();
+  });
+
+  it("normalizes NEXT_PUBLIC_API_URL when it includes a trailing /api/v1 suffix", async () => {
+    // Some deployments bake the version suffix into the env var. The helper
+    // must strip it so the result is .../api/v1/auth/... not .../api/v1/api/v1/auth/...
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com/api/v1");
+    mockSearchParams.set("return_to", "/device?user_code=ABC");
+    await clickOAuthButton("google");
+
+    await waitFor(() => {
+      expect(hrefAssignments.length).toBeGreaterThan(0);
+    });
+    expect(hrefAssignments[0]).toMatch(
+      /^https:\/\/api\.example\.com\/api\/v1\/auth\/google\/login\?return_to=/,
+    );
+    expect(hrefAssignments[0]).not.toMatch(/\/api\/v1\/api\/v1\//);
+  });
+
+  it("normalizes NEXT_PUBLIC_API_URL with a trailing slash", async () => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com/");
+    mockSearchParams.set("return_to", "/device?user_code=ABC");
+    await clickOAuthButton("google");
+
+    await waitFor(() => {
+      expect(hrefAssignments.length).toBeGreaterThan(0);
+    });
+    expect(hrefAssignments[0]).toMatch(
+      /^https:\/\/api\.example\.com\/api\/v1\/auth\/google\/login\?return_to=/,
+    );
+    expect(hrefAssignments[0]).not.toMatch(/\/\/api\/v1/);
+  });
+
+  it("with cross-origin return_to, sanitizes to undefined and uses JSON path (Google)", async () => {
+    // safeReturnTo strips the cross-origin URL → returnTo is undefined →
+    // we take the JSON path with no args (existing behavior).
+    mockSearchParams.set("return_to", "https://evil.com/x");
+    mockGetAuthUrl.mockResolvedValue("https://accounts.google.com/oauth/auth");
+    await clickOAuthButton("google");
+
+    await waitFor(() => {
+      expect(mockGetAuthUrl).toHaveBeenCalledTimes(1);
+    });
+    expect(mockGetAuthUrl).toHaveBeenCalledWith();
+  });
+
+  it("with no return_to, uses JSON path with no args (Google)", async () => {
+    mockGetAuthUrl.mockResolvedValue("https://accounts.google.com/oauth/auth");
+    await clickOAuthButton("google");
+
+    await waitFor(() => {
+      expect(mockGetAuthUrl).toHaveBeenCalledTimes(1);
+    });
+    expect(mockGetAuthUrl).toHaveBeenCalledWith();
   });
 });
