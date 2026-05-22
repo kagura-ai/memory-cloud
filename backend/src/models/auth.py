@@ -844,16 +844,6 @@ class OAuth2DeviceCode(Base):
 
     client: Mapped["OAuth2Client"] = relationship("OAuth2Client")
 
-    # Redundant secondary indexes from migration d08_536: the UK auto-indexes
-    # from ``unique=True`` already cover equality lookups, but production has
-    # them as separate objects so the ORM mirrors them for create_all parity.
-    # TODO(#737): drop both ``ix_*`` indexes in one migration and remove
-    # these two lines.
-    __table_args__ = (
-        Index("ix_oauth_device_codes_device_code", "device_code"),
-        Index("ix_oauth_device_codes_user_code", "user_code"),
-    )
-
     def __repr__(self) -> str:
         return f"<OAuth2DeviceCode(device_code='{self.device_code[:8]}...', client='{self.client_id}')>"
 
