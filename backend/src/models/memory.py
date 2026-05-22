@@ -317,9 +317,6 @@ EDGE_TYPE_NEURAL_ASSOCIATION = "neural_association"
 EDGE_TYPE_RELATED_TO = "related_to"
 EDGE_TYPE_DEPENDS_ON = "depends_on"
 EDGE_TYPE_LEARNED_FROM = "learned_from"
-EDGE_TYPE_SEMANTIC_SIMILARITY = "semantic_similarity"
-EDGE_TYPE_DECLARED_LINK = "declared_link"
-EDGE_TYPE_TAG_COOCCURRENCE = "tag_cooccurrence"
 
 # Issue #509 (Phase B of #461): registration-order tuple used to derive the
 # ``valid_edge_type`` CHECK constraint string in ``NeuralMemoryEdge.__table_args__``.
@@ -333,9 +330,6 @@ _ALL_EDGE_TYPES: tuple[str, ...] = (
     EDGE_TYPE_RELATED_TO,
     EDGE_TYPE_DEPENDS_ON,
     EDGE_TYPE_LEARNED_FROM,
-    EDGE_TYPE_SEMANTIC_SIMILARITY,
-    EDGE_TYPE_DECLARED_LINK,
-    EDGE_TYPE_TAG_COOCCURRENCE,
 )
 
 # Edge origin discriminator (Issue #722).
