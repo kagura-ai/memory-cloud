@@ -817,11 +817,6 @@ class OAuth2DeviceCode(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
-    # ``unique=True`` produces the UK constraint that alembic creates. The
-    # non-unique ``ix_oauth_device_codes_<column>`` indexes are declared in
-    # ``__table_args__`` below — combining ``index=True`` with ``unique=True``
-    # here would collapse both into one unique index, but production has two
-    # separate objects.
     device_code: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     user_code: Mapped[str] = mapped_column(String(8), nullable=False, unique=True)
     client_id: Mapped[str] = mapped_column(
@@ -843,16 +838,6 @@ class OAuth2DeviceCode(Base):
     )
 
     client: Mapped["OAuth2Client"] = relationship("OAuth2Client")
-
-    # Redundant secondary indexes from migration d08_536: the UK auto-indexes
-    # from ``unique=True`` already cover equality lookups, but production has
-    # them as separate objects so the ORM mirrors them for create_all parity.
-    # TODO(#737): drop both ``ix_*`` indexes in one migration and remove
-    # these two lines.
-    __table_args__ = (
-        Index("ix_oauth_device_codes_device_code", "device_code"),
-        Index("ix_oauth_device_codes_user_code", "user_code"),
-    )
 
     def __repr__(self) -> str:
         return f"<OAuth2DeviceCode(device_code='{self.device_code[:8]}...', client='{self.client_id}')>"
