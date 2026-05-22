@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 
+from models.memory import EDGE_ORIGIN_HEBBIAN, EDGE_ORIGIN_SEMANTIC
 from services.sleep.edge_discovery import (
     BATCH_SIZE,
     CONFIDENCE_HISTOGRAM_KEYS,
@@ -67,12 +68,23 @@ def _make_memory(memory_id=None, summary="test", importance=0.5):
     return m
 
 
-def _make_edge(edge_type, weight, dst_id=None):
-    """Build a minimal edge double with only the attributes the filter reads."""
+def _make_edge(edge_type, weight, dst_id=None, origin=EDGE_ORIGIN_HEBBIAN, edge_metadata=None):
+    """Build a minimal edge double with only the attributes the filter reads.
+
+    Issue #741: ``_is_synthetic_seed_edge`` reads ``origin`` and
+    ``edge_metadata`` (no longer ``edge_type``). Callers exercising the
+    synthetic-seed classifier must pass ``origin='semantic'`` for k-NN
+    seed edges and ``edge_metadata={'source': 'tag_cooccurrence'}`` for
+    tag-cooccurrence seed edges. Default ``origin='hebbian'`` /
+    ``edge_metadata=None`` matches the dominant "real connection" shape
+    used by the other tests in this file.
+    """
     e = MagicMock()
     e.edge_type = edge_type
     e.weight = weight
     e.dst_id = dst_id or uuid4()
+    e.origin = origin
+    e.edge_metadata = edge_metadata
     return e
 
 
@@ -335,17 +347,25 @@ class TestIsSyntheticSeedEdge:
 
     def test_knn_seed_default_weight_is_synthetic(self):
         """Default knn_seed_weight=0.3 must be classified as synthetic —
-        this is the in-production value that #248 was triggered by."""
-        edge = _make_edge("semantic_similarity", 0.3)
+        this is the in-production value that #248 was triggered by.
+
+        Issue #741: classifier now keys on ``origin='semantic'`` rather
+        than ``edge_type='semantic_similarity'``.
+        """
+        edge = _make_edge("semantic_similarity", 0.3, origin=EDGE_ORIGIN_SEMANTIC)
         assert _is_synthetic_seed_edge(edge) is True
 
     def test_high_weight_semantic_similarity_is_not_synthetic(self):
-        edge = _make_edge("semantic_similarity", 0.8)
+        edge = _make_edge("semantic_similarity", 0.8, origin=EDGE_ORIGIN_SEMANTIC)
         assert _is_synthetic_seed_edge(edge) is False
 
     def test_at_threshold_is_not_synthetic(self):
         """Threshold is strict (< 0.5); exactly 0.5 is treated as real."""
-        edge = _make_edge("semantic_similarity", SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD)
+        edge = _make_edge(
+            "semantic_similarity",
+            SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD,
+            origin=EDGE_ORIGIN_SEMANTIC,
+        )
         assert _is_synthetic_seed_edge(edge) is False
 
     def test_related_to_is_never_synthetic(self):
@@ -368,13 +388,18 @@ class TestIsSyntheticSeedEdge:
     # ---- Issue #223: tag_cooccurrence is synthetic at any weight ----
 
     def test_tag_cooccurrence_low_weight_is_synthetic(self):
-        """Default tag_cooccurrence weight (2 shared = 0.25) is synthetic."""
-        edge = _make_edge("tag_cooccurrence", 0.25)
+        """Default tag_cooccurrence weight (2 shared = 0.25) is synthetic.
+
+        Issue #741: classifier now keys on
+        ``edge_metadata['source']=='tag_cooccurrence'`` rather than
+        ``edge_type='tag_cooccurrence'``.
+        """
+        edge = _make_edge("tag_cooccurrence", 0.25, edge_metadata={"source": "tag_cooccurrence"})
         assert _is_synthetic_seed_edge(edge) is True
 
     def test_tag_cooccurrence_capped_weight_is_synthetic(self):
         """4+ shared tags caps weight at 0.40 — still synthetic."""
-        edge = _make_edge("tag_cooccurrence", 0.40)
+        edge = _make_edge("tag_cooccurrence", 0.40, edge_metadata={"source": "tag_cooccurrence"})
         assert _is_synthetic_seed_edge(edge) is True
 
     def test_tag_cooccurrence_above_threshold_is_still_synthetic(self):
@@ -385,7 +410,7 @@ class TestIsSyntheticSeedEdge:
         documented design: tag_cooccurrence is purely seeding by definition,
         and Sleep Discovery should be free to overwrite it with a confirmed
         ``related_to``."""
-        edge = _make_edge("tag_cooccurrence", 0.9)
+        edge = _make_edge("tag_cooccurrence", 0.9, edge_metadata={"source": "tag_cooccurrence"})
         assert _is_synthetic_seed_edge(edge) is True
 
 
@@ -401,10 +426,13 @@ class TestFilterExistingEdges:
 
     @pytest.mark.asyncio
     async def test_low_weight_semantic_similarity_does_not_block(self, edge_phase):
-        """A pair with only a k-NN seed edge is re-judged by discovery."""
+        """A pair with only a k-NN seed edge is re-judged by discovery.
+
+        Issue #741: seed identity is the ``origin='semantic'`` discriminator.
+        """
         src = uuid4()
         dst = uuid4()
-        seed_edge = _make_edge("semantic_similarity", 0.3, dst_id=dst)
+        seed_edge = _make_edge("semantic_similarity", 0.3, dst_id=dst, origin=EDGE_ORIGIN_SEMANTIC)
         edge_phase.edge_repo.get_outgoing_edges = AsyncMock(return_value=[seed_edge])
 
         filtered = await edge_phase._filter_existing_edges(
@@ -418,7 +446,9 @@ class TestFilterExistingEdges:
         """A strong semantic_similarity edge is treated as a real connection."""
         src = uuid4()
         dst = uuid4()
-        strong_edge = _make_edge("semantic_similarity", 0.8, dst_id=dst)
+        strong_edge = _make_edge(
+            "semantic_similarity", 0.8, dst_id=dst, origin=EDGE_ORIGIN_SEMANTIC
+        )
         edge_phase.edge_repo.get_outgoing_edges = AsyncMock(return_value=[strong_edge])
 
         filtered = await edge_phase._filter_existing_edges(
@@ -475,7 +505,9 @@ class TestFilterExistingEdges:
         src = uuid4()
         dst = uuid4()
         other = uuid4()
-        seed_to_other = _make_edge("semantic_similarity", 0.3, dst_id=other)
+        seed_to_other = _make_edge(
+            "semantic_similarity", 0.3, dst_id=other, origin=EDGE_ORIGIN_SEMANTIC
+        )
         edge_phase.edge_repo.get_outgoing_edges = AsyncMock(return_value=[seed_to_other])
 
         filtered = await edge_phase._filter_existing_edges(
