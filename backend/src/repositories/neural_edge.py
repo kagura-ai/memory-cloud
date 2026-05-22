@@ -21,9 +21,9 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import (
+    EDGE_ORIGIN_DECLARED,
     EDGE_ORIGIN_HEBBIAN,
     EDGE_ORIGIN_SEMANTIC,
-    EDGE_TYPE_DECLARED_LINK,
     Memory,
     NeuralMemoryEdge,
 )
@@ -157,12 +157,16 @@ class NeuralEdgeRepository:
             workspace_id: Workspace ID (for 3-level isolation)
             context_id: Context ID (for 3-level isolation)
             protect_declared_link: When True, ON CONFLICT preserves the
-                existing edge_type if it is "declared_link" (only weight/
-                confidence/metadata/last_updated update). Used by automated
-                writers (Hebbian co-activation, edge discovery) so user-
-                declared links survive co-activation retyping. User-driven
-                update_edge calls leave this False so an explicit type
-                change still works. (Issue #457)
+                existing row's ``edge_type`` AND ``origin`` if it already
+                has ``origin='declared'`` (only weight/confidence/metadata/
+                last_updated update). Used by automated writers (Hebbian
+                co-activation, edge discovery) so user-declared links
+                survive co-activation retyping. User-driven update_edge
+                calls leave this False so an explicit type change still
+                works. (Issue #457; pivoted to origin discriminator
+                in #741 — the parameter name is retained for callsite
+                stability but the predicate is now ``origin='declared'``,
+                not ``edge_type='declared_link'``.)
             return_fresh_edge: When True (default), the returned ORM is
                 refreshed from the DB so its Python attributes reflect what
                 RETURNING actually wrote (Issue #458). Hot-path callers that
@@ -208,25 +212,31 @@ class NeuralEdgeRepository:
             last_updated=utcnow(),
         )
 
-        # Issue #457: declared_link rows must survive Hebbian retyping.
-        # CASE keeps the existing edge_type when it is declared_link;
-        # weight/confidence/metadata/last_updated still update so co-
-        # activation can strengthen user-declared links.
+        # Issue #457 / #741: user-asserted ("declared") links must survive
+        # Hebbian retyping. After #741 the predicate pivots from
+        # edge_type=='declared_link' to origin=='declared': a row with
+        # origin='declared' represents a user-asserted link, so both its
+        # edge_type and origin are preserved across a hebbian co-activation
+        # upsert. weight/confidence/metadata/last_updated still update so
+        # co-activation can strengthen user-declared links.
         if protect_declared_link:
             edge_type_set = case(
                 (
-                    NeuralMemoryEdge.edge_type == EDGE_TYPE_DECLARED_LINK,
-                    EDGE_TYPE_DECLARED_LINK,
+                    NeuralMemoryEdge.origin == EDGE_ORIGIN_DECLARED,
+                    NeuralMemoryEdge.edge_type,
                 ),
                 else_=stmt.excluded.edge_type,
             )
         else:
             edge_type_set = stmt.excluded.edge_type
 
-        # Sticky origin (mirrors protect_declared_link CASE above): semantic
-        # and declared edges survive a Hebbian co-recall upsert; only existing
-        # hebbian rows can be overwritten. Without this, a runtime co-recall
-        # would silently demote sleep-discovered edges back into the decay loop.
+        # Sticky origin: semantic and declared edges survive a Hebbian
+        # co-recall upsert; only existing hebbian rows can be overwritten.
+        # Without this, a runtime co-recall would silently demote sleep-
+        # discovered edges back into the decay loop. This also enforces the
+        # symmetric arm of the protect_declared_link CASE above — when the
+        # existing row has origin='declared', its origin is preserved
+        # alongside its edge_type, keeping the two columns co-managed.
         origin_set = case(
             (NeuralMemoryEdge.origin != EDGE_ORIGIN_HEBBIAN, NeuralMemoryEdge.origin),
             else_=stmt.excluded.origin,
