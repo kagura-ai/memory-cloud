@@ -817,11 +817,6 @@ class OAuth2DeviceCode(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
-    # ``unique=True`` produces the UK constraint that alembic creates. The
-    # non-unique ``ix_oauth_device_codes_<column>`` indexes are declared in
-    # ``__table_args__`` below — combining ``index=True`` with ``unique=True``
-    # here would collapse both into one unique index, but production has two
-    # separate objects.
     device_code: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     user_code: Mapped[str] = mapped_column(String(8), nullable=False, unique=True)
     client_id: Mapped[str] = mapped_column(
