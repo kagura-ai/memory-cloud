@@ -21,6 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from auth.workspace_roles import ContextRole
 from utils.exceptions import AuthorizationError
 
 WORKSPACE_ID = uuid4()
@@ -462,7 +463,7 @@ class TestAddMemberHappyPath:
 class TestRemoveMemberHappyPath:
     def test_cannot_remove_context_owner_role(self, client):
         """Existing role-is-owner guard remains functional."""
-        owner_member = MagicMock(role="owner")
+        owner_member = MagicMock(role=ContextRole.OWNER)
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = owner_member
 
