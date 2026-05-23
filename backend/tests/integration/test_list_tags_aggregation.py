@@ -26,6 +26,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.workspace_roles import WorkspaceRole
 from models.auth import Context, Workspace, WorkspaceMember
 from models.memory import Memory
 from services.context_service import ContextService
@@ -75,7 +76,7 @@ async def _seed_workspace_context(
     member = WorkspaceMember(
         workspace_id=ws.id,
         user_id=user_id,
-        role="owner",
+        role=WorkspaceRole.OWNER,
     )
     ctx = Context(
         id=uuid4(),
