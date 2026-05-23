@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 
+from auth.workspace_roles import WorkspaceRole
 from services.permission_service import (
     CONTEXT_ROLE_WEIGHTS,
     ORG_ROLE_WEIGHTS,
@@ -53,21 +54,23 @@ class TestWorkspaceAccess:
     async def test_check_workspace_access_owner(self, service):
         """Owner should have access to any role requirement."""
         ws_id = uuid4()
-        mock_member = MagicMock(role="owner")
+        mock_member = MagicMock(role=WorkspaceRole.OWNER)
         service.workspace_service.get_member = AsyncMock(return_value=mock_member)
 
-        result = await service.check_workspace_access("user1", ws_id, required_role="owner")
+        result = await service.check_workspace_access(
+            "user1", ws_id, required_role=WorkspaceRole.OWNER
+        )
         assert result == mock_member
 
     @pytest.mark.asyncio
     async def test_check_workspace_access_insufficient_role(self, service):
         """Viewer should not have admin access."""
         ws_id = uuid4()
-        mock_member = MagicMock(role="viewer")
+        mock_member = MagicMock(role=WorkspaceRole.VIEWER)
         service.workspace_service.get_member = AsyncMock(return_value=mock_member)
 
         with pytest.raises(AuthorizationError) as exc_info:
-            await service.check_workspace_access("user1", ws_id, required_role="admin")
+            await service.check_workspace_access("user1", ws_id, required_role=WorkspaceRole.ADMIN)
         assert exc_info.value.status_code == 403
         assert exc_info.value.reason == "role_too_low"
 
@@ -97,7 +100,9 @@ class TestWorkspaceAccess:
     @pytest.mark.asyncio
     async def test_is_workspace_member_true(self, service):
         """User with membership returns True."""
-        service.workspace_service.get_member = AsyncMock(return_value=MagicMock(role="member"))
+        service.workspace_service.get_member = AsyncMock(
+            return_value=MagicMock(role=WorkspaceRole.MEMBER)
+        )
         assert await service.is_workspace_member("user1", uuid4()) is True
 
     @pytest.mark.asyncio
@@ -110,7 +115,7 @@ class TestWorkspaceAccess:
     async def test_check_workspace_owner(self, service):
         """Convenience method for owner check."""
         ws_id = uuid4()
-        mock_member = MagicMock(role="owner")
+        mock_member = MagicMock(role=WorkspaceRole.OWNER)
         service.workspace_service.get_member = AsyncMock(return_value=mock_member)
         result = await service.check_workspace_owner("user1", ws_id)
         assert result == mock_member
@@ -119,7 +124,7 @@ class TestWorkspaceAccess:
     async def test_check_workspace_admin(self, service):
         """Convenience method for admin check."""
         ws_id = uuid4()
-        mock_member = MagicMock(role="admin")
+        mock_member = MagicMock(role=WorkspaceRole.ADMIN)
         service.workspace_service.get_member = AsyncMock(return_value=mock_member)
         result = await service.check_workspace_admin("user1", ws_id)
         assert result == mock_member
@@ -244,7 +249,9 @@ class TestMemoryAccessControl:
 
         mock_ctx_svc = MagicMock()
         mock_ctx_svc.is_context_shared = AsyncMock(return_value=True)
-        service.workspace_service.get_member = AsyncMock(return_value=MagicMock(role="member"))
+        service.workspace_service.get_member = AsyncMock(
+            return_value=MagicMock(role=WorkspaceRole.MEMBER)
+        )
 
         with patch("services.context_service.ContextService", return_value=mock_ctx_svc):
             result = await service.can_access_memory(
@@ -300,7 +307,7 @@ class TestGetAccessibleContextsForViewer:
     @pytest.fixture
     def viewer_member(self):
         member = MagicMock()
-        member.role = "viewer"
+        member.role = WorkspaceRole.VIEWER
         member.allowed_context_ids = None  # No restriction → all shared contexts
         return member
 
@@ -333,7 +340,7 @@ class TestGetAccessibleContextsForViewer:
     async def test_viewer_with_empty_whitelist_returns_empty(self):
         """Viewer with allowed_context_ids=[] → no access (explicit empty)."""
         viewer = MagicMock()
-        viewer.role = "viewer"
+        viewer.role = WorkspaceRole.VIEWER
         viewer.allowed_context_ids = []
 
         db = MagicMock()
@@ -376,7 +383,7 @@ class TestResolveContextWhitelistEnforcement:
         ctx_id = uuid4()
         ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
         member = MagicMock()
-        member.role = "member"
+        member.role = WorkspaceRole.MEMBER
         member.allowed_context_ids = [uuid4()]  # whitelist excludes ctx_id
         service = self._service_with_member(member, ctx)
 
@@ -389,7 +396,7 @@ class TestResolveContextWhitelistEnforcement:
         ctx_id = uuid4()
         ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
         viewer = MagicMock()
-        viewer.role = "viewer"
+        viewer.role = WorkspaceRole.VIEWER
         viewer.allowed_context_ids = []  # explicit empty whitelist
         service = self._service_with_member(viewer, ctx)
 
@@ -402,7 +409,7 @@ class TestResolveContextWhitelistEnforcement:
         ctx_id = uuid4()
         ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
         member = MagicMock()
-        member.role = "member"
+        member.role = WorkspaceRole.MEMBER
         member.allowed_context_ids = [ctx_id]  # whitelist includes ctx_id
         service = self._service_with_member(member, ctx)
 
@@ -416,7 +423,7 @@ class TestResolveContextWhitelistEnforcement:
         ctx_id = uuid4()
         ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
         admin = MagicMock()
-        admin.role = "admin"
+        admin.role = WorkspaceRole.ADMIN
         admin.allowed_context_ids = [uuid4()]  # would exclude ctx_id if checked
         service = self._service_with_member(admin, ctx)
 
@@ -432,7 +439,7 @@ class TestResolveContextWhitelistEnforcement:
         ctx_id = uuid4()
         ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
         suspended_member = MagicMock()
-        suspended_member.role = "member"
+        suspended_member.role = WorkspaceRole.MEMBER
         suspended_member.allowed_context_ids = None  # suspended
         service = self._service_with_member(suspended_member, ctx)
 
@@ -447,7 +454,7 @@ class TestResolveContextWhitelistEnforcement:
         ctx_id = uuid4()
         ctx = MagicMock(id=ctx_id, workspace_id=uuid4(), is_private=False, created_by="someone")
         viewer = MagicMock()
-        viewer.role = "viewer"
+        viewer.role = WorkspaceRole.VIEWER
         viewer.allowed_context_ids = None  # no restriction (all contexts)
         service = self._service_with_member(viewer, ctx)
 

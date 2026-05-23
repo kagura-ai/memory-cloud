@@ -23,6 +23,7 @@ from api.routes.admin import (
     list_users,
     update_workspace_slot_bonus,
 )
+from auth.workspace_roles import WorkspaceRole
 from models.auth import AuditLog, User, WorkspaceMember
 from models.schemas import UpdateWorkspaceSlotBonusRequest
 from utils.exceptions import BonusBelowZeroError, InsufficientReasonError
@@ -44,7 +45,9 @@ async def user_with_bonus(db_session: AsyncSession) -> dict:
     ws = make_workspace(owner_user_id=user.user_id)
     db_session.add(ws)
     await db_session.flush()
-    db_session.add(WorkspaceMember(workspace_id=ws.id, user_id=user.user_id, role="owner"))
+    db_session.add(
+        WorkspaceMember(workspace_id=ws.id, user_id=user.user_id, role=WorkspaceRole.OWNER)
+    )
     await db_session.commit()
 
     return {"user_id": user.user_id, "email": user.email, "workspace_id": str(ws.id)}
@@ -64,7 +67,9 @@ async def user_at_risk(db_session: AsyncSession) -> dict:
     ws = make_workspace(owner_user_id=user.user_id, plan_name="free")
     db_session.add(ws)
     await db_session.flush()
-    db_session.add(WorkspaceMember(workspace_id=ws.id, user_id=user.user_id, role="owner"))
+    db_session.add(
+        WorkspaceMember(workspace_id=ws.id, user_id=user.user_id, role=WorkspaceRole.OWNER)
+    )
     await db_session.commit()
 
     return {"user_id": user.user_id, "email": user.email}
@@ -85,7 +90,10 @@ async def user_destructive(db_session: AsyncSession) -> dict:
     db_session.add_all(workspaces)
     await db_session.flush()
     db_session.add_all(
-        [WorkspaceMember(workspace_id=w.id, user_id=user.user_id, role="owner") for w in workspaces]
+        [
+            WorkspaceMember(workspace_id=w.id, user_id=user.user_id, role=WorkspaceRole.OWNER)
+            for w in workspaces
+        ]
     )
     await db_session.commit()
 
@@ -112,8 +120,10 @@ async def user_with_mixed_workspaces_plan_filter(db_session: AsyncSession) -> di
     await db_session.flush()
     db_session.add_all(
         [
-            WorkspaceMember(workspace_id=active.id, user_id=user.user_id, role="owner"),
-            WorkspaceMember(workspace_id=deleted.id, user_id=user.user_id, role="owner"),
+            WorkspaceMember(workspace_id=active.id, user_id=user.user_id, role=WorkspaceRole.OWNER),
+            WorkspaceMember(
+                workspace_id=deleted.id, user_id=user.user_id, role=WorkspaceRole.OWNER
+            ),
         ]
     )
     await db_session.commit()
@@ -313,8 +323,8 @@ async def user_with_two_pro_workspaces(db_session: AsyncSession) -> dict:
     await db_session.flush()
     db_session.add_all(
         [
-            WorkspaceMember(workspace_id=ws_a.id, user_id=user.user_id, role="owner"),
-            WorkspaceMember(workspace_id=ws_b.id, user_id=user.user_id, role="owner"),
+            WorkspaceMember(workspace_id=ws_a.id, user_id=user.user_id, role=WorkspaceRole.OWNER),
+            WorkspaceMember(workspace_id=ws_b.id, user_id=user.user_id, role=WorkspaceRole.OWNER),
         ]
     )
     await db_session.commit()

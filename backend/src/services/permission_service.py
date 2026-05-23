@@ -11,6 +11,14 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.workspace_roles import (
+    CONTEXT_ROLE_WEIGHTS,
+    ContextRole,
+    WorkspaceRole,
+)
+from auth.workspace_roles import (
+    WORKSPACE_ROLE_WEIGHTS as ORG_ROLE_WEIGHTS,
+)
 from models.auth import Context, ContextMember, WorkspaceMember
 from services.workspace_service import WorkspaceService
 from utils.exceptions import AuthorizationError, NotFoundException
@@ -24,19 +32,18 @@ logger = get_logger(__name__)
 CallerId = NewType("CallerId", str)
 MemoryAuthorId = NewType("MemoryAuthorId", str)
 
-# Role hierarchy weights (higher = more privilege)
-ORG_ROLE_WEIGHTS = {
-    "owner": 4,
-    "admin": 3,
-    "member": 2,
-    "viewer": 1,
-}
-
-CONTEXT_ROLE_WEIGHTS = {
-    "owner": 3,
-    "editor": 2,
-    "viewer": 1,
-}
+# Re-exported from auth.workspace_roles for backward compatibility.
+# New code should import directly from auth.workspace_roles.
+# ORG_ROLE_WEIGHTS keeps the old name (used by external callers).
+__all__ = [
+    "ContextRole",
+    "WorkspaceRole",
+    "ORG_ROLE_WEIGHTS",
+    "CONTEXT_ROLE_WEIGHTS",
+    "CallerId",
+    "MemoryAuthorId",
+    "PermissionService",
+]
 
 
 class PermissionService:
@@ -73,7 +80,7 @@ class PermissionService:
         self,
         user_id: str,
         workspace_id: UUID,
-        required_role: str = "member",
+        required_role: WorkspaceRole | str = WorkspaceRole.MEMBER,
     ) -> WorkspaceMember:
         """Check if user has required workspace access.
 
@@ -96,6 +103,13 @@ class PermissionService:
                 ``"workspace_deleted"`` / ``"not_a_member"`` / ``"role_too_low"``
                 for structured-log classification.
         """
+        # Normalise at the boundary: accept str for backward compat
+        required = (
+            required_role
+            if isinstance(required_role, WorkspaceRole)
+            else WorkspaceRole(required_role)
+        )
+
         # Issue #276: Verify workspace exists and is not deleted
         from sqlalchemy import select
 
@@ -130,7 +144,7 @@ class PermissionService:
 
         # Check role hierarchy
         user_weight = ORG_ROLE_WEIGHTS.get(member.role, 0)
-        required_weight = ORG_ROLE_WEIGHTS.get(required_role, 0)
+        required_weight = ORG_ROLE_WEIGHTS.get(required, 0)
 
         if user_weight < required_weight:
             raise AuthorizationError(
@@ -145,7 +159,7 @@ class PermissionService:
         user_id: str,
         resource_id: str,
         *,
-        required_role: str = "member",
+        required_role: WorkspaceRole | str = WorkspaceRole.MEMBER,
     ) -> Context:
         """Resolve a ``resource_id`` slug to the Context the caller can access.
 
@@ -229,7 +243,7 @@ class PermissionService:
         user_id: str,
         context_id: UUID,
         *,
-        required_role: str = "viewer",
+        required_role: WorkspaceRole | str = WorkspaceRole.VIEWER,
     ) -> Context:
         """Resolve a ``context_id`` to a Context the caller can read, with uniform 404.
 
@@ -324,7 +338,10 @@ class PermissionService:
         #   - viewer, allowed_context_ids IS NULL → no restriction (all)
         #   - either, allowed_context_ids = [<ids>] → whitelist enforced
         #   - either, allowed_context_ids = []     → explicit no access
-        if workspace_member.role == "member" and workspace_member.allowed_context_ids is None:
+        if (
+            workspace_member.role == WorkspaceRole.MEMBER
+            and workspace_member.allowed_context_ids is None
+        ):
             logger.warning(
                 "context_read_denied",
                 reason="member_suspended",
@@ -335,7 +352,7 @@ class PermissionService:
             raise NotFoundException("Context", str(context_id))
 
         if (
-            workspace_member.role in ("member", "viewer")
+            workspace_member.role in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER)
             and workspace_member.allowed_context_ids is not None
             and context_id not in workspace_member.allowed_context_ids
         ):
@@ -363,7 +380,9 @@ class PermissionService:
         Raises:
             AuthorizationError: 403 if not owner
         """
-        return await self.check_workspace_access(user_id, workspace_id, required_role="owner")
+        return await self.check_workspace_access(
+            user_id, workspace_id, required_role=WorkspaceRole.OWNER
+        )
 
     async def check_workspace_admin(self, user_id: str, workspace_id: UUID) -> WorkspaceMember:
         """Check if user is workspace admin or owner.
@@ -378,7 +397,9 @@ class PermissionService:
         Raises:
             AuthorizationError: 403 if not admin/owner
         """
-        return await self.check_workspace_access(user_id, workspace_id, required_role="admin")
+        return await self.check_workspace_access(
+            user_id, workspace_id, required_role=WorkspaceRole.ADMIN
+        )
 
     async def is_workspace_member(self, user_id: str, workspace_id: UUID) -> bool:
         """Check if user is a member of workspace (any role).
@@ -405,8 +426,8 @@ class PermissionService:
         self,
         user_id: str,
         context_id: UUID,
-        required_role: str = "viewer",
-    ) -> tuple[Context, str]:
+        required_role: ContextRole | str = ContextRole.VIEWER,
+    ) -> tuple[Context, ContextRole]:
         """Check if user has required context access.
 
         Access hierarchy:
@@ -420,7 +441,10 @@ class PermissionService:
             required_role: Minimum required role (owner/editor/viewer)
 
         Returns:
-            Tuple of (Context, effective_role)
+            Tuple of (Context, effective_role). The effective_role is always a
+            ``ContextRole``: workspace owner/admin map to ``ContextRole.OWNER``,
+            workspace viewer maps to ``ContextRole.VIEWER``, and an explicit
+            ContextMember row keeps its own role.
 
         Raises:
             NotFoundException: 404 if the context does not exist.
@@ -444,10 +468,15 @@ class PermissionService:
             raise NotFoundException("Context")
 
         # Issue #165: Private context check (creator-only access)
+        # Normalise at the boundary: accept str for backward compat
+        required = (
+            required_role if isinstance(required_role, ContextRole) else ContextRole(required_role)
+        )
+
         if context.is_private:
             if context.created_by == user_id:
                 # Creator has full access to their private context
-                return context, "owner"
+                return context, ContextRole.OWNER
             else:
                 # Others cannot access private contexts
                 raise AuthorizationError("Insufficient permissions")
@@ -464,9 +493,9 @@ class PermissionService:
 
         # Workspace owner/admin → bypass context checks (full access)
         # Note: allowed_context_ids is ignored for owner/admin
-        if workspace_member.role in ("owner", "admin"):
-            effective_role = "owner"  # Treat as context owner
-            return context, effective_role
+        if workspace_member.role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
+            # Treat as context owner
+            return context, ContextRole.OWNER
 
         # Issue #234: Check allowed_context_ids whitelist for member/viewer
         if workspace_member.allowed_context_ids is not None:
@@ -474,11 +503,11 @@ class PermissionService:
                 raise AuthorizationError("Insufficient permissions")
 
         # Workspace viewer → read-only access (bypass context checks)
-        if workspace_member.role == "viewer":
+        if workspace_member.role == WorkspaceRole.VIEWER:
             # Check if viewer role meets requirement
-            if required_role != "viewer":
+            if required != ContextRole.VIEWER:
                 raise AuthorizationError("Insufficient permissions")
-            return context, "viewer"
+            return context, ContextRole.VIEWER
 
         # Workspace member → requires explicit context membership
         stmt = select(ContextMember).where(
@@ -493,12 +522,12 @@ class PermissionService:
 
         # Check context role hierarchy
         user_weight = CONTEXT_ROLE_WEIGHTS.get(context_member.role, 0)
-        required_weight = CONTEXT_ROLE_WEIGHTS.get(required_role, 0)
+        required_weight = CONTEXT_ROLE_WEIGHTS.get(required, 0)
 
         if user_weight < required_weight:
             raise AuthorizationError("Insufficient permissions")
 
-        return context, context_member.role
+        return context, ContextRole(context_member.role)
 
     async def check_context_write(self, user_id: str, context_id: UUID) -> Context:
         """Check if user can write to context (editor or owner).
@@ -514,10 +543,10 @@ class PermissionService:
             NotFoundException: 404 if the context does not exist.
             AuthorizationError: 403 if no write access.
         """
-        context, role = await self.check_context_access(
+        context, _ = await self.check_context_access(
             user_id,
             context_id,
-            required_role="editor",
+            required_role=ContextRole.EDITOR,
         )
         return context
 
@@ -535,10 +564,10 @@ class PermissionService:
             NotFoundException: 404 if the context does not exist.
             AuthorizationError: 403 if not context owner.
         """
-        context, role = await self.check_context_access(
+        context, _ = await self.check_context_access(
             user_id,
             context_id,
-            required_role="owner",
+            required_role=ContextRole.OWNER,
         )
         return context
 
@@ -555,9 +584,9 @@ class PermissionService:
         demotion-only today — re-wire into the remove flow if we ever relax
         that to "remove allowed when >1 owners exist".
 
-        Workspace-level owner/admin bypass (check_context_access:327-329) is
-        not counted here — this reflects the real governance anchor stored in
-        the ContextMember table.
+        Workspace-level owner/admin bypass (handled inside
+        ``check_context_access``) is not counted here — this reflects the
+        real governance anchor stored in the ContextMember table.
 
         Args:
             context_id: Context ID
@@ -572,7 +601,7 @@ class PermissionService:
             .select_from(ContextMember)
             .where(
                 ContextMember.context_id == context_id,
-                ContextMember.role == "owner",
+                ContextMember.role == ContextRole.OWNER,
             )
         )
         result = await self.db.execute(stmt)
@@ -603,7 +632,7 @@ class PermissionService:
         # Check workspace membership (viewer is the floor — the per-role
         # branches below decide what each role can actually see).
         workspace_member = await self.check_workspace_access(
-            user_id, workspace_id, required_role="viewer"
+            user_id, workspace_id, required_role=WorkspaceRole.VIEWER
         )
 
         # Private contexts are creator-only across every workspace role
@@ -617,7 +646,7 @@ class PermissionService:
 
         # Workspace owner/admin → all accessible contexts (ignore
         # allowed_context_ids; privacy still applies).
-        if workspace_member.role in ("owner", "admin"):
+        if workspace_member.role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
             stmt = (
                 select(Context)
                 .where(
@@ -631,7 +660,7 @@ class PermissionService:
             return list(result.scalars().all())
 
         # Issue #234: Workspace viewer with allowed_context_ids restriction
-        if workspace_member.role == "viewer":
+        if workspace_member.role == WorkspaceRole.VIEWER:
             if workspace_member.allowed_context_ids is not None:
                 # Only whitelisted contexts
                 if not workspace_member.allowed_context_ids:

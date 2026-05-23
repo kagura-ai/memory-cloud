@@ -16,6 +16,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import func, select
 
+from auth.workspace_roles import WorkspaceRole
 from config.plan_tiers import get_plan_tier
 from models.auth import (
     Context,
@@ -48,7 +49,7 @@ async def pro_workspace(db_session):
     owner_member = WorkspaceMember(
         workspace_id=workspace.id,
         user_id=owner_id,
-        role="owner",
+        role=WorkspaceRole.OWNER,
     )
     db_session.add(owner_member)
     await db_session.commit()
@@ -112,7 +113,7 @@ async def test_admin_plan_upgrade_free_to_pro(db_session):
     owner_member = WorkspaceMember(
         workspace_id=workspace.id,
         user_id=owner_id,
-        role="owner",
+        role=WorkspaceRole.OWNER,
     )
     db_session.add(owner_member)
     await db_session.commit()
@@ -286,7 +287,9 @@ async def test_downgrade_allowed_when_contexts_within_limit(db_session):
         weekly_api_limit=250000,
     )
     db_session.add(workspace)
-    db_session.add(WorkspaceMember(workspace_id=workspace.id, user_id=owner_id, role="owner"))
+    db_session.add(
+        WorkspaceMember(workspace_id=workspace.id, user_id=owner_id, role=WorkspaceRole.OWNER)
+    )
     await db_session.commit()
 
     # Only 1 context — within Free limit

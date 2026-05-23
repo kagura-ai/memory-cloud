@@ -33,6 +33,7 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.workspace_roles import WorkspaceRole
 from models.auth import APIKey, AuditLog, User, Workspace, WorkspaceMember
 from models.erasure import (
     REASON_USER_REQUEST_VIA_SUPPORT,
@@ -88,13 +89,13 @@ async def erasure_scenario(db_session: AsyncSession):
     target_member = WorkspaceMember(
         workspace_id=workspace.id,
         user_id=target_user_id,
-        role="owner",
+        role=WorkspaceRole.OWNER,
     )
     # Another user already in the workspace as admin — for ownership transfer
     other_member = WorkspaceMember(
         workspace_id=workspace.id,
         user_id=other_user_id,
-        role="admin",
+        role=WorkspaceRole.ADMIN,
     )
     db_session.add_all([target_member, other_member])
 

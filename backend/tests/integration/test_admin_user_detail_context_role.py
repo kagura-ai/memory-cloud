@@ -16,6 +16,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes.admin import get_user_detail
+from auth.workspace_roles import ContextRole, WorkspaceRole
 from models.auth import ContextMember, WorkspaceMember
 
 from ._admin_helpers import make_context, make_user, make_workspace, mock_admin
@@ -32,7 +33,9 @@ async def workspace_owner_no_ctx_member(db_session: AsyncSession) -> dict:
     db_session.add(ws)
     await db_session.flush()
 
-    db_session.add(WorkspaceMember(workspace_id=ws.id, user_id=user.user_id, role="owner"))
+    db_session.add(
+        WorkspaceMember(workspace_id=ws.id, user_id=user.user_id, role=WorkspaceRole.OWNER)
+    )
 
     ctx = make_context(workspace_id=ws.id, created_by=user.user_id)
     db_session.add(ctx)
@@ -58,8 +61,12 @@ async def workspace_admin_no_ctx_member(db_session: AsyncSession) -> dict:
 
     db_session.add_all(
         [
-            WorkspaceMember(workspace_id=ws.id, user_id=owner_user.user_id, role="owner"),
-            WorkspaceMember(workspace_id=ws.id, user_id=admin_user.user_id, role="admin"),
+            WorkspaceMember(
+                workspace_id=ws.id, user_id=owner_user.user_id, role=WorkspaceRole.OWNER
+            ),
+            WorkspaceMember(
+                workspace_id=ws.id, user_id=admin_user.user_id, role=WorkspaceRole.ADMIN
+            ),
         ]
     )
 
@@ -93,11 +100,13 @@ async def workspace_member_no_ctx_member(db_session: AsyncSession) -> dict:
 
     db_session.add_all(
         [
-            WorkspaceMember(workspace_id=ws.id, user_id=owner_user.user_id, role="owner"),
+            WorkspaceMember(
+                workspace_id=ws.id, user_id=owner_user.user_id, role=WorkspaceRole.OWNER
+            ),
             WorkspaceMember(
                 workspace_id=ws.id,
                 user_id=member_user.user_id,
-                role="member",
+                role=WorkspaceRole.MEMBER,
                 allowed_context_ids=[ctx.id],
             ),
         ]
@@ -128,14 +137,16 @@ async def workspace_member_with_ctx_member(db_session: AsyncSession) -> dict:
 
     db_session.add_all(
         [
-            WorkspaceMember(workspace_id=ws.id, user_id=owner_user.user_id, role="owner"),
+            WorkspaceMember(
+                workspace_id=ws.id, user_id=owner_user.user_id, role=WorkspaceRole.OWNER
+            ),
             WorkspaceMember(
                 workspace_id=ws.id,
                 user_id=member_user.user_id,
-                role="member",
+                role=WorkspaceRole.MEMBER,
                 allowed_context_ids=[ctx.id],
             ),
-            ContextMember(context_id=ctx.id, user_id=member_user.user_id, role="editor"),
+            ContextMember(context_id=ctx.id, user_id=member_user.user_id, role=ContextRole.EDITOR),
         ]
     )
     await db_session.commit()

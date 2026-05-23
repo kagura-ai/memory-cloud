@@ -39,10 +39,19 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy import (
+    Enum as SAEnum,
+)
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE
+from auth.workspace_roles import (
+    CONTEXT_ROLE_CHECK_SQL,
+    WORKSPACE_ROLE_CHECK_SQL,
+    ContextRole,
+    WorkspaceRole,
+)
 from db.base import Base
 from utils.datetime import utcnow
 from utils.redirect_uri import any_redirect_uri_matches
@@ -1627,7 +1636,16 @@ class WorkspaceMember(Base):
         index=True,
     )
     user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    role: Mapped[str] = mapped_column(String(50), nullable=False, server_default="member")
+    role: Mapped[WorkspaceRole] = mapped_column(
+        SAEnum(
+            WorkspaceRole,
+            native_enum=False,
+            length=50,
+            values_callable=lambda enum: [e.value for e in enum],
+        ),
+        nullable=False,
+        server_default=WorkspaceRole.MEMBER.value,
+    )
 
     # Context access restriction (Issue #234)
     # NULL = no restriction, [] = no access, [uuid, ...] = whitelist
@@ -1654,9 +1672,7 @@ class WorkspaceMember(Base):
         Index("idx_workspace_members_org", "workspace_id"),
         Index("idx_workspace_members_user", "user_id"),
         Index("idx_workspace_members_role", "workspace_id", "role"),
-        CheckConstraint(
-            "role IN ('owner', 'admin', 'member', 'viewer')", name="valid_workspace_member_role"
-        ),
+        CheckConstraint(WORKSPACE_ROLE_CHECK_SQL, name="valid_workspace_member_role"),
     )
 
     def __repr__(self) -> str:
@@ -1710,7 +1726,16 @@ class WorkspaceInvitation(Base):
     )
     token: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
-    role: Mapped[str] = mapped_column(String(50), nullable=False, server_default="member")
+    role: Mapped[WorkspaceRole] = mapped_column(
+        SAEnum(
+            WorkspaceRole,
+            native_enum=False,
+            length=50,
+            values_callable=lambda enum: [e.value for e in enum],
+        ),
+        nullable=False,
+        server_default=WorkspaceRole.MEMBER.value,
+    )
     invited_by: Mapped[str] = mapped_column(String(255), nullable=False)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -1728,9 +1753,7 @@ class WorkspaceInvitation(Base):
 
     # Constraints
     __table_args__ = (
-        CheckConstraint(
-            "role IN ('owner', 'admin', 'member', 'viewer')", name="valid_invitation_role"
-        ),
+        CheckConstraint(WORKSPACE_ROLE_CHECK_SQL, name="valid_invitation_role"),
         CheckConstraint("length(token) >= 20", name="valid_invitation_token"),
     )
 
@@ -1802,7 +1825,16 @@ class ContextMember(Base):
         index=True,
     )
     user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    role: Mapped[str] = mapped_column(String(50), nullable=False, server_default="editor")
+    role: Mapped[ContextRole] = mapped_column(
+        SAEnum(
+            ContextRole,
+            native_enum=False,
+            length=50,
+            values_callable=lambda enum: [e.value for e in enum],
+        ),
+        nullable=False,
+        server_default=ContextRole.EDITOR.value,
+    )
 
     # Invitation tracking
     invited_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -1820,7 +1852,7 @@ class ContextMember(Base):
     __table_args__ = (
         Index("idx_context_members_context", "context_id"),
         Index("idx_context_members_user", "user_id"),
-        CheckConstraint("role IN ('owner', 'editor', 'viewer')", name="valid_context_member_role"),
+        CheckConstraint(CONTEXT_ROLE_CHECK_SQL, name="valid_context_member_role"),
     )
 
     def __repr__(self) -> str:

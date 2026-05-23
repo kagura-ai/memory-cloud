@@ -31,7 +31,7 @@ import {
   type CostDashboardFetchParams,
 } from "@/components/cost/CostDashboard";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
-import { hasWorkspaceRole } from "@/lib/auth/rbac";
+import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { fetchWorkspaceCostAggregation } from "@/lib/api";
 
 export default function WorkspaceCostPage() {
@@ -40,7 +40,7 @@ export default function WorkspaceCostPage() {
 
   const allowed = hasWorkspaceRole(
     currentWorkspace?.current_user_role,
-    "admin",
+    WorkspaceRole.Admin,
   );
 
   // useCallback keyed on currentWorkspaceId only. Without this, every

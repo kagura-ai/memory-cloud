@@ -26,7 +26,7 @@ import type { Context } from "@/lib/types/context";
 import { useMemoryContext } from "@/contexts/MemoryContextContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
-import { hasWorkspaceRole } from "@/lib/auth/rbac";
+import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import {
   Lock,
   Users,
@@ -98,15 +98,17 @@ export default function ContextDetailPage() {
   // a member briefly sees admin-only triggers.
   const canSeeAdminTabs = hasWorkspaceRole(
     currentWorkspace?.current_user_role,
-    "admin",
+    WorkspaceRole.Admin,
   );
   // Analyses tab gating: requires owner role AND workspace allowlist
   // membership (#497). Hiding the tab entirely for non-allowlisted owners
   // keeps the UX honest — there is no path forward inside the tab until
   // the workspace is on the allowlist.
   const canSeeAnalysesTab =
-    hasWorkspaceRole(currentWorkspace?.current_user_role, "owner") &&
-    currentWorkspace?.analyses_enabled === true;
+    hasWorkspaceRole(
+      currentWorkspace?.current_user_role,
+      WorkspaceRole.Owner,
+    ) && currentWorkspace?.analyses_enabled === true;
   const visibleTabs = canSeeAnalysesTab
     ? OWNER_CONTEXT_TABS
     : canSeeAdminTabs

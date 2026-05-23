@@ -90,7 +90,7 @@ import {
   type EmbeddingModel,
 } from "@/lib/api/contexts";
 import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
-import { hasWorkspaceRole } from "@/lib/auth/rbac";
+import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { ApiError } from "@/lib/api/base";
 import type { Context, ContextStats } from "@/lib/types/context";
 import { CONTEXT_TEMPLATES, getTemplate } from "@/lib/templates/usage-guide";
@@ -176,14 +176,16 @@ export default function ContextsPage() {
   // while currentWorkspace hydrates — controls stay hidden until role is known.
   const canManageContexts = hasWorkspaceRole(
     currentWorkspace?.current_user_role,
-    "admin",
+    WorkspaceRole.Admin,
   );
   // The kebab "Analysis" entry mirrors the analyses tab gating in
   // [id]/page.tsx: owner role AND workspace allowlist membership.
   // Both must be true for the menu to appear (#497).
   const canStartAnalysis =
-    hasWorkspaceRole(currentWorkspace?.current_user_role, "owner") &&
-    currentWorkspace?.analyses_enabled === true;
+    hasWorkspaceRole(
+      currentWorkspace?.current_user_role,
+      WorkspaceRole.Owner,
+    ) && currentWorkspace?.analyses_enabled === true;
   const tAnalyses = useTranslations("analyses");
 
   const fetchContexts = useCallback(async () => {
@@ -891,7 +893,7 @@ export default function ContextsPage() {
               </>
             ) : !currentWorkspace?.current_user_role ? null : !hasWorkspaceRole(
                 currentWorkspace.current_user_role,
-                "admin",
+                WorkspaceRole.Admin,
               ) ? (
               <>{t("createFirstContextNonAdmin")}</>
             ) : (

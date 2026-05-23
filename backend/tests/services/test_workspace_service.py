@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import pytest
 
+from auth.workspace_roles import WorkspaceRole
 from models.auth import Context, User, Workspace, WorkspaceMember
 from models.memory import Memory
 from services.workspace_service import WorkspaceService
@@ -115,7 +116,7 @@ class TestListUserWorkspaces:
         db_session.add(ws)
         await db_session.flush()
 
-        member = WorkspaceMember(workspace_id=ws.id, user_id="u2", role="owner")
+        member = WorkspaceMember(workspace_id=ws.id, user_id="u2", role=WorkspaceRole.OWNER)
         db_session.add(member)
         await db_session.flush()
 
@@ -155,7 +156,7 @@ class TestAddMember:
         db_session.add(ws)
         await db_session.flush()
 
-        member = await service.add_member(ws.id, "u5", role="member")
+        member = await service.add_member(ws.id, "u5", role=WorkspaceRole.MEMBER)
         assert member.user_id == "u5"
         assert member.role == "member"
 
@@ -166,9 +167,9 @@ class TestAddMember:
         db_session.add(ws)
         await db_session.flush()
 
-        await service.add_member(ws.id, "u7", role="member")
+        await service.add_member(ws.id, "u7", role=WorkspaceRole.MEMBER)
         with pytest.raises(ValidationError, match="already a member"):
-            await service.add_member(ws.id, "u7", role="member")
+            await service.add_member(ws.id, "u7", role=WorkspaceRole.MEMBER)
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +185,7 @@ class TestGetMember:
         db_session.add(ws)
         await db_session.flush()
 
-        member = WorkspaceMember(workspace_id=ws.id, user_id="u9", role="admin")
+        member = WorkspaceMember(workspace_id=ws.id, user_id="u9", role=WorkspaceRole.ADMIN)
         db_session.add(member)
         await db_session.flush()
 
@@ -210,7 +211,7 @@ class TestGetMember:
         db_session.add(ws)
         await db_session.flush()
 
-        member = WorkspaceMember(workspace_id=ws.id, user_id="u11", role="member")
+        member = WorkspaceMember(workspace_id=ws.id, user_id="u11", role=WorkspaceRole.MEMBER)
         db_session.add(member)
         await db_session.flush()
 
@@ -231,8 +232,10 @@ class TestListMembers:
         db_session.add(ws)
         await db_session.flush()
 
-        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u12", role="owner"))
-        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u13", role="member"))
+        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u12", role=WorkspaceRole.OWNER))
+        db_session.add(
+            WorkspaceMember(workspace_id=ws.id, user_id="u13", role=WorkspaceRole.MEMBER)
+        )
         await db_session.flush()
 
         result = await service.list_members(ws.id)
@@ -252,8 +255,10 @@ class TestUpdateMemberRole:
         db_session.add(ws)
         await db_session.flush()
 
-        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u14", role="owner"))
-        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u15", role="member"))
+        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u14", role=WorkspaceRole.OWNER))
+        db_session.add(
+            WorkspaceMember(workspace_id=ws.id, user_id="u15", role=WorkspaceRole.MEMBER)
+        )
         await db_session.flush()
 
         updated = await service.update_member_role(ws.id, "u15", "admin")
@@ -266,8 +271,10 @@ class TestUpdateMemberRole:
         db_session.add(ws)
         await db_session.flush()
 
-        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u16", role="owner"))
-        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u17", role="member"))
+        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u16", role=WorkspaceRole.OWNER))
+        db_session.add(
+            WorkspaceMember(workspace_id=ws.id, user_id="u17", role=WorkspaceRole.MEMBER)
+        )
         await db_session.flush()
 
         with pytest.raises(ValidationError, match="already has an owner"):
@@ -280,7 +287,7 @@ class TestUpdateMemberRole:
         db_session.add(ws)
         await db_session.flush()
 
-        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u18", role="owner"))
+        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u18", role=WorkspaceRole.OWNER))
         await db_session.flush()
 
         updated = await service.update_member_role(ws.id, "u18", "admin")
@@ -300,7 +307,9 @@ class TestUpdateMemberContextAccess:
         db_session.add(ws)
         await db_session.flush()
 
-        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u19", role="member"))
+        db_session.add(
+            WorkspaceMember(workspace_id=ws.id, user_id="u19", role=WorkspaceRole.MEMBER)
+        )
         await db_session.flush()
 
         cid = uuid4()
@@ -323,7 +332,7 @@ class TestGetWorkspaceStats:
         db_session.add(ws)
         await db_session.flush()
 
-        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u20", role="owner"))
+        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u20", role=WorkspaceRole.OWNER))
         await db_session.flush()
 
         stats = await service.get_workspace_stats(ws.id)
@@ -338,7 +347,7 @@ class TestGetWorkspaceStats:
         db_session.add(ws)
         await db_session.flush()
 
-        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u21", role="owner"))
+        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u21", role=WorkspaceRole.OWNER))
         await db_session.flush()
 
         ctx = Context(
@@ -477,7 +486,9 @@ class TestEnsurePersonalWorkspace:
         await db_session.flush()
         # delete_workspace soft-deletes the workspace but leaves WorkspaceMember
         # rows intact — that is the "historical membership" signal.
-        db_session.add(WorkspaceMember(workspace_id=dead_ws.id, user_id="u660-2", role="owner"))
+        db_session.add(
+            WorkspaceMember(workspace_id=dead_ws.id, user_id="u660-2", role=WorkspaceRole.OWNER)
+        )
 
         user = User(
             user_id="u660-2",
@@ -511,7 +522,9 @@ class TestEnsurePersonalWorkspace:
         db_session.add(ws_remaining)
         await db_session.flush()
         db_session.add(
-            WorkspaceMember(workspace_id=ws_remaining.id, user_id="u660-3", role="owner")
+            WorkspaceMember(
+                workspace_id=ws_remaining.id, user_id="u660-3", role=WorkspaceRole.OWNER
+            )
         )
 
         user = User(
@@ -642,9 +655,13 @@ class TestEnsurePersonalWorkspace:
         await db_session.flush()
         db_session.add_all(
             [
-                WorkspaceMember(workspace_id=live_ws.id, user_id="u660-4", role="member"),
+                WorkspaceMember(
+                    workspace_id=live_ws.id, user_id="u660-4", role=WorkspaceRole.MEMBER
+                ),
                 # Membership row on a soft-deleted workspace can exist — Workspace.deleted_at IS NULL filter is what excludes it.
-                WorkspaceMember(workspace_id=dead_ws.id, user_id="u660-4", role="owner"),
+                WorkspaceMember(
+                    workspace_id=dead_ws.id, user_id="u660-4", role=WorkspaceRole.OWNER
+                ),
             ]
         )
 
@@ -680,10 +697,16 @@ class TestEnsurePersonalWorkspace:
         db_session.add_all(
             [
                 WorkspaceMember(
-                    workspace_id=ws_a.id, user_id="u660-5", role="member", joined_at=None
+                    workspace_id=ws_a.id,
+                    user_id="u660-5",
+                    role=WorkspaceRole.MEMBER,
+                    joined_at=None,
                 ),
                 WorkspaceMember(
-                    workspace_id=ws_b.id, user_id="u660-5", role="member", joined_at=None
+                    workspace_id=ws_b.id,
+                    user_id="u660-5",
+                    role=WorkspaceRole.MEMBER,
+                    joined_at=None,
                 ),
             ]
         )

@@ -20,6 +20,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import APIKeyOrSessionUser, SessionUser, get_current_user
+from auth.workspace_roles import ContextRole, WorkspaceRole
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.schemas import RelatedTagItem
@@ -364,10 +365,10 @@ async def list_contexts(
         for context in contexts_list:
             count = 0
             for om in workspace_members:
-                if om.role in ("owner", "admin"):
+                if om.role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
                     # Owners/admins always have access
                     count += 1
-                elif om.role in ("member", "viewer"):
+                elif om.role in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER):
                     # Check allowed_context_ids
                     if om.allowed_context_ids is None:
                         # No restriction - has access
@@ -853,7 +854,7 @@ async def update_context(
     else:
         # Editor can update description
         existing_context, _ = await perm_service.check_context_access(
-            user_id, context_id, required_role="editor"
+            user_id, context_id, required_role=ContextRole.EDITOR
         )
 
     try:
@@ -1141,7 +1142,7 @@ async def list_context_members(
     # Issue #271 Code Review C-2: check_context_access already verifies workspace membership
     # Issue #272 M-3: Reuse context from check_context_access to avoid redundant DB query
     context, _ = await perm_service.check_context_access(
-        user["user_id"], context_id, required_role="viewer"
+        user["user_id"], context_id, required_role=ContextRole.VIEWER
     )
 
     # Get context for member list query
@@ -1178,9 +1179,9 @@ async def list_context_members(
     #     which is consistent with the "explicit membership required" rule.
     accessible_members = []
     for om in all_workspace_members:
-        if om.role in ("owner", "admin"):
+        if om.role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
             accessible_members.append(om)
-        elif om.role == "viewer":
+        elif om.role == WorkspaceRole.VIEWER:
             if om.allowed_context_ids is None:
                 accessible_members.append(om)
             elif context_id in om.allowed_context_ids:
@@ -1227,13 +1228,15 @@ async def list_context_members(
     # so that viewers excluded by their allowed_context_ids whitelist are
     # still kept out of Pass 2. Such viewers lack effective access per
     # check_context_access and simply do not appear in the response at all.
-    workspace_viewer_ids = {om.user_id for om in all_workspace_members if om.role == "viewer"}
+    workspace_viewer_ids = {
+        om.user_id for om in all_workspace_members if om.role == WorkspaceRole.VIEWER
+    }
     response = []
     seen_user_ids: set[str] = set()
 
     # Pass 1 — workspace owner/admin (dominant access layer)
     for om in accessible_members:
-        if om.role not in ("owner", "admin"):
+        if om.role not in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
             continue
         user_info = users.get(om.user_id)
         response.append(
@@ -1428,7 +1431,7 @@ async def update_context_member_role(
     # v0.12.1 — this endpoint is admin-click frequency, and a workspace admin
     # can always promote another member to recover. Revisit with row-level
     # locking if traffic patterns change.
-    if member.role == "owner" and body.role != "owner":
+    if member.role == ContextRole.OWNER and body.role != ContextRole.OWNER:
         owner_count = await perm_service.count_context_owners(context_id)
         if owner_count <= 1:
             raise HTTPException(
@@ -1509,7 +1512,7 @@ async def remove_context_member(
         )
 
     # Cannot remove owner
-    if member.role == "owner":
+    if member.role == ContextRole.OWNER:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot remove context owner",

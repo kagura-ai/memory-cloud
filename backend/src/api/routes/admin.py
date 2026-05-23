@@ -16,6 +16,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import require_admin
+from auth.workspace_roles import ContextRole, WorkspaceRole
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import (
@@ -574,8 +575,8 @@ async def get_user_detail(
             workspace, workspace_role = context_workspace_map[ctx.id]
 
             # Determine user's role in this context
-            ctx_role = "viewer"  # Default
-            if workspace_role in ("owner", "admin"):
+            ctx_role: WorkspaceRole | ContextRole = ContextRole.VIEWER  # Default
+            if workspace_role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
                 ctx_role = workspace_role  # #699: preserve owner/admin distinction
             else:
                 # Check context_members for explicit role

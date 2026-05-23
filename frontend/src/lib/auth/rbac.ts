@@ -99,13 +99,35 @@ export function isSystemAdmin(user: User | null | undefined): boolean {
 }
 
 /**
+ * Workspace-level tenancy role (mirrors backend WorkspaceRole StrEnum).
+ *
+ * Issue #700: Replaces stringly-typed role literals across the frontend.
+ * Values must match the Python enum byte-for-byte (no codegen, manual sync).
+ */
+export enum WorkspaceRole {
+  Owner = "owner",
+  Admin = "admin",
+  Member = "member",
+  Viewer = "viewer",
+}
+
+/**
+ * Context-level tenancy role (mirrors backend ContextRole StrEnum).
+ */
+export enum ContextRole {
+  Owner = "owner",
+  Editor = "editor",
+  Viewer = "viewer",
+}
+
+/**
  * Workspace role hierarchy weights (higher = more privilege)
  */
-const WORKSPACE_ROLE_WEIGHTS: Record<string, number> = {
-  owner: 4,
-  admin: 3,
-  member: 2,
-  viewer: 1,
+const WORKSPACE_ROLE_WEIGHTS: Record<WorkspaceRole, number> = {
+  [WorkspaceRole.Owner]: 4,
+  [WorkspaceRole.Admin]: 3,
+  [WorkspaceRole.Member]: 2,
+  [WorkspaceRole.Viewer]: 1,
 };
 
 /**
@@ -114,14 +136,12 @@ const WORKSPACE_ROLE_WEIGHTS: Record<string, number> = {
  * Issue #59: Unified workspace role hierarchy check.
  */
 export function hasWorkspaceRole(
-  userRole: string | null | undefined,
-  requiredRole: "owner" | "admin" | "member",
+  userRole: WorkspaceRole | string | null | undefined,
+  requiredRole: Exclude<WorkspaceRole, WorkspaceRole.Viewer>,
 ): boolean {
   if (!userRole) return false;
-  return (
-    (WORKSPACE_ROLE_WEIGHTS[userRole] ?? 0) >=
-    WORKSPACE_ROLE_WEIGHTS[requiredRole]
-  );
+  const userWeight = WORKSPACE_ROLE_WEIGHTS[userRole as WorkspaceRole] ?? 0;
+  return userWeight >= WORKSPACE_ROLE_WEIGHTS[requiredRole];
 }
 
 /**
@@ -130,8 +150,13 @@ export function hasWorkspaceRole(
  * Workspace admins (owner or admin role at workspace level) have workspace-wide access
  * but not system-level access.
  */
-export function isWorkspaceAdmin(workspaceRole: string | undefined): boolean {
-  return workspaceRole === "admin" || workspaceRole === "owner";
+export function isWorkspaceAdmin(
+  workspaceRole: WorkspaceRole | string | undefined,
+): boolean {
+  return (
+    workspaceRole === WorkspaceRole.Admin ||
+    workspaceRole === WorkspaceRole.Owner
+  );
 }
 
 /**
@@ -156,16 +181,16 @@ export function getSystemRoleBadgeColor(role: string | undefined): string {
  * Returns Tailwind color classes for workspace-level role badges.
  */
 export function getWorkspaceRoleBadgeColor(
-  workspaceRole: string | undefined,
+  workspaceRole: WorkspaceRole | string | undefined,
 ): string {
   switch (workspaceRole) {
-    case "owner":
+    case WorkspaceRole.Owner:
       return "bg-purple-100 text-purple-800"; // Purple for owner
-    case "admin":
+    case WorkspaceRole.Admin:
       return "bg-blue-100 text-blue-800"; // Blue for workspace admin
-    case "member":
+    case WorkspaceRole.Member:
       return "bg-gray-100 text-gray-800"; // Gray for member
-    case "viewer":
+    case WorkspaceRole.Viewer:
       return "bg-green-100 text-green-800"; // Green for viewer
     default:
       return "bg-gray-100 text-gray-800";

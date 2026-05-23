@@ -17,6 +17,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import get_current_user
+from auth.workspace_roles import WorkspaceRole
 from db.base import get_db
 from models.auth import Workspace, WorkspaceInvitation, WorkspaceMember
 from models.schemas import (
@@ -95,7 +96,9 @@ async def create_invitation(
         # SECURITY: Workspace boundary check
         # Issue #268/#269: Membership verification is sufficient
         # check_workspace_access ensures user is admin of this workspace
-        await perm_service.check_workspace_access(user_id, workspace_id, required_role="admin")
+        await perm_service.check_workspace_access(
+            user_id, workspace_id, required_role=WorkspaceRole.ADMIN
+        )
 
         # Check plan tier (Issue #165 - invitations require Pro plan)
         from sqlalchemy import select
@@ -215,7 +218,9 @@ async def list_invitations(
 
     # SECURITY: Workspace boundary check
     # Issue #268/#269: Membership verification is sufficient
-    await perm_service.check_workspace_access(user_id, workspace_id, required_role="admin")
+    await perm_service.check_workspace_access(
+        user_id, workspace_id, required_role=WorkspaceRole.ADMIN
+    )
 
     invitation_service = InvitationService(db)
     invitations = await invitation_service.list_invitations(
@@ -282,7 +287,9 @@ async def delete_invitation(
 
         # SECURITY: Workspace boundary check
         # Issue #268/#269: Membership verification is sufficient
-        await perm_service.check_workspace_access(user_id, workspace_id, required_role="admin")
+        await perm_service.check_workspace_access(
+            user_id, workspace_id, required_role=WorkspaceRole.ADMIN
+        )
 
         invitation_service = InvitationService(db)
         await invitation_service.delete_invitation(invitation_id, workspace_id)
@@ -542,7 +549,9 @@ async def get_member_quota(
 
     # Check permission (at least member access required)
     perm_service = PermissionService(db)
-    await perm_service.check_workspace_access(user_id, workspace_id, required_role="member")
+    await perm_service.check_workspace_access(
+        user_id, workspace_id, required_role=WorkspaceRole.MEMBER
+    )
 
     # Count current members
     member_count_result = await db.execute(

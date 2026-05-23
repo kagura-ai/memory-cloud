@@ -10,6 +10,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from auth.workspace_roles import ContextRole, WorkspaceRole
 from models.api_base import TZAwareBaseModel
 
 logger = logging.getLogger(__name__)
@@ -789,7 +790,9 @@ class UserAccessibleContext(TZAwareBaseModel):
     context_name: str
     workspace_id: str
     workspace_name: str
-    role: str  # owner/admin/editor/viewer  # #699: admin added for workspace_admin without ContextMember
+    # #699: workspace owner/admin without ContextMember are reported with their
+    # workspace role; explicit ContextMember rows use ContextRole.
+    role: WorkspaceRole | ContextRole
     last_used_at: datetime | None
 
     class Config:
@@ -908,9 +911,8 @@ class WorkspaceInvitationCreate(BaseModel):
         max_length=255,
         pattern=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$",
     )
-    role: str = Field(
-        "member",
-        pattern=r"^(owner|admin|member|viewer)$",
+    role: WorkspaceRole = Field(
+        WorkspaceRole.MEMBER,
         description="Role to assign upon acceptance",
     )
     expires_in_days: int | None = Field(

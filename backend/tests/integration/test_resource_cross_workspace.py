@@ -30,6 +30,7 @@ from auth.dependencies import (
     get_user_from_api_key_or_session,
     require_workspace_owner,
 )
+from auth.workspace_roles import WorkspaceRole
 from db.base import get_db
 from models.auth import Context, Workspace, WorkspaceMember
 from models.resource import Resource, ResourceSchema, ResourceToken
@@ -112,7 +113,7 @@ async def cross_workspace_scenario(async_engine, db_session):
     # contract: without it, /schema would return 404 simply because no
     # schema exists, and the test would pass for the wrong reason if the
     # boundary check regressed. With this row present, a regression that
-    # removes required_role="owner" (or bypasses resolve_resource_by_slug
+    # removes required_role=WorkspaceRole.OWNER (or bypasses resolve_resource_by_slug
     # entirely) would return 200 + this schema's data, correctly failing
     # the 404 assertion. Copilot catch on PR #391 loop 4.
     schema_b = ResourceSchema(
@@ -130,8 +131,8 @@ async def cross_workspace_scenario(async_engine, db_session):
     await db_session.flush()
     db_session.add_all(
         [
-            WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role="owner"),
-            WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role="owner"),
+            WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role=WorkspaceRole.OWNER),
+            WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role=WorkspaceRole.OWNER),
             resource_b,
             ctx_b,
             schema_b,
@@ -226,7 +227,7 @@ async def test_cross_workspace_probe_returns_404(cross_workspace_scenario, path_
 # ============================================================================
 #
 # The base fixture covers "owner of A, NOT a member of B". The more subtle
-# case is "owner of A, also a member/admin of B". Without required_role="owner"
+# case is "owner of A, also a member/admin of B". Without required_role=WorkspaceRole.OWNER
 # on resolve_resource_by_slug, WorkspaceOwner only verifies ownership of the
 # caller's *current* workspace (A), while the helper's default required_role=
 # "member" would pass the B-membership check and leak B's resource data.
@@ -294,9 +295,9 @@ async def cross_workspace_multi_member_scenario(async_engine, db_session):
     await db_session.flush()
     db_session.add_all(
         [
-            WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role="owner"),
-            WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role="owner"),
-            WorkspaceMember(workspace_id=ws_b.id, user_id=owner_a_id, role="member"),
+            WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role=WorkspaceRole.OWNER),
+            WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role=WorkspaceRole.OWNER),
+            WorkspaceMember(workspace_id=ws_b.id, user_id=owner_a_id, role=WorkspaceRole.MEMBER),
             resource_b,
             ctx_b,
             schema_b,
@@ -358,8 +359,8 @@ async def test_multi_workspace_member_probe_returns_404(
 ):
     """Owner-of-A who is also a member-of-B must still get 404 on B's slug.
 
-    Regression pin for the required_role="owner" fix on resolve_resource_by_slug.
-    Without it, the helper's default required_role="member" would pass for this
+    Regression pin for the required_role=WorkspaceRole.OWNER fix on resolve_resource_by_slug.
+    Without it, the helper's default required_role=WorkspaceRole.MEMBER would pass for this
     caller and leak workspace B's resource data.
     """
     slug = cross_workspace_multi_member_scenario["probe_slug"]
@@ -503,8 +504,8 @@ async def cross_workspace_list_scenario(async_engine, db_session):
     await db_session.flush()
     db_session.add_all(
         [
-            WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role="owner"),
-            WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role="owner"),
+            WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role=WorkspaceRole.OWNER),
+            WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role=WorkspaceRole.OWNER),
             resource_a,
             resource_b,
             ctx_a,
@@ -717,8 +718,8 @@ async def test_slug_reuse_after_soft_delete_isolates_orphans(async_engine, db_se
     await db_session.flush()
     db_session.add_all(
         [
-            WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role="owner"),
-            WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role="owner"),
+            WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role=WorkspaceRole.OWNER),
+            WorkspaceMember(workspace_id=ws_b.id, user_id=owner_b_id, role=WorkspaceRole.OWNER),
             resource_a,
             resource_b,
             ctx_a_soft_deleted,

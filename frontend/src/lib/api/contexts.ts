@@ -5,6 +5,7 @@
  */
 
 import { apiClient } from "./base";
+import { ContextRole, WorkspaceRole } from "@/lib/auth/rbac";
 import type {
   Context,
   ContextListResponse,
@@ -139,18 +140,20 @@ export interface ContextMember {
   user_id: string;
   user_name: string | null;
   user_email: string | null;
-  role: "owner" | "admin" | "member" | "viewer" | "editor";
-  added_at: string | null; // null for workspace owners/admins with automatic access
+  // Cross-axis union: workspace-role-derived rows carry WorkspaceRole (owners/admins and viewers),
+  // while explicit ContextMember rows carry ContextRole.
+  role: WorkspaceRole | ContextRole;
+  added_at: string | null; // null only for workspace owner/admin rows (viewer rows use joined_at)
   is_workspace_admin: boolean; // true if access is via workspace role
 }
 
 export interface AddContextMemberRequest {
   user_id: string;
-  role: "owner" | "editor" | "viewer";
+  role: ContextRole;
 }
 
 export interface UpdateContextMemberRoleRequest {
-  role: "owner" | "editor" | "viewer";
+  role: ContextRole;
 }
 
 /**

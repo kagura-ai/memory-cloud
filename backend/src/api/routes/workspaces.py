@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.analysis_allowlist import check_workspace_in_allowlist
 from auth.dependencies import get_current_user
+from auth.workspace_roles import WorkspaceRole
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import Context, ExternalAPIKey, User
@@ -420,7 +421,9 @@ async def get_workspace(
     perm_service = PermissionService(db)
 
     # Check access
-    await perm_service.check_workspace_access(user["user_id"], workspace_id, required_role="member")
+    await perm_service.check_workspace_access(
+        user["user_id"], workspace_id, required_role=WorkspaceRole.MEMBER
+    )
 
     workspace = await workspace_service.get_workspace(workspace_id)
     stats = await workspace_service.get_workspace_stats(workspace_id)
@@ -530,7 +533,9 @@ async def switch_workspace(
     perm_service = PermissionService(db)
 
     # Verify user is a member of this workspace
-    await perm_service.check_workspace_access(user["user_id"], workspace_id, required_role="member")
+    await perm_service.check_workspace_access(
+        user["user_id"], workspace_id, required_role=WorkspaceRole.MEMBER
+    )
 
     # Update user's current workspace
     user_result = await db.execute(select(User).where(User.user_id == user["user_id"]))
@@ -568,7 +573,9 @@ async def list_members(
     perm_service = PermissionService(db)
 
     # Check access
-    await perm_service.check_workspace_access(user["user_id"], workspace_id, required_role="member")
+    await perm_service.check_workspace_access(
+        user["user_id"], workspace_id, required_role=WorkspaceRole.MEMBER
+    )
 
     members = await workspace_service.list_members(workspace_id)
 
@@ -732,7 +739,7 @@ async def update_member_role(
 
     # Issue #254: Prevent non-owners from changing owner's role
     target_member = await workspace_service.get_member(workspace_id, user_id)
-    if target_member.role == "owner" and current_member.role != "owner":
+    if target_member.role == WorkspaceRole.OWNER and current_member.role != WorkspaceRole.OWNER:
         raise HTTPException(
             status_code=403,
             detail="Only the owner can change the owner's role.",
@@ -868,7 +875,9 @@ async def get_workspace_stats(
     # SECURITY: Workspace boundary check
     # Issue #269: Membership verification is sufficient (no current_workspace_id required)
     # Users can access stats for any workspace they are a member of
-    await perm_service.check_workspace_access(user["user_id"], workspace_id, required_role="member")
+    await perm_service.check_workspace_access(
+        user["user_id"], workspace_id, required_role=WorkspaceRole.MEMBER
+    )
 
     stats = await workspace_service.get_workspace_stats(workspace_id)
 
@@ -901,7 +910,9 @@ async def get_context_stats(
 
     # SECURITY: Workspace boundary check
     # Issue #269: Membership verification is sufficient (no current_workspace_id required)
-    await perm_service.check_workspace_access(user["user_id"], workspace_id, required_role="member")
+    await perm_service.check_workspace_access(
+        user["user_id"], workspace_id, required_role=WorkspaceRole.MEMBER
+    )
 
     stats = await workspace_service.get_context_stats(workspace_id)
 
@@ -937,7 +948,9 @@ async def get_context_usage_timeline(
 
     # SECURITY: Workspace boundary check
     # Issue #269: Membership verification is sufficient (no current_workspace_id required)
-    await perm_service.check_workspace_access(user["user_id"], workspace_id, required_role="member")
+    await perm_service.check_workspace_access(
+        user["user_id"], workspace_id, required_role=WorkspaceRole.MEMBER
+    )
 
     # Limit days to prevent excessive queries
     days = min(days, 30)
@@ -976,7 +989,9 @@ async def get_context_user_activity(
 
     # SECURITY: Workspace boundary check
     # Issue #269: Membership verification is sufficient (no current_workspace_id required)
-    await perm_service.check_workspace_access(user["user_id"], workspace_id, required_role="admin")
+    await perm_service.check_workspace_access(
+        user["user_id"], workspace_id, required_role=WorkspaceRole.ADMIN
+    )
 
     # Limit days to prevent excessive queries
     days = min(days, 30)
@@ -1003,7 +1018,9 @@ async def get_workspace_memory_timeline(
     workspace_service = WorkspaceService(db)
     perm_service = PermissionService(db)
 
-    await perm_service.check_workspace_access(user["user_id"], workspace_id, required_role="member")
+    await perm_service.check_workspace_access(
+        user["user_id"], workspace_id, required_role=WorkspaceRole.MEMBER
+    )
 
     days = min(days, 90)  # Performance limit
 
@@ -1052,7 +1069,9 @@ async def get_context_public_api_stats(
 
     # SECURITY: Workspace boundary check
     # Issue #269: Membership verification is sufficient (no current_workspace_id required)
-    await perm_service.check_workspace_access(user["user_id"], workspace_id, required_role="member")
+    await perm_service.check_workspace_access(
+        user["user_id"], workspace_id, required_role=WorkspaceRole.MEMBER
+    )
 
     # Limit days to prevent excessive queries
     days = min(days, 30)
@@ -1097,7 +1116,7 @@ async def check_openai_key_status(
 
     # Check access (any member can view) and get member info
     workspace_member = await perm_service.check_workspace_access(
-        user["user_id"], workspace_id, required_role="viewer"
+        user["user_id"], workspace_id, required_role=WorkspaceRole.VIEWER
     )
 
     # Query for OpenAI key (prioritize workspace-scoped, fallback to user-scoped)
@@ -1122,7 +1141,7 @@ async def check_openai_key_status(
         openai_key = result.scalar_one_or_none()
 
     # Check if user can configure (owner/admin)
-    can_configure = workspace_member.role in ["owner", "admin"]
+    can_configure = workspace_member.role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN)
 
     logger.info(
         f"User {user['user_id']} checked OpenAI key status for workspace {workspace_id}: "

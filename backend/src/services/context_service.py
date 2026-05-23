@@ -16,6 +16,7 @@ from sqlalchemy import and_, delete, func, select
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.workspace_roles import WorkspaceRole
 from config.settings import get_settings
 from models.auth import Context, ContextMember, User, Workspace, WorkspaceMember
 from models.sleep import SleepMode
@@ -145,11 +146,11 @@ class ContextService:
 
             if workspace_member:
                 # Check role: Owner/Admin can create contexts
-                if workspace_member.role not in ["owner", "admin"]:
+                if workspace_member.role not in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
                     raise ValidationError("Only workspace owners and admins can create contexts.")
 
                 # Private contexts: Owner only
-                if is_private and workspace_member.role != "owner":
+                if is_private and workspace_member.role != WorkspaceRole.OWNER:
                     raise ValidationError(
                         "Only workspace owners can create private contexts. "
                         "Admins can create shared contexts."
@@ -323,7 +324,7 @@ class ContextService:
             raise NotFoundException(f"Context not found: {context_id}")
 
         # Issue #234: Check allowed_context_ids whitelist for member/viewer
-        if workspace_member.role in ("member", "viewer"):
+        if workspace_member.role in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER):
             if workspace_member.allowed_context_ids is not None:
                 if context_id not in workspace_member.allowed_context_ids:
                     raise NotFoundException(f"Context not found: {context_id}")
@@ -1383,7 +1384,7 @@ class ContextService:
         membership = WorkspaceMember(
             workspace_id=workspace.id,
             user_id=user_id,
-            role="owner",
+            role=WorkspaceRole.OWNER,
         )
         self.db.add(membership)
 

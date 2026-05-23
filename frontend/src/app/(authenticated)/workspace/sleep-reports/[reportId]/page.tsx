@@ -19,7 +19,7 @@ import { ArrowLeft, Moon } from "lucide-react";
 import Link from "next/link";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
-import { hasWorkspaceRole } from "@/lib/auth/rbac";
+import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { fetchWorkspaceSleepReportDetail } from "@/lib/api";
 import { SleepReportDetailView } from "@/components/sleep-reports/SleepReportDetailView";
 import type { SleepReportDetailResponse } from "@/lib/api/sleep-reports";
@@ -38,7 +38,7 @@ export default function WorkspaceSleepReportDetailPage() {
 
   const allowed = hasWorkspaceRole(
     currentWorkspace?.current_user_role,
-    "admin",
+    WorkspaceRole.Admin,
   );
 
   const [detail, setDetail] = useState<SleepReportDetailResponse | null>(null);
