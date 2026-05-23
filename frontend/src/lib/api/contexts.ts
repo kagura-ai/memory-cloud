@@ -140,10 +140,10 @@ export interface ContextMember {
   user_id: string;
   user_name: string | null;
   user_email: string | null;
-  // Cross-axis union: workspace owner/admin appear here via automatic access
-  // (carrying WorkspaceRole), while explicit ContextMember rows carry ContextRole.
+  // Cross-axis union: workspace-role-derived rows carry WorkspaceRole (owners/admins and viewers),
+  // while explicit ContextMember rows carry ContextRole.
   role: WorkspaceRole | ContextRole;
-  added_at: string | null; // null for workspace owners/admins with automatic access
+  added_at: string | null; // null only for workspace owner/admin rows (viewer rows use joined_at)
   is_workspace_admin: boolean; // true if access is via workspace role
 }
 
