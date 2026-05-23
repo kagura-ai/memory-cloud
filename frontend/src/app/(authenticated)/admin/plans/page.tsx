@@ -88,6 +88,19 @@ import {
   type PlanTierInfo,
   type WorkspaceQuotaDetail,
 } from "@/lib/api/admin";
+import {
+  ADDON_TYPES,
+  READ_ONLY_QUOTAS,
+  EMPTY_ADDON_VALUES,
+  buildUpdateAddonRequest,
+  computeAddonEffectivePreview,
+  formatAddonValue,
+  formatQuotaValue,
+  formatReadOnlyQuotaValue,
+  snapshotAddonValues,
+  type AddonKey,
+  type AddonValuesByKey,
+} from "./_addon-types";
 
 const PLAN_TABS = ["workspaces", "tiers", "audit"] as const;
 
@@ -217,11 +230,14 @@ export default function AdminPlansPage() {
   );
   const [quotaLoading, setQuotaLoading] = useState(false);
   const [addonDialogOpen, setAddonDialogOpen] = useState(false);
-  const [addonMemory, setAddonMemory] = useState(0);
-  const [addonMcp, setAddonMcp] = useState(0);
-  const [addonMember, setAddonMember] = useState(0);
-  const [addonContext, setAddonContext] = useState(0);
-  const [addonAnalysis, setAddonAnalysis] = useState(0);
+  // Issue #663: 9 addon dimensions consolidated into a single record so
+  // ``ADDON_TYPES`` can drive both the dialog inputs and the PUT body
+  // construction without per-field useState plumbing.
+  const [addonValues, setAddonValues] =
+    useState<AddonValuesByKey>(EMPTY_ADDON_VALUES);
+  const setAddonValue = (key: AddonKey, value: number): void => {
+    setAddonValues((prev) => ({ ...prev, [key]: value }));
+  };
   const { toast } = useToast();
   const [tab, setTab] = useTabParam("workspaces", "tab", PLAN_TABS);
 
@@ -325,24 +341,17 @@ export default function AdminPlansPage() {
 
   const openAddonDialog = () => {
     if (!quotaDetail) return;
-    setAddonMemory(quotaDetail.addon.memory_bonus);
-    setAddonMcp(quotaDetail.addon.mcp_quota_bonus);
-    setAddonMember(quotaDetail.addon.member_bonus);
-    setAddonContext(quotaDetail.addon.context_bonus);
-    setAddonAnalysis(quotaDetail.addon.analysis_bonus);
+    setAddonValues(snapshotAddonValues(quotaDetail));
     setAddonDialogOpen(true);
   };
 
   const handleUpdateAddons = async () => {
     if (!quotaDetail) return;
     try {
-      await updateWorkspaceAddons(quotaDetail.workspace_id, {
-        addon_memory_bonus: addonMemory,
-        addon_mcp_quota_bonus: addonMcp,
-        addon_member_bonus: addonMember,
-        addon_context_bonus: addonContext,
-        addon_analysis_bonus: addonAnalysis,
-      });
+      await updateWorkspaceAddons(
+        quotaDetail.workspace_id,
+        buildUpdateAddonRequest(addonValues),
+      );
       toast({
         title: tCommon("success"),
         description: t("messages.addonUpdateSuccess"),
@@ -529,90 +538,96 @@ export default function AdminPlansPage() {
                                           {t("quota.effectiveUsage")}
                                         </div>
                                       </div>
-                                      {[
-                                        {
-                                          label: t("quota.memory"),
-                                          base: quotaDetail.base.memory_limit,
-                                          addon: quotaDetail.addon.memory_bonus,
-                                          effective:
-                                            quotaDetail.effective.memory_limit,
-                                          usage: quotaDetail.usage.memories,
-                                        },
-                                        {
-                                          label: t("quota.mcp"),
-                                          base: quotaDetail.base
-                                            .mcp_calls_per_day,
-                                          addon:
-                                            quotaDetail.addon.mcp_quota_bonus,
-                                          effective:
-                                            quotaDetail.effective
-                                              .mcp_calls_per_day,
-                                          usage: null,
-                                        },
-                                        {
-                                          label: t("quota.contexts"),
-                                          base: quotaDetail.base.max_contexts,
-                                          addon:
-                                            quotaDetail.addon.context_bonus,
-                                          effective:
-                                            quotaDetail.effective.max_contexts,
-                                          usage: quotaDetail.usage.contexts,
-                                        },
-                                        {
-                                          label: t("quota.members"),
-                                          base: quotaDetail.base.max_members,
-                                          addon: quotaDetail.addon.member_bonus,
-                                          effective:
-                                            quotaDetail.effective.max_members,
-                                          usage: quotaDetail.usage.members,
-                                        },
-                                        {
-                                          label: t("quota.analysis"),
-                                          base: quotaDetail.base
-                                            .analysis_runs_per_day,
-                                          addon:
-                                            quotaDetail.addon.analysis_bonus,
-                                          effective:
-                                            quotaDetail.effective
-                                              .analysis_runs_per_day,
-                                          usage: null,
-                                        },
-                                      ].map((row) => (
-                                        <div
-                                          key={row.label}
-                                          className="grid grid-cols-4 gap-2 text-sm"
-                                        >
-                                          <div className="font-medium">
-                                            {row.label}
-                                          </div>
-                                          <div className="text-right text-muted-foreground">
-                                            {row.base.toLocaleString()}
-                                          </div>
-                                          <div className="text-right">
-                                            {row.addon > 0 ? (
-                                              <span className="text-green-600 dark:text-green-400">
-                                                +{row.addon.toLocaleString()}
+                                      {/* Issue #663: ADDON_TYPES drives the
+                                          addon-bearing rows; READ_ONLY_QUOTAS
+                                          appends tier-fixed dimensions (e.g.
+                                          max_resource_tokens) with no addon
+                                          column. Single source of truth shared
+                                          with the addon edit dialog below. */}
+                                      {ADDON_TYPES.map((meta) => {
+                                        const base =
+                                          quotaDetail.base[meta.baseField];
+                                        const addon =
+                                          quotaDetail.addon[meta.addonField];
+                                        const effective =
+                                          quotaDetail.effective[meta.baseField];
+                                        const usage = meta.usageField
+                                          ? quotaDetail.usage[meta.usageField]
+                                          : null;
+                                        return (
+                                          <div
+                                            key={meta.key}
+                                            className="grid grid-cols-4 gap-2 text-sm"
+                                          >
+                                            <div className="font-medium">
+                                              {t(`quota.${meta.key}`)}
+                                            </div>
+                                            <div className="text-right text-muted-foreground">
+                                              {formatQuotaValue(meta, base)}
+                                            </div>
+                                            <div className="text-right">
+                                              {addon > 0 ? (
+                                                <span className="text-green-600 dark:text-green-400">
+                                                  {formatAddonValue(
+                                                    meta,
+                                                    addon,
+                                                  )}
+                                                </span>
+                                              ) : (
+                                                <span className="text-muted-foreground">
+                                                  -
+                                                </span>
+                                              )}
+                                            </div>
+                                            <div className="text-right">
+                                              <span className="font-medium">
+                                                {formatQuotaValue(
+                                                  meta,
+                                                  effective,
+                                                )}
                                               </span>
-                                            ) : (
-                                              <span className="text-muted-foreground">
-                                                -
-                                              </span>
-                                            )}
+                                              {usage !== null && (
+                                                <span className="text-muted-foreground">
+                                                  {" "}
+                                                  / {usage.toLocaleString()}{" "}
+                                                  {t("quota.used")}
+                                                </span>
+                                              )}
+                                            </div>
                                           </div>
-                                          <div className="text-right">
-                                            <span className="font-medium">
-                                              {row.effective.toLocaleString()}
-                                            </span>
-                                            {row.usage !== null && (
-                                              <span className="text-muted-foreground">
-                                                {" "}
-                                                / {row.usage.toLocaleString()}{" "}
-                                                {t("quota.used")}
+                                        );
+                                      })}
+                                      {READ_ONLY_QUOTAS.map((meta) => {
+                                        const value =
+                                          quotaDetail.base[meta.baseField];
+                                        return (
+                                          <div
+                                            key={meta.key}
+                                            className="grid grid-cols-4 gap-2 text-sm"
+                                          >
+                                            <div className="font-medium">
+                                              {t(`quota.${meta.key}`)}
+                                            </div>
+                                            <div className="text-right text-muted-foreground">
+                                              {formatReadOnlyQuotaValue(
+                                                meta,
+                                                value,
+                                              )}
+                                            </div>
+                                            <div className="text-right text-muted-foreground">
+                                              -
+                                            </div>
+                                            <div className="text-right">
+                                              <span className="font-medium">
+                                                {formatReadOnlyQuotaValue(
+                                                  meta,
+                                                  value,
+                                                )}
                                               </span>
-                                            )}
+                                            </div>
                                           </div>
-                                        </div>
-                                      ))}
+                                        );
+                                      })}
                                       <div className="pt-2 border-t">
                                         <Button
                                           size="sm"
@@ -871,137 +886,76 @@ export default function AdminPlansPage() {
           </DialogHeader>
 
           <div className="space-y-4 py-4">
-            <div>
-              <Label htmlFor="addon-memory">
-                {t("addonDialog.memory")}{" "}
-                <span className="text-xs text-muted-foreground font-normal">
-                  {t("addonDialog.perUnit", { count: 10000 })}
-                </span>
-              </Label>
-              <div className="flex items-center gap-2 mt-1">
-                <Input
-                  id="addon-memory"
-                  type="number"
-                  min={0}
-                  step={10000}
-                  value={addonMemory}
-                  onChange={(e) => setAddonMemory(Number(e.target.value))}
-                />
-                <span className="text-xs text-muted-foreground whitespace-nowrap">
-                  {t("addonDialog.effective")}:{" "}
-                  {(
-                    (quotaDetail?.base.memory_limit ?? 0) + addonMemory
-                  ).toLocaleString()}
-                </span>
-              </div>
-            </div>
+            {/* Issue #663: 9 addon inputs driven by ADDON_TYPES. The
+                "effective" preview reflects the backend's _zero_floor
+                clamp for PRO-only addons (sleep_contexts) on FREE/BASIC
+                — admins see "0" before submitting, matching the LD-9
+                "no effect on this tier" contract. */}
+            {ADDON_TYPES.map((meta) => {
+              const base = quotaDetail?.base[meta.baseField] ?? 0;
+              const state = addonValues[meta.key];
+              const usage = meta.usageField
+                ? (quotaDetail?.usage[meta.usageField] ?? 0)
+                : null;
+              const effective = computeAddonEffectivePreview(meta, base, state);
+              const perUnitHint = meta.unitSuffix
+                ? t("addonDialog.perUnitWithSuffix", {
+                    count: meta.perUnit,
+                    unit: meta.unitSuffix,
+                  })
+                : t("addonDialog.perUnit", { count: meta.perUnit });
+              return (
+                <div key={meta.key}>
+                  <Label htmlFor={`addon-${meta.key}`}>
+                    {t(`addonDialog.${meta.key}`)}{" "}
+                    <span className="text-xs text-muted-foreground font-normal">
+                      {perUnitHint}
+                    </span>
+                    {meta.proOnly && (
+                      <span className="ml-2 text-xs text-muted-foreground font-normal">
+                        {t("addonDialog.proOnlyInline")}
+                      </span>
+                    )}
+                  </Label>
+                  <div className="flex items-center gap-2 mt-1">
+                    <Input
+                      id={`addon-${meta.key}`}
+                      type="number"
+                      min={0}
+                      step={meta.perUnit}
+                      value={state}
+                      onChange={(e) =>
+                        setAddonValue(meta.key, Number(e.target.value))
+                      }
+                    />
+                    <span className="text-xs text-muted-foreground whitespace-nowrap">
+                      {t("addonDialog.effective")}: {effective.toLocaleString()}
+                      {meta.unitSuffix ? ` ${meta.unitSuffix}` : ""}
+                      {usage !== null && (
+                        <>
+                          {" "}
+                          ({usage} {t("addonDialog.used")})
+                        </>
+                      )}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
 
-            <div>
-              <Label htmlFor="addon-mcp">
-                {t("addonDialog.mcp")}{" "}
-                <span className="text-xs text-muted-foreground font-normal">
-                  {t("addonDialog.perUnit", { count: 5000 })}
-                </span>
-              </Label>
-              <div className="flex items-center gap-2 mt-1">
-                <Input
-                  id="addon-mcp"
-                  type="number"
-                  min={0}
-                  step={5000}
-                  value={addonMcp}
-                  onChange={(e) => setAddonMcp(Number(e.target.value))}
-                />
-                <span className="text-xs text-muted-foreground whitespace-nowrap">
-                  {t("addonDialog.effective")}:{" "}
-                  {(
-                    (quotaDetail?.base.mcp_calls_per_day ?? 0) + addonMcp
-                  ).toLocaleString()}
-                </span>
-              </div>
-            </div>
-
-            <div>
-              <Label htmlFor="addon-member">
-                {t("addonDialog.members")}{" "}
-                <span className="text-xs text-muted-foreground font-normal">
-                  {t("addonDialog.perUnit", { count: 5 })}
-                </span>
-              </Label>
-              <div className="flex items-center gap-2 mt-1">
-                <Input
-                  id="addon-member"
-                  type="number"
-                  min={0}
-                  step={5}
-                  value={addonMember}
-                  onChange={(e) => setAddonMember(Number(e.target.value))}
-                />
-                <span className="text-xs text-muted-foreground whitespace-nowrap">
-                  {t("addonDialog.effective")}:{" "}
-                  {(
-                    (quotaDetail?.base.max_members ?? 0) + addonMember
-                  ).toLocaleString()}{" "}
-                  ({quotaDetail?.usage.members ?? 0} {t("addonDialog.used")})
-                </span>
-              </div>
-            </div>
-
-            <div>
-              <Label htmlFor="addon-context">
-                {t("addonDialog.contexts")}{" "}
-                <span className="text-xs text-muted-foreground font-normal">
-                  {t("addonDialog.perUnit", { count: 5 })}
-                </span>
-              </Label>
-              <div className="flex items-center gap-2 mt-1">
-                <Input
-                  id="addon-context"
-                  type="number"
-                  min={0}
-                  step={5}
-                  value={addonContext}
-                  onChange={(e) => setAddonContext(Number(e.target.value))}
-                />
-                <span className="text-xs text-muted-foreground whitespace-nowrap">
-                  {t("addonDialog.effective")}:{" "}
-                  {(
-                    (quotaDetail?.base.max_contexts ?? 0) + addonContext
-                  ).toLocaleString()}{" "}
-                  ({quotaDetail?.usage.contexts ?? 0} {t("addonDialog.used")})
-                </span>
-              </div>
-            </div>
-
-            <div>
-              <Label htmlFor="addon-analysis">
-                {t("addonDialog.analysis")}{" "}
-                <span className="text-xs text-muted-foreground font-normal">
-                  {t("addonDialog.perUnit", { count: 1 })}
-                </span>
-              </Label>
-              <div className="flex items-center gap-2 mt-1">
-                <Input
-                  id="addon-analysis"
-                  type="number"
-                  min={0}
-                  step={1}
-                  value={addonAnalysis}
-                  onChange={(e) => setAddonAnalysis(Number(e.target.value))}
-                />
-                <span className="text-xs text-muted-foreground whitespace-nowrap">
-                  {t("addonDialog.effective")}:{" "}
-                  {(
-                    (quotaDetail?.base.analysis_runs_per_day ?? 0) +
-                    addonAnalysis
-                  ).toLocaleString()}
-                </span>
-              </div>
-            </div>
-
+            {/* Reduction warning scope (#663): only addons with a live
+                usage counter can be reduced "below current usage" — the
+                backend's LD-7 guard rejects them as HTTP 400. Pre-#663
+                this covered members and contexts; #663 adds memory to
+                the trigger since the same guard applies there. The
+                other 6 addons have no per-workspace usage counter, so
+                a client-side warning would have nothing to compare. */}
             {quotaDetail &&
-              (addonMember < quotaDetail.addon.member_bonus ||
-                addonContext < quotaDetail.addon.context_bonus) && (
+              ADDON_TYPES.some(
+                (meta) =>
+                  meta.usageField !== undefined &&
+                  addonValues[meta.key] < quotaDetail.addon[meta.addonField],
+              ) && (
                 <div className="bg-yellow-50 dark:bg-yellow-950 p-3 rounded-md">
                   <p className="text-sm text-yellow-800 dark:text-yellow-100">
                     {t("addonDialog.reductionWarning", {

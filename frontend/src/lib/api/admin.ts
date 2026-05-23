@@ -145,6 +145,11 @@ export interface QuotaBreakdown {
   public_calls_per_day: number;
   storage_bytes_limit: number;
   sleep_enabled_contexts_limit: number;
+  // Issue #663: surfaced read-only so the admin panel can show the
+  // tier-fixed Resource Token cap alongside the addon-bearing quotas.
+  // No corresponding addon column exists — the value is identical
+  // across ``base`` and ``effective`` for any given workspace.
+  max_resource_tokens: number;
 }
 
 export interface WorkspaceQuotaDetail {

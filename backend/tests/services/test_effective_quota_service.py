@@ -39,13 +39,14 @@ class TestEffectiveQuotaService:
     ):
         """Create a mock workspace with addon bonuses and effective properties.
 
-        All 12 ``effective_*`` properties read by
+        All 13 ``effective_*`` properties read by
         ``EffectiveQuotaService.get_effective_quotas`` are set to concrete int
         values. Without explicit assignment, MagicMock attribute access
         produces nested MagicMocks — which silently pass equality checks but
         return non-int values and let drift between the service's returned
         keys and the mock's populated keys go undetected (Copilot review on
-        PR #588 flagged this gap).
+        PR #588 flagged this gap). Issue #663 added ``max_resource_tokens``
+        as the 13th key (tier-fixed, no addon).
         """
         ws = MagicMock()
         ws.plan_name = plan_name
@@ -79,6 +80,8 @@ class TestEffectiveQuotaService:
         ws.effective_sleep_enabled_contexts_limit = (
             tier.sleep_enabled_contexts_limit + addon_sleep_contexts_bonus
         )
+        # Issue #663: tier-fixed, no addon. Mirrors the model property.
+        ws.effective_max_resource_tokens = tier.max_resource_tokens
         return ws
 
     @pytest.mark.asyncio
@@ -137,11 +140,12 @@ class TestEffectiveQuotaService:
         mock_db.commit.assert_not_awaited()
         mock_db.flush.assert_not_awaited()
 
-        # Drift guard: the service returns 12 keys, all int-typed and matching
+        # Drift guard: the service returns 13 keys, all int-typed and matching
         # the tier base when bonuses are 0. Without this whole-dict check, a
         # MagicMock fixture would silently produce non-int (MagicMock-typed)
         # values for any future field the service starts reading, and the test
-        # would still pass — Copilot flagged this gap on PR #588.
+        # would still pass — Copilot flagged this gap on PR #588. Issue #663
+        # added ``max_resource_tokens`` as a read-only quota dimension.
         expected_keys = {
             "memory_limit",
             "mcp_calls_per_day",
@@ -155,6 +159,7 @@ class TestEffectiveQuotaService:
             "analysis_runs_per_day",
             "storage_bytes_limit",
             "sleep_enabled_contexts_limit",
+            "max_resource_tokens",
         }
         assert set(quotas.keys()) == expected_keys
         for key, value in quotas.items():

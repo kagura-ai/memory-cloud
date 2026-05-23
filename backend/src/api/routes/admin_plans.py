@@ -90,6 +90,7 @@ class QuotaBreakdown(BaseModel):
     public_calls_per_day: int = 0
     storage_bytes_limit: int = 0
     sleep_enabled_contexts_limit: int = 0
+    max_resource_tokens: int = 0  # Issue #663: tier-fixed (no addon), surfaced read-only
 
 
 class AddonValues(BaseModel):
@@ -664,6 +665,7 @@ async def get_workspace_quotas(
                 public_calls_per_day=plan_tier.public_calls_per_day,
                 storage_bytes_limit=plan_tier.storage_limit_bytes,
                 sleep_enabled_contexts_limit=plan_tier.sleep_enabled_contexts_limit,
+                max_resource_tokens=plan_tier.max_resource_tokens,
             ),
             addon=AddonValues(
                 memory_bonus=workspace.addon_memory_bonus,
@@ -686,6 +688,7 @@ async def get_workspace_quotas(
                 public_calls_per_day=effective["public_calls_per_day"],
                 storage_bytes_limit=effective["storage_bytes_limit"],
                 sleep_enabled_contexts_limit=effective["sleep_enabled_contexts_limit"],
+                max_resource_tokens=effective["max_resource_tokens"],
             ),
             usage=UsageValues(
                 memories=memory_count,
