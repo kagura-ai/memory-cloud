@@ -27,6 +27,7 @@ from models.auth import (
 )
 from models.memory import Memory
 from models.resource import ResourceToken
+from auth.workspace_roles import ContextRole, WorkspaceRole
 from services.workspace_service import WorkspaceService
 from utils.exceptions import ValidationError
 
@@ -77,7 +78,7 @@ async def test_remove_member_comprehensive_cleanup(db_session):
     owner_member = WorkspaceMember(
         workspace_id=workspace.id,
         user_id=owner_id,
-        role="owner",
+        role=WorkspaceRole.OWNER,
     )
     db_session.add(owner_member)
     await db_session.commit()
@@ -111,7 +112,7 @@ async def test_remove_member_comprehensive_cleanup(db_session):
     context_membership = ContextMember(
         context_id=context_by_owner.id,
         user_id=member_id,
-        role="editor",
+        role=ContextRole.EDITOR,
         invited_by=owner_id,
     )
     db_session.add(context_membership)
@@ -161,7 +162,7 @@ async def test_remove_member_comprehensive_cleanup(db_session):
     invitation = WorkspaceInvitation(
         workspace_id=workspace.id,
         email="invitee@example.com",
-        role="member",
+        role=WorkspaceRole.MEMBER,
         invited_by=member_id,
         token=f"invite_{uuid4().hex[:16]}",
     )
@@ -308,7 +309,7 @@ async def test_remove_member_with_no_context_memberships(db_session):
     owner_member = WorkspaceMember(
         workspace_id=workspace.id,
         user_id=owner_id,
-        role="owner",
+        role=WorkspaceRole.OWNER,
     )
     db_session.add(owner_member)
     await db_session.commit()
@@ -317,7 +318,7 @@ async def test_remove_member_with_no_context_memberships(db_session):
     await workspace_service.add_member(
         workspace_id=workspace.id,
         user_id=member_id,
-        role="member",
+        role=WorkspaceRole.MEMBER,
     )
 
     # Remove member (should succeed)
@@ -367,7 +368,7 @@ async def test_remove_member_does_not_affect_other_members(db_session):
     owner_member = WorkspaceMember(
         workspace_id=workspace.id,
         user_id=owner_id,
-        role="owner",
+        role=WorkspaceRole.OWNER,
     )
     db_session.add(owner_member)
     await db_session.commit()
@@ -391,13 +392,13 @@ async def test_remove_member_does_not_affect_other_members(db_session):
     context_member_1 = ContextMember(
         context_id=context.id,
         user_id=member1_id,
-        role="editor",
+        role=ContextRole.EDITOR,
         invited_by=owner_id,
     )
     context_member_2 = ContextMember(
         context_id=context.id,
         user_id=member2_id,
-        role="editor",
+        role=ContextRole.EDITOR,
         invited_by=owner_id,
     )
     db_session.add_all([context_member_1, context_member_2])
@@ -447,7 +448,7 @@ async def test_cannot_remove_workspace_owner(db_session):
     owner_member = WorkspaceMember(
         workspace_id=workspace.id,
         user_id=owner_id,
-        role="owner",
+        role=WorkspaceRole.OWNER,
     )
     db_session.add(owner_member)
     await db_session.commit()
