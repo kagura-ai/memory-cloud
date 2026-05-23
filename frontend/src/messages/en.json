@@ -2178,7 +2178,7 @@
         "perUnit": "(+{count} / unit)",
         "perUnitWithSuffix": "(+{count} {unit} / unit)",
         "proOnlyInline": "(PRO only)",
-        "reductionWarning": "Reducing addons below current usage will be rejected by the backend. (Members: {members} used, Contexts: {contexts} used)"
+        "reductionWarning": "Reducing addons below current usage will be rejected by the backend. (Memories: {memories} used, Members: {members} used, Contexts: {contexts} used)"
       },
       "auditTable": {
         "title": "Change Audit Log",

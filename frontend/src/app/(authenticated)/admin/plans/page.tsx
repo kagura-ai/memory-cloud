@@ -959,6 +959,7 @@ export default function AdminPlansPage() {
                 <div className="bg-yellow-50 dark:bg-yellow-950 p-3 rounded-md">
                   <p className="text-sm text-yellow-800 dark:text-yellow-100">
                     {t("addonDialog.reductionWarning", {
+                      memories: quotaDetail.usage.memories,
                       members: quotaDetail.usage.members,
                       contexts: quotaDetail.usage.contexts,
                     })}

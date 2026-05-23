@@ -237,15 +237,24 @@ export function buildUpdateAddonRequest(
 /**
  * Format the in-dialog "effective" preview next to each input.
  *
- * For non-storage addons: `base + state` (same unit, e.g. memory count).
- * For storage: `base` is bytes, `state` is MB → return MB total so the
- * preview matches the input unit.
+ * Three cases, in order:
+ * 1. `proOnly` addon on a zero-base tier (FREE/BASIC for sleep) → return 0
+ *    to mirror the backend `_zero_floor` clamp. The admin sees the same
+ *    effective value the backend will report after save, even when they
+ *    type a non-zero addon — matching the LD-9 "no effect on this tier"
+ *    contract that the inline "(PRO only)" hint promises.
+ * 2. Storage → `base` is bytes, `addon` is MB → return MB total so the
+ *    preview matches the input unit (which is MB).
+ * 3. Default → `base + addon` (same unit, e.g. memory count).
  */
 export function computeAddonEffectivePreview(
   meta: AddonTypeMeta,
   base: number,
   addon: number,
 ): number {
+  if (meta.proOnly && base === 0) {
+    return 0;
+  }
   if (meta.key === "storage") {
     return Math.floor(base / (1024 * 1024)) + addon;
   }
@@ -288,7 +297,7 @@ export function formatAddonValue(meta: AddonTypeMeta, value: number): string {
 }
 
 function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0";
+  if (bytes === 0) return "0 B";
   const gib = bytes / 1024 ** 3;
   if (gib >= 1) {
     return Number.isInteger(gib) ? `${gib} GiB` : `${gib.toFixed(1)} GiB`;

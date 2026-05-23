@@ -2178,7 +2178,7 @@
         "perUnit": "(+{count} / 単位)",
         "perUnitWithSuffix": "(+{count} {unit} / 単位)",
         "proOnlyInline": "(PRO 限定)",
-        "reductionWarning": "現在の使用量を下回るアドオン削減は backend に拒否されます。（メンバー: {members} 使用中、コンテキスト: {contexts} 使用中）"
+        "reductionWarning": "現在の使用量を下回るアドオン削減は backend に拒否されます。（メモリー: {memories} 使用中、メンバー: {members} 使用中、コンテキスト: {contexts} 使用中）"
       },
       "auditTable": {
         "title": "変更監査ログ",
