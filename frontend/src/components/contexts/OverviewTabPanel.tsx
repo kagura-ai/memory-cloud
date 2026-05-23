@@ -54,7 +54,7 @@ import { PublicAPIStats } from "@/components/dashboard/PublicAPIStats";
 import { formatRelativeTime, formatDate } from "@/lib/utils/datetime";
 import type { Context } from "@/lib/types/context";
 import { useAuth } from "@/contexts/AuthContext";
-import { hasWorkspaceRole } from "@/lib/auth/rbac";
+import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 
 interface OverviewTabPanelProps {
   contextId: string;
@@ -85,7 +85,7 @@ export function OverviewTabPanel({
   // card and skips the doomed API call.
   const canSeeUserActivity = hasWorkspaceRole(
     currentWorkspace?.current_user_role,
-    "admin",
+    WorkspaceRole.Admin,
   );
 
   const fetchUsageStats = useCallback(async () => {

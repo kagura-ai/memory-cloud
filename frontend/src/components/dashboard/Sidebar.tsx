@@ -22,7 +22,12 @@ import {
 } from "@/styles/design-tokens";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
-import { hasRole, hasWorkspaceRole, Role } from "@/lib/auth/rbac";
+import {
+  hasRole,
+  hasWorkspaceRole,
+  Role,
+  WorkspaceRole,
+} from "@/lib/auth/rbac";
 import { getContexts } from "@/lib/api/contexts";
 import { listExternalAPIKeys } from "@/lib/api/external-keys";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -81,7 +86,7 @@ interface NavItem {
   href: string;
   icon: React.ElementType;
   requiredRole?: Role; // System admin role
-  requiredWorkspaceRole?: "owner" | "admin" | "member"; // Workspace role (minimum required)
+  requiredWorkspaceRole?: Exclude<WorkspaceRole, WorkspaceRole.Viewer>; // Workspace role (minimum required)
   disabled?: boolean; // Issue #115: Support for "Coming Soon" items
   showMemberCount?: boolean; // Issue #223: Show dynamic member count
   showContextCount?: boolean; // Show dynamic context count
@@ -106,7 +111,7 @@ const navigationGroups: NavGroup[] = [
         nameKey: "dashboard",
         href: "/workspace/dashboard",
         icon: BarChart,
-        requiredWorkspaceRole: "member", // Issue #398: hide from viewer (read-only role)
+        requiredWorkspaceRole: WorkspaceRole.Member, // Issue #398: hide from viewer (read-only role)
       },
       {
         nameKey: "contexts",
@@ -118,14 +123,14 @@ const navigationGroups: NavGroup[] = [
         nameKey: "resources",
         href: "/workspace/resources",
         icon: Database,
-        requiredWorkspaceRole: "owner", // Issue #389: Owner-only (resource tokens + schema decisions)
+        requiredWorkspaceRole: WorkspaceRole.Owner, // Issue #389: Owner-only (resource tokens + schema decisions)
       },
       {
         nameKey: "members",
         href: "/workspace/members",
         icon: Users,
         showMemberCount: true,
-        requiredWorkspaceRole: "admin", // Issue #398: hide from member/viewer
+        requiredWorkspaceRole: WorkspaceRole.Admin, // Issue #398: hide from member/viewer
       },
       {
         // Issue #473: workspace-scoped cost dashboard.
@@ -135,7 +140,7 @@ const navigationGroups: NavGroup[] = [
         nameKey: "cost",
         href: "/workspace/cost",
         icon: DollarSign,
-        requiredWorkspaceRole: "admin",
+        requiredWorkspaceRole: WorkspaceRole.Admin,
       },
       {
         // Issue #526: workspace-scoped sleep reports view.
@@ -144,7 +149,7 @@ const navigationGroups: NavGroup[] = [
         nameKey: "sleepReports",
         href: "/workspace/sleep-reports",
         icon: Moon,
-        requiredWorkspaceRole: "admin",
+        requiredWorkspaceRole: WorkspaceRole.Admin,
       },
     ],
   },
@@ -172,13 +177,13 @@ const navigationGroups: NavGroup[] = [
         nameKey: "workspaceSettings",
         href: "/workspace/settings/general",
         icon: Sliders,
-        requiredWorkspaceRole: "owner",
+        requiredWorkspaceRole: WorkspaceRole.Owner,
       },
       {
         nameKey: "externalKeys",
         href: "/workspace/integrations/external-keys",
         icon: KeyRound,
-        requiredWorkspaceRole: "owner", // Issue #381: Owner-only (workspace-level secrets)
+        requiredWorkspaceRole: WorkspaceRole.Owner, // Issue #381: Owner-only (workspace-level secrets)
       },
     ],
   },

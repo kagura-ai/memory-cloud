@@ -23,6 +23,7 @@ import { ApiError } from "@/lib/api/base";
 import type { Context } from "@/lib/types/context";
 import type { ContextMember } from "@/lib/api/contexts";
 import type { WorkspaceMember } from "@/lib/api/workspaces";
+import { ContextRole } from "@/lib/auth/rbac";
 
 // ---------- Mocks ------------------------------------------------------------
 
@@ -91,7 +92,7 @@ function makeMember(overrides: Partial<ContextMember> = {}): ContextMember {
     user_id: "user-editor",
     user_name: "Editor User",
     user_email: "editor@example.com",
-    role: "editor",
+    role: ContextRole.Editor,
     added_at: "2026-04-01T00:00:00Z",
     is_workspace_admin: false,
     ...overrides,
@@ -188,11 +189,15 @@ describe("MembersSection — member list", () => {
 
   it("renders rows with role selectors for non-owner members", async () => {
     mockListContextMembers.mockResolvedValue([
-      makeMember({ user_id: "u1", user_email: "one@ex.com", role: "editor" }),
+      makeMember({
+        user_id: "u1",
+        user_email: "one@ex.com",
+        role: ContextRole.Editor,
+      }),
       makeMember({
         user_id: "u2",
         user_email: "two@ex.com",
-        role: "owner",
+        role: ContextRole.Owner,
         is_workspace_admin: false,
       }),
     ]);
@@ -211,8 +216,16 @@ describe("MembersSection — member list", () => {
   it("hides remove button for self rows", async () => {
     setAuth("u1");
     mockListContextMembers.mockResolvedValue([
-      makeMember({ user_id: "u1", user_email: "self@ex.com", role: "editor" }),
-      makeMember({ user_id: "u2", user_email: "other@ex.com", role: "editor" }),
+      makeMember({
+        user_id: "u1",
+        user_email: "self@ex.com",
+        role: ContextRole.Editor,
+      }),
+      makeMember({
+        user_id: "u2",
+        user_email: "other@ex.com",
+        role: ContextRole.Editor,
+      }),
     ]);
     render(<MembersSection contextId={CONTEXT_ID} context={makeContext()} />);
     await waitFor(() => {
@@ -238,7 +251,7 @@ describe("MembersSection — role change with rollback", () => {
 
   it("optimistically updates and rolls back on API error", async () => {
     mockListContextMembers.mockResolvedValue([
-      makeMember({ user_id: "u1", role: "editor" }),
+      makeMember({ user_id: "u1", role: ContextRole.Editor }),
     ]);
     mockUpdateContextMemberRole.mockRejectedValue(
       new ApiError({
@@ -325,7 +338,7 @@ describe("MembersSection — add member flow", () => {
     await waitFor(() => {
       expect(mockAddContextMember).toHaveBeenCalledWith(CONTEXT_ID, {
         user_id: "cand-1",
-        role: "editor",
+        role: ContextRole.Editor,
       });
     });
 
@@ -344,7 +357,7 @@ describe("MembersSection — remove flow", () => {
       makeMember({
         user_id: "u-target",
         user_email: "target@ex.com",
-        role: "editor",
+        role: ContextRole.Editor,
       }),
     ]);
     mockRemoveContextMember.mockResolvedValue(undefined);

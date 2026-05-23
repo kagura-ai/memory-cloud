@@ -10,7 +10,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { hasWorkspaceRole } from "@/lib/auth/rbac";
+import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Button } from "@/components/ui/button";
 import {
@@ -55,7 +55,10 @@ export default function WorkspaceStatsPage() {
   useEffect(() => {
     if (
       currentWorkspace &&
-      !hasWorkspaceRole(currentWorkspace.current_user_role, "member")
+      !hasWorkspaceRole(
+        currentWorkspace.current_user_role,
+        WorkspaceRole.Member,
+      )
     ) {
       router.push("/workspace/contexts");
     }
@@ -108,7 +111,10 @@ export default function WorkspaceStatsPage() {
     if (workspaceLoading) return;
     if (
       currentWorkspace &&
-      !hasWorkspaceRole(currentWorkspace.current_user_role, "member")
+      !hasWorkspaceRole(
+        currentWorkspace.current_user_role,
+        WorkspaceRole.Member,
+      )
     ) {
       return;
     }
@@ -125,7 +131,10 @@ export default function WorkspaceStatsPage() {
     // Same viewer-skip as above — memory-timeline is a member+ surface.
     if (
       currentWorkspace &&
-      !hasWorkspaceRole(currentWorkspace.current_user_role, "member")
+      !hasWorkspaceRole(
+        currentWorkspace.current_user_role,
+        WorkspaceRole.Member,
+      )
     ) {
       return;
     }

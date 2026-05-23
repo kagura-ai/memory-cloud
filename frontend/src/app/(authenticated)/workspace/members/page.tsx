@@ -11,7 +11,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { hasWorkspaceRole } from "@/lib/auth/rbac";
+import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
@@ -86,7 +86,7 @@ export default function WorkspaceMembersPage() {
     if (workspaceLoading) return;
     if (
       currentWorkspace &&
-      !hasWorkspaceRole(currentWorkspace.current_user_role, "admin")
+      !hasWorkspaceRole(currentWorkspace.current_user_role, WorkspaceRole.Admin)
     ) {
       router.push("/workspace/dashboard");
     }
@@ -156,7 +156,13 @@ export default function WorkspaceMembersPage() {
     // protected endpoints in parallel with the redirect, surfacing spurious
     // error toasts before the route change lands.
     if (workspaceLoading) return;
-    if (!hasWorkspaceRole(currentWorkspace?.current_user_role, "admin")) return;
+    if (
+      !hasWorkspaceRole(
+        currentWorkspace?.current_user_role,
+        WorkspaceRole.Admin,
+      )
+    )
+      return;
     if (currentWorkspaceId) {
       loadMembers();
       loadInvitations();
@@ -488,7 +494,7 @@ export default function WorkspaceMembersPage() {
     setRoleChangeLoading(true);
     try {
       await updateMemberRole(currentWorkspaceId, userId, {
-        role: newRole as "owner" | "admin" | "member" | "viewer",
+        role: newRole as WorkspaceRole,
       });
       await loadMembers();
       setShowRoleChangeDialog(false);

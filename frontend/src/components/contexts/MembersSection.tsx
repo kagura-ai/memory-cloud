@@ -41,7 +41,7 @@ import { TableLoadingState } from "@/components/common/LoadingState";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
-import { hasWorkspaceRole } from "@/lib/auth/rbac";
+import { hasWorkspaceRole, ContextRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { useToast } from "@/hooks/use-toast";
 import { ApiError } from "@/lib/api/base";
 import {
@@ -54,15 +54,17 @@ import {
 import { listMembers, type WorkspaceMember } from "@/lib/api/workspaces";
 import type { Context } from "@/lib/types/context";
 
-type ContextRole = "owner" | "editor" | "viewer";
-
 interface MembersSectionProps {
   contextId: string;
   context: Context;
 }
 
 function isContextRole(role: string): role is ContextRole {
-  return role === "owner" || role === "editor" || role === "viewer";
+  return (
+    role === ContextRole.Owner ||
+    role === ContextRole.Editor ||
+    role === ContextRole.Viewer
+  );
 }
 
 export function MembersSection({ contextId, context }: MembersSectionProps) {
@@ -74,7 +76,7 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
 
   const canManage =
     !context.is_private &&
-    hasWorkspaceRole(currentWorkspace?.current_user_role, "admin");
+    hasWorkspaceRole(currentWorkspace?.current_user_role, WorkspaceRole.Admin);
 
   const [members, setMembers] = useState<ContextMember[]>([]);
   const [loading, setLoading] = useState(true);
@@ -90,7 +92,9 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
   >(null);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [addSelectedUserId, setAddSelectedUserId] = useState<string>("");
-  const [addSelectedRole, setAddSelectedRole] = useState<ContextRole>("editor");
+  const [addSelectedRole, setAddSelectedRole] = useState<ContextRole>(
+    ContextRole.Editor,
+  );
   const [submittingAdd, setSubmittingAdd] = useState(false);
 
   const [removeTarget, setRemoveTarget] = useState<ContextMember | null>(null);
@@ -159,13 +163,13 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
       if (!m.is_workspace_admin) excluded.add(m.user_id);
     }
     return workspaceMembers.filter(
-      (wm) => wm.role === "member" && !excluded.has(wm.user_id),
+      (wm) => wm.role === WorkspaceRole.Member && !excluded.has(wm.user_id),
     );
   }, [members, workspaceMembers, recentlyAddedIds]);
 
   const handleOpenAddDialog = async () => {
     setAddSelectedUserId("");
-    setAddSelectedRole("editor");
+    setAddSelectedRole(ContextRole.Editor);
     setAddDialogOpen(true);
     await ensureWorkspaceMembersLoaded();
   };
@@ -260,7 +264,9 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
   // Row-level action gate. Rendering no button is a UX hint; backend still
   // enforces the corresponding 400 guards independently.
   const canModifyMember = (m: ContextMember) =>
-    !m.is_workspace_admin && m.role !== "owner" && m.user_id !== currentUserId;
+    !m.is_workspace_admin &&
+    m.role !== ContextRole.Owner &&
+    m.user_id !== currentUserId;
 
   return (
     <>
@@ -512,15 +518,17 @@ function roleBadgeKey(m: ContextMember): string {
   // Show the actual role on every row. "via workspace access" rendered as
   // the secondary hint already disambiguates workspace-derived rows.
   switch (m.role) {
-    case "owner":
+    case WorkspaceRole.Owner:
+    case ContextRole.Owner:
       return "owner";
-    case "admin":
+    case WorkspaceRole.Admin:
       return "admin";
-    case "member":
+    case WorkspaceRole.Member:
       return "member";
-    case "editor":
+    case ContextRole.Editor:
       return "contextRoleEditor";
-    case "viewer":
+    case WorkspaceRole.Viewer:
+    case ContextRole.Viewer:
       return "viewer";
     default:
       return "contextMember";

@@ -19,7 +19,7 @@ import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
-import { hasWorkspaceRole } from "@/lib/auth/rbac";
+import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { fetchWorkspaceSleepReports } from "@/lib/api";
 
 export default function WorkspaceSleepReportsPage() {
@@ -28,7 +28,7 @@ export default function WorkspaceSleepReportsPage() {
 
   const allowed = hasWorkspaceRole(
     currentWorkspace?.current_user_role,
-    "admin",
+    WorkspaceRole.Admin,
   );
 
   const fetchData = useCallback(
