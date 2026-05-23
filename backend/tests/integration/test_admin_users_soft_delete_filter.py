@@ -13,6 +13,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes.admin import get_user_detail, list_users
+from auth.workspace_roles import WorkspaceRole
 from models.auth import WorkspaceMember
 
 from ._admin_helpers import make_user, make_workspace, mock_admin
@@ -32,8 +33,10 @@ async def user_with_mixed_workspaces(db_session: AsyncSession) -> dict:
 
     db_session.add_all(
         [
-            WorkspaceMember(workspace_id=active.id, user_id=user.user_id, role="owner"),
-            WorkspaceMember(workspace_id=deleted.id, user_id=user.user_id, role="owner"),
+            WorkspaceMember(workspace_id=active.id, user_id=user.user_id, role=WorkspaceRole.OWNER),
+            WorkspaceMember(
+                workspace_id=deleted.id, user_id=user.user_id, role=WorkspaceRole.OWNER
+            ),
         ]
     )
     await db_session.commit()
