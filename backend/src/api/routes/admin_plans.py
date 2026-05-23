@@ -351,7 +351,10 @@ async def update_workspace_plan(
     async with db_transaction(db, "update_workspace_plan", "Failed to update workspace plan"):
         # Get workspace
         workspace_result = await db.execute(
-            select(Workspace).where(Workspace.id == UUID(workspace_id))
+            select(Workspace).where(
+                Workspace.id == UUID(workspace_id),
+                Workspace.deleted_at.is_(None),  # #687 / #681 pattern: soft-delete safe
+            )
         )
         workspace = workspace_result.scalar_one_or_none()
 
@@ -463,7 +466,11 @@ async def get_plan_change_audit(
         List of plan change audit entries
     """
     async with db_transaction(db, "get_plan_audit", "Failed to get audit log"):
-        # Get audit entries with workspace names and user names
+        # Get audit entries with workspace names and user names.
+        # #687: audit/history — intentionally NO Workspace.deleted_at filter.
+        # The audit log records historical plan changes; entries for workspaces
+        # that have since been soft-deleted must remain visible so admins can
+        # reconcile past billing / plan transitions.
         audit_result = await db.execute(
             select(PlanChange, Workspace.name, User.name)
             .join(Workspace, PlanChange.workspace_id == Workspace.id)
@@ -512,7 +519,12 @@ async def get_workspace_quotas(
 
     async with db_transaction(db, "get_workspace_quotas", "Failed to get quota details"):
         # Get workspace
-        result = await db.execute(select(Workspace).where(Workspace.id == ws_uuid))
+        result = await db.execute(
+            select(Workspace).where(
+                Workspace.id == ws_uuid,
+                Workspace.deleted_at.is_(None),  # #687 / #681 pattern: soft-delete safe
+            )
+        )
         workspace = result.scalar_one_or_none()
         if not workspace:
             raise HTTPException(status_code=404, detail="Workspace not found")
@@ -634,7 +646,12 @@ async def update_workspace_quotas(
 
     async with db_transaction(db, "update_workspace_quotas", "Failed to update quotas"):
         # Get workspace
-        result = await db.execute(select(Workspace).where(Workspace.id == ws_uuid))
+        result = await db.execute(
+            select(Workspace).where(
+                Workspace.id == ws_uuid,
+                Workspace.deleted_at.is_(None),  # #687 / #681 pattern: soft-delete safe
+            )
+        )
         workspace = result.scalar_one_or_none()
         if not workspace:
             raise HTTPException(status_code=404, detail="Workspace not found")
@@ -759,7 +776,12 @@ async def update_workspace_spend_cap(
     ws_uuid = UUID(workspace_id)
 
     async with db_transaction(db, "update_workspace_spend_cap", "Failed to update spend cap"):
-        result = await db.execute(select(Workspace).where(Workspace.id == ws_uuid))
+        result = await db.execute(
+            select(Workspace).where(
+                Workspace.id == ws_uuid,
+                Workspace.deleted_at.is_(None),  # #687 / #681 pattern: soft-delete safe
+            )
+        )
         workspace = result.scalar_one_or_none()
         if not workspace:
             raise HTTPException(status_code=404, detail="Workspace not found")
