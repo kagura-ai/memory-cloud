@@ -47,12 +47,25 @@ class AddonCalculatorService:
 
         Any code that mutates ``WorkspaceAddon`` rows
         (INSERT / UPDATE active_until / DELETE / future Stripe webhook
-        handlers / admin scripts) **MUST** call
+        handlers / admin scripts / the admin HTTP handler
+        ``PUT /admin/plans/workspaces/{id}/quotas``) **MUST** call
         ``recalculate_workspace_bonuses(workspace_id)`` after staging
         the mutation in the session (``db.add(...)`` / ``db.delete(...)``).
         Skipping the call leaves the cache stale and every downstream
         quota check returns wrong numbers until something else
         triggers a recalc.
+
+        Provenance discriminator (Issue #665):
+            ``WorkspaceAddon.source`` distinguishes ``'stripe'`` rows
+            (purchase flow) from ``'admin_grant'`` rows (admin manual
+            override). The composite UNIQUE
+            ``(workspace_id, addon_type, source)`` ensures admin grants
+            and Stripe purchases co-exist without overwriting each other
+            — this method's SUM aggregation reads BOTH sources, so the
+            cache always reflects the union. The admin handler
+            UPSERTs the ``(workspace_id, addon_type, 'admin_grant')``
+            row and then calls this method, exactly as Stripe webhooks
+            will when they land.
 
         Commit semantics: ``recalculate_workspace_bonuses`` calls
         ``db.commit()`` internally, which flushes BOTH the caller's
