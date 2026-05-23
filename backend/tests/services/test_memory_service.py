@@ -389,9 +389,13 @@ class TestReferenceWithLinks:
 
             # Repo must have been called with limit=51 (cap+1) so service can
             # detect has_more without paginating.
+            # Issue #741: declared-link filter pivoted from edge_types=[...] to
+            # origin='declared'.
+            from models.memory import EDGE_ORIGIN_DECLARED
+
             kwargs = mock_edge_repo.get_outgoing_edges.await_args.kwargs
             assert kwargs["limit"] == 51
-            assert kwargs["edge_types"] == ["declared_link"]
+            assert kwargs.get("origin") == EDGE_ORIGIN_DECLARED
 
         assert len(response.outgoing_links) == 50
         assert response.outgoing_has_more is True
@@ -432,7 +436,15 @@ class TestReferenceWithLinks:
     async def test_passes_declared_link_filter_to_repo(
         self, source_memory, workspace_id, context_id
     ):
-        """Edge fetch is restricted to declared_link only (not semantic/cooccurrence)."""
+        """Edge fetch is restricted to user-asserted (origin='declared') edges.
+
+        Issue #741: discriminator pivoted from edge_type='declared_link' to
+        origin='declared'. The consumer in ``_fetch_declared_link_refs`` now
+        passes ``origin=EDGE_ORIGIN_DECLARED`` instead of
+        ``edge_types=['declared_link']``.
+        """
+        from models.memory import EDGE_ORIGIN_DECLARED
+
         service = self._make_service(source_memory)
         service.db.execute = self._bulk_select_returning([])
 
@@ -453,8 +465,8 @@ class TestReferenceWithLinks:
 
         out_kwargs = mock_edge_repo.get_outgoing_edges.await_args.kwargs
         in_kwargs = mock_edge_repo.get_incoming_edges.await_args.kwargs
-        assert out_kwargs["edge_types"] == ["declared_link"]
-        assert in_kwargs["edge_types"] == ["declared_link"]
+        assert out_kwargs.get("origin") == EDGE_ORIGIN_DECLARED
+        assert in_kwargs.get("origin") == EDGE_ORIGIN_DECLARED
         # Both edge fetches are scoped to the source memory's workspace+context.
         assert out_kwargs["workspace_id"] == str(workspace_id)
         assert out_kwargs["context_id"] == str(context_id)
@@ -726,13 +738,19 @@ class TestTagCooccurrenceSeeding:
     @pytest.mark.asyncio
     async def test_idempotency_guard_skips_when_seeded(self, base_memory, cfg):
         """If tag_cooccurrence edges already exist for this memory, skip the
-        SQL candidate query entirely. Edge-type-scoped — knn semantic_similarity
-        edges on the same memory must NOT trigger this skip."""
+        SQL candidate query entirely. Issue #741: edge_type='tag_cooccurrence'
+        merged into 'neural_association'; the discriminator moved to
+        ``edge_metadata['source']`` on hebbian-origin rows. Pure-semantic
+        edges (origin='semantic', no source metadata) must NOT trigger this skip."""
         from services import memory_service as ms
+
+        # Build a fake hebbian edge that carries the tag_cooccurrence stamp.
+        seeded_edge = MagicMock()
+        seeded_edge.edge_metadata = {"source": "tag_cooccurrence"}
 
         edge_repo_cls = MagicMock()
         repo_inst = MagicMock()
-        repo_inst.get_outgoing_edges = AsyncMock(return_value=[MagicMock()])  # already seeded
+        repo_inst.get_outgoing_edges = AsyncMock(return_value=[seeded_edge])
         edge_repo_cls.return_value = repo_inst
 
         # to_regclass returns table; idempotency then short-circuits
@@ -749,9 +767,13 @@ class TestTagCooccurrenceSeeding:
         # to_regclass ran (1 execute), then idempotency fired
         assert session.execute.await_count == 1
         repo_inst.get_outgoing_edges.assert_awaited_once()
-        # filter passed only the tag_cooccurrence edge_type
+        # Post-#741: filter pivots from edge_types=[...] to origin='hebbian',
+        # then Python-side scan of edge_metadata['source'].
+        from models.memory import EDGE_ORIGIN_HEBBIAN
+
         call_kwargs = repo_inst.get_outgoing_edges.call_args.kwargs
-        assert call_kwargs["edge_types"] == ["tag_cooccurrence"]
+        assert call_kwargs.get("origin") == EDGE_ORIGIN_HEBBIAN
+        assert "edge_types" not in call_kwargs or call_kwargs["edge_types"] is None
 
     @pytest.mark.asyncio
     async def test_all_tags_are_hub_skips_query(self, base_memory, cfg):
@@ -811,8 +833,14 @@ class TestTagCooccurrenceSeeding:
 
         assert repo_inst.create_edge_if_absent.await_count == 2
         # First call: shared=3 → weight=0.35, confidence=0.75
+        # Issue #741: edge_type='tag_cooccurrence' merged into
+        # 'neural_association'; the discriminator moved to
+        # edge_metadata['source'].
+        from models.memory import EDGE_TYPE_NEURAL_ASSOCIATION
+
         first = repo_inst.create_edge_if_absent.call_args_list[0].kwargs
-        assert first["edge_type"] == "tag_cooccurrence"
+        assert first["edge_type"] == EDGE_TYPE_NEURAL_ASSOCIATION
+        assert first.get("edge_metadata") == {"source": "tag_cooccurrence"}
         assert first["dst_id"] == cand_b_id
         assert first["weight"] == pytest.approx(0.35)
         assert first["confidence"] == pytest.approx(0.75)

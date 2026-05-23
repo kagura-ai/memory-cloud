@@ -294,7 +294,13 @@ class TestKnnSeeding:
         call = mock_repo.create_edge_if_absent.call_args
         assert call.kwargs["src_id"] == memory.id
         assert call.kwargs["dst_id"] == neighbor_id
-        assert call.kwargs["edge_type"] == "semantic_similarity"
+        # Issue #741: edge_type='semantic_similarity' deprecated; discriminator
+        # moved to origin='semantic'. The row writes neural_association with
+        # the origin kwarg carrying the semantic signal.
+        from models.memory import EDGE_ORIGIN_SEMANTIC, EDGE_TYPE_NEURAL_ASSOCIATION
+
+        assert call.kwargs["edge_type"] == EDGE_TYPE_NEURAL_ASSOCIATION
+        assert call.kwargs["origin"] == EDGE_ORIGIN_SEMANTIC
         assert call.kwargs["weight"] == 0.3
         assert call.kwargs["confidence"] == 0.85
         assert call.kwargs["workspace_id"] == str(memory.workspace_id)
