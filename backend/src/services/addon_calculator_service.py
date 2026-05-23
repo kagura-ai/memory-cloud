@@ -155,6 +155,32 @@ class AddonCalculatorService:
                 bonuses["addon_analysis_bonus"] += total_bonus
             elif addon_type == "extra_sleep_contexts":
                 bonuses["addon_sleep_contexts_bonus"] += total_bonus  # Issue #560
+            else:
+                # Issue #665 review-finding #3: a WorkspaceAddon row exists
+                # for an addon_type that has no corresponding cache-column
+                # mapping here. The row passes the check_addon_type CHECK
+                # constraint, so it's a valid enum value the spec table
+                # (admin_plans._ADDON_FIELD_SPECS) added without updating
+                # this method. The contribution is silently dropped; cache
+                # stays at 0; downstream quota check uses the base-tier
+                # value as if the admin grant never happened. Log loudly
+                # so the drift surfaces in production logs at the first
+                # recalc for an affected workspace.
+                logger.warning(
+                    "addon_type_no_bonus_column_mapping",
+                    addon_type=addon_type,
+                    workspace_id=workspace_id,
+                    addon_id=addon.id,
+                    quantity=addon.quantity,
+                    note=(
+                        "WorkspaceAddon row exists for an addon_type with "
+                        "no entry in the if/elif chain above. The grant "
+                        "will not appear in the workspace.addon_*_bonus "
+                        "cache. Update both this method AND "
+                        "admin_plans._ADDON_FIELD_SPECS when introducing "
+                        "a new addon type."
+                    ),
+                )
 
         # Update workspace table
         result = await self.db.execute(select(Workspace).where(Workspace.id == workspace_id))

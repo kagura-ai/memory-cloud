@@ -69,13 +69,27 @@ class UpdatePlanRequest(BaseModel):
 
 
 class QuotaBreakdown(BaseModel):
-    """Quota values for a single tier."""
+    """Quota values for a single tier (Issue #665).
+
+    Extended to 9 fields so the GET ``effective`` block surfaces every
+    addon type the PUT handler accepts — review-finding #8 fixed the
+    write-only hole where storage / rest_quota / public_quota /
+    sleep_contexts could be set but not read back as an effective value.
+
+    The legacy 5 fields stay required (callers always populated them);
+    the 4 new fields default to 0 so existing TS consumers ignore the
+    additive keys without runtime impact.
+    """
 
     memory_limit: int
     mcp_calls_per_day: int
     max_contexts: int
     max_members: int
     analysis_runs_per_day: int
+    rest_calls_per_day: int = 0
+    public_calls_per_day: int = 0
+    storage_bytes_limit: int = 0
+    sleep_enabled_contexts_limit: int = 0
 
 
 class AddonValues(BaseModel):
@@ -140,34 +154,37 @@ class WorkspaceQuotaDetail(BaseModel):
 class UpdateAddonRequest(BaseModel):
     """Request to update workspace addon bonuses (Issue #665).
 
-    All 9 fields are absolute desired effective-bonus values (per the
-    existing API contract, unchanged from the pre-#665 5-field shape).
+    All 9 fields are **optional with no-touch semantics**: when a field is
+    omitted from the request body, the corresponding admin grant is left
+    untouched. To zero out an addon, the client must send the field
+    explicitly with value ``0``.
 
-    The 5 legacy fields keep their pre-#665 defaults (``int = Field(0)``)
-    so callers that omit them get the documented "set to zero" behavior.
-    Wire-format-compatible: a request body with only those 5 fields
-    behaves identically to before.
+    Concrete values are bounded ``0 <= value <= 2_000_000_000``. The upper
+    bound is below PostgreSQL ``INTEGER`` max (2_147_483_647) so the
+    multiplied-out cache-column write at recalc time never overflows.
+    Per-handler logic additionally rejects values lower than the active
+    Stripe-purchased SUM for the same addon type (HTTP 400) so silent
+    clamping cannot happen.
 
-    The 4 new fields (``addon_rest_quota_bonus``, ``addon_public_quota_bonus``,
-    ``addon_storage_bonus_mb``, ``addon_sleep_contexts_bonus``) default to
-    ``None`` with **no-touch semantics**: when omitted, the corresponding
-    admin grant is left untouched, preserving frontend back-compat for the
-    legacy 5-field admin UI.
-
-    All concrete values must be ``>= 0``; the per-handler logic additionally
-    rejects values lower than the active Stripe-purchased SUM for the same
-    addon type (HTTP 400) so silent clamping cannot happen.
+    Wire-format compatibility note (#665 review fix #2): pre-#665 the 5
+    legacy fields defaulted to ``int = Field(0)`` so omitting them meant
+    "set to zero". That semantics is incompatible with the row-based SSoT
+    design — an omitted-default 0 would silently DELETE existing
+    WorkspaceAddon admin_grant rows on partial-update PUTs. The unified
+    optional shape closes this footgun. Clients that intentionally want
+    to zero a field continue to work by sending the field explicitly with
+    value 0; clients that omit the field get the safer no-touch behavior.
     """
 
-    addon_memory_bonus: int = Field(0, ge=0)
-    addon_mcp_quota_bonus: int = Field(0, ge=0)
-    addon_member_bonus: int = Field(0, ge=0)
-    addon_context_bonus: int = Field(0, ge=0)
-    addon_analysis_bonus: int = Field(0, ge=0)
-    addon_rest_quota_bonus: int | None = Field(None, ge=0)
-    addon_public_quota_bonus: int | None = Field(None, ge=0)
-    addon_storage_bonus_mb: int | None = Field(None, ge=0)
-    addon_sleep_contexts_bonus: int | None = Field(None, ge=0)
+    addon_memory_bonus: int | None = Field(None, ge=0, le=2_000_000_000)
+    addon_mcp_quota_bonus: int | None = Field(None, ge=0, le=2_000_000_000)
+    addon_member_bonus: int | None = Field(None, ge=0, le=2_000_000_000)
+    addon_context_bonus: int | None = Field(None, ge=0, le=2_000_000_000)
+    addon_analysis_bonus: int | None = Field(None, ge=0, le=2_000_000_000)
+    addon_rest_quota_bonus: int | None = Field(None, ge=0, le=2_000_000_000)
+    addon_public_quota_bonus: int | None = Field(None, ge=0, le=2_000_000_000)
+    addon_storage_bonus_mb: int | None = Field(None, ge=0, le=2_000_000_000)
+    addon_sleep_contexts_bonus: int | None = Field(None, ge=0, le=2_000_000_000)
 
 
 class UpdateSpendCapRequest(BaseModel):
@@ -643,6 +660,10 @@ async def get_workspace_quotas(
                 max_contexts=plan_tier.max_contexts_per_workspace,
                 max_members=plan_tier.max_members_per_workspace,
                 analysis_runs_per_day=plan_tier.analysis_runs_per_day,
+                rest_calls_per_day=plan_tier.rest_calls_per_day,
+                public_calls_per_day=plan_tier.public_calls_per_day,
+                storage_bytes_limit=plan_tier.storage_limit_bytes,
+                sleep_enabled_contexts_limit=plan_tier.sleep_enabled_contexts_limit,
             ),
             addon=AddonValues(
                 memory_bonus=workspace.addon_memory_bonus,
@@ -661,6 +682,10 @@ async def get_workspace_quotas(
                 max_contexts=effective["max_contexts"],
                 max_members=effective["max_members"],
                 analysis_runs_per_day=effective["analysis_runs_per_day"],
+                rest_calls_per_day=effective["rest_calls_per_day"],
+                public_calls_per_day=effective["public_calls_per_day"],
+                storage_bytes_limit=effective["storage_bytes_limit"],
+                sleep_enabled_contexts_limit=effective["sleep_enabled_contexts_limit"],
             ),
             usage=UsageValues(
                 memories=memory_count,
@@ -958,11 +983,15 @@ async def update_workspace_quotas(
                 ),
             )
 
-        # 2d. Persistent-addon overflow guard (LD-7). Only fires when the
-        #     bonus is actually changing AND the addon has a usage counter
-        #     in the codebase; daily-reset quotas and storage (no tracking
-        #     yet) skip via ``guard_kind is None``.
-        if spec.guard_kind is not None and requested != old_bonus:
+        # 2d. Persistent-addon overflow guard (LD-7). Fires whenever the
+        #     addon has a usage counter (member/context/memory/sleep_contexts),
+        #     regardless of whether ``requested`` matches the cached
+        #     ``old_bonus``. Review-finding #6: keying the skip on cache
+        #     equality let upstream cache drift (e.g. operator SQL leaving
+        #     the cache stale relative to actual usage) slip through a
+        #     re-PUT of the cached value. The cost is one extra COUNT per
+        #     touched persistent-addon field — admin-only path, acceptable.
+        if spec.guard_kind is not None:
             usage_count = await _count_addon_usage(db, ws_uuid, spec.guard_kind)
             new_effective = _effective_for_guard(plan_tier, spec.guard_kind, requested)
             if usage_count > new_effective:
@@ -1028,23 +1057,34 @@ async def update_workspace_quotas(
                 constraint="uq_workspace_addons_workspace_addon_source",
                 set_={
                     "quantity": plan.quantity,
-                    "active_until": None,
-                    "created_by": admin_user["user_id"],
-                    # ``active_from`` intentionally NOT updated on conflict —
-                    # preserve the original-grant timestamp so the audit trail
-                    # tracks "when this admin override was first applied",
-                    # not "when it was last touched" (Phase 6 review A1.1).
+                    # ``active_from``, ``active_until``, and ``created_by``
+                    # are intentionally NOT updated on conflict — the audit
+                    # trail records the original grant (when it first applied
+                    # AND who first applied it). Subsequent re-grants only
+                    # adjust the quantity; the structured log entry
+                    # ``workspace_addon_updated`` captures the changing admin
+                    # identity per-PUT. Review-finding #5 + #7: an unset
+                    # ``set_`` for ``active_until`` previously clobbered any
+                    # pre-existing expiration to NULL, silently extending
+                    # time-bound grants; clobbering ``created_by`` made the
+                    # audit trail half-preserved (timestamp from T1, attribution
+                    # from T_last). Preserving all three closes both gaps.
                 },
             )
         )
         await db.execute(stmt)
 
-    # 4. Recalculate. Commits the staged ``WorkspaceAddon`` UPSERTs and
-    #    the refreshed ``addon_*_bonus`` cache columns atomically per the
-    #    #570 contract docstring on ``AddonCalculatorService`` — which is
-    #    also why this handler has no ``db_transaction(...)`` wrapper
-    #    (LD-3, see function docstring).
-    await AddonCalculatorService(db).recalculate_workspace_bonuses(ws_uuid)
+    # 4. Recalculate (skipped when validation produced no mutations).
+    #    Commits the staged ``WorkspaceAddon`` UPSERTs and the refreshed
+    #    ``addon_*_bonus`` cache columns atomically per the #570 contract
+    #    docstring on ``AddonCalculatorService`` — also why this handler
+    #    has no ``db_transaction(...)`` wrapper (LD-3, see function docstring).
+    #
+    # Review-finding #14: skip the recalc when ``grants_to_apply`` is empty
+    # (e.g. an all-no-touch PUT) so we don't commit a no-op transaction and
+    # emit a misleading ``addon_bonuses_recalculated`` log entry.
+    if grants_to_apply:
+        await AddonCalculatorService(db).recalculate_workspace_bonuses(ws_uuid)
 
     logger.info(
         "workspace_addon_updated",
