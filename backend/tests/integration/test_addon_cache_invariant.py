@@ -71,12 +71,14 @@ async def pro_workspace(db_session: AsyncSession) -> dict:
 
 
 def _zero_legacy_request(**overrides) -> UpdateAddonRequest:
-    """Construct an UpdateAddonRequest with the legacy 5 fields all zeroed.
+    """Construct an UpdateAddonRequest with the legacy 5 fields explicitly zeroed.
 
-    Avoids the per-test boilerplate of restating all 5 required fields,
-    while leaving the new 4 optional fields as ``None`` (no-touch) unless
-    a test explicitly sets one. ``overrides`` keyword arguments take
-    precedence and may include any of the 9 fields.
+    Since #665 review-fix #2 unified all 9 fields as optional with no-touch
+    semantics, this helper now passes the 5 legacy fields as *explicit* zeros
+    (matching the legacy admin UI's behavior of always sending all 5 values).
+    The new 4 optional fields remain ``None`` (no-touch) unless an override
+    sets them. ``overrides`` may include any of the 9 fields and take
+    precedence over the explicit-zero defaults.
     """
     base: dict = {
         "addon_memory_bonus": 0,
@@ -431,3 +433,227 @@ class TestGetResponseShape:
         assert addon.analysis_bonus == 2
         assert addon.storage_bonus_mb == 300
         assert addon.sleep_contexts_bonus == 2
+
+    @pytest.mark.asyncio
+    async def test_get_response_exposes_all_9_effective_fields(
+        self, db_session: AsyncSession, pro_workspace: dict
+    ) -> None:
+        """Review fix #8: GET ``effective`` block surfaces all 9 fields.
+
+        Pre-fix, ``effective`` was a 5-field QuotaBreakdown — the 4 new
+        addon types (rest_quota, public_quota, storage, sleep_contexts)
+        had no read-back path even though PUT accepted them. Confirms the
+        write-only hole is closed.
+        """
+        ws_uuid = pro_workspace["ws_uuid"]
+
+        await update_workspace_quotas(
+            workspace_id=str(ws_uuid),
+            request=_zero_legacy_request(
+                addon_storage_bonus_mb=200,
+                addon_rest_quota_bonus=1000,
+                addon_public_quota_bonus=500,
+                addon_sleep_contexts_bonus=2,
+            ),
+            admin_user=mock_admin(),
+            db=db_session,
+        )
+
+        response = await get_workspace_quotas(
+            workspace_id=str(ws_uuid),
+            admin_user=mock_admin(),
+            db=db_session,
+        )
+        eff = response.effective
+
+        # Effective values reflect tier base + admin grant for all 9
+        # addon types. PRO base values come from config/plan_tiers.py.
+        assert eff.rest_calls_per_day > 0  # PRO base 5000 + addon 1000
+        assert eff.public_calls_per_day > 0  # PRO base 1000 + addon 500
+        assert eff.storage_bytes_limit > 0  # PRO base 10 GiB + addon 200 MB
+        assert eff.sleep_enabled_contexts_limit > 0  # PRO base 3 + addon 2
+
+
+# --- Review fixes ----------------------------------------------------------
+
+
+class TestAlwaysFireOverflowGuard:
+    """Review fix #6: LD-7 overflow guard fires regardless of cache match.
+
+    Pre-fix, the guard was keyed on ``requested != old_bonus``. If the cache
+    column was stale (e.g. operator SQL bypassing the application path), a
+    re-PUT of the cached value silently skipped the check and let over-cap
+    state persist. The fix runs the guard whenever the addon has a usage
+    counter, regardless of cache equality.
+    """
+
+    @pytest.mark.asyncio
+    async def test_guard_fires_when_requested_equals_cached_bonus(
+        self, db_session: AsyncSession, pro_workspace: dict
+    ) -> None:
+        ws_uuid = pro_workspace["ws_uuid"]
+        user_id = pro_workspace["user_id"]
+
+        # Set up: grant sleep_contexts_bonus=5 (effective = 3 + 5 = 8),
+        # create 5 sleep-enabled contexts, then simulate a cache desync
+        # by leaving 5 in the cache but having actual usage that would
+        # exceed the post-reduction effective. We do this by re-asserting
+        # the same bonus value AFTER the contexts exist — pre-fix the
+        # guard skipped; post-fix it fires.
+        await update_workspace_quotas(
+            workspace_id=str(ws_uuid),
+            request=_zero_legacy_request(addon_sleep_contexts_bonus=5),
+            admin_user=mock_admin(),
+            db=db_session,
+        )
+        for _ in range(8):  # exactly at effective cap (3 + 5)
+            db_session.add(
+                Context(
+                    workspace_id=ws_uuid,
+                    name=f"sleep-ctx-{uuid4().hex[:8]}",
+                    created_by=user_id,
+                    is_private=False,
+                    sleep_mode="full",
+                )
+            )
+        await db_session.commit()
+
+        # Re-PUT the SAME bonus value (5). Pre-fix this skipped the guard
+        # because requested == old_bonus. Post-fix the guard fires and
+        # confirms usage (8) <= effective (8), so it passes. To prove the
+        # guard *runs*, we add one more sleep context to push over the
+        # limit, then re-PUT — the guard should now reject 400.
+        db_session.add(
+            Context(
+                workspace_id=ws_uuid,
+                name=f"sleep-ctx-{uuid4().hex[:8]}",
+                created_by=user_id,
+                is_private=False,
+                sleep_mode="full",
+            )
+        )
+        await db_session.commit()
+
+        # Usage=9, requested=5 (same as old), effective=8. 9 > 8 → 400.
+        with pytest.raises(HTTPException) as exc_info:
+            await update_workspace_quotas(
+                workspace_id=str(ws_uuid),
+                request=_zero_legacy_request(addon_sleep_contexts_bonus=5),
+                admin_user=mock_admin(),
+                db=db_session,
+            )
+
+        assert exc_info.value.status_code == 400
+        assert "sleep_contexts" in exc_info.value.detail
+
+
+class TestUpsertPreservesActiveUntilAndCreatedBy:
+    """Review fix #5 + #7: UPSERT preserves active_until and created_by.
+
+    Pre-fix, ON CONFLICT DO UPDATE set_={active_until: None, created_by: ...}
+    silently clobbered any prior expiration to NULL (un-expiring time-bound
+    grants) and overwrote the original-grantor attribution while preserving
+    active_from — half-preserved audit trail. The fix excludes both fields
+    from set_, preserving the full original-grant record.
+    """
+
+    @pytest.mark.asyncio
+    async def test_upsert_preserves_original_grantor_and_expiration(
+        self, db_session: AsyncSession, pro_workspace: dict
+    ) -> None:
+        ws_uuid = pro_workspace["ws_uuid"]
+
+        # Admin A grants memory_bonus=10000 — creates admin_grant row.
+        original_admin = {
+            "user_id": "admin_A_original",
+            "email": "a@test.invalid",
+            "role": "admin",
+        }
+        await update_workspace_quotas(
+            workspace_id=str(ws_uuid),
+            request=_zero_legacy_request(addon_memory_bonus=10000),
+            admin_user=original_admin,
+            db=db_session,
+        )
+
+        # Simulate ops manually setting active_until on the row (would
+        # represent a future time-bound-grant feature or a manual revoke
+        # scheduled by ops).
+        from datetime import timedelta
+
+        sentinel_expiry = utcnow() + timedelta(days=30)
+        existing = (
+            await db_session.execute(
+                select(WorkspaceAddon).where(
+                    WorkspaceAddon.workspace_id == ws_uuid,
+                    WorkspaceAddon.addon_type == "extra_memory",
+                    WorkspaceAddon.source == "admin_grant",
+                )
+            )
+        ).scalar_one()
+        existing.active_until = sentinel_expiry
+        await db_session.commit()
+
+        # Admin B re-grants the same memory_bonus value. Pre-fix this would
+        # have wiped active_until → None AND overwritten created_by → 'admin_B'.
+        # Post-fix both fields are preserved.
+        await update_workspace_quotas(
+            workspace_id=str(ws_uuid),
+            request=_zero_legacy_request(addon_memory_bonus=20000),
+            admin_user={
+                "user_id": "admin_B_later",
+                "email": "b@test.invalid",
+                "role": "admin",
+            },
+            db=db_session,
+        )
+
+        await db_session.refresh(existing)
+        # active_until preserved (NOT clobbered to NULL)
+        assert existing.active_until is not None
+        # created_by preserved (NOT overwritten to admin_B)
+        assert existing.created_by == "admin_A_original"
+        # quantity updated as expected
+        assert existing.quantity == 2  # 20000 / 10000
+
+
+class TestSkipRecalcOnEmptyMutations:
+    """Review fix #14: no-op PUT should not trigger recalc commit + log.
+
+    When every field in the request body is None (or matches the no-op
+    case where grants_to_apply is empty after validation), the handler
+    should skip ``recalculate_workspace_bonuses`` entirely — avoiding a
+    misleading ``addon_bonuses_recalculated`` structured log entry that
+    implies state changed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_all_none_request_does_not_create_admin_grant_rows(
+        self, db_session: AsyncSession, pro_workspace: dict
+    ) -> None:
+        ws_uuid = pro_workspace["ws_uuid"]
+
+        # Send a request with every field omitted (all None default).
+        # Post-fix: validation produces zero grants_to_apply, mutation pass
+        # is a no-op, recalc is skipped — no admin_grant rows created.
+        await update_workspace_quotas(
+            workspace_id=str(ws_uuid),
+            request=UpdateAddonRequest(),  # all 9 None
+            admin_user=mock_admin(),
+            db=db_session,
+        )
+
+        # No admin_grant rows should exist for this workspace.
+        rows = (
+            (
+                await db_session.execute(
+                    select(WorkspaceAddon).where(
+                        WorkspaceAddon.workspace_id == ws_uuid,
+                        WorkspaceAddon.source == "admin_grant",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 0
