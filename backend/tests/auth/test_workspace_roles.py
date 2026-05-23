@@ -1,5 +1,7 @@
 """Test the WorkspaceRole + ContextRole StrEnum (#700)."""
 
+import pytest
+
 from auth.workspace_roles import (
     CONTEXT_ROLE_CHECK_SQL,
     CONTEXT_ROLE_WEIGHTS,
@@ -19,6 +21,7 @@ def test_workspace_role_values_match_db_literals() -> None:
 
 
 def test_context_role_values_match_db_literals() -> None:
+    """Enum values must equal the existing DB CHECK literals byte-for-byte."""
     assert ContextRole.OWNER.value == "owner"
     assert ContextRole.EDITOR.value == "editor"
     assert ContextRole.VIEWER.value == "viewer"
@@ -31,6 +34,13 @@ def test_workspace_role_is_strenum() -> None:
     assert WorkspaceRole("owner") is WorkspaceRole.OWNER
 
 
+def test_context_role_is_strenum() -> None:
+    """StrEnum members compare equal to their string values (round-trip)."""
+    assert ContextRole.OWNER == "owner"
+    assert "editor" == ContextRole.EDITOR
+    assert ContextRole("viewer") is ContextRole.VIEWER
+
+
 def test_workspace_role_weights_keyed_on_enum() -> None:
     """Weights dict is keyed on enum members for type-safe lookup."""
     assert WORKSPACE_ROLE_WEIGHTS[WorkspaceRole.OWNER] == 4
@@ -40,9 +50,16 @@ def test_workspace_role_weights_keyed_on_enum() -> None:
 
 
 def test_context_role_weights_keyed_on_enum() -> None:
+    """Weights dict is keyed on enum members for type-safe lookup."""
     assert CONTEXT_ROLE_WEIGHTS[ContextRole.OWNER] == 3
     assert CONTEXT_ROLE_WEIGHTS[ContextRole.EDITOR] == 2
     assert CONTEXT_ROLE_WEIGHTS[ContextRole.VIEWER] == 1
+
+
+def test_workspace_role_weights_immutable() -> None:
+    """WORKSPACE_ROLE_WEIGHTS is a read-only view — mutation raises TypeError."""
+    with pytest.raises(TypeError):
+        WORKSPACE_ROLE_WEIGHTS[WorkspaceRole.OWNER] = 99  # type: ignore[index]
 
 
 def test_workspace_role_check_sql_matches_existing_migration_literal() -> None:

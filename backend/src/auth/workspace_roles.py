@@ -10,7 +10,7 @@ serialises as its ``.value``, so API responses are byte-identical to the
 pre-refactor shape.
 
 The ``*_CHECK_SQL`` constants are derived from ``.value`` via f-string and
-are byte-identical to the migration literals — re-used in
+are byte-identical to the migration literals — re-used (Task 3 of #700) in
 ``models/auth.py`` ``CheckConstraint`` blocks so the enum is the single
 source of truth for the DB constraint.
 """
@@ -18,6 +18,17 @@ source of truth for the DB constraint.
 from __future__ import annotations
 
 from enum import StrEnum
+from types import MappingProxyType
+from typing import Mapping
+
+__all__ = [
+    "WorkspaceRole",
+    "ContextRole",
+    "WORKSPACE_ROLE_WEIGHTS",
+    "CONTEXT_ROLE_WEIGHTS",
+    "WORKSPACE_ROLE_CHECK_SQL",
+    "CONTEXT_ROLE_CHECK_SQL",
+]
 
 
 class WorkspaceRole(StrEnum):
@@ -45,18 +56,22 @@ class ContextRole(StrEnum):
     VIEWER = "viewer"
 
 
-WORKSPACE_ROLE_WEIGHTS: dict[WorkspaceRole, int] = {
-    WorkspaceRole.OWNER: 4,
-    WorkspaceRole.ADMIN: 3,
-    WorkspaceRole.MEMBER: 2,
-    WorkspaceRole.VIEWER: 1,
-}
+WORKSPACE_ROLE_WEIGHTS: Mapping[WorkspaceRole, int] = MappingProxyType(
+    {
+        WorkspaceRole.OWNER: 4,
+        WorkspaceRole.ADMIN: 3,
+        WorkspaceRole.MEMBER: 2,
+        WorkspaceRole.VIEWER: 1,
+    }
+)
 
-CONTEXT_ROLE_WEIGHTS: dict[ContextRole, int] = {
-    ContextRole.OWNER: 3,
-    ContextRole.EDITOR: 2,
-    ContextRole.VIEWER: 1,
-}
+CONTEXT_ROLE_WEIGHTS: Mapping[ContextRole, int] = MappingProxyType(
+    {
+        ContextRole.OWNER: 3,
+        ContextRole.EDITOR: 2,
+        ContextRole.VIEWER: 1,
+    }
+)
 
 
 WORKSPACE_ROLE_CHECK_SQL: str = f"role IN ({', '.join(repr(r.value) for r in WorkspaceRole)})"
