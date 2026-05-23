@@ -191,7 +191,8 @@ class AddonCalculatorService:
         workspace = result.scalar_one_or_none()
 
         if not workspace:
-            logger.error("workspace_not_found", workspace_id=workspace_id)
+            # Cast UUID to str for JSONRenderer compatibility (see line 169).
+            logger.error("workspace_not_found", workspace_id=str(workspace_id))
             return bonuses
 
         workspace.addon_storage_bonus_mb = bonuses["addon_storage_bonus_mb"]
@@ -206,9 +207,10 @@ class AddonCalculatorService:
 
         await self.db.commit()
 
+        # Cast UUID to str for JSONRenderer compatibility (see line 169).
         logger.info(
             "addon_bonuses_recalculated",
-            workspace_id=workspace_id,
+            workspace_id=str(workspace_id),
             active_addons=len(active_addons),
             bonuses=bonuses,
         )

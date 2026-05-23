@@ -135,10 +135,19 @@ def upgrade() -> None:
                 'pre_665_migration_backfill'
             FROM workspaces w
             LEFT JOIN (
+                -- Subtract ONLY active non-admin rows. Match the active-window
+                -- predicate used by AddonCalculatorService.recalculate_workspace_bonuses
+                -- (addon_calculator_service.py:99-104). Including expired or
+                -- future rows in the subtraction would understate the admin
+                -- portion: at the next recalc, those rows are excluded from
+                -- the SUM, so the cache would drop by the amount they
+                -- previously contributed (Copilot review #797 round 3).
                 SELECT workspace_id, SUM(quantity) AS non_admin_sum
                 FROM workspace_addons
                 WHERE addon_type = '{addon_type}'
                   AND source != 'admin_grant'
+                  AND active_from <= NOW()
+                  AND (active_until IS NULL OR active_until > NOW())
                 GROUP BY workspace_id
             ) na ON w.id = na.workspace_id
             WHERE w.deleted_at IS NULL
