@@ -289,6 +289,7 @@ class NeuralEdgeRepository:
         context_id: str | None = None,
         *,
         origin: str = EDGE_ORIGIN_HEBBIAN,
+        edge_metadata: dict[str, Any] | None = None,
     ) -> NeuralMemoryEdge | None:
         """Create an edge only if no edge exists for (user_id, src_id, dst_id).
 
@@ -298,6 +299,13 @@ class NeuralEdgeRepository:
         This is the canonical path for **synthetic / seed edges** (k-NN
         cold-start seeding, tag co-occurrence, etc.) where we must not
         overwrite Hebbian-learned edges via upsert.
+
+        Args:
+            edge_metadata: Optional JSON metadata stored on the row's
+                ``metadata`` column. The tag-cooccurrence seed path (#741)
+                uses this to stamp ``{"source": "tag_cooccurrence"}`` on
+                otherwise-hebbian rows so the original edge-type discriminator
+                stays recoverable post-merge to ``neural_association``.
 
         Returns:
             The newly created NeuralMemoryEdge, or ``None`` if an edge
@@ -326,6 +334,7 @@ class NeuralEdgeRepository:
                 workspace_id=ws_uuid,
                 context_id=ctx_uuid,
                 origin=origin,
+                edge_metadata=edge_metadata,
                 created_at=utcnow(),
                 last_updated=utcnow(),
             )
@@ -463,6 +472,8 @@ class NeuralEdgeRepository:
         limit: int | None = None,
         workspace_id: str | None = None,
         context_id: str | None = None,
+        *,
+        origin: str | None = None,
     ) -> list[NeuralMemoryEdge]:
         """Get outgoing edges from a node with 3-level isolation.
 
@@ -484,6 +495,10 @@ class NeuralEdgeRepository:
             limit: Maximum edges to return
             workspace_id: Workspace ID (for isolation)
             context_id: Context ID (for isolation)
+            origin: Optional origin filter (#741). Pass ``EDGE_ORIGIN_DECLARED``
+                to fetch user-asserted links, etc. Mirrors the post-#741 pivot
+                where edge_type='declared_link' is replaced by
+                origin='declared'.
 
         Returns:
             List of outgoing edges sorted by weight descending
@@ -506,6 +521,9 @@ class NeuralEdgeRepository:
             conditions.append(NeuralMemoryEdge.workspace_id == UUID(workspace_id))
         if context_id:
             conditions.append(NeuralMemoryEdge.context_id == UUID(context_id))
+
+        if origin is not None:
+            conditions.append(NeuralMemoryEdge.origin == origin)
 
         stmt = (
             select(NeuralMemoryEdge)
@@ -531,6 +549,8 @@ class NeuralEdgeRepository:
         limit: int | None = None,
         workspace_id: str | None = None,
         context_id: str | None = None,
+        *,
+        origin: str | None = None,
     ) -> list[NeuralMemoryEdge]:
         """Get incoming edges to a node with 3-level isolation.
 
@@ -552,6 +572,8 @@ class NeuralEdgeRepository:
             limit: Maximum edges to return
             workspace_id: Workspace ID (for isolation)
             context_id: Context ID (for isolation)
+            origin: Optional origin filter (#741). Mirrors the kwarg on
+                ``get_outgoing_edges``.
 
         Returns:
             List of incoming edges sorted by weight descending
@@ -574,6 +596,9 @@ class NeuralEdgeRepository:
             conditions.append(NeuralMemoryEdge.workspace_id == UUID(workspace_id))
         if context_id:
             conditions.append(NeuralMemoryEdge.context_id == UUID(context_id))
+
+        if origin is not None:
+            conditions.append(NeuralMemoryEdge.origin == origin)
 
         stmt = (
             select(NeuralMemoryEdge)
