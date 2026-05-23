@@ -47,12 +47,25 @@ class AddonCalculatorService:
 
         Any code that mutates ``WorkspaceAddon`` rows
         (INSERT / UPDATE active_until / DELETE / future Stripe webhook
-        handlers / admin scripts) **MUST** call
+        handlers / admin scripts / the admin HTTP handler
+        ``PUT /admin/plans/workspaces/{id}/quotas``) **MUST** call
         ``recalculate_workspace_bonuses(workspace_id)`` after staging
         the mutation in the session (``db.add(...)`` / ``db.delete(...)``).
         Skipping the call leaves the cache stale and every downstream
         quota check returns wrong numbers until something else
         triggers a recalc.
+
+        Provenance discriminator (Issue #665):
+            ``WorkspaceAddon.source`` distinguishes ``'stripe'`` rows
+            (purchase flow) from ``'admin_grant'`` rows (admin manual
+            override). The composite UNIQUE
+            ``(workspace_id, addon_type, source)`` ensures admin grants
+            and Stripe purchases co-exist without overwriting each other
+            — this method's SUM aggregation reads BOTH sources, so the
+            cache always reflects the union. The admin handler
+            UPSERTs the ``(workspace_id, addon_type, 'admin_grant')``
+            row and then calls this method, exactly as Stripe webhooks
+            will when they land.
 
         Commit semantics: ``recalculate_workspace_bonuses`` calls
         ``db.commit()`` internally, which flushes BOTH the caller's
@@ -142,13 +155,44 @@ class AddonCalculatorService:
                 bonuses["addon_analysis_bonus"] += total_bonus
             elif addon_type == "extra_sleep_contexts":
                 bonuses["addon_sleep_contexts_bonus"] += total_bonus  # Issue #560
+            else:
+                # Issue #665 review-finding #3: a WorkspaceAddon row exists
+                # for an addon_type that has no corresponding cache-column
+                # mapping here. The row passes the check_addon_type CHECK
+                # constraint, so it's a valid enum value the spec table
+                # (admin_plans._ADDON_FIELD_SPECS) added without updating
+                # this method. The contribution is silently dropped; cache
+                # stays at 0; downstream quota check uses the base-tier
+                # value as if the admin grant never happened. Log loudly
+                # so the drift surfaces in production logs at the first
+                # recalc for an affected workspace.
+                # Cast UUID to str — utils/logger.py uses JSONRenderer in
+                # production (LOG_COLORIZE=false) without a default=str
+                # serializer, so raw UUID kwargs would fail JSON encoding
+                # and the warning would silently drop. Copilot review #797.
+                logger.warning(
+                    "addon_type_no_bonus_column_mapping",
+                    addon_type=addon_type,
+                    workspace_id=str(workspace_id),
+                    addon_id=addon.id,
+                    quantity=addon.quantity,
+                    note=(
+                        "WorkspaceAddon row exists for an addon_type with "
+                        "no entry in the if/elif chain above. The grant "
+                        "will not appear in the workspace.addon_*_bonus "
+                        "cache. Update both this method AND "
+                        "admin_plans._ADDON_FIELD_SPECS when introducing "
+                        "a new addon type."
+                    ),
+                )
 
         # Update workspace table
         result = await self.db.execute(select(Workspace).where(Workspace.id == workspace_id))
         workspace = result.scalar_one_or_none()
 
         if not workspace:
-            logger.error("workspace_not_found", workspace_id=workspace_id)
+            # Cast UUID to str for JSONRenderer compatibility (see line 169).
+            logger.error("workspace_not_found", workspace_id=str(workspace_id))
             return bonuses
 
         workspace.addon_storage_bonus_mb = bonuses["addon_storage_bonus_mb"]
@@ -163,9 +207,10 @@ class AddonCalculatorService:
 
         await self.db.commit()
 
+        # Cast UUID to str for JSONRenderer compatibility (see line 169).
         logger.info(
             "addon_bonuses_recalculated",
-            workspace_id=workspace_id,
+            workspace_id=str(workspace_id),
             active_addons=len(active_addons),
             bonuses=bonuses,
         )

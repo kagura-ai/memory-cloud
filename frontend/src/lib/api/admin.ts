@@ -135,6 +135,16 @@ export interface QuotaBreakdown {
   max_contexts: number;
   max_members: number;
   analysis_runs_per_day: number;
+  // Issue #665 review fix #8: extended to 9 fields so GET surfaces the
+  // effective value for every addon type the PUT accepts. The backend
+  // populates these unconditionally (Pydantic ``int = 0`` defaults), so
+  // they are typed as required ``number`` not optional — matches the
+  // actual wire format and avoids ``undefined`` creeping into UI math
+  // (Copilot review feedback on #797).
+  rest_calls_per_day: number;
+  public_calls_per_day: number;
+  storage_bytes_limit: number;
+  sleep_enabled_contexts_limit: number;
 }
 
 export interface WorkspaceQuotaDetail {
@@ -142,12 +152,21 @@ export interface WorkspaceQuotaDetail {
   workspace_name: string;
   plan_name: string;
   base: QuotaBreakdown;
+  // Issue #665: 9 addon cache columns surfaced. The 4 new fields
+  // (rest_quota_bonus, public_quota_bonus, storage_bonus_mb,
+  // sleep_contexts_bonus) are always present in the response; UI
+  // components that don't render them yet (#663 picks that up) simply
+  // ignore the extra keys.
   addon: {
     memory_bonus: number;
     mcp_quota_bonus: number;
+    rest_quota_bonus: number;
+    public_quota_bonus: number;
     member_bonus: number;
     context_bonus: number;
     analysis_bonus: number;
+    storage_bonus_mb: number;
+    sleep_contexts_bonus: number;
   };
   effective: QuotaBreakdown;
   usage: { memories: number; contexts: number; members: number };
@@ -155,11 +174,26 @@ export interface WorkspaceQuotaDetail {
 }
 
 export interface UpdateAddonRequest {
-  addon_memory_bonus: number;
-  addon_mcp_quota_bonus: number;
-  addon_member_bonus: number;
-  addon_context_bonus: number;
-  addon_analysis_bonus: number;
+  // Issue #665 review-fix #2: all 9 fields are optional with no-touch
+  // semantics. Omit a field to leave the corresponding admin grant
+  // unchanged; send explicit ``0`` to zero it out. The pre-#665 5-field
+  // required-default-0 shape silently DELETEd grants on partial PUTs;
+  // unified optional closes that footgun. Existing callers that always
+  // send all 5 legacy fields continue to behave identically (explicit
+  // values, no omissions).
+  //
+  // Absolute-value semantics: every concrete value is the desired
+  // effective bonus contribution, NOT a delta. Backend rejects values
+  // below the active Stripe SUM (HTTP 400) — no silent clamping.
+  addon_memory_bonus?: number;
+  addon_mcp_quota_bonus?: number;
+  addon_member_bonus?: number;
+  addon_context_bonus?: number;
+  addon_analysis_bonus?: number;
+  addon_rest_quota_bonus?: number;
+  addon_public_quota_bonus?: number;
+  addon_storage_bonus_mb?: number;
+  addon_sleep_contexts_bonus?: number;
 }
 
 /**
