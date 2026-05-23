@@ -2538,23 +2538,21 @@ async def _create_tag_cooccurrence_seed_edges(
         #
         # Issue #741: the original guard filtered by ``edge_type='tag_cooccurrence'``.
         # After #741 those rows are merged into ``neural_association`` and the
-        # tag-cooccurrence stamp moves to ``edge_metadata['source']``. We fetch
-        # hebbian-origin outgoing edges and scan in Python for the metadata
-        # marker rather than bloat the repo API for a single caller.
+        # tag-cooccurrence stamp moves to ``edge_metadata['source']``. The
+        # filter is pushed into SQL (``metadata::jsonb ->> 'source'``) with
+        # ``limit=1`` so high-degree memory nodes don't pull thousands of
+        # co-activation edges into Python just to answer "already seeded?".
         edge_repo = NeuralEdgeRepository(db)
-        hebbian_outgoing = await edge_repo.get_outgoing_edges(
+        existing_seed = await edge_repo.get_outgoing_edges(
             user_id=memory.user_id,
             src_id=memory.id,
             workspace_id=workspace_id_str,
             context_id=context_id_str,
             origin=EDGE_ORIGIN_HEBBIAN,
+            metadata_source="tag_cooccurrence",
+            limit=1,
         )
-        already_seeded = any(
-            edge.edge_metadata is not None
-            and edge.edge_metadata.get("source") == "tag_cooccurrence"
-            for edge in hebbian_outgoing
-        )
-        if already_seeded:
+        if existing_seed:
             logger.debug(
                 "tag_cooccurrence_skip_already_seeded",
                 memory_id=memory_id_str,

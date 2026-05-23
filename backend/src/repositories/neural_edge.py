@@ -16,7 +16,8 @@ from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import and_, case, delete, desc, func, or_, select
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import cast as sa_cast
+from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -474,6 +475,7 @@ class NeuralEdgeRepository:
         context_id: str | None = None,
         *,
         origin: str | None = None,
+        metadata_source: str | None = None,
     ) -> list[NeuralMemoryEdge]:
         """Get outgoing edges from a node with 3-level isolation.
 
@@ -499,6 +501,16 @@ class NeuralEdgeRepository:
                 to fetch user-asserted links, etc. Mirrors the post-#741 pivot
                 where edge_type='declared_link' is replaced by
                 origin='declared'.
+            metadata_source: Optional filter on ``edge_metadata['source']``
+                (#741). Pushed into SQL via ``metadata::jsonb ->> 'source'``
+                so high-degree nodes (many co-activation edges) don't pull
+                thousands of rows into Python just to scan for a metadata
+                marker. Used by the tag-cooccurrence idempotency guard which
+                pairs ``origin=EDGE_ORIGIN_HEBBIAN`` +
+                ``metadata_source='tag_cooccurrence'`` + ``limit=1`` for an
+                O(1) early-out. ``edge_metadata`` is stored as ``JSON``
+                rather than ``JSONB`` (see ``models/memory.py``), so the
+                cast is applied here at query time.
 
         Returns:
             List of outgoing edges sorted by weight descending
@@ -524,6 +536,14 @@ class NeuralEdgeRepository:
 
         if origin is not None:
             conditions.append(NeuralMemoryEdge.origin == origin)
+
+        if metadata_source is not None:
+            # JSON → JSONB cast at query time so we can use the ->> operator
+            # via SQLAlchemy's astext accessor. Equivalent SQL:
+            #   metadata::jsonb ->> 'source' = :metadata_source
+            conditions.append(
+                sa_cast(NeuralMemoryEdge.edge_metadata, JSONB)["source"].astext == metadata_source
+            )
 
         stmt = (
             select(NeuralMemoryEdge)
@@ -551,6 +571,7 @@ class NeuralEdgeRepository:
         context_id: str | None = None,
         *,
         origin: str | None = None,
+        metadata_source: str | None = None,
     ) -> list[NeuralMemoryEdge]:
         """Get incoming edges to a node with 3-level isolation.
 
@@ -574,6 +595,10 @@ class NeuralEdgeRepository:
             context_id: Context ID (for isolation)
             origin: Optional origin filter (#741). Mirrors the kwarg on
                 ``get_outgoing_edges``.
+            metadata_source: Optional filter on ``edge_metadata['source']``
+                (#741). Mirrors the kwarg on ``get_outgoing_edges`` for
+                symmetry; same SQL-level ``metadata::jsonb ->> 'source'``
+                push-down semantics apply.
 
         Returns:
             List of incoming edges sorted by weight descending
@@ -599,6 +624,12 @@ class NeuralEdgeRepository:
 
         if origin is not None:
             conditions.append(NeuralMemoryEdge.origin == origin)
+
+        if metadata_source is not None:
+            # See get_outgoing_edges() for the JSON→JSONB cast rationale.
+            conditions.append(
+                sa_cast(NeuralMemoryEdge.edge_metadata, JSONB)["source"].astext == metadata_source
+            )
 
         stmt = (
             select(NeuralMemoryEdge)

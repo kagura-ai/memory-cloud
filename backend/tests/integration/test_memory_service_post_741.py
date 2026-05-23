@@ -234,23 +234,24 @@ async def test_create_tag_cooccurrence_writes_edge_metadata_source(
     assert edge.origin == EDGE_ORIGIN_HEBBIAN
     assert edge.edge_metadata == {"source": "tag_cooccurrence"}
 
-    # The idempotency guard path must recognize the stamp.
-    hebbian_outgoing = await repo.get_outgoing_edges(
+    # The idempotency guard path must recognize the stamp via the SQL-pushed
+    # metadata_source filter (#741 follow-up): origin=hebbian +
+    # metadata_source='tag_cooccurrence' + limit=1 is the O(1) early-out the
+    # producer uses on high-degree memory nodes.
+    seeded = await repo.get_outgoing_edges(
         user_id=s["owner_id"],
         src_id=s["src"].id,
         workspace_id=str(s["ws_id"]),
         context_id=str(s["ctx_id"]),
         origin=EDGE_ORIGIN_HEBBIAN,
+        metadata_source="tag_cooccurrence",
+        limit=1,
     )
-    seeded = [
-        e
-        for e in hebbian_outgoing
-        if e.edge_metadata and e.edge_metadata.get("source") == "tag_cooccurrence"
-    ]
     assert len(seeded) == 1, (
-        "idempotency guard must detect prior tag_cooccurrence seed via "
-        "metadata scan over hebbian-origin outgoing edges"
+        "idempotency guard must detect prior tag_cooccurrence seed via the "
+        "SQL-pushed metadata_source filter on hebbian-origin outgoing edges"
     )
+    assert seeded[0].edge_metadata == {"source": "tag_cooccurrence"}
 
 
 @pytest.mark.asyncio
