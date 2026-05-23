@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.main import app
 from auth.api_keys import APIKeyManager
 from db.redis import get_redis_client
+from auth.workspace_roles import WorkspaceRole
 from models.auth import Context, UsageStats, WorkspaceMember
 
 from ._admin_helpers import make_user, make_workspace
@@ -51,7 +52,7 @@ async def _seed_public_context(db: AsyncSession) -> tuple[Context, str]:
     db.add(ws)
     await db.flush()
 
-    db.add(WorkspaceMember(workspace_id=ws.id, user_id=user.user_id, role="owner"))
+    db.add(WorkspaceMember(workspace_id=ws.id, user_id=user.user_id, role=WorkspaceRole.OWNER))
 
     ctx = Context(
         id=uuid4(),
