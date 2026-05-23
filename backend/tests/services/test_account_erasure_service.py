@@ -24,6 +24,7 @@ from models.erasure import (
     STATUS_PENDING,
     ErasureRequest,
 )
+from auth.workspace_roles import WorkspaceRole
 from services.account_erasure_service import (
     COOLING_OFF_PERIOD,
     AccountErasureService,
@@ -764,7 +765,7 @@ class TestHandleOwnedWorkspaces:
         svc = _service()
         ws_id = uuid4()
         ws = SimpleNamespace(id=ws_id, owner_user_id="u-1")
-        rows = [SimpleNamespace(workspace_id=ws_id, user_id="u-1", role="owner")]
+        rows = [SimpleNamespace(workspace_id=ws_id, user_id="u-1", role=WorkspaceRole.OWNER)]
         svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
         svc.db.commit = AsyncMock()
 
@@ -777,9 +778,9 @@ class TestHandleOwnedWorkspaces:
         svc = _service()
         ws_id = uuid4()
         ws = SimpleNamespace(id=ws_id, owner_user_id="u-1")
-        new_admin = SimpleNamespace(workspace_id=ws_id, user_id="u-2", role="admin")
+        new_admin = SimpleNamespace(workspace_id=ws_id, user_id="u-2", role=WorkspaceRole.ADMIN)
         rows = [
-            SimpleNamespace(workspace_id=ws_id, user_id="u-1", role="owner"),
+            SimpleNamespace(workspace_id=ws_id, user_id="u-1", role=WorkspaceRole.OWNER),
             new_admin,
         ]
         svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
@@ -798,9 +799,9 @@ class TestHandleOwnedWorkspaces:
         ws_id = uuid4()
         ws = SimpleNamespace(id=ws_id, owner_user_id="u-1")
         rows = [
-            SimpleNamespace(workspace_id=ws_id, user_id="u-1", role="owner"),
-            SimpleNamespace(workspace_id=ws_id, user_id="u-2", role="member"),
-            SimpleNamespace(workspace_id=ws_id, user_id="u-3", role="viewer"),
+            SimpleNamespace(workspace_id=ws_id, user_id="u-1", role=WorkspaceRole.OWNER),
+            SimpleNamespace(workspace_id=ws_id, user_id="u-2", role=WorkspaceRole.MEMBER),
+            SimpleNamespace(workspace_id=ws_id, user_id="u-3", role=WorkspaceRole.VIEWER),
         ]
         svc.db.execute = AsyncMock(return_value=self._bulk_members_result(rows))
         svc.db.commit = AsyncMock()
