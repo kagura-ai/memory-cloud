@@ -10,6 +10,7 @@ import pytest_asyncio
 from sqlalchemy import select
 
 from db.qdrant import ensure_kagura_memories_collection
+from auth.workspace_roles import WorkspaceRole
 from models.auth import Context, Workspace, WorkspaceMember
 from models.memory import Memory
 from models.schemas import ExploreRequest, RecallRequest, RememberRequest
@@ -74,7 +75,7 @@ async def test_workspace1(db_session):
         member = WorkspaceMember(
             workspace_id=workspace.id,
             user_id=uid,
-            role="owner" if uid == "owner1" else "member",
+            role=WorkspaceRole.OWNER if uid == "owner1" else WorkspaceRole.MEMBER,
         )
         db_session.add(member)
 
@@ -98,7 +99,7 @@ async def test_workspace2(db_session):
         member = WorkspaceMember(
             workspace_id=workspace.id,
             user_id=uid,
-            role="owner" if uid == "owner2" else "member",
+            role=WorkspaceRole.OWNER if uid == "owner2" else WorkspaceRole.MEMBER,
         )
         db_session.add(member)
 
