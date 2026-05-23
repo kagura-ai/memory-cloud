@@ -98,12 +98,25 @@ _ADDON_BACKFILL: tuple[tuple[str, str, int], ...] = (
 
 
 def upgrade() -> None:
-    """Insert admin_grant rows for every non-zero cache column on every workspace.
+    """Insert admin_grant rows for the admin-only portion of each cache column.
 
-    Per-column INSERT ... SELECT with floor-divide and a positive-only WHERE
-    filter (``quantity > 0`` ensures we never insert a zero-quantity row,
-    which would violate ``check_quantity_positive``). ``ON CONFLICT DO
-    NOTHING`` on the composite UNIQUE makes the migration idempotent.
+    Per-column INSERT ... SELECT with floor-divide. The admin portion is
+    ``cache_bonus - SUM(non_admin_quantity) * unit_value`` so that
+    pre-existing ``source='stripe'`` (or any future non-admin source) rows
+    already covered by the cache are subtracted out — avoids
+    double-counting if a workspace somehow already has non-admin
+    workspace_addons rows AND a non-zero cache (e.g. data inserted via
+    direct SQL or a Stripe webhook landing before this migration runs).
+
+    The ``GREATEST(0, ...)`` clamp guards against negative deltas (could
+    occur if the cache has drifted lower than the SUM of non-admin rows).
+    The WHERE clause filters to workspaces where the admin portion is
+    actually >= unit_value, so we never INSERT quantity=0 (would violate
+    ``check_quantity_positive``).
+
+    ``ON CONFLICT DO NOTHING`` on the composite UNIQUE makes the migration
+    idempotent on re-run AND preserves any admin_grant row that already
+    exists (e.g. landed via the new handler before backfill was applied).
     """
     op.execute("LOCK TABLE workspaces IN SHARE ROW EXCLUSIVE MODE")
     op.execute("LOCK TABLE workspace_addons IN SHARE ROW EXCLUSIVE MODE")
@@ -116,13 +129,20 @@ def upgrade() -> None:
             SELECT
                 w.id,
                 '{addon_type}',
-                w.{cache_col} / {unit_value},
+                GREATEST(0, w.{cache_col} - COALESCE(na.non_admin_sum, 0) * {unit_value}) / {unit_value},
                 'admin_grant',
                 NOW(),
                 'pre_665_migration_backfill'
             FROM workspaces w
-            WHERE w.{cache_col} >= {unit_value}
-              AND w.deleted_at IS NULL
+            LEFT JOIN (
+                SELECT workspace_id, SUM(quantity) AS non_admin_sum
+                FROM workspace_addons
+                WHERE addon_type = '{addon_type}'
+                  AND source != 'admin_grant'
+                GROUP BY workspace_id
+            ) na ON w.id = na.workspace_id
+            WHERE w.deleted_at IS NULL
+              AND (w.{cache_col} - COALESCE(na.non_admin_sum, 0) * {unit_value}) >= {unit_value}
             ON CONFLICT ON CONSTRAINT uq_workspace_addons_workspace_addon_source
                 DO NOTHING
             """

@@ -166,10 +166,14 @@ class AddonCalculatorService:
                 # value as if the admin grant never happened. Log loudly
                 # so the drift surfaces in production logs at the first
                 # recalc for an affected workspace.
+                # Cast UUID to str — utils/logger.py uses JSONRenderer in
+                # production (LOG_COLORIZE=false) without a default=str
+                # serializer, so raw UUID kwargs would fail JSON encoding
+                # and the warning would silently drop. Copilot review #797.
                 logger.warning(
                     "addon_type_no_bonus_column_mapping",
                     addon_type=addon_type,
-                    workspace_id=workspace_id,
+                    workspace_id=str(workspace_id),
                     addon_id=addon.id,
                     quantity=addon.quantity,
                     note=(
