@@ -1004,9 +1004,15 @@ async def delete_user(
         await db.execute(delete(Context).where(Context.created_by == user_id))
 
         # Remove user from workspace memberships
+        # #687: operation-on-deleted — full user erasure must purge memberships
+        # from soft-deleted workspaces too; otherwise a workspace restore would
+        # resurrect ghost members for an account that no longer exists.
         await db.execute(delete(WorkspaceMember).where(WorkspaceMember.user_id == user_id))
 
         # Delete workspaces owned by the user
+        # #687: operation-on-deleted — hard-delete cascades over soft-deleted
+        # workspaces; the user is leaving the system entirely, so any workspace
+        # they own (active or soft-deleted) must be removed.
         await db.execute(delete(Workspace).where(Workspace.owner_user_id == user_id))
 
         # Note: Qdrant points are automatically cleaned up via context deletion cascade
