@@ -881,10 +881,13 @@ async def update_workspace_quotas(
     only an error-boundary rollback, never an outer commit boundary
     (``utils/db_helpers.py:45-82``).
 
-    Per LD-4: 9-field request schema. Legacy 5 fields keep their pre-#665
-    ``int = 0`` defaults so callers that send only those fields behave
-    identically; the new 4 fields are ``int | None = None`` with no-touch
-    semantics. The pre-#665 frontend admin UI continues to work unchanged.
+    Per LD-4 (revised by review-fix #2): all 9 request fields are
+    ``int | None = None`` with no-touch semantics — omit a field to leave
+    its admin grant untouched; send explicit ``0`` to zero it out. The
+    pre-#665 legacy 5-field admin UI continues to work because it always
+    sends all 5 values explicitly. The unified optional shape closes the
+    partial-update footgun where omitted-default 0 silently DELETEd
+    existing admin_grant rows.
 
     Per LD-2: absolute-value semantics. For each touched field, compute
     ``non_admin_total = SUM(active WorkspaceAddon rows WHERE source !=
@@ -934,7 +937,7 @@ async def update_workspace_quotas(
     for spec in _ADDON_FIELD_SPECS:
         requested = getattr(request, spec.field_name)
         if requested is None:
-            continue  # no-touch (LD-4: only the 4 new optional fields can be None)
+            continue  # no-touch (LD-4 revised by review-fix #2: any of the 9 fields can be None)
 
         # field_name doubles as the Workspace cache-column name by convention.
         old_bonus = getattr(workspace, spec.field_name)

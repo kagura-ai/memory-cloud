@@ -136,13 +136,15 @@ export interface QuotaBreakdown {
   max_members: number;
   analysis_runs_per_day: number;
   // Issue #665 review fix #8: extended to 9 fields so GET surfaces the
-  // effective value for every addon type the PUT accepts. New fields
-  // default to 0 server-side; UI components that don't render them yet
-  // (#663 picks that up) simply ignore the additive keys.
-  rest_calls_per_day?: number;
-  public_calls_per_day?: number;
-  storage_bytes_limit?: number;
-  sleep_enabled_contexts_limit?: number;
+  // effective value for every addon type the PUT accepts. The backend
+  // populates these unconditionally (Pydantic ``int = 0`` defaults), so
+  // they are typed as required ``number`` not optional — matches the
+  // actual wire format and avoids ``undefined`` creeping into UI math
+  // (Copilot review feedback on #797).
+  rest_calls_per_day: number;
+  public_calls_per_day: number;
+  storage_bytes_limit: number;
+  sleep_enabled_contexts_limit: number;
 }
 
 export interface WorkspaceQuotaDetail {
