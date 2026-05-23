@@ -89,13 +89,16 @@ async def declared_link_scenario(db_session: AsyncSession):
 async def test_protect_declared_link_preserves_edge_type(
     db_session: AsyncSession, declared_link_scenario
 ):
-    """Hebbian-style retyping must not clobber declared_link edge_type.
+    """Hebbian-style retyping must not clobber a declared-origin edge.
 
-    Scenario: a `declared_link` edge exists (user-declared). Hebbian
+    Scenario: a user-declared edge exists (origin='declared'). Hebbian
     co-activation later fires and tries to upsert the same (src, dst)
-    with edge_type="neural_association" via GraphService.add_edge,
-    which passes protect_declared_link=True. The edge_type must stay
-    "declared_link"; weight/last_updated may update.
+    with edge_type="neural_association" via GraphService.add_edge, which
+    passes protect_declared_link=True. The existing edge_type AND origin
+    must stay pinned (#741: declared-link semantics now key on the origin
+    discriminator, and the preserved edge_type is whatever value the user
+    asserted — `related_to` in this fixture); weight/last_updated may
+    update.
     """
     repo = NeuralEdgeRepository(db_session)
     s = declared_link_scenario
