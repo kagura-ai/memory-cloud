@@ -439,7 +439,10 @@ class PermissionService:
             required_role: Minimum required role (owner/editor/viewer)
 
         Returns:
-            Tuple of (Context, effective_role)
+            Tuple of (Context, effective_role). The effective_role is always a
+            ``ContextRole``: workspace owner/admin map to ``ContextRole.OWNER``,
+            workspace viewer maps to ``ContextRole.VIEWER``, and an explicit
+            ContextMember row keeps its own role.
 
         Raises:
             NotFoundException: 404 if the context does not exist.
@@ -538,7 +541,7 @@ class PermissionService:
             NotFoundException: 404 if the context does not exist.
             AuthorizationError: 403 if no write access.
         """
-        context, role = await self.check_context_access(
+        context, _ = await self.check_context_access(
             user_id,
             context_id,
             required_role=ContextRole.EDITOR,
@@ -559,7 +562,7 @@ class PermissionService:
             NotFoundException: 404 if the context does not exist.
             AuthorizationError: 403 if not context owner.
         """
-        context, role = await self.check_context_access(
+        context, _ = await self.check_context_access(
             user_id,
             context_id,
             required_role=ContextRole.OWNER,
@@ -579,9 +582,9 @@ class PermissionService:
         demotion-only today — re-wire into the remove flow if we ever relax
         that to "remove allowed when >1 owners exist".
 
-        Workspace-level owner/admin bypass (check_context_access:327-329) is
-        not counted here — this reflects the real governance anchor stored in
-        the ContextMember table.
+        Workspace-level owner/admin bypass (handled inside
+        ``check_context_access``) is not counted here — this reflects the
+        real governance anchor stored in the ContextMember table.
 
         Args:
             context_id: Context ID
