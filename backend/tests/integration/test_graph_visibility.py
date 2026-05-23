@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from api.main import app
 from auth.dependencies import require_session_auth
 from db.base import get_db
+from auth.workspace_roles import WorkspaceRole
 from models.auth import Context, Workspace, WorkspaceMember
 from models.memory import Memory, NeuralMemoryEdge
 
@@ -160,7 +161,7 @@ async def visibility_scenario(async_engine, db_session):
 
     db_session.add_all(
         [
-            WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role="owner"),
+            WorkspaceMember(workspace_id=ws_a.id, user_id=owner_a_id, role=WorkspaceRole.OWNER),
             # member_a needs an explicit allowed_context_ids whitelist — post-#398
             # (commit bd5b7a4) a member with ``allowed_context_ids=NULL`` is
             # treated as suspended and uniformly 404s on every UUID-addressed
@@ -173,10 +174,10 @@ async def visibility_scenario(async_engine, db_session):
             WorkspaceMember(
                 workspace_id=ws_a.id,
                 user_id=member_a_id,
-                role="member",
+                role=WorkspaceRole.MEMBER,
                 allowed_context_ids=[ctx_shared.id],
             ),
-            WorkspaceMember(workspace_id=ws_b.id, user_id=outsider_b_id, role="owner"),
+            WorkspaceMember(workspace_id=ws_b.id, user_id=outsider_b_id, role=WorkspaceRole.OWNER),
         ]
     )
     await db_session.flush()
