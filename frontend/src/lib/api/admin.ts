@@ -5,6 +5,7 @@
  */
 
 import { apiClient } from "./base";
+import { ContextRole, WorkspaceRole } from "@/lib/auth/rbac";
 
 export interface WorkspacePlanInfo {
   id: string;
@@ -222,7 +223,7 @@ export async function updateWorkspaceSpendCap(
 export interface UserWorkspace {
   workspace_id: string;
   workspace_name: string;
-  role: string;
+  role: WorkspaceRole;
   is_primary: boolean;
   joined_at: string | null;
   plan_name: string;
@@ -233,7 +234,9 @@ export interface UserContext {
   context_name: string;
   workspace_id: string;
   workspace_name: string;
-  role: string;
+  // Cross-axis: workspace owner/admin bypass returns the WorkspaceRole;
+  // explicit ContextMember rows carry the ContextRole. See backend #699.
+  role: WorkspaceRole | ContextRole;
   last_used_at: string | null;
 }
 

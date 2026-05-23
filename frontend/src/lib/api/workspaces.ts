@@ -5,6 +5,7 @@
  */
 
 import { apiClient } from "./base";
+import { WorkspaceRole } from "@/lib/auth/rbac";
 import type {
   UsageCurrentResponse,
   UsageHistoryResponse,
@@ -44,7 +45,7 @@ export interface WorkspaceMember {
   user_id: string;
   user_name: string | null;
   user_email: string | null;
-  role: "owner" | "admin" | "member" | "viewer";
+  role: WorkspaceRole;
   joined_at: string | null;
   credentials_status?: CredentialsStatusInfo | null; // New: credentials info
 
@@ -76,11 +77,11 @@ export interface UpdateWorkspaceRequest {
 
 export interface AddMemberRequest {
   user_id: string;
-  role: "owner" | "admin" | "member" | "viewer";
+  role: WorkspaceRole;
 }
 
 export interface UpdateMemberRoleRequest {
-  role: "owner" | "admin" | "member" | "viewer";
+  role: WorkspaceRole;
 }
 
 // Issue #249: Context usage statistics
