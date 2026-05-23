@@ -1501,6 +1501,18 @@ class Workspace(Base):
         return _zero_floor(self._plan_tier.storage_limit_bytes, addon_bytes)
 
     @property
+    def effective_max_resource_tokens(self) -> int:
+        """Max resource tokens: tier-fixed value (Issue #663).
+
+        There is no addon for resource tokens — the cap is purely
+        tier-determined. The property exists for API surface symmetry with
+        the other ``effective_*`` quotas so ``EffectiveQuotaService`` can
+        expose it through the same key shape; no ``_zero_floor`` is needed
+        because there is no addon to clamp.
+        """
+        return self._plan_tier.max_resource_tokens
+
+    @property
     def effective_sleep_enabled_contexts_limit(self) -> int:
         """Sleep-enabled contexts cap: plan tier base + addon (Issue #560).
 
