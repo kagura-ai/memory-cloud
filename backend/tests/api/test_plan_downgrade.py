@@ -16,8 +16,8 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import func, select
 
-from config.plan_tiers import get_plan_tier
 from auth.workspace_roles import WorkspaceRole
+from config.plan_tiers import get_plan_tier
 from models.auth import (
     Context,
     PlanChange,

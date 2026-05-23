@@ -27,8 +27,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.main import app
 from auth.dependencies import require_session_auth
-from db.base import get_db
 from auth.workspace_roles import WorkspaceRole
+from db.base import get_db
 from models.auth import Context, Workspace, WorkspaceMember
 from models.memory import Memory, NeuralMemoryEdge
 

@@ -11,9 +11,9 @@ from uuid import uuid4
 
 import pytest
 
+from auth.workspace_roles import WorkspaceRole
 from models.auth import Context, User, Workspace, WorkspaceMember
 from models.memory import Memory
-from auth.workspace_roles import WorkspaceRole
 from services.workspace_service import WorkspaceService
 from utils.exceptions import NotFoundException, ValidationError
 

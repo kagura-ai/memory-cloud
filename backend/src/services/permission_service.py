@@ -13,9 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import (
     CONTEXT_ROLE_WEIGHTS,
-    WORKSPACE_ROLE_WEIGHTS as ORG_ROLE_WEIGHTS,
     ContextRole,
     WorkspaceRole,
+)
+from auth.workspace_roles import (
+    WORKSPACE_ROLE_WEIGHTS as ORG_ROLE_WEIGHTS,
 )
 from models.auth import Context, ContextMember, WorkspaceMember
 from services.workspace_service import WorkspaceService

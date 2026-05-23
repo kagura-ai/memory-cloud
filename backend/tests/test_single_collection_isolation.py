@@ -9,8 +9,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
-from db.qdrant import ensure_kagura_memories_collection
 from auth.workspace_roles import WorkspaceRole
+from db.qdrant import ensure_kagura_memories_collection
 from models.auth import Context, Workspace, WorkspaceMember
 from models.memory import Memory
 from models.schemas import ExploreRequest, RecallRequest, RememberRequest

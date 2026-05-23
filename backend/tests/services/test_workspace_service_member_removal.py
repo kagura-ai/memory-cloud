@@ -17,6 +17,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import func, select
 
+from auth.workspace_roles import ContextRole, WorkspaceRole
 from models.auth import (
     Context,
     ContextMember,
@@ -27,7 +28,6 @@ from models.auth import (
 )
 from models.memory import Memory
 from models.resource import ResourceToken
-from auth.workspace_roles import ContextRole, WorkspaceRole
 from services.workspace_service import WorkspaceService
 from utils.exceptions import ValidationError
 

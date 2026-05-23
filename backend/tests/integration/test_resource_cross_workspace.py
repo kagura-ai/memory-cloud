@@ -30,8 +30,8 @@ from auth.dependencies import (
     get_user_from_api_key_or_session,
     require_workspace_owner,
 )
-from db.base import get_db
 from auth.workspace_roles import WorkspaceRole
+from db.base import get_db
 from models.auth import Context, Workspace, WorkspaceMember
 from models.resource import Resource, ResourceSchema, ResourceToken
 from utils.datetime import utcnow

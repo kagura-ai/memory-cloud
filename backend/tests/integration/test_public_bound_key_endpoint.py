@@ -27,8 +27,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.main import app
 from auth.api_keys import APIKeyManager
-from db.redis import get_redis_client
 from auth.workspace_roles import WorkspaceRole
+from db.redis import get_redis_client
 from models.auth import Context, UsageStats, WorkspaceMember
 
 from ._admin_helpers import make_user, make_workspace

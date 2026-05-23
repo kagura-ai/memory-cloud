@@ -16,6 +16,7 @@ from uuid import uuid4
 
 import pytest
 
+from auth.workspace_roles import WorkspaceRole
 from models.erasure import (
     REASON_SELF_SERVICE,
     REASON_USER_REQUEST_VIA_SUPPORT,
@@ -24,7 +25,6 @@ from models.erasure import (
     STATUS_PENDING,
     ErasureRequest,
 )
-from auth.workspace_roles import WorkspaceRole
 from services.account_erasure_service import (
     COOLING_OFF_PERIOD,
     AccountErasureService,
