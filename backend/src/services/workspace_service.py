@@ -11,6 +11,7 @@ from uuid import UUID
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.workspace_roles import WorkspaceRole
 from models.auth import Context, ExternalAPIKey, UsageStats, Workspace, WorkspaceMember
 from models.memory import Memory
 from utils.datetime import utcnow
@@ -100,7 +101,7 @@ class WorkspaceService:
         member = WorkspaceMember(
             workspace_id=workspace.id,
             user_id=owner_user_id,
-            role="owner",
+            role=WorkspaceRole.OWNER,
             joined_at=func.now(),
         )
         self.db.add(member)
@@ -528,7 +529,7 @@ class WorkspaceService:
         self,
         workspace_id: UUID,
         user_id: str,
-        role: str = "member",
+        role: WorkspaceRole | str = WorkspaceRole.MEMBER,
         invited_by: str | None = None,
     ) -> WorkspaceMember:
         """Add a member to workspace.
@@ -660,11 +661,11 @@ class WorkspaceService:
             raise NotFoundException(f"Member not found: {user_id} in workspace {workspace_id}")
 
         # Validate single owner constraint (Issue #165)
-        if new_role == "owner" and member.role != "owner":
+        if new_role == WorkspaceRole.OWNER and member.role != WorkspaceRole.OWNER:
             # Promoting to owner - check if owner already exists
             stmt = select(WorkspaceMember).where(
                 WorkspaceMember.workspace_id == workspace_id,
-                WorkspaceMember.role == "owner",
+                WorkspaceMember.role == WorkspaceRole.OWNER,
             )
             result = await self.db.execute(stmt)
             existing_owners = result.scalars().all()
@@ -727,7 +728,10 @@ class WorkspaceService:
             raise NotFoundException(f"Member not found: {user_id} in workspace {workspace_id}")
 
         # Warn if setting on owner/admin (no effect)
-        if member.role in ("owner", "admin") and allowed_context_ids is not None:
+        if (
+            member.role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN)
+            and allowed_context_ids is not None
+        ):
             logger.warning(
                 f"allowed_context_ids set on privileged role (ignored): "
                 f"workspace={workspace_id}, user={user_id}, role={member.role}"
@@ -773,7 +777,7 @@ class WorkspaceService:
         member = await self.get_member(workspace_id, user_id, with_lock=True)
 
         # Cannot remove owner
-        if member.role == "owner":
+        if member.role == WorkspaceRole.OWNER:
             raise ValidationError("Cannot remove workspace owner")
 
         # Issue #275: Comprehensive cleanup with transaction safety
@@ -787,7 +791,7 @@ class WorkspaceService:
                 select(WorkspaceMember.user_id).where(
                     and_(
                         WorkspaceMember.workspace_id == workspace_id,
-                        WorkspaceMember.role == "owner",
+                        WorkspaceMember.role == WorkspaceRole.OWNER,
                     )
                 )
             )
@@ -823,7 +827,7 @@ class WorkspaceService:
             # Issue #275 High: Re-check role before deletion (permission escalation prevention)
             # Member object might be stale if role was changed during cleanup
             await self.db.refresh(member)
-            if member.role == "owner":
+            if member.role == WorkspaceRole.OWNER:
                 await self.db.rollback()
                 logger.warning(
                     "member_role_changed_to_owner_during_removal",
@@ -1543,9 +1547,10 @@ class WorkspaceService:
         Raises:
             ValidationError: If role is invalid
         """
-        valid_roles = {"owner", "admin", "member", "viewer"}
+        valid_roles: frozenset[WorkspaceRole] = frozenset(WorkspaceRole)
         if role not in valid_roles:
-            raise ValidationError(f"Invalid role: {role}. Must be one of: {', '.join(valid_roles)}")
+            valid_values = ", ".join(r.value for r in WorkspaceRole)
+            raise ValidationError(f"Invalid role: {role}. Must be one of: {valid_values}")
 
     async def create_personal_workspace(
         self,
