@@ -15,13 +15,10 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import (
-    EDGE_TYPE_DECLARED_LINK,
     EDGE_TYPE_DEPENDS_ON,
     EDGE_TYPE_LEARNED_FROM,
     EDGE_TYPE_NEURAL_ASSOCIATION,
     EDGE_TYPE_RELATED_TO,
-    EDGE_TYPE_SEMANTIC_SIMILARITY,
-    EDGE_TYPE_TAG_COOCCURRENCE,
 )
 from repositories.neural_edge import NeuralEdgeRepository
 from utils.datetime import to_utc_iso
@@ -46,13 +43,21 @@ class GraphService:
         - user: User nodes (future)
 
     Edge Types (mirrors the DB CHECK constraint and ``EDGE_TYPE_*`` constants):
-        - neural_association: Learned associations (Hebbian)
-        - related_to: Semantic relationship
-        - depends_on: Dependency relationship
-        - learned_from: Learning source
-        - semantic_similarity: k-NN cold-start seeding (#221)
-        - declared_link: Client-declared explicit link (#215)
-        - tag_cooccurrence: Tag co-occurrence cold-start seeding (#223)
+        - neural_association: Learned associations (Hebbian) — also the
+          generic catch-all post-#741 for any provenance not expressible
+          as a relation (e.g. cold-start seeds and synthetic links)
+        - related_to: LLM-judged semantic relationship (undirected)
+        - depends_on: LLM-judged dependency relationship (directed)
+        - learned_from: LLM-judged learning source (directed)
+
+    Provenance lives on the ``origin`` axis (#722), independent of edge_type:
+        - hebbian: runtime Hebbian co-activation trace
+        - semantic: sleep edge_discovery (cosine-similarity-derived;
+          was edge_type='semantic_similarity' pre-#741)
+        - declared: user-asserted (was edge_type='declared_link' pre-#741)
+
+    Tag-cooccurrence-derived edges (was edge_type='tag_cooccurrence' pre-#741)
+    are recorded with ``edge_metadata['source']='tag_cooccurrence'``.
 
     Attributes:
         user_id: Owner user ID (GDPR compliance)
@@ -69,20 +74,19 @@ class GraphService:
     _STATS_OWNER_DEFAULT: Any = object()
 
     NODE_TYPES = ["memory", "user", "topic"]
-    # Issue #506: full set of edge_types accepted by the DB CHECK constraint
-    # (mirrors ``mcp_server/tools/edge.py::VALID_EDGE_TYPES`` from PR #507).
+    # Issue #506 / #741: full set of edge_types accepted by the DB CHECK
+    # constraint (mirrors ``mcp_server/tools/edge.py::VALID_EDGE_TYPES``).
     # ``frozenset`` for immutability + O(1) ``not in`` lookup at the validator
     # in ``add_edge``. Sourced from ``EDGE_TYPE_*`` constants so this set
-    # cannot drift from the schema literal.
+    # cannot drift from the schema literal. Post-#741 the set collapsed
+    # from 7 to 4 values: ``semantic_similarity``, ``declared_link``, and
+    # ``tag_cooccurrence`` moved to the ``origin`` / ``edge_metadata`` axes.
     EDGE_TYPES: frozenset[str] = frozenset(
         {
             EDGE_TYPE_NEURAL_ASSOCIATION,
             EDGE_TYPE_RELATED_TO,
             EDGE_TYPE_DEPENDS_ON,
             EDGE_TYPE_LEARNED_FROM,
-            EDGE_TYPE_SEMANTIC_SIMILARITY,
-            EDGE_TYPE_DECLARED_LINK,
-            EDGE_TYPE_TAG_COOCCURRENCE,
         }
     )
 

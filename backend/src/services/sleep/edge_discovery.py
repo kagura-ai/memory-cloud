@@ -67,38 +67,46 @@ DISCOVERY_EDGE_WEIGHT = 0.5
 BATCH_SIZE = 5
 
 # Issue #248: k-NN cold-start seeding (#224/#238) births every new memory
-# with weak `semantic_similarity` edges to its 0.4-0.9 Qdrant neighbors at
+# with weak semantic-origin edges to its 0.4-0.9 Qdrant neighbors at
 # `knn_seed_weight` (default 0.3, "intentionally low — synthetic signal").
-# Without an edge_type-aware filter, `_filter_existing_edges` below would
+# Without an origin-aware filter, `_filter_existing_edges` below would
 # treat those seeded pairs as "already connected" and skip LLM judgment,
 # producing 0 edges per run in production. 0.5 sits comfortably above the
 # default seed weight so the LLM judge sees the mid-similarity band again;
 # operators who configure `knn_seed_weight` >= 0.5 are implicitly opting
 # those edges back into "real connection" semantics.
+#
+# Issue #741: discriminator pivoted from edge_type='semantic_similarity'
+# to origin='semantic'. The numeric threshold itself is unchanged.
 SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD = 0.5
 
 
 def _is_synthetic_seed_edge(edge: NeuralMemoryEdge) -> bool:
-    """Return True if ``edge`` is a synthetic cold-start seed (#248, #223).
+    """Return True if ``edge`` is a synthetic cold-start seed (#248, #223, #741).
 
     Cold-start seeds must NOT block Sleep Edge Discovery from re-judging a
-    pair. Two seed types qualify:
+    pair. Two seed types qualify; post-#741 both are identified via the
+    ``origin`` axis (and ``edge_metadata['source']`` for tag_cooccurrence):
 
-    - **k-NN ``semantic_similarity`` (#221/#224/#238)**: synthetic only when
+    - **k-NN semantic-origin (#221/#224/#238)**: ``origin='semantic'`` with
       ``weight < SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD`` (0.5).
       Operators who set ``knn_seed_weight`` >= 0.5 are implicitly opting
-      those edges back into "real connection" semantics.
-    - **``tag_cooccurrence`` (#223)**: synthetic at *any* weight — the type
-      is purely seeding, weight 0.25–0.40 by spec, and there is no operator
-      knob to "promote" tag-cooccurrence to a real connection. If a pair
-      becomes truly related, Sleep Discovery should overwrite the
-      tag_cooccurrence edge with a confirmed ``related_to`` (or similar).
+      those edges back into "real connection" semantics. Pre-#741 these
+      were tagged ``edge_type='semantic_similarity'``.
+    - **tag_cooccurrence (#223)**: identified by
+      ``edge_metadata['source']=='tag_cooccurrence'``; synthetic at *any*
+      weight — the source is purely seeding, weight 0.25–0.40 by spec, and
+      there is no operator knob to "promote" tag-cooccurrence to a real
+      connection. If a pair becomes truly related, Sleep Discovery should
+      overwrite the tag_cooccurrence edge with a confirmed ``related_to``
+      (or similar). Pre-#741 these were tagged
+      ``edge_type='tag_cooccurrence'``.
 
-    All other edge types are treated as real connections regardless of weight.
+    All other edges are treated as real connections regardless of weight.
     """
-    if edge.edge_type == "semantic_similarity":
+    if edge.origin == EDGE_ORIGIN_SEMANTIC:
         return edge.weight < SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD
-    if edge.edge_type == "tag_cooccurrence":
+    if edge.edge_metadata is not None and edge.edge_metadata.get("source") == "tag_cooccurrence":
         return True
     return False
 
@@ -115,11 +123,11 @@ CONFIDENCE_HISTOGRAM_KEYS: tuple[str, ...] = ("0.0-0.5", "0.5-0.7", "0.7-0.85", 
 
 # Issue #374: `EdgeType` is the type-level source of truth for valid
 # `NeuralMemoryEdge.edge_type` values emitted by the LLM judge (a deliberate
-# subset of the DB CHECK constraint in `models/memory.py` — the DB accepts
-# additional non-LLM types like `tag_cooccurrence`). `LLM_EMITTABLE_EDGE_TYPES`
-# is derived via `get_args` so the runtime membership check and the type
-# annotation cannot drift. Adding a new LLM-emittable edge type only requires
-# editing the Literal.
+# subset of the DB CHECK constraint in `models/memory.py` — the DB also
+# accepts `neural_association`, the generic catch-all that the LLM judge
+# does not emit). `LLM_EMITTABLE_EDGE_TYPES` is derived via `get_args` so
+# the runtime membership check and the type annotation cannot drift.
+# Adding a new LLM-emittable edge type only requires editing the Literal.
 #
 # Issue #461: renamed from `VALID_EDGE_TYPES` to disambiguate from the
 # full DB-accepted set in `mcp_server/tools/edge.py::VALID_EDGE_TYPES`.
@@ -732,12 +740,15 @@ class EdgeDiscoveryPhase:
     ) -> list[tuple[UUID, UUID, float]]:
         """Remove pairs that already have a meaningful edge.
 
-        Issue #248: Low-weight ``semantic_similarity`` edges (weight <
-        ``SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD``) are synthetic
-        k-NN cold-start seeds from #224/#238 and do NOT block the pair from
-        being re-judged by Sleep Edge Discovery. All other edge types — and
-        high-weight ``semantic_similarity`` edges — are treated as real
-        connections and cause the pair to be filtered out.
+        Issue #248 / #741: Low-weight semantic-origin edges (``origin='semantic'``,
+        ``weight < SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD``) are
+        synthetic k-NN cold-start seeds from #224/#238 and do NOT block the
+        pair from being re-judged by Sleep Edge Discovery. Tag-cooccurrence
+        seeds (``edge_metadata['source']='tag_cooccurrence'``) are likewise
+        treated as synthetic at any weight. All other edges — and high-weight
+        semantic-origin edges — are treated as real connections and cause the
+        pair to be filtered out. See ``_is_synthetic_seed_edge`` for the full
+        discriminator.
         """
         # TODO: N+1 query per candidate — batch fetch edges for all src_ids in one query
         filtered = []

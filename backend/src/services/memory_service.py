@@ -21,7 +21,13 @@ from db.qdrant import (
     update_memory_payload_in_qdrant,
 )
 from models.auth import Context
-from models.memory import Memory
+from models.memory import (
+    EDGE_ORIGIN_DECLARED,
+    EDGE_ORIGIN_HEBBIAN,
+    EDGE_ORIGIN_SEMANTIC,
+    EDGE_TYPE_NEURAL_ASSOCIATION,
+    Memory,
+)
 from models.schemas import (
     ExploreHint,
     ExploreRequest,
@@ -918,21 +924,25 @@ class MemoryService:
         edge_repo = NeuralEdgeRepository(self.db)
         cap = 50
 
+        # Issue #741: discriminator pivoted from edge_type='declared_link' to
+        # origin='declared'. The post-#741 schema merges edge_type into
+        # ``neural_association`` and tracks user-asserted semantics on the
+        # ``origin`` column.
         out_edges = await edge_repo.get_outgoing_edges(
             user_id=None,
             src_id=memory_id,
-            edge_types=["declared_link"],
             limit=cap + 1,
             workspace_id=str(workspace_id),
             context_id=str(context_id),
+            origin=EDGE_ORIGIN_DECLARED,
         )
         in_edges = await edge_repo.get_incoming_edges(
             user_id=None,
             dst_id=memory_id,
-            edge_types=["declared_link"],
             limit=cap + 1,
             workspace_id=str(workspace_id),
             context_id=str(context_id),
+            origin=EDGE_ORIGIN_DECLARED,
         )
 
         out_has_more = len(out_edges) > cap
@@ -1039,15 +1049,18 @@ class MemoryService:
                     if target_id not in valid_ids:
                         logger.debug("declared_link_target_not_found", target_id=str(target_id))
                         continue
+                    # Issue #741: edge_type='declared_link' deprecated;
+                    # discriminator moved to origin='declared'.
                     await edge_repo.create_edge_if_absent(
                         user_id=user_id,
                         src_id=memory_id,
                         dst_id=target_id,
-                        edge_type="declared_link",
+                        edge_type=EDGE_TYPE_NEURAL_ASSOCIATION,
                         weight=1.0,
                         confidence=1.0,
                         workspace_id=workspace_id,
                         context_id=context_id,
+                        origin=EDGE_ORIGIN_DECLARED,
                     )
                     created += 1
 
@@ -1071,15 +1084,18 @@ class MemoryService:
                         continue
                     if target_id == memory_id:
                         continue
+                    # Issue #741: edge_type='declared_link' deprecated;
+                    # discriminator moved to origin='declared'.
                     await edge_repo.create_edge_if_absent(
                         user_id=user_id,
                         src_id=memory_id,
                         dst_id=target_id,
-                        edge_type="declared_link",
+                        edge_type=EDGE_TYPE_NEURAL_ASSOCIATION,
                         weight=1.0,
                         confidence=1.0,
                         workspace_id=workspace_id,
                         context_id=context_id,
+                        origin=EDGE_ORIGIN_DECLARED,
                     )
                     created += 1
 
@@ -2379,15 +2395,18 @@ async def _create_knn_seed_edges(
             # inserts and the final commit still succeed.
             try:
                 async with db.begin_nested():
+                    # Issue #741: edge_type='semantic_similarity' deprecated;
+                    # discriminator moved to origin='semantic'.
                     edge = await edge_repo.create_edge_if_absent(
                         user_id=memory.user_id,
                         src_id=memory.id,
                         dst_id=neighbor_id,
-                        edge_type="semantic_similarity",
+                        edge_type=EDGE_TYPE_NEURAL_ASSOCIATION,
                         weight=config.knn_seed_weight,
                         confidence=neighbor_score,
                         workspace_id=workspace_id_str,
                         context_id=context_id_str,
+                        origin=EDGE_ORIGIN_SEMANTIC,
                     )
                 # edge is None when ON CONFLICT DO NOTHING fired — existing
                 # edge was preserved (TOCTOU-safe against concurrent Hebbian
@@ -2509,23 +2528,31 @@ async def _create_tag_cooccurrence_seed_edges(
         context_id_str = str(memory.context_id)
         memory_id_str = str(memory.id)
 
-        # Edge-type-scoped idempotency guard. Unlike knn (any-type guard), we
+        # Source-scoped idempotency guard. Unlike knn (any-type guard), we
         # only skip when tag_cooccurrence edges already exist for this memory
         # — otherwise the knn seeding pass that just ran would prevent us from
         # ever writing tag_cooccurrence edges. Re-embed on update_memory()
         # would re-enter this function with the guard protecting us from
         # duplicate writes (create_edge_if_absent also protects via ON
         # CONFLICT, but skipping the SQL work is cheaper).
+        #
+        # Issue #741: the original guard filtered by ``edge_type='tag_cooccurrence'``.
+        # After #741 those rows are merged into ``neural_association`` and the
+        # tag-cooccurrence stamp moves to ``edge_metadata['source']``. The
+        # filter is pushed into SQL (``metadata::jsonb ->> 'source'``) with
+        # ``limit=1`` so high-degree memory nodes don't pull thousands of
+        # co-activation edges into Python just to answer "already seeded?".
         edge_repo = NeuralEdgeRepository(db)
-        existing_edges = await edge_repo.get_outgoing_edges(
+        existing_seed = await edge_repo.get_outgoing_edges(
             user_id=memory.user_id,
             src_id=memory.id,
-            edge_types=["tag_cooccurrence"],
             workspace_id=workspace_id_str,
             context_id=context_id_str,
+            origin=EDGE_ORIGIN_HEBBIAN,
+            metadata_source="tag_cooccurrence",
             limit=1,
         )
-        if existing_edges:
+        if existing_seed:
             logger.debug(
                 "tag_cooccurrence_skip_already_seeded",
                 memory_id=memory_id_str,
@@ -2650,15 +2677,20 @@ async def _create_tag_cooccurrence_seed_edges(
             # failure cannot poison the session for the remaining inserts.
             try:
                 async with db.begin_nested():
+                    # Issue #741: edge_type='tag_cooccurrence' deprecated. The
+                    # row is still hebbian-origin (decays/prunes apply), but
+                    # the original derivation is preserved via metadata so the
+                    # idempotency guard above can detect prior seeding.
                     edge = await edge_repo.create_edge_if_absent(
                         user_id=memory.user_id,
                         src_id=memory.id,
                         dst_id=neighbor_id,
-                        edge_type="tag_cooccurrence",
+                        edge_type=EDGE_TYPE_NEURAL_ASSOCIATION,
                         weight=weight,
                         confidence=confidence,
                         workspace_id=workspace_id_str,
                         context_id=context_id_str,
+                        edge_metadata={"source": "tag_cooccurrence"},
                     )
                 # edge is None when ON CONFLICT DO NOTHING fired — e.g. a
                 # semantic_similarity edge from knn seeding already exists

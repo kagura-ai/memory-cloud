@@ -16,14 +16,15 @@ from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import and_, case, delete, desc, func, or_, select
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import cast as sa_cast
+from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import (
+    EDGE_ORIGIN_DECLARED,
     EDGE_ORIGIN_HEBBIAN,
     EDGE_ORIGIN_SEMANTIC,
-    EDGE_TYPE_DECLARED_LINK,
     Memory,
     NeuralMemoryEdge,
 )
@@ -157,12 +158,16 @@ class NeuralEdgeRepository:
             workspace_id: Workspace ID (for 3-level isolation)
             context_id: Context ID (for 3-level isolation)
             protect_declared_link: When True, ON CONFLICT preserves the
-                existing edge_type if it is "declared_link" (only weight/
-                confidence/metadata/last_updated update). Used by automated
-                writers (Hebbian co-activation, edge discovery) so user-
-                declared links survive co-activation retyping. User-driven
-                update_edge calls leave this False so an explicit type
-                change still works. (Issue #457)
+                existing row's ``edge_type`` AND ``origin`` if it already
+                has ``origin='declared'`` (only weight/confidence/metadata/
+                last_updated update). Used by automated writers (Hebbian
+                co-activation, edge discovery) so user-declared links
+                survive co-activation retyping. User-driven update_edge
+                calls leave this False so an explicit type change still
+                works. (Issue #457; pivoted to origin discriminator
+                in #741 — the parameter name is retained for callsite
+                stability but the predicate is now ``origin='declared'``,
+                not ``edge_type='declared_link'``.)
             return_fresh_edge: When True (default), the returned ORM is
                 refreshed from the DB so its Python attributes reflect what
                 RETURNING actually wrote (Issue #458). Hot-path callers that
@@ -208,25 +213,31 @@ class NeuralEdgeRepository:
             last_updated=utcnow(),
         )
 
-        # Issue #457: declared_link rows must survive Hebbian retyping.
-        # CASE keeps the existing edge_type when it is declared_link;
-        # weight/confidence/metadata/last_updated still update so co-
-        # activation can strengthen user-declared links.
+        # Issue #457 / #741: user-asserted ("declared") links must survive
+        # Hebbian retyping. After #741 the predicate pivots from
+        # edge_type=='declared_link' to origin=='declared': a row with
+        # origin='declared' represents a user-asserted link, so both its
+        # edge_type and origin are preserved across a hebbian co-activation
+        # upsert. weight/confidence/metadata/last_updated still update so
+        # co-activation can strengthen user-declared links.
         if protect_declared_link:
             edge_type_set = case(
                 (
-                    NeuralMemoryEdge.edge_type == EDGE_TYPE_DECLARED_LINK,
-                    EDGE_TYPE_DECLARED_LINK,
+                    NeuralMemoryEdge.origin == EDGE_ORIGIN_DECLARED,
+                    NeuralMemoryEdge.edge_type,
                 ),
                 else_=stmt.excluded.edge_type,
             )
         else:
             edge_type_set = stmt.excluded.edge_type
 
-        # Sticky origin (mirrors protect_declared_link CASE above): semantic
-        # and declared edges survive a Hebbian co-recall upsert; only existing
-        # hebbian rows can be overwritten. Without this, a runtime co-recall
-        # would silently demote sleep-discovered edges back into the decay loop.
+        # Sticky origin: semantic and declared edges survive a Hebbian
+        # co-recall upsert; only existing hebbian rows can be overwritten.
+        # Without this, a runtime co-recall would silently demote sleep-
+        # discovered edges back into the decay loop. This also enforces the
+        # symmetric arm of the protect_declared_link CASE above — when the
+        # existing row has origin='declared', its origin is preserved
+        # alongside its edge_type, keeping the two columns co-managed.
         origin_set = case(
             (NeuralMemoryEdge.origin != EDGE_ORIGIN_HEBBIAN, NeuralMemoryEdge.origin),
             else_=stmt.excluded.origin,
@@ -279,6 +290,7 @@ class NeuralEdgeRepository:
         context_id: str | None = None,
         *,
         origin: str = EDGE_ORIGIN_HEBBIAN,
+        edge_metadata: dict[str, Any] | None = None,
     ) -> NeuralMemoryEdge | None:
         """Create an edge only if no edge exists for (user_id, src_id, dst_id).
 
@@ -288,6 +300,13 @@ class NeuralEdgeRepository:
         This is the canonical path for **synthetic / seed edges** (k-NN
         cold-start seeding, tag co-occurrence, etc.) where we must not
         overwrite Hebbian-learned edges via upsert.
+
+        Args:
+            edge_metadata: Optional JSON metadata stored on the row's
+                ``metadata`` column. The tag-cooccurrence seed path (#741)
+                uses this to stamp ``{"source": "tag_cooccurrence"}`` on
+                otherwise-hebbian rows so the original edge-type discriminator
+                stays recoverable post-merge to ``neural_association``.
 
         Returns:
             The newly created NeuralMemoryEdge, or ``None`` if an edge
@@ -316,6 +335,7 @@ class NeuralEdgeRepository:
                 workspace_id=ws_uuid,
                 context_id=ctx_uuid,
                 origin=origin,
+                edge_metadata=edge_metadata,
                 created_at=utcnow(),
                 last_updated=utcnow(),
             )
@@ -453,6 +473,9 @@ class NeuralEdgeRepository:
         limit: int | None = None,
         workspace_id: str | None = None,
         context_id: str | None = None,
+        *,
+        origin: str | None = None,
+        metadata_source: str | None = None,
     ) -> list[NeuralMemoryEdge]:
         """Get outgoing edges from a node with 3-level isolation.
 
@@ -474,6 +497,20 @@ class NeuralEdgeRepository:
             limit: Maximum edges to return
             workspace_id: Workspace ID (for isolation)
             context_id: Context ID (for isolation)
+            origin: Optional origin filter (#741). Pass ``EDGE_ORIGIN_DECLARED``
+                to fetch user-asserted links, etc. Mirrors the post-#741 pivot
+                where edge_type='declared_link' is replaced by
+                origin='declared'.
+            metadata_source: Optional filter on ``edge_metadata['source']``
+                (#741). Pushed into SQL via ``metadata::jsonb ->> 'source'``
+                so high-degree nodes (many co-activation edges) don't pull
+                thousands of rows into Python just to scan for a metadata
+                marker. Used by the tag-cooccurrence idempotency guard which
+                pairs ``origin=EDGE_ORIGIN_HEBBIAN`` +
+                ``metadata_source='tag_cooccurrence'`` + ``limit=1`` for an
+                O(1) early-out. ``edge_metadata`` is stored as ``JSON``
+                rather than ``JSONB`` (see ``models/memory.py``), so the
+                cast is applied here at query time.
 
         Returns:
             List of outgoing edges sorted by weight descending
@@ -496,6 +533,17 @@ class NeuralEdgeRepository:
             conditions.append(NeuralMemoryEdge.workspace_id == UUID(workspace_id))
         if context_id:
             conditions.append(NeuralMemoryEdge.context_id == UUID(context_id))
+
+        if origin is not None:
+            conditions.append(NeuralMemoryEdge.origin == origin)
+
+        if metadata_source is not None:
+            # JSON → JSONB cast at query time so we can use the ->> operator
+            # via SQLAlchemy's astext accessor. Equivalent SQL:
+            #   metadata::jsonb ->> 'source' = :metadata_source
+            conditions.append(
+                sa_cast(NeuralMemoryEdge.edge_metadata, JSONB)["source"].astext == metadata_source
+            )
 
         stmt = (
             select(NeuralMemoryEdge)
@@ -521,6 +569,9 @@ class NeuralEdgeRepository:
         limit: int | None = None,
         workspace_id: str | None = None,
         context_id: str | None = None,
+        *,
+        origin: str | None = None,
+        metadata_source: str | None = None,
     ) -> list[NeuralMemoryEdge]:
         """Get incoming edges to a node with 3-level isolation.
 
@@ -542,6 +593,12 @@ class NeuralEdgeRepository:
             limit: Maximum edges to return
             workspace_id: Workspace ID (for isolation)
             context_id: Context ID (for isolation)
+            origin: Optional origin filter (#741). Mirrors the kwarg on
+                ``get_outgoing_edges``.
+            metadata_source: Optional filter on ``edge_metadata['source']``
+                (#741). Mirrors the kwarg on ``get_outgoing_edges`` for
+                symmetry; same SQL-level ``metadata::jsonb ->> 'source'``
+                push-down semantics apply.
 
         Returns:
             List of incoming edges sorted by weight descending
@@ -564,6 +621,15 @@ class NeuralEdgeRepository:
             conditions.append(NeuralMemoryEdge.workspace_id == UUID(workspace_id))
         if context_id:
             conditions.append(NeuralMemoryEdge.context_id == UUID(context_id))
+
+        if origin is not None:
+            conditions.append(NeuralMemoryEdge.origin == origin)
+
+        if metadata_source is not None:
+            # See get_outgoing_edges() for the JSON→JSONB cast rationale.
+            conditions.append(
+                sa_cast(NeuralMemoryEdge.edge_metadata, JSONB)["source"].astext == metadata_source
+            )
 
         stmt = (
             select(NeuralMemoryEdge)

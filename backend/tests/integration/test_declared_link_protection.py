@@ -1,9 +1,13 @@
-"""Integration test for declared_link protection in upsert (#457).
+"""Integration test for declared-link protection in upsert (#457, #741).
 
 NeuralEdgeRepository.create_or_update_edge with protect_declared_link=True
-must keep an existing edge_type="declared_link" pinned even when the
-incoming upsert tries to set edge_type="neural_association" (e.g. Hebbian
-co-activation flowing through GraphService.add_edge).
+must keep an existing row pinned (both edge_type AND origin) when the
+incoming upsert tries to retype it (e.g. Hebbian co-activation flowing
+through GraphService.add_edge with edge_type="neural_association").
+
+After #741 the preservation predicate pivots from edge_type=='declared_link'
+to origin=='declared', so the seed edge in these tests explicitly passes
+``origin=EDGE_ORIGIN_DECLARED`` to mark it as a user-asserted link.
 
 The smoke-test on v0.14.0 (2026-04-26 prod) reproduced the unprotected
 case 100% — user-declared links got retyped to neural_association as
@@ -22,7 +26,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import Context, Workspace
-from models.memory import Memory
+from models.memory import EDGE_ORIGIN_DECLARED, Memory
 from repositories.neural_edge import NeuralEdgeRepository
 
 
@@ -100,13 +104,16 @@ async def test_protect_declared_link_preserves_edge_type(
         user_id=s["owner_id"],
         src_id=s["mem_a"].id,
         dst_id=s["mem_b"].id,
-        edge_type="declared_link",
+        edge_type="related_to",
         weight=1.0,
         confidence=1.0,
         workspace_id=str(s["ws_id"]),
         context_id=str(s["ctx_id"]),
+        # #741: declared-link semantics now carried by origin, not edge_type.
+        origin=EDGE_ORIGIN_DECLARED,
     )
-    assert declared.edge_type == "declared_link"
+    assert declared.edge_type == "related_to"
+    assert declared.origin == EDGE_ORIGIN_DECLARED
     assert declared.weight == 1.0
     initial_last_updated = declared.last_updated
 
@@ -122,8 +129,12 @@ async def test_protect_declared_link_preserves_edge_type(
         protect_declared_link=True,
     )
 
-    assert retyped.edge_type == "declared_link", (
-        "protect_declared_link=True must pin the existing declared_link type"
+    assert retyped.edge_type == "related_to", (
+        "protect_declared_link=True must pin the existing edge_type when "
+        "origin='declared' (#741 pivot)"
+    )
+    assert retyped.origin == EDGE_ORIGIN_DECLARED, (
+        "origin must also be preserved — declared and edge_type are co-managed (#741)"
     )
     assert retyped.weight == 1.03, (
         "weight must still update so co-activation continues to strengthen the link"
@@ -149,10 +160,12 @@ async def test_unprotected_upsert_still_allows_user_driven_retype(
         user_id=s["owner_id"],
         src_id=s["mem_a"].id,
         dst_id=s["mem_b"].id,
-        edge_type="declared_link",
+        edge_type="related_to",
         weight=1.0,
         workspace_id=str(s["ws_id"]),
         context_id=str(s["ctx_id"]),
+        # #741: seed as user-asserted via origin='declared'.
+        origin=EDGE_ORIGIN_DECLARED,
     )
 
     retyped = await repo.create_or_update_edge(
@@ -163,11 +176,13 @@ async def test_unprotected_upsert_still_allows_user_driven_retype(
         weight=0.5,
         workspace_id=str(s["ws_id"]),
         context_id=str(s["ctx_id"]),
-        # protect_declared_link defaults to False — user-driven path
+        # protect_declared_link defaults to False — user-driven path can
+        # retype the edge. (Origin sticks via the sticky-origin CASE — that
+        # is intentional, only edge_type is mutable in the user-driven path.)
     )
 
     assert retyped.edge_type == "neural_association", (
-        "Without protection, user-driven update_edge can change the type explicitly"
+        "Without protection, user-driven update_edge can change the edge_type explicitly"
     )
     assert retyped.weight == 0.5
 
