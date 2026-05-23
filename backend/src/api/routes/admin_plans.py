@@ -16,7 +16,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import delete as sql_delete
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import require_admin as auth_require_admin
@@ -24,6 +26,8 @@ from config.plan_tiers import PLAN_TIERS, PlanName, get_plan_tier
 from db.base import get_db
 from models.auth import Context, PlanChange, User, Workspace, WorkspaceInvitation, WorkspaceMember
 from models.memory import Memory
+from models.resource import WorkspaceAddon  # Issue #665: row-based admin grants
+from services.addon_calculator_service import ADDON_UNIT_VALUES, AddonCalculatorService
 from services.effective_quota_service import EffectiveQuotaService
 from utils import db_transaction
 from utils.datetime import to_utc_iso, utcnow
@@ -75,13 +79,22 @@ class QuotaBreakdown(BaseModel):
 
 
 class AddonValues(BaseModel):
-    """Addon bonus values."""
+    """Addon bonus values.
+
+    Issue #665: Extended to expose all 9 addon cache columns so the admin
+    UI can read back any value the PUT handler accepts. Pre-#665 only the
+    5 that were directly writable from the legacy handler were surfaced.
+    """
 
     memory_bonus: int = 0
     mcp_quota_bonus: int = 0
+    rest_quota_bonus: int = 0
+    public_quota_bonus: int = 0
     member_bonus: int = 0
     context_bonus: int = 0
     analysis_bonus: int = 0
+    storage_bonus_mb: int = 0
+    sleep_contexts_bonus: int = 0
 
 
 class UsageValues(BaseModel):
@@ -125,13 +138,36 @@ class WorkspaceQuotaDetail(BaseModel):
 
 
 class UpdateAddonRequest(BaseModel):
-    """Request to update workspace addon bonuses."""
+    """Request to update workspace addon bonuses (Issue #665).
+
+    All 9 fields are absolute desired effective-bonus values (per the
+    existing API contract, unchanged from the pre-#665 5-field shape).
+
+    The 5 legacy fields keep their pre-#665 defaults (``int = Field(0)``)
+    so callers that omit them get the documented "set to zero" behavior.
+    Wire-format-compatible: a request body with only those 5 fields
+    behaves identically to before.
+
+    The 4 new fields (``addon_rest_quota_bonus``, ``addon_public_quota_bonus``,
+    ``addon_storage_bonus_mb``, ``addon_sleep_contexts_bonus``) default to
+    ``None`` with **no-touch semantics**: when omitted, the corresponding
+    admin grant is left untouched, preserving frontend back-compat for the
+    legacy 5-field admin UI.
+
+    All concrete values must be ``>= 0``; the per-handler logic additionally
+    rejects values lower than the active Stripe-purchased SUM for the same
+    addon type (HTTP 400) so silent clamping cannot happen.
+    """
 
     addon_memory_bonus: int = Field(0, ge=0)
     addon_mcp_quota_bonus: int = Field(0, ge=0)
     addon_member_bonus: int = Field(0, ge=0)
     addon_context_bonus: int = Field(0, ge=0)
     addon_analysis_bonus: int = Field(0, ge=0)
+    addon_rest_quota_bonus: int | None = Field(None, ge=0)
+    addon_public_quota_bonus: int | None = Field(None, ge=0)
+    addon_storage_bonus_mb: int | None = Field(None, ge=0)
+    addon_sleep_contexts_bonus: int | None = Field(None, ge=0)
 
 
 class UpdateSpendCapRequest(BaseModel):
@@ -611,9 +647,13 @@ async def get_workspace_quotas(
             addon=AddonValues(
                 memory_bonus=workspace.addon_memory_bonus,
                 mcp_quota_bonus=workspace.addon_mcp_quota_bonus,
+                rest_quota_bonus=workspace.addon_rest_quota_bonus,
+                public_quota_bonus=workspace.addon_public_quota_bonus,
                 member_bonus=workspace.addon_member_bonus,
                 context_bonus=workspace.addon_context_bonus,
                 analysis_bonus=workspace.addon_analysis_bonus,
+                storage_bonus_mb=workspace.addon_storage_bonus_mb,
+                sleep_contexts_bonus=workspace.addon_sleep_contexts_bonus,
             ),
             effective=QuotaBreakdown(
                 memory_limit=effective["memory_limit"],
@@ -631,6 +671,167 @@ async def get_workspace_quotas(
         )
 
 
+# ---------------------------------------------------------------------------
+# Issue #665: addon UPSERT spec table + helpers
+# ---------------------------------------------------------------------------
+# Each addon cache column maps 1:1 to:
+#   - a request field on ``UpdateAddonRequest``,
+#   - a ``WorkspaceAddon.addon_type`` enum value,
+#   - a unit value from ``ADDON_UNIT_VALUES`` (used to convert between the
+#     request's bonus integer and the row's ``quantity`` integer), and
+#   - an optional "guard kind" — the name of a usage counter that must
+#     not exceed the new effective limit when the bonus is reduced (LD-7).
+#
+# The handler iterates the spec table once for validation (raising 400 on
+# any conflict BEFORE writing) and once for mutation (UPSERT or DELETE the
+# admin_grant row). Adding a new addon type is a one-line change here.
+
+
+@dataclasses.dataclass(frozen=True)
+class _AddonFieldSpec:
+    """One row in the addon UPSERT spec table (Issue #665).
+
+    ``field_name`` doubles as the ``Workspace.addon_*_bonus`` cache column
+    name; the two are identical by convention (e.g. ``addon_memory_bonus``)
+    and the spec keeps a single source of truth so they cannot drift.
+    """
+
+    field_name: str  # ``UpdateAddonRequest`` AND ``Workspace`` attribute (same name)
+    addon_type: str  # the ``WorkspaceAddon.addon_type`` enum value
+    unit_value: int  # from ``ADDON_UNIT_VALUES`` — bonus = quantity * unit_value
+    guard_kind: str | None  # 'member' / 'context' / 'memory' / 'sleep_contexts' / None
+
+
+_ADDON_FIELD_SPECS: tuple[_AddonFieldSpec, ...] = (
+    _AddonFieldSpec(
+        "addon_memory_bonus",
+        "extra_memory",
+        ADDON_UNIT_VALUES["extra_memory"],
+        "memory",
+    ),
+    _AddonFieldSpec(
+        "addon_mcp_quota_bonus",
+        "extra_mcp_quota",
+        ADDON_UNIT_VALUES["extra_mcp_quota"],
+        None,  # daily Redis-reset quota; admin throttling mid-day is allowed
+    ),
+    _AddonFieldSpec(
+        "addon_rest_quota_bonus",
+        "extra_rest_quota",
+        ADDON_UNIT_VALUES["extra_rest_quota"],
+        None,
+    ),
+    _AddonFieldSpec(
+        "addon_public_quota_bonus",
+        "extra_public_quota",
+        ADDON_UNIT_VALUES["extra_public_quota"],
+        None,
+    ),
+    _AddonFieldSpec(
+        "addon_member_bonus",
+        "extra_members",
+        ADDON_UNIT_VALUES["extra_members"],
+        "member",
+    ),
+    _AddonFieldSpec(
+        "addon_context_bonus",
+        "extra_contexts",
+        ADDON_UNIT_VALUES["extra_contexts"],
+        "context",
+    ),
+    _AddonFieldSpec(
+        "addon_analysis_bonus",
+        "extra_analysis_runs",
+        ADDON_UNIT_VALUES["extra_analysis_runs"],
+        None,  # daily counter; admin reduction is acceptable
+    ),
+    _AddonFieldSpec(
+        "addon_storage_bonus_mb",
+        "extra_storage",
+        ADDON_UNIT_VALUES["extra_storage"],
+        None,  # Storage-usage tracking not yet implemented; guard pending follow-up.
+    ),
+    _AddonFieldSpec(
+        "addon_sleep_contexts_bonus",
+        "extra_sleep_contexts",
+        ADDON_UNIT_VALUES["extra_sleep_contexts"],
+        "sleep_contexts",
+    ),
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class _GrantPlan:
+    """Pending mutation produced by validation pass; consumed by mutation pass."""
+
+    addon_type: str
+    quantity: int  # >= 0; 0 means "delete existing admin_grant row (if any)"
+
+
+async def _count_addon_usage(db: AsyncSession, workspace_id: UUID, guard_kind: str) -> int:
+    """Current usage for an LD-7 persistent-addon overflow guard."""
+    if guard_kind == "member":
+        # Match the get_workspace_quotas accounting: active members + pending invitations.
+        members_result = await db.execute(
+            select(func.count(WorkspaceMember.id)).where(
+                WorkspaceMember.workspace_id == workspace_id
+            )
+        )
+        invites_result = await db.execute(
+            select(func.count(WorkspaceInvitation.id)).where(
+                WorkspaceInvitation.workspace_id == workspace_id,
+                WorkspaceInvitation.accepted_at.is_(None),
+                WorkspaceInvitation.expires_at > func.now(),
+            )
+        )
+        return (members_result.scalar() or 0) + (invites_result.scalar() or 0)
+    if guard_kind == "context":
+        result = await db.execute(
+            select(func.count(Context.id)).where(
+                Context.workspace_id == workspace_id,
+                Context.deleted_at.is_(None),
+            )
+        )
+        return result.scalar() or 0
+    if guard_kind == "memory":
+        result = await db.execute(
+            select(func.count(Memory.id)).where(
+                Memory.workspace_id == workspace_id,
+                Memory.deleted_at.is_(None),
+            )
+        )
+        return result.scalar() or 0
+    if guard_kind == "sleep_contexts":
+        result = await db.execute(
+            select(func.count(Context.id)).where(
+                Context.workspace_id == workspace_id,
+                Context.deleted_at.is_(None),
+                Context.sleep_mode != "skip",
+            )
+        )
+        return result.scalar() or 0
+    raise ValueError(f"unknown guard_kind: {guard_kind!r}")
+
+
+def _effective_for_guard(plan_tier, guard_kind: str, requested_bonus: int) -> int:
+    """New effective limit for an LD-7 guard, mirroring ``_zero_floor``.
+
+    A tier with base ``0`` always yields ``0`` regardless of the addon —
+    matches the runtime ``Workspace.effective_*`` properties so admins
+    cannot bypass the tier gate via a manual grant (#569 defense).
+    """
+    base_map = {
+        "memory": plan_tier.memory_limit,
+        "member": plan_tier.max_members_per_workspace,
+        "context": plan_tier.max_contexts_per_workspace,
+        "sleep_contexts": plan_tier.sleep_enabled_contexts_limit,
+    }
+    base = base_map[guard_kind]
+    if base == 0:
+        return 0
+    return base + requested_bonus
+
+
 @router.put("/workspaces/{workspace_id}/quotas")
 async def update_workspace_quotas(
     workspace_id: str,
@@ -638,94 +839,221 @@ async def update_workspace_quotas(
     admin_user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update workspace addon bonuses.
+    """Update workspace addon bonuses via WorkspaceAddon row UPSERT (#665).
 
-    Validates that reducing addons won't put usage over effective limits.
+    Pre-#665 this handler wrote ``Workspace.addon_*_bonus`` cache columns
+    directly, bypassing the #570 contract. Once Stripe addon webhooks
+    land, the cache recalc would silently overwrite admin grants. This
+    handler now UPSERTs ``WorkspaceAddon`` rows with
+    ``source='admin_grant'`` for each touched addon type, then calls
+    ``AddonCalculatorService.recalculate_workspace_bonuses`` so the
+    cache is regenerated from the union of Stripe rows + admin grants.
+
+    Per LD-3: no ``db_transaction`` wrapper. The recalc service performs
+    its own atomic commit that flushes the staged UPSERTs together. The
+    validation pass below raises BEFORE any mutation, so there is no
+    rollback target between mutation and recalc — ``db_transaction`` was
+    only an error-boundary rollback, never an outer commit boundary
+    (``utils/db_helpers.py:45-82``).
+
+    Per LD-4: 9-field request schema. Legacy 5 fields keep their pre-#665
+    ``int = 0`` defaults so callers that send only those fields behave
+    identically; the new 4 fields are ``int | None = None`` with no-touch
+    semantics. The pre-#665 frontend admin UI continues to work unchanged.
+
+    Per LD-2: absolute-value semantics. For each touched field, compute
+    ``non_admin_total = SUM(active WorkspaceAddon rows WHERE source !=
+    'admin_grant') * unit_value`` and reject (HTTP 400) when the request
+    would require a negative admin grant — admin reductions cannot
+    silently fall below the Stripe-purchased floor. The admin sees the
+    conflict instead of getting an unexpected effective value.
+
+    Per LD-7: persistent-addon overflow guard (member / context / memory
+    / sleep_contexts). Reject (HTTP 400) when the new effective limit
+    falls below current usage. Daily-reset quotas (mcp / rest / public /
+    analysis) are intentionally NOT guarded — admin throttling mid-day
+    is acceptable since the counter resets at next reset boundary. The
+    ``addon_storage_bonus_mb`` guard is also deferred: per-workspace
+    storage usage tracking does not yet exist in the codebase. Filed as
+    a follow-up to add the storage guard once usage tracking lands.
+
+    Per LD-9: ``extra_sleep_contexts`` PRO-tier check is intentionally
+    NOT enforced here. ``_zero_floor`` clamps the effective limit to 0
+    for tiers with base ``sleep_enabled_contexts_limit == 0`` (FREE,
+    BASIC), so an admin grant on those tiers is harmless to user-facing
+    behavior; the admin UI (#663) should display "no effect on this tier"
+    rather than rejecting the request from this handler.
     """
     ws_uuid = UUID(workspace_id)
+    now = utcnow()
 
-    async with db_transaction(db, "update_workspace_quotas", "Failed to update quotas"):
-        # Get workspace
-        result = await db.execute(
-            select(Workspace).where(
-                Workspace.id == ws_uuid,
-                Workspace.deleted_at.is_(None),  # #687 / #681 pattern: soft-delete safe
-            )
+    # 1. Fetch + soft-delete-safe workspace lookup (#687 / #681 pattern).
+    result = await db.execute(
+        select(Workspace).where(
+            Workspace.id == ws_uuid,
+            Workspace.deleted_at.is_(None),
         )
-        workspace = result.scalar_one_or_none()
-        if not workspace:
-            raise HTTPException(status_code=404, detail="Workspace not found")
+    )
+    workspace = result.scalar_one_or_none()
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
 
-        plan_tier = get_plan_tier(workspace.plan_name)
+    plan_tier = get_plan_tier(workspace.plan_name)
 
-        # Calculate new effective values
-        new_effective_members = plan_tier.max_members_per_workspace + request.addon_member_bonus
-        new_effective_contexts = plan_tier.max_contexts_per_workspace + request.addon_context_bonus
+    # 2. Validation pass — no DB writes. Build the mutation plan; raise
+    #    400 on any conflict so the caller sees the first reason cleanly
+    #    rather than discovering it mid-mutation.
+    grants_to_apply: list[_GrantPlan] = []
+    audit_changes: dict[str, str] = {}
 
-        # Hard limit: members — cannot reduce below current count + pending invitations
-        member_count_result = await db.execute(
-            select(func.count(WorkspaceMember.id)).where(WorkspaceMember.workspace_id == ws_uuid)
-        )
-        pending_invite_result = await db.execute(
-            select(func.count(WorkspaceInvitation.id)).where(
-                WorkspaceInvitation.workspace_id == ws_uuid,
-                WorkspaceInvitation.accepted_at.is_(None),
-                WorkspaceInvitation.expires_at > func.now(),
-            )
-        )
-        member_count = (member_count_result.scalar() or 0) + (pending_invite_result.scalar() or 0)
+    for spec in _ADDON_FIELD_SPECS:
+        requested = getattr(request, spec.field_name)
+        if requested is None:
+            continue  # no-touch (LD-4: only the 4 new optional fields can be None)
 
-        if member_count > new_effective_members:
+        # field_name doubles as the Workspace cache-column name by convention.
+        old_bonus = getattr(workspace, spec.field_name)
+
+        # 2a. Divisibility — addons are sold in fixed-unit increments
+        #     (see ``ADDON_UNIT_VALUES``). Reject early with a clear
+        #     "value must be a multiple of N" error before the floor
+        #     and overflow queries run. Stripe rows are integer-quantity
+        #     by schema, so this check on ``requested`` implies the same
+        #     check on the derived admin-portion below.
+        if requested % spec.unit_value != 0:
             raise HTTPException(
                 status_code=400,
-                detail=f"Cannot reduce member quota: current member count ({member_count}) exceeds new effective limit ({new_effective_members})",
+                detail=(
+                    f"{spec.field_name} value {requested} must be a multiple of "
+                    f"{spec.unit_value} (addon type {spec.addon_type!r})"
+                ),
             )
 
-        # Hard limit: contexts — cannot reduce below current count
-        context_count_result = await db.execute(
-            select(func.count(Context.id)).where(
-                Context.workspace_id == ws_uuid,
-                Context.deleted_at.is_(None),
+        # 2b. Compute Stripe-side floor for this addon_type. Predicate
+        #     mirrors ``recalculate_workspace_bonuses`` (active window
+        #     check at addon_calculator_service.py:99-104) so floor and
+        #     cache cannot diverge.
+        sum_result = await db.execute(
+            select(func.coalesce(func.sum(WorkspaceAddon.quantity), 0)).where(
+                WorkspaceAddon.workspace_id == ws_uuid,
+                WorkspaceAddon.addon_type == spec.addon_type,
+                WorkspaceAddon.source != "admin_grant",
+                WorkspaceAddon.active_from <= now,
+                ((WorkspaceAddon.active_until.is_(None)) | (WorkspaceAddon.active_until > now)),
             )
         )
-        context_count = context_count_result.scalar() or 0
+        non_admin_quantity = int(sum_result.scalar() or 0)
+        non_admin_total = non_admin_quantity * spec.unit_value
 
-        if context_count > new_effective_contexts:
+        # 2c. Reject silent clamp (LD-2). Admins must see when their
+        #     requested value would fall below the Stripe-purchased floor.
+        if requested < non_admin_total:
             raise HTTPException(
                 status_code=400,
-                detail=f"Cannot reduce context quota: current context count ({context_count}) exceeds new effective limit ({new_effective_contexts})",
+                detail=(
+                    f"Cannot reduce {spec.field_name} below the Stripe-purchased floor "
+                    f"of {non_admin_total} (active subscription provides "
+                    f"{non_admin_quantity} unit(s) x {spec.unit_value}). "
+                    f"Cancel or wait for the subscription to expire before reducing."
+                ),
             )
 
-        # Store old values for logging
-        old_memory_bonus = workspace.addon_memory_bonus
-        old_mcp_bonus = workspace.addon_mcp_quota_bonus
-        old_member_bonus = workspace.addon_member_bonus
-        old_context_bonus = workspace.addon_context_bonus
-        old_analysis_bonus = workspace.addon_analysis_bonus
+        # 2d. Persistent-addon overflow guard (LD-7). Only fires when the
+        #     bonus is actually changing AND the addon has a usage counter
+        #     in the codebase; daily-reset quotas and storage (no tracking
+        #     yet) skip via ``guard_kind is None``.
+        if spec.guard_kind is not None and requested != old_bonus:
+            usage_count = await _count_addon_usage(db, ws_uuid, spec.guard_kind)
+            new_effective = _effective_for_guard(plan_tier, spec.guard_kind, requested)
+            if usage_count > new_effective:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Cannot reduce {spec.field_name}: current "
+                        f"{spec.guard_kind} count ({usage_count}) exceeds new "
+                        f"effective limit ({new_effective})"
+                    ),
+                )
 
-        # Update addon bonuses
-        workspace.addon_memory_bonus = request.addon_memory_bonus
-        workspace.addon_mcp_quota_bonus = request.addon_mcp_quota_bonus
-        workspace.addon_member_bonus = request.addon_member_bonus
-        workspace.addon_context_bonus = request.addon_context_bonus
-        workspace.addon_analysis_bonus = request.addon_analysis_bonus
+        # 2e. Compute admin_grant quantity. ``check_quantity_positive``
+        #     forbids storing ``quantity == 0`` — the mutation pass DELETEs
+        #     the row when this is 0. Divisibility is guaranteed by 2a +
+        #     integer-quantity Stripe rows.
+        admin_grant_quantity = (requested - non_admin_total) // spec.unit_value
 
-        await db.commit()
-
-        logger.info(
-            "workspace_addon_updated",
-            workspace_id=workspace_id,
-            admin_user=admin_user["user_id"],
-            changes={
-                "memory_bonus": f"{old_memory_bonus} -> {request.addon_memory_bonus}",
-                "mcp_quota_bonus": f"{old_mcp_bonus} -> {request.addon_mcp_quota_bonus}",
-                "member_bonus": f"{old_member_bonus} -> {request.addon_member_bonus}",
-                "context_bonus": f"{old_context_bonus} -> {request.addon_context_bonus}",
-                "analysis_bonus": f"{old_analysis_bonus} -> {request.addon_analysis_bonus}",
-            },
+        grants_to_apply.append(
+            _GrantPlan(addon_type=spec.addon_type, quantity=admin_grant_quantity)
         )
+        if old_bonus != requested:
+            audit_changes[spec.field_name] = f"{old_bonus} -> {requested}"
 
-        return {"message": f"Quota addons updated for workspace {workspace.name}"}
+    # 3. Mutation pass. Use ``INSERT ... ON CONFLICT DO UPDATE`` so
+    #    concurrent admin PUTs against the same (workspace, addon_type)
+    #    are race-free at the DB layer — the composite UNIQUE
+    #    ``uq_workspace_addons_workspace_addon_source`` is the conflict
+    #    target. A naive SELECT-then-INSERT pattern could race two
+    #    admins past the SELECT and crash one of them on the UNIQUE
+    #    constraint (HTTP 500 via UniqueViolation). The UPSERT statement
+    #    has well-defined "first-write wins on insert, last-write wins
+    #    on update" semantics, mirroring the user-visible single-admin
+    #    PUT API contract.
+    for plan in grants_to_apply:
+        if plan.quantity == 0:
+            # check_quantity_positive forbids quantity=0 storage; DELETE
+            # the admin grant row instead. Single-statement is race-safe
+            # (no-op when the row doesn't exist).
+            await db.execute(
+                sql_delete(WorkspaceAddon).where(
+                    WorkspaceAddon.workspace_id == ws_uuid,
+                    WorkspaceAddon.addon_type == plan.addon_type,
+                    WorkspaceAddon.source == "admin_grant",
+                )
+            )
+            continue
+
+        stmt = (
+            pg_insert(WorkspaceAddon)
+            .values(
+                workspace_id=ws_uuid,
+                addon_type=plan.addon_type,
+                source="admin_grant",
+                quantity=plan.quantity,
+                purchase_price_cents=None,
+                stripe_product_id=None,
+                active_from=now,
+                active_until=None,
+                created_by=admin_user["user_id"],
+            )
+            .on_conflict_do_update(
+                constraint="uq_workspace_addons_workspace_addon_source",
+                set_={
+                    "quantity": plan.quantity,
+                    "active_until": None,
+                    "created_by": admin_user["user_id"],
+                    # ``active_from`` intentionally NOT updated on conflict —
+                    # preserve the original-grant timestamp so the audit trail
+                    # tracks "when this admin override was first applied",
+                    # not "when it was last touched" (Phase 6 review A1.1).
+                },
+            )
+        )
+        await db.execute(stmt)
+
+    # 4. Recalculate. Commits the staged ``WorkspaceAddon`` UPSERTs and
+    #    the refreshed ``addon_*_bonus`` cache columns atomically per the
+    #    #570 contract docstring on ``AddonCalculatorService`` — which is
+    #    also why this handler has no ``db_transaction(...)`` wrapper
+    #    (LD-3, see function docstring).
+    await AddonCalculatorService(db).recalculate_workspace_bonuses(ws_uuid)
+
+    logger.info(
+        "workspace_addon_updated",
+        workspace_id=workspace_id,
+        admin_user=admin_user["user_id"],
+        changes=audit_changes,
+    )
+
+    return {"message": f"Quota addons updated for workspace {workspace.name}"}
 
 
 def _reject_above_tier(
