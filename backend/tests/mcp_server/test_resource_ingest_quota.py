@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import pytest
 
+from auth.workspace_roles import WorkspaceRole
 from mcp_server.tools.resource import handle_ingest_events
 from utils.exceptions import RateLimitError
 
@@ -91,7 +92,7 @@ def _patch_log_tool_usage():
 @pytest.mark.asyncio
 async def test_quota_check_invoked_after_permission_with_workspace_key(workspace_id):
     """Happy-path wiring: quota helper is called with (resource_id, workspace_id, count)."""
-    mock_db = _build_db_mock(role="member", boundary_ok=True)
+    mock_db = _build_db_mock(role=WorkspaceRole.MEMBER, boundary_ok=True)
 
     with (
         _patch_get_db(mock_db),
@@ -127,7 +128,7 @@ async def test_quota_check_invoked_after_permission_with_workspace_key(workspace
 async def test_quota_exceeded_returns_error_and_does_not_ingest(workspace_id):
     """When check_event_quota raises RateLimitError, handler returns quota_exceeded
     and never reaches the ingest loop."""
-    mock_db = _build_db_mock(role="member", boundary_ok=True)
+    mock_db = _build_db_mock(role=WorkspaceRole.MEMBER, boundary_ok=True)
     mock_db.add = MagicMock()  # would be called inside the ingest loop if reached
 
     with (
@@ -166,7 +167,7 @@ async def test_quota_exceeded_returns_error_and_does_not_ingest(workspace_id):
 @pytest.mark.asyncio
 async def test_quota_skipped_when_viewer_rejected(workspace_id):
     """Viewer permission denial happens BEFORE quota check — no quota call, no resolve."""
-    mock_db = _build_db_mock(role="viewer", boundary_ok=True)
+    mock_db = _build_db_mock(role=WorkspaceRole.VIEWER, boundary_ok=True)
 
     with (
         _patch_get_db(mock_db),
@@ -198,7 +199,7 @@ async def test_quota_skipped_when_viewer_rejected(workspace_id):
 @pytest.mark.asyncio
 async def test_quota_skipped_when_workspace_boundary_fails(workspace_id):
     """Workspace boundary fails BEFORE quota check — no quota call."""
-    mock_db = _build_db_mock(role="member", boundary_ok=False)
+    mock_db = _build_db_mock(role=WorkspaceRole.MEMBER, boundary_ok=False)
 
     with (
         _patch_get_db(mock_db),
