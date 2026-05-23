@@ -21,6 +21,7 @@ from api.routes.workspace import (
     get_workspace_usage_current,
 )
 from api.routes.workspaces import UpdateMemberRoleRequest, update_member_role
+from auth.workspace_roles import WorkspaceRole
 
 
 class TestWorkspaceStats:
@@ -253,7 +254,7 @@ class TestUpdateMemberRole:
         with patch("api.routes.workspaces.get_current_user", return_value=admin_user):
             # Mock permission check to return admin member
             mock_admin_member = MagicMock()
-            mock_admin_member.role = "admin"
+            mock_admin_member.role = WorkspaceRole.ADMIN
 
             with patch("api.routes.workspaces.PermissionService") as mock_perm_service:
                 mock_perm_service.return_value.check_workspace_admin = AsyncMock(
@@ -261,7 +262,7 @@ class TestUpdateMemberRole:
                 )
 
                 # Try to change own role
-                body = UpdateMemberRoleRequest(role="member")
+                body = UpdateMemberRoleRequest(role=WorkspaceRole.MEMBER)
 
                 with pytest.raises(HTTPException) as exc_info:
                     await update_member_role(
@@ -284,11 +285,11 @@ class TestUpdateMemberRole:
         with patch("api.routes.workspaces.get_current_user", return_value=admin_user):
             # Mock permission check to return admin member
             mock_admin_member = MagicMock()
-            mock_admin_member.role = "admin"
+            mock_admin_member.role = WorkspaceRole.ADMIN
 
             # Mock target member as owner
             mock_owner_member = MagicMock()
-            mock_owner_member.role = "owner"
+            mock_owner_member.role = WorkspaceRole.OWNER
 
             with patch("api.routes.workspaces.PermissionService") as mock_perm_service:
                 mock_perm_service.return_value.check_workspace_admin = AsyncMock(
@@ -300,7 +301,7 @@ class TestUpdateMemberRole:
                         return_value=mock_owner_member
                     )
 
-                    body = UpdateMemberRoleRequest(role="admin")
+                    body = UpdateMemberRoleRequest(role=WorkspaceRole.ADMIN)
 
                     with pytest.raises(HTTPException) as exc_info:
                         await update_member_role(
@@ -323,7 +324,7 @@ class TestUpdateMemberRole:
         with patch("api.routes.workspaces.get_current_user", return_value=owner_user):
             # Mock permission check to return owner member
             mock_owner_member = MagicMock()
-            mock_owner_member.role = "owner"
+            mock_owner_member.role = WorkspaceRole.OWNER
 
             # Mock target member as owner
             mock_target_owner = MagicMock()
@@ -344,7 +345,7 @@ class TestUpdateMemberRole:
                         return_value=mock_target_owner
                     )
 
-                    body = UpdateMemberRoleRequest(role="admin")
+                    body = UpdateMemberRoleRequest(role=WorkspaceRole.ADMIN)
 
                     # Should succeed
                     response = await update_member_role(
@@ -366,7 +367,7 @@ class TestUpdateMemberRole:
         with patch("api.routes.workspaces.get_current_user", return_value=admin_user):
             # Mock permission check to return admin member
             mock_admin_member = MagicMock()
-            mock_admin_member.role = "admin"
+            mock_admin_member.role = WorkspaceRole.ADMIN
 
             # Mock target member as regular member
             mock_target_member = MagicMock()
@@ -387,7 +388,7 @@ class TestUpdateMemberRole:
                         return_value=mock_target_member
                     )
 
-                    body = UpdateMemberRoleRequest(role="viewer")
+                    body = UpdateMemberRoleRequest(role=WorkspaceRole.VIEWER)
 
                     # Should succeed
                     response = await update_member_role(
