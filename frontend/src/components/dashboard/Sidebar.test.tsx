@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import packageJson from "../../../package.json";
 
 // Mock next-intl to return the translation key (matches KpiCards.test.tsx pattern)
 vi.mock("next-intl", () => ({
@@ -78,7 +79,7 @@ vi.mock("@/components/icons/KaguraLogo", () => ({
 }));
 
 vi.mock("@/lib/version", () => ({
-  APP_VERSION: "0.16.3",
+  APP_VERSION: packageJson.version,
 }));
 
 // Mock i18n module to expose locale data without provider
