@@ -367,6 +367,9 @@ class WorkspaceAddon(Base):
     """Workspace addon model (Addon purchase system).
 
     Issue #238: Tracks addon purchases for variable quotas.
+    Issue #665: ``source`` discriminator added so the admin grant path
+    and the (future) Stripe webhook path can share this table as a
+    single source of truth without overwriting each other.
 
     Attributes:
         id: Primary key
@@ -375,6 +378,12 @@ class WorkspaceAddon(Base):
         quantity: Number of addon units purchased
         purchase_price_cents: Purchase price in cents
         stripe_product_id: Stripe product/price ID (optional)
+        source: Provenance discriminator (``'stripe'`` for purchase
+            flow, ``'admin_grant'`` for manual admin grants). The
+            composite UNIQUE ``(workspace_id, addon_type, source)``
+            enforces "at most one row per provenance per addon type",
+            which is what makes the admin handler's UPSERT semantics
+            safe (Issue #665, LD-2).
         active_from: Addon activation timestamp
         active_until: Addon expiration timestamp (NULL = permanent)
         created_at: Purchase timestamp
@@ -394,6 +403,9 @@ class WorkspaceAddon(Base):
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     purchase_price_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     stripe_product_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    source: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="stripe", server_default="stripe"
+    )
     active_from: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )
@@ -411,6 +423,16 @@ class WorkspaceAddon(Base):
             name="check_addon_type",
         ),
         CheckConstraint("quantity > 0", name="check_quantity_positive"),
+        CheckConstraint(
+            "source IN ('stripe', 'admin_grant')",
+            name="check_addon_source",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "addon_type",
+            "source",
+            name="uq_workspace_addons_workspace_addon_source",
+        ),
     )
 
 
