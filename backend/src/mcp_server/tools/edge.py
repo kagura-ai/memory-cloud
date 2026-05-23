@@ -32,9 +32,16 @@ from models.memory import (
 
 # Issue #461 / #741: full set of edge_types accepted by the DB CHECK constraint
 # (`models/memory.py::valid_edge_type`). Sourced from `EDGE_TYPE_*` constants
-# so this set cannot drift from the schema literal. Covers the LLM-emittable
-# neural type (#374 → see `services/sleep/edge_discovery.py::LLM_EMITTABLE_EDGE_TYPES`)
-# plus the three client-declared semantic types.
+# so this set cannot drift from the schema literal. The 4 surviving values
+# after #741 are:
+#   - neural_association: runtime Hebbian co-activation, or the post-#741
+#     catch-all for any provenance not expressible as a relation
+#     (tag_cooccurrence + semantic_similarity merged here).
+#   - related_to / depends_on / learned_from: LLM-emittable relation types
+#     (#374 → see `services/sleep/edge_discovery.py::LLM_EMITTABLE_EDGE_TYPES`).
+# Provenance for what was previously edge_type='semantic_similarity' /
+# 'declared_link' / 'tag_cooccurrence' now lives on `origin` and
+# `edge_metadata['source']` (see migration `e20_741` docstring).
 VALID_EDGE_TYPES = frozenset(
     {
         EDGE_TYPE_NEURAL_ASSOCIATION,
