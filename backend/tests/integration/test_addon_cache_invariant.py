@@ -25,6 +25,7 @@ read-modify-write loops.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from uuid import uuid4
 
 import pytest
@@ -35,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes.admin_plans import (
     UpdateAddonRequest,
+    get_addon_cache_consistency,
     get_workspace_quotas,
     update_workspace_quotas,
 )
@@ -657,3 +659,207 @@ class TestSkipRecalcOnEmptyMutations:
             .all()
         )
         assert len(rows) == 0
+
+
+# --- #799: normalization of pre-#665 broken caches -------------------------
+
+
+async def _seed_workspace_with_cache(
+    db_session: AsyncSession, cache_col: str, cache_value: int
+) -> Workspace:
+    """Create a PRO workspace with a directly-set (possibly drifted) cache column.
+
+    Returns the flushed (not yet committed) ORM instance so the caller can
+    attach ``WorkspaceAddon`` rows referencing ``ws.id`` before committing.
+    """
+    user = make_user(name="Normalization Test Owner")
+    db_session.add(user)
+    await db_session.flush()
+
+    ws = make_workspace(owner_user_id=user.user_id, plan_name="pro")
+    setattr(ws, cache_col, cache_value)
+    db_session.add(ws)
+    await db_session.flush()
+    return ws
+
+
+async def _reread_workspace(db_session: AsyncSession, ws_id) -> Workspace:
+    """Re-SELECT a workspace so assertions see post-recalc committed state."""
+    return (await db_session.execute(select(Workspace).where(Workspace.id == ws_id))).scalar_one()
+
+
+class TestNormalizationRestoresSSoT:
+    """#799: recalc-from-rows normalizes legacy non-multiple cache values.
+
+    The ``e23_799_normalize_addon_caches`` migration applies the SQL
+    equivalent of ``AddonCalculatorService.recalculate_workspace_bonuses``
+    (``cache = SUM(active rows) * unit_value``) to every active workspace.
+    These tests exercise that same service path against the classes of legacy
+    state ``e22_665`` left behind — orphan, partial-divisible, consistent, and
+    expired-row — pinning the post-migration invariant
+    ``cache == SUM(active rows × unit)`` AND the active-window predicate that
+    the migration SQL and the runtime recalc must share. The migration's raw
+    SQL is additionally exercised by ``alembic upgrade head`` in the
+    integration harness.
+    """
+
+    @pytest.mark.asyncio
+    async def test_orphan_cache_normalized_to_zero(self, db_session: AsyncSession) -> None:
+        """Legacy 9000 memory (no backing WorkspaceAddon row) → recalc resets to 0.
+
+        This is the exact prod incident: 9000 < unit_value 10000, so e22 created
+        no row and left the cache at 9000, which the #663 dialog then rejected.
+        """
+        ws = await _seed_workspace_with_cache(db_session, "addon_memory_bonus", 9000)
+        await db_session.commit()
+
+        await AddonCalculatorService(db_session).recalculate_workspace_bonuses(ws.id)
+
+        ws_after = await _reread_workspace(db_session, ws.id)
+        assert ws_after.addon_memory_bonus == 0
+        await assert_addon_invariant(db_session, ws.id)
+
+    @pytest.mark.asyncio
+    async def test_partial_divisible_cache_preserves_backfilled_row(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Legacy 250 storage with a 2-unit (200) row → recalc yields 200, not 0.
+
+        This is the case the rejected "reset non-multiples to 0" design would
+        have broken: it would zero the cache while a legitimate 200 MB row
+        remained, re-violating the SSoT (cache 0 ≠ SUM 200).
+        """
+        ws = await _seed_workspace_with_cache(db_session, "addon_storage_bonus_mb", 250)
+        # e22 would have floor-divided 250 → a 2-unit (200 MB) admin_grant row.
+        db_session.add(
+            WorkspaceAddon(
+                workspace_id=ws.id,
+                addon_type="extra_storage",
+                quantity=2,
+                source="admin_grant",
+                active_from=utcnow(),
+                created_by="pre_665_migration_backfill",
+            )
+        )
+        await db_session.commit()
+
+        await AddonCalculatorService(db_session).recalculate_workspace_bonuses(ws.id)
+
+        ws_after = await _reread_workspace(db_session, ws.id)
+        assert ws_after.addon_storage_bonus_mb == 200  # preserved, NOT reset to 0
+        await assert_addon_invariant(db_session, ws.id)
+
+    @pytest.mark.asyncio
+    async def test_consistent_cache_unchanged(self, db_session: AsyncSession) -> None:
+        """An already-consistent workspace is a no-op under recalc (idempotent)."""
+        ws = await _seed_workspace_with_cache(db_session, "addon_memory_bonus", 20000)
+        db_session.add(
+            WorkspaceAddon(
+                workspace_id=ws.id,
+                addon_type="extra_memory",
+                quantity=2,  # 2 × 10000 == the 20000 cache set above
+                source="admin_grant",
+                active_from=utcnow(),
+                created_by="admin_runner",
+            )
+        )
+        await db_session.commit()
+
+        await AddonCalculatorService(db_session).recalculate_workspace_bonuses(ws.id)
+
+        ws_after = await _reread_workspace(db_session, ws.id)
+        assert ws_after.addon_memory_bonus == 20000  # unchanged
+        await assert_addon_invariant(db_session, ws.id)
+
+    @pytest.mark.asyncio
+    async def test_expired_addon_row_excluded_from_recalc(self, db_session: AsyncSession) -> None:
+        """Active-window predicate: an EXPIRED row must NOT count toward the cache.
+
+        Guards the ``active_until > NOW()`` predicate that the migration SQL and
+        the runtime recalc share (the divergence trap called out in the e23
+        docstring). A stale cache of 10000 backed only by an expired
+        ``extra_memory`` row must normalize to 0.
+        """
+        ws = await _seed_workspace_with_cache(db_session, "addon_memory_bonus", 10000)
+        db_session.add(
+            WorkspaceAddon(
+                workspace_id=ws.id,
+                addon_type="extra_memory",
+                quantity=1,
+                source="admin_grant",
+                active_from=utcnow() - timedelta(days=2),
+                active_until=utcnow() - timedelta(days=1),  # expired yesterday
+                created_by="admin_runner",
+            )
+        )
+        await db_session.commit()
+
+        await AddonCalculatorService(db_session).recalculate_workspace_bonuses(ws.id)
+
+        ws_after = await _reread_workspace(db_session, ws.id)
+        assert ws_after.addon_memory_bonus == 0  # expired row excluded from SUM
+        await assert_addon_invariant(db_session, ws.id)
+
+
+class TestAddonCacheConsistencyEndpoint:
+    """#799: GET /admin/plans/addon-cache-consistency detects drifted caches.
+
+    Direct-function-call pattern (matches the rest of this file): the handler
+    runs against the real Postgres test session. Assertions filter by the
+    workspace IDs this test created so they stay deterministic regardless of
+    any other active workspaces present in the session.
+    """
+
+    @pytest.mark.asyncio
+    async def test_endpoint_reports_drifted_and_skips_healthy(
+        self, db_session: AsyncSession
+    ) -> None:
+        # Drifted: orphan 9000 memory cache, no backing WorkspaceAddon row.
+        drifted = await _seed_workspace_with_cache(db_session, "addon_memory_bonus", 9000)
+        # Healthy: cache 20000 backed by a matching 2-unit row.
+        healthy = await _seed_workspace_with_cache(db_session, "addon_memory_bonus", 20000)
+        db_session.add(
+            WorkspaceAddon(
+                workspace_id=healthy.id,
+                addon_type="extra_memory",
+                quantity=2,
+                source="admin_grant",
+                active_from=utcnow(),
+                created_by="admin_runner",
+            )
+        )
+        await db_session.commit()
+
+        entries = await get_addon_cache_consistency(admin_user=mock_admin(), db=db_session)
+
+        by_key = {(e.workspace_id, e.cache_column): e for e in entries}
+
+        drift = by_key.get((str(drifted.id), "addon_memory_bonus"))
+        assert drift is not None, "drifted workspace must be reported"
+        assert drift.addon_type == "extra_memory"
+        assert drift.cache_value == 9000
+        assert drift.expected_value == 0
+
+        # The healthy workspace must NOT appear for any addon column.
+        assert not [k for k in by_key if k[0] == str(healthy.id)]
+
+    @pytest.mark.asyncio
+    async def test_endpoint_omits_consistent_workspace(self, db_session: AsyncSession) -> None:
+        """A fully-consistent workspace is absent from the drift report."""
+        ws = await _seed_workspace_with_cache(db_session, "addon_memory_bonus", 10000)
+        db_session.add(
+            WorkspaceAddon(
+                workspace_id=ws.id,
+                addon_type="extra_memory",
+                quantity=1,  # 1 × 10000 == the cache
+                source="admin_grant",
+                active_from=utcnow(),
+                created_by="admin_runner",
+            )
+        )
+        await db_session.commit()
+
+        entries = await get_addon_cache_consistency(admin_user=mock_admin(), db=db_session)
+
+        mine = [e for e in entries if e.workspace_id == str(ws.id)]
+        assert mine == []
