@@ -219,6 +219,23 @@ class PlanChangeAuditEntry(BaseModel):
     reason: str | None
 
 
+class AddonCacheDriftEntry(BaseModel):
+    """One drifted addon cache column for a workspace (Issue #799).
+
+    Reports a workspace whose cached ``addon_*_bonus`` column disagrees with
+    the row-based SSoT (``SUM(active WorkspaceAddon.quantity) × unit_value``).
+    A healthy system returns an empty list; the ``e23_799`` normalization
+    migration brings the live count to 0.
+    """
+
+    workspace_id: str
+    workspace_name: str
+    addon_type: str
+    cache_column: str
+    cache_value: int
+    expected_value: int
+
+
 class PlanTierInfo(BaseModel):
     """Plan tier configuration served to the admin tiers comparison table.
 
@@ -550,6 +567,87 @@ async def get_plan_change_audit(
 
         logger.info(
             f"Admin retrieved {len(entries)} audit entries", admin_user=admin_user["user_id"]
+        )
+        return entries
+
+
+@router.get("/addon-cache-consistency", response_model=list[AddonCacheDriftEntry])
+async def get_addon_cache_consistency(
+    admin_user: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Detect workspaces whose addon cache columns drifted from the row SSoT.
+
+    Issue #799. For every active (non-deleted) workspace and every addon type
+    in ``_ADDON_FIELD_SPECS``, compares the cached ``addon_*_bonus`` column to
+    ``SUM(active WorkspaceAddon.quantity) × unit_value`` — the same invariant
+    enforced by ``AddonCalculatorService.recalculate_workspace_bonuses`` and
+    asserted by ``tests/integration/_addon_helpers.assert_addon_invariant``.
+
+    On-demand audit, not a startup probe: the ``e23_799`` migration brings the
+    live count to 0, so a per-boot full-table scan (all workspaces × 9 columns)
+    would be wasted work. Each drifted column is logged at WARNING and returned
+    for admin review.
+
+    Returns:
+        List of drifted (workspace, addon_type) entries. Empty when healthy.
+    """
+    async with db_transaction(db, "addon_cache_consistency", "Failed to audit addon caches"):
+        now = utcnow()
+
+        # All active workspaces, keyed by id for cache-column lookup.
+        ws_result = await db.execute(select(Workspace).where(Workspace.deleted_at.is_(None)))
+        workspaces = {ws.id: ws for ws in ws_result.scalars().all()}
+
+        entries: list[AddonCacheDriftEntry] = []
+
+        # One grouped SUM per addon_type → constant query count regardless of
+        # workspace count. The active-window predicate mirrors the runtime
+        # recalc (addon_calculator_service.py:112-118) so the comparison
+        # matches what the next recalc would compute.
+        for spec in _ADDON_FIELD_SPECS:
+            sum_result = await db.execute(
+                select(
+                    WorkspaceAddon.workspace_id,
+                    func.coalesce(func.sum(WorkspaceAddon.quantity), 0),
+                )
+                .where(
+                    WorkspaceAddon.addon_type == spec.addon_type,
+                    WorkspaceAddon.active_from <= now,
+                    (WorkspaceAddon.active_until.is_(None) | (WorkspaceAddon.active_until > now)),
+                )
+                .group_by(WorkspaceAddon.workspace_id)
+            )
+            summed = {ws_id: int(total) for ws_id, total in sum_result.all()}
+
+            for ws_id, workspace in workspaces.items():
+                expected = summed.get(ws_id, 0) * spec.unit_value
+                actual = getattr(workspace, spec.field_name)
+                if actual != expected:
+                    logger.warning(
+                        "addon_cache_drift",
+                        workspace_id=str(ws_id),
+                        addon_type=spec.addon_type,
+                        cache_column=spec.field_name,
+                        cache_value=actual,
+                        expected_value=expected,
+                    )
+                    entries.append(
+                        AddonCacheDriftEntry(
+                            workspace_id=str(ws_id),
+                            workspace_name=workspace.name,
+                            addon_type=spec.addon_type,
+                            cache_column=spec.field_name,
+                            cache_value=actual,
+                            expected_value=expected,
+                        )
+                    )
+
+        logger.info(
+            "addon_cache_consistency_audit",
+            admin_user=admin_user["user_id"],
+            workspaces_scanned=len(workspaces),
+            drift_count=len(entries),
         )
         return entries
 
