@@ -1,0 +1,20 @@
+{
+  "name": "kagura-memory-cloud",
+  "interface": {
+    "displayName": "Kagura Memory Cloud"
+  },
+  "plugins": [
+    {
+      "name": "kagura-memory",
+      "source": {
+        "source": "local",
+        "path": "./plugins/kagura-memory"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
