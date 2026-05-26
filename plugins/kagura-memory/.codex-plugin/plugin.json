@@ -1,0 +1,41 @@
+{
+  "name": "kagura-memory",
+  "version": "0.16.5",
+  "description": "Kagura Memory Cloud workflows for Codex session restore, recall, remember, and setup",
+  "author": {
+    "name": "Kagura AI, Inc.",
+    "url": "https://github.com/kagura-ai"
+  },
+  "homepage": "https://github.com/kagura-ai/memory-cloud",
+  "repository": "https://github.com/kagura-ai/memory-cloud",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "mcp",
+    "ai-memory",
+    "session-management",
+    "knowledge-base"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Kagura Memory",
+    "shortDescription": "Restore context and save durable project knowledge from Codex.",
+    "longDescription": "Kagura Memory Cloud adds persistent project memory workflows to Codex. Use it to restore session context, recall past decisions and fixes, save reusable knowledge, inspect setup, and smoke-test the MCP connection.",
+    "developerName": "Kagura AI, Inc.",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Interactive"
+    ],
+    "websiteURL": "https://github.com/kagura-ai/memory-cloud",
+    "brandColor": "#DC2626",
+    "logo": "./assets/kagura-icon.svg",
+    "composerIcon": "./assets/kagura-icon.svg",
+    "defaultPrompt": [
+      "Restore my Kagura Memory session context.",
+      "Recall prior decisions about this repository.",
+      "Save this decision to Kagura Memory."
+    ]
+  }
+}
