@@ -32,8 +32,10 @@ Design rationale:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
+from typing import Final
 
+from cachetools import TTLCache
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +43,39 @@ from models.llm_pricing import LLM_PRICING_UNIT_TYPES, LLMPricing
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Process-local price cache (Issue #713). Pricing rows in ``llm_pricing`` are
+# read-mostly — they change at most a few times per year — yet the recall hot
+# path resolves the same ``(provider, model, embedding_tokens)`` price TWICE per
+# call: once in ``EmbeddingSpendCapService.record_spend_from_tokens`` for the
+# BYOK spend cap, once in ``LLMCallLogWriter.record`` for the cost ledger. A
+# small in-process TTL cache collapses both to a single SELECT and shares the
+# result across every request in the worker, since pricing is global, not
+# tenant-scoped. Process-local (not Redis) is deliberate — the value it replaces
+# is itself one indexed SELECT, so a Redis round-trip would not beat it; the
+# issue records Redis as out of scope for the same reason. The 60-minute TTL
+# bounds post-change staleness to one hour (acceptable per the issue) at the
+# cost of up-to-1h cross-worker skew after a price change; explicit invalidation
+# is therefore unnecessary for v1, but ``clear_pricing_cache()`` is exposed for
+# tests and post-seed refresh. Misses are cached too (value ``None``) so an
+# unseeded model doesn't re-query.
+_PRICING_CACHE_TTL_SECONDS: Final = 3600
+_PRICING_CACHE_MAXSIZE: Final = 1024
+# key: (provider, model, unit_type, started_at.date(), context_tokens)
+# value: (price_per_unit, unit_denominator) | None
+_pricing_cache: TTLCache[tuple[str, str, str, date, int], tuple[float, float] | None] = TTLCache(
+    maxsize=_PRICING_CACHE_MAXSIZE, ttl=_PRICING_CACHE_TTL_SECONDS
+)
+
+
+def clear_pricing_cache() -> None:
+    """Drop all entries from the process-local pricing cache.
+
+    Exposed for two callers: tests that need a deterministic cache state,
+    and ops tooling that wants newly-seeded ``llm_pricing`` rows to take
+    effect immediately rather than after the 60-minute TTL.
+    """
+    _pricing_cache.clear()
 
 
 class LLMPricingService:
@@ -181,6 +216,75 @@ class LLMPricingService:
         if units == 0:
             return 0.0
 
+        components = await self._cached_price_components(
+            provider=provider,
+            model=model,
+            unit_type=unit_type,
+            started_at=started_at,
+            context_tokens=context_tokens,
+        )
+        if components is None:
+            return None
+
+        price_per_unit, unit_denominator = components
+        return float(units) * price_per_unit / unit_denominator
+
+    async def _cached_price_components(
+        self,
+        *,
+        provider: str,
+        model: str,
+        unit_type: str,
+        started_at: datetime,
+        context_tokens: int,
+    ) -> tuple[float, float] | None:
+        """Return ``(price_per_unit, unit_denominator)`` for a call, cached (#713).
+
+        Wraps ``lookup()`` with the process-local ``_pricing_cache`` so the
+        duplicate per-recall pricing SELECT collapses to a single round-trip.
+        Returns ``None`` for a lookup miss (caller writes ``cost_usd = NULL``),
+        and that ``None`` is cached so an unseeded model doesn't re-query every
+        call.
+
+        The cache key keeps ``context_tokens`` so multi-tier models (e.g. Gemini
+        2.5 Pro's 200k breakpoint) still resolve to the correct tier — the AC's
+        ``(provider, model, unit_type, date)`` key is a subset of this one.
+
+        **Snapshot axis = ``started_at.date()`` (day granularity), deliberately.**
+        The two hot-path lookups for one recall
+        (``EmbeddingSpendCapService.record_spend_from_tokens`` and
+        ``LLMCallLogWriter.record``) each call ``utcnow()`` independently, so they
+        carry timestamps milliseconds apart; day-bucketing is what collapses them
+        into the single SELECT this cache exists to save. A finer key (e.g. full
+        ``started_at``) would never hit between those two calls and would defeat
+        the optimization.
+
+        Reproducibility bound this trades away: ``lookup()`` documents
+        ``effective_from <= started_at`` for *exact* historical reproducibility,
+        but ``effective_from`` is an unconstrained ``DateTime`` (it MAY be
+        intra-day). Day-bucketing therefore guarantees reproducibility only at
+        **day granularity** — two calls on the same UTC date that straddle an
+        intra-day ``effective_from`` change collapse to whichever price was cached
+        first. This is bounded and acceptable today because: (a) on the live path
+        ``started_at`` is always ``utcnow()`` and the 60-minute TTL already caps
+        staleness to ≤1h regardless of key granularity; (b) the historical-replay
+        path (``record_spend_from_tokens(occurred_at=...)``) has no live caller.
+        **If sub-day-precise historical replay is ever wired up, this key needs a
+        finer time component OR the replay must bypass the cache** (Copilot review
+        on PR #811).
+        """
+        cache_key = (provider, model, unit_type, started_at.date(), context_tokens)
+        # A single ``__getitem__`` reads the TTL clock once, so it is race-free
+        # (unlike ``key in cache`` then ``cache[key]``, which read the clock
+        # twice and can raise on an entry expiring between them). A stored ``None``
+        # (negative cache) returns ``None`` here; only an absent OR expired key
+        # raises ``KeyError``, both of which mean "re-query". Typed value, so a
+        # wrong-typed cache write is still caught by the checker.
+        try:
+            return _pricing_cache[cache_key]
+        except KeyError:
+            pass
+
         row = await self.lookup(
             provider=provider,
             model=model,
@@ -188,7 +292,8 @@ class LLMPricingService:
             started_at=started_at,
             context_tokens=context_tokens,
         )
-        if row is None:
-            return None
-
-        return float(units) * float(row.price_per_unit) / float(row.unit_denominator)
+        components = (
+            None if row is None else (float(row.price_per_unit), float(row.unit_denominator))
+        )
+        _pricing_cache[cache_key] = components
+        return components

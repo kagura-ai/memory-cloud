@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import os
 import unicodedata
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import xxhash
 from openai import AsyncOpenAI
@@ -37,6 +37,12 @@ if TYPE_CHECKING:
     from services.embedding_spend_cap_service import EmbeddingSpendCapService
 
 logger = get_logger(__name__)
+
+# The credential tier ``_get_user_api_key`` resolved a key from. ``"workspace"``
+# / ``"context"`` are BYOK rows in ``external_api_keys``; ``"env"`` is the
+# platform ``OPENAI_API_KEY`` fallback. Maps directly to ``LLMCallLog.paid_by``
+# (``"env"`` → ``"platform"``, otherwise → ``"byok"``) — see ``resolve_paid_by``.
+KeySource = Literal["workspace", "context", "env"]
 
 
 class EmbeddingService:
@@ -79,6 +85,12 @@ class EmbeddingService:
             self.provider = settings.embedding_provider
         self.ollama_base_url = settings.ollama_base_url
         self._ollama_verified = False
+        # Issue #713: the credential tier the most recent ``_get_client`` OpenAI
+        # call resolved (set in ``_get_client``). ``resolve_paid_by`` reads it to
+        # derive ``paid_by`` without re-probing ``external_api_keys`` — the
+        # service is request-scoped (one per recall, holding a per-request
+        # session) so this state is never shared across concurrent requests.
+        self._last_key_source: KeySource | None = None
 
     async def _get_user_api_key(
         self,
@@ -86,7 +98,7 @@ class EmbeddingService:
         context_id: str | None = None,
         workspace_id: str | None = None,  # Issue #146
         disallow_env_fallback: bool = False,
-    ) -> str:
+    ) -> tuple[str, KeySource]:
         """Resolve the OpenAI API key for the calling user's workspace context.
 
         Issue #105: DB-first lookup with environment variable fallback.
@@ -114,7 +126,12 @@ class EmbeddingService:
                 platform key. Has no effect when a DB key is found.
 
         Returns:
-            Decrypted OpenAI API key.
+            ``(api_key, source)`` where ``source`` is the credential tier the
+            key came from — ``"context"`` / ``"workspace"`` for a BYOK row,
+            ``"env"`` for the platform ``OPENAI_API_KEY`` fallback. Issue #713:
+            callers derive ``LLMCallLog.paid_by`` from ``source`` (``"env"`` →
+            ``"platform"``, else ``"byok"``) instead of re-running the BYOK
+            probe via ``has_byok_key``.
 
         Raises:
             ConfigurationError: If neither a DB key nor an env var is available
@@ -156,13 +173,18 @@ class EmbeddingService:
         if api_key_entry:
             encryptor = get_encryptor()
             api_key = encryptor.decrypt(str(api_key_entry.encrypted_value))
+            # The ORDER BY context_id DESC NULLS LAST in the query above means a
+            # context-scoped row wins over a workspace-wide one; a non-NULL
+            # ``context_id`` therefore identifies a context-scoped credential.
+            source: KeySource = "context" if api_key_entry.context_id is not None else "workspace"
             logger.debug(
                 "openai_api_key_from_db",
                 user_id=user_id,
                 context_id=context_id,
                 workspace_id=workspace_id,
+                source=source,
             )
-            return api_key
+            return api_key, source
 
         # Fallback to environment variable (development / env-only deployments),
         # gated by the Option A shared-context contract: when the caller has
@@ -194,7 +216,7 @@ class EmbeddingService:
                 "openai_api_key_from_env",
                 user_id=user_id,
             )
-            return env_key
+            return env_key, "env"
 
         if workspace_id:
             raise ConfigurationError(
@@ -263,24 +285,40 @@ class EmbeddingService:
         the call, ``"platform"`` when the call would fall back to the env
         var (or Ollama / no workspace context). Callers must pass the
         returned value through to ``LLMCallLogWriter.record(paid_by=...)``
-        — see ``search_service.py:200-210`` for the canonical usage.
+        — see the recall embed branch in ``SearchService`` for the
+        canonical usage.
 
         Centralizing the resolution here keeps the ``"byok" if … else
         "platform"`` rule in one place; downstream writers don't need to
         know how key sourcing works.
 
-        Issue #708 loop 4: ``context_id`` mirrors ``has_byok_key``'s
-        priority so the recorded ``paid_by`` matches what
-        ``_get_user_api_key`` actually returned. Without this parameter, a
-        workspace whose only BYOK is scoped to a different context would
-        have env-fallback calls falsely logged as ``"byok"`` — corrupting
-        billing analytics and the #524 cost-grade attribution path.
+        Issue #713: when a key has already been resolved on this instance
+        (the recall hot path: ``embed_with_usage`` → ``_get_client`` →
+        ``_get_user_api_key`` ran on a cache miss), derive ``paid_by`` from
+        the recorded ``_last_key_source`` instead of re-querying
+        ``external_api_keys``. ``_get_user_api_key``'s actual return is the
+        ground truth for which key was used — strictly more accurate than a
+        second ``has_byok_key`` probe — so this both removes a DB round-trip
+        and closes the #708 loop-4 probe/lookup drift by construction. The
+        ``has_byok_key`` fallback below covers only the off-hot-path case
+        where ``resolve_paid_by`` is called without a preceding embed (no
+        source resolved yet, e.g. Ollama or a standalone caller); recall
+        never reaches it because ``search_service`` calls ``resolve_paid_by``
+        only after a cache-miss embed recorded the source. ``context_id`` is
+        still forwarded to that fallback so it mirrors ``_get_user_api_key``'s
+        priority — without it, a workspace whose only BYOK is scoped to a
+        different context would falsely log env-fallback calls as ``"byok"``.
         """
         from models.llm_call_log import LLM_CALL_LOG_PAID_BY_VALUES
 
-        paid_by = (
-            "byok" if await self.has_byok_key(workspace_id, context_id=context_id) else "platform"
-        )
+        if self._last_key_source is not None:
+            paid_by = "platform" if self._last_key_source == "env" else "byok"
+        else:
+            paid_by = (
+                "byok"
+                if await self.has_byok_key(workspace_id, context_id=context_id)
+                else "platform"
+            )
         assert paid_by in LLM_CALL_LOG_PAID_BY_VALUES
         return paid_by
 
@@ -388,12 +426,16 @@ class EmbeddingService:
                 api_key="ollama",  # Ollama doesn't require a real key
             )
         # OpenAI (default)
-        api_key = await self._get_user_api_key(
+        api_key, source = await self._get_user_api_key(
             user_id,
             context_id,
             workspace_id,
             disallow_env_fallback=disallow_env_fallback,
         )
+        # Issue #713: remember which credential tier this call used so the
+        # post-embed ``resolve_paid_by`` can derive ``paid_by`` without a
+        # second ``external_api_keys`` SELECT.
+        self._last_key_source = source
         return AsyncOpenAI(api_key=api_key)
 
     def _build_embedding_kwargs(self, input_data: str | list[str]) -> dict:
@@ -486,6 +528,12 @@ class EmbeddingService:
             OpenAIError: If embedding generation fails.
             ConfigurationError: If API key not configured.
         """
+        # Issue #713: clear any source recorded by a prior embed on this
+        # (reused) instance so ``resolve_paid_by`` can never read a stale tier.
+        # A cache hit returns before ``_get_client`` runs, leaving it None — and
+        # ``search_service`` skips ``resolve_paid_by`` on a hit (0 tokens) — so
+        # the only value it ever reads is the one this call resolves below.
+        self._last_key_source = None
         try:
             normalized_text = unicodedata.normalize("NFC", text)
 

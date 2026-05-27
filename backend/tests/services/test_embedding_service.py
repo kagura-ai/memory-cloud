@@ -59,11 +59,16 @@ class TestEmbeddingService:
 
     @pytest.mark.asyncio
     async def test_get_user_api_key_from_env(self, service):
-        """Test getting API key from environment variable."""
+        """Test getting API key from environment variable.
+
+        Issue #713: returns ``(api_key, source)``; the env fallback is the
+        platform key, so ``source`` is ``"env"``.
+        """
         with patch.dict("os.environ", {"OPENAI_API_KEY": "test-api-key"}):
-            api_key = await service._get_user_api_key("test_user")
+            api_key, source = await service._get_user_api_key("test_user")
 
             assert api_key == "test-api-key"
+            assert source == "env"
 
     @pytest.mark.asyncio
     async def test_get_user_api_key_not_configured(self, service):
@@ -346,6 +351,154 @@ class TestContextAwareBYOKThreading:
         )
 
 
+class TestKeySourceAndPaidByDedup:
+    """#713: ``_get_user_api_key`` returns the key tier so ``resolve_paid_by``
+    derives ``paid_by`` without a second ``external_api_keys`` SELECT.
+    """
+
+    @pytest.fixture
+    def service(self):
+        return EmbeddingService(_make_mock_db())
+
+    @pytest.mark.asyncio
+    async def test_get_user_api_key_context_scoped_source(self, service):
+        """A non-NULL ``context_id`` on the resolved row → ``"context"`` tier."""
+        api_key_entry = MagicMock()
+        api_key_entry.encrypted_value = "enc"
+        api_key_entry.context_id = "00000000-0000-0000-0000-000000000002"
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none.return_value = api_key_entry
+        service.db.execute = AsyncMock(return_value=execute_result)
+
+        with patch("services.embedding_service.get_encryptor") as enc:
+            enc.return_value.decrypt.return_value = "sk-ctx"
+            api_key, source = await service._get_user_api_key(
+                user_id="caller",
+                context_id="00000000-0000-0000-0000-000000000002",
+                workspace_id="00000000-0000-0000-0000-000000000001",
+            )
+
+        assert api_key == "sk-ctx"
+        assert source == "context"
+
+    @pytest.mark.asyncio
+    async def test_get_client_records_last_key_source(self, service, monkeypatch):
+        """``_get_client`` stores the resolved tier for ``resolve_paid_by``."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        # No DB key → env fallback → source "env".
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none.return_value = None
+        service.db.execute = AsyncMock(return_value=execute_result)
+
+        with patch("services.embedding_service.AsyncOpenAI", return_value=MagicMock()):
+            await service._get_client("caller", workspace_id="00000000-0000-0000-0000-000000000001")
+
+        assert service._last_key_source == "env"
+
+    @pytest.mark.asyncio
+    async def test_get_client_records_workspace_source_from_db_key(self, service):
+        """A DB BYOK row drives ``_get_client`` to record the ``"workspace"`` tier."""
+        api_key_entry = MagicMock()
+        api_key_entry.encrypted_value = "enc"
+        api_key_entry.context_id = None  # workspace-wide row
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none.return_value = api_key_entry
+        service.db.execute = AsyncMock(return_value=execute_result)
+
+        with (
+            patch("services.embedding_service.get_encryptor") as enc,
+            patch("services.embedding_service.AsyncOpenAI", return_value=MagicMock()),
+        ):
+            enc.return_value.decrypt.return_value = "sk-ws"
+            await service._get_client("caller", workspace_id="00000000-0000-0000-0000-000000000001")
+
+        assert service._last_key_source == "workspace"
+
+    @pytest.mark.asyncio
+    async def test_embed_with_usage_resets_stale_source_on_cache_hit(self, service):
+        """A cache hit must clear a source left by a prior embed on the instance.
+
+        Guards the #713 staleness class: without the reset, a reused instance
+        whose previous embed resolved a BYOK key would leak ``"workspace"`` into
+        a later cache-hit call's ``resolve_paid_by``.
+        """
+        service._last_key_source = "workspace"  # left over from a prior call
+
+        with (
+            patch(
+                "services.embedding_service.get_cache",
+                new=AsyncMock(return_value="[0.1, 0.2, 0.3]"),
+            ),
+            patch("services.embedding_service.set_cache", new=AsyncMock()),
+        ):
+            _, tokens = await service.embed_with_usage(
+                "cached text",
+                user_id="caller",
+                workspace_id="00000000-0000-0000-0000-000000000001",
+            )
+
+        assert tokens == 0  # cache hit
+        assert service._last_key_source is None
+
+    @pytest.mark.asyncio
+    async def test_resolve_paid_by_uses_cached_source_skips_probe(self, service):
+        """With a cached source, ``resolve_paid_by`` does NOT re-probe the DB.
+
+        Pins the #713 optimization: ``has_byok_key`` (the duplicate SELECT)
+        must not be called. The cached source is ground truth — even when a
+        probe *would* say "byok", a cached ``"env"`` source resolves to
+        ``"platform"``.
+        """
+        service.has_byok_key = AsyncMock(return_value=True)
+        service._last_key_source = "env"
+
+        result = await service.resolve_paid_by(
+            "00000000-0000-0000-0000-000000000001",
+            context_id="00000000-0000-0000-0000-000000000002",
+        )
+
+        assert result == "platform"
+        service.has_byok_key.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [("workspace", "byok"), ("context", "byok"), ("env", "platform")],
+    )
+    async def test_resolve_paid_by_maps_cached_source(self, service, source, expected):
+        """Cached tier → ``paid_by``: BYOK rows bill the workspace, env is platform."""
+        service.has_byok_key = AsyncMock()
+        service._last_key_source = source
+
+        result = await service.resolve_paid_by("00000000-0000-0000-0000-000000000001")
+
+        assert result == expected
+        service.has_byok_key.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resolve_paid_by_falls_back_to_probe_when_no_source(self, service):
+        """Off-hot-path (no embed ran): fall back to the ``has_byok_key`` probe.
+
+        ``_last_key_source`` stays ``None`` (e.g. Ollama or a standalone
+        caller), so correctness is preserved via the legacy probe — which
+        recall never reaches because it only resolves ``paid_by`` after a
+        cache-miss embed that recorded the source.
+        """
+        service.has_byok_key = AsyncMock(return_value=True)
+        assert service._last_key_source is None
+
+        result = await service.resolve_paid_by(
+            "00000000-0000-0000-0000-000000000001",
+            context_id="00000000-0000-0000-0000-000000000002",
+        )
+
+        assert result == "byok"
+        service.has_byok_key.assert_called_once_with(
+            "00000000-0000-0000-0000-000000000001",
+            context_id="00000000-0000-0000-0000-000000000002",
+        )
+
+
 class TestDisallowEnvFallback:
     """#708 loop 7: ``disallow_env_fallback`` propagation for Option A reads.
 
@@ -411,7 +564,7 @@ class TestDisallowEnvFallback:
         execute_result.scalar_one_or_none.return_value = None
         service.db.execute = AsyncMock(return_value=execute_result)
 
-        result = await service._get_user_api_key(
+        result, source = await service._get_user_api_key(
             user_id="caller",
             context_id="00000000-0000-0000-0000-000000000002",
             workspace_id="00000000-0000-0000-0000-000000000001",
@@ -419,6 +572,7 @@ class TestDisallowEnvFallback:
         )
 
         assert result == "sk-test-platform-key"
+        assert source == "env"
 
     @pytest.mark.asyncio
     async def test_disallow_env_fallback_does_not_block_db_key(self, service, monkeypatch):
@@ -430,9 +584,11 @@ class TestDisallowEnvFallback:
         # The env is set but should not be consulted
         monkeypatch.setenv("OPENAI_API_KEY", "sk-must-not-be-used")
 
-        # Mock DB: BYOK key found
+        # Mock DB: workspace-wide BYOK key found (context_id IS NULL → the
+        # ORDER BY context_id DESC NULLS LAST winner for a no-context match).
         api_key_entry = MagicMock()
         api_key_entry.encrypted_value = "encrypted-byok-key-data"
+        api_key_entry.context_id = None
         execute_result = MagicMock()
         execute_result.scalar_one_or_none.return_value = api_key_entry
         service.db.execute = AsyncMock(return_value=execute_result)
@@ -441,7 +597,7 @@ class TestDisallowEnvFallback:
         with patch("services.embedding_service.get_encryptor") as enc:
             enc.return_value.decrypt.return_value = "sk-actual-byok-key"
 
-            result = await service._get_user_api_key(
+            result, source = await service._get_user_api_key(
                 user_id="caller",
                 context_id="00000000-0000-0000-0000-000000000002",
                 workspace_id="00000000-0000-0000-0000-000000000001",
@@ -450,6 +606,8 @@ class TestDisallowEnvFallback:
 
         assert result == "sk-actual-byok-key"
         assert result != "sk-must-not-be-used"
+        # Issue #713: a NULL-context row resolves as the "workspace" tier.
+        assert source == "workspace"
 
     @pytest.mark.asyncio
     async def test_embed_with_usage_propagates_disallow_env_fallback(self, service, monkeypatch):
