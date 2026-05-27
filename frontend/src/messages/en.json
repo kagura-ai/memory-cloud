@@ -2254,6 +2254,96 @@
         "deleteConfirm": "Delete user {name}? This will permanently delete all their memories.",
         "deleteSuccess": "User {name} deleted successfully",
         "deleteError": "Failed to delete user"
+      },
+      "detail": {
+        "title": "User Detail",
+        "titleLoading": "User Details",
+        "descriptionError": "Failed to load user information",
+        "descriptionLoading": "Loading user information...",
+        "backToUsers": "Back to Users",
+        "userInfo": {
+          "title": "User Information",
+          "initialAdminBadge": "Initial Admin",
+          "created": "Created",
+          "lastLogin": "Last Login",
+          "never": "Never"
+        },
+        "workspaces": {
+          "title": "Workspaces ({count})",
+          "table": {
+            "workspace": "Workspace",
+            "role": "Role",
+            "plan": "Plan",
+            "joined": "Joined",
+            "actions": "Actions"
+          },
+          "primaryBadge": "Primary",
+          "notAvailable": "N/A",
+          "changePlanButton": "Change Plan",
+          "empty": "No workspaces"
+        },
+        "workspaceCapacity": {
+          "title": "Workspace Capacity",
+          "ownedLabel": "Owned: {count}",
+          "capLabel": "Cap: {cap}",
+          "formula": "({base} base + {bonus} bonus)",
+          "atCapBadge": "at cap",
+          "usagePctBadge": "{pct}% used",
+          "slotBonusLabel": "Slot bonus:",
+          "decrementAria": "Decrement slot bonus",
+          "incrementAria": "Increment slot bonus",
+          "ownedWorkspacesLabel": "Owned workspaces ({count})",
+          "noOwnedWorkspaces": "User owns no workspaces."
+        },
+        "accessibleContexts": {
+          "title": "Accessible Contexts ({count})",
+          "table": {
+            "context": "Context",
+            "workspace": "Workspace",
+            "role": "Role",
+            "lastUsed": "Last Used"
+          },
+          "empty": "No accessible contexts"
+        },
+        "stats": {
+          "title": "Usage Statistics",
+          "totalMemories": "Total Memories",
+          "memoryBreakdown": "Working: {working} | Persistent: {persistent}",
+          "activeApiKeys": "Active API Keys"
+        },
+        "changePlanDialog": {
+          "title": "Change Workspace Plan",
+          "description": "Change plan tier for {workspaceName}",
+          "currentPlanLabel": "Current Plan",
+          "newPlanLabel": "New Plan",
+          "planOptions": {
+            "free": "Free",
+            "basic": "Basic",
+            "pro": "Pro"
+          },
+          "warningText": "⚠️ Plan changes take effect immediately and will update quota limits.",
+          "confirm": "Change Plan"
+        },
+        "reasonModal": {
+          "title": "Reason required",
+          "description": "This change reduces the cap below the user's current owned count.",
+          "reasonLabel": "Reason (required)",
+          "reasonPlaceholder": "Why is this admin operation needed?",
+          "charCounter": "{count}/500",
+          "confirming": "Confirming…",
+          "confirmButton": "Confirm decrement"
+        },
+        "messages": {
+          "loadError": "Failed to load user details",
+          "planChangeSuccessDesc": "Plan changed to {plan} for {workspace}",
+          "planChangeErrorDesc": "Failed to change plan",
+          "bonusUpdateSuccessTitle": "Updated",
+          "bonusUpdateSuccessDesc": "Slot bonus: {before} → {after}.",
+          "bonusUpdateErrorDesc": "Failed to update slot bonus",
+          "bonusAt0Title": "Cannot decrement",
+          "bonusAt0Desc": "Slot bonus is already at 0.",
+          "overCapWarn": "User currently owns {owned} workspaces. Setting bonus to {projected} caps them at {cap}. They cannot create new workspaces until {shortfall, plural, one {# existing workspace is} other {# existing workspaces are}} deleted. Existing workspaces are NOT removed."
+        }
       }
     },
     "systemAdmins": {
