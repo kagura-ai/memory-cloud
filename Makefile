@@ -26,7 +26,8 @@ help:
 	@echo "  make test-neural     - Run Neural Memory tests only"
 	@echo "  make test-neural-cov - Run Neural Memory tests with coverage"
 	@echo "  make test-smoke      - Run smoke tests (health, auth, well-known)"
-	@echo "  make test-e2e        - Run E2E tests (memory lifecycle, rate limit)"
+	@echo "  make test-e2e        - Run backend E2E tests (memory lifecycle, rate limit)"
+	@echo "  make test-e2e-frontend - Run frontend E2E tests (Playwright; admin specs need E2E_ADMIN_* env)"
 	@echo "  make test-integration - Run integration tests (DB, migrations, attachments)"
 	@echo "  make test-urls       - Run URL validation (all routes != 500)"
 	@echo "  make test-watch      - Run tests in watch mode (local)"
@@ -130,6 +131,13 @@ test-e2e:
 	@echo "Running E2E tests..."
 	cd $(BACKEND_DIR) && pytest tests/e2e/ -v --timeout=60
 	@echo "E2E tests complete."
+
+.PHONY: test-e2e-frontend
+test-e2e-frontend:
+	@echo "Running frontend E2E tests (Playwright)..."
+	@echo "Note: a11y specs run without auth; admin specs require E2E_ADMIN_LOGIN_ID + E2E_ADMIN_PASSWORD env vars (see frontend/e2e/README.md)."
+	cd frontend && npm run test:e2e
+	@echo "Frontend E2E tests complete."
 
 .PHONY: test-integration
 test-integration:
