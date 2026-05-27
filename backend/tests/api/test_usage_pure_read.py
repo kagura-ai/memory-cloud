@@ -6,11 +6,11 @@ had no ``UserPlan`` row, ``get_current_usage`` lazy-created one and COMMITted
 from the GET path.
 
 Issue #668 removed the legacy ``user_plans`` table entirely. The handler no
-longer reads or writes any per-user plan row — the ``plan`` block is now
-sourced from the caller's current workspace via ``EffectiveQuotaService``,
-falling back to the FREE plan tier when no workspace is selected. That makes
-the pure-read contract structural (there is no write path left to regress),
-but we still pin it with the four-pillar mock pattern:
+longer reads or writes any per-user plan row — the ``plan`` block now uses the
+FREE plan tier (``config.plan_tiers``), exactly what the removed table always
+reported, preserving the endpoint's behavior. That makes the pure-read
+contract structural (there is no write path left to regress), but we still pin
+it with the four-pillar mock pattern:
 
 1. ``commit.assert_not_awaited()`` — no explicit commit reaches the DB.
 2. ``add.assert_not_called()`` — and no ``db.add`` either, because the
@@ -19,8 +19,8 @@ but we still pin it with the four-pillar mock pattern:
    still persist through that auto-commit, masking the bug.
 3. ``execute.await_count`` — read-side calls still happen (we are not
    regressing into a degenerate no-op endpoint).
-4. Functional value check — with no current workspace the response uses the
-   FREE plan-tier limits (``config.plan_tiers.get_plan_tier("free")``).
+4. Functional value check — the response uses the FREE plan-tier limits
+   (``config.plan_tiers.get_plan_tier("free")``).
 """
 
 from __future__ import annotations

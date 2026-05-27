@@ -608,6 +608,12 @@ async def get_current_usage(
                 memory_limit=plan_memory_limit,
                 daily_total_limit=plan_daily_total,
                 weekly_total_limit=plan_weekly_total,
+                mcp_calls_per_day=free_tier.mcp_calls_per_day,
+                mcp_calls_per_week=free_tier.mcp_calls_per_week,
+                rest_calls_per_day=free_tier.rest_calls_per_day,
+                rest_calls_per_week=free_tier.rest_calls_per_week,
+                public_calls_per_day=free_tier.public_calls_per_day,
+                public_calls_per_week=free_tier.public_calls_per_week,
             ),
             usage=CurrentUsage(
                 memory_count=memory_count,

@@ -10,9 +10,9 @@ source of truth is the per-workspace ``Workspace`` model (plan_name +
 owned-workspace slot cap (``users.workspace_slot_bonus``, #674/#675).
 
 With this migration the last readers/writers are gone:
-- ``GET /usage/current`` now sources its ``plan`` block from the caller's
-  current workspace via ``EffectiveQuotaService`` (FREE-tier fallback when
-  no workspace is selected) instead of the ``user_plans`` row.
+- ``GET /usage/current`` now sources its ``plan`` block from the FREE plan
+  tier (``config.plan_tiers``) instead of the ``user_plans`` row, preserving
+  the table's always-FREE behavior.
 - ``auth.roles.RoleManager._ensure_user_postgres`` no longer inserts a
   default row on user creation.
 - ``account_erasure_service`` no longer deletes ``user_plans`` rows.
