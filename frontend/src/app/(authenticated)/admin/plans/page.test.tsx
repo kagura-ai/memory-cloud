@@ -412,6 +412,28 @@ describe("AdminPlansPage — workspaces tab addon dialog (Issue #663)", () => {
     ).toHaveLength(1);
   });
 
+  it("warns and snaps when the cache holds a non-multiple value (#800)", async () => {
+    // Broken cache: a pre-#665 memory_bonus of 9000 is not a multiple of the
+    // memory addon's perUnit (10000). Rendering it verbatim would let the
+    // admin hit an opaque HTTP 400 on save.
+    mockGetWorkspaceQuotas.mockResolvedValue({
+      ...QUOTA_DETAIL_PRO,
+      addon: { ...QUOTA_DETAIL_PRO.addon, memory_bonus: 9000 },
+    });
+    await openAddonDialog();
+
+    // A visible warning explains why the input was reset.
+    expect(
+      screen.getByText("admin.plans.addonDialog.snapWarning.title"),
+    ).toBeInTheDocument();
+
+    // The memory input is snapped to 0, not the invalid 9000.
+    const memoryInput = document.getElementById(
+      "addon-memory",
+    ) as HTMLInputElement;
+    expect(memoryInput.value).toBe("0");
+  });
+
   it("renders the max_resource_tokens read-only row in the expanded panel", async () => {
     render(<AdminPlansPage />);
     const workspaceCell = await screen.findByText("Pro Workspace");

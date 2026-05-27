@@ -94,6 +94,7 @@ import {
   EMPTY_ADDON_VALUES,
   buildUpdateAddonRequest,
   computeAddonEffectivePreview,
+  detectNonMultipleAddons,
   formatAddonValue,
   formatQuotaValue,
   formatReadOnlyQuotaValue,
@@ -886,6 +887,26 @@ export default function AdminPlansPage() {
           </DialogHeader>
 
           <div className="space-y-4 py-4">
+            {/* Issue #800: a legacy / broken cache can hold a value that is
+                not a multiple of perUnit (e.g. pre-#665 memory_bonus 9000).
+                snapshotAddonValues snaps those to 0; this banner names the
+                affected addons so the admin knows why the input shows 0
+                instead of the stored value — rather than hitting an opaque
+                HTTP 400 on save. Informational gating notice, not an error
+                channel (frontend.md) → Alert, not destructive. */}
+            {quotaDetail && detectNonMultipleAddons(quotaDetail).length > 0 && (
+              <Alert>
+                <AlertTitle>{t("addonDialog.snapWarning.title")}</AlertTitle>
+                <AlertDescription>
+                  {t("addonDialog.snapWarning.body", {
+                    keys: detectNonMultipleAddons(quotaDetail)
+                      .map((key) => t(`addonDialog.${key}`))
+                      .join(", "),
+                  })}
+                </AlertDescription>
+              </Alert>
+            )}
+
             {/* Issue #663: 9 addon inputs driven by ADDON_TYPES. The
                 "effective" preview reflects the backend's _zero_floor
                 clamp for PRO-only addons (sleep_contexts) on FREE/BASIC
