@@ -16,17 +16,16 @@ import { test as base, expect } from "@playwright/test";
  *   E2E_ADMIN_LOGIN_ID   — login_id for an existing admin user without MFA
  *   E2E_ADMIN_PASSWORD   — that user's password
  *
- * CI prerequisite (not a local-dev concern): `playwright.config.ts` sets
- * `trace: "retain-on-failure"`, which captures network request bodies in
- * the retained trace artifact on test failure. Because the login POST
- * below sends E2E_ADMIN_PASSWORD as form data, a failed E2E run would
- * leave the password in `test-results/.../trace.zip`. Local dev runs do
- * not propagate this anywhere, but before this spec is added to CI:
- * either switch to pre-seeded storage state (`playwright.config.ts`
- * `globalSetup` + project `use.storageState`) so the password never
- * touches a traced context, OR disable tracing for this spec via
- * `test.use({ trace: "off" })`. See frontend/e2e/README.md for the full
- * decision. Surfaced by Copilot review on PR #807.
+ * Trace-capture mitigation (current): every spec that uses this fixture
+ * MUST set `test.use({ trace: "off" })` at the top of the file —
+ * `playwright.config.ts` defaults to `trace: "retain-on-failure"`, which
+ * would capture the E2E_ADMIN_PASSWORD POST body in the retained trace
+ * artifact on test failure. `admin-user-detail.spec.ts` is the reference
+ * example. Long-term, switch to pre-seeded storage state via
+ * `playwright.config.ts` `globalSetup` + project `use.storageState` so
+ * the password never touches a traced context at all — tracked in
+ * `frontend/e2e/README.md` as a CI prerequisite. Surfaced by Copilot
+ * review on PR #807 (loops 1 + 2).
  * Optional:
  *   E2E_API_URL          — backend API base URL (default: NEXT_PUBLIC_API_URL
  *                          else http://localhost:8080). Required because the
