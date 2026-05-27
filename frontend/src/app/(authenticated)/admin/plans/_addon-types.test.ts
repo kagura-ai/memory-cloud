@@ -1,16 +1,20 @@
 /**
- * Tests for addon snap + non-multiple detection (Issue #800).
+ * Tests for addon value validation (Issue #800).
  *
- * `snapshotAddonValues` populates the admin addon dialog from the quota
- * detail response. A legacy / broken cache can hold a value that is not a
- * multiple of `perUnit` (e.g. pre-#665 `addon_memory_bonus = 9000` with
- * `perUnit = 10000`). The backend rejects such values with HTTP 400 on save,
- * so the dialog must snap them and warn the admin rather than render the
- * invalid value verbatim and surface an opaque 400.
+ * A legacy / broken cache can hold a value that is not a multiple of `perUnit`
+ * (e.g. pre-#665 `addon_memory_bonus = 9000` with `perUnit = 10000`). The
+ * backend rejects such values with HTTP 400 on save. Rather than render an
+ * opaque 400, the dialog detects invalid values, warns the admin, and gates
+ * Save until they are corrected.
  *
- * Snap policy (#800-A): reset non-multiples to 0 (not round) so the admin's
- * value is never silently rewritten — paired with a visible warning driven by
- * `detectNonMultipleAddons`.
+ * Design note (post code-review): `snapshotAddonValues` deliberately does NOT
+ * coerce the stored value to 0. Coercing the editable form state was found to
+ * (a) silently destroy a legacy value when the admin saves after editing an
+ * unrelated field — the dialog sends all 9 fields — and (b) spuriously trigger
+ * the LD-7 reduction warning on open. Instead the raw value is preserved (so
+ * the dialog matches the read-only panel and nothing is lost), the warning is
+ * driven by the live form state, and Save is disabled while any value is
+ * invalid.
  */
 
 import { describe, expect, it } from "vitest";
@@ -18,9 +22,12 @@ import { describe, expect, it } from "vitest";
 import type { WorkspaceQuotaDetail } from "@/lib/api/admin";
 import {
   ADDON_TYPES,
-  detectNonMultipleAddons,
+  EMPTY_ADDON_VALUES,
+  findInvalidAddonValues,
+  isValidAddonValue,
   snapshotAddonValues,
   type AddonKey,
+  type AddonValuesByKey,
 } from "./_addon-types";
 
 /** All-zero addon block, overridable per field. */
@@ -62,51 +69,65 @@ function makeQuota(
   } as WorkspaceQuotaDetail;
 }
 
+/** Form values with a single key overridden. */
+function values(overrides: Partial<AddonValuesByKey> = {}): AddonValuesByKey {
+  return { ...EMPTY_ADDON_VALUES, ...overrides };
+}
+
 /** perUnit > 1 addons are the only ones where a non-multiple is possible. */
 const SNAPPABLE = ADDON_TYPES.filter((m) => m.perUnit > 1);
-/** perUnit === 1 addons (analysis, sleep): every integer is a valid multiple. */
+/** perUnit === 1 addons (analysis, sleep): every non-negative integer is valid. */
 const ALWAYS_VALID = ADDON_TYPES.filter((m) => m.perUnit === 1);
 
-describe("snapshotAddonValues", () => {
-  it("snaps a non-multiple memory_bonus (9000) to 0", () => {
-    const snapshot = snapshotAddonValues(makeQuota({ memory_bonus: 9000 }));
-    expect(snapshot.memory).toBe(0);
-  });
-
-  it("preserves a valid multiple verbatim", () => {
-    const snapshot = snapshotAddonValues(makeQuota({ memory_bonus: 20_000 }));
-    expect(snapshot.memory).toBe(20_000);
+describe("isValidAddonValue", () => {
+  it("accepts 0 (no addon is always saveable)", () => {
+    expect(isValidAddonValue(SNAPPABLE[0], 0)).toBe(true);
   });
 
   it.each(SNAPPABLE)(
-    "snaps a non-multiple $key value to 0 (perUnit=$perUnit)",
+    "accepts an exact multiple of $key (perUnit=$perUnit)",
     (meta) => {
-      const snapshot = snapshotAddonValues(
-        makeQuota({ [meta.addonField]: meta.perUnit - 1 }),
-      );
-      expect(snapshot[meta.key]).toBe(0);
+      expect(isValidAddonValue(meta, meta.perUnit * 3)).toBe(true);
     },
   );
 
-  it.each(SNAPPABLE)(
-    "preserves a valid multiple of $key (2 * perUnit)",
-    (meta) => {
-      const snapshot = snapshotAddonValues(
-        makeQuota({ [meta.addonField]: meta.perUnit * 2 }),
-      );
-      expect(snapshot[meta.key]).toBe(meta.perUnit * 2);
-    },
-  );
+  it.each(SNAPPABLE)("rejects a non-multiple of $key (perUnit-1)", (meta) => {
+    expect(isValidAddonValue(meta, meta.perUnit - 1)).toBe(false);
+  });
 
   it.each(ALWAYS_VALID)(
-    "preserves any value for perUnit=1 addon $key",
+    "accepts any non-negative integer for perUnit=1 addon $key",
     (meta) => {
-      const snapshot = snapshotAddonValues(makeQuota({ [meta.addonField]: 7 }));
-      expect(snapshot[meta.key]).toBe(7);
+      expect(isValidAddonValue(meta, 7)).toBe(true);
     },
   );
 
-  it("leaves an all-valid snapshot untouched", () => {
+  it("rejects negative values", () => {
+    expect(isValidAddonValue(SNAPPABLE[0], -SNAPPABLE[0].perUnit)).toBe(false);
+  });
+
+  it("rejects NaN / non-integers", () => {
+    expect(isValidAddonValue(SNAPPABLE[0], Number.NaN)).toBe(false);
+    expect(isValidAddonValue(SNAPPABLE[0], 1.5)).toBe(false);
+  });
+});
+
+describe("snapshotAddonValues", () => {
+  it("preserves a valid multiple verbatim", () => {
+    expect(
+      snapshotAddonValues(makeQuota({ memory_bonus: 20_000 })).memory,
+    ).toBe(20_000);
+  });
+
+  it("preserves a non-multiple verbatim — never silently coerces to 0", () => {
+    // The dialog must show the admin their real stored value; saving is gated
+    // separately. Coercing here would destroy the value on an unrelated save.
+    expect(snapshotAddonValues(makeQuota({ memory_bonus: 9000 })).memory).toBe(
+      9000,
+    );
+  });
+
+  it("maps every addon key from its cache field", () => {
     const snapshot = snapshotAddonValues(
       makeQuota({
         memory_bonus: 10_000,
@@ -120,29 +141,32 @@ describe("snapshotAddonValues", () => {
   });
 });
 
-describe("detectNonMultipleAddons", () => {
-  it("returns [] when every addon value is a valid multiple", () => {
+describe("findInvalidAddonValues", () => {
+  it("returns [] when every value is a valid multiple", () => {
     expect(
-      detectNonMultipleAddons(
-        makeQuota({ memory_bonus: 10_000, storage_bonus_mb: 200 }),
-      ),
+      findInvalidAddonValues(values({ memory: 10_000, storage: 200 })),
     ).toEqual([]);
   });
 
-  it("returns the key of a non-zero non-multiple value", () => {
-    expect(detectNonMultipleAddons(makeQuota({ memory_bonus: 9000 }))).toEqual([
-      "memory",
-    ]);
+  it("returns the key of a non-multiple value", () => {
+    expect(findInvalidAddonValues(values({ memory: 9000 }))).toEqual<
+      AddonKey[]
+    >(["memory"]);
   });
 
-  it("ignores zero values (zero is a valid multiple, nothing to warn about)", () => {
-    expect(detectNonMultipleAddons(makeQuota({ memory_bonus: 0 }))).toEqual([]);
+  it("ignores zero (a valid, saveable amount)", () => {
+    expect(findInvalidAddonValues(values({ memory: 0 }))).toEqual([]);
+  });
+
+  it("flags a negative value", () => {
+    expect(findInvalidAddonValues(values({ members: -5 }))).toEqual<AddonKey[]>(
+      ["members"],
+    );
   });
 
   it("reports multiple broken keys in ADDON_TYPES order", () => {
-    const result = detectNonMultipleAddons(
-      makeQuota({ memory_bonus: 9000, storage_bonus_mb: 150 }),
-    );
-    expect(result).toEqual<AddonKey[]>(["memory", "storage"]);
+    expect(
+      findInvalidAddonValues(values({ memory: 9000, storage: 150 })),
+    ).toEqual<AddonKey[]>(["memory", "storage"]);
   });
 });

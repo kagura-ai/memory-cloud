@@ -2179,9 +2179,9 @@
         "perUnitWithSuffix": "(+{count} {unit} / unit)",
         "proOnlyInline": "(PRO only)",
         "reductionWarning": "Reducing addons below current usage will be rejected by the backend. (Memories: {memories} used, Members: {members} used, Contexts: {contexts} used)",
-        "snapWarning": {
-          "title": "Some addon values were reset",
-          "body": "The stored value for {keys} is not a valid multiple of its unit and would be rejected on save, so it was reset to 0. Re-enter a valid amount if needed."
+        "invalidWarning": {
+          "title": "Some addon values can't be saved",
+          "body": "The value for {keys} is not a valid multiple of its unit (or is negative) and would be rejected on save. Saving is disabled until you enter a valid amount."
         }
       },
       "auditTable": {
