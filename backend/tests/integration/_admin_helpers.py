@@ -1,10 +1,11 @@
 """Shared helpers for admin integration tests.
 
-Used by:
+Used by (grep ``from ._admin_helpers`` for the authoritative list):
 - test_admin_users_soft_delete_filter.py (#681)
 - test_admin_users_list_cap_column.py (#695)
 - test_admin_workspace_slot_bonus.py (#676)
 - test_admin_user_detail_context_role.py (#699)
+- test_admin_plans_base_memory_limit.py (#801)
 
 Each helper returns a fresh, unsaved SQLAlchemy instance with a unique
 auto-generated identifier (user_id / workspace UUID / context name) so

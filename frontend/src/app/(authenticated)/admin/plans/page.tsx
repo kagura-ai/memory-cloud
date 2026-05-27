@@ -94,6 +94,7 @@ import {
   EMPTY_ADDON_VALUES,
   buildUpdateAddonRequest,
   computeAddonEffectivePreview,
+  findInvalidAddonValues,
   formatAddonValue,
   formatQuotaValue,
   formatReadOnlyQuotaValue,
@@ -238,6 +239,11 @@ export default function AdminPlansPage() {
   const setAddonValue = (key: AddonKey, value: number): void => {
     setAddonValues((prev) => ({ ...prev, [key]: value }));
   };
+  // #800: addon keys whose current form value can't be saved (non-multiple of
+  // perUnit, or negative). Derived once from the live form state so the dialog
+  // warning and the Save gate stay in lock-step and clear as the admin fixes
+  // each value. Cheap pure scan of 9 entries — no memoization needed.
+  const invalidAddons = findInvalidAddonValues(addonValues);
   const { toast } = useToast();
   const [tab, setTab] = useTabParam("workspaces", "tab", PLAN_TABS);
 
@@ -886,6 +892,27 @@ export default function AdminPlansPage() {
           </DialogHeader>
 
           <div className="space-y-4 py-4">
+            {/* Issue #800: a legacy / broken cache can hold a value that is
+                not a multiple of perUnit (e.g. pre-#665 memory_bonus 9000),
+                which the backend rejects with HTTP 400 on save. Rather than
+                surface an opaque 400, name the offending addons here and
+                disable Save (below) until they are corrected. Driven by the
+                live form state so it clears as the admin fixes each value.
+                Informational gating notice, not an error channel
+                (frontend.md) → Alert, not destructive. */}
+            {invalidAddons.length > 0 && (
+              <Alert>
+                <AlertTitle>{t("addonDialog.invalidWarning.title")}</AlertTitle>
+                <AlertDescription>
+                  {t("addonDialog.invalidWarning.body", {
+                    keys: invalidAddons
+                      .map((key) => t(`addonDialog.${key}`))
+                      .join(", "),
+                  })}
+                </AlertDescription>
+              </Alert>
+            )}
+
             {/* Issue #663: 9 addon inputs driven by ADDON_TYPES. The
                 "effective" preview reflects the backend's _zero_floor
                 clamp for PRO-only addons (sleep_contexts) on FREE/BASIC
@@ -972,7 +999,13 @@ export default function AdminPlansPage() {
             <Button variant="outline" onClick={() => setAddonDialogOpen(false)}>
               {tCommon("cancel")}
             </Button>
-            <Button onClick={handleUpdateAddons}>
+            {/* #800: block save while any addon value is non-saveable — the
+                PUT sends all 9 fields, so an invalid one would 400 the whole
+                request. Gating here keeps the warning and the save in sync. */}
+            <Button
+              onClick={handleUpdateAddons}
+              disabled={invalidAddons.length > 0}
+            >
               <CheckCircle className="h-4 w-4 mr-2" />
               {t("addonDialog.save")}
             </Button>

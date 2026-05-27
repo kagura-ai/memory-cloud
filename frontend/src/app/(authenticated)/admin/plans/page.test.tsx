@@ -412,6 +412,64 @@ describe("AdminPlansPage — workspaces tab addon dialog (Issue #663)", () => {
     ).toHaveLength(1);
   });
 
+  it("warns, preserves the value, and disables Save for a non-multiple cache (#800)", async () => {
+    // Broken cache: a pre-#665 memory_bonus of 9000 is not a multiple of the
+    // memory addon's perUnit (10000); the backend would 400 it on save.
+    mockGetWorkspaceQuotas.mockResolvedValue({
+      ...QUOTA_DETAIL_PRO,
+      addon: { ...QUOTA_DETAIL_PRO.addon, memory_bonus: 9000 },
+    });
+    await openAddonDialog();
+
+    // A visible warning names the offending addon.
+    expect(
+      screen.getByText("admin.plans.addonDialog.invalidWarning.title"),
+    ).toBeInTheDocument();
+
+    // The value is preserved verbatim (NOT coerced to 0) so it matches the
+    // read-only panel and an unrelated edit can't silently destroy it.
+    const memoryInput = document.getElementById(
+      "addon-memory",
+    ) as HTMLInputElement;
+    expect(memoryInput.value).toBe("9000");
+
+    // Save is gated until the invalid value is corrected.
+    const saveButton = screen
+      .getByText("admin.plans.addonDialog.save")
+      .closest("button");
+    expect(saveButton).toBeDisabled();
+
+    // The LD-7 reduction warning must NOT fire spuriously — the admin has not
+    // reduced anything (form value 9000 == cache 9000).
+    expect(
+      screen.queryByText("admin.plans.addonDialog.reductionWarning"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("clears the warning and re-enables Save once a valid value is entered (#800)", async () => {
+    mockGetWorkspaceQuotas.mockResolvedValue({
+      ...QUOTA_DETAIL_PRO,
+      addon: { ...QUOTA_DETAIL_PRO.addon, memory_bonus: 9000 },
+    });
+    await openAddonDialog();
+
+    const memoryInput = document.getElementById(
+      "addon-memory",
+    ) as HTMLInputElement;
+    // Admin corrects the value to a valid multiple of perUnit (10000).
+    fireEvent.change(memoryInput, { target: { value: "20000" } });
+
+    // Warning clears (driven by live form state, not the original cache)...
+    expect(
+      screen.queryByText("admin.plans.addonDialog.invalidWarning.title"),
+    ).not.toBeInTheDocument();
+    // ...and Save is re-enabled.
+    const saveButton = screen
+      .getByText("admin.plans.addonDialog.save")
+      .closest("button");
+    expect(saveButton).not.toBeDisabled();
+  });
+
   it("renders the max_resource_tokens read-only row in the expanded panel", async () => {
     render(<AdminPlansPage />);
     const workspaceCell = await screen.findByText("Pro Workspace");

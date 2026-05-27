@@ -201,10 +201,35 @@ export function readAddonFromQuota(
 }
 
 /**
+ * Whether `value` is a saveable amount for this addon: a non-negative
+ * integer multiple of ``perUnit``. This is the single source of the
+ * divisibility rule — both the dialog's invalid-value warning and its
+ * Save gate derive from it, so snap/warn/save can never drift apart.
+ *
+ * The backend rejects non-multiples (``requested % unit_value != 0``) and
+ * negatives (``ge=0``) with HTTP 400; this mirrors that contract on the
+ * client. ``perUnit === 1`` addons (analysis, sleep) accept any
+ * non-negative integer; 0 (no addon) is always valid.
+ */
+export function isValidAddonValue(meta: AddonTypeMeta, value: number): boolean {
+  return Number.isInteger(value) && value >= 0 && value % meta.perUnit === 0;
+}
+
+/**
  * Build a complete addon snapshot from the quota detail response.
  * Used by ``openAddonDialog`` to populate the form state in one step
  * — every key in ``AddonValuesByKey`` is set from the corresponding
- * cache column.
+ * cache column, verbatim.
+ *
+ * Issue #800: a legacy / broken cache can hold a value that is not a
+ * multiple of ``perUnit`` (e.g. pre-#665 ``addon_memory_bonus = 9000``).
+ * We deliberately do NOT coerce such values to 0 here — coercing the
+ * editable form state would (a) silently destroy the stored value when
+ * the admin saves after editing an unrelated field (the dialog sends all
+ * 9 fields), and (b) spuriously trigger the LD-7 reduction warning on
+ * open. Instead the raw value is preserved (matching the read-only quota
+ * panel), ``findInvalidAddonValues`` drives a live warning, and the
+ * dialog disables Save until every value is valid.
  */
 export function snapshotAddonValues(
   quotaDetail: WorkspaceQuotaDetail,
@@ -214,6 +239,18 @@ export function snapshotAddonValues(
     snapshot[meta.key] = readAddonFromQuota(quotaDetail, meta);
   }
   return snapshot;
+}
+
+/**
+ * Addon keys in the current form state whose value is not saveable, in
+ * ``ADDON_TYPES`` order. Driven by the live form state (not the original
+ * cache) so the dialog's warning clears the moment the admin corrects a
+ * value, and the Save gate stays in lock-step. See Issue #800.
+ */
+export function findInvalidAddonValues(values: AddonValuesByKey): AddonKey[] {
+  return ADDON_TYPES.filter(
+    (meta) => !isValidAddonValue(meta, values[meta.key]),
+  ).map((meta) => meta.key);
 }
 
 /**
