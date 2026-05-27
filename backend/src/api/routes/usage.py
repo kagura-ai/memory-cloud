@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import SessionUser
 from config.settings import get_settings
 from db.base import get_db
-from models.auth import UsageStats, Workspace
+from models.auth import UsageStats
 from models.memory import Memory
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -458,16 +458,21 @@ async def get_current_usage(
 
         usage_filter = _build_usage_filter(user_id, current_workspace_id)
 
-        # Get current memory count.
+        # Get current memory count. Scope it the same way as memory_limit's
+        # source (#668): workspace-wide when a workspace is selected — matching
+        # /workspace/usage/current and the workspace-tier limit — else user-wide
+        # with the FREE-tier fallback limit. Without this the numerator (count)
+        # and denominator (limit) would mix scopes and misreport quota status.
         # Issue #198 (Bug D): exclude soft-deleted rows so this matches the
-        # workspace endpoint and the underlying DB count. Without this filter
-        # the dashboard's "memories" card double-counted forgotten items.
-        memory_result = await db.execute(
-            select(func.count(Memory.id)).where(
-                Memory.user_id == user_id,
+        # workspace endpoint and the underlying DB count.
+        if current_workspace_id is not None:
+            memory_filter = and_(
+                Memory.workspace_id == current_workspace_id,
                 Memory.deleted_at.is_(None),
             )
-        )
+        else:
+            memory_filter = and_(Memory.user_id == user_id, Memory.deleted_at.is_(None))
+        memory_result = await db.execute(select(func.count(Memory.id)).where(memory_filter))
         memory_count = memory_result.scalar() or 0
 
         # Get API calls today (Issue #238: Separate MCP/REST/Public)
@@ -546,45 +551,29 @@ async def get_current_usage(
         )
         rest_calls_week = rest_week_result.scalar() or 0
 
-        # Fetch effective quotas ONCE and pass into both helpers so we don't
-        # trigger ``EffectiveQuotaService`` twice. Issue #570 removed the
-        # GET-time self-heal COMMIT, so this is now a DB-roundtrip optimization
-        # rather than a correctness requirement; the kwarg plumbing is kept
-        # because both helpers still need the same dict.
+        # Plan name + effective quotas both come from the caller's current
+        # workspace (Workspace is the plan source of truth; the legacy per-user
+        # ``user_plans`` table was removed in #668). A single round-trip returns
+        # both, and the quota dict is also passed into the analysis / sleep
+        # helpers below so ``EffectiveQuotaService`` is hit once, not twice.
         #
-        # On ``ValueError`` (workspace not found), pass an EMPTY dict (not
-        # ``None``) into the helpers. ``None`` would make the helpers fall
-        # back to fetching ``EffectiveQuotaService`` themselves — which would
-        # re-raise the same ``ValueError``, defeating the "compute once"
-        # invariant. Empty dict makes the helpers' ``.get(key, 0) or 0`` calls
-        # land on 0, surfacing a graceful "no quota data" response rather
-        # than crashing the dashboard.
+        # On ``ValueError`` (workspace not found) pass an EMPTY dict (not
+        # ``None``) into the helpers. ``None`` would make them fall back to
+        # fetching ``EffectiveQuotaService`` themselves — which would re-raise
+        # the same ``ValueError``. Empty dict makes their ``.get(key, 0) or 0``
+        # calls land on 0, a graceful "no quota data" response. With no current
+        # workspace at all, the FREE-tier fallback below fills the plan block.
         from services.effective_quota_service import EffectiveQuotaService
 
+        plan_name = "free"
         effective_quotas_dict: dict[str, int] | None = None
         if current_workspace_id is not None:
             try:
-                effective_quotas_dict = await EffectiveQuotaService(db).get_effective_quotas(
-                    current_workspace_id
-                )
+                plan_name, effective_quotas_dict = await EffectiveQuotaService(
+                    db
+                ).get_plan_and_quotas(current_workspace_id)
             except ValueError:
                 effective_quotas_dict = {}
-
-        # Plan limits come from the user's current workspace — Workspace is the
-        # plan source of truth. The legacy per-user ``user_plans`` table (read
-        # here until #668) was never updated by billing, so it always reported
-        # FREE; sourcing from the workspace's effective quota fixes that. With
-        # no current workspace (or one that vanished), fall back to FREE-tier
-        # defaults so the dashboard still renders.
-        plan_name = "free"
-        if current_workspace_id is not None:
-            ws_plan_name = (
-                await db.execute(
-                    select(Workspace.plan_name).where(Workspace.id == current_workspace_id)
-                )
-            ).scalar_one_or_none()
-            if ws_plan_name is not None:
-                plan_name = ws_plan_name
 
         if effective_quotas_dict:
             quotas = effective_quotas_dict
