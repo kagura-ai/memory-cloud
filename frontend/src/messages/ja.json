@@ -2343,6 +2343,15 @@
           "bonusAt0Title": "減算できません",
           "bonusAt0Desc": "スロットボーナスは既に 0 です",
           "overCapWarn": "ユーザーは現在 {owned} 件のワークスペースを保有しています。ボーナスを {projected} にすると上限は {cap} になります。{shortfall, plural, other {既存ワークスペースを # 件削除}}するまで新規作成はできません。既存ワークスペースは削除されません。"
+        },
+        "roles": {
+          "admin": "管理者",
+          "user": "ユーザー",
+          "read_only": "閲覧専用",
+          "owner": "オーナー",
+          "member": "メンバー",
+          "viewer": "閲覧者",
+          "editor": "編集者"
         }
       }
     },

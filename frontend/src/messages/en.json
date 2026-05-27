@@ -2343,6 +2343,15 @@
           "bonusAt0Title": "Cannot decrement",
           "bonusAt0Desc": "Slot bonus is already at 0.",
           "overCapWarn": "User currently owns {owned} workspaces. Setting bonus to {projected} caps them at {cap}. They cannot create new workspaces until {shortfall, plural, one {# existing workspace is} other {# existing workspaces are}} deleted. Existing workspaces are NOT removed."
+        },
+        "roles": {
+          "admin": "Admin",
+          "user": "User",
+          "read_only": "Read-only",
+          "owner": "Owner",
+          "member": "Member",
+          "viewer": "Viewer",
+          "editor": "Editor"
         }
       }
     },

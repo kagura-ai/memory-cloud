@@ -100,6 +100,16 @@ interface UserDetail {
   workspace_summary?: WorkspaceSummary | null; // #676 (optional during rollout)
 }
 
+const KNOWN_ROLE_VALUES = [
+  "admin",
+  "user",
+  "read_only",
+  "owner",
+  "member",
+  "viewer",
+  "editor",
+] as const;
+
 export default function UserDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -137,6 +147,12 @@ export default function UserDetailPage() {
   }>({ open: false, delta: -1, reason: "", warnText: "", submitting: false });
 
   const { toast } = useToast();
+
+  const getLocalizedRole = (role: string) => {
+    return KNOWN_ROLE_VALUES.includes(role as (typeof KNOWN_ROLE_VALUES)[number])
+      ? t(`roles.${role}`)
+      : role;
+  };
 
   useEffect(() => {
     loadUserDetail();
@@ -432,7 +448,7 @@ export default function UserDetailPage() {
                   {userDetail.user.role === "admin" && (
                     <Shield className="h-3 w-3 mr-1" />
                   )}
-                  {userDetail.user.role}
+                  {getLocalizedRole(userDetail.user.role)}
                 </Badge>
                 {userDetail.user.is_initial_admin && (
                   <Badge
@@ -510,7 +526,7 @@ export default function UserDetailPage() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <Badge>{workspace.role}</Badge>
+                      <Badge>{getLocalizedRole(workspace.role)}</Badge>
                     </TableCell>
                     <TableCell>
                       <Badge
@@ -730,7 +746,7 @@ export default function UserDetailPage() {
                       {ctx.workspace_name}
                     </TableCell>
                     <TableCell>
-                      <Badge variant="outline">{ctx.role}</Badge>
+                      <Badge variant="outline">{getLocalizedRole(ctx.role)}</Badge>
                     </TableCell>
                     <TableCell className="text-sm text-gray-500">
                       {ctx.last_used_at
