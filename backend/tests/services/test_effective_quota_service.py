@@ -186,37 +186,6 @@ class TestEffectiveQuotaService:
             await service.get_effective_quotas(uuid4())
 
     @pytest.mark.asyncio
-    async def test_get_plan_and_quotas_single_fetch(self, service, mock_db):
-        """get_plan_and_quotas returns (plan_name, quotas) from one SELECT.
-
-        The single round-trip is the whole reason this method exists — callers
-        that need both plan_name and the quota dict (the usage endpoints) would
-        otherwise issue a separate ``Workspace.plan_name`` SELECT (#668).
-        """
-        ws = self._mock_workspace(plan_name="pro", memory_limit=1000, addon_memory_bonus=500)
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = ws
-        mock_db.execute = AsyncMock(return_value=mock_result)
-
-        plan_name, quotas = await service.get_plan_and_quotas(uuid4())
-
-        assert mock_db.execute.await_count == 1
-        assert plan_name == "pro"
-        # Same dict contract as get_effective_quotas (shared _quotas_from_workspace).
-        assert quotas["memory_limit"] == 1500
-        assert isinstance(quotas["mcp_calls_per_day"], int)
-
-    @pytest.mark.asyncio
-    async def test_get_plan_and_quotas_not_found(self, service, mock_db):
-        """get_plan_and_quotas raises ValueError when the workspace is missing."""
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None
-        mock_db.execute = AsyncMock(return_value=mock_result)
-
-        with pytest.raises(ValueError, match="not found"):
-            await service.get_plan_and_quotas(uuid4())
-
-    @pytest.mark.asyncio
     async def test_get_addon_summary(self, service, mock_db):
         """get_addon_summary returns all bonus fields."""
         ws = self._mock_workspace(

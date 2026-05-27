@@ -456,31 +456,40 @@ async def get_current_usage(
         # Issue #50: Workspace-scoped usage stats
         current_workspace_id = user.get("current_workspace_id")
 
-        # API-call counts are workspace-wide (all members) when a workspace is
-        # selected — matching the workspace-tier limits and the memory_count
-        # below, and /workspace/usage/current (#668). Without a workspace, fall
-        # back to user-scoped counts paired with the FREE-tier limit. The shared
-        # _build_usage_filter stays user-scoped for the history endpoints below.
-        if current_workspace_id is not None:
-            usage_filter = UsageStats.workspace_id == current_workspace_id
-        else:
-            usage_filter = UsageStats.user_id == user_id
+        usage_filter = _build_usage_filter(user_id, current_workspace_id)
 
-        # Get current memory count. Scope it the same way as memory_limit's
-        # source (#668): workspace-wide when a workspace is selected — matching
-        # /workspace/usage/current and the workspace-tier limit — else user-wide
-        # with the FREE-tier fallback limit. Without this the numerator (count)
-        # and denominator (limit) would mix scopes and misreport quota status.
+        # Plan limits: the legacy per-user ``user_plans`` table (read here until
+        # #668) was never updated by billing and always reported the FREE-tier
+        # defaults, so source the same FREE-tier limits from plan_tiers to
+        # preserve this endpoint's behavior. NOTE: /usage/current is user-scoped
+        # and its frontend path is unused in production; redefining or
+        # deprecating this endpoint is tracked as a follow-up to #668.
+        from config.plan_tiers import get_plan_tier
+
+        free_tier = get_plan_tier("free")
+        plan_name = "free"
+        plan_memory_limit = free_tier.memory_limit
+        plan_daily_total = (
+            free_tier.mcp_calls_per_day
+            + free_tier.rest_calls_per_day
+            + free_tier.public_calls_per_day
+        )
+        plan_weekly_total = (
+            free_tier.mcp_calls_per_week
+            + free_tier.rest_calls_per_week
+            + free_tier.public_calls_per_week
+        )
+
+        # Get current memory count.
         # Issue #198 (Bug D): exclude soft-deleted rows so this matches the
-        # workspace endpoint and the underlying DB count.
-        if current_workspace_id is not None:
-            memory_filter = and_(
-                Memory.workspace_id == current_workspace_id,
+        # workspace endpoint and the underlying DB count. Without this filter
+        # the dashboard's "memories" card double-counted forgotten items.
+        memory_result = await db.execute(
+            select(func.count(Memory.id)).where(
+                Memory.user_id == user_id,
                 Memory.deleted_at.is_(None),
             )
-        else:
-            memory_filter = and_(Memory.user_id == user_id, Memory.deleted_at.is_(None))
-        memory_result = await db.execute(select(func.count(Memory.id)).where(memory_filter))
+        )
         memory_count = memory_result.scalar() or 0
 
         # Get API calls today (Issue #238: Separate MCP/REST/Public)
@@ -559,55 +568,29 @@ async def get_current_usage(
         )
         rest_calls_week = rest_week_result.scalar() or 0
 
-        # Plan name + effective quotas both come from the caller's current
-        # workspace (Workspace is the plan source of truth; the legacy per-user
-        # ``user_plans`` table was removed in #668). A single round-trip returns
-        # both, and the quota dict is also passed into the analysis / sleep
-        # helpers below so ``EffectiveQuotaService`` is hit once, not twice.
+        # Fetch effective quotas ONCE and pass into both helpers so we don't
+        # trigger ``EffectiveQuotaService`` twice. Issue #570 removed the
+        # GET-time self-heal COMMIT, so this is now a DB-roundtrip optimization
+        # rather than a correctness requirement; the kwarg plumbing is kept
+        # because both helpers still need the same dict.
         #
-        # On ``ValueError`` (workspace not found) pass an EMPTY dict (not
-        # ``None``) into the helpers. ``None`` would make them fall back to
-        # fetching ``EffectiveQuotaService`` themselves — which would re-raise
-        # the same ``ValueError``. Empty dict makes their ``.get(key, 0) or 0``
-        # calls land on 0, a graceful "no quota data" response. With no current
-        # workspace at all, the FREE-tier fallback below fills the plan block.
+        # On ``ValueError`` (workspace not found), pass an EMPTY dict (not
+        # ``None``) into the helpers. ``None`` would make the helpers fall
+        # back to fetching ``EffectiveQuotaService`` themselves — which would
+        # re-raise the same ``ValueError``, defeating the "compute once"
+        # invariant. Empty dict makes the helpers' ``.get(key, 0) or 0`` calls
+        # land on 0, surfacing a graceful "no quota data" response rather
+        # than crashing the dashboard.
         from services.effective_quota_service import EffectiveQuotaService
 
-        plan_name = "free"
         effective_quotas_dict: dict[str, int] | None = None
         if current_workspace_id is not None:
             try:
-                plan_name, effective_quotas_dict = await EffectiveQuotaService(
-                    db
-                ).get_plan_and_quotas(current_workspace_id)
+                effective_quotas_dict = await EffectiveQuotaService(db).get_effective_quotas(
+                    current_workspace_id
+                )
             except ValueError:
                 effective_quotas_dict = {}
-
-        if effective_quotas_dict:
-            quotas = effective_quotas_dict
-        else:
-            from config.plan_tiers import get_plan_tier
-
-            free_tier = get_plan_tier("free")
-            quotas = {
-                "memory_limit": free_tier.memory_limit,
-                "mcp_calls_per_day": free_tier.mcp_calls_per_day,
-                "mcp_calls_per_week": free_tier.mcp_calls_per_week,
-                "rest_calls_per_day": free_tier.rest_calls_per_day,
-                "rest_calls_per_week": free_tier.rest_calls_per_week,
-                "public_calls_per_day": free_tier.public_calls_per_day,
-                "public_calls_per_week": free_tier.public_calls_per_week,
-            }
-
-        memory_limit = quotas["memory_limit"]
-        mcp_daily = quotas["mcp_calls_per_day"]
-        mcp_weekly = quotas["mcp_calls_per_week"]
-        rest_daily = quotas["rest_calls_per_day"]
-        rest_weekly = quotas["rest_calls_per_week"]
-        public_daily = quotas["public_calls_per_day"]
-        public_weekly = quotas["public_calls_per_week"]
-        daily_total_limit = mcp_daily + rest_daily + public_daily
-        weekly_total_limit = mcp_weekly + rest_weekly + public_weekly
 
         analysis_usage = await _build_analysis_usage(
             db, user_id, current_workspace_id, effective_quotas=effective_quotas_dict
@@ -622,15 +605,9 @@ async def get_current_usage(
         response = UsageCurrentResponse(
             plan=PlanLimits(
                 plan_name=plan_name,
-                memory_limit=memory_limit,
-                daily_total_limit=daily_total_limit,
-                weekly_total_limit=weekly_total_limit,
-                mcp_calls_per_day=mcp_daily,
-                mcp_calls_per_week=mcp_weekly,
-                rest_calls_per_day=rest_daily,
-                rest_calls_per_week=rest_weekly,
-                public_calls_per_day=public_daily,
-                public_calls_per_week=public_weekly,
+                memory_limit=plan_memory_limit,
+                daily_total_limit=plan_daily_total,
+                weekly_total_limit=plan_weekly_total,
             ),
             usage=CurrentUsage(
                 memory_count=memory_count,
@@ -646,9 +623,9 @@ async def get_current_usage(
                 sleep_contexts=sleep_contexts_usage,
                 workspaces=workspaces_usage,
             ),
-            memory_usage=calculate_usage_status(memory_count, memory_limit),
-            daily_api_usage=calculate_usage_status(api_calls_today, daily_total_limit),
-            weekly_api_usage=calculate_usage_status(api_calls_week, weekly_total_limit),
+            memory_usage=calculate_usage_status(memory_count, plan_memory_limit),
+            daily_api_usage=calculate_usage_status(api_calls_today, plan_daily_total),
+            weekly_api_usage=calculate_usage_status(api_calls_week, plan_weekly_total),
         )
 
         logger.info("current_usage_retrieved", user_id=user_id)

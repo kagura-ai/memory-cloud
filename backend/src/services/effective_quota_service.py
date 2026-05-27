@@ -77,48 +77,10 @@ class EffectiveQuotaService:
         if not workspace:
             raise ValueError(f"Workspace {workspace_id} not found")
 
-        effective_quotas = self._quotas_from_workspace(workspace)
-
-        logger.debug(
-            "effective_quotas_calculated",
-            extra={
-                "workspace_id": str(workspace_id),
-                "plan_name": workspace.plan_name,
-                "effective_quotas": effective_quotas,
-            },
-        )
-
-        return effective_quotas
-
-    async def get_plan_and_quotas(self, workspace_id: UUID) -> tuple[str, dict[str, int]]:
-        """Get the workspace's plan name and effective quotas in one round-trip.
-
-        Callers that need both ``plan_name`` and the quota dict (e.g. the usage
-        endpoints) should use this instead of a separate ``Workspace.plan_name``
-        SELECT plus ``get_effective_quotas`` — both read the same row.
-
-        Returns:
-            ``(plan_name, effective_quotas)``.
-
-        Raises:
-            ValueError: If workspace not found.
-        """
-        result = await self.db.execute(select(Workspace).where(Workspace.id == workspace_id))
-        workspace = result.scalar_one_or_none()
-
-        if not workspace:
-            raise ValueError(f"Workspace {workspace_id} not found")
-
-        return workspace.plan_name, self._quotas_from_workspace(workspace)
-
-    @staticmethod
-    def _quotas_from_workspace(workspace: Workspace) -> dict[str, int]:
-        """Build the effective-quota dict from a Workspace's model properties.
-
-        Issue #198 (Bug C): include weekly fields so callers don't need to fall
-        back on the broken ``daily * 7`` heuristic.
-        """
-        return {
+        # Calculate effective quotas via model properties
+        # Issue #198 (Bug C): include weekly fields so callers don't need to fall
+        # back on the broken `daily * 7` heuristic.
+        effective_quotas = {
             "memory_limit": workspace.effective_memory_limit,
             "mcp_calls_per_day": workspace.effective_mcp_calls_per_day,
             "mcp_calls_per_week": workspace.effective_mcp_calls_per_week,
@@ -133,6 +95,17 @@ class EffectiveQuotaService:
             "sleep_enabled_contexts_limit": workspace.effective_sleep_enabled_contexts_limit,
             "max_resource_tokens": workspace.effective_max_resource_tokens,
         }
+
+        logger.debug(
+            "effective_quotas_calculated",
+            extra={
+                "workspace_id": str(workspace_id),
+                "plan_name": workspace.plan_name,
+                "effective_quotas": effective_quotas,
+            },
+        )
+
+        return effective_quotas
 
     async def get_addon_summary(self, workspace_id: UUID) -> dict[str, int]:
         """Get summary of active addon bonuses.
