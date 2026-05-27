@@ -2254,6 +2254,105 @@
         "deleteConfirm": "ユーザー{name}を削除しますか？すべてのメモリーが完全に削除されます。",
         "deleteSuccess": "ユーザー{name}を正常に削除しました",
         "deleteError": "ユーザーの削除に失敗しました"
+      },
+      "detail": {
+        "title": "ユーザー詳細",
+        "titleLoading": "ユーザー詳細",
+        "descriptionError": "ユーザー情報の読み込みに失敗しました",
+        "descriptionLoading": "ユーザー情報を読み込み中...",
+        "backToUsers": "ユーザー一覧へ戻る",
+        "userInfo": {
+          "title": "ユーザー情報",
+          "initialAdminBadge": "初期管理者",
+          "created": "作成日",
+          "lastLogin": "最終ログイン",
+          "never": "未ログイン"
+        },
+        "workspaces": {
+          "title": "ワークスペース ({count})",
+          "table": {
+            "workspace": "ワークスペース",
+            "role": "ロール",
+            "plan": "プラン",
+            "joined": "参加日",
+            "actions": "操作"
+          },
+          "primaryBadge": "プライマリ",
+          "notAvailable": "N/A",
+          "changePlanButton": "プラン変更",
+          "empty": "ワークスペースなし"
+        },
+        "workspaceCapacity": {
+          "title": "ワークスペース上限",
+          "ownedLabel": "保有: {count}",
+          "capLabel": "上限: {cap}",
+          "formula": "({base} 基本 + {bonus} ボーナス)",
+          "atCapBadge": "上限到達",
+          "usagePctBadge": "{pct}% 使用",
+          "slotBonusLabel": "スロットボーナス:",
+          "decrementAria": "スロットボーナスを減らす",
+          "incrementAria": "スロットボーナスを増やす",
+          "ownedWorkspacesLabel": "保有ワークスペース ({count})",
+          "noOwnedWorkspaces": "保有ワークスペースなし"
+        },
+        "accessibleContexts": {
+          "title": "アクセス可能コンテキスト ({count})",
+          "table": {
+            "context": "コンテキスト",
+            "workspace": "ワークスペース",
+            "role": "ロール",
+            "lastUsed": "最終使用"
+          },
+          "empty": "アクセス可能コンテキストなし"
+        },
+        "stats": {
+          "title": "使用状況",
+          "totalMemories": "メモリ合計",
+          "memoryBreakdown": "Working: {working} | Persistent: {persistent}",
+          "activeApiKeys": "有効な API キー"
+        },
+        "changePlanDialog": {
+          "title": "ワークスペースプラン変更",
+          "description": "{workspaceName} のプラン階層を変更",
+          "currentPlanLabel": "現在のプラン",
+          "newPlanLabel": "新しいプラン",
+          "planOptions": {
+            "free": "Free",
+            "basic": "Basic",
+            "pro": "Pro"
+          },
+          "warningText": "⚠️ プラン変更は即時反映され、クォータ上限が更新されます。",
+          "confirm": "プラン変更"
+        },
+        "reasonModal": {
+          "title": "理由を入力してください",
+          "description": "この変更はユーザーの現在の保有数より下に上限を下げます。",
+          "reasonLabel": "理由 (必須)",
+          "reasonPlaceholder": "この管理者操作が必要な理由は?",
+          "charCounter": "{count}/500",
+          "confirming": "確認中…",
+          "confirmButton": "減算を確認"
+        },
+        "messages": {
+          "loadError": "ユーザー詳細の読み込みに失敗しました",
+          "planChangeSuccessDesc": "{workspace} のプランを {plan} に変更しました",
+          "planChangeErrorDesc": "プラン変更に失敗しました",
+          "bonusUpdateSuccessTitle": "更新しました",
+          "bonusUpdateSuccessDesc": "スロットボーナス: {before} → {after}",
+          "bonusUpdateErrorDesc": "スロットボーナスの更新に失敗しました",
+          "bonusAt0Title": "減算できません",
+          "bonusAt0Desc": "スロットボーナスは既に 0 です",
+          "overCapWarn": "ユーザーは現在 {owned} 件のワークスペースを保有しています。ボーナスを {projected} にすると上限は {cap} になります。{shortfall, plural, other {既存ワークスペースを # 件削除}}するまで新規作成はできません。既存ワークスペースは削除されません。"
+        },
+        "roles": {
+          "admin": "管理者",
+          "user": "ユーザー",
+          "read_only": "閲覧専用",
+          "owner": "オーナー",
+          "member": "メンバー",
+          "viewer": "閲覧者",
+          "editor": "編集者"
+        }
       }
     },
     "systemAdmins": {

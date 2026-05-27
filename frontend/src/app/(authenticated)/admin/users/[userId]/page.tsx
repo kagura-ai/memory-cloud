@@ -10,6 +10,7 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { useTranslations, useLocale } from "next-intl";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { LoadingState, InlineSpinner } from "@/components/common/LoadingState";
@@ -59,8 +60,9 @@ import {
   updateWorkspaceSlotBonus,
   type WorkspaceSummary,
 } from "@/lib/api/admin";
-import { formatDistanceToNow } from "date-fns";
+import { formatRelativeTime } from "@/lib/utils/datetime";
 import { useToast } from "@/hooks/use-toast";
+import { USER_DETAIL_TEST_IDS } from "./testids";
 
 interface UserDetail {
   user: {
@@ -98,9 +100,24 @@ interface UserDetail {
   workspace_summary?: WorkspaceSummary | null; // #676 (optional during rollout)
 }
 
+const KNOWN_ROLE_VALUES = [
+  "admin",
+  "user",
+  "read_only",
+  "owner",
+  "member",
+  "viewer",
+  "editor",
+] as const;
+
+const KNOWN_PLAN_VALUES = ["free", "basic", "pro"] as const;
+
 export default function UserDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const t = useTranslations("admin.users.detail");
+  const tCommon = useTranslations("admin.common");
+  const locale = useLocale();
   const userId = params.userId as string;
   const [userDetail, setUserDetail] = useState<UserDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -133,6 +150,22 @@ export default function UserDetailPage() {
 
   const { toast } = useToast();
 
+  const getLocalizedRole = (role: string) => {
+    return KNOWN_ROLE_VALUES.includes(
+      role as (typeof KNOWN_ROLE_VALUES)[number],
+    )
+      ? t(`roles.${role}`)
+      : role;
+  };
+
+  const getLocalizedPlan = (plan: string) => {
+    return KNOWN_PLAN_VALUES.includes(
+      plan as (typeof KNOWN_PLAN_VALUES)[number],
+    )
+      ? t(`changePlanDialog.planOptions.${plan as "free" | "basic" | "pro"}`)
+      : plan;
+  };
+
   useEffect(() => {
     loadUserDetail();
   }, [userId]);
@@ -150,7 +183,7 @@ export default function UserDetailPage() {
       // error-surface rule). No toast for the same event — one channel per
       // error class.
       const message =
-        error instanceof Error ? error.message : "Failed to load user details";
+        error instanceof Error ? error.message : t("messages.loadError");
       setLoadError(message);
     } finally {
       setLoading(false);
@@ -180,8 +213,11 @@ export default function UserDetailPage() {
       );
 
       toast({
-        title: "Success",
-        description: `Plan changed to ${newPlan} for ${planDialog.workspaceName}`,
+        title: tCommon("success"),
+        description: t("messages.planChangeSuccessDesc", {
+          plan: newPlan,
+          workspace: planDialog.workspaceName ?? "",
+        }),
       });
 
       setPlanDialog({
@@ -193,9 +229,11 @@ export default function UserDetailPage() {
       loadUserDetail();
     } catch (error: unknown) {
       const message =
-        error instanceof Error ? error.message : "Failed to change plan";
+        error instanceof Error
+          ? error.message
+          : t("messages.planChangeErrorDesc");
       toast({
-        title: "Error",
+        title: tCommon("error"),
         description: message,
         variant: "destructive",
       });
@@ -258,8 +296,11 @@ export default function UserDetailPage() {
           : prev,
       );
       toast({
-        title: "Updated",
-        description: `Slot bonus: ${response.before_value} → ${response.after_value}.`,
+        title: t("messages.bonusUpdateSuccessTitle"),
+        description: t("messages.bonusUpdateSuccessDesc", {
+          before: response.before_value,
+          after: response.after_value,
+        }),
       });
     } catch (error: unknown) {
       // Refetch authoritative state on PATCH failure. A naive
@@ -272,9 +313,11 @@ export default function UserDetailPage() {
       // post-failure state always reflects truth. Extra round-trip on
       // the rare failure path is acceptable for admin-only endpoint.
       const message =
-        error instanceof Error ? error.message : "Failed to update slot bonus";
+        error instanceof Error
+          ? error.message
+          : t("messages.bonusUpdateErrorDesc");
       toast({
-        title: "Error",
+        title: tCommon("error"),
         description: message,
         variant: "destructive",
       });
@@ -296,8 +339,8 @@ export default function UserDetailPage() {
 
     if (projectedBonus < 0) {
       toast({
-        title: "Cannot decrement",
-        description: "Slot bonus is already at 0.",
+        title: t("messages.bonusAt0Title"),
+        description: t("messages.bonusAt0Desc"),
         variant: "destructive",
       });
       return;
@@ -310,12 +353,12 @@ export default function UserDetailPage() {
         open: true,
         delta,
         reason: "",
-        warnText:
-          `User currently owns ${summary.owned_count} workspaces. ` +
-          `Setting bonus to ${projectedBonus} caps them at ${projectedCap}. ` +
-          `They cannot create new workspaces until ${shortfall} existing ` +
-          `workspace${shortfall === 1 ? " is" : "s are"} deleted. ` +
-          `Existing workspaces are NOT removed.`,
+        warnText: t("messages.overCapWarn", {
+          owned: summary.owned_count,
+          projected: projectedBonus,
+          cap: projectedCap,
+          shortfall,
+        }),
         submitting: false,
       });
       return;
@@ -345,15 +388,15 @@ export default function UserDetailPage() {
     return (
       <PageContainer>
         <PageHeader
-          title="User Detail"
-          description="Failed to load user information"
+          title={t("title")}
+          description={t("descriptionError")}
           actions={
             <Button
               variant="outline"
               onClick={() => router.push("/admin/users")}
             >
               <ArrowLeft className="h-4 w-4 mr-2" />
-              Back to Users
+              {t("backToUsers")}
             </Button>
           }
         />
@@ -366,8 +409,8 @@ export default function UserDetailPage() {
     return (
       <PageContainer>
         <PageHeader
-          title="User Details"
-          description="Loading user information..."
+          title={t("titleLoading")}
+          description={t("descriptionLoading")}
         />
         <LoadingState lines={5} />
       </PageContainer>
@@ -377,12 +420,12 @@ export default function UserDetailPage() {
   return (
     <PageContainer>
       <PageHeader
-        title="User Detail"
+        title={t("title")}
         description={`${userDetail.user.name} (${userDetail.user.email})`}
         actions={
           <Button variant="outline" onClick={() => router.push("/admin/users")}>
             <ArrowLeft className="h-4 w-4 mr-2" />
-            Back to Users
+            {t("backToUsers")}
           </Button>
         }
       />
@@ -390,7 +433,7 @@ export default function UserDetailPage() {
       {/* User Info Card */}
       <Card>
         <CardHeader>
-          <CardTitle>User Information</CardTitle>
+          <CardTitle>{t("userInfo.title")}</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="flex items-center gap-4 mb-6">
@@ -417,14 +460,14 @@ export default function UserDetailPage() {
                   {userDetail.user.role === "admin" && (
                     <Shield className="h-3 w-3 mr-1" />
                   )}
-                  {userDetail.user.role}
+                  {getLocalizedRole(userDetail.user.role)}
                 </Badge>
                 {userDetail.user.is_initial_admin && (
                   <Badge
                     variant="secondary"
                     className="bg-amber-100 text-amber-800"
                   >
-                    Initial Admin
+                    {t("userInfo.initialAdminBadge")}
                   </Badge>
                 )}
               </div>
@@ -433,22 +476,17 @@ export default function UserDetailPage() {
 
           <div className="grid grid-cols-2 gap-4 text-sm">
             <div>
-              <p className="text-gray-500">Created</p>
+              <p className="text-gray-500">{t("userInfo.created")}</p>
               <p className="font-medium">
-                {formatDistanceToNow(new Date(userDetail.user.created_at), {
-                  addSuffix: true,
-                })}
+                {formatRelativeTime(userDetail.user.created_at, locale)}
               </p>
             </div>
             <div>
-              <p className="text-gray-500">Last Login</p>
+              <p className="text-gray-500">{t("userInfo.lastLogin")}</p>
               <p className="font-medium">
                 {userDetail.user.last_login_at
-                  ? formatDistanceToNow(
-                      new Date(userDetail.user.last_login_at),
-                      { addSuffix: true },
-                    )
-                  : "Never"}
+                  ? formatRelativeTime(userDetail.user.last_login_at, locale)
+                  : t("userInfo.never")}
               </p>
             </div>
           </div>
@@ -460,7 +498,11 @@ export default function UserDetailPage() {
         <CardHeader>
           <div className="flex items-center gap-2">
             <Building2 className="h-5 w-5" />
-            <CardTitle>Workspaces ({userDetail.workspaces.length})</CardTitle>
+            <CardTitle>
+              {t("workspaces.title", {
+                count: userDetail.workspaces.length,
+              })}
+            </CardTitle>
           </div>
         </CardHeader>
         <CardContent>
@@ -468,11 +510,13 @@ export default function UserDetailPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Workspace</TableHead>
-                  <TableHead>Role</TableHead>
-                  <TableHead>Plan</TableHead>
-                  <TableHead>Joined</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
+                  <TableHead>{t("workspaces.table.workspace")}</TableHead>
+                  <TableHead>{t("workspaces.table.role")}</TableHead>
+                  <TableHead>{t("workspaces.table.plan")}</TableHead>
+                  <TableHead>{t("workspaces.table.joined")}</TableHead>
+                  <TableHead className="text-right">
+                    {t("workspaces.table.actions")}
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -488,13 +532,13 @@ export default function UserDetailPage() {
                         </span>
                         {workspace.is_primary && (
                           <Badge variant="outline" className="text-xs">
-                            Primary
+                            {t("workspaces.primaryBadge")}
                           </Badge>
                         )}
                       </div>
                     </TableCell>
                     <TableCell>
-                      <Badge>{workspace.role}</Badge>
+                      <Badge>{getLocalizedRole(workspace.role)}</Badge>
                     </TableCell>
                     <TableCell>
                       <Badge
@@ -511,10 +555,8 @@ export default function UserDetailPage() {
                     </TableCell>
                     <TableCell className="text-sm text-gray-500">
                       {workspace.joined_at
-                        ? formatDistanceToNow(new Date(workspace.joined_at), {
-                            addSuffix: true,
-                          })
-                        : "N/A"}
+                        ? formatRelativeTime(workspace.joined_at, locale)
+                        : t("workspaces.notAvailable")}
                     </TableCell>
                     <TableCell className="text-right">
                       <Button
@@ -523,7 +565,7 @@ export default function UserDetailPage() {
                         onClick={() => openPlanDialog(workspace)}
                       >
                         <CreditCard className="h-4 w-4 mr-2" />
-                        Change Plan
+                        {t("workspaces.changePlanButton")}
                       </Button>
                     </TableCell>
                   </TableRow>
@@ -531,18 +573,18 @@ export default function UserDetailPage() {
               </TableBody>
             </Table>
           ) : (
-            <p className="text-gray-500 text-sm">No workspaces</p>
+            <p className="text-gray-500 text-sm">{t("workspaces.empty")}</p>
           )}
         </CardContent>
       </Card>
 
       {/* Workspace Capacity Card (#676) */}
       {userDetail.workspace_summary && (
-        <Card>
+        <Card data-testid={USER_DETAIL_TEST_IDS.workspaceCapacitySection}>
           <CardHeader>
             <div className="flex items-center gap-2">
               <Layers className="h-5 w-5" />
-              <CardTitle>Workspace Capacity</CardTitle>
+              <CardTitle>{t("workspaceCapacity.title")}</CardTitle>
             </div>
           </CardHeader>
           <CardContent>
@@ -560,27 +602,45 @@ export default function UserDetailPage() {
               return (
                 <div className="space-y-4">
                   <div className="flex items-baseline gap-3">
-                    <p className="text-sm">
+                    <p
+                      className="text-sm"
+                      data-testid={
+                        USER_DETAIL_TEST_IDS.workspaceCapacityCapDisplay
+                      }
+                    >
                       <span className="font-medium">
-                        Owned: {summary.owned_count}
+                        {t("workspaceCapacity.ownedLabel", {
+                          count: summary.owned_count,
+                        })}
                       </span>{" "}
-                      / Cap: {summary.cap}
+                      / {t("workspaceCapacity.capLabel", { cap: summary.cap })}
                       <span className="text-gray-500 ml-2">
-                        ({summary.base_cap} base +{" "}
-                        {summary.workspace_slot_bonus} bonus)
+                        {t("workspaceCapacity.formula", {
+                          base: summary.base_cap,
+                          bonus: summary.workspace_slot_bonus,
+                        })}
                       </span>
                     </p>
                     <Badge variant={badgeVariant}>
-                      {summary.is_at_cap ? "at cap" : `${usagePct}% used`}
+                      {summary.is_at_cap
+                        ? t("workspaceCapacity.atCapBadge")
+                        : t("workspaceCapacity.usagePctBadge", {
+                            pct: usagePct,
+                          })}
                     </Badge>
                   </div>
 
                   <div className="flex items-center gap-3">
-                    <span className="text-sm text-gray-500">Slot bonus:</span>
+                    <span className="text-sm text-gray-500">
+                      {t("workspaceCapacity.slotBonusLabel")}
+                    </span>
                     <Button
                       variant="outline"
                       size="sm"
-                      aria-label="Decrement slot bonus"
+                      aria-label={t("workspaceCapacity.decrementAria")}
+                      data-testid={
+                        USER_DETAIL_TEST_IDS.workspaceCapacityDecrement
+                      }
                       onClick={() => handleBonusDelta(-1)}
                       disabled={
                         bonusPending !== null ||
@@ -593,13 +653,21 @@ export default function UserDetailPage() {
                         <Minus className="h-4 w-4" />
                       )}
                     </Button>
-                    <span className="font-mono font-medium text-lg min-w-[2ch] text-center">
+                    <span
+                      className="font-mono font-medium text-lg min-w-[2ch] text-center"
+                      data-testid={
+                        USER_DETAIL_TEST_IDS.workspaceCapacityBonusValue
+                      }
+                    >
                       {summary.workspace_slot_bonus}
                     </span>
                     <Button
                       variant="outline"
                       size="sm"
-                      aria-label="Increment slot bonus"
+                      aria-label={t("workspaceCapacity.incrementAria")}
+                      data-testid={
+                        USER_DETAIL_TEST_IDS.workspaceCapacityIncrement
+                      }
                       onClick={() => handleBonusDelta(1)}
                       disabled={bonusPending !== null}
                     >
@@ -614,7 +682,9 @@ export default function UserDetailPage() {
                   {summary.owned_workspaces.length > 0 ? (
                     <div>
                       <p className="text-xs text-gray-500 mb-2">
-                        Owned workspaces ({summary.owned_workspaces.length})
+                        {t("workspaceCapacity.ownedWorkspacesLabel", {
+                          count: summary.owned_workspaces.length,
+                        })}
                       </p>
                       <ul className="space-y-1">
                         {summary.owned_workspaces.map((ws) => (
@@ -641,7 +711,7 @@ export default function UserDetailPage() {
                     </div>
                   ) : (
                     <p className="text-xs text-gray-500">
-                      User owns no workspaces.
+                      {t("workspaceCapacity.noOwnedWorkspaces")}
                     </p>
                   )}
                 </div>
@@ -657,7 +727,9 @@ export default function UserDetailPage() {
           <div className="flex items-center gap-2">
             <FolderOpen className="h-5 w-5" />
             <CardTitle>
-              Accessible Contexts ({userDetail.accessible_contexts.length})
+              {t("accessibleContexts.title", {
+                count: userDetail.accessible_contexts.length,
+              })}
             </CardTitle>
           </div>
         </CardHeader>
@@ -666,10 +738,14 @@ export default function UserDetailPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Context</TableHead>
-                  <TableHead>Workspace</TableHead>
-                  <TableHead>Role</TableHead>
-                  <TableHead>Last Used</TableHead>
+                  <TableHead>{t("accessibleContexts.table.context")}</TableHead>
+                  <TableHead>
+                    {t("accessibleContexts.table.workspace")}
+                  </TableHead>
+                  <TableHead>{t("accessibleContexts.table.role")}</TableHead>
+                  <TableHead>
+                    {t("accessibleContexts.table.lastUsed")}
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -682,21 +758,23 @@ export default function UserDetailPage() {
                       {ctx.workspace_name}
                     </TableCell>
                     <TableCell>
-                      <Badge variant="outline">{ctx.role}</Badge>
+                      <Badge variant="outline">
+                        {getLocalizedRole(ctx.role)}
+                      </Badge>
                     </TableCell>
                     <TableCell className="text-sm text-gray-500">
                       {ctx.last_used_at
-                        ? formatDistanceToNow(new Date(ctx.last_used_at), {
-                            addSuffix: true,
-                          })
-                        : "Never"}
+                        ? formatRelativeTime(ctx.last_used_at, locale)
+                        : t("userInfo.never")}
                     </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
           ) : (
-            <p className="text-gray-500 text-sm">No accessible contexts</p>
+            <p className="text-gray-500 text-sm">
+              {t("accessibleContexts.empty")}
+            </p>
           )}
         </CardContent>
       </Card>
@@ -706,23 +784,29 @@ export default function UserDetailPage() {
         <CardHeader>
           <div className="flex items-center gap-2">
             <BarChart2 className="h-5 w-5" />
-            <CardTitle>Usage Statistics</CardTitle>
+            <CardTitle>{t("stats.title")}</CardTitle>
           </div>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-2 gap-6">
             <div>
-              <p className="text-sm text-gray-500">Total Memories</p>
+              <p className="text-sm text-gray-500">
+                {t("stats.totalMemories")}
+              </p>
               <p className="text-3xl font-bold">
                 {userDetail.stats.total_memories}
               </p>
               <p className="text-xs text-gray-500 mt-1">
-                Working: {userDetail.stats.working_memories} | Persistent:{" "}
-                {userDetail.stats.persistent_memories}
+                {t("stats.memoryBreakdown", {
+                  working: userDetail.stats.working_memories,
+                  persistent: userDetail.stats.persistent_memories,
+                })}
               </p>
             </div>
             <div>
-              <p className="text-sm text-gray-500">Active API Keys</p>
+              <p className="text-sm text-gray-500">
+                {t("stats.activeApiKeys")}
+              </p>
               <p className="text-3xl font-bold">
                 {userDetail.stats.active_api_keys}
               </p>
@@ -738,44 +822,57 @@ export default function UserDetailPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Change Workspace Plan</DialogTitle>
+            <DialogTitle>{t("changePlanDialog.title")}</DialogTitle>
             <DialogDescription>
-              Change plan tier for <strong>{planDialog.workspaceName}</strong>
+              {t("changePlanDialog.description", {
+                workspaceName: planDialog.workspaceName ?? "",
+              })}
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4 py-4">
             <div>
-              <label className="text-sm font-medium">Current Plan</label>
+              <label className="text-sm font-medium">
+                {t("changePlanDialog.currentPlanLabel")}
+              </label>
               <div className="mt-2">
                 <Badge
                   variant={
                     planDialog.currentPlan === "pro" ? "destructive" : "default"
                   }
                 >
-                  {planDialog.currentPlan}
+                  {planDialog.currentPlan
+                    ? getLocalizedPlan(planDialog.currentPlan)
+                    : ""}
                 </Badge>
               </div>
             </div>
 
             <div>
-              <label className="text-sm font-medium">New Plan</label>
+              <label className="text-sm font-medium">
+                {t("changePlanDialog.newPlanLabel")}
+              </label>
               <Select value={newPlan} onValueChange={setNewPlan}>
                 <SelectTrigger className="mt-2">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="free">Free</SelectItem>
-                  <SelectItem value="basic">Basic</SelectItem>
-                  <SelectItem value="pro">Pro</SelectItem>
+                  <SelectItem value="free">
+                    {t("changePlanDialog.planOptions.free")}
+                  </SelectItem>
+                  <SelectItem value="basic">
+                    {t("changePlanDialog.planOptions.basic")}
+                  </SelectItem>
+                  <SelectItem value="pro">
+                    {t("changePlanDialog.planOptions.pro")}
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </div>
 
             <div className="bg-yellow-50 border border-yellow-200 rounded p-3">
               <p className="text-sm text-yellow-800">
-                ⚠️ Plan changes take effect immediately and will update quota
-                limits.
+                {t("changePlanDialog.warningText")}
               </p>
             </div>
           </div>
@@ -792,13 +889,13 @@ export default function UserDetailPage() {
                 })
               }
             >
-              Cancel
+              {tCommon("cancel")}
             </Button>
             <Button
               onClick={handleChangePlan}
               disabled={newPlan === planDialog.currentPlan}
             >
-              Change Plan
+              {t("changePlanDialog.confirm")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -812,12 +909,11 @@ export default function UserDetailPage() {
           setDestructiveModal({ ...destructiveModal, open })
         }
       >
-        <DialogContent>
+        <DialogContent data-testid={USER_DETAIL_TEST_IDS.reasonModal}>
           <DialogHeader>
-            <DialogTitle>Reason required</DialogTitle>
+            <DialogTitle>{t("reasonModal.title")}</DialogTitle>
             <DialogDescription>
-              This change reduces the cap below the user&apos;s current owned
-              count.
+              {t("reasonModal.description")}
             </DialogDescription>
           </DialogHeader>
 
@@ -832,10 +928,11 @@ export default function UserDetailPage() {
 
             <div>
               <label htmlFor="bonus-reason" className="text-sm font-medium">
-                Reason (required)
+                {t("reasonModal.reasonLabel")}
               </label>
               <Textarea
                 id="bonus-reason"
+                data-testid={USER_DETAIL_TEST_IDS.reasonModalInput}
                 value={destructiveModal.reason}
                 onChange={(e) =>
                   setDestructiveModal({
@@ -843,14 +940,16 @@ export default function UserDetailPage() {
                     reason: e.target.value,
                   })
                 }
-                placeholder="Why is this admin operation needed?"
+                placeholder={t("reasonModal.reasonPlaceholder")}
                 rows={3}
                 maxLength={500}
                 disabled={destructiveModal.submitting}
                 className="mt-2"
               />
               <p className="text-xs text-gray-500 mt-1">
-                {destructiveModal.reason.length}/500
+                {t("reasonModal.charCounter", {
+                  count: destructiveModal.reason.length,
+                })}
               </p>
             </div>
           </div>
@@ -869,18 +968,19 @@ export default function UserDetailPage() {
               }
               disabled={destructiveModal.submitting}
             >
-              Cancel
+              {tCommon("cancel")}
             </Button>
             <Button
               variant="destructive"
+              data-testid={USER_DETAIL_TEST_IDS.reasonModalConfirm}
               onClick={submitDestructive}
               disabled={
                 !destructiveModal.reason.trim() || destructiveModal.submitting
               }
             >
               {destructiveModal.submitting
-                ? "Confirming…"
-                : "Confirm decrement"}
+                ? t("reasonModal.confirming")
+                : t("reasonModal.confirmButton")}
             </Button>
           </DialogFooter>
         </DialogContent>

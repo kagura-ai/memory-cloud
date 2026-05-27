@@ -44,6 +44,23 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn() }),
 }));
 
+// next-intl mock matches the project convention (see frontend/src/app/login/
+// page.test.tsx): useTranslations returns the key verbatim. For calls that
+// pass params, we echo `key var1=value1 var2=value2` so tests can assert
+// data interpolation flowed through without needing the real message
+// catalog. Tests assert on data-testid / role queries (#688) rather than
+// visible English text, so the key-as-text is fine.
+vi.mock("next-intl", () => ({
+  useTranslations: () => (key: string, params?: Record<string, unknown>) => {
+    if (!params) return key;
+    const tail = Object.entries(params)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(" ");
+    return `${key} ${tail}`;
+  },
+  useLocale: () => "en",
+}));
+
 // Reduce layout chrome.
 vi.mock("@/components/common/PageContainer", () => ({
   PageContainer: ({ children }: { children: React.ReactNode }) => (
@@ -55,6 +72,7 @@ vi.mock("@/components/common/PageHeader", () => ({
 }));
 
 import UserDetailPage from "./page";
+import { USER_DETAIL_TEST_IDS } from "./testids";
 
 const BASE_USER_DETAIL = {
   user: {
@@ -90,12 +108,14 @@ describe("Workspace Capacity section (#676)", () => {
     render(<UserDetailPage />);
     // Wait for the page to actually finish loading by waiting for a
     // post-load element (the user's name from the fetched payload).
-    // Without this anchor, `queryByText(/Workspace Capacity/)` returns
-    // null both *before* the fetch resolves AND when the section is
-    // correctly absent — making the test a false positive that would
+    // Without this anchor, `queryByTestId(USER_DETAIL_TEST_IDS.workspaceCapacitySection)`
+    // returns null both *before* the fetch resolves AND when the section
+    // is correctly absent — making the test a false positive that would
     // pass even if the section was rendered after load.
     await screen.findByText(BASE_USER_DETAIL.user.name);
-    expect(screen.queryByText(/Workspace Capacity/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId(USER_DETAIL_TEST_IDS.workspaceCapacitySection),
+    ).not.toBeInTheDocument();
   });
 
   it("renders cap formula and badge variant from workspace_summary", async () => {
@@ -113,11 +133,18 @@ describe("Workspace Capacity section (#676)", () => {
       }),
     );
     render(<UserDetailPage />);
-    await screen.findByText(/Workspace Capacity/);
-    expect(screen.getByText(/Owned: 2/)).toBeInTheDocument();
-    expect(screen.getByText(/Cap: 3/)).toBeInTheDocument();
-    expect(screen.getByText(/1 base \+ 2 bonus/)).toBeInTheDocument();
-    expect(screen.getByText(/67% used/)).toBeInTheDocument();
+    await screen.findByTestId(USER_DETAIL_TEST_IDS.workspaceCapacitySection);
+    // Cap-display text is rendered via the i18n mock as
+    // `<key> <param>=<value> ...` so we assert on the data flowed
+    // through rather than the localized message.
+    const capDisplay = screen.getByTestId(
+      USER_DETAIL_TEST_IDS.workspaceCapacityCapDisplay,
+    );
+    expect(capDisplay.textContent).toMatch(/count=2/);
+    expect(capDisplay.textContent).toMatch(/cap=3/);
+    expect(capDisplay.textContent).toMatch(/base=1/);
+    expect(capDisplay.textContent).toMatch(/bonus=2/);
+    expect(capDisplay.parentElement?.textContent).toMatch(/pct=67/);
     expect(screen.getByText("Personal")).toBeInTheDocument();
     expect(screen.getByText("Side project")).toBeInTheDocument();
   });
@@ -134,7 +161,10 @@ describe("Workspace Capacity section (#676)", () => {
       }),
     );
     render(<UserDetailPage />);
-    await screen.findByText(/at cap/);
+    const section = await screen.findByTestId(
+      USER_DETAIL_TEST_IDS.workspaceCapacitySection,
+    );
+    expect(section.textContent).toMatch(/workspaceCapacity\.atCapBadge/);
   });
 
   it("commits +1 immediately and updates the displayed bonus on success", async () => {
@@ -158,9 +188,11 @@ describe("Workspace Capacity section (#676)", () => {
       reason: null,
     });
     render(<UserDetailPage />);
-    await screen.findByText(/Workspace Capacity/);
+    await screen.findByTestId(USER_DETAIL_TEST_IDS.workspaceCapacitySection);
 
-    fireEvent.click(screen.getByLabelText("Increment slot bonus"));
+    fireEvent.click(
+      screen.getByTestId(USER_DETAIL_TEST_IDS.workspaceCapacityIncrement),
+    );
 
     await waitFor(() => {
       expect(mockUpdateBonus).toHaveBeenCalledWith("u_test_123", {
@@ -170,7 +202,9 @@ describe("Workspace Capacity section (#676)", () => {
     });
     await waitFor(() => {
       expect(mockToast).toHaveBeenCalledWith(
-        expect.objectContaining({ title: "Updated" }),
+        expect.objectContaining({
+          title: "messages.bonusUpdateSuccessTitle",
+        }),
       );
     });
   });
@@ -196,9 +230,11 @@ describe("Workspace Capacity section (#676)", () => {
       reason: null,
     });
     render(<UserDetailPage />);
-    await screen.findByText(/Workspace Capacity/);
+    await screen.findByTestId(USER_DETAIL_TEST_IDS.workspaceCapacitySection);
 
-    fireEvent.click(screen.getByLabelText("Decrement slot bonus"));
+    fireEvent.click(
+      screen.getByTestId(USER_DETAIL_TEST_IDS.workspaceCapacityDecrement),
+    );
 
     await waitFor(() => {
       expect(mockUpdateBonus).toHaveBeenCalledWith("u_test_123", {
@@ -207,7 +243,9 @@ describe("Workspace Capacity section (#676)", () => {
       });
     });
     // No modal should be visible.
-    expect(screen.queryByText(/Reason required/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId(USER_DETAIL_TEST_IDS.reasonModal),
+    ).not.toBeInTheDocument();
   });
 
   it("opens reason modal for destructive -1 and submits with reason", async () => {
@@ -231,28 +269,37 @@ describe("Workspace Capacity section (#676)", () => {
       reason: "finance request",
     });
     render(<UserDetailPage />);
-    await screen.findByText(/Workspace Capacity/);
+    await screen.findByTestId(USER_DETAIL_TEST_IDS.workspaceCapacitySection);
 
-    fireEvent.click(screen.getByLabelText("Decrement slot bonus"));
+    fireEvent.click(
+      screen.getByTestId(USER_DETAIL_TEST_IDS.workspaceCapacityDecrement),
+    );
 
     // Modal opens — no PATCH yet.
-    await screen.findByText(/Reason required/);
+    const modal = await screen.findByTestId(USER_DETAIL_TEST_IDS.reasonModal);
     expect(mockUpdateBonus).not.toHaveBeenCalled();
 
-    // Warning text mentions the shortfall and that workspaces aren't removed.
-    expect(
-      screen.getByText(/Existing workspaces are NOT removed/),
-    ).toBeInTheDocument();
+    // Warning text is built from the t() messages.overCapWarn message; the
+    // mock echoes the params so we can assert that the shortfall / cap
+    // values flowed through correctly.
+    expect(modal.textContent).toMatch(/messages\.overCapWarn/);
+    expect(modal.textContent).toMatch(/owned=4/);
+    expect(modal.textContent).toMatch(/projected=2/);
+    expect(modal.textContent).toMatch(/cap=3/);
+    expect(modal.textContent).toMatch(/shortfall=1/);
 
     // Confirm button is disabled until reason is non-empty.
-    const confirmBtn = screen.getByRole("button", {
-      name: /Confirm decrement/,
-    });
+    const confirmBtn = screen.getByTestId(
+      USER_DETAIL_TEST_IDS.reasonModalConfirm,
+    );
     expect(confirmBtn).toBeDisabled();
 
-    fireEvent.change(screen.getByLabelText(/Reason \(required\)/), {
-      target: { value: "finance request" },
-    });
+    fireEvent.change(
+      screen.getByTestId(USER_DETAIL_TEST_IDS.reasonModalInput),
+      {
+        target: { value: "finance request" },
+      },
+    );
     expect(confirmBtn).not.toBeDisabled();
 
     fireEvent.click(confirmBtn);
@@ -277,18 +324,23 @@ describe("Workspace Capacity section (#676)", () => {
       }),
     );
     render(<UserDetailPage />);
-    await screen.findByText(/Workspace Capacity/);
+    await screen.findByTestId(USER_DETAIL_TEST_IDS.workspaceCapacitySection);
 
-    fireEvent.click(screen.getByLabelText("Decrement slot bonus"));
-    await screen.findByText(/Reason required/);
+    fireEvent.click(
+      screen.getByTestId(USER_DETAIL_TEST_IDS.workspaceCapacityDecrement),
+    );
+    await screen.findByTestId(USER_DETAIL_TEST_IDS.reasonModal);
 
-    fireEvent.change(screen.getByLabelText(/Reason \(required\)/), {
-      target: { value: "   " },
-    });
+    fireEvent.change(
+      screen.getByTestId(USER_DETAIL_TEST_IDS.reasonModalInput),
+      {
+        target: { value: "   " },
+      },
+    );
 
-    const confirmBtn = screen.getByRole("button", {
-      name: /Confirm decrement/,
-    });
+    const confirmBtn = screen.getByTestId(
+      USER_DETAIL_TEST_IDS.reasonModalConfirm,
+    );
     expect(confirmBtn).toBeDisabled();
     expect(mockUpdateBonus).not.toHaveBeenCalled();
   });
@@ -309,20 +361,25 @@ describe("Workspace Capacity section (#676)", () => {
     mockGet.mockResolvedValueOnce(initialDetail);
     mockUpdateBonus.mockRejectedValueOnce(new Error("network down"));
     render(<UserDetailPage />);
-    await screen.findByText(/Workspace Capacity/);
+    await screen.findByTestId(USER_DETAIL_TEST_IDS.workspaceCapacitySection);
 
-    fireEvent.click(screen.getByLabelText("Increment slot bonus"));
+    fireEvent.click(
+      screen.getByTestId(USER_DETAIL_TEST_IDS.workspaceCapacityIncrement),
+    );
 
     await waitFor(() => {
       expect(mockToast).toHaveBeenCalledWith(
         expect.objectContaining({
-          title: "Error",
+          title: "error",
           variant: "destructive",
         }),
       );
     });
     // Displayed bonus should be back to the pre-call value (2), proving rollback.
-    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(
+      screen.getByTestId(USER_DETAIL_TEST_IDS.workspaceCapacityBonusValue)
+        .textContent,
+    ).toBe("2");
   });
 
   it("disables [-] when bonus is already 0", async () => {
@@ -337,7 +394,9 @@ describe("Workspace Capacity section (#676)", () => {
       }),
     );
     render(<UserDetailPage />);
-    await screen.findByText(/Workspace Capacity/);
-    expect(screen.getByLabelText("Decrement slot bonus")).toBeDisabled();
+    await screen.findByTestId(USER_DETAIL_TEST_IDS.workspaceCapacitySection);
+    expect(
+      screen.getByTestId(USER_DETAIL_TEST_IDS.workspaceCapacityDecrement),
+    ).toBeDisabled();
   });
 });
