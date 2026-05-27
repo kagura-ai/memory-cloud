@@ -754,7 +754,12 @@ async def get_workspace_quotas(
             workspace_name=workspace.name,
             plan_name=workspace.plan_name,
             base=QuotaBreakdown(
-                memory_limit=workspace.memory_limit,
+                # #801: read the plan tier, not the per-workspace cache column.
+                # Every sibling field below reads plan_tier.*; memory_limit was the
+                # lone exception, so a stale Workspace.memory_limit (e.g. a PRO
+                # workspace still carrying the FREE-tier 1000) made the admin dialog
+                # preview off by 100x. plan_tier is the SSoT the effective calc uses.
+                memory_limit=plan_tier.memory_limit,
                 mcp_calls_per_day=plan_tier.mcp_calls_per_day,
                 max_contexts=plan_tier.max_contexts_per_workspace,
                 max_members=plan_tier.max_members_per_workspace,
