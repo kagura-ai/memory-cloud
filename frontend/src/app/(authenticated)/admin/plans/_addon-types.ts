@@ -205,15 +205,43 @@ export function readAddonFromQuota(
  * Used by ``openAddonDialog`` to populate the form state in one step
  * — every key in ``AddonValuesByKey`` is set from the corresponding
  * cache column.
+ *
+ * Issue #800: a legacy / broken cache can hold a value that is not a
+ * multiple of ``perUnit`` (e.g. pre-#665 ``addon_memory_bonus = 9000``
+ * with ``perUnit = 10000``). The backend rejects such values with HTTP
+ * 400 on save, so we snap non-multiples to 0 here rather than render
+ * them verbatim and let the admin hit an opaque 400. Reset-to-0 (not
+ * round) keeps the admin's intent honest — paired with a visible
+ * warning driven by ``detectNonMultipleAddons``.
  */
 export function snapshotAddonValues(
   quotaDetail: WorkspaceQuotaDetail,
 ): AddonValuesByKey {
   const snapshot = { ...EMPTY_ADDON_VALUES };
   for (const meta of ADDON_TYPES) {
-    snapshot[meta.key] = readAddonFromQuota(quotaDetail, meta);
+    const raw = readAddonFromQuota(quotaDetail, meta);
+    snapshot[meta.key] = raw % meta.perUnit === 0 ? raw : 0;
   }
   return snapshot;
+}
+
+/**
+ * Detect addon cache values that are not a multiple of their ``perUnit``.
+ *
+ * Returns the affected ``AddonKey``s in ``ADDON_TYPES`` order so the dialog
+ * can name them in a warning banner. Zero is a valid multiple (nothing to
+ * warn about), and ``perUnit === 1`` addons (analysis, sleep) can never be
+ * non-multiples. These are exactly the values ``snapshotAddonValues`` snaps
+ * to 0 — the warning explains why the input shows 0 instead of the broken
+ * cache value. See Issue #800.
+ */
+export function detectNonMultipleAddons(
+  quotaDetail: WorkspaceQuotaDetail,
+): AddonKey[] {
+  return ADDON_TYPES.filter((meta) => {
+    const raw = readAddonFromQuota(quotaDetail, meta);
+    return raw !== 0 && raw % meta.perUnit !== 0;
+  }).map((meta) => meta.key);
 }
 
 /**
