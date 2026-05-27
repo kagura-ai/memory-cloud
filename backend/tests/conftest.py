@@ -36,6 +36,23 @@ from utils.logger import setup_logger as _setup_logger  # noqa: E402
 _setup_logger()
 
 
+@pytest.fixture(autouse=True)
+def _clear_pricing_cache():
+    """Reset the process-local ``llm_pricing`` cache around every test (#713).
+
+    ``LLMPricingService`` caches resolved prices in a module-global ``TTLCache``
+    for the recall hot path. Without clearing it between tests, a pricing row
+    seeded by one test would leak into another that seeds a different price for
+    the same ``(provider, model, unit_type, date)`` key — making cost
+    assertions order-dependent. Cheap (a dict clear) so applied unconditionally.
+    """
+    from services.llm_pricing_service import clear_pricing_cache
+
+    clear_pricing_cache()
+    yield
+    clear_pricing_cache()
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Validate asyncio_default_test_loop_scope matches fixture loop scope.
 
