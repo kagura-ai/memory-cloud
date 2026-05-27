@@ -2092,6 +2092,7 @@
         "actions": "Actions",
         "changePlan": "Change Tier",
         "editAddons": "Edit Addons",
+        "editSpendCap": "Edit Spend Cap",
         "owner": "Owner: {name}"
       },
       "tiersTable": {
@@ -2184,6 +2185,26 @@
           "body": "The value for {keys} is not a valid multiple of its unit (or is negative) and would be rejected on save. Saving is disabled until you enter a valid amount."
         }
       },
+      "spendCapDialog": {
+        "title": "Edit Spend Cap",
+        "description": "Adjust the BYOK embedding spend cap for",
+        "dailyLabel": "Daily cap (USD)",
+        "monthlyLabel": "Monthly cap (USD)",
+        "dailyWarningLabel": "Daily spend",
+        "monthlyWarningLabel": "Monthly spend",
+        "currentSpend": "Current spend",
+        "tierDefaultHint": "tier default {value}",
+        "noLimit": "No limit",
+        "usageWarning": "{label}: {current} of {limit} used ({percentage}%)",
+        "invalidNumber": "Enter a valid number.",
+        "negativeNotAllowed": "Value cannot be negative.",
+        "clearHint": "Leave a field empty to clear the override and inherit the tier default. Enter 0 to disable embedding entirely.",
+        "lockoutWarning": {
+          "title": "0 disables all embedding",
+          "body": "A cap of 0 stops all BYOK embedding for this workspace until you raise it. Leave the field empty instead to inherit the tier default."
+        },
+        "save": "Save Spend Cap"
+      },
       "auditTable": {
         "title": "Change Audit Log",
         "description": "History of tier changes",
@@ -2206,7 +2227,10 @@
         "loadError": "Failed to load workspaces",
         "changeSuccess": "Tier changed from {oldPlan} to {newPlan}",
         "changeError": "Failed to change tier",
-        "addonUpdateSuccess": "Quota addons updated"
+        "addonUpdateSuccess": "Quota addons updated",
+        "spendCapUpdateSuccess": "Spend cap updated",
+        "spendCapUpdateError": "Failed to update spend cap",
+        "quotaRefreshError": "Failed to refresh quota details"
       }
     },
     "users": {

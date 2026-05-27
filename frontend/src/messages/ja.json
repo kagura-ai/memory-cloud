@@ -2092,6 +2092,7 @@
         "actions": "操作",
         "changePlan": "ティア変更",
         "editAddons": "アドオン編集",
+        "editSpendCap": "上限額を編集",
         "owner": "所有者: {name}"
       },
       "tiersTable": {
@@ -2184,6 +2185,26 @@
           "body": "{keys} の値が単位の倍数になっていない（または負の値）ため、保存時に拒否されます。有効な値を入力するまで保存は無効化されます。"
         }
       },
+      "spendCapDialog": {
+        "title": "上限額を編集",
+        "description": "BYOK embedding の上限額を調整：",
+        "dailyLabel": "日次上限 (USD)",
+        "monthlyLabel": "月次上限 (USD)",
+        "dailyWarningLabel": "日次使用額",
+        "monthlyWarningLabel": "月次使用額",
+        "currentSpend": "現在の使用額",
+        "tierDefaultHint": "ティア既定値 {value}",
+        "noLimit": "上限なし",
+        "usageWarning": "{label}：{limit} 中 {current} を使用（{percentage}%）",
+        "invalidNumber": "有効な数値を入力してください。",
+        "negativeNotAllowed": "負の値は指定できません。",
+        "clearHint": "空欄にすると override を解除してティア既定値を継承します。0 を入力すると embedding を完全に停止します。",
+        "lockoutWarning": {
+          "title": "0 は embedding を完全停止します",
+          "body": "上限を 0 にすると、引き上げるまでこのワークスペースの BYOK embedding がすべて停止します。ティア既定値を継承したい場合は空欄にしてください。"
+        },
+        "save": "上限額を保存"
+      },
       "auditTable": {
         "title": "変更監査ログ",
         "description": "ティア変更の履歴",
@@ -2206,7 +2227,10 @@
         "loadError": "ワークスペースの読み込みに失敗しました",
         "changeSuccess": "プランを{oldPlan}から{newPlan}に変更しました",
         "changeError": "ティアの変更に失敗しました",
-        "addonUpdateSuccess": "アドオンを更新しました"
+        "addonUpdateSuccess": "アドオンを更新しました",
+        "spendCapUpdateSuccess": "上限額を更新しました",
+        "spendCapUpdateError": "上限額の更新に失敗しました",
+        "quotaRefreshError": "クォータ詳細の再取得に失敗しました"
       }
     },
     "users": {

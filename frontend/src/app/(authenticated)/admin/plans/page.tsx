@@ -61,6 +61,7 @@ import {
   Settings,
   Info,
   Inbox,
+  DollarSign,
 } from "lucide-react";
 import {
   InlineSpinner,
@@ -102,6 +103,7 @@ import {
   type AddonKey,
   type AddonValuesByKey,
 } from "./_addon-types";
+import { SpendCapEditDialog } from "./SpendCapEditDialog";
 
 const PLAN_TABS = ["workspaces", "tiers", "audit"] as const;
 
@@ -231,6 +233,7 @@ export default function AdminPlansPage() {
   );
   const [quotaLoading, setQuotaLoading] = useState(false);
   const [addonDialogOpen, setAddonDialogOpen] = useState(false);
+  const [spendCapDialogOpen, setSpendCapDialogOpen] = useState(false);
   // Issue #663: 9 addon dimensions consolidated into a single record so
   // ``ADDON_TYPES`` can drive both the dialog inputs and the PUT body
   // construction without per-field useState plumbing.
@@ -634,7 +637,7 @@ export default function AdminPlansPage() {
                                           </div>
                                         );
                                       })}
-                                      <div className="pt-2 border-t">
+                                      <div className="pt-2 border-t flex gap-2">
                                         <Button
                                           size="sm"
                                           variant="outline"
@@ -646,6 +649,19 @@ export default function AdminPlansPage() {
                                           <Settings className="h-4 w-4 mr-1" />
                                           {t("workspacesTable.editAddons")}
                                         </Button>
+                                        {quotaDetail.spend_cap && (
+                                          <Button
+                                            size="sm"
+                                            variant="outline"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setSpendCapDialogOpen(true);
+                                            }}
+                                          >
+                                            <DollarSign className="h-4 w-4 mr-1" />
+                                            {t("workspacesTable.editSpendCap")}
+                                          </Button>
+                                        )}
                                       </div>
                                     </div>
                                   ) : null}
@@ -1012,6 +1028,32 @@ export default function AdminPlansPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Spend Cap Edit Dialog (Issue #712) */}
+      {quotaDetail?.spend_cap && (
+        <SpendCapEditDialog
+          open={spendCapDialogOpen}
+          onOpenChange={setSpendCapDialogOpen}
+          workspaceId={quotaDetail.workspace_id}
+          workspaceName={quotaDetail.workspace_name}
+          spendCap={quotaDetail.spend_cap}
+          onSaved={async () => {
+            // The save already succeeded; this is a best-effort refresh of the
+            // expanded panel. Catch so a failed refetch surfaces a toast
+            // instead of an unhandled rejection + silently stale cap values.
+            try {
+              const detail = await getWorkspaceQuotas(quotaDetail.workspace_id);
+              setQuotaDetail(detail);
+            } catch {
+              toast({
+                title: tCommon("error"),
+                description: t("messages.quotaRefreshError"),
+                variant: "destructive",
+              });
+            }
+          }}
+        />
+      )}
     </PageContainer>
   );
 }
