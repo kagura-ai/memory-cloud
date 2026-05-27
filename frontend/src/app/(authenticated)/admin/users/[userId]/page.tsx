@@ -110,6 +110,8 @@ const KNOWN_ROLE_VALUES = [
   "editor",
 ] as const;
 
+const KNOWN_PLAN_VALUES = ["free", "basic", "pro"] as const;
+
 export default function UserDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -149,9 +151,19 @@ export default function UserDetailPage() {
   const { toast } = useToast();
 
   const getLocalizedRole = (role: string) => {
-    return KNOWN_ROLE_VALUES.includes(role as (typeof KNOWN_ROLE_VALUES)[number])
+    return KNOWN_ROLE_VALUES.includes(
+      role as (typeof KNOWN_ROLE_VALUES)[number],
+    )
       ? t(`roles.${role}`)
       : role;
+  };
+
+  const getLocalizedPlan = (plan: string) => {
+    return KNOWN_PLAN_VALUES.includes(
+      plan as (typeof KNOWN_PLAN_VALUES)[number],
+    )
+      ? t(`changePlanDialog.planOptions.${plan as "free" | "basic" | "pro"}`)
+      : plan;
   };
 
   useEffect(() => {
@@ -746,7 +758,9 @@ export default function UserDetailPage() {
                       {ctx.workspace_name}
                     </TableCell>
                     <TableCell>
-                      <Badge variant="outline">{getLocalizedRole(ctx.role)}</Badge>
+                      <Badge variant="outline">
+                        {getLocalizedRole(ctx.role)}
+                      </Badge>
                     </TableCell>
                     <TableCell className="text-sm text-gray-500">
                       {ctx.last_used_at
@@ -827,7 +841,9 @@ export default function UserDetailPage() {
                     planDialog.currentPlan === "pro" ? "destructive" : "default"
                   }
                 >
-                  {planDialog.currentPlan}
+                  {planDialog.currentPlan
+                    ? getLocalizedPlan(planDialog.currentPlan)
+                    : ""}
                 </Badge>
               </div>
             </div>
