@@ -248,9 +248,30 @@ class LLMPricingService:
 
         The cache key keeps ``context_tokens`` so multi-tier models (e.g. Gemini
         2.5 Pro's 200k breakpoint) still resolve to the correct tier — the AC's
-        ``(provider, model, unit_type, date)`` key is a subset of this one. The
-        snapshot axis is ``started_at.date()`` so calls milliseconds apart share
-        an entry, while a date rollover plus the 60-minute TTL bound staleness.
+        ``(provider, model, unit_type, date)`` key is a subset of this one.
+
+        **Snapshot axis = ``started_at.date()`` (day granularity), deliberately.**
+        The two hot-path lookups for one recall
+        (``EmbeddingSpendCapService.record_spend_from_tokens`` and
+        ``LLMCallLogWriter.record``) each call ``utcnow()`` independently, so they
+        carry timestamps milliseconds apart; day-bucketing is what collapses them
+        into the single SELECT this cache exists to save. A finer key (e.g. full
+        ``started_at``) would never hit between those two calls and would defeat
+        the optimization.
+
+        Reproducibility bound this trades away: ``lookup()`` documents
+        ``effective_from <= started_at`` for *exact* historical reproducibility,
+        but ``effective_from`` is an unconstrained ``DateTime`` (it MAY be
+        intra-day). Day-bucketing therefore guarantees reproducibility only at
+        **day granularity** — two calls on the same UTC date that straddle an
+        intra-day ``effective_from`` change collapse to whichever price was cached
+        first. This is bounded and acceptable today because: (a) on the live path
+        ``started_at`` is always ``utcnow()`` and the 60-minute TTL already caps
+        staleness to ≤1h regardless of key granularity; (b) the historical-replay
+        path (``record_spend_from_tokens(occurred_at=...)``) has no live caller.
+        **If sub-day-precise historical replay is ever wired up, this key needs a
+        finer time component OR the replay must bypass the cache** (Copilot review
+        on PR #811).
         """
         cache_key = (provider, model, unit_type, started_at.date(), context_tokens)
         # A single ``__getitem__`` reads the TTL clock once, so it is race-free
