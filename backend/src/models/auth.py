@@ -1107,56 +1107,6 @@ class UsageStats(Base):
     )
 
 
-class UserPlan(Base):
-    """User subscription plan and quota limits.
-
-    Manages user plan details for billing and quota enforcement.
-    Issue #48 - Usage Statistics - Plan Limits & Usage Tracking
-
-    Attributes:
-        user_id: OAuth2 user ID (primary key)
-        plan_name: Plan type (free/pro/enterprise)
-        memory_limit: Maximum memories allowed
-        daily_api_limit: Daily API call limit
-        weekly_api_limit: Weekly API call limit
-        created_at: Plan creation timestamp
-        updated_at: Last update timestamp
-    """
-
-    __tablename__ = "user_plans"
-
-    user_id: Mapped[str] = mapped_column(String(255), primary_key=True)
-    plan_name: Mapped[str] = mapped_column(String(50), nullable=False, default="free")
-    memory_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=1000)
-    daily_api_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=1000)
-    weekly_api_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=5000)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=func.now(), onupdate=func.now()
-    )
-
-    __table_args__ = (Index("idx_user_plans_plan_name", "plan_name"),)
-
-    @classmethod
-    def default_for_user(cls, user_id: str, settings) -> "UserPlan":
-        """Construct the default 'free' plan from settings defaults.
-
-        Shared between two callers so a future column add can't drift
-        them apart (Issue #586):
-        - ``auth.roles.RoleManager._ensure_user_postgres`` writes this
-          row on user creation.
-        - ``api.routes.usage.get_current_usage`` builds an in-memory
-          instance on the fallback path (no persistence).
-        """
-        return cls(
-            user_id=user_id,
-            plan_name="free",
-            memory_limit=settings.default_plan_memory_limit,
-            daily_api_limit=settings.default_plan_daily_api_limit,
-            weekly_api_limit=settings.default_plan_weekly_api_limit,
-        )
-
-
 # ============================================================================
 # Context-based Multi-Collection (Issue #82 → #160: renamed from Project)
 # ============================================================================

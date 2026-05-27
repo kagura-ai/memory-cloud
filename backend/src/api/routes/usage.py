@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import SessionUser
 from config.settings import get_settings
 from db.base import get_db
-from models.auth import UsageStats, UserPlan
+from models.auth import UsageStats, Workspace
 from models.memory import Memory
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -458,19 +458,6 @@ async def get_current_usage(
 
         usage_filter = _build_usage_filter(user_id, current_workspace_id)
 
-        settings = get_settings()
-
-        # The default UserPlan row is created at user-creation time in
-        # auth.roles.RoleManager._ensure_user_postgres (#586). The fallback
-        # below covers (a) the race window between user creation and the
-        # first /usage/current call and (b) test fixtures that bypass the
-        # signup flow.
-        result = await db.execute(select(UserPlan).where(UserPlan.user_id == user_id))
-        plan = result.scalar_one_or_none()
-
-        if not plan:
-            plan = UserPlan.default_for_user(user_id, settings)
-
         # Get current memory count.
         # Issue #198 (Bug D): exclude soft-deleted rows so this matches the
         # workspace endpoint and the underlying DB count. Without this filter
@@ -583,6 +570,48 @@ async def get_current_usage(
             except ValueError:
                 effective_quotas_dict = {}
 
+        # Plan limits come from the user's current workspace — Workspace is the
+        # plan source of truth. The legacy per-user ``user_plans`` table (read
+        # here until #668) was never updated by billing, so it always reported
+        # FREE; sourcing from the workspace's effective quota fixes that. With
+        # no current workspace (or one that vanished), fall back to FREE-tier
+        # defaults so the dashboard still renders.
+        plan_name = "free"
+        if current_workspace_id is not None:
+            ws_plan_name = (
+                await db.execute(
+                    select(Workspace.plan_name).where(Workspace.id == current_workspace_id)
+                )
+            ).scalar_one_or_none()
+            if ws_plan_name is not None:
+                plan_name = ws_plan_name
+
+        if effective_quotas_dict:
+            quotas = effective_quotas_dict
+        else:
+            from config.plan_tiers import get_plan_tier
+
+            free_tier = get_plan_tier("free")
+            quotas = {
+                "memory_limit": free_tier.memory_limit,
+                "mcp_calls_per_day": free_tier.mcp_calls_per_day,
+                "mcp_calls_per_week": free_tier.mcp_calls_per_week,
+                "rest_calls_per_day": free_tier.rest_calls_per_day,
+                "rest_calls_per_week": free_tier.rest_calls_per_week,
+                "public_calls_per_day": free_tier.public_calls_per_day,
+                "public_calls_per_week": free_tier.public_calls_per_week,
+            }
+
+        memory_limit = quotas["memory_limit"]
+        mcp_daily = quotas["mcp_calls_per_day"]
+        mcp_weekly = quotas["mcp_calls_per_week"]
+        rest_daily = quotas["rest_calls_per_day"]
+        rest_weekly = quotas["rest_calls_per_week"]
+        public_daily = quotas["public_calls_per_day"]
+        public_weekly = quotas["public_calls_per_week"]
+        daily_total_limit = mcp_daily + rest_daily + public_daily
+        weekly_total_limit = mcp_weekly + rest_weekly + public_weekly
+
         analysis_usage = await _build_analysis_usage(
             db, user_id, current_workspace_id, effective_quotas=effective_quotas_dict
         )
@@ -595,10 +624,16 @@ async def get_current_usage(
         # Build response
         response = UsageCurrentResponse(
             plan=PlanLimits(
-                plan_name=plan.plan_name,
-                memory_limit=plan.memory_limit,
-                daily_total_limit=plan.daily_api_limit,
-                weekly_total_limit=plan.weekly_api_limit,
+                plan_name=plan_name,
+                memory_limit=memory_limit,
+                daily_total_limit=daily_total_limit,
+                weekly_total_limit=weekly_total_limit,
+                mcp_calls_per_day=mcp_daily,
+                mcp_calls_per_week=mcp_weekly,
+                rest_calls_per_day=rest_daily,
+                rest_calls_per_week=rest_weekly,
+                public_calls_per_day=public_daily,
+                public_calls_per_week=public_weekly,
             ),
             usage=CurrentUsage(
                 memory_count=memory_count,
@@ -614,9 +649,9 @@ async def get_current_usage(
                 sleep_contexts=sleep_contexts_usage,
                 workspaces=workspaces_usage,
             ),
-            memory_usage=calculate_usage_status(memory_count, plan.memory_limit),
-            daily_api_usage=calculate_usage_status(api_calls_today, plan.daily_api_limit),
-            weekly_api_usage=calculate_usage_status(api_calls_week, plan.weekly_api_limit),
+            memory_usage=calculate_usage_status(memory_count, memory_limit),
+            daily_api_usage=calculate_usage_status(api_calls_today, daily_total_limit),
+            weekly_api_usage=calculate_usage_status(api_calls_week, weekly_total_limit),
         )
 
         logger.info("current_usage_retrieved", user_id=user_id)

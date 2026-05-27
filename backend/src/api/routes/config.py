@@ -234,20 +234,6 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             recommended="0.01 (moderate regularization)",
             documentation_url="https://github.com/kagura-ai/memory-cloud/issues/20",
         ),
-        # Plan Limits
-        "DEFAULT_PLAN_MEMORY_LIMIT": ConfigKeySchema(
-            key="DEFAULT_PLAN_MEMORY_LIMIT",
-            type="number",
-            category="usage",
-            description="Default FREE plan memory limit",
-            default_value=1000,
-            min_value=1,
-            max_value=1000000,
-            requires_restart=False,
-            impact="Sets maximum memories for new FREE plan users",
-            examples=["1000", "10000"],
-            recommended="1000 (FREE), 10000 (PRO)",
-        ),
         "USAGE_WARNING_THRESHOLD": ConfigKeySchema(
             key="USAGE_WARNING_THRESHOLD",
             type="number",

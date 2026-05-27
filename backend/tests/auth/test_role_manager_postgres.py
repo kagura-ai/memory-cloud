@@ -331,9 +331,8 @@ class TestUpdateCollision:
 class TestCreatePath:
     @pytest.mark.asyncio
     async def test_first_user_gets_admin(self, role_manager):
-        # Sequence: User lookup miss → count=0 → UserPlan pre-check miss
-        # (Issue #586) → commit succeeds
-        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, None))
+        # Sequence: User lookup miss → count=0 → commit succeeds
+        db = _make_db_mock(_execute_returns(None, {"scalar": 0}))
 
         with _patch_get_db(db):
             role = await role_manager.ensure_user(
@@ -349,8 +348,8 @@ class TestCreatePath:
 
     @pytest.mark.asyncio
     async def test_second_user_gets_user(self, role_manager):
-        # Sequence: User lookup miss → count=1 → UserPlan pre-check miss (Issue #586)
-        db = _make_db_mock(_execute_returns(None, {"scalar": 1}, None))
+        # Sequence: User lookup miss → count=1 → commit succeeds
+        db = _make_db_mock(_execute_returns(None, {"scalar": 1}))
 
         with _patch_get_db(db):
             role = await role_manager.ensure_user(
@@ -374,12 +373,12 @@ class TestCreatePath:
         # Existing row was just inserted by another concurrent request with a
         # stale email — the racing caller's IdP payload has the fresher value.
         race_existing = _user_row(email="alice@old.com", name="Alice Old", role="admin")
-        # Sequence: User lookup miss → count=0 → UserPlan pre-check miss
-        # (Issue #586) → commit raises (user_id race — constraint_name
-        # ix_users_user_id, NOT email, so we precisely model the user_id-
-        # collision shape rather than reusing the email helper) → re-lookup
-        # hits → sync_existing_user commits the update
-        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, None, race_existing))
+        # Sequence: User lookup miss → count=0 → commit raises (user_id
+        # race — constraint_name ix_users_user_id, NOT email, so we
+        # precisely model the user_id-collision shape rather than reusing
+        # the email helper) → re-lookup hits → sync_existing_user commits
+        # the update
+        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing))
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 
         with _patch_get_db(db):
@@ -403,9 +402,9 @@ class TestCreatePath:
 
     @pytest.mark.asyncio
     async def test_email_collision_on_create_raises_conflict(self, role_manager):
-        # Sequence: User lookup miss → count=5 → UserPlan pre-check miss
-        # (Issue #586) → commit raises → re-lookup also miss
-        db = _make_db_mock(_execute_returns(None, {"scalar": 5}, None, None))
+        # Sequence: User lookup miss → count=5 → commit raises → re-lookup
+        # also miss
+        db = _make_db_mock(_execute_returns(None, {"scalar": 5}, None))
         db.commit = AsyncMock(side_effect=_email_unique_violation())
 
         with _patch_get_db(db), structlog.testing.capture_logs() as logs:
