@@ -1,6 +1,6 @@
 {
   "name": "kagura-memory",
-  "version": "0.16.5",
+  "version": "0.17.0",
   "description": "Kagura Memory Cloud plugin — session management, memory recall/save, and setup tools",
   "author": {
     "name": "Kagura AI, Inc.",
