@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import SessionUser
 from config.settings import get_settings
 from db.base import get_db
-from models.auth import UsageStats, UserPlan
+from models.auth import UsageStats
 from models.memory import Memory
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -458,18 +458,27 @@ async def get_current_usage(
 
         usage_filter = _build_usage_filter(user_id, current_workspace_id)
 
-        settings = get_settings()
+        # Plan limits: the legacy per-user ``user_plans`` table (read here until
+        # #668) was never updated by billing and always reported the FREE-tier
+        # defaults, so source the same FREE-tier limits from plan_tiers to
+        # preserve this endpoint's behavior. NOTE: /usage/current is user-scoped
+        # and its frontend path is unused in production; redefining or
+        # deprecating this endpoint is tracked as a follow-up to #668.
+        from config.plan_tiers import get_plan_tier
 
-        # The default UserPlan row is created at user-creation time in
-        # auth.roles.RoleManager._ensure_user_postgres (#586). The fallback
-        # below covers (a) the race window between user creation and the
-        # first /usage/current call and (b) test fixtures that bypass the
-        # signup flow.
-        result = await db.execute(select(UserPlan).where(UserPlan.user_id == user_id))
-        plan = result.scalar_one_or_none()
-
-        if not plan:
-            plan = UserPlan.default_for_user(user_id, settings)
+        free_tier = get_plan_tier("free")
+        plan_name = "free"
+        plan_memory_limit = free_tier.memory_limit
+        plan_daily_total = (
+            free_tier.mcp_calls_per_day
+            + free_tier.rest_calls_per_day
+            + free_tier.public_calls_per_day
+        )
+        plan_weekly_total = (
+            free_tier.mcp_calls_per_week
+            + free_tier.rest_calls_per_week
+            + free_tier.public_calls_per_week
+        )
 
         # Get current memory count.
         # Issue #198 (Bug D): exclude soft-deleted rows so this matches the
@@ -595,10 +604,16 @@ async def get_current_usage(
         # Build response
         response = UsageCurrentResponse(
             plan=PlanLimits(
-                plan_name=plan.plan_name,
-                memory_limit=plan.memory_limit,
-                daily_total_limit=plan.daily_api_limit,
-                weekly_total_limit=plan.weekly_api_limit,
+                plan_name=plan_name,
+                memory_limit=plan_memory_limit,
+                daily_total_limit=plan_daily_total,
+                weekly_total_limit=plan_weekly_total,
+                mcp_calls_per_day=free_tier.mcp_calls_per_day,
+                mcp_calls_per_week=free_tier.mcp_calls_per_week,
+                rest_calls_per_day=free_tier.rest_calls_per_day,
+                rest_calls_per_week=free_tier.rest_calls_per_week,
+                public_calls_per_day=free_tier.public_calls_per_day,
+                public_calls_per_week=free_tier.public_calls_per_week,
             ),
             usage=CurrentUsage(
                 memory_count=memory_count,
@@ -614,9 +629,9 @@ async def get_current_usage(
                 sleep_contexts=sleep_contexts_usage,
                 workspaces=workspaces_usage,
             ),
-            memory_usage=calculate_usage_status(memory_count, plan.memory_limit),
-            daily_api_usage=calculate_usage_status(api_calls_today, plan.daily_api_limit),
-            weekly_api_usage=calculate_usage_status(api_calls_week, plan.weekly_api_limit),
+            memory_usage=calculate_usage_status(memory_count, plan_memory_limit),
+            daily_api_usage=calculate_usage_status(api_calls_today, plan_daily_total),
+            weekly_api_usage=calculate_usage_status(api_calls_week, plan_weekly_total),
         )
 
         logger.info("current_usage_retrieved", user_id=user_id)

@@ -373,16 +373,7 @@ class Settings(BaseSettings):
         default=None, description="Display name for PRO tier (default: L)"
     )
 
-    # Usage & Plan Limits (Issue #48)
-    default_plan_memory_limit: int = Field(
-        default=1000, description="Default FREE plan memory limit"
-    )
-    default_plan_daily_api_limit: int = Field(
-        default=1000, description="Default FREE plan daily API call limit"
-    )
-    default_plan_weekly_api_limit: int = Field(
-        default=5000, description="Default FREE plan weekly API call limit"
-    )
+    # Usage warning thresholds (Issue #48)
     usage_warning_threshold: float = Field(
         default=0.80, description="Usage warning threshold (0.0-1.0)"
     )
