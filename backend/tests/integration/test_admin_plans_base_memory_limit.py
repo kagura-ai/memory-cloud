@@ -102,3 +102,39 @@ class TestBaseMemoryLimitReadsPlanTier:
         assert (
             result.effective.memory_limit == result.base.memory_limit + result.addon.memory_bonus
         ), "effective.memory_limit must equal base + addon once base reads plan_tier (#801)"
+
+    @pytest.mark.asyncio
+    async def test_effective_includes_nonzero_addon_on_tier_base(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """effective == tier base + addon when a non-zero addon is present (#801).
+
+        Exercises the addon term explicitly (the parametrized fixtures carry
+        addon=0). ``effective_memory_limit`` is ``_zero_floor(plan_tier, addon)``
+        and ``base`` now reads the tier, so a PRO workspace with a 20000 memory
+        addon must report base=100000, addon=20000, effective=120000 — even with
+        the stale 1000 cache column still on the row.
+        """
+        user = make_user()
+        db_session.add(user)
+        await db_session.flush()
+
+        ws = make_workspace(owner_user_id=user.user_id, plan_name="pro")
+        ws.addon_memory_bonus = 20_000  # valid multiple of perUnit (10000)
+        db_session.add(ws)
+        await db_session.commit()
+
+        result = await get_workspace_quotas(
+            workspace_id=str(ws.id),
+            admin_user=mock_admin(),
+            db=db_session,
+        )
+
+        pro_tier = get_plan_tier("pro")
+        assert result.base.memory_limit == pro_tier.memory_limit
+        assert result.addon.memory_bonus == 20_000
+        assert result.effective.memory_limit == pro_tier.memory_limit + 20_000, (
+            "effective must add the non-zero addon to the tier base, not the stale "
+            "Workspace.memory_limit column (#801)"
+        )
