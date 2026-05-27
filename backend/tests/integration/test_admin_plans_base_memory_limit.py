@@ -28,63 +28,77 @@ from ._admin_helpers import make_user, make_workspace, mock_admin
 
 
 @pytest_asyncio.fixture
-async def pro_workspace_stale_memory_limit(db_session: AsyncSession) -> dict:
-    """A ``pro`` workspace whose ``memory_limit`` column holds the stale FREE value.
+async def stale_memory_limit_workspace(db_session: AsyncSession, request) -> dict:
+    """A workspace whose ``memory_limit`` column holds the stale FREE value (1000).
 
-    ``make_workspace`` defaults to ``plan_name="pro"`` and ``memory_limit=1000``
-    — exactly the drift the kagura prod incident exposed (PRO plan, FREE-tier
-    column value).
+    Parametrize ``request.param`` with the plan name to exercise; defaults to
+    ``pro`` when used without ``indirect`` parametrization. ``make_workspace``
+    seeds ``memory_limit=1000`` regardless of plan — exactly the drift the
+    kagura prod incident exposed (non-FREE plan, FREE-tier column value).
     """
+    plan_name = getattr(request, "param", "pro")
     user = make_user()
     db_session.add(user)
     await db_session.flush()
 
-    ws = make_workspace(owner_user_id=user.user_id, plan_name="pro")
+    ws = make_workspace(owner_user_id=user.user_id, plan_name=plan_name)
     assert ws.memory_limit == 1000, "fixture premise: column carries the stale FREE value"
     db_session.add(ws)
     await db_session.commit()
 
-    return {"workspace_id": str(ws.id)}
+    return {"workspace_id": str(ws.id), "plan_name": plan_name}
 
 
 class TestBaseMemoryLimitReadsPlanTier:
     """``base.memory_limit`` must come from the plan tier, not the stale column (#801)."""
 
+    # BASIC (10000) and PRO (100000) both differ from the stale FREE value (1000),
+    # so each distinguishes a tier-read from a column-read. FREE is omitted: its
+    # tier value IS 1000, so it cannot tell the two sources apart (degenerate).
+    @pytest.mark.parametrize("stale_memory_limit_workspace", ["basic", "pro"], indirect=True)
     @pytest.mark.asyncio
     async def test_base_memory_limit_reflects_plan_tier_not_stale_column(
         self,
         db_session: AsyncSession,
-        pro_workspace_stale_memory_limit: dict,
+        stale_memory_limit_workspace: dict,
     ) -> None:
         result = await get_workspace_quotas(
-            workspace_id=pro_workspace_stale_memory_limit["workspace_id"],
+            workspace_id=stale_memory_limit_workspace["workspace_id"],
             admin_user=mock_admin(),
             db=db_session,
         )
 
-        pro_tier = get_plan_tier("pro")
-        assert pro_tier.memory_limit != 1000, (
-            "test premise: PRO tier memory_limit must differ from the stale 1000 "
-            "column value, otherwise this test proves nothing"
+        tier = get_plan_tier(stale_memory_limit_workspace["plan_name"])
+        assert tier.memory_limit != 1000, (
+            "test premise: this tier's memory_limit must differ from the stale "
+            "1000 column value, otherwise this test proves nothing"
         )
-        assert result.base.memory_limit == pro_tier.memory_limit, (
+        assert result.base.memory_limit == tier.memory_limit, (
             "base.memory_limit must read plan_tier.memory_limit, not the stale "
             "Workspace.memory_limit column (#801: 100x dialog preview bug)"
         )
 
     @pytest.mark.asyncio
-    async def test_effective_memory_limit_equals_base_plus_addon(
+    async def test_effective_memory_limit_tracks_plan_tier_base(
         self,
         db_session: AsyncSession,
-        pro_workspace_stale_memory_limit: dict,
+        stale_memory_limit_workspace: dict,
     ) -> None:
-        """Spot-check the preview invariant: effective == base + addon (#801)."""
+        """Preview invariant: effective == base + addon, with base from the tier.
+
+        The default fixture has no addon (addon.memory_bonus == 0), so this both
+        pins effective == base and proves base tracks the tier (not the stale
+        column): pre-fix, base would be 1000 while effective is the PRO tier
+        100000, breaking the equality.
+        """
         result = await get_workspace_quotas(
-            workspace_id=pro_workspace_stale_memory_limit["workspace_id"],
+            workspace_id=stale_memory_limit_workspace["workspace_id"],
             admin_user=mock_admin(),
             db=db_session,
         )
 
+        pro_tier = get_plan_tier("pro")
+        assert result.base.memory_limit == pro_tier.memory_limit
         assert (
             result.effective.memory_limit == result.base.memory_limit + result.addon.memory_bonus
         ), "effective.memory_limit must equal base + addon once base reads plan_tier (#801)"
