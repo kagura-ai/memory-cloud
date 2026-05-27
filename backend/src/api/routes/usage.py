@@ -456,7 +456,15 @@ async def get_current_usage(
         # Issue #50: Workspace-scoped usage stats
         current_workspace_id = user.get("current_workspace_id")
 
-        usage_filter = _build_usage_filter(user_id, current_workspace_id)
+        # API-call counts are workspace-wide (all members) when a workspace is
+        # selected — matching the workspace-tier limits and the memory_count
+        # below, and /workspace/usage/current (#668). Without a workspace, fall
+        # back to user-scoped counts paired with the FREE-tier limit. The shared
+        # _build_usage_filter stays user-scoped for the history endpoints below.
+        if current_workspace_id is not None:
+            usage_filter = UsageStats.workspace_id == current_workspace_id
+        else:
+            usage_filter = UsageStats.user_id == user_id
 
         # Get current memory count. Scope it the same way as memory_limit's
         # source (#668): workspace-wide when a workspace is selected — matching
