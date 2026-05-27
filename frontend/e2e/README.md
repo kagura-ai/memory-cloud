@@ -71,3 +71,30 @@ A11y job (`/login` contrast) is tracked for `.github/workflows/ci.yml` wiring
 in #786. Admin smoke specs (#688) require backend + DB up and admin credentials
 seeded — CI wiring is deferred until secret management for E2E admin
 credentials is decided.
+
+### CI prerequisites for admin specs
+
+Before wiring `make test-e2e-frontend` into CI, address these:
+
+1. **Secret management for `E2E_ADMIN_LOGIN_ID` / `E2E_ADMIN_PASSWORD`.**
+   GitHub Actions secrets, vault, or equivalent — never commit.
+2. **Password leak in failure traces.** `playwright.config.ts` sets
+   `trace: "retain-on-failure"`, which captures network request bodies
+   including the login POST body. A failed CI run would publish
+   `E2E_ADMIN_PASSWORD` in the trace artifact. Fix BEFORE CI by either:
+   - Pre-seeded storage state: add `globalSetup` to `playwright.config.ts`
+     that performs the login once and writes cookies to a gitignored
+     file, then reference via `use.storageState` on an admin-only
+     project. The fixture's API-login path goes away (or stays as a
+     fallback for the no-storage-state case).
+   - Per-spec opt-out: `test.use({ trace: "off" })` at the top of
+     `admin-*.spec.ts` files. Loses trace coverage on those specs but
+     trivially closes the leak.
+3. **DB residue from interrupted round-trip specs.** Add a
+   `test.afterEach` that PATCHes `workspace_slot_bonus` back to its
+   pre-test value via the admin API, so an interrupted run leaves no
+   state behind. For local dev this is acceptable to defer (admin can
+   reset via UI); for CI it is mandatory.
+4. **Tighten the 15s `waitFor` timeout** in `admin-user-detail.spec.ts`
+   to ~30s. Cold `next dev` first-paint can take 8–12s on slow CI
+   runners — 15s leaves no safety margin.

@@ -27,42 +27,68 @@ import { USER_DETAIL_TEST_IDS as T } from "@/app/(authenticated)/admin/users/[us
  */
 
 /**
- * Navigate to the first admin user's detail page and wait for the
- * Workspace Capacity section to render. The list is guaranteed non-empty
- * because the test admin themselves is in it. Returns the targeted user_id
- * for tests that need it for further assertions.
- *
- * `waitFor` with an explicit 15s timeout (rather than relying on the
- * follow-on `toBeVisible` auto-wait) is the gate that absorbs slow
- * `next dev` first-paint — `networkidle` is unreliable against `next dev`
- * because the HMR websocket keeps the network busy indefinitely.
+ * Direct API call — must use API_URL (backend), not the Playwright config's
+ * baseURL which points at Next.js (:3000). There is no Next.js /api/*
+ * rewrite, so a relative path would 404.
  */
-async function gotoFirstUserDetail(page: Page): Promise<string> {
-  // Direct API call — must use API_URL (backend), not the Playwright config's
-  // baseURL which points at Next.js (:3000). There is no Next.js /api/*
-  // rewrite, so a relative path would 404.
+async function listAdminUsers(page: Page): Promise<Array<{ id: string }>> {
   const usersRes = await page.request.get(`${API_URL}/api/v1/admin/users`);
   expect(usersRes.ok()).toBe(true);
-  const usersBody = (await usersRes.json()) as {
-    users: Array<{ id: string }>;
-  };
+  const usersBody = (await usersRes.json()) as { users: Array<{ id: string }> };
   expect(usersBody.users.length).toBeGreaterThan(0);
-  const targetUserId = usersBody.users[0].id;
+  return usersBody.users;
+}
 
-  await page.goto(`/admin/users/${targetUserId}`, {
+async function gotoUserDetail(page: Page, userId: string): Promise<void> {
+  await page.goto(`/admin/users/${userId}`, {
     waitUntil: "domcontentloaded",
   });
+  // Explicit 15s waitFor (rather than relying on follow-on toBeVisible
+  // auto-wait) absorbs slow `next dev` first-paint — `networkidle` is
+  // unreliable against `next dev` because the HMR websocket keeps the
+  // network busy indefinitely.
   await page
     .getByTestId(T.workspaceCapacitySection)
     .waitFor({ state: "visible", timeout: 15_000 });
-  return targetUserId;
+}
+
+/**
+ * Fetch the workspace_summary block for a user via the admin detail API.
+ * Returns null if the response shape lacks the block (older API or
+ * un-backfilled user).
+ */
+async function getWorkspaceSummary(
+  page: Page,
+  userId: string,
+): Promise<{
+  owned_count: number;
+  cap: number;
+  base_cap: number;
+  workspace_slot_bonus: number;
+  is_at_cap: boolean;
+} | null> {
+  const detailRes = await page.request.get(
+    `${API_URL}/api/v1/admin/users/${userId}`,
+  );
+  if (!detailRes.ok()) return null;
+  const detail = (await detailRes.json()) as {
+    workspace_summary?: {
+      owned_count: number;
+      cap: number;
+      base_cap: number;
+      workspace_slot_bonus: number;
+      is_at_cap: boolean;
+    } | null;
+  };
+  return detail.workspace_summary ?? null;
 }
 
 test.describe("/admin/users/[userId] smoke (#688)", () => {
   test("renders the workspace capacity section after admin login", async ({
     page,
   }) => {
-    await gotoFirstUserDetail(page);
+    const users = await listAdminUsers(page);
+    await gotoUserDetail(page, users[0].id);
 
     await expect(page.getByTestId(T.workspaceCapacityCapDisplay)).toBeVisible();
     await expect(page.getByTestId(T.workspaceCapacityBonusValue)).toBeVisible();
@@ -73,7 +99,27 @@ test.describe("/admin/users/[userId] smoke (#688)", () => {
   test("[+] then [-] round-trip via real backend (idempotent)", async ({
     page,
   }) => {
-    await gotoFirstUserDetail(page);
+    // Round-trip mutation requires a target with safe decrement headroom
+    // (cap > owned_count). If the test admin is at-cap or over-cap, the
+    // [-] step triggers the destructive reason modal instead of a direct
+    // PATCH, leaving the +1 bonus in DB after the test times out.
+    // Pick the first non-at-cap candidate via the admin detail API
+    // before navigating — surfaced by Copilot review on PR #807.
+    const users = await listAdminUsers(page);
+    let targetUserId: string | null = null;
+    for (const user of users) {
+      const summary = await getWorkspaceSummary(page, user.id);
+      if (summary && summary.cap > summary.owned_count) {
+        targetUserId = user.id;
+        break;
+      }
+    }
+    test.skip(
+      targetUserId === null,
+      "no admin user has cap > owned_count headroom — seed a non-at-cap user before running the round-trip spec",
+    );
+
+    await gotoUserDetail(page, targetUserId as string);
 
     const bonusValue = page.getByTestId(T.workspaceCapacityBonusValue);
     const beforeText = await bonusValue.textContent();
@@ -86,10 +132,9 @@ test.describe("/admin/users/[userId] smoke (#688)", () => {
     await page.getByTestId(T.workspaceCapacityIncrement).click();
     await expect(bonusValue).toHaveText(String(before + 1));
 
-    // [-] counter-mutation restores the original bonus so this spec is
-    // idempotent and leaves no DB residue. The non-destructive decrement
-    // path (projectedCap >= owned_count) skips the reason modal and
-    // commits immediately.
+    // [-] counter-mutation restores the original bonus. Safe because the
+    // pre-test filter above guarantees projectedCap >= owned_count (the
+    // non-destructive decrement path).
     await page.getByTestId(T.workspaceCapacityDecrement).click();
     await expect(bonusValue).toHaveText(String(before));
   });
