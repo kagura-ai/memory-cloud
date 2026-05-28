@@ -186,8 +186,8 @@ class TestCreateEdgeOriginAndWeight:
     written with `origin='declared'` so they survive the nightly Hebbian
     decay loop, and the default weight MUST be 1.0 (full confidence)
     rather than the prior 0.5 carryover. PR #735 documented this contract
-    in concepts.md / architecture.md; this test pair pins it at the
-    handler layer.
+    in concepts.md / architecture.md; this test trio pins it at both the
+    handler layer and the MCP tool-definition schema layer (#814).
     """
 
     @pytest.fixture
