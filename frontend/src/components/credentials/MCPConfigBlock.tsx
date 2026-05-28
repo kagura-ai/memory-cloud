@@ -28,14 +28,19 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
-import { Copy, Check, Eye, EyeOff } from "lucide-react";
+import { Copy, Check, Eye, EyeOff, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { useToast } from "@/hooks/use-toast";
 import { useRevealableSecret } from "@/hooks/useRevealableSecret";
 import type { MemberAPIKey } from "@/lib/api/member-credentials";
 
-const MCP_CLIENTS = ["claude-code", "cursor", "chatgpt"] as const;
+const MCP_CLIENTS = ["claude-code", "cursor", "chatgpt", "codex"] as const;
 type MCPClient = (typeof MCP_CLIENTS)[number];
 
 const STORAGE_KEY = "kagura_last_mcp_client";
@@ -46,6 +51,13 @@ const DEFAULT_CLIENT: MCPClient = "claude-code";
 const FALLBACK_KEY_PREFIX = "kag_";
 const MASK_BODY = "•••••••••••";
 const PLACEHOLDER_KEY = "YOUR_API_KEY";
+
+// Codex CLI plugin install one-liner. The plugin handle is the
+// `installHandle` declared in `.agents/plugins/marketplace.json` and is
+// stable across versions (the kagura-memory plugin's identity is
+// `kagura-memory@kagura-memory-cloud`).
+export const CODEX_INSTALL_COMMAND =
+  "codex plugin install kagura-memory@kagura-memory-cloud";
 
 export interface MCPConfigBlockProps {
   /**
@@ -144,6 +156,44 @@ function buildJsonConfig(
   );
 }
 
+/**
+ * Build the Codex CLI `~/.codex/config.toml` snippet for the manual config
+ * block. The snippet declares an HTTP-transport MCP server using the same
+ * URL + Bearer pair as the JSON variants.
+ *
+ * TOML escape contract: values are emitted as TOML basic strings (`"..."`),
+ * which require `\` and `"` to be escaped. We escape `\` first (so the
+ * backslash from `"` escaping is not double-escaped) and then `"`. The
+ * dev-mode guard below matches `buildJsonConfig`'s expectation that the
+ * inputs are server-issued — `mcpUrl` is build-time + backend-issued UUID,
+ * `authValue` is the live key / masked constant / placeholder constant.
+ * Real keys are base64-ish (no `\` or `"`), so escape is a future-proofing
+ * net for refactors that introduce user-controllable content, not a
+ * day-one requirement.
+ */
+export function buildTomlConfig(mcpUrl: string, authValue: string): string {
+  if (process.env.NODE_ENV === "development") {
+    const unsafeRe = /[\n\r]/;
+    if (unsafeRe.test(mcpUrl) || unsafeRe.test(authValue)) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[MCPConfigBlock.buildTomlConfig] mcpUrl or authValue contains " +
+          "newlines. TOML basic strings cannot embed unescaped newlines — " +
+          "these inputs MUST be server-issued. If a refactor introduced " +
+          "user-controllable content, switch to a TOML multi-line literal " +
+          "string or sanitize before passing here.",
+      );
+    }
+  }
+  const escape = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return [
+    "[mcp_servers.kagura-memory]",
+    'type = "http"',
+    `url = "${escape(mcpUrl)}"`,
+    `bearer_token = "${escape(authValue)}"`,
+  ].join("\n");
+}
+
 export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
   const t = useTranslations("apiKeys");
   const tCommon = useTranslations("common");
@@ -233,6 +283,18 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
     return buildJsonConfig(client, mcpUrl, liveKey);
   }, [client, mcpUrl, liveKey]);
 
+  // Codex tab — TOML snippet variants. Mirror the JSON pair: displayToml
+  // uses visibleAuthValue (mask / placeholder / live), copyToml always
+  // uses the live key. Same disabled-when-null contract.
+  const displayToml = useMemo(
+    () => buildTomlConfig(mcpUrl, visibleAuthValue),
+    [mcpUrl, visibleAuthValue],
+  );
+  const copyToml = useMemo(() => {
+    if (liveKey === null) return null;
+    return buildTomlConfig(mcpUrl, liveKey);
+  }, [mcpUrl, liveKey]);
+
   const handleCopy = async () => {
     if (copyJson === null) return;
     try {
@@ -253,6 +315,43 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
     }
   };
 
+  const handleTomlCopy = async () => {
+    if (copyToml === null) return;
+    try {
+      await copy(copyToml);
+      toast({
+        title: t("mcpConfigCopied"),
+        description: t("mcpConfigCopiedHint"),
+      });
+    } catch (err) {
+      toast({
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleInstallCopy = async () => {
+    // Route through useRevealableSecret.copy so the hook cancels any
+    // pending auto-clear from a prior JSON/TOML copy — otherwise that
+    // 60s timer would fire after the install command lands in the
+    // clipboard and silently wipe it before the user can paste. The
+    // install command is not a secret, but the consistent 60s auto-clear
+    // matches the other Copy buttons in this component, and the user has
+    // plenty of time to switch to a terminal and paste.
+    try {
+      await copy(CODEX_INSTALL_COMMAND);
+      toast({ title: t("codexInstallCopied") });
+    } catch (err) {
+      toast({
+        title: tCommon("error"),
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
+    }
+  };
+
   return (
     <div className="space-y-3" suppressHydrationWarning>
       <Tabs value={client} onValueChange={(v) => setClient(v as MCPClient)}>
@@ -262,9 +361,13 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
           </TabsTrigger>
           <TabsTrigger value="cursor">{t("clients.cursor")}</TabsTrigger>
           <TabsTrigger value="chatgpt">{t("clients.chatgpt")}</TabsTrigger>
+          <TabsTrigger value="codex">{t("clients.codex")}</TabsTrigger>
         </TabsList>
 
-        {MCP_CLIENTS.map((c) => (
+        {/* JSON-shape tabs share one render path. Codex needs an independent
+            path because its UI is a static install command + a collapsible
+            manual TOML — buildJsonConfig doesn't apply. */}
+        {MCP_CLIENTS.filter((c) => c !== "codex").map((c) => (
           <TabsContent key={c} value={c} className="mt-3">
             <div className="relative">
               <pre className="bg-gray-900 text-gray-100 p-3 pr-20 rounded overflow-x-auto text-xs whitespace-pre-wrap break-all">
@@ -319,6 +422,110 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
             </p>
           </TabsContent>
         ))}
+
+        {/* Codex CLI tab: install one-liner (recommended) + collapsible
+            manual TOML fallback. The install path handles plugin sign-in;
+            the manual TOML covers fallback when the plugin install does
+            not auto-configure the MCP server endpoint. */}
+        <TabsContent value="codex" className="mt-3 space-y-3">
+          <div>
+            <h4 className="text-sm font-medium mb-2">
+              {t("codexInstallHeading")}
+            </h4>
+            <div className="relative">
+              <pre className="bg-gray-900 text-gray-100 p-3 pr-12 rounded overflow-x-auto text-xs whitespace-pre-wrap break-all">
+                {CODEX_INSTALL_COMMAND}
+              </pre>
+              <div className="absolute top-2 right-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={handleInstallCopy}
+                  title={t("copyConfig")}
+                  aria-label={t("copyConfig")}
+                  className="text-gray-300 hover:text-white hover:bg-gray-700/50"
+                >
+                  {copied ? (
+                    <Check className="w-4 h-4 text-green-400" />
+                  ) : (
+                    <Copy className="w-4 h-4" />
+                  )}
+                </Button>
+              </div>
+            </div>
+            <p className="text-xs text-blue-700 dark:text-blue-300 mt-2">
+              💡 {t("codexInstallHint")}
+            </p>
+          </div>
+
+          <Collapsible>
+            <CollapsibleTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="gap-1 text-xs"
+              >
+                <ChevronDown className="w-3 h-3" />
+                {t("codexManualConfigToggle")}
+              </Button>
+            </CollapsibleTrigger>
+            <CollapsibleContent className="mt-2">
+              <div className="relative">
+                <pre className="bg-gray-900 text-gray-100 p-3 pr-20 rounded overflow-x-auto text-xs whitespace-pre-wrap break-all">
+                  {displayToml}
+                </pre>
+                <div className="absolute top-2 right-2 flex gap-1">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={toggle}
+                    disabled={disabled}
+                    title={revealed ? t("hideKey") : t("showKey")}
+                    aria-label={revealed ? t("hideKey") : t("showKey")}
+                    aria-pressed={revealed}
+                    className="text-gray-300 hover:text-white hover:bg-gray-700/50"
+                  >
+                    {revealed ? (
+                      <EyeOff className="w-4 h-4" />
+                    ) : (
+                      <Eye className="w-4 h-4" />
+                    )}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={handleTomlCopy}
+                    disabled={disabled}
+                    title={
+                      disabled
+                        ? t("mcpConfigHiddenCopyDisabled")
+                        : t("copyConfig")
+                    }
+                    aria-label={
+                      disabled
+                        ? t("mcpConfigHiddenCopyDisabled")
+                        : t("copyConfig")
+                    }
+                    className="text-gray-300 hover:text-white hover:bg-gray-700/50"
+                  >
+                    {copied ? (
+                      <Check className="w-4 h-4 text-green-400" />
+                    ) : (
+                      <Copy className="w-4 h-4" />
+                    )}
+                  </Button>
+                </div>
+              </div>
+              <p className="text-xs text-blue-700 dark:text-blue-300 mt-2">
+                💡 {t("mcpConfigHint")}
+              </p>
+            </CollapsibleContent>
+          </Collapsible>
+        </TabsContent>
       </Tabs>
     </div>
   );

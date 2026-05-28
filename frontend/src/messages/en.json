@@ -1490,8 +1490,13 @@
     "clients": {
       "claudeCode": "Claude Code",
       "cursor": "Cursor",
-      "chatgpt": "ChatGPT"
+      "chatgpt": "ChatGPT",
+      "codex": "Codex CLI"
     },
+    "codexInstallHeading": "Install the kagura-memory plugin (recommended)",
+    "codexInstallHint": "The plugin handles sign-in and adds /recall, /remember, /session-start skills to Codex CLI.",
+    "codexManualConfigToggle": "Manual config (~/.codex/config.toml)",
+    "codexInstallCopied": "Install command copied",
     "createApiKey": "Create API Key",
     "noApiKeys": "No API keys configured. Click \"Create API Key\" button above to get started.",
     "noKeysTitle": "No API keys yet",

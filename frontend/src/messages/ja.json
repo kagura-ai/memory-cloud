@@ -1490,8 +1490,13 @@
     "clients": {
       "claudeCode": "Claude Code",
       "cursor": "Cursor",
-      "chatgpt": "ChatGPT"
+      "chatgpt": "ChatGPT",
+      "codex": "Codex CLI"
     },
+    "codexInstallHeading": "kagura-memory プラグインをインストール (推奨)",
+    "codexInstallHint": "プラグインがサインインを処理し、Codex CLI に /recall, /remember, /session-start を追加します。",
+    "codexManualConfigToggle": "手動設定 (~/.codex/config.toml)",
+    "codexInstallCopied": "インストールコマンドをコピーしました",
     "createApiKey": "APIキーを作成",
     "noApiKeys": "APIキーが設定されていません。上の「APIキーを作成」ボタンをクリックして開始してください。",
     "noKeysTitle": "APIキーがまだありません",
