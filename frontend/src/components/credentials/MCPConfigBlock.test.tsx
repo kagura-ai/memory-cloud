@@ -502,8 +502,10 @@ describe("MCPConfigBlock", () => {
     });
 
     it("warns in dev mode if the inputs contain control characters", () => {
+      // process.env.NODE_ENV is typed as string under the project's
+      // tsconfig, so direct assignment type-checks without a suppression
+      // (Copilot PR #817 review caught the unused @ts-expect-error).
       const originalEnv = process.env.NODE_ENV;
-      // @ts-expect-error — runtime override for the dev-guard branch
       process.env.NODE_ENV = "development";
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
@@ -515,7 +517,6 @@ describe("MCPConfigBlock", () => {
         );
       } finally {
         warnSpy.mockRestore();
-        // @ts-expect-error — restore original
         process.env.NODE_ENV = originalEnv;
       }
     });
