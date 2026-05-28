@@ -527,6 +527,12 @@ async def list_memories(
     context_id: UUID | None = Query(
         None, description="Optional context ID to scope results to a single context"
     ),
+    q: str | None = Query(
+        None,
+        max_length=200,
+        description="Optional case-insensitive substring filter on memory.summary. "
+        "Whitespace-only values are treated as None.",
+    ),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
@@ -544,6 +550,12 @@ async def list_memories(
             only the creator sees their own. Mirrors the graph routes'
             ``owner_filter = user_id if context.is_private else None`` pattern
             in ``api/routes/graph.py``.
+        q: Optional case-insensitive substring filter applied to
+            ``Memory.summary`` via SQL ``ILIKE``. Surrounding whitespace is
+            stripped, and whitespace-only / empty values are normalized to
+            ``None`` (no filter). Independent of ``owner_filter`` — works
+            for both private (creator-only) and shared (all-members)
+            contexts.
         limit: Maximum number of memories to return
         offset: Pagination offset
 
@@ -574,6 +586,24 @@ async def list_memories(
             )
             owner_filter = user_id if context.is_private else None
 
+        # Normalize the substring filter: strip surrounding whitespace and
+        # treat empty / whitespace-only values as "no filter" so callers
+        # that bind an empty input box don't accidentally pin results to
+        # rows whose summary literally contains spaces. Independent of
+        # ``owner_filter`` — applies uniformly to both private and shared
+        # context paths.
+        q_normalized = (q or "").strip() or None
+
+        # Escape SQL LIKE wildcards in user input so a literal ``%`` or
+        # ``_`` is matched as a character, not as a wildcard. Without this,
+        # ``q="50%"`` matches every summary containing "50" followed by
+        # anything, and ``q="_"`` matches every single-character row.
+        # Escape backslash first to avoid double-escaping the escape itself.
+        q_pattern: str | None = None
+        if q_normalized:
+            q_escaped = q_normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            q_pattern = f"%{q_escaped}%"
+
         # Build query. Exclude soft-deleted rows — POST /forget sets
         # ``deleted_at`` rather than removing the row, and the list view
         # must not surface tombstones.
@@ -590,6 +620,9 @@ async def list_memories(
         if context_id is not None:
             query = query.where(Memory.context_id == context_id)
 
+        if q_pattern is not None:
+            query = query.where(Memory.summary.ilike(q_pattern, escape="\\"))
+
         # Get total count (with same filters as data query)
         count_query = select(func.count(Memory.id)).where(Memory.deleted_at.is_(None))
         if owner_filter is not None:
@@ -600,6 +633,8 @@ async def list_memories(
             count_query = count_query.where(Memory.type == type)
         if context_id is not None:
             count_query = count_query.where(Memory.context_id == context_id)
+        if q_pattern is not None:
+            count_query = count_query.where(Memory.summary.ilike(q_pattern, escape="\\"))
         count_result = await db.execute(count_query)
         total = count_result.scalar() or 0
 
@@ -632,7 +667,17 @@ async def list_memories(
 
         has_more = offset + len(memories) < total
 
-        logger.info("memory_list_retrieved", user_id=user_id, count=len(memories), total=total)
+        # Log presence + length of `q` rather than the value — user search
+        # strings can carry PII or secrets the operator did not intend to
+        # persist in log aggregation.
+        logger.info(
+            "memory_list_retrieved",
+            user_id=user_id,
+            count=len(memories),
+            total=total,
+            q_present=q_normalized is not None,
+            q_len=len(q_normalized) if q_normalized else 0,
+        )
 
         return MemoryListResponse(memories=memory_items, total=total, has_more=has_more)
 

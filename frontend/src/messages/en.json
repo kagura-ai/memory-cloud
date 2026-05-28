@@ -3056,7 +3056,13 @@
       "loadFailed": "Failed to load memories",
       "hydrateFailed": "Failed to load memory details",
       "deleteSuccess": "Memory deleted",
-      "editSuccess": "Memory updated"
+      "editSuccess": "Memory updated",
+      "search": {
+        "placeholder": "Search memories…",
+        "label": "Search"
+      },
+      "noResultsTitle": "No results",
+      "noResultsDesc": "No memories match \"{query}\"."
     },
     "memoriesTable": {
       "loading": "Loading memories...",

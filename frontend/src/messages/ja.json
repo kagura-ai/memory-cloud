@@ -3056,7 +3056,13 @@
       "loadFailed": "メモリの読み込みに失敗しました",
       "hydrateFailed": "メモリ詳細の取得に失敗しました",
       "deleteSuccess": "メモリを削除しました",
-      "editSuccess": "メモリを更新しました"
+      "editSuccess": "メモリを更新しました",
+      "search": {
+        "placeholder": "メモリを検索…",
+        "label": "検索"
+      },
+      "noResultsTitle": "該当なし",
+      "noResultsDesc": "「{query}」に一致するメモリがありません。"
     },
     "memoriesTable": {
       "loading": "メモリを読み込み中...",
