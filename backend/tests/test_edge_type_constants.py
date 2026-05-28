@@ -3,9 +3,11 @@
 Pins:
 
 1. ``mcp_server/tools/edge.py::VALID_EDGE_TYPES`` equals the union of the
-   seven ``EDGE_TYPE_*`` constants exported from ``models/memory.py`` — i.e.
+   ``EDGE_TYPE_*`` constants exported from ``models/memory.py`` — i.e.
    the runtime set used by MCP edge tools is exactly the set the DB CHECK
    constraint accepts (the latter is mirrored as the constants in #460).
+   Post-#741 the set was four values; #782 appended ``continues_from`` and
+   ``references_file`` (producer-asserted structural relation types).
 
 2. ``services/sleep/edge_discovery.py::LLM_EMITTABLE_EDGE_TYPES`` is a
    subset of ``VALID_EDGE_TYPES`` — the LLM judge can only emit a deliberate
@@ -20,11 +22,15 @@ runtime test is the next safety net after pyright.
 
 from mcp_server.tools.edge import VALID_EDGE_TYPES
 from models.memory import (
+    _ALL_EDGE_TYPES,
+    EDGE_TYPE_CONTINUES_FROM,
     EDGE_TYPE_DEPENDS_ON,
     EDGE_TYPE_LEARNED_FROM,
     EDGE_TYPE_NEURAL_ASSOCIATION,
+    EDGE_TYPE_REFERENCES_FILE,
     EDGE_TYPE_RELATED_TO,
 )
+from services.graph_service import GraphService
 from services.sleep.edge_discovery import LLM_EMITTABLE_EDGE_TYPES
 
 
@@ -41,8 +47,37 @@ def test_valid_edge_types_matches_constants() -> None:
             EDGE_TYPE_RELATED_TO,
             EDGE_TYPE_DEPENDS_ON,
             EDGE_TYPE_LEARNED_FROM,
+            EDGE_TYPE_CONTINUES_FROM,
+            EDGE_TYPE_REFERENCES_FILE,
         }
     )
+
+
+def test_all_edge_type_validator_sets_match_all_edge_types() -> None:
+    """All three validator sets equal ``frozenset(_ALL_EDGE_TYPES)`` (#782).
+
+    The model's ``_ALL_EDGE_TYPES`` tuple (``models/memory.py``) is the
+    canonical source of truth for the relation axis (it drives the DB CHECK
+    constraint f-string). The two runtime guard sets —
+    ``mcp_server/tools/edge.py::VALID_EDGE_TYPES`` and
+    ``services/graph_service.py::GraphService.EDGE_TYPES`` — must equal the
+    same set, otherwise the MCP boundary and the in-process validator drift
+    (e.g. one accepts a new type that the other rejects).
+
+    The sibling ``test_valid_edge_types_matches_constants`` and
+    ``test_edge_types_matches_constants`` in
+    ``tests/services/test_graph_service_edge_types.py`` each pin one set
+    against a hand-typed frozenset of named constants — useful as a NAME
+    coverage check, but they cannot catch a drift WITHIN that hand-typed
+    set (e.g. a refactor that updates one site but not the other). This
+    chain-equality assertion pins all three sites to the same source so
+    adding ``EDGE_TYPE_NEW`` requires only appending to ``_ALL_EDGE_TYPES``
+    and the two frozensets — the test set in each sibling file no longer
+    needs hand-curation.
+    """
+    expected = frozenset(_ALL_EDGE_TYPES)
+    assert VALID_EDGE_TYPES == expected
+    assert GraphService.EDGE_TYPES == expected
 
 
 def test_llm_emittable_edge_types_subset_of_valid_edge_types() -> None:
@@ -78,7 +113,10 @@ def test_valid_edge_type_check_constraint_matches_migration_literal() -> None:
     """
     from models.memory import NeuralMemoryEdge
 
-    expected = "edge_type IN ('neural_association', 'related_to', 'depends_on', 'learned_from')"
+    expected = (
+        "edge_type IN ('neural_association', 'related_to', 'depends_on', "
+        "'learned_from', 'continues_from', 'references_file')"
+    )
 
     valid_edge_type_check = next(
         c for c in NeuralMemoryEdge.__table_args__ if getattr(c, "name", None) == "valid_edge_type"

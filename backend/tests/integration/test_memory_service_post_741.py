@@ -292,7 +292,12 @@ async def test_deprecated_edge_type_literals_rejected_by_check(
             f"{constraint_def}"
         )
 
-    # Positive: the 4 surviving values MUST be present so the constraint is
-    # not accidentally too restrictive either.
-    for kept in ("neural_association", "related_to", "depends_on", "learned_from"):
+    # Positive: every value in ``_ALL_EDGE_TYPES`` (the canonical source of
+    # truth from models/memory.py) MUST appear in the live CHECK so the
+    # constraint is not accidentally too restrictive either. Iterating the
+    # source-of-truth tuple — instead of hand-typing the list here — means
+    # adding ``EDGE_TYPE_NEW`` requires no edit to this test (#782 self-review).
+    from models.memory import _ALL_EDGE_TYPES
+
+    for kept in _ALL_EDGE_TYPES:
         assert kept in constraint_def, f"surviving edge_type {kept!r} missing from CHECK constraint"
