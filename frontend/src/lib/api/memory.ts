@@ -12,12 +12,18 @@ import type {
   MemoryReference,
 } from "../types/memory";
 
-// Issue #431/#433: Backend `GET /api/v1/memory/list` accepts only
-// {context_id, scope, type, limit, offset}.
+// Issue #431/#433/#580: Backend `GET /api/v1/memory/list` accepts only
+// {context_id, scope, type, q, limit, offset}.
+//
+// `q` (Issue #580): case-insensitive substring filter on memory summary.
+// Trimmed client-side; whitespace-only values are dropped (the param is not
+// sent at all) so the URL stays clean and the backend treats absent and
+// whitespace-only identically.
 export interface ListMemoriesParams {
   context_id?: string;
   scope?: MemoryScope;
   type?: string;
+  q?: string;
   limit?: number;
   offset?: number;
 }
@@ -36,6 +42,10 @@ export async function getMemories(
   if (params.context_id) searchParams.set("context_id", params.context_id);
   if (params.scope) searchParams.set("scope", params.scope);
   if (params.type) searchParams.set("type", params.type);
+  if (params.q) {
+    const trimmed = params.q.trim();
+    if (trimmed) searchParams.set("q", trimmed);
+  }
   searchParams.set("limit", String(params.limit ?? 50));
   searchParams.set("offset", String(params.offset ?? 0));
 
