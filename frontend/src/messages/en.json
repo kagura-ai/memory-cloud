@@ -1484,6 +1484,8 @@
     "mcpConfigTitle": "Configuration (Claude Code, Cline, etc.):",
     "mcpConfigHint": "While your API key is in the visibility window, the config above is ready to copy with the live key already embedded.",
     "copyConfig": "Copy config",
+    "copyInstallCommand": "Copy install command",
+    "copyManualConfig": "Copy manual config",
     "mcpConfigCopied": "Config copied",
     "mcpConfigCopiedHint": "Clipboard clears in 60 seconds — paste it now.",
     "mcpConfigHiddenCopyDisabled": "Regenerate the key to copy a working config",

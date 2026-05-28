@@ -350,18 +350,45 @@ describe("MCPConfigBlock", () => {
     it("install Copy writes CODEX_INSTALL_COMMAND to clipboard and fires the install toast", async () => {
       render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
 
-      // Two Copy buttons exist in codex mode (install + manual TOML). The
-      // install one carries the generic "copyConfig" aria-label (no live
-      // secret context) — match the first one (install lives above the
-      // collapsed TOML in DOM order).
-      const copyButtons = screen.getAllByRole("button", { name: "copyConfig" });
-      fireEvent.click(copyButtons[0]);
+      // Distinct aria-label per Copy button (Copilot PR #817 review):
+      // install uses copyInstallCommand, manual TOML uses copyManualConfig,
+      // JSON tabs (unmounted in codex mode) use copyConfig.
+      fireEvent.click(
+        screen.getByRole("button", { name: "copyInstallCommand" }),
+      );
       await act(async () => {
         await Promise.resolve();
       });
 
       expect(mockWriteText).toHaveBeenCalledWith(CODEX_INSTALL_COMMAND);
       expect(mockToast).toHaveBeenCalledWith({ title: "codexInstallCopied" });
+    });
+
+    it("install Copy does NOT flash Check on the manual TOML Copy button (cross-button leak regression pin)", async () => {
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      // Expand the manual TOML so its Copy button is in the DOM
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexManualConfigToggle" }),
+      );
+
+      // Press the install Copy
+      fireEvent.click(
+        screen.getByRole("button", { name: "copyInstallCommand" }),
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      // The install button SHOULD now contain a Check icon (lucide renders
+      // an svg with class "lucide-check"); the manual TOML Copy MUST NOT.
+      const installBtn = screen.getByRole("button", {
+        name: "copyInstallCommand",
+      });
+      const tomlBtn = screen.getByRole("button", {
+        name: "copyManualConfig",
+      });
+      expect(installBtn.querySelector("svg.lucide-check")).not.toBeNull();
+      expect(tomlBtn.querySelector("svg.lucide-check")).toBeNull();
     });
 
     it("manual config Collapsible is closed by default — TOML body is hidden", () => {

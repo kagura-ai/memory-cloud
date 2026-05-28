@@ -1484,6 +1484,8 @@
     "mcpConfigTitle": "設定 (Claude Code, Cline など):",
     "mcpConfigHint": "APIキーが公開期間内であれば、上記の設定は有効なキーが埋め込まれた状態でそのままコピーできます。",
     "copyConfig": "設定をコピー",
+    "copyInstallCommand": "インストールコマンドをコピー",
+    "copyManualConfig": "手動設定をコピー",
     "mcpConfigCopied": "設定をコピーしました",
     "mcpConfigCopiedHint": "クリップボードは 60 秒後に消去されます。今すぐ貼り付けてください。",
     "mcpConfigHiddenCopyDisabled": "動作する設定をコピーするにはキーを再生成してください",

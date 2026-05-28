@@ -295,10 +295,21 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
     return buildTomlConfig(mcpUrl, liveKey);
   }, [mcpUrl, liveKey]);
 
+  // Track which Copy button the user pressed last, so the Check icon only
+  // flashes on the button they actually clicked. Without this, the shared
+  // `copied` flag from useRevealableSecret causes the Codex tab's install
+  // and manual-TOML buttons to BOTH flash Check when either is pressed
+  // (Copilot review flagged this on PR #817). The hook still owns the 2s
+  // timer; this just disambiguates the visual target.
+  const [lastCopied, setLastCopied] = useState<
+    "json" | "toml" | "install" | null
+  >(null);
+
   const handleCopy = async () => {
     if (copyJson === null) return;
     try {
       await copy(copyJson);
+      setLastCopied("json");
       toast({
         title: t("mcpConfigCopied"),
         description: t("mcpConfigCopiedHint"),
@@ -319,6 +330,7 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
     if (copyToml === null) return;
     try {
       await copy(copyToml);
+      setLastCopied("toml");
       toast({
         title: t("mcpConfigCopied"),
         description: t("mcpConfigCopiedHint"),
@@ -342,6 +354,7 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
     // plenty of time to switch to a terminal and paste.
     try {
       await copy(CODEX_INSTALL_COMMAND);
+      setLastCopied("install");
       toast({ title: t("codexInstallCopied") });
     } catch (err) {
       toast({
@@ -409,7 +422,7 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
                   }
                   className="text-gray-300 hover:text-white hover:bg-gray-700/50"
                 >
-                  {copied ? (
+                  {copied && lastCopied === "json" ? (
                     <Check className="w-4 h-4 text-green-400" />
                   ) : (
                     <Copy className="w-4 h-4" />
@@ -442,11 +455,11 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
                   variant="ghost"
                   size="icon"
                   onClick={handleInstallCopy}
-                  title={t("copyConfig")}
-                  aria-label={t("copyConfig")}
+                  title={t("copyInstallCommand")}
+                  aria-label={t("copyInstallCommand")}
                   className="text-gray-300 hover:text-white hover:bg-gray-700/50"
                 >
-                  {copied ? (
+                  {copied && lastCopied === "install" ? (
                     <Check className="w-4 h-4 text-green-400" />
                   ) : (
                     <Copy className="w-4 h-4" />
@@ -503,16 +516,16 @@ export function MCPConfigBlock({ apiKey, mcpUrl }: MCPConfigBlockProps) {
                     title={
                       disabled
                         ? t("mcpConfigHiddenCopyDisabled")
-                        : t("copyConfig")
+                        : t("copyManualConfig")
                     }
                     aria-label={
                       disabled
                         ? t("mcpConfigHiddenCopyDisabled")
-                        : t("copyConfig")
+                        : t("copyManualConfig")
                     }
                     className="text-gray-300 hover:text-white hover:bg-gray-700/50"
                   >
-                    {copied ? (
+                    {copied && lastCopied === "toml" ? (
                       <Check className="w-4 h-4 text-green-400" />
                     ) : (
                       <Copy className="w-4 h-4" />
