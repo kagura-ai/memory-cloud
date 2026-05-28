@@ -97,6 +97,40 @@ class TestParamsIsoToNaiveUtc:
             2024, 1, 15, 10, 30, 0
         )
 
+    def test_end_of_day_shifts_date_only_to_next_day(self) -> None:
+        """Regression for #820: a date-only ``to`` value must be shifted
+        forward by one day so the SQL ``Memory.created_at < to_dt``
+        comparison effectively includes the entire calendar day. Without
+        this shift, ``to=2026-05-28`` silently excludes every memory
+        ingested on 2026-05-28.
+        """
+        assert _params_iso_to_naive_utc("2026-05-28", end_of_day=True) == datetime(
+            2026, 5, 29, 0, 0, 0
+        )
+
+    def test_end_of_day_passes_datetime_inputs_through_unchanged(self) -> None:
+        """A precise-time ``to`` (datetime with a time component) keeps
+        exclusive-bound semantics; only date-only inputs are reinterpreted.
+        """
+        # Naive datetime.
+        assert _params_iso_to_naive_utc("2026-05-28T15:00:00", end_of_day=True) == datetime(
+            2026, 5, 28, 15, 0, 0
+        )
+        # Tz-aware datetime (JST → UTC normalization still happens; no
+        # day shift because the input is not date-only).
+        assert _params_iso_to_naive_utc("2026-05-28T15:00:00+09:00", end_of_day=True) == datetime(
+            2026, 5, 28, 6, 0, 0
+        )
+
+    def test_end_of_day_none_returns_none(self) -> None:
+        assert _params_iso_to_naive_utc(None, end_of_day=True) is None
+
+    def test_default_end_of_day_false_preserves_legacy_behavior(self) -> None:
+        """Callers that do not opt in (e.g. the ``from`` lower-bound)
+        keep the original parse-as-is behavior — no accidental shift.
+        """
+        assert _params_iso_to_naive_utc("2026-05-28") == datetime(2026, 5, 28, 0, 0, 0)
+
 
 # ---------------------------------------------------------------------------
 # _resolve_pricing_row

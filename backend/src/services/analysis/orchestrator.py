@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -129,7 +129,7 @@ assert _PAID_BY_BYOK in MEMORY_ANALYSIS_PAID_BY_VALUES, (
 )
 
 
-def _params_iso_to_naive_utc(s: str | None) -> datetime | None:
+def _params_iso_to_naive_utc(s: str | None, *, end_of_day: bool = False) -> datetime | None:
     """Parse an ISO-8601 string into a naive UTC datetime.
 
     The API layer (#496) accepts both naive and tz-aware datetimes in
@@ -138,12 +138,27 @@ def _params_iso_to_naive_utc(s: str | None) -> datetime | None:
     TIME ZONE — naive UTC by repo convention #489). Without this
     normalization, asyncpg raises a binding error when a tz-aware
     bound parameter is compared against a naive column.
+
+    When ``end_of_day=True`` AND the input is a **date-only** string
+    (e.g. ``"2026-05-28"``, no ``T`` separator), the result is shifted
+    to the *start of the next day* so that downstream filters using
+    ``Memory.created_at < to_dt`` are effectively day-inclusive (#820).
+    The UI date picker surfaces ``to`` as the last *included* date;
+    without the shift, ``to=2026-05-28`` would silently exclude every
+    memory created on 2026-05-28. Strings carrying a time component
+    are passed through unchanged so callers that need precise-time
+    bounds keep the original semantics.
     """
     if s is None:
         return None
     dt = datetime.fromisoformat(s)
     if dt.tzinfo is not None:
         dt = dt.astimezone(UTC).replace(tzinfo=None)
+    # Date-only detection: ISO-8601 date is exactly 10 chars ("YYYY-MM-DD")
+    # and contains no time separator. Anything richer (datetime, tz suffix)
+    # is treated as caller-controlled precision.
+    if end_of_day and len(s) == 10 and "T" not in s:
+        dt = dt + timedelta(days=1)
     return dt
 
 
@@ -349,7 +364,10 @@ class AnalysisOrchestrator:
         # may submit either tz-aware (e.g. "...+09:00") or naive ISO
         # strings; both routes converge here.
         from_dt = _params_iso_to_naive_utc(params_jsonb.get("from"))
-        to_dt = _params_iso_to_naive_utc(params_jsonb.get("to"))
+        # ``to`` is inclusive at the day level for date-only inputs — see
+        # _params_iso_to_naive_utc / #820. Datetimes with time components
+        # stay exclusive so callers needing precision are not surprised.
+        to_dt = _params_iso_to_naive_utc(params_jsonb.get("to"), end_of_day=True)
 
         try:
             # Stage [C] — pull memories + their existing Qdrant vectors.
