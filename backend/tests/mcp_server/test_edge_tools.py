@@ -21,6 +21,7 @@ from uuid import uuid4
 
 import pytest
 
+from mcp_server.tools._definitions import get_tool_definitions
 from mcp_server.tools.edge import handle_create_edge, handle_update_edge
 from models.memory import EDGE_ORIGIN_DECLARED
 
@@ -185,8 +186,8 @@ class TestCreateEdgeOriginAndWeight:
     written with `origin='declared'` so they survive the nightly Hebbian
     decay loop, and the default weight MUST be 1.0 (full confidence)
     rather than the prior 0.5 carryover. PR #735 documented this contract
-    in concepts.md / architecture.md; this test pair pins it at the
-    handler layer.
+    in concepts.md / architecture.md; this test trio pins it at both the
+    handler layer and the MCP tool-definition schema layer (#814).
     """
 
     @pytest.fixture
@@ -318,3 +319,15 @@ class TestCreateEdgeOriginAndWeight:
         mock_repo.create_or_update_edge.assert_awaited_once()
         kwargs = mock_repo.create_or_update_edge.await_args.kwargs
         assert kwargs["weight"] == 1.0
+
+    def test_schema_default_matches_handler_default(self):
+        """Issue #814: MCP tool definition's `create_edge.weight.default` MUST equal
+        the handler's runtime default (1.0). Pinning both sides forces any future
+        change to the handler to update the tool definition in the same PR, which
+        prevents the docs/runtime drift that Copilot caught on PR #812 and surfaced
+        as #814. The handler-side pin is `test_default_weight_is_1` above; this is
+        its schema-side counterpart.
+        """
+        create_edge = next(t for t in get_tool_definitions() if t["name"] == "create_edge")
+        weight_schema = create_edge["inputSchema"]["properties"]["weight"]
+        assert weight_schema["default"] == 1.0

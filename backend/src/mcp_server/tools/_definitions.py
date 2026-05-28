@@ -473,7 +473,7 @@ Response includes: edge_id, source_id, target_id, edge_type, weight, confidence,
             "description": """Create a manual edge between two memories in the Neural Memory graph.
 
 Use this when you know two memories are related but the automatic Edge Discovery hasn't connected them.
-The default weight of 0.5 is suitable for most manually created edges — you only need to specify source and target.
+The default weight of 1.0 is suitable for most manually created edges — you only need to specify source and target.
 
 Edge types:
 - 'related_to' (default): General relationship between memories
@@ -483,7 +483,7 @@ Edge types:
 - 'continues_from': Chronological/narrative successor between chat memories (producer-asserted, directional; #782)
 - 'references_file': Structural reference from a chat memory to a file overview (producer-asserted, directional; #782)
 
-Weight range: 0.0 (weakest) to 3.0 (strongest). Default: 0.5 (moderate manual connection).""",
+Weight range: 0.0 (weakest) to 3.0 (strongest). Default: 1.0 (full-confidence manual edge).""",
             "inputSchema": {
                 "type": "object",
                 "required": ["source_id", "target_id", "context_id"],
@@ -513,8 +513,8 @@ Weight range: 0.0 (weakest) to 3.0 (strongest). Default: 0.5 (moderate manual co
                     },
                     "weight": {
                         "type": "number",
-                        "description": "Edge weight 0.0-3.0 (default: 0.5). Higher = stronger connection.",
-                        "default": 0.5,
+                        "description": "Edge weight 0.0-3.0 (default: 1.0). Higher = stronger connection.",
+                        "default": 1.0,
                     },
                     "confidence": {
                         "type": "number",
