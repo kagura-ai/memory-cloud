@@ -384,6 +384,7 @@ Response format:
 Optional relation_types filter for specific edge types:
 • 'neural_association' (default, Hebbian learning)
 • 'related_to', 'depends_on', 'learned_from'
+• 'continues_from', 'references_file' (producer-asserted structural edges)
 • Omit to explore all connection types
 
 Returns memories ranked by activation strength (graph-based relevance).
@@ -410,7 +411,7 @@ IMPORTANT: Always specify context_id to ensure you're exploring the intended con
                     "relation_types": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Optional filter for specific relation types: 'neural_association', 'related_to', 'depends_on', 'learned_from'. Omit to explore all connections.",
+                        "description": "Optional filter for specific relation types: 'neural_association', 'related_to', 'depends_on', 'learned_from', 'continues_from', 'references_file'. Omit to explore all connections.",
                     },
                     "context_id": {
                         "type": "string",
@@ -453,7 +454,7 @@ Response includes: edge_id, source_id, target_id, edge_type, weight, confidence,
                     "edge_types": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Filter by edge types: 'neural_association', 'related_to', 'depends_on', 'learned_from'. Omit to list all.",
+                        "description": "Filter by edge types: 'neural_association', 'related_to', 'depends_on', 'learned_from', 'continues_from', 'references_file'. Omit to list all.",
                     },
                     "limit": {
                         "type": "integer",
@@ -479,6 +480,8 @@ Edge types:
 - 'depends_on': Target memory depends on source
 - 'learned_from': Knowledge derived from source
 - 'neural_association': Auto-created by Hebbian learning (prefer 'related_to' for manual edges)
+- 'continues_from': Chronological/narrative successor between chat memories (producer-asserted, directional; #782)
+- 'references_file': Structural reference from a chat memory to a file overview (producer-asserted, directional; #782)
 
 Weight range: 0.0 (weakest) to 3.0 (strongest). Default: 0.5 (moderate manual connection).""",
             "inputSchema": {
@@ -497,7 +500,14 @@ Weight range: 0.0 (weakest) to 3.0 (strongest). Default: 0.5 (moderate manual co
                     },
                     "edge_type": {
                         "type": "string",
-                        "enum": ["neural_association", "related_to", "depends_on", "learned_from"],
+                        "enum": [
+                            "neural_association",
+                            "related_to",
+                            "depends_on",
+                            "learned_from",
+                            "continues_from",
+                            "references_file",
+                        ],
                         "description": "Type of relationship (default: 'related_to').",
                         "default": "related_to",
                     },
@@ -526,7 +536,7 @@ Weight range: 0.0 (weakest) to 3.0 (strongest). Default: 0.5 (moderate manual co
 Use this to:
 - Strengthen an edge: increase weight when memories are confirmed related
 - Weaken an edge: decrease weight for less relevant connections
-- Change edge type: reclassify the relationship
+- Change edge type: reclassify the relationship (see create_edge for the full edge_type enumeration; all values accepted by create_edge are valid targets here)
 
 Identify edges using source_id + target_id (from list_edges or explore results).""",
             "inputSchema": {
@@ -549,7 +559,14 @@ Identify edges using source_id + target_id (from list_edges or explore results).
                     },
                     "edge_type": {
                         "type": "string",
-                        "enum": ["neural_association", "related_to", "depends_on", "learned_from"],
+                        "enum": [
+                            "neural_association",
+                            "related_to",
+                            "depends_on",
+                            "learned_from",
+                            "continues_from",
+                            "references_file",
+                        ],
                         "description": "New edge type.",
                     },
                     "context_id": {

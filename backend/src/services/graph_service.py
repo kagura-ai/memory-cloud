@@ -15,9 +15,12 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import (
+    _ALL_EDGE_ORIGINS,
+    EDGE_TYPE_CONTINUES_FROM,
     EDGE_TYPE_DEPENDS_ON,
     EDGE_TYPE_LEARNED_FROM,
     EDGE_TYPE_NEURAL_ASSOCIATION,
+    EDGE_TYPE_REFERENCES_FILE,
     EDGE_TYPE_RELATED_TO,
 )
 from repositories.neural_edge import NeuralEdgeRepository
@@ -49,6 +52,10 @@ class GraphService:
         - related_to: LLM-judged semantic relationship (undirected)
         - depends_on: LLM-judged dependency relationship (directed)
         - learned_from: LLM-judged learning source (directed)
+        - continues_from: producer-asserted chronological/narrative successor
+          (directed; #782, emitted by kagura-memory-ai-worker)
+        - references_file: producer-asserted structural reference, chat → file
+          overview (directed; #782, emitted by kagura-memory-ai-worker)
 
     Provenance lives on the ``origin`` axis (#722), independent of edge_type:
         - hebbian: runtime Hebbian co-activation trace
@@ -74,19 +81,21 @@ class GraphService:
     _STATS_OWNER_DEFAULT: Any = object()
 
     NODE_TYPES = ["memory", "user", "topic"]
-    # Issue #506 / #741: full set of edge_types accepted by the DB CHECK
+    # Issue #506 / #741 / #782: full set of edge_types accepted by the DB CHECK
     # constraint (mirrors ``mcp_server/tools/edge.py::VALID_EDGE_TYPES``).
     # ``frozenset`` for immutability + O(1) ``not in`` lookup at the validator
     # in ``add_edge``. Sourced from ``EDGE_TYPE_*`` constants so this set
-    # cannot drift from the schema literal. Post-#741 the set collapsed
-    # from 7 to 4 values: ``semantic_similarity``, ``declared_link``, and
-    # ``tag_cooccurrence`` moved to the ``origin`` / ``edge_metadata`` axes.
+    # cannot drift from the schema literal. Post-#741 the relation axis held 4
+    # values; #782 appended the two producer-asserted structural types
+    # (``continues_from`` / ``references_file``) emitted by the ai-worker.
     EDGE_TYPES: frozenset[str] = frozenset(
         {
             EDGE_TYPE_NEURAL_ASSOCIATION,
             EDGE_TYPE_RELATED_TO,
             EDGE_TYPE_DEPENDS_ON,
             EDGE_TYPE_LEARNED_FROM,
+            EDGE_TYPE_CONTINUES_FROM,
+            EDGE_TYPE_REFERENCES_FILE,
         }
     )
 
@@ -196,6 +205,7 @@ class GraphService:
         weight: float = 1.0,
         edge_metadata: dict[str, Any] | None = None,
         confidence: float = 1.0,
+        origin: str | None = None,
     ) -> None:
         """Add edge between nodes.
 
@@ -206,15 +216,55 @@ class GraphService:
             weight: Edge weight (0.0-3.0 for Neural Memory)
             edge_metadata: Additional edge metadata
             confidence: Confidence score (0.0-1.0)
+            origin: Optional provenance discriminator (#722; one of
+                ``EDGE_ORIGIN_HEBBIAN`` / ``EDGE_ORIGIN_SEMANTIC`` /
+                ``EDGE_ORIGIN_DECLARED``). When ``None`` (the default), the
+                kwarg is NOT forwarded to ``NeuralEdgeRepository.create_or_update_edge``,
+                whose own ``origin: str = EDGE_ORIGIN_HEBBIAN`` keyword default
+                then takes effect (matching the ``server_default`` on the
+                column for raw-SQL paths). This path is the Hebbian-internal
+                writer, so the default fits the dominant caller. Producer-
+                asserted writes (e.g. the ai-worker emitting
+                ``continues_from`` / ``references_file``, #782) MUST pass
+                ``origin=EDGE_ORIGIN_DECLARED`` explicitly so the row is
+                exempt from ``DecayManager`` (which only touches
+                ``origin='hebbian'``). The MCP ``create_edge`` /
+                ``update_edge`` tools (``mcp_server/tools/edge.py``) pin
+                ``declared`` themselves for their own callers; this knob is
+                for non-MCP producer paths. When a non-None value is passed,
+                it is validated against ``_ALL_EDGE_ORIGINS`` and a
+                ``ValueError`` is raised on mismatch — fail-fast at the
+                service boundary rather than waiting for a DB CHECK violation
+                deep in the repository call (#782 Copilot review).
 
         Raises:
-            ValueError: If rel_type is invalid
+            ValueError: If ``rel_type`` is not in ``GraphService.EDGE_TYPES``,
+                or if ``origin`` is not None and not in ``_ALL_EDGE_ORIGINS``.
         """
         if rel_type not in self.EDGE_TYPES:
             raise ValueError(f"Invalid rel_type: {rel_type}. Must be one of {self.EDGE_TYPES}")
 
+        # #782 Copilot review: fail-fast on an invalid ``origin`` rather than
+        # letting an unrecognized value reach the DB CHECK constraint
+        # ``valid_edge_origin`` (which raises a deeper, less actionable
+        # IntegrityError). Cheap O(1) frozenset membership check; only runs
+        # when the caller opted into pinning ``origin`` explicitly.
+        if origin is not None and origin not in _ALL_EDGE_ORIGINS:
+            raise ValueError(
+                f"Invalid origin: {origin!r}. Must be one of {sorted(_ALL_EDGE_ORIGINS)}"
+            )
+
         src_uuid = UUID(src_id) if isinstance(src_id, str) else src_id
         dst_uuid = UUID(dst_id) if isinstance(dst_id, str) else dst_id
+
+        # Only forward ``origin`` when the caller explicitly set it. Passing
+        # ``origin=None`` through to the repository would override its own
+        # ``EDGE_ORIGIN_HEBBIAN`` default (and the column ``server_default``)
+        # in ways that surprise existing Hebbian callers that have always
+        # relied on the implicit default.
+        extra_kwargs: dict[str, Any] = {}
+        if origin is not None:
+            extra_kwargs["origin"] = origin
 
         await self.edge_repo.create_or_update_edge(
             user_id=self.user_id,
@@ -232,6 +282,7 @@ class GraphService:
             # Hebbian / GraphService.add_edge callers discard the return value
             # — skip the post-upsert SELECT (Issue #458 doesn't apply here).
             return_fresh_edge=False,
+            **extra_kwargs,
         )
 
         logger.debug(

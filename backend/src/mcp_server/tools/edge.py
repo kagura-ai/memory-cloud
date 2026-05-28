@@ -24,21 +24,32 @@ from mcp_server.tools._helpers import (
 )
 from models.memory import (
     EDGE_ORIGIN_DECLARED,
+    EDGE_TYPE_CONTINUES_FROM,
     EDGE_TYPE_DEPENDS_ON,
     EDGE_TYPE_LEARNED_FROM,
     EDGE_TYPE_NEURAL_ASSOCIATION,
+    EDGE_TYPE_REFERENCES_FILE,
     EDGE_TYPE_RELATED_TO,
 )
 
-# Issue #461 / #741: full set of edge_types accepted by the DB CHECK constraint
-# (`models/memory.py::valid_edge_type`). Sourced from `EDGE_TYPE_*` constants
-# so this set cannot drift from the schema literal. The 4 surviving values
-# after #741 are:
+# Issue #461 / #741 / #782: full set of edge_types accepted by the DB CHECK
+# constraint (`models/memory.py::valid_edge_type`). Sourced from `EDGE_TYPE_*`
+# constants so this set cannot drift from the schema literal.
 #   - neural_association: runtime Hebbian co-activation, or the post-#741
 #     catch-all for any provenance not expressible as a relation
 #     (tag_cooccurrence + semantic_similarity merged here).
 #   - related_to / depends_on / learned_from: LLM-emittable relation types
 #     (#374 → see `services/sleep/edge_discovery.py::LLM_EMITTABLE_EDGE_TYPES`).
+#   - continues_from / references_file (#782): producer-asserted structural
+#     relation types emitted by the kagura-memory-ai-worker ingest pipeline.
+#     NOT emitted by the sleep LLM judge (excluded from
+#     `services/sleep/edge_discovery.py::LLM_EMITTABLE_EDGE_TYPES`); the MCP
+#     boundary does not separately enforce this — clients may pass them.
+#     Their provenance is origin='declared' (pinned below for both
+#     handle_create_edge and handle_update_edge); the MCP-only invariant
+#     does not extend to GraphService.add_edge — that path is the internal
+#     Hebbian-default writer and callers wanting a non-Hebbian origin must
+#     pass it explicitly via the optional `origin=` parameter (#782).
 # Provenance for what was previously edge_type='semantic_similarity' /
 # 'declared_link' / 'tag_cooccurrence' now lives on `origin` and
 # `edge_metadata['source']` (see migration `e20_741` docstring).
@@ -48,6 +59,8 @@ VALID_EDGE_TYPES = frozenset(
         EDGE_TYPE_RELATED_TO,
         EDGE_TYPE_DEPENDS_ON,
         EDGE_TYPE_LEARNED_FROM,
+        EDGE_TYPE_CONTINUES_FROM,
+        EDGE_TYPE_REFERENCES_FILE,
     }
 )
 
@@ -355,6 +368,12 @@ async def handle_update_edge(
                     confidence=existing.confidence,
                     workspace_id=ws_id,
                     context_id=ctx_id,
+                    # Issue #782: MCP `update_edge` is the explicit user re-assertion
+                    # path (mirrors `handle_create_edge` above); pin origin='declared'
+                    # so retyping a hebbian row to a producer-asserted edge_type
+                    # (continues_from / references_file) doesn't leave origin='hebbian'
+                    # and re-expose the row to DecayManager pruning.
+                    origin=EDGE_ORIGIN_DECLARED,
                 ),
                 operation_name="update_edge",
             )

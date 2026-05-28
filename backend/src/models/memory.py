@@ -317,19 +317,31 @@ EDGE_TYPE_NEURAL_ASSOCIATION = "neural_association"
 EDGE_TYPE_RELATED_TO = "related_to"
 EDGE_TYPE_DEPENDS_ON = "depends_on"
 EDGE_TYPE_LEARNED_FROM = "learned_from"
+# Issue #782: producer-asserted structural relation types emitted by the
+# kagura-memory-ai-worker ingest pipeline. They live on the edge_type
+# (relation) axis; their provenance is the ``origin`` axis (origin='declared'
+# for the worker create_edge path, pinned in mcp_server/tools/edge.py).
+#   - continues_from: chronological/narrative successor between chat memories
+#   - references_file: structural reference from a chat memory to a file overview
+EDGE_TYPE_CONTINUES_FROM = "continues_from"
+EDGE_TYPE_REFERENCES_FILE = "references_file"
 
 # Issue #509 (Phase B of #461): registration-order tuple used to derive the
 # ``valid_edge_type`` CHECK constraint string in ``NeuralMemoryEdge.__table_args__``.
-# Order MUST match the literal order ``b05_223_tag_cooccurrence.py`` installed
-# on prod (its ``_NEW_EDGE_TYPES_SQL``) so ``Base.metadata.create_all()`` produces
-# a CHECK string byte-identical to alembic head — preventing
-# ``alembic revision --autogenerate`` from generating a spurious no-op migration
-# on future runs.
+# Order MUST match the literal order the latest CHECK-altering migration installed
+# on prod (currently ``e25_782_widen_edge_type.py``'s ``_NEW_CHECK_SQL``; previously
+# ``e20_741`` then ``b05_223``) so ``Base.metadata.create_all()`` produces a CHECK
+# string byte-identical to alembic head — preventing ``alembic revision
+# --autogenerate`` from generating a spurious no-op migration on future runs. New
+# edge_types are APPENDED (never reordered) to preserve byte-identity with prior
+# literals.
 _ALL_EDGE_TYPES: tuple[str, ...] = (
     EDGE_TYPE_NEURAL_ASSOCIATION,
     EDGE_TYPE_RELATED_TO,
     EDGE_TYPE_DEPENDS_ON,
     EDGE_TYPE_LEARNED_FROM,
+    EDGE_TYPE_CONTINUES_FROM,
+    EDGE_TYPE_REFERENCES_FILE,
 )
 
 # Edge origin discriminator (Issue #722).
@@ -417,8 +429,10 @@ class NeuralMemoryEdge(Base):
         # ``_ALL_EDGE_TYPES``, (3) update the expected literal in
         # ``test_valid_edge_type_check_constraint_matches_migration_literal``,
         # plus a corresponding alembic migration that ALTERs the prod CHECK.
-        # The f-string output is byte-identical to ``b05_223_tag_cooccurrence.py``'s
-        # ``_NEW_EDGE_TYPES_SQL`` (registration order, single quotes, exact whitespace).
+        # The f-string output is byte-identical to the latest CHECK-altering
+        # migration's literal (currently ``e25_782_widen_edge_type.py``'s
+        # ``_NEW_CHECK_SQL``; previously ``e20_741`` then ``b05_223``) — registration
+        # order, single quotes, exact whitespace.
         CheckConstraint(
             f"edge_type IN ({', '.join(repr(t) for t in _ALL_EDGE_TYPES)})",
             name="valid_edge_type",
