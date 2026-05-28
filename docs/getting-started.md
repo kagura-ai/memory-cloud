@@ -91,6 +91,8 @@ Kagura Memory Cloud supports multiple authentication methods:
 
 ## MCP Integration
 
+The Web UI MCP Setup Guide at `/workspace/integrations/credentials?tab=api-keys` renders ready-to-paste snippets for each client below. The manual snippets in this section are the source of truth — keep them in sync if you change the supported transport shape.
+
 ### Claude Code / Claude Desktop
 
 The `create_admin` CLI automatically generates `.mcp.json`. If you need to create it manually:
@@ -110,6 +112,43 @@ The `create_admin` CLI automatically generates `.mcp.json`. If you need to creat
 ```
 
 Restart Claude Code to pick up the config, then test with `remember` and `recall` tools.
+
+### Cursor
+
+Cursor reads the same `mcpServers` shape as Claude Code. Add the snippet above to your Cursor settings file (Settings → MCP), then restart Cursor.
+
+### ChatGPT (Custom Connectors)
+
+ChatGPT custom connectors take a flatter shape — paste the URL and header into the connector form fields:
+
+```
+ChatGPT → Settings → Custom Connectors → New connector
+  URL: http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID
+  Authorization: Bearer YOUR_API_KEY
+```
+
+### Codex CLI
+
+**Recommended — plugin install (handles sign-in):**
+
+```bash
+codex plugin install kagura-memory@kagura-memory-cloud
+```
+
+The plugin adds `/recall`, `/remember`, and `/session-start` slash skills to Codex CLI.
+
+**Manual fallback — `~/.codex/config.toml`:**
+
+If the plugin install does not auto-configure the MCP server endpoint, add the snippet manually:
+
+```toml
+[mcp_servers.kagura-memory]
+type = "http"
+url = "http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID"
+bearer_token = "YOUR_API_KEY"
+```
+
+Restart Codex CLI to pick up the config.
 
 ## Quick API Test
 

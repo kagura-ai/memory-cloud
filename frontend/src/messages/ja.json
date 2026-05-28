@@ -1484,14 +1484,21 @@
     "mcpConfigTitle": "設定 (Claude Code, Cline など):",
     "mcpConfigHint": "APIキーが公開期間内であれば、上記の設定は有効なキーが埋め込まれた状態でそのままコピーできます。",
     "copyConfig": "設定をコピー",
+    "copyInstallCommand": "インストールコマンドをコピー",
+    "copyManualConfig": "手動設定をコピー",
     "mcpConfigCopied": "設定をコピーしました",
     "mcpConfigCopiedHint": "クリップボードは 60 秒後に消去されます。今すぐ貼り付けてください。",
     "mcpConfigHiddenCopyDisabled": "動作する設定をコピーするにはキーを再生成してください",
     "clients": {
       "claudeCode": "Claude Code",
       "cursor": "Cursor",
-      "chatgpt": "ChatGPT"
+      "chatgpt": "ChatGPT",
+      "codex": "Codex CLI"
     },
+    "codexInstallHeading": "kagura-memory プラグインをインストール (推奨)",
+    "codexInstallHint": "プラグインがサインインを処理し、Codex CLI に /recall, /remember, /session-start を追加します。",
+    "codexManualConfigToggle": "手動設定 (~/.codex/config.toml)",
+    "codexInstallCopied": "インストールコマンドをコピーしました",
     "createApiKey": "APIキーを作成",
     "noApiKeys": "APIキーが設定されていません。上の「APIキーを作成」ボタンをクリックして開始してください。",
     "noKeysTitle": "APIキーがまだありません",

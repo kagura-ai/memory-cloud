@@ -17,7 +17,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, act, fireEvent } from "@testing-library/react";
 import type { MemberAPIKey } from "@/lib/api/member-credentials";
-import { MCPConfigBlock } from "./MCPConfigBlock";
+import {
+  MCPConfigBlock,
+  CODEX_INSTALL_COMMAND,
+  buildTomlConfig,
+} from "./MCPConfigBlock";
 
 // Stable references defined OUTSIDE beforeEach so React's useCallback /
 // useEffect dependency arrays see constant references — matches the
@@ -322,6 +326,200 @@ describe("MCPConfigBlock", () => {
       expect(screen.getByText(/Bearer YOUR_API_KEY/)).toBeInTheDocument();
       // Toggle is now disabled
       expect(screen.getByRole("button", { name: "showKey" })).toBeDisabled();
+    });
+  });
+
+  // Codex CLI tab — independent render path (install command + collapsible
+  // manual TOML). Per the existing test pattern (line 130 comment), Radix
+  // tab triggers don't respond cleanly to fireEvent.click in happy-dom, so
+  // we exercise the codex render path by pre-populating localStorage.
+  describe("codex tab", () => {
+    beforeEach(() => {
+      localStorageStore["kagura_last_mcp_client"] = "codex";
+    });
+
+    it("renders the Codex install command verbatim when codex is the active client", () => {
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      // The install command is a module-level constant; assert by reading
+      // the same export the component renders so a rename catches here.
+      expect(screen.getByText(CODEX_INSTALL_COMMAND)).toBeInTheDocument();
+      // The JSON shape MUST NOT appear in codex mode (independent path).
+      expect(screen.queryByText(/"mcpServers"/)).not.toBeInTheDocument();
+    });
+
+    it("install Copy writes CODEX_INSTALL_COMMAND to clipboard and fires the install toast", async () => {
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+
+      // Distinct aria-label per Copy button (Copilot PR #817 review):
+      // install uses copyInstallCommand, manual TOML uses copyManualConfig,
+      // JSON tabs (unmounted in codex mode) use copyConfig.
+      fireEvent.click(
+        screen.getByRole("button", { name: "copyInstallCommand" }),
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(mockWriteText).toHaveBeenCalledWith(CODEX_INSTALL_COMMAND);
+      // The install toast includes the same "clipboard clears in 60s" hint
+      // as the other Copy buttons, because handleInstallCopy routes through
+      // useRevealableSecret.copy (which arms the 60s auto-clear).
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "codexInstallCopied",
+        description: "mcpConfigCopiedHint",
+      });
+    });
+
+    it("install Copy does NOT flash Check on the manual TOML Copy button (cross-button leak regression pin)", async () => {
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      // Expand the manual TOML so its Copy button is in the DOM
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexManualConfigToggle" }),
+      );
+
+      // Press the install Copy
+      fireEvent.click(
+        screen.getByRole("button", { name: "copyInstallCommand" }),
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      // The install button SHOULD now contain a Check icon (lucide renders
+      // an svg with class "lucide-check"); the manual TOML Copy MUST NOT.
+      const installBtn = screen.getByRole("button", {
+        name: "copyInstallCommand",
+      });
+      const tomlBtn = screen.getByRole("button", {
+        name: "copyManualConfig",
+      });
+      expect(installBtn.querySelector("svg.lucide-check")).not.toBeNull();
+      expect(tomlBtn.querySelector("svg.lucide-check")).toBeNull();
+    });
+
+    it("manual config Collapsible is closed by default — TOML body is hidden", () => {
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      // Radix Collapsible renders the content with `data-state="closed"` and
+      // hides it from accessibility tree — querying for the TOML body text
+      // returns null when collapsed.
+      expect(
+        screen.queryByText(/\[mcp_servers\.kagura-memory\]/),
+      ).not.toBeInTheDocument();
+      // The trigger is present and labeled.
+      expect(
+        screen.getByRole("button", { name: "codexManualConfigToggle" }),
+      ).toBeInTheDocument();
+    });
+
+    it("expanding manual config reveals the TOML snippet with url and bearer_token rows (masked by default)", () => {
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexManualConfigToggle" }),
+      );
+
+      // TOML header is rendered
+      expect(
+        screen.getByText(/\[mcp_servers\.kagura-memory\]/),
+      ).toBeInTheDocument();
+      // url row carries the MCP_URL
+      expect(
+        screen.getByText(new RegExp(`url = "${MCP_URL}"`)),
+      ).toBeInTheDocument();
+      // bearer_token row uses the masked value by default (not the live key)
+      expect(
+        screen.getByText(/bearer_token = "kag_•••••••••••"/),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/kag_real_secret_xyz/)).not.toBeInTheDocument();
+    });
+
+    it("manual TOML reveal toggle swaps the masked bearer_token for the live key in display", () => {
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexManualConfigToggle" }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "showKey" }));
+
+      expect(
+        screen.getByText(/bearer_token = "kag_real_secret_xyz"/),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText(/bearer_token = "kag_•••••••••••"/),
+      ).not.toBeInTheDocument();
+    });
+
+    it("manual TOML Copy is disabled and placeholder is shown when apiKey is null", () => {
+      render(<MCPConfigBlock apiKey={null} mcpUrl={MCP_URL} />);
+      fireEvent.click(
+        screen.getByRole("button", { name: "codexManualConfigToggle" }),
+      );
+
+      // Placeholder value is rendered in the bearer_token row
+      expect(
+        screen.getByText(/bearer_token = "YOUR_API_KEY"/),
+      ).toBeInTheDocument();
+      // The manual TOML Copy is the second `mcpConfigHiddenCopyDisabled`-
+      // labeled button (the first lives in the JSON tab's render path,
+      // which is not rendered when codex is active — so we actually expect
+      // exactly one disabled Copy here).
+      const disabledCopies = screen.getAllByRole("button", {
+        name: "mcpConfigHiddenCopyDisabled",
+      });
+      expect(disabledCopies).toHaveLength(1);
+      expect(disabledCopies[0]).toBeDisabled();
+    });
+  });
+
+  // buildTomlConfig — direct helper tests (the TOML escape contract is
+  // hand-rolled, unlike JSON.stringify, so a focused unit test on the
+  // helper itself is cheaper than threading escape-needing keys through
+  // the full render path.
+  describe("buildTomlConfig", () => {
+    it("escapes backslashes and quotes in the authValue", () => {
+      const out = buildTomlConfig(
+        "https://example.com/mcp",
+        'kag_a\\b"c', // raw: kag_a\b"c
+      );
+      // After escape, the literal in the TOML basic string is `kag_a\\b\"c`.
+      // We assert by checking the exact bearer_token row to pin both the
+      // backslash AND the quote escape in one shot.
+      expect(out).toContain('bearer_token = "kag_a\\\\b\\"c"');
+    });
+
+    it("escapes backslashes and quotes in the mcpUrl too", () => {
+      const out = buildTomlConfig('https://ex\\amp"le.com/mcp', "tok");
+      expect(out).toContain('url = "https://ex\\\\amp\\"le.com/mcp"');
+    });
+
+    it("escapes raw control characters with \\uXXXX (TOML basic strings forbid raw controls)", () => {
+      // Common whitespace controls (\n, \r, \t) get named escapes; other
+      // C0 controls + DEL get numeric \uXXXX escapes. Together the helper
+      // produces parse-safe TOML even if a refactor leaks control chars.
+      const out = buildTomlConfig(
+        "https://example.com/mcp",
+        "tok\nA\rB\tC\bDE",
+      );
+      expect(out).toContain('bearer_token = "tok\\nA\\rB\\tC\\u0008D\\u007fE"');
+    });
+
+    it("warns in dev mode if the inputs contain control characters", () => {
+      // Use Vitest's stubEnv to override NODE_ENV — this works regardless
+      // of whether @types/node types NODE_ENV as read-only (which differs
+      // across environments and tripped up two prior loops: direct
+      // assignment hit TS2540 in CI, while @ts-expect-error hit TS2578
+      // locally). vi.stubEnv is the canonical pattern.
+      vi.stubEnv("NODE_ENV", "development");
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      try {
+        buildTomlConfig("https://example.com/mcp\ninjected", "tok");
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(warnSpy.mock.calls[0][0]).toContain(
+          "[MCPConfigBlock.buildTomlConfig]",
+        );
+      } finally {
+        warnSpy.mockRestore();
+        vi.unstubAllEnvs();
+      }
     });
   });
 });
