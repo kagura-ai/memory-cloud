@@ -502,11 +502,12 @@ describe("MCPConfigBlock", () => {
     });
 
     it("warns in dev mode if the inputs contain control characters", () => {
-      // process.env.NODE_ENV is typed as string under the project's
-      // tsconfig, so direct assignment type-checks without a suppression
-      // (Copilot PR #817 review caught the unused @ts-expect-error).
-      const originalEnv = process.env.NODE_ENV;
-      process.env.NODE_ENV = "development";
+      // Use Vitest's stubEnv to override NODE_ENV — this works regardless
+      // of whether @types/node types NODE_ENV as read-only (which differs
+      // across environments and tripped up two prior loops: direct
+      // assignment hit TS2540 in CI, while @ts-expect-error hit TS2578
+      // locally). vi.stubEnv is the canonical pattern.
+      vi.stubEnv("NODE_ENV", "development");
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
       try {
@@ -517,7 +518,7 @@ describe("MCPConfigBlock", () => {
         );
       } finally {
         warnSpy.mockRestore();
-        process.env.NODE_ENV = originalEnv;
+        vi.unstubAllEnvs();
       }
     });
   });
