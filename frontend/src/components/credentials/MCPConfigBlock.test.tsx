@@ -361,7 +361,13 @@ describe("MCPConfigBlock", () => {
       });
 
       expect(mockWriteText).toHaveBeenCalledWith(CODEX_INSTALL_COMMAND);
-      expect(mockToast).toHaveBeenCalledWith({ title: "codexInstallCopied" });
+      // The install toast includes the same "clipboard clears in 60s" hint
+      // as the other Copy buttons, because handleInstallCopy routes through
+      // useRevealableSecret.copy (which arms the 60s auto-clear).
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "codexInstallCopied",
+        description: "mcpConfigCopiedHint",
+      });
     });
 
     it("install Copy does NOT flash Check on the manual TOML Copy button (cross-button leak regression pin)", async () => {
@@ -484,7 +490,18 @@ describe("MCPConfigBlock", () => {
       expect(out).toContain('url = "https://ex\\\\amp\\"le.com/mcp"');
     });
 
-    it("warns in dev mode if the inputs contain newlines (TOML basic strings cannot embed unescaped newlines)", () => {
+    it("escapes raw control characters with \\uXXXX (TOML basic strings forbid raw controls)", () => {
+      // Common whitespace controls (\n, \r, \t) get named escapes; other
+      // C0 controls + DEL get numeric \uXXXX escapes. Together the helper
+      // produces parse-safe TOML even if a refactor leaks control chars.
+      const out = buildTomlConfig(
+        "https://example.com/mcp",
+        "tok\nA\rB\tC\bDE",
+      );
+      expect(out).toContain('bearer_token = "tok\\nA\\rB\\tC\\u0008D\\u007fE"');
+    });
+
+    it("warns in dev mode if the inputs contain control characters", () => {
       const originalEnv = process.env.NODE_ENV;
       // @ts-expect-error — runtime override for the dev-guard branch
       process.env.NODE_ENV = "development";
