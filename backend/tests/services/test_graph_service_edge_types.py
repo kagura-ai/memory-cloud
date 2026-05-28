@@ -198,6 +198,38 @@ async def test_add_edge_propagates_explicit_origin(rel_type: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_add_edge_rejects_invalid_origin() -> None:
+    """#782 Copilot review: invalid ``origin`` fails fast at the service boundary.
+
+    Without this check, an unrecognized origin string would silently flow
+    through ``GraphService.add_edge`` and reach the DB CHECK constraint
+    ``valid_edge_origin``, surfacing as a deep IntegrityError. The fail-fast
+    ValueError at the service boundary is more actionable for non-MCP callers
+    (the MCP path pins origin to a constant and never hits this).
+    """
+    graph = GraphService.__new__(GraphService)
+    graph.user_id = "test_user_782_origin_invalid"
+    graph.workspace_id = str(uuid4())
+    graph.context_id = str(uuid4())
+    graph.db = MagicMock()
+    graph.edge_repo = MagicMock()
+    graph.edge_repo.create_or_update_edge = AsyncMock()
+
+    with pytest.raises(ValueError, match="Invalid origin"):
+        await graph.add_edge(
+            src_id=uuid4(),
+            dst_id=uuid4(),
+            rel_type=EDGE_TYPE_CONTINUES_FROM,
+            weight=0.8,
+            origin="not_a_real_origin",
+        )
+
+    # Validator must reject BEFORE reaching the repo — proves "fail-fast"
+    # is at the right layer (not merely earlier-than-DB).
+    graph.edge_repo.create_or_update_edge.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_add_edge_rejects_unknown_rel_type() -> None:
     """Validator still rejects values outside ``EDGE_TYPES``.
 
