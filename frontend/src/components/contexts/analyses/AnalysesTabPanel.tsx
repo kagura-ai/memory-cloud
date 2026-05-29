@@ -26,6 +26,7 @@ import { ApiError } from "@/lib/api/base";
 import {
   cancelAnalysisRun,
   getActiveAnalysis,
+  getAnalysisRun,
   listAnalysisRuns,
   listRunClusters,
   listRunPositions,
@@ -50,7 +51,9 @@ import {
   DollarSign,
   Award,
   Clock,
+  History,
 } from "lucide-react";
+import { formatLocalDate } from "@/lib/utils/datetime";
 import { ScatterPlot } from "./ScatterPlot";
 import { ClusterList } from "./ClusterList";
 import { RepresentativesPanel } from "./RepresentativesPanel";
@@ -98,6 +101,18 @@ export function AnalysesTabPanel({
   const [state, setState] = useState<BootstrapState>(EMPTY_BOOTSTRAP);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
 
+  // Issue #732: a ?run_id-selected past run, loaded *independently* of
+  // bootstrap (see the effect below) so clicking a history row neither tears
+  // the whole panel down into the loading skeleton nor re-fetches the latest
+  // run / history. ``null`` = viewing the latest run.
+  const [selectedView, setSelectedView] = useState<{
+    run: AnalysisRunRow;
+    clusters: AnalysisCluster[];
+    positions: ScatterPosition[];
+  } | null>(null);
+  const [selectedLoading, setSelectedLoading] = useState(false);
+  const [selectedError, setSelectedError] = useState<string | null>(null);
+
   // Modal state is URL-driven (?new=1). Reading + writing the URL is
   // the single source of truth so back/forward keeps the modal closed
   // / open consistently.
@@ -108,6 +123,22 @@ export function AnalysesTabPanel({
       const params = new URLSearchParams(searchParams.toString());
       if (next) params.set("new", "1");
       else params.delete("new");
+      const query = params.toString();
+      router.replace(query ? `${pathname}?${query}` : pathname);
+    },
+    [searchParams, pathname, router],
+  );
+
+  // Issue #732: the past run being viewed is URL-driven (?run_id=<uuid>) so the
+  // view is bookmarkable / shareable / survives refresh. ``null`` clears it and
+  // returns to the latest-run view. Other params (tab, new) are preserved.
+  const selectedRunId = searchParams.get("run_id");
+
+  const setSelectedRunId = useCallback(
+    (next: string | null) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (next) params.set("run_id", next);
+      else params.delete("run_id");
       const query = params.toString();
       router.replace(query ? `${pathname}?${query}` : pathname);
     },
@@ -227,6 +258,56 @@ export function AnalysesTabPanel({
     bootstrap();
   }, [bootstrap]);
 
+  // Issue #732: load the ?run_id-selected past run on its own, leaving the
+  // latest-run view + polling mounted (no skeleton flash, no latest re-fetch on
+  // every row click). Skips when there's no selection or the selection IS the
+  // latest run (that view is already shown). The cancelled guard drops stale
+  // responses when the user clicks through several rows quickly.
+  const latestRunId = state.activeRun?.run_id ?? null;
+  useEffect(() => {
+    if (!selectedRunId || selectedRunId === latestRunId) {
+      setSelectedView(null);
+      setSelectedError(null);
+      setSelectedLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setSelectedLoading(true);
+    setSelectedError(null);
+    (async () => {
+      try {
+        const run = await getAnalysisRun(contextId, selectedRunId);
+        let clusters: AnalysisCluster[] = [];
+        let positions: ScatterPosition[] = [];
+        // Only succeeded runs have clusters/positions; a failed/running/
+        // cancelled selection renders the "no results" past-run state.
+        if (run.status === "succeeded") {
+          const [clusterRes, positionRes] = await Promise.all([
+            listRunClusters(contextId, selectedRunId),
+            listRunPositions(contextId, selectedRunId),
+          ]);
+          clusters = clusterRes.items;
+          positions = positionRes.items;
+        }
+        if (!cancelled) setSelectedView({ run, clusters, positions });
+      } catch (err) {
+        // Bad / out-of-scope run_id (403/404) etc. — surface inline; the
+        // latest view stays mounted and "Back to latest" clears the param.
+        if (!cancelled) {
+          setSelectedView(null);
+          setSelectedError(
+            err instanceof Error ? err.message : t("states.loadFailed"),
+          );
+        }
+      } finally {
+        if (!cancelled) setSelectedLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [contextId, selectedRunId, latestRunId, t]);
+
   // Polling: armed only when activeRunId points at a *running* run.
   // The terminal callback re-runs bootstrap so the cluster+position
   // payload of the just-finished run lands.
@@ -265,9 +346,40 @@ export function AnalysesTabPanel({
     }
   }, [contextId, polling]);
 
+  // Issue #732: the run shown in the KPI strip + scatter + cluster list +
+  // property stats is the ?run_id-selected past run when one is active,
+  // otherwise the latest run. ``activeRun`` (the latest) is kept separately for
+  // polling + the "is this the latest run?" comparison below.
+  const displayRun = selectedView?.run ?? state.activeRun;
+  const displayClusters = selectedView ? selectedView.clusters : state.clusters;
+  const displayPositions = selectedView
+    ? selectedView.positions
+    : state.positions;
+  // True as soon as a non-latest run is selected (banner shows immediately,
+  // even while the selected run is still loading).
+  const viewingPastRun = !!selectedRunId && selectedRunId !== latestRunId;
+
+  // Localized status label for the non-succeeded past-run empty state — reuse
+  // the history table's status.* keys so it isn't a raw English enum dropped
+  // into the ja sentence.
+  const displayRunStatusLabel = !displayRun
+    ? ""
+    : displayRun.status === "cancelled"
+      ? t("history.status.cancelled", {
+          reason: displayRun.cancellation_reason ?? "",
+        })
+      : ["running", "succeeded", "failed"].includes(displayRun.status)
+        ? t(
+            `history.status.${displayRun.status}` as
+              | "history.status.running"
+              | "history.status.succeeded"
+              | "history.status.failed",
+          )
+        : t("history.status.unknown", { raw: displayRun.status });
+
   const allowedClusterIndexes = useMemo(
-    () => state.clusters.map((c) => c.cluster_index),
-    [state.clusters],
+    () => displayClusters.map((c) => c.cluster_index),
+    [displayClusters],
   );
   const { focusedClusterId, setFocusedClusterId, toggleFocusedClusterId } =
     useFocusedClusterId(allowedClusterIndexes);
@@ -279,9 +391,9 @@ export function AnalysesTabPanel({
   const focusedCluster = useMemo(() => {
     if (focusedClusterId === null) return null;
     return (
-      state.clusters.find((c) => c.cluster_index === focusedClusterId) ?? null
+      displayClusters.find((c) => c.cluster_index === focusedClusterId) ?? null
     );
-  }, [focusedClusterId, state.clusters]);
+  }, [focusedClusterId, displayClusters]);
 
   const handleRunStarted = useCallback(
     (runId: string) => {
@@ -378,31 +490,67 @@ export function AnalysesTabPanel({
         </div>
       )}
 
+      {/* Issue #732: past-run viewing banner — shown as soon as ?run_id selects
+          a non-latest run. While it loads, the latest view stays mounted and
+          the banner shows a spinner (no full-panel skeleton flash). "Back to
+          latest" clears the param. */}
+      {viewingPastRun && (
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-900/30">
+          <div className="flex items-center gap-3">
+            {selectedLoading ? (
+              <InlineSpinner size="sm" variant="brand" />
+            ) : (
+              <History className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+            )}
+            <div className="text-sm text-gray-700 dark:text-gray-300">
+              {selectedLoading
+                ? t("pastRun.loading")
+                : selectedView
+                  ? t("pastRun.banner", {
+                      when: formatLocalDate(
+                        new Date(selectedView.run.started_at),
+                      ),
+                    })
+                  : t("pastRun.generic")}
+            </div>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setSelectedRunId(null)}
+            className="shrink-0"
+          >
+            {t("pastRun.backToLatest")}
+          </Button>
+        </div>
+      )}
+      {selectedError && <ErrorBanner error={selectedError} />}
+
       {/* KPI strip */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <KpiCard
           icon={Clock}
           label={t("kpi.lastRun")}
           value={
-            state.activeRun
-              ? new Date(state.activeRun.started_at).toLocaleString()
+            displayRun
+              ? new Date(displayRun.started_at).toLocaleString()
               : t("kpi.neverRun")
           }
-          tone={state.activeRun ? "primary" : "muted"}
+          tone={displayRun ? "primary" : "muted"}
         />
         <KpiCard
           icon={Activity}
           label={t("kpi.memoriesSurveyed")}
-          value={state.activeRun ? state.activeRun.input_count : "—"}
+          value={displayRun ? displayRun.input_count : "—"}
         />
         <KpiCard
           icon={DollarSign}
           label={t("kpi.runCost")}
           value={
-            state.activeRun
+            displayRun
               ? formatCostCents(
-                  state.activeRun.cost_actual_cents ??
-                    state.activeRun.cost_estimated_cents,
+                  displayRun.cost_actual_cents ??
+                    displayRun.cost_estimated_cents,
                 )
               : "—"
           }
@@ -411,40 +559,54 @@ export function AnalysesTabPanel({
           icon={Award}
           label={t("kpi.quality")}
           value={
-            state.clusters.length === 0
+            displayClusters.length === 0
               ? t("kpi.qualityNoData")
               : t("kpi.qualityValue", {
                   value: formatConfidence(
-                    state.clusters
+                    displayClusters
                       .map((c) => c.label_confidence)
-                      .reduce((acc, n) => acc + n, 0) / state.clusters.length,
+                      .reduce((acc, n) => acc + n, 0) / displayClusters.length,
                   ),
                 })
           }
-          tone={state.clusters.length === 0 ? "muted" : "secondary"}
+          tone={displayClusters.length === 0 ? "muted" : "secondary"}
         />
       </div>
 
       {/* main scatter + cluster list grid */}
-      {state.clusters.length === 0 ? (
-        <EmptyState
-          icon={Sparkles}
-          title={t("states.empty.title")}
-          description={t("states.empty.description")}
-          // Hide the action button while a run is in flight — the
-          // running banner above already provides the visual signal
-          // and a Cancel control. Re-enabling on terminal lets the
-          // user fire a follow-up run if the first one failed.
-          actionLabel={runInProgress ? undefined : t("actions.newAnalysis")}
-          onAction={runInProgress ? undefined : () => setShowModal(true)}
-        />
+      {displayClusters.length === 0 ? (
+        viewingPastRun ? (
+          // Issue #732: a selected past run with no clusters (failed / running /
+          // cancelled, or not-yet-succeeded) — explain its status instead of the
+          // "run your first analysis" CTA, which would misleadingly imply the
+          // context has never been analyzed.
+          <EmptyState
+            icon={History}
+            title={t("states.pastRunEmpty.title")}
+            description={t("states.pastRunEmpty.description", {
+              status: displayRunStatusLabel,
+            })}
+          />
+        ) : (
+          <EmptyState
+            icon={Sparkles}
+            title={t("states.empty.title")}
+            description={t("states.empty.description")}
+            // Hide the action button while a run is in flight — the
+            // running banner above already provides the visual signal
+            // and a Cancel control. Re-enabling on terminal lets the
+            // user fire a follow-up run if the first one failed.
+            actionLabel={runInProgress ? undefined : t("actions.newAnalysis")}
+            onAction={runInProgress ? undefined : () => setShowModal(true)}
+          />
+        )
       ) : (
         <>
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">
             <div className="space-y-4">
               <ScatterPlot
-                clusters={state.clusters}
-                positions={state.positions}
+                clusters={displayClusters}
+                positions={displayPositions}
                 focusedClusterId={focusedClusterId}
                 focusedCluster={focusedCluster}
                 onClearFocus={() => setFocusedClusterId(null)}
@@ -455,7 +617,7 @@ export function AnalysesTabPanel({
               />
             </div>
             <ClusterList
-              clusters={state.clusters}
+              clusters={displayClusters}
               focusedClusterId={focusedClusterId}
               onToggleFocus={toggleFocusedClusterId}
               onClearFocus={() => setFocusedClusterId(null)}
@@ -467,9 +629,11 @@ export function AnalysesTabPanel({
               runs={state.history}
               total={state.history.length}
               activeRunId={state.activeRun?.run_id ?? null}
+              selectedRunId={selectedView?.run.run_id ?? null}
+              onSelectRun={setSelectedRunId}
             />
             <PropertyStats
-              clusters={state.clusters}
+              clusters={displayClusters}
               focusedCluster={focusedCluster}
             />
           </div>

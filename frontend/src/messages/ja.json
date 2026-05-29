@@ -3444,6 +3444,7 @@
       "headerCost": "コスト",
       "noRunsTitle": "まだ run がありません",
       "noRunsDescription": "最初の分析を実行すると履歴がここに表示されます。",
+      "viewRunAria": "{when} の run の結果を表示",
       "status": {
         "running": "実行中",
         "succeeded": "成功",
@@ -3451,6 +3452,12 @@
         "cancelled": "キャンセル · {reason}",
         "unknown": "{raw}"
       }
+    },
+    "pastRun": {
+      "banner": "{when} の過去 run を表示中 — 最新ではありません。",
+      "generic": "過去 run を表示中 — 最新ではありません。",
+      "loading": "選択した run を読み込み中…",
+      "backToLatest": "最新に戻る"
     },
     "modal": {
       "title": "分析を実行",
@@ -3495,6 +3502,10 @@
       "empty": {
         "title": "まだ分析がありません",
         "description": "最初の分析を実行するとクラスタ俯瞰、scatter map、各クラスタのプロパティ統計が表示されます。"
+      },
+      "pastRunEmpty": {
+        "title": "この run には表示できる結果がありません",
+        "description": "選択した run は {status} です — クラスタ・scatter 座標・プロパティ統計を持つのは成功した run のみです。「最新に戻る」で現在の表示に戻れます。"
       },
       "notEnabled": {
         "title": "この workspace では Analyses はまだ有効化されていません",
