@@ -311,7 +311,18 @@ class QuotaService:
                 return True, None
 
             if raise_on_denied:
-                raise QuotaExceededError(error)
+                # Issue #680: carry structured fields in ``details`` so clients
+                # (e.g. WorkspaceCreateForm) can localize the message instead of
+                # surfacing the English string verbatim. ``quota_type`` is the
+                # discriminator the frontend keys off (``error`` stays the shared
+                # ``QUOTA-001``); ``owned_count`` / ``cap`` feed the i18n
+                # placeholders. Future quota types follow the same convention.
+                raise QuotaExceededError(
+                    error,
+                    quota_type="workspace_limit_reached",
+                    owned_count=workspace_count,
+                    cap=cap,
+                )
             return False, error
 
         # Info-level success log so the 7-day observation window can

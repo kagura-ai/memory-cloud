@@ -1084,6 +1084,7 @@
     "workspaceCreated": "ワークスペースを作成しました",
     "workspaceCreatedDesc": "新しいワークスペースが正常に作成されました。",
     "workspaceLimitReached": "最大{limit}個のワークスペースまで所有できます。",
+    "workspaceLimitReachedDetailed": "現在 {limit} 個中 {owned} 個のワークスペースを所有しています。1つ手放すか譲渡するか、招待で他のワークスペースに参加できます。",
     "lastUsedWorkspace": "前回使用したワークスペース",
     "openaiKeyOptional": "オプション。後でExternal API Keys設定から追加できます。",
     "cancel": "キャンセル",

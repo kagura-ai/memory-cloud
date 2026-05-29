@@ -1084,6 +1084,7 @@
     "workspaceCreated": "Workspace created",
     "workspaceCreatedDesc": "Your new workspace has been created successfully.",
     "workspaceLimitReached": "You can own maximum {limit} workspaces.",
+    "workspaceLimitReachedDetailed": "You currently own {owned} of {limit} workspaces. Leave or transfer one, or join others via invite.",
     "lastUsedWorkspace": "Last used workspace",
     "openaiKeyOptional": "Optional. You can add this later in External API Keys settings.",
     "cancel": "Cancel",
