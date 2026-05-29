@@ -314,6 +314,7 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
           open={dialog.editOpen}
           onOpenChange={dialog.handleEditOpenChange}
           onSuccess={handleEditSuccess}
+          contextId={contextId}
         />
       )}
     </>

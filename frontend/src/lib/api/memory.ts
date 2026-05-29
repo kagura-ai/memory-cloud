@@ -24,6 +24,8 @@ export interface ListMemoriesParams {
   scope?: MemoryScope;
   type?: string;
   q?: string;
+  /** ANY-match tag filter (#618). Repeated as ?tags=a&tags=b; blanks ignored. */
+  tags?: string[];
   limit?: number;
   offset?: number;
 }
@@ -45,6 +47,10 @@ export async function getMemories(
   if (params.q) {
     const trimmed = params.q.trim();
     if (trimmed) searchParams.set("q", trimmed);
+  }
+  for (const tag of params.tags ?? []) {
+    const trimmed = tag.trim();
+    if (trimmed) searchParams.append("tags", trimmed);
   }
   searchParams.set("limit", String(params.limit ?? 50));
   searchParams.set("offset", String(params.offset ?? 0));

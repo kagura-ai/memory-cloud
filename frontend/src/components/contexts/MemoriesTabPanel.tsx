@@ -35,6 +35,9 @@ import { useToast } from "@/hooks/use-toast";
 import { useMemoryDetailDialog } from "@/hooks/useMemoryDetailDialog";
 import { useMemoryIdParam } from "@/hooks/useMemoryIdParam";
 import { getMemories } from "@/lib/api/memory";
+import { TagCloud } from "@/components/contexts/TagCloud";
+import { Badge } from "@/components/ui/badge";
+import { X } from "lucide-react";
 import type { MemoryListItem, MemoryReference } from "@/lib/types/memory";
 
 interface MemoriesTabPanelProps {
@@ -43,6 +46,7 @@ interface MemoriesTabPanelProps {
 
 const PAGE_SIZE = 50;
 const SEARCH_PARAM = "q";
+const TAG_PARAM = "tag";
 const DEBOUNCE_MS = 300;
 
 export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
@@ -72,7 +76,36 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   // committed to state.
   const requestIdRef = useRef(0);
 
+  // #618: tracks the previous debounced query so we reset an active tag only
+  // when the search actually *changes* (typing) — not on mount / shared links.
+  const prevDebouncedQueryRef = useRef(debouncedQuery);
+
   const dialog = useMemoryDetailDialog({ memoryIdParam, setMemoryIdParam });
+
+  // Issue #618: a single active tag filter, URL-driven (?tag=) so it's
+  // shareable and survives refresh. Clicking a TagCloud tag toggles it; the
+  // memory list re-fetches with an ANY-match tags filter (AND-ed with q).
+  // Normalize at the source: a whitespace-only ?tag (e.g. ?tag=%20) is ignored
+  // by getMemories, so collapse it to null here too — otherwise the chip /
+  // hasFilter UI would show an "active" filter the API query doesn't apply.
+  const activeTag = searchParams.get(TAG_PARAM)?.trim() || null;
+
+  const setActiveTagFilter = useCallback(
+    (tag: string | null) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (tag) params.set(TAG_PARAM, tag);
+      else params.delete(TAG_PARAM);
+      const next = params.toString();
+      setPage(1);
+      router.replace(`${pathname}${next ? `?${next}` : ""}`);
+    },
+    [searchParams, pathname, router],
+  );
+
+  const handleTagClick = useCallback(
+    (tag: string) => setActiveTagFilter(tag === activeTag ? null : tag),
+    [activeTag, setActiveTagFilter],
+  );
 
   // Debounce: schedule a single timer that promotes `searchInput` into
   // `debouncedQuery` AND resets page to 1 in one batched update. Doing
@@ -101,6 +134,14 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     } else {
       params.delete(SEARCH_PARAM);
     }
+    // #618: a *changed* search resets the active tag so a new query doesn't
+    // silently AND with a stale tag (the cloud re-facets to the query). Mount
+    // / shared-link loads (query unchanged) keep any ?tag intact.
+    const queryChanged = debouncedQuery !== prevDebouncedQueryRef.current;
+    prevDebouncedQueryRef.current = debouncedQuery;
+    if (trimmed && queryChanged) {
+      params.delete(TAG_PARAM);
+    }
     const next = params.toString();
     const current = searchParams.toString();
     if (next === current) return;
@@ -126,6 +167,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         limit: PAGE_SIZE,
         offset,
         q: trimmed || undefined,
+        tags: activeTag ? [activeTag] : undefined,
       });
       if (requestId !== requestIdRef.current) return;
       setItems(response.memories);
@@ -136,7 +178,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     } finally {
       if (requestId === requestIdRef.current) setLoading(false);
     }
-  }, [contextId, page, debouncedQuery, t]);
+  }, [contextId, page, debouncedQuery, activeTag, t]);
 
   useEffect(() => {
     fetchMemories();
@@ -175,21 +217,49 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     }
   }, [dialog, fetchMemories, toast, t, items.length, page]);
 
-  // Search input renders above any state branch (error / empty) so the
-  // user can always clear or refine the query without re-mounting it.
-  const searchBar = (
-    <div className="relative">
-      <Search
-        className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400"
-        aria-hidden="true"
-      />
-      <Input
-        type="search"
-        value={searchInput}
-        onChange={(e) => setSearchInput(e.target.value)}
-        placeholder={t("search.placeholder")}
-        aria-label={t("search.label")}
-        className="pl-9"
+  // Search input → active-tag chip → tag cloud, rendered above any state branch
+  // (error / empty) so the user can always search, see/clear the active filter,
+  // or discover tags. Search leads (primary, familiar control); the tag cloud —
+  // which can be tall — sits below so it never pushes search off-screen.
+  const filterControls = (
+    <div className="space-y-3">
+      <div className="relative">
+        <Search
+          className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400"
+          aria-hidden="true"
+        />
+        <Input
+          type="search"
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          placeholder={t("search.placeholder")}
+          aria-label={t("search.label")}
+          className="pl-9"
+        />
+      </div>
+      {activeTag && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-gray-500 dark:text-gray-400">
+            {t("filter.activeLabel")}
+          </span>
+          <Badge variant="secondary" className="gap-1">
+            {activeTag}
+            <button
+              type="button"
+              onClick={() => setActiveTagFilter(null)}
+              aria-label={t("filter.clearTag", { tag: activeTag })}
+              className="ml-0.5 rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </Badge>
+        </div>
+      )}
+      <TagCloud
+        contextId={contextId}
+        activeTag={activeTag}
+        onTagClick={handleTagClick}
+        q={debouncedQuery}
       />
     </div>
   );
@@ -197,19 +267,22 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   if (error) {
     return (
       <div className="space-y-4">
-        {searchBar}
+        {filterControls}
         <ErrorBanner error={error} />
       </div>
     );
   }
 
   const hasQuery = debouncedQuery.trim().length > 0;
+  // Any active filter (text search OR tag) — distinguishes "no memories at all"
+  // from "no matches for the current filter".
+  const hasFilter = hasQuery || !!activeTag;
 
   // No memories at all in this context — keep the existing landing copy.
-  if (!loading && items.length === 0 && !hasQuery && !memoryIdParam) {
+  if (!loading && items.length === 0 && !hasFilter && !memoryIdParam) {
     return (
       <div className="space-y-4">
-        {searchBar}
+        {filterControls}
         <EmptyState
           icon={FileText}
           title={t("emptyTitle")}
@@ -219,16 +292,19 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     );
   }
 
-  // Query produced no matches — distinct copy that echoes the query so the
-  // user can tell whether they mistyped vs. ran a too-narrow filter.
-  if (!loading && items.length === 0 && hasQuery && !memoryIdParam) {
+  // Filter produced no matches — distinct copy that echoes the filter so the
+  // user can tell whether they mistyped vs. ran a too-narrow filter. Prefer
+  // the tag in the message when a tag filter is active.
+  if (!loading && items.length === 0 && hasFilter && !memoryIdParam) {
     return (
       <div className="space-y-4">
-        {searchBar}
+        {filterControls}
         <EmptyState
           icon={SearchX}
           title={t("noResultsTitle")}
-          description={t("noResultsDesc", { query: debouncedQuery })}
+          description={t("noResultsDesc", {
+            query: activeTag && !hasQuery ? activeTag : debouncedQuery,
+          })}
         />
       </div>
     );
@@ -237,7 +313,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   return (
     <>
       <div className="space-y-4">
-        {searchBar}
+        {filterControls}
         <MemoriesTable
           memories={items}
           loading={loading}
@@ -276,6 +352,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
           open={dialog.editOpen}
           onOpenChange={dialog.handleEditOpenChange}
           onSuccess={handleEditSuccess}
+          contextId={contextId}
         />
       )}
     </>

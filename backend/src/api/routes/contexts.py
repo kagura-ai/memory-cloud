@@ -741,6 +741,16 @@ async def list_context_tags(
             "a wildcard probe."
         ),
     ),
+    q: str | None = Query(
+        None,
+        max_length=200,
+        description=(
+            "Optional case-insensitive substring filter on memory.summary "
+            "(#618). When set, only tags on matching memories are aggregated, "
+            "so the tag cloud facets to the current search. Whitespace-only is "
+            "treated as no filter."
+        ),
+    ),
 ) -> ContextTagsResponse:
     """List existing tag vocabulary in a context (Issue #614).
 
@@ -772,6 +782,7 @@ async def list_context_tags(
             min_count=min_count,
             sort=sort,
             prefix=prefix,
+            q=q,
         )
     except NotFoundException as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e

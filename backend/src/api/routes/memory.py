@@ -533,6 +533,12 @@ async def list_memories(
         description="Optional case-insensitive substring filter on memory.summary. "
         "Whitespace-only values are treated as None.",
     ),
+    tags: list[str] | None = Query(
+        None,
+        description="Filter to memories having ANY of these tags (exact match). "
+        "Repeat the param to pass several: ?tags=a&tags=b. Combined with other "
+        "filters (e.g. q) by AND. Blank / whitespace-only entries are ignored.",
+    ),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
@@ -604,6 +610,19 @@ async def list_memories(
             q_escaped = q_normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             q_pattern = f"%{q_escaped}%"
 
+        # Normalize the tag filter (#618): strip blanks, drop whitespace-only
+        # entries, de-dup (order-preserving). An all-blank list collapses to
+        # None so a stray ``?tags=`` doesn't pin results to the empty set.
+        tags_normalized: list[str] | None = None
+        if tags:
+            # Bound the filter to the write-path caps (<=64 chars/tag, <=100
+            # tags): drop blank / over-length entries, de-dup (order-preserving),
+            # then cap — so an oversized query string can't reach the DB.
+            cleaned = list(dict.fromkeys(s for t in tags if (s := t.strip()) and len(s) <= 64))[
+                :100
+            ]
+            tags_normalized = cleaned or None
+
         # Build query. Exclude soft-deleted rows — POST /forget sets
         # ``deleted_at`` rather than removing the row, and the list view
         # must not surface tombstones.
@@ -623,6 +642,11 @@ async def list_memories(
         if q_pattern is not None:
             query = query.where(Memory.summary.ilike(q_pattern, escape="\\"))
 
+        # ANY-match: row has at least one of the requested tags (PG array
+        # overlap ``&&``). NULL-tags rows never overlap, so they're excluded.
+        if tags_normalized is not None:
+            query = query.where(Memory.tags.overlap(tags_normalized))
+
         # Get total count (with same filters as data query)
         count_query = select(func.count(Memory.id)).where(Memory.deleted_at.is_(None))
         if owner_filter is not None:
@@ -635,6 +659,8 @@ async def list_memories(
             count_query = count_query.where(Memory.context_id == context_id)
         if q_pattern is not None:
             count_query = count_query.where(Memory.summary.ilike(q_pattern, escape="\\"))
+        if tags_normalized is not None:
+            count_query = count_query.where(Memory.tags.overlap(tags_normalized))
         count_result = await db.execute(count_query)
         total = count_result.scalar() or 0
 
@@ -677,6 +703,7 @@ async def list_memories(
             total=total,
             q_present=q_normalized is not None,
             q_len=len(q_normalized) if q_normalized else 0,
+            tag_filter_count=len(tags_normalized) if tags_normalized else 0,
         )
 
         return MemoryListResponse(memories=memory_items, total=total, has_more=has_more)

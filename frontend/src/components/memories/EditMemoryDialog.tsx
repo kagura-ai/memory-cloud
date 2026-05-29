@@ -32,6 +32,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { TagAutocomplete } from "@/components/contexts/TagAutocomplete";
 import { Textarea } from "@/components/ui/textarea";
 import { updateMemoryById, type UpdateMemoryByIdPatch } from "@/lib/api/memory";
 import type { KnownMemoryType, MemoryReference } from "@/lib/types/memory";
@@ -41,6 +42,8 @@ interface EditMemoryDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSuccess: (updated: MemoryReference) => void;
+  /** When set, the tag field uses prefix-autocomplete against this context (#618). */
+  contextId?: string;
 }
 
 // `MemoryType` is a free string at the column level (`String(50)`), but the
@@ -77,6 +80,7 @@ export function EditMemoryDialog({
   open,
   onOpenChange,
   onSuccess,
+  contextId,
 }: EditMemoryDialogProps) {
   const t = useTranslations("contextDetail.editDialog");
   const [loading, setLoading] = useState(false);
@@ -332,12 +336,25 @@ export function EditMemoryDialog({
             </div>
             <div className="space-y-2">
               <Label htmlFor="edit-tags">{t("tagsLabel")}</Label>
-              <Input
-                id="edit-tags"
-                value={tagsCsv}
-                onChange={(e) => setTagsCsv(e.target.value)}
-                placeholder={t("tagsPlaceholder")}
-              />
+              {/* #618: prefix-autocomplete the tag field when the context is
+                  known; fall back to a plain input otherwise (backward compat). */}
+              {contextId ? (
+                <TagAutocomplete
+                  id="edit-tags"
+                  contextId={contextId}
+                  value={tagsCsv}
+                  onChange={setTagsCsv}
+                  placeholder={t("tagsPlaceholder")}
+                  ariaLabel={t("tagsLabel")}
+                />
+              ) : (
+                <Input
+                  id="edit-tags"
+                  value={tagsCsv}
+                  onChange={(e) => setTagsCsv(e.target.value)}
+                  placeholder={t("tagsPlaceholder")}
+                />
+              )}
             </div>
           </div>
 
