@@ -46,9 +46,16 @@ export interface TagCloudProps {
   activeTag: string | null;
   /** Toggle a tag as the active filter (parent clears when tag === activeTag). */
   onTagClick: (tag: string) => void;
+  /** #618: facet the cloud to tags on memories matching this search query. */
+  q?: string;
 }
 
-export function TagCloud({ contextId, activeTag, onTagClick }: TagCloudProps) {
+export function TagCloud({
+  contextId,
+  activeTag,
+  onTagClick,
+  q,
+}: TagCloudProps) {
   const t = useTranslations("contextDetail.tagCloud");
   const [sort, setSort] = useState<TagSortMode>("count");
   const [tags, setTags] = useState<ContextTagItem[]>([]);
@@ -60,7 +67,7 @@ export function TagCloud({ contextId, activeTag, onTagClick }: TagCloudProps) {
     const reqId = ++reqRef.current;
     setLoading(true);
     setError(null);
-    getContextTags(contextId, { sort, limit: TAG_LIMIT })
+    getContextTags(contextId, { sort, limit: TAG_LIMIT, q })
       .then((res) => {
         if (reqId === reqRef.current) setTags(res.tags);
       })
@@ -71,7 +78,7 @@ export function TagCloud({ contextId, activeTag, onTagClick }: TagCloudProps) {
       .finally(() => {
         if (reqId === reqRef.current) setLoading(false);
       });
-  }, [contextId, sort, t]);
+  }, [contextId, sort, q, t]);
 
   const counts = tags.map((x) => x.count);
   const min = counts.length ? Math.min(...counts) : 0;

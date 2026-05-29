@@ -42,6 +42,8 @@ export interface GetContextTagsParams {
   limit?: number;
   minCount?: number;
   sort?: TagSortMode;
+  /** #618: facet the tags to memories whose summary matches this substring. */
+  q?: string;
 }
 
 /**
@@ -60,6 +62,10 @@ export async function getContextTags(
   if (params.limit != null) sp.set("limit", String(params.limit));
   if (params.minCount != null) sp.set("min_count", String(params.minCount));
   if (params.sort) sp.set("sort", params.sort);
+  if (params.q) {
+    const trimmed = params.q.trim();
+    if (trimmed) sp.set("q", trimmed);
+  }
   const qs = sp.toString();
   return apiClient.get<ContextTagsResponse>(
     `/api/v1/contexts/${contextId}/tags${qs ? `?${qs}` : ""}`,

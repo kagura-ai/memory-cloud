@@ -76,6 +76,10 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   // committed to state.
   const requestIdRef = useRef(0);
 
+  // #618: tracks the previous debounced query so we reset an active tag only
+  // when the search actually *changes* (typing) — not on mount / shared links.
+  const prevDebouncedQueryRef = useRef(debouncedQuery);
+
   const dialog = useMemoryDetailDialog({ memoryIdParam, setMemoryIdParam });
 
   // Issue #618: a single active tag filter, URL-driven (?tag=) so it's
@@ -126,6 +130,14 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
       params.set(SEARCH_PARAM, trimmed);
     } else {
       params.delete(SEARCH_PARAM);
+    }
+    // #618: a *changed* search resets the active tag so a new query doesn't
+    // silently AND with a stale tag (the cloud re-facets to the query). Mount
+    // / shared-link loads (query unchanged) keep any ?tag intact.
+    const queryChanged = debouncedQuery !== prevDebouncedQueryRef.current;
+    prevDebouncedQueryRef.current = debouncedQuery;
+    if (trimmed && queryChanged) {
+      params.delete(TAG_PARAM);
     }
     const next = params.toString();
     const current = searchParams.toString();
@@ -244,6 +256,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         contextId={contextId}
         activeTag={activeTag}
         onTagClick={handleTagClick}
+        q={debouncedQuery}
       />
     </div>
   );

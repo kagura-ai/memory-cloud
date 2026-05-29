@@ -1099,6 +1099,7 @@ class ContextService:
         min_count: int = 1,
         sort: TagSortMode = "count",
         prefix: str = "",
+        q: str | None = None,
     ) -> dict:
         """Aggregate tags across non-deleted memories in a context (Issue #614).
 
@@ -1160,6 +1161,16 @@ class ContextService:
         else:
             prefix_pattern = ""
 
+        # #618: optional ``q`` facets the cloud to tags on memories whose summary
+        # matches (same substring semantics as GET /memory/list?q). Escape
+        # #/%/_ to literals so it can't be used as a wildcard probe.
+        q_clean = (q or "").strip()
+        if q_clean:
+            eq = q_clean.replace("#", "##").replace("%", "#%").replace("_", "#_")
+            q_pattern = f"%{eq}%"
+        else:
+            q_pattern = ""
+
         # sort is allow-list validated above; safe to interpolate.
         sort_clause = {
             "count": "ORDER BY cnt DESC, tag ASC",
@@ -1179,6 +1190,7 @@ class ContextService:
                   AND deleted_at IS NULL
                   AND tags IS NOT NULL
                   AND cardinality(tags) > 0
+                  AND (:q_pattern = '' OR summary ILIKE :q_pattern ESCAPE '#')
             ),
             tag_rows AS (
                 -- DISTINCT id, tag collapses intra-array duplicates so a
@@ -1210,6 +1222,7 @@ class ContextService:
                 "workspace_id": str(context.workspace_id),
                 "context_id": str(context_id),
                 "prefix_pattern": prefix_pattern,
+                "q_pattern": q_pattern,
                 "min_count": min_count,
                 "limit": limit,
             },
