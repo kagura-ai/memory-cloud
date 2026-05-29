@@ -129,10 +129,6 @@ class TestAuthEndpoints:
         response = client.get("/api/v1/admin/users")
         assert response.status_code in (401, 403)
 
-    def test_usage_requires_auth(self, client):
-        response = client.get("/api/v1/usage/current")
-        assert response.status_code in (401, 403)
-
 
 class TestSystemEndpoints:
     """Test system info endpoints."""
@@ -188,8 +184,6 @@ class TestAllEndpointsExercised:
             ("POST", "/api/v1/oauth/clients"),
             ("GET", "/api/v1/admin/users"),
             ("GET", "/api/v1/admin/plans/workspaces"),
-            ("GET", "/api/v1/usage/current"),
-            ("GET", "/api/v1/usage/history"),
             ("GET", "/api/v1/mcp/tools"),
             ("GET", "/api/v1/mcp/status"),
             ("GET", "/api/v1/config/external-keys"),

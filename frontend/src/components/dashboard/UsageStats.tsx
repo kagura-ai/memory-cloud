@@ -35,7 +35,6 @@ import {
   CartesianGrid,
 } from "recharts";
 import { Brain, Zap, TrendingUp, XCircle, Moon, Briefcase } from "lucide-react";
-import { apiClient } from "@/lib/api";
 import type {
   PlanLimits,
   SleepContextsUsage,
@@ -46,7 +45,6 @@ import {
   getWorkspaceUsageHistory,
   getWorkspaceUsageBreakdown,
 } from "@/lib/api/workspaces";
-import { useMemoryContext } from "@/contexts/MemoryContextContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatDate } from "@/lib/utils/datetime";
@@ -129,16 +127,14 @@ export interface UsageStatsRef {
 }
 
 export interface UsageStatsProps {
-  scope?: "user" | "workspace"; // Default: 'user' (backward compatible)
   className?: string;
 }
 
 export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
-  ({ scope = "user", className }, ref) => {
+  ({ className }, ref) => {
     const t = useTranslations("usageStats");
 
-    const { contextId } = useMemoryContext(); // For user-scoped (context)
-    const { currentWorkspaceId } = useWorkspace(); // For workspace-scoped
+    const { currentWorkspaceId } = useWorkspace();
     const { user } = useAuth();
     const locale = useLocale();
     const [currentUsage, setCurrentUsage] = useState<UsageCurrentData | null>(
@@ -184,21 +180,11 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
       try {
         setIsLoading(true);
 
-        // Use different API endpoints based on scope
-        const [current, hist, brkdwn] =
-          scope === "workspace"
-            ? await Promise.all([
-                getWorkspaceUsageCurrent(),
-                getWorkspaceUsageHistory(7),
-                getWorkspaceUsageBreakdown(30),
-              ])
-            : await Promise.all([
-                apiClient.get<UsageCurrentData>("/api/v1/usage/current"),
-                apiClient.get<UsageHistory>("/api/v1/usage/history?days=7"),
-                apiClient.get<UsageBreakdown>(
-                  "/api/v1/usage/breakdown?days=30",
-                ),
-              ]);
+        const [current, hist, brkdwn] = await Promise.all([
+          getWorkspaceUsageCurrent(),
+          getWorkspaceUsageHistory(7),
+          getWorkspaceUsageBreakdown(30),
+        ]);
 
         setCurrentUsage(current);
         setHistory(hist);
@@ -218,17 +204,12 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
     }));
 
     useEffect(() => {
-      // Re-fetch when context changes (context for user scope, workspace for workspace scope)
-      const shouldFetch =
-        scope === "workspace"
-          ? currentWorkspaceId !== null
-          : contextId !== null;
-
-      if (shouldFetch) {
+      // Re-fetch when the active workspace changes.
+      if (currentWorkspaceId !== null) {
         fetchAllStats();
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [scope === "workspace" ? currentWorkspaceId : contextId, scope]);
+    }, [currentWorkspaceId]);
 
     if (isLoading) {
       return (
@@ -268,8 +249,8 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
         {/* Current Usage Cards */}
         <div>
           <h2 className="text-2xl font-bold mb-4">
-            {scope === "workspace" ? t("usage") : t("currentUsage")} -{" "}
-            {currentUsage.plan.plan_name.toUpperCase()} {t("plan")}
+            {t("usage")} - {currentUsage.plan.plan_name.toUpperCase()}{" "}
+            {t("plan")}
           </h2>
 
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">

@@ -4,8 +4,6 @@
  * Issue #48: Usage statistics API types
  */
 
-import { apiClient } from "./base";
-
 export interface PlanLimits {
   plan_name: string;
   memory_limit: number;
@@ -109,15 +107,4 @@ export interface UsageBreakdownResponse {
   by_endpoint: EndpointUsage[];
   total_requests: number;
   period_days: number;
-}
-
-/**
- * Fetch the caller's user-scoped current usage. Wraps the
- * `/api/v1/usage/current` endpoint so the URL and response type are
- * not duplicated at each call site. Returns the full envelope (plan +
- * usage + per-metric warnings); read ``response.usage.workspaces.limit``
- * for the workspace cap, etc.
- */
-export async function getCurrentUsage(): Promise<UsageCurrentResponse> {
-  return apiClient.get<UsageCurrentResponse>("/api/v1/usage/current");
 }

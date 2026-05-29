@@ -266,7 +266,7 @@ export default function WorkspaceStatsPage() {
             currentWorkspaceId={currentWorkspaceId}
           />
 
-          <UsageStats scope="workspace" />
+          <UsageStats />
         </>
       ) : null}
     </PageContainer>
