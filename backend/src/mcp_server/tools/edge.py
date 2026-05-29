@@ -105,9 +105,19 @@ def _validate_edge_endpoints(
 
 
 def _parse_float(
-    value: Any, name: str, min_val: float, max_val: float, default: float
+    value: Any, name: str, min_val: float, max_val: float, default: float | None = None
 ) -> tuple[float | None, list[TextContent] | None]:
-    """Parse and validate a float parameter."""
+    """Parse and validate a float parameter.
+
+    ``default`` is the fallback returned when ``value is None``. Pass it only
+    at call sites that are actually reachable with ``value is None`` (an
+    unguarded ``args.get(...)``). At a site already guarded by
+    ``if value is not None`` the fallback is unreachable, so omit it
+    (``default=None``) rather than passing a misleading literal — see
+    ``handle_update_edge``. ``default=None`` means "no fallback; the caller
+    guarantees ``value`` is not None", in which case the ``(None, None)``
+    return is unreachable.
+    """
     if value is None:
         return default, None
     try:
@@ -322,7 +332,12 @@ async def handle_update_edge(
 
     new_weight = None
     if new_weight_raw is not None:
-        new_weight, error = _parse_float(new_weight_raw, "weight", 0.0, 3.0, 0.5)
+        # Guarded by the `is not None` check above, so _parse_float's None
+        # fallback is unreachable here — omit it. (Contrast create_edge, which
+        # parses an unguarded args.get("weight") and passes an explicit 1.0
+        # fallback, #814.) Omitting weight from update_edge preserves the
+        # edge's current weight; pass edge_type to make a no-weight update.
+        new_weight, error = _parse_float(new_weight_raw, "weight", 0.0, 3.0)
         if error:
             return error
 
