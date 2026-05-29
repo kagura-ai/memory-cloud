@@ -196,7 +196,7 @@ describe("UsageStats — sleep-enabled contexts card", () => {
     mockGetWorkspaceUsageCurrent.mockResolvedValue(
       makeCurrentResponse({ usage: makeUsage({ sleep_contexts: null }) }),
     );
-    render(<UsageStats scope="workspace" />);
+    render(<UsageStats />);
 
     // Wait for the dashboard body to land (memories card is always present).
     await screen.findByText("memories");
@@ -211,7 +211,7 @@ describe("UsageStats — sleep-enabled contexts card", () => {
         }),
       }),
     );
-    render(<UsageStats scope="workspace" />);
+    render(<UsageStats />);
 
     await screen.findByText("sleepEnabledContexts");
     // "1 / 3" rendered. Use a function matcher because the text spans
@@ -229,7 +229,7 @@ describe("UsageStats — sleep-enabled contexts card", () => {
         }),
       }),
     );
-    render(<UsageStats scope="workspace" />);
+    render(<UsageStats />);
 
     // The local shadcn Progress (src/components/ui/progress.tsx) renders
     // the percentage as `transform: translateX(-${100-pct}%)` on an
@@ -261,7 +261,7 @@ describe("UsageStats — sleep-enabled contexts card", () => {
         }),
       }),
     );
-    render(<UsageStats scope="workspace" />);
+    render(<UsageStats />);
 
     await screen.findByText("sleepContextsWithAddon:+2");
     expect(screen.queryByText("sleepContextsTier")).not.toBeInTheDocument();
@@ -275,7 +275,7 @@ describe("UsageStats — sleep-enabled contexts card", () => {
         }),
       }),
     );
-    render(<UsageStats scope="workspace" />);
+    render(<UsageStats />);
 
     await screen.findByText("sleepContextsTier");
     expect(
@@ -295,7 +295,7 @@ describe("UsageStats — sleep-enabled contexts card", () => {
         }),
       }),
     );
-    render(<UsageStats scope="workspace" />);
+    render(<UsageStats />);
 
     await screen.findByText("sleepContextsTier");
     expect(
@@ -309,7 +309,7 @@ describe("UsageStats — sleep-enabled contexts card", () => {
 describe("UsageStats — primary usage cards", () => {
   it("renders Memory / API Today / API This Week cards with the right numbers", async () => {
     mockGetWorkspaceUsageCurrent.mockResolvedValue(makeCurrentResponse());
-    render(<UsageStats scope="workspace" />);
+    render(<UsageStats />);
 
     // Card titles
     await screen.findByText("memories");
@@ -345,7 +345,7 @@ describe("UsageStats — loading and error states", () => {
       }),
     );
 
-    render(<UsageStats scope="workspace" />);
+    render(<UsageStats />);
 
     // Dashboard cards must NOT have rendered while the fetch is in flight.
     expect(screen.queryByText("memories")).not.toBeInTheDocument();
@@ -360,7 +360,7 @@ describe("UsageStats — loading and error states", () => {
 
   it("renders the error Alert when the current-usage fetch rejects", async () => {
     mockGetWorkspaceUsageCurrent.mockRejectedValue(new Error("boom"));
-    render(<UsageStats scope="workspace" />);
+    render(<UsageStats />);
 
     // Error message from the rejected promise lands in the Alert body.
     // The component prefers err.message over the fallback "failedToLoad" key.

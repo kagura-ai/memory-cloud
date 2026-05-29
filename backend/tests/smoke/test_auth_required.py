@@ -50,9 +50,7 @@ AUTH_REQUIRED_ENDPOINTS = [
     # MCP tools
     ("GET", "/api/v1/mcp/tools"),
     ("GET", "/api/v1/mcp/status"),
-    # Usage
-    ("GET", "/api/v1/usage/current"),
-    ("GET", "/api/v1/usage/history"),
+    # Usage: user-scoped /usage/* removed in #810 (use /workspace/usage/*).
 ]
 
 

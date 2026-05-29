@@ -212,7 +212,6 @@ openapi_tags = [
     {"name": "system-admins", "description": "Admin: system administrator management"},
     # System
     {"name": "config", "description": "Environment configuration management (admin)"},
-    {"name": "usage", "description": "Usage statistics"},
     {"name": "system", "description": "System health and info"},
     {"name": "well-known", "description": "OAuth2 discovery endpoints"},
 ]
@@ -415,7 +414,6 @@ from api.routes import (  # noqa: E402
     sleep_reports,  # Issue #179: Sleep Report admin UI
     system,
     system_admins,
-    usage,
     users,
     well_known,
     workspace,
@@ -534,8 +532,10 @@ app.include_router(public_search.router, prefix="/api/v1")
 # Graph routes (Issue #46 Phase 5 - Neural Memory stats)
 app.include_router(graph.router, prefix="/api/v1")
 
-# Usage routes (Issue #48 - Usage Statistics and Plan Limits)
-app.include_router(usage.router, prefix="/api/v1")
+# Usage routes removed in #810: the user-scoped /usage/{current,history,breakdown}
+# endpoints were orphaned after #668 dropped per-user plans and were superseded by
+# the workspace-scoped /workspace/usage/* twins. The api.routes.usage module is
+# retained only for the shared response models + helpers that workspace.py imports.
 
 # System routes
 app.include_router(system.router, prefix="/api/v1")

@@ -203,18 +203,9 @@ class TestUserRoutes:
         assert response.status_code in (200, 404)
 
 
-class TestUsageRoutes:
-    """Test usage API routes."""
-
-    def test_usage_current(self, authed_client):
-        """GET /api/v1/usage/current returns usage data."""
-        response = authed_client.get("/api/v1/usage/current")
-        assert response.status_code in (200, 404, 422)
-
-    def test_usage_history(self, authed_client):
-        """GET /api/v1/usage/history returns history."""
-        response = authed_client.get("/api/v1/usage/history")
-        assert response.status_code in (200, 404, 422)
+# TestUsageRoutes removed in #810: user-scoped /usage/{current,history} endpoints
+# were deleted (superseded by /workspace/usage/*). Workspace usage coverage lives
+# in test_usage_workspaces.py and the workspace route tests.
 
 
 class TestAdminRoutes:

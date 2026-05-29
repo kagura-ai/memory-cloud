@@ -1,4 +1,8 @@
-"""Tests for the user-level workspace cap field in /api/v1/usage/current.
+"""Tests for the user-level workspace cap built by ``_build_workspaces_usage``.
+
+This helper feeds the workspace-scoped ``/workspace/usage/current`` endpoint
+(``workspace.py``). It originally also fed the user-scoped ``/usage/current``,
+removed in #810; the helper and these unit tests are unchanged by that removal.
 
 Issue #675 (epic #674 sub-A): cap is now ``1 + users.workspace_slot_bonus``.
 The helper ``_build_workspaces_usage`` issues a single SELECT via
