@@ -359,6 +359,24 @@ export function AnalysesTabPanel({
   // even while the selected run is still loading).
   const viewingPastRun = !!selectedRunId && selectedRunId !== latestRunId;
 
+  // Localized status label for the non-succeeded past-run empty state — reuse
+  // the history table's status.* keys so it isn't a raw English enum dropped
+  // into the ja sentence.
+  const displayRunStatusLabel = !displayRun
+    ? ""
+    : displayRun.status === "cancelled"
+      ? t("history.status.cancelled", {
+          reason: displayRun.cancellation_reason ?? "",
+        })
+      : ["running", "succeeded", "failed"].includes(displayRun.status)
+        ? t(
+            `history.status.${displayRun.status}` as
+              | "history.status.running"
+              | "history.status.succeeded"
+              | "history.status.failed",
+          )
+        : t("history.status.unknown", { raw: displayRun.status });
+
   const allowedClusterIndexes = useMemo(
     () => displayClusters.map((c) => c.cluster_index),
     [displayClusters],
@@ -566,7 +584,7 @@ export function AnalysesTabPanel({
             icon={History}
             title={t("states.pastRunEmpty.title")}
             description={t("states.pastRunEmpty.description", {
-              status: displayRun?.status ?? "",
+              status: displayRunStatusLabel,
             })}
           />
         ) : (
@@ -611,7 +629,7 @@ export function AnalysesTabPanel({
               runs={state.history}
               total={state.history.length}
               activeRunId={state.activeRun?.run_id ?? null}
-              selectedRunId={displayRun?.run_id ?? null}
+              selectedRunId={selectedView?.run.run_id ?? null}
               onSelectRun={setSelectedRunId}
             />
             <PropertyStats
