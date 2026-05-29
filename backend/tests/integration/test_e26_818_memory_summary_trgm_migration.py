@@ -104,8 +104,15 @@ def test_e26_upgrade_creates_trgm_index_and_extension() -> None:
 
         with engine.connect() as conn:
             conn.execute(text("SET enable_seqscan = off"))
+            # Mirror the route's exact predicate shape: it builds
+            # ``Memory.summary.ilike(q_pattern, escape="\\")`` which compiles
+            # with a trailing ``ESCAPE '\'``. Including it here guards that the
+            # trigram index stays eligible for the production predicate, not
+            # just a bare ILIKE.
             plan = "\n".join(
-                conn.execute(text("EXPLAIN SELECT id FROM memories WHERE summary ILIKE '%auth%'"))
+                conn.execute(
+                    text(r"EXPLAIN SELECT id FROM memories WHERE summary ILIKE '%auth%' ESCAPE '\'")
+                )
                 .scalars()
                 .all()
             )
