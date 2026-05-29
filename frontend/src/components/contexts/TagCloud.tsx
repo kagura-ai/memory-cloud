@@ -23,6 +23,7 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
+import { LoadingState } from "@/components/common/LoadingState";
 
 const TAG_LIMIT = 50;
 // Discrete sqrt-scaled buckets. Counts are long-tailed, so sqrt compresses the
@@ -94,14 +95,8 @@ export function TagCloud({ contextId, activeTag, onTagClick }: TagCloudProps) {
       {error ? (
         <ErrorBanner error={error} />
       ) : loading ? (
-        <div className="flex flex-wrap gap-2" aria-hidden="true">
-          {Array.from({ length: 12 }).map((_, i) => (
-            <span
-              key={i}
-              className="h-6 w-16 animate-pulse rounded bg-gray-100 dark:bg-gray-800"
-            />
-          ))}
-        </div>
+        // Shared skeleton primitive (frontend rules: never hand-roll skeletons).
+        <LoadingState lines={2} />
       ) : tags.length === 0 ? (
         <EmptyState
           compact
