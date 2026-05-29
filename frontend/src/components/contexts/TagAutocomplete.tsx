@@ -116,6 +116,11 @@ export function TagAutocomplete({
         role="combobox"
         aria-expanded={open}
         aria-controls={listId}
+        aria-activedescendant={
+          open && suggestions.length > 0
+            ? `${listId}-opt-${highlight}`
+            : undefined
+        }
         aria-autocomplete="list"
         autoComplete="off"
         onChange={(e) => onChange(e.target.value)}
@@ -136,8 +141,10 @@ export function TagAutocomplete({
             setOpen(false);
           }
         }}
-        // Delay close so a mouse-down on an option still registers.
-        onBlur={() => window.setTimeout(() => setOpen(false), 120)}
+        // Close immediately — option clicks use onMouseDown + preventDefault
+        // (below) so they don't blur the input; a delayed close would otherwise
+        // risk a setState after unmount when the dialog closes while focused.
+        onBlur={() => setOpen(false)}
       />
       {open && suggestions.length > 0 && (
         <ul
@@ -149,6 +156,7 @@ export function TagAutocomplete({
           {suggestions.map((s, i) => (
             <li
               key={s.tag}
+              id={`${listId}-opt-${i}`}
               role="option"
               aria-selected={i === highlight}
               onMouseDown={(e) => {
