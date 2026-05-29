@@ -1240,25 +1240,37 @@ class WorkspaceService:
         if not workspace:
             raise NotFoundException(f"Workspace {workspace_id} not found")
 
-        # Get workspace member user_ids (CRITICAL: workspace boundary via members)
-        members_stmt = select(WorkspaceMember.user_id).where(
-            WorkspaceMember.workspace_id == workspace_id
+        # Workspace boundary via the workspace's own contexts (Issue #822).
+        # Scoping by membership (``Memory.user_id.in_(member_ids)``) leaked
+        # other workspaces' memories for users who belong to multiple
+        # workspaces. Scope by ``Context.workspace_id`` instead — matching the
+        # stats-card semantics in ``api/routes/workspace.py`` — because
+        # ``Memory.workspace_id`` is nullable and would under-count legacy rows.
+        contexts_stmt = select(Context.id).where(
+            Context.workspace_id == workspace_id,
+            Context.deleted_at.is_(None),
         )
-        members_result = await self.db.execute(members_stmt)
-        member_ids = [row[0] for row in members_result.all()]
+        contexts_result = await self.db.execute(contexts_stmt)
+        workspace_context_ids = [row[0] for row in contexts_result.all()]
+
+        # An optional ``context_id`` filter must belong to this workspace —
+        # otherwise a foreign context_id could surface another workspace's
+        # memories through this endpoint.
+        if context_id is not None:
+            scoped_context_ids = [context_id] if context_id in workspace_context_ids else []
+        else:
+            scoped_context_ids = workspace_context_ids
 
         # Aggregate daily memory creation counts
-        if member_ids:
+        if scoped_context_ids:
             # Issue #275 Performance: Use datetime range filter (idx_created_at)
             # instead of func.date() which prevents index usage
             conditions = [
-                Memory.user_id.in_(member_ids),
+                Memory.context_id.in_(scoped_context_ids),
                 Memory.deleted_at.is_(None),  # CRITICAL: Exclude soft-deleted
                 Memory.created_at >= start_datetime,  # ✅ Uses idx_created_at
                 Memory.created_at <= end_datetime,
             ]
-            if context_id:
-                conditions.append(Memory.context_id == context_id)
 
             daily_counts_stmt = (
                 select(
