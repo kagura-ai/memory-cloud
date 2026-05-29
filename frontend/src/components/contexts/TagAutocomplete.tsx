@@ -59,6 +59,9 @@ export function TagAutocomplete({
   useEffect(() => {
     const trimmed = token.trim();
     if (trimmed.length < 1) {
+      // Invalidate any in-flight request (bump the id) so a prior fetch that
+      // resolves after the token was cleared can't re-open the listbox.
+      reqRef.current++;
       setSuggestions([]);
       setOpen(false);
       return;

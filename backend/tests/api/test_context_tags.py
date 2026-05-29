@@ -138,6 +138,7 @@ class TestListContextTagsRoute:
             min_count=3,
             sort="recent",
             prefix="auth",
+            q="deploy",
         )
 
         mock_service.aggregate_tags.assert_awaited_once_with(
@@ -147,4 +148,5 @@ class TestListContextTagsRoute:
             min_count=3,
             sort="recent",
             prefix="auth",
+            q="deploy",
         )
