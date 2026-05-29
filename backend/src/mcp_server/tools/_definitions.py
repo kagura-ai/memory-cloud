@@ -555,7 +555,12 @@ Identify edges using source_id + target_id (from list_edges or explore results).
                     },
                     "weight": {
                         "type": "number",
-                        "description": "New edge weight 0.0-3.0.",
+                        "description": (
+                            "New edge weight 0.0-3.0. Omit to preserve the "
+                            "edge's current weight (pass edge_type to make a "
+                            "type-only update). There is no default — an "
+                            "omitted weight is left unchanged, not reset."
+                        ),
                     },
                     "edge_type": {
                         "type": "string",

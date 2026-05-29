@@ -331,3 +331,110 @@ class TestCreateEdgeOriginAndWeight:
         create_edge = next(t for t in get_tool_definitions() if t["name"] == "create_edge")
         weight_schema = create_edge["inputSchema"]["properties"]["weight"]
         assert weight_schema["default"] == 1.0
+
+
+class TestUpdateEdgeWeightNoDefault:
+    """Issue #816: update_edge has NO weight default. Omitting weight preserves
+    the edge's current value, the schema declares no default, and the guarded
+    `_parse_float` call must not carry the unreachable 0.5 fallback that drifted
+    from create_edge's 1.0 (#814)."""
+
+    @pytest.fixture
+    def user_id(self):
+        return "test_user_816"
+
+    @pytest.fixture
+    def workspace_id(self):
+        return uuid4()
+
+    @pytest.fixture
+    def context_id(self):
+        return uuid4()
+
+    @pytest.mark.asyncio
+    async def test_omitted_weight_preserves_current(self, user_id, workspace_id, context_id):
+        """edge_type-only update (weight omitted) leaves the existing weight intact.
+
+        Pins the documented contract: an omitted ``weight`` is NOT reset to any
+        handler default — the repo is called with the existing edge's weight, so
+        a type-only update never silently rewrites weight.
+        """
+        src_id = uuid4()
+        dst_id = uuid4()
+        existing = _mock_edge(src_id, dst_id, edge_type="neural_association", weight=0.5)
+        post_update = _mock_edge(src_id, dst_id, edge_type="related_to", weight=0.5)
+
+        mock_db = AsyncMock()
+        mock_db.commit = AsyncMock()
+        mock_db.rollback = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        mock_repo = MagicMock()
+        mock_repo.get_edge = AsyncMock(return_value=existing)
+        mock_repo.create_or_update_edge = AsyncMock(return_value=post_update)
+
+        mock_ctx = MagicMock()
+        mock_ctx.id = context_id
+        mock_ctx.workspace_id = workspace_id
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "mcp_server.tools.edge._resolve_context",
+                new_callable=AsyncMock,
+                return_value=mock_ctx,
+            ),
+            patch(
+                "mcp_server.tools.edge._check_viewer_permission",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "mcp_server.tools.edge._log_tool_usage",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await handle_update_edge(
+                {
+                    "source_id": str(src_id),
+                    "target_id": str(dst_id),
+                    "edge_type": "related_to",
+                    # weight intentionally omitted
+                    "context_id": str(context_id),
+                },
+                user_id,
+                workspace_id,
+            )
+
+        data = json.loads(result[0].text)
+        assert data["status"] == "success"
+        # Repo MUST be called with the EXISTING weight (preserved), not a default.
+        kwargs = mock_repo.create_or_update_edge.await_args.kwargs
+        assert kwargs["weight"] == 0.5
+        assert kwargs["edge_type"] == "related_to"
+
+    def test_schema_has_no_weight_default(self):
+        """update_edge.weight has NO schema default — the load-bearing fact behind
+        "omitting weight preserves current value". Contrast create_edge.weight,
+        which pins default=1.0 (test_schema_default_matches_handler_default)."""
+        update_edge = next(t for t in get_tool_definitions() if t["name"] == "update_edge")
+        weight_schema = update_edge["inputSchema"]["properties"]["weight"]
+        assert "default" not in weight_schema
+
+    def test_parse_float_no_fallback_when_default_omitted(self):
+        """`_parse_float` with no ``default`` returns (None, None) on None input.
+
+        This pins the contract that lets the guarded update_edge call site omit a
+        fallback (`_parse_float(new_weight_raw, "weight", 0.0, 3.0)`) instead of
+        passing the unreachable 0.5. A provided value still parses normally.
+        """
+        from mcp_server.tools.edge import _parse_float
+
+        assert _parse_float(None, "weight", 0.0, 3.0) == (None, None)
+        assert _parse_float(0.8, "weight", 0.0, 3.0) == (0.8, None)
