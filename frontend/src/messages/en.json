@@ -3063,7 +3063,24 @@
         "label": "Search"
       },
       "noResultsTitle": "No results",
-      "noResultsDesc": "No memories match \"{query}\"."
+      "noResultsDesc": "No memories match \"{query}\".",
+      "filter": {
+        "activeLabel": "Filtered by tag:",
+        "clearTag": "Clear tag filter: {tag}"
+      }
+    },
+    "tagCloud": {
+      "title": "Tags",
+      "ariaLabel": "Tag cloud — click a tag to filter memories",
+      "sortCount": "Most used",
+      "sortRecent": "Recent",
+      "emptyTitle": "No tags yet",
+      "emptyDesc": "Tags appear here as memories are added to this context.",
+      "tagWithCount": "{tag} ({count} memories)",
+      "loadFailed": "Failed to load tags"
+    },
+    "tagAutocomplete": {
+      "suggestionsLabel": "Tag suggestions"
     },
     "memoriesTable": {
       "loading": "Loading memories...",

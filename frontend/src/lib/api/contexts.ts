@@ -17,6 +17,55 @@ import type {
 // Re-export types for consumers
 export type { Context, ContextListResponse, ContextStats };
 
+// ---------------------------------------------------------------------------
+// Tags (#614 / #618): GET /contexts/{id}/tags drives the tag cloud + autocomplete
+// ---------------------------------------------------------------------------
+
+export type TagSortMode = "count" | "recent" | "alpha";
+
+export interface ContextTagItem {
+  tag: string;
+  count: number;
+  /** ISO-8601 UTC; present on list_tags (#614). */
+  last_used_at?: string | null;
+  sample_summary?: string | null;
+}
+
+export interface ContextTagsResponse {
+  context_id: string;
+  tags: ContextTagItem[];
+  total: number;
+}
+
+export interface GetContextTagsParams {
+  prefix?: string;
+  limit?: number;
+  minCount?: number;
+  sort?: TagSortMode;
+}
+
+/**
+ * List a context's tags with counts (#614). Powers the TagCloud (sort=count)
+ * and TagAutocomplete (prefix + sort=count) on the context detail page (#618).
+ */
+export async function getContextTags(
+  contextId: string,
+  params: GetContextTagsParams = {},
+): Promise<ContextTagsResponse> {
+  const sp = new URLSearchParams();
+  if (params.prefix) {
+    const trimmed = params.prefix.trim();
+    if (trimmed) sp.set("prefix", trimmed);
+  }
+  if (params.limit != null) sp.set("limit", String(params.limit));
+  if (params.minCount != null) sp.set("min_count", String(params.minCount));
+  if (params.sort) sp.set("sort", params.sort);
+  const qs = sp.toString();
+  return apiClient.get<ContextTagsResponse>(
+    `/api/v1/contexts/${contextId}/tags${qs ? `?${qs}` : ""}`,
+  );
+}
+
 /**
  * Get all contexts for the current user
  */

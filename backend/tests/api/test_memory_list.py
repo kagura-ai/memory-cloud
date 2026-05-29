@@ -76,6 +76,7 @@ class TestListMemoriesContextFilter:
                 type=None,
                 context_id=None,
                 q=None,
+                tags=None,
                 limit=50,
                 offset=0,
             )
@@ -117,6 +118,7 @@ class TestListMemoriesContextFilter:
                 type=None,
                 context_id=context_id,
                 q=None,
+                tags=None,
                 limit=50,
                 offset=0,
             )
@@ -169,6 +171,7 @@ class TestListMemoriesContextFilter:
                 type=None,
                 context_id=context_id,
                 q=None,
+                tags=None,
                 limit=50,
                 offset=0,
             )
@@ -213,6 +216,7 @@ class TestListMemoriesContextFilter:
                 type=None,
                 context_id=None,
                 q=None,
+                tags=None,
                 limit=50,
                 offset=0,
             )
@@ -234,6 +238,7 @@ class TestListMemoriesContextFilter:
                 type=None,
                 context_id=None,
                 q=None,
+                tags=None,
                 limit=50,
                 offset=0,
             )
@@ -297,6 +302,7 @@ class TestListMemoriesQueryFilter:
                 type=None,
                 context_id=None,
                 q=None,
+                tags=None,
                 limit=50,
                 offset=0,
             )
@@ -323,6 +329,7 @@ class TestListMemoriesQueryFilter:
                 type=None,
                 context_id=None,
                 q="hello",
+                tags=None,
                 limit=50,
                 offset=0,
             )
@@ -348,6 +355,7 @@ class TestListMemoriesQueryFilter:
                 type=None,
                 context_id=None,
                 q="   ",
+                tags=None,
                 limit=50,
                 offset=0,
             )
@@ -386,6 +394,7 @@ class TestListMemoriesQueryFilter:
                 type=None,
                 context_id=context_id,
                 q="found",
+                tags=None,
                 limit=50,
                 offset=0,
             )
@@ -424,6 +433,7 @@ class TestListMemoriesQueryFilter:
                 type=None,
                 context_id=None,
                 q="  hello  ",
+                tags=None,
                 limit=50,
                 offset=0,
             )
@@ -455,6 +465,7 @@ class TestListMemoriesQueryFilter:
                 type=None,
                 context_id=None,
                 q="50%_\\bar",
+                tags=None,
                 limit=50,
                 offset=0,
             )
@@ -471,4 +482,84 @@ class TestListMemoriesQueryFilter:
             # interprets the backslash-prefixed metacharacters correctly.
             assert "ESCAPE '\\'" in literal_sql, (
                 f"ESCAPE clause missing (call_index={call_index}): {literal_sql}"
+            )
+
+
+class TestListMemoriesTagsFilter:
+    """Issue #618: ANY-match ``tags`` filter on GET /memory/list."""
+
+    @pytest.mark.asyncio
+    async def test_tags_filter_applied_to_both_queries(self):
+        """When tags are given, the array-overlap predicate is added to the data
+        AND count queries (so the total reflects the filter)."""
+        mem = _mock_memory_row()
+        mock_db = _db_with_rows(total=1, rows=[mem])
+
+        response = await list_memories(
+            user=MOCK_USER,
+            db=mock_db,
+            scope=None,
+            type=None,
+            context_id=None,
+            q=None,
+            tags=["python", "auth"],
+            limit=50,
+            offset=0,
+        )
+
+        assert response.total == 1
+        for call_index in (0, 1):
+            sql = _where_sql(mock_db, call_index)
+            # Array overlap (&&) on memories.tags — ANY-match.
+            assert "tags" in sql and "&&" in sql, (
+                f"tags overlap predicate missing (call_index={call_index}): {sql}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_no_tags_skips_filter(self):
+        """Omitting tags leaves the tags predicate out of both queries."""
+        mem = _mock_memory_row()
+        mock_db = _db_with_rows(total=1, rows=[mem])
+
+        await list_memories(
+            user=MOCK_USER,
+            db=mock_db,
+            scope=None,
+            type=None,
+            context_id=None,
+            q=None,
+            tags=None,
+            limit=50,
+            offset=0,
+        )
+
+        for call_index in (0, 1):
+            sql = _where_sql(mock_db, call_index)
+            assert "&&" not in sql, (
+                f"tags overlap unexpectedly present when omitted (call_index={call_index}): {sql}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_blank_tags_ignored(self):
+        """Whitespace-only / empty tag entries normalize to no filter, so a stray
+        ``?tags=`` does not pin results to the empty set."""
+        mem = _mock_memory_row()
+        mock_db = _db_with_rows(total=1, rows=[mem])
+
+        await list_memories(
+            user=MOCK_USER,
+            db=mock_db,
+            scope=None,
+            type=None,
+            context_id=None,
+            q=None,
+            tags=["   ", ""],
+            limit=50,
+            offset=0,
+        )
+
+        for call_index in (0, 1):
+            sql = _where_sql(mock_db, call_index)
+            assert "&&" not in sql, (
+                f"blank tags should be ignored (call_index={call_index}): {sql}"
             )
