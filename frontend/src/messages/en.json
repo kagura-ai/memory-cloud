@@ -3455,6 +3455,8 @@
     },
     "pastRun": {
       "banner": "Viewing a past run from {when} — not the latest.",
+      "generic": "Viewing a past run — not the latest.",
+      "loading": "Loading the selected run…",
       "backToLatest": "Back to latest"
     },
     "modal": {

@@ -3455,6 +3455,8 @@
     },
     "pastRun": {
       "banner": "{when} の過去 run を表示中 — 最新ではありません。",
+      "generic": "過去 run を表示中 — 最新ではありません。",
+      "loading": "選択した run を読み込み中…",
       "backToLatest": "最新に戻る"
     },
     "modal": {
