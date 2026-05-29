@@ -55,13 +55,18 @@ describe("TagAutocomplete (#618)", () => {
     expect(screen.queryByRole("option", { name: /auth/ })).toBeNull();
   });
 
-  it("does not query or open the listbox for an empty trailing token", async () => {
-    render(
-      <TagAutocomplete contextId="c1" value="auth, " onChange={vi.fn()} />,
-    );
-    // Give any (incorrect) debounce a chance to fire.
-    await new Promise((r) => setTimeout(r, 400));
-    expect(getContextTags).not.toHaveBeenCalled();
-    expect(screen.queryByRole("listbox")).toBeNull();
+  it("does not query or open the listbox for an empty trailing token", () => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <TagAutocomplete contextId="c1" value="auth, " onChange={vi.fn()} />,
+      );
+      // Advance well past the debounce deterministically — no real sleep.
+      vi.advanceTimersByTime(400);
+      expect(getContextTags).not.toHaveBeenCalled();
+      expect(screen.queryByRole("listbox")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
