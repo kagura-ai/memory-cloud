@@ -138,6 +138,7 @@ export function TagCloud({
                 className={[
                   sizeClass(item.count, min, max),
                   "rounded px-1.5 py-0.5 transition-colors",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50",
                   isActive
                     ? "bg-primary/10 font-semibold text-primary ring-1 ring-primary/40"
                     : "text-gray-600 hover:text-primary dark:text-gray-300 dark:hover:text-primary",

@@ -3076,7 +3076,7 @@
       "sortRecent": "Recent",
       "emptyTitle": "No tags yet",
       "emptyDesc": "Tags appear here as memories are added to this context.",
-      "tagWithCount": "{tag} ({count} memories)",
+      "tagWithCount": "{tag} ({count, plural, one {# memory} other {# memories}})",
       "loadFailed": "Failed to load tags"
     },
     "tagAutocomplete": {

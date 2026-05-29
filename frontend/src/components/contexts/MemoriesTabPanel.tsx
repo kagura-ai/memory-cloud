@@ -248,7 +248,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
               type="button"
               onClick={() => setActiveTagFilter(null)}
               aria-label={t("filter.clearTag", { tag: activeTag })}
-              className="ml-0.5 rounded hover:text-foreground"
+              className="ml-0.5 rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
             >
               <X className="h-3 w-3" />
             </button>
