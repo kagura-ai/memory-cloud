@@ -285,6 +285,23 @@ class TestQuotaServiceWorkspaceCreationCap:
         assert "PRO" not in error
 
     @pytest.mark.asyncio
+    async def test_denied_raises_with_structured_details(self, service, mock_db):
+        """#680: raise_on_denied=True → QuotaExceededError carries structured
+        ``details`` (quota_type + owned_count + cap) so clients localize the
+        message instead of regex-parsing the English string. ``error_code``
+        stays the shared QUOTA-001 — ``quota_type`` is the discriminator."""
+        self._arm_db(mock_db, owned_count=3, slot_bonus=2)  # cap=3, 3 >= 3 → denied
+        with self._patch_settings(enforce=True):
+            with pytest.raises(QuotaExceededError) as exc_info:
+                await service.check_workspace_creation_allowed("user-1", raise_on_denied=True)
+        exc = exc_info.value
+        assert exc.details["quota_type"] == "workspace_limit_reached"
+        assert exc.details["owned_count"] == 3
+        assert exc.details["cap"] == 3
+        assert exc.error_code == "QUOTA-001"
+        assert exc.status_code == 429
+
+    @pytest.mark.asyncio
     async def test_one_owned_no_bonus_allowed_when_flag_off(self, service, mock_db):
         """1 owned, 0 bonus → over cap but flag=False → log-only allow."""
         self._arm_db(mock_db, owned_count=1, slot_bonus=0)

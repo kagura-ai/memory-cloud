@@ -13,6 +13,7 @@ import { useTranslations } from "next-intl";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useToast } from "@/hooks/use-toast";
 import { createWorkspace, Workspace } from "@/lib/api/workspaces";
+import { ApiError } from "@/lib/api/base";
 import {
   Card,
   CardHeader,
@@ -28,6 +29,24 @@ import { Building2, ArrowLeft, Loader2 } from "lucide-react";
 interface WorkspaceCreateFormProps {
   onSuccess?: (workspace: Workspace) => void;
   onCancel?: () => void;
+}
+
+/**
+ * Narrow an ApiError's structured `details` to the workspace-cap quota shape
+ * (#680). Keyed off `quota_type` so other QUOTA-001 errors don't match, with
+ * runtime number checks so a malformed payload falls through to the verbatim
+ * message path instead of rendering `undefined` in the i18n placeholders.
+ */
+function isWorkspaceLimitDetails(
+  details: unknown,
+): details is { owned_count: number; cap: number } {
+  if (typeof details !== "object" || details === null) return false;
+  const d = details as Record<string, unknown>;
+  return (
+    d.quota_type === "workspace_limit_reached" &&
+    typeof d.owned_count === "number" &&
+    typeof d.cap === "number"
+  );
 }
 
 export function WorkspaceCreateForm({
@@ -85,12 +104,21 @@ export function WorkspaceCreateForm({
       const errorMessage =
         err instanceof Error ? err.message : t("failedToCreateWorkspace");
 
-      if (errorMessage.includes("Workspace limit reached")) {
-        // Surface the backend's authoritative message verbatim — it
-        // includes live ``owned N (cap: M)`` data that a cached frontend
-        // value cannot reliably match. The trade-off is that ja users see
-        // the English backend message, but the alternative (cached cap +
-        // i18n) showed stale numbers in real scenarios (Copilot review #5).
+      if (err instanceof ApiError && isWorkspaceLimitDetails(err.details)) {
+        // #680: structured quota details carry live owned_count + cap, so we
+        // render a localized message instead of the verbatim English string.
+        // (The string-only branch below remains as a fallback for older
+        // backends / un-migrated quota errors.)
+        setError(
+          t("workspaceLimitReachedDetailed", {
+            owned: err.details.owned_count,
+            limit: err.details.cap,
+          }),
+        );
+      } else if (errorMessage.includes("Workspace limit reached")) {
+        // Fallback: surface the backend's authoritative message verbatim when
+        // structured details are absent. Live ``owned N (cap: M)`` data still
+        // beats a cached frontend cap; ja users see English in this path only.
         setError(errorMessage);
       } else if (
         errorMessage.includes("validation") ||
