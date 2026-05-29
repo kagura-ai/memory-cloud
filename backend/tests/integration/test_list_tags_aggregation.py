@@ -99,13 +99,14 @@ def _memory(
     created_at: datetime,
     updated_at: datetime | None = None,
     deleted_at: datetime | None = None,
+    summary: str | None = None,
 ) -> Memory:
     return Memory(
         id=uuid4(),
         user_id=user_id,
         workspace_id=ws_id,
         context_id=ctx_id,
-        summary=f"mem-{uuid4().hex[:6]}",
+        summary=summary or f"mem-{uuid4().hex[:6]}",
         content="x",
         type="note",
         client="test",
@@ -145,6 +146,43 @@ class TestAggregateTagsCTE:
 
         counts = {r["tag"]: r["count"] for r in rows}
         assert counts == {"python": 1, "backend": 1}
+
+    async def test_q_facets_tags_to_matching_summaries(self, db_session, now):
+        """#618: ``q`` filters the scope by summary substring, so only tags on
+        matching memories are aggregated. Blank / absent q → all tags."""
+        user_id = f"u_q_{uuid4().hex[:6]}"
+        ws, ctx = await _seed_workspace_context(db_session, user_id=user_id)
+        db_session.add_all(
+            [
+                _memory(
+                    ws_id=ws.id,
+                    ctx_id=ctx.id,
+                    user_id=user_id,
+                    tags=["ops"],
+                    created_at=now,
+                    summary="deploy runbook",
+                ),
+                _memory(
+                    ws_id=ws.id,
+                    ctx_id=ctx.id,
+                    user_id=user_id,
+                    tags=["security"],
+                    created_at=now,
+                    summary="auth flow",
+                ),
+            ]
+        )
+        await db_session.flush()
+
+        # q matches only "deploy runbook" → just its tag.
+        facet = {r["tag"] for r in await _agg_rows(db_session, user_id, ctx.id, q="deploy")}
+        assert facet == {"ops"}
+        # No q → all tags in the context.
+        all_tags = {r["tag"] for r in await _agg_rows(db_session, user_id, ctx.id)}
+        assert all_tags == {"ops", "security"}
+        # Whitespace-only q is treated as no filter (no accidental empty set).
+        blank = {r["tag"] for r in await _agg_rows(db_session, user_id, ctx.id, q="   ")}
+        assert blank == {"ops", "security"}
 
     async def test_soft_deleted_memory_excluded(self, db_session, now):
         user_id = f"u_softdel_{uuid4().hex[:6]}"
