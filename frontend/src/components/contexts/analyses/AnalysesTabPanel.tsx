@@ -26,6 +26,7 @@ import { ApiError } from "@/lib/api/base";
 import {
   cancelAnalysisRun,
   getActiveAnalysis,
+  getAnalysisRun,
   listAnalysisRuns,
   listRunClusters,
   listRunPositions,
@@ -50,6 +51,7 @@ import {
   DollarSign,
   Award,
   Clock,
+  History,
 } from "lucide-react";
 import { ScatterPlot } from "./ScatterPlot";
 import { ClusterList } from "./ClusterList";
@@ -71,6 +73,13 @@ interface BootstrapState {
   clusters: AnalysisCluster[];
   positions: ScatterPosition[];
   history: AnalysisRunRow[];
+  // Issue #732: a past run selected via ?run_id. When non-null it drives the
+  // KPI/scatter/cluster/stats view in place of ``activeRun`` (the latest run),
+  // which stays the source of truth for polling + the "is latest" comparison.
+  // Null when no selection, or when the selected id equals the latest run.
+  selectedRun: AnalysisRunRow | null;
+  selectedClusters: AnalysisCluster[];
+  selectedPositions: ScatterPosition[];
   error: string | null;
   notEnabled: boolean;
   loading: boolean;
@@ -81,6 +90,9 @@ const EMPTY_BOOTSTRAP: BootstrapState = {
   clusters: [],
   positions: [],
   history: [],
+  selectedRun: null,
+  selectedClusters: [],
+  selectedPositions: [],
   error: null,
   notEnabled: false,
   loading: true,
@@ -108,6 +120,22 @@ export function AnalysesTabPanel({
       const params = new URLSearchParams(searchParams.toString());
       if (next) params.set("new", "1");
       else params.delete("new");
+      const query = params.toString();
+      router.replace(query ? `${pathname}?${query}` : pathname);
+    },
+    [searchParams, pathname, router],
+  );
+
+  // Issue #732: the past run being viewed is URL-driven (?run_id=<uuid>) so the
+  // view is bookmarkable / shareable / survives refresh. ``null`` clears it and
+  // returns to the latest-run view. Other params (tab, new) are preserved.
+  const selectedRunId = searchParams.get("run_id");
+
+  const setSelectedRunId = useCallback(
+    (next: string | null) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (next) params.set("run_id", next);
+      else params.delete("run_id");
       const query = params.toString();
       router.replace(query ? `${pathname}?${query}` : pathname);
     },
@@ -197,11 +225,45 @@ export function AnalysesTabPanel({
         return;
       }
 
+      // Issue #732: when ?run_id points at a run *other* than the latest, load
+      // it for the view. Only succeeded runs have clusters/positions — for a
+      // failed/running/cancelled selection we still show its KPI row + status
+      // (clusters stay empty → the empty-state branch renders). A bad / out-of-
+      // scope id throws (403/404) and surfaces as an error banner; the latest
+      // view is one "Back to latest" click away once the id is cleared.
+      let selectedRun: AnalysisRunRow | null = null;
+      let selectedClusters: AnalysisCluster[] = [];
+      let selectedPositions: ScatterPosition[] = [];
+      if (selectedRunId && selectedRunId !== activeRun?.run_id) {
+        try {
+          selectedRun = await getAnalysisRun(contextId, selectedRunId);
+          if (selectedRun.status === "succeeded") {
+            const [clusterRes, positionRes] = await Promise.all([
+              listRunClusters(contextId, selectedRunId),
+              listRunPositions(contextId, selectedRunId),
+            ]);
+            selectedClusters = clusterRes.items;
+            selectedPositions = positionRes.items;
+          }
+        } catch (err) {
+          setState({
+            ...EMPTY_BOOTSTRAP,
+            history,
+            error: err instanceof Error ? err.message : t("states.loadFailed"),
+            loading: false,
+          });
+          return;
+        }
+      }
+
       setState({
         activeRun,
         clusters,
         positions,
         history,
+        selectedRun,
+        selectedClusters,
+        selectedPositions,
         error: null,
         notEnabled: false,
         loading: false,
@@ -221,7 +283,7 @@ export function AnalysesTabPanel({
         loading: false,
       });
     }
-  }, [contextId, t]);
+  }, [contextId, selectedRunId, t]);
 
   useEffect(() => {
     bootstrap();
@@ -265,9 +327,22 @@ export function AnalysesTabPanel({
     }
   }, [contextId, polling]);
 
+  // Issue #732: the run shown in the KPI strip + scatter + cluster list +
+  // property stats is the ?run_id-selected past run when one is active,
+  // otherwise the latest run. ``activeRun`` (the latest) is kept separately for
+  // polling + the "is this the latest run?" comparison below.
+  const displayRun = state.selectedRun ?? state.activeRun;
+  const displayClusters = state.selectedRun
+    ? state.selectedClusters
+    : state.clusters;
+  const displayPositions = state.selectedRun
+    ? state.selectedPositions
+    : state.positions;
+  const viewingPastRun = state.selectedRun !== null;
+
   const allowedClusterIndexes = useMemo(
-    () => state.clusters.map((c) => c.cluster_index),
-    [state.clusters],
+    () => displayClusters.map((c) => c.cluster_index),
+    [displayClusters],
   );
   const { focusedClusterId, setFocusedClusterId, toggleFocusedClusterId } =
     useFocusedClusterId(allowedClusterIndexes);
@@ -279,9 +354,9 @@ export function AnalysesTabPanel({
   const focusedCluster = useMemo(() => {
     if (focusedClusterId === null) return null;
     return (
-      state.clusters.find((c) => c.cluster_index === focusedClusterId) ?? null
+      displayClusters.find((c) => c.cluster_index === focusedClusterId) ?? null
     );
-  }, [focusedClusterId, state.clusters]);
+  }, [focusedClusterId, displayClusters]);
 
   const handleRunStarted = useCallback(
     (runId: string) => {
@@ -378,31 +453,54 @@ export function AnalysesTabPanel({
         </div>
       )}
 
+      {/* Issue #732: past-run viewing banner — shown when ?run_id selects a
+          run other than the latest. "Back to latest" clears the param. */}
+      {viewingPastRun && displayRun && (
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-900/30">
+          <div className="flex items-center gap-3">
+            <History className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+            <div className="text-sm text-gray-700 dark:text-gray-300">
+              {t("pastRun.banner", {
+                when: new Date(displayRun.started_at).toLocaleString(),
+              })}
+            </div>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setSelectedRunId(null)}
+            className="shrink-0"
+          >
+            {t("pastRun.backToLatest")}
+          </Button>
+        </div>
+      )}
+
       {/* KPI strip */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <KpiCard
           icon={Clock}
           label={t("kpi.lastRun")}
           value={
-            state.activeRun
-              ? new Date(state.activeRun.started_at).toLocaleString()
+            displayRun
+              ? new Date(displayRun.started_at).toLocaleString()
               : t("kpi.neverRun")
           }
-          tone={state.activeRun ? "primary" : "muted"}
+          tone={displayRun ? "primary" : "muted"}
         />
         <KpiCard
           icon={Activity}
           label={t("kpi.memoriesSurveyed")}
-          value={state.activeRun ? state.activeRun.input_count : "—"}
+          value={displayRun ? displayRun.input_count : "—"}
         />
         <KpiCard
           icon={DollarSign}
           label={t("kpi.runCost")}
           value={
-            state.activeRun
+            displayRun
               ? formatCostCents(
-                  state.activeRun.cost_actual_cents ??
-                    state.activeRun.cost_estimated_cents,
+                  displayRun.cost_actual_cents ??
+                    displayRun.cost_estimated_cents,
                 )
               : "—"
           }
@@ -411,40 +509,54 @@ export function AnalysesTabPanel({
           icon={Award}
           label={t("kpi.quality")}
           value={
-            state.clusters.length === 0
+            displayClusters.length === 0
               ? t("kpi.qualityNoData")
               : t("kpi.qualityValue", {
                   value: formatConfidence(
-                    state.clusters
+                    displayClusters
                       .map((c) => c.label_confidence)
-                      .reduce((acc, n) => acc + n, 0) / state.clusters.length,
+                      .reduce((acc, n) => acc + n, 0) / displayClusters.length,
                   ),
                 })
           }
-          tone={state.clusters.length === 0 ? "muted" : "secondary"}
+          tone={displayClusters.length === 0 ? "muted" : "secondary"}
         />
       </div>
 
       {/* main scatter + cluster list grid */}
-      {state.clusters.length === 0 ? (
-        <EmptyState
-          icon={Sparkles}
-          title={t("states.empty.title")}
-          description={t("states.empty.description")}
-          // Hide the action button while a run is in flight — the
-          // running banner above already provides the visual signal
-          // and a Cancel control. Re-enabling on terminal lets the
-          // user fire a follow-up run if the first one failed.
-          actionLabel={runInProgress ? undefined : t("actions.newAnalysis")}
-          onAction={runInProgress ? undefined : () => setShowModal(true)}
-        />
+      {displayClusters.length === 0 ? (
+        viewingPastRun ? (
+          // Issue #732: a selected past run with no clusters (failed / running /
+          // cancelled, or not-yet-succeeded) — explain its status instead of the
+          // "run your first analysis" CTA, which would misleadingly imply the
+          // context has never been analyzed.
+          <EmptyState
+            icon={History}
+            title={t("states.pastRunEmpty.title")}
+            description={t("states.pastRunEmpty.description", {
+              status: displayRun?.status ?? "",
+            })}
+          />
+        ) : (
+          <EmptyState
+            icon={Sparkles}
+            title={t("states.empty.title")}
+            description={t("states.empty.description")}
+            // Hide the action button while a run is in flight — the
+            // running banner above already provides the visual signal
+            // and a Cancel control. Re-enabling on terminal lets the
+            // user fire a follow-up run if the first one failed.
+            actionLabel={runInProgress ? undefined : t("actions.newAnalysis")}
+            onAction={runInProgress ? undefined : () => setShowModal(true)}
+          />
+        )
       ) : (
         <>
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">
             <div className="space-y-4">
               <ScatterPlot
-                clusters={state.clusters}
-                positions={state.positions}
+                clusters={displayClusters}
+                positions={displayPositions}
                 focusedClusterId={focusedClusterId}
                 focusedCluster={focusedCluster}
                 onClearFocus={() => setFocusedClusterId(null)}
@@ -455,7 +567,7 @@ export function AnalysesTabPanel({
               />
             </div>
             <ClusterList
-              clusters={state.clusters}
+              clusters={displayClusters}
               focusedClusterId={focusedClusterId}
               onToggleFocus={toggleFocusedClusterId}
               onClearFocus={() => setFocusedClusterId(null)}
@@ -467,9 +579,11 @@ export function AnalysesTabPanel({
               runs={state.history}
               total={state.history.length}
               activeRunId={state.activeRun?.run_id ?? null}
+              selectedRunId={displayRun?.run_id ?? null}
+              onSelectRun={setSelectedRunId}
             />
             <PropertyStats
-              clusters={state.clusters}
+              clusters={displayClusters}
               focusedCluster={focusedCluster}
             />
           </div>

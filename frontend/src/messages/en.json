@@ -3444,6 +3444,7 @@
       "headerCost": "Cost",
       "noRunsTitle": "No runs yet",
       "noRunsDescription": "Run your first analysis to populate the history.",
+      "viewRunAria": "View results for the run from {when}",
       "status": {
         "running": "running",
         "succeeded": "succeeded",
@@ -3451,6 +3452,10 @@
         "cancelled": "cancelled · {reason}",
         "unknown": "{raw}"
       }
+    },
+    "pastRun": {
+      "banner": "Viewing a past run from {when} — not the latest.",
+      "backToLatest": "Back to latest"
     },
     "modal": {
       "title": "Analysis",
@@ -3495,6 +3500,10 @@
       "empty": {
         "title": "No analyses yet",
         "description": "Run your first analysis to surface the cluster overview, scatter map, and per-cluster property stats."
+      },
+      "pastRunEmpty": {
+        "title": "This run has no results to show",
+        "description": "The selected run is {status} — only succeeded runs have clusters, scatter positions, and property stats. Use \"Back to latest\" to return to the current view."
       },
       "notEnabled": {
         "title": "Analyses are not yet enabled for this workspace",

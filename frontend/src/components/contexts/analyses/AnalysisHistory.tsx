@@ -27,6 +27,10 @@ interface AnalysisHistoryProps {
   runs: AnalysisRunRow[];
   total: number | null;
   activeRunId: string | null;
+  // Issue #732: when ``onSelectRun`` is provided, rows become clickable to view
+  // that run's results; ``selectedRunId`` marks the row currently being viewed.
+  selectedRunId?: string | null;
+  onSelectRun?: (runId: string) => void;
 }
 
 // Translatable status labels — keyed by the canonical
@@ -39,6 +43,8 @@ export function AnalysisHistory({
   runs,
   total,
   activeRunId,
+  selectedRunId = null,
+  onSelectRun,
 }: AnalysisHistoryProps) {
   const t = useTranslations("analyses.history");
 
@@ -77,12 +83,45 @@ export function AnalysisHistory({
         <TableBody>
           {runs.map((run) => {
             const isActive = activeRunId === run.run_id;
+            const isSelected = selectedRunId === run.run_id;
+            const clickable = !!onSelectRun;
+            const handleSelect = () => onSelectRun?.(run.run_id);
             return (
               <TableRow
                 key={run.run_id}
-                className={
-                  isActive ? "bg-emerald-50/40 dark:bg-emerald-900/20" : ""
+                onClick={clickable ? handleSelect : undefined}
+                onKeyDown={
+                  clickable
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          handleSelect();
+                        }
+                      }
+                    : undefined
                 }
+                tabIndex={clickable ? 0 : undefined}
+                role={clickable ? "button" : undefined}
+                aria-current={isSelected ? "true" : undefined}
+                aria-label={
+                  clickable
+                    ? t("viewRunAria", {
+                        when: formatLocalDate(new Date(run.started_at)),
+                      })
+                    : undefined
+                }
+                className={[
+                  isSelected
+                    ? "bg-blue-50 ring-1 ring-inset ring-blue-300 dark:bg-blue-900/30 dark:ring-blue-700"
+                    : isActive
+                      ? "bg-emerald-50/40 dark:bg-emerald-900/20"
+                      : clickable
+                        ? "hover:bg-gray-50 dark:hover:bg-gray-800/50"
+                        : "",
+                  clickable ? "cursor-pointer" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
               >
                 <TableCell className="font-mono text-xs">
                   {formatLocalDate(new Date(run.started_at))}
