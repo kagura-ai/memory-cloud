@@ -1244,29 +1244,39 @@ class WorkspaceService:
         # Scoping by membership (``Memory.user_id.in_(member_ids)``) leaked
         # other workspaces' memories for users who belong to multiple
         # workspaces. Scope by ``Context.workspace_id`` instead — matching the
-        # stats-card semantics in ``api/routes/workspace.py`` — because
-        # ``Memory.workspace_id`` is nullable and would under-count legacy rows.
-        contexts_stmt = select(Context.id).where(
+        # context-scoped stats path in ``api/routes/workspace.py`` (the
+        # /workspace/stats endpoint filters ``Context.workspace_id``). We scope
+        # on ``Context`` rather than ``Memory.workspace_id`` because the latter
+        # is nullable and would under-count legacy rows. As a subquery (not a
+        # materialized id list) this stays a single round-trip and lets the DB
+        # use the ``Context`` index regardless of how many contexts exist.
+        workspace_contexts = select(Context.id).where(
             Context.workspace_id == workspace_id,
             Context.deleted_at.is_(None),
         )
-        contexts_result = await self.db.execute(contexts_stmt)
-        workspace_context_ids = [row[0] for row in contexts_result.all()]
 
         # An optional ``context_id`` filter must belong to this workspace —
         # otherwise a foreign context_id could surface another workspace's
-        # memories through this endpoint.
+        # memories. Reuse the canonical boundary check rather than re-deriving
+        # it here (single source of truth, see analysis.query_service).
         if context_id is not None:
-            scoped_context_ids = [context_id] if context_id in workspace_context_ids else []
-        else:
-            scoped_context_ids = workspace_context_ids
+            from services.analysis.query_service import verify_context_in_workspace
 
-        # Aggregate daily memory creation counts
-        if scoped_context_ids:
+            in_workspace = await verify_context_in_workspace(
+                self.db, workspace_id=workspace_id, context_id=context_id
+            )
+            memory_scope = Memory.context_id == context_id if in_workspace else None
+        else:
+            memory_scope = Memory.context_id.in_(workspace_contexts)
+
+        # Aggregate daily memory creation counts. ``memory_scope`` is None only
+        # when a foreign context_id was supplied — return an empty (zero-filled)
+        # timeline in that case.
+        if memory_scope is not None:
             # Issue #275 Performance: Use datetime range filter (idx_created_at)
             # instead of func.date() which prevents index usage
             conditions = [
-                Memory.context_id.in_(scoped_context_ids),
+                memory_scope,
                 Memory.deleted_at.is_(None),  # CRITICAL: Exclude soft-deleted
                 Memory.created_at >= start_datetime,  # ✅ Uses idx_created_at
                 Memory.created_at <= end_datetime,
