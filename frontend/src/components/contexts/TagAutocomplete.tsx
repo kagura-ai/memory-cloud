@@ -115,7 +115,7 @@ export function TagAutocomplete({
         aria-label={ariaLabel}
         role="combobox"
         aria-expanded={open}
-        aria-controls={listId}
+        aria-controls={open ? listId : undefined}
         aria-activedescendant={
           open && suggestions.length > 0
             ? `${listId}-opt-${highlight}`

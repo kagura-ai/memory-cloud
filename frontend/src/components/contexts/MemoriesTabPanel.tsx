@@ -85,7 +85,10 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   // Issue #618: a single active tag filter, URL-driven (?tag=) so it's
   // shareable and survives refresh. Clicking a TagCloud tag toggles it; the
   // memory list re-fetches with an ANY-match tags filter (AND-ed with q).
-  const activeTag = searchParams.get(TAG_PARAM);
+  // Normalize at the source: a whitespace-only ?tag (e.g. ?tag=%20) is ignored
+  // by getMemories, so collapse it to null here too — otherwise the chip /
+  // hasFilter UI would show an "active" filter the API query doesn't apply.
+  const activeTag = searchParams.get(TAG_PARAM)?.trim() || null;
 
   const setActiveTagFilter = useCallback(
     (tag: string | null) => {
