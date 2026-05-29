@@ -560,6 +560,4 @@ class TestListMemoriesTagsFilter:
 
         for call_index in (0, 1):
             sql = _where_sql(mock_db, call_index)
-            assert "&&" not in sql, (
-                f"blank tags should be ignored (call_index={call_index}): {sql}"
-            )
+            assert "&&" not in sql, f"blank tags should be ignored (call_index={call_index}): {sql}"
