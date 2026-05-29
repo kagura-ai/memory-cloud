@@ -202,16 +202,12 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     }
   }, [dialog, fetchMemories, toast, t, items.length, page]);
 
-  // Tag cloud + search input + active-tag chip render above any state branch
-  // (error / empty) so the user can always discover tags, filter, or clear a
-  // filter without re-mounting the controls.
+  // Search input → active-tag chip → tag cloud, rendered above any state branch
+  // (error / empty) so the user can always search, see/clear the active filter,
+  // or discover tags. Search leads (primary, familiar control); the tag cloud —
+  // which can be tall — sits below so it never pushes search off-screen.
   const filterControls = (
     <div className="space-y-3">
-      <TagCloud
-        contextId={contextId}
-        activeTag={activeTag}
-        onTagClick={handleTagClick}
-      />
       <div className="relative">
         <Search
           className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400"
@@ -244,6 +240,11 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
           </Badge>
         </div>
       )}
+      <TagCloud
+        contextId={contextId}
+        activeTag={activeTag}
+        onTagClick={handleTagClick}
+      />
     </div>
   );
 
