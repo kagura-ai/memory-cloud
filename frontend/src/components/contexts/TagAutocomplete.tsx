@@ -58,12 +58,15 @@ export function TagAutocomplete({
 
   useEffect(() => {
     const trimmed = token.trim();
+    // On any token change, immediately invalidate any in-flight request and
+    // close the listbox. This both stops a late prior response from re-opening
+    // for a cleared token, and prevents Enter from selecting a stale suggestion
+    // that no longer matches what's being typed. The debounced fetch below then
+    // reopens with fresh suggestions for the current token.
+    reqRef.current++;
+    setOpen(false);
     if (trimmed.length < 1) {
-      // Invalidate any in-flight request (bump the id) so a prior fetch that
-      // resolves after the token was cleared can't re-open the listbox.
-      reqRef.current++;
       setSuggestions([]);
-      setOpen(false);
       return;
     }
     const timer = window.setTimeout(() => {
