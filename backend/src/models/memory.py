@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    DDL,
     JSON,
     BigInteger,
     Boolean,
@@ -26,6 +27,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     func,
     text,
 )
@@ -48,7 +50,9 @@ class Memory(Base):
     Attributes:
         id: UUID primary key
         user_id: Owner user ID
-        summary: Layer 1 - 検索用サマリー (50-200文字)
+        summary: Layer 1 - 検索用サマリー (50-200文字). Backed by a pg_trgm
+            GIN index (``idx_memories_summary_trgm``, #818) accelerating the
+            ``summary ILIKE '%q%'`` substring filter on GET /memory/list.
         summary_embedding_id: Qdrant point ID
         context_summary: Layer 2 - 文脈説明 (200-1000文字)
         content: Layer 3 - 基本内容
@@ -219,10 +223,37 @@ class Memory(Base):
             "external_blob_ref",
             postgresql_where=text("external_blob_ref IS NOT NULL"),
         ),
+        # Issue #818 trigram GIN index on summary, accelerating the
+        # `summary ILIKE '%q%'` substring filter on GET /memory/list (#580)
+        # (migration e26_818_summary_trgm_idx). Indexed on the bare
+        # column — gin_trgm_ops serves ILIKE case-insensitively, so no
+        # lower(summary) expression is needed and the #580 query is unchanged.
+        Index(
+            "idx_memories_summary_trgm",
+            "summary",
+            postgresql_using="gin",
+            postgresql_ops={"summary": "gin_trgm_ops"},
+        ),
     )
 
     def __repr__(self) -> str:
         return f"<Memory(id='{self.id}', type='{self.type}', scope='{self.scope}')>"
+
+
+# The ``idx_memories_summary_trgm`` GIN index (#818) uses the ``gin_trgm_ops``
+# operator class, which only exists once the ``pg_trgm`` extension is installed.
+# Alembic migration e26 installs it on the upgrade path, but the
+# ``Base.metadata.create_all()`` path (test session setup + the create_all-vs-
+# alembic drift guard, which runs after ``DROP SCHEMA public CASCADE`` wipes the
+# extension) has no such step — create_all would fail emitting the index. This
+# ``before_create`` hook installs the extension first so the model is fully
+# create_all-able. Guarded to PostgreSQL so non-PG dialects (e.g. SQLite in unit
+# tests) skip it; ``IF NOT EXISTS`` keeps it idempotent against the migrated DB.
+event.listen(
+    Base.metadata,
+    "before_create",
+    DDL("CREATE EXTENSION IF NOT EXISTS pg_trgm").execute_if(dialect="postgresql"),
+)
 
 
 class Attachment(Base):
