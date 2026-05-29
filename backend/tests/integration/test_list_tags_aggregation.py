@@ -106,7 +106,7 @@ def _memory(
         user_id=user_id,
         workspace_id=ws_id,
         context_id=ctx_id,
-        summary=summary or f"mem-{uuid4().hex[:6]}",
+        summary=summary if summary is not None else f"mem-{uuid4().hex[:6]}",
         content="x",
         type="note",
         client="test",

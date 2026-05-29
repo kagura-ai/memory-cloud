@@ -78,6 +78,12 @@ export function TagCloud({
       .finally(() => {
         if (reqId === reqRef.current) setLoading(false);
       });
+    // Invalidate the in-flight request on re-run / unmount so a late response
+    // can't setState after the component is gone (the reqId guards above will
+    // no longer match).
+    return () => {
+      reqRef.current++;
+    };
   }, [contextId, sort, q, t]);
 
   const counts = tags.map((x) => x.count);

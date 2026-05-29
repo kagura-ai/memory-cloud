@@ -615,7 +615,12 @@ async def list_memories(
         # None so a stray ``?tags=`` doesn't pin results to the empty set.
         tags_normalized: list[str] | None = None
         if tags:
-            cleaned = list(dict.fromkeys(t.strip() for t in tags if t and t.strip()))
+            # Bound the filter to the write-path caps (<=64 chars/tag, <=100
+            # tags): drop blank / over-length entries, de-dup (order-preserving),
+            # then cap — so an oversized query string can't reach the DB.
+            cleaned = list(dict.fromkeys(s for t in tags if (s := t.strip()) and len(s) <= 64))[
+                :100
+            ]
             tags_normalized = cleaned or None
 
         # Build query. Exclude soft-deleted rows — POST /forget sets

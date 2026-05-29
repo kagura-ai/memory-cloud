@@ -99,7 +99,12 @@ export function TagAutocomplete({
           }
         });
     }, DEBOUNCE_MS);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      // Invalidate the in-flight request so a response that arrives after this
+      // effect re-runs or the component unmounts is ignored (no setState leak).
+      reqRef.current++;
+    };
   }, [contextId, token, before]);
 
   const select = (tag: string) => {
