@@ -9,7 +9,6 @@ Provides REST API endpoints for managing workspace invitations:
 - Accept invitation (authenticated users)
 """
 
-import os
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -28,7 +27,7 @@ from models.schemas import (
     WorkspaceInvitationCreate,
     WorkspaceInvitationResponse,
 )
-from services.invitation_service import InvitationService
+from services.invitation_service import InvitationService, build_invitation_url
 from services.permission_service import PermissionService
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import NotFoundException, ValidationError
@@ -38,24 +37,11 @@ logger = get_logger(__name__)
 
 router = APIRouter(tags=["invitations"])
 
-
-def build_invitation_url(token: str) -> str:
-    """Build full invitation URL.
-
-    Gets base URL from environment variable FRONTEND_URL.
-    Defaults to production URL if not set.
-
-    Args:
-        token: Invitation token
-
-    Returns:
-        Full invitation URL
-
-    Environment:
-        FRONTEND_URL: Base URL for frontend (e.g., https://your-domain.com)
-    """
-    base_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-    return f"{base_url}/invite/{token}"
+# ``build_invitation_url`` now lives in ``services.invitation_service`` so the
+# API response and the invitation email (Issue #654) share one URL builder and
+# cannot drift. Re-exported here for backward compatibility with importers of
+# ``api.routes.invitations.build_invitation_url``.
+__all__ = ["router", "build_invitation_url"]
 
 
 @router.post(

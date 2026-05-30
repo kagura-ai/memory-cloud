@@ -364,3 +364,137 @@ async def test_send_erasure_confirmation_failure_does_not_leak_token_in_logs():
 
     assert raw_token not in haystack, "raw confirm_token leaked into failure log"
     assert confirm_url not in haystack, "confirm_url leaked into failure log"
+
+
+# ---------------------------------------------------------------------------
+# Workspace invitation (Issue #654)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_workspace_invitation_calls_sdk_with_expected_payload():
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+    accept_url = "https://app.example.com/invite/tok-abc123"
+
+    with patch.object(
+        resend_module.resend.Emails, "send", return_value={"id": "re_inv_001"}
+    ) as mock_send:
+        result = await svc.send_workspace_invitation(
+            to_email="invitee@example.com",
+            inviter_name="Alice Admin",
+            workspace_name="Acme Research",
+            accept_url=accept_url,
+            expires_at_iso="2026-06-01T00:00:00Z",
+        )
+
+    assert result is True
+    mock_send.assert_called_once()
+    params = mock_send.call_args.args[0]
+    assert params["from"] == "noreply@example.com"
+    assert params["to"] == ["invitee@example.com"]
+    assert "Acme Research" in params["subject"]
+    assert "Alice Admin" in params["text"]
+    assert "Acme Research" in params["text"]
+    assert accept_url in params["text"]
+    assert "2026-06-01T00:00:00Z" in params["text"]
+
+
+@pytest.mark.asyncio
+async def test_send_workspace_invitation_renders_no_expiry():
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+
+    with patch.object(
+        resend_module.resend.Emails, "send", return_value={"id": "re_inv_002"}
+    ) as mock_send:
+        result = await svc.send_workspace_invitation(
+            to_email="invitee@example.com",
+            inviter_name="Bob",
+            workspace_name="Team",
+            accept_url="https://app.example.com/invite/tok-xyz",
+            expires_at_iso=None,
+        )
+
+    assert result is True
+    params = mock_send.call_args.args[0]
+    assert "does not expire" in params["text"]
+
+
+@pytest.mark.asyncio
+async def test_send_workspace_invitation_returns_false_when_sdk_raises():
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+
+    with patch.object(
+        resend_module.resend.Emails,
+        "send",
+        side_effect=RuntimeError("Domain not found"),
+    ):
+        result = await svc.send_workspace_invitation(
+            to_email="invitee@example.com",
+            inviter_name="Alice",
+            workspace_name="Acme",
+            accept_url="https://app.example.com/invite/tok-fail",
+            expires_at_iso=None,
+        )
+
+    assert result is False, "Protocol contract: must return False, not raise"
+
+
+@pytest.mark.asyncio
+async def test_send_workspace_invitation_does_not_leak_token_in_logs():
+    """The accept_url embeds the single-use token — it must never reach any
+    log payload (same redaction invariant as send_erasure_confirmation)."""
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+    token = "raw-invite-token-DO-NOT-LEAK-7f"  # noqa: S105
+    accept_url = f"https://app.example.com/invite/{token}"
+
+    with (
+        patch.object(resend_module.resend.Emails, "send", return_value={"id": "ok"}),
+        patch.object(resend_module, "logger") as mock_logger,
+    ):
+        result = await svc.send_workspace_invitation(
+            to_email="invitee@example.com",
+            inviter_name="Alice",
+            workspace_name="Acme",
+            accept_url=accept_url,
+            expires_at_iso="2026-06-01T00:00:00Z",
+        )
+
+    assert result is True
+    haystack_parts: list[str] = []
+    for method_call in mock_logger.method_calls:
+        _name, args, kwargs = method_call
+        haystack_parts.extend(str(a) for a in args)
+        haystack_parts.extend(f"{k}={v}" for k, v in kwargs.items())
+    haystack = " ".join(haystack_parts)
+    assert token not in haystack, "invitation token leaked into logs"
+    assert accept_url not in haystack, "accept_url leaked into logs"
+
+
+@pytest.mark.asyncio
+async def test_send_workspace_invitation_failure_does_not_leak_token_in_logs():
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+    token = "raw-invite-token-DO-NOT-LEAK-fail-2b"  # noqa: S105
+    accept_url = f"https://app.example.com/invite/{token}"
+    leaky_exc = f"Resend API error: invalid request body — {accept_url}"
+
+    with (
+        patch.object(resend_module.resend.Emails, "send", side_effect=RuntimeError(leaky_exc)),
+        patch.object(resend_module, "logger") as mock_logger,
+    ):
+        result = await svc.send_workspace_invitation(
+            to_email="invitee@example.com",
+            inviter_name="Alice",
+            workspace_name="Acme",
+            accept_url=accept_url,
+            expires_at_iso=None,
+        )
+
+    assert result is False
+    haystack_parts: list[str] = []
+    for method_call in mock_logger.method_calls:
+        _name, args, kwargs = method_call
+        haystack_parts.extend(str(a) for a in args)
+        haystack_parts.extend(f"{k}={v}" for k, v in kwargs.items())
+    haystack = " ".join(haystack_parts)
+    assert token not in haystack, "invitation token leaked into failure log"
+    assert accept_url not in haystack, "accept_url leaked into failure log"

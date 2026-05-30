@@ -238,6 +238,50 @@ class ResendEmailService:
             },
         )
 
+    async def send_workspace_invitation(
+        self,
+        *,
+        to_email: str,
+        inviter_name: str,
+        workspace_name: str,
+        accept_url: str,
+        expires_at_iso: str | None,
+    ) -> bool:
+        # ``accept_url`` embeds the single-use invitation token as a path
+        # segment, so it goes in the body (delivered to the recipient inbox)
+        # but is NEVER placed in ``log_context`` — same redaction discipline as
+        # send_erasure_confirmation (Issue #654 / #478 Phase-3 precedent).
+        expiry_line = (
+            f"This invitation expires on {expires_at_iso}.\n"
+            if expires_at_iso
+            else "This invitation does not expire.\n"
+        )
+        text = (
+            f'{inviter_name} has invited you to join the "{workspace_name}" '
+            "workspace on Kagura Memory Cloud.\n"
+            "\n"
+            "Accept the invitation by opening the link below:\n"
+            "\n"
+            f"  {accept_url}\n"
+            "\n"
+            f"{expiry_line}"
+            "\n"
+            "If you were not expecting this invitation, you can ignore this "
+            "email — no action is taken unless you open the link.\n"
+        )
+        return await self._send(
+            to_email=to_email,
+            subject=f"You're invited to the {workspace_name} workspace on Kagura",
+            text=text,
+            log_event="workspace_invitation_email",
+            log_context={
+                "to_email": to_email,
+                "workspace_name": workspace_name,
+                "expires_at": expires_at_iso,
+                "template": "workspace_invitation",
+            },
+        )
+
     async def send_erasure_confirmation(
         self,
         *,

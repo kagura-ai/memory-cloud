@@ -144,6 +144,46 @@ async def test_logging_send_erasure_confirmation_does_not_log_raw_token():
     assert confirm_url not in haystack, "confirm_url leaked into log payload"
 
 
+@pytest.mark.asyncio
+async def test_logging_send_workspace_invitation_logs_safe_fields_only():
+    """Issue #654: the logging stub records ops-triage metadata but MUST NOT
+    log the accept_url (it embeds the single-use token) or the inviter name."""
+    svc = LoggingEmailService()
+    token = "raw-invite-token-DO-NOT-LEAK-3c"  # noqa: S105
+    accept_url = f"https://app.example.com/invite/{token}"
+
+    with patch.object(email_service_module, "logger") as mock_logger:
+        result = await svc.send_workspace_invitation(
+            to_email="invitee@example.com",
+            inviter_name="Alice Admin",
+            workspace_name="Acme Research",
+            accept_url=accept_url,
+            expires_at_iso="2026-06-01T00:00:00Z",
+        )
+
+    assert result is True
+    mock_logger.info.assert_called_once()
+    args, kwargs = mock_logger.info.call_args
+    assert args[0] == "workspace_invitation_email"
+    assert kwargs == {
+        "to_email": "invitee@example.com",
+        "workspace_name": "Acme Research",
+        "expires_at": "2026-06-01T00:00:00Z",
+        "email_dispatch_required": True,
+        "template": "workspace_invitation",
+    }
+
+    haystack_parts: list[str] = []
+    for method_call in mock_logger.method_calls:
+        _name, m_args, m_kwargs = method_call
+        haystack_parts.extend(str(a) for a in m_args)
+        haystack_parts.extend(f"{k}={v}" for k, v in m_kwargs.items())
+    haystack = " ".join(haystack_parts)
+    assert token not in haystack, "invitation token leaked into log payload"
+    assert accept_url not in haystack, "accept_url leaked into log payload"
+    assert "Alice Admin" not in haystack, "inviter name leaked into log payload"
+
+
 # ---------------------------------------------------------------------------
 # Singleton + provider switch
 # ---------------------------------------------------------------------------

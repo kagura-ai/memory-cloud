@@ -112,6 +112,42 @@ class EmailService(Protocol):
         """
         ...
 
+    async def send_workspace_invitation(
+        self,
+        *,
+        to_email: str,
+        inviter_name: str,
+        workspace_name: str,
+        accept_url: str,
+        expires_at_iso: str | None,
+    ) -> bool:
+        """Deliver a workspace invitation email (Issue #654).
+
+        Sent as a **courtesy** notification after the invitation row is
+        persisted: the row is the source of truth, so an email failure MUST
+        NOT roll back the invitation. Like every method here, implementations
+        MUST NOT raise — log and return False on failure.
+
+        ``accept_url`` embeds the single-use invitation token as a path
+        segment, so it is **sensitive**: implementations MUST NOT log it (the
+        token is the credential). Mirror ``send_erasure_confirmation``'s
+        redaction discipline — deliver the URL to the recipient inbox, never
+        to local logs.
+
+        Args:
+            to_email: Invitee's email address.
+            inviter_name: Display name of the inviting admin (for the body).
+            workspace_name: Workspace display name (for the body / subject).
+            accept_url: Absolute invitation accept URL embedding the token.
+                **Sensitive** — do not log.
+            expires_at_iso: ISO-8601 UTC expiry (Z-suffixed via ``to_utc_iso``)
+                or ``None`` when the invitation never expires.
+
+        Returns:
+            True on delivery (or logging fallback), False on hard failure.
+        """
+        ...
+
     async def send_erasure_confirmation(
         self,
         *,
@@ -190,6 +226,31 @@ class LoggingEmailService:
             request_id=request_id,
             email_dispatch_required=True,
             template="erasure_complete",
+        )
+        return True
+
+    async def send_workspace_invitation(
+        self,
+        *,
+        to_email: str,
+        inviter_name: str,
+        workspace_name: str,
+        accept_url: str,
+        expires_at_iso: str | None,
+    ) -> bool:
+        # accept_url embeds the single-use token; redact it per the Protocol's
+        # no-log discipline. inviter_name (a person's name) is also kept out of
+        # the log line — the recipient address + workspace are enough for ops
+        # triage. The admin who created the invite already has the accept URL
+        # from the API response, so logging-mode delivery is not lost.
+        del accept_url, inviter_name
+        logger.info(
+            "workspace_invitation_email",
+            to_email=to_email,
+            workspace_name=workspace_name,
+            expires_at=expires_at_iso,
+            email_dispatch_required=True,
+            template="workspace_invitation",
         )
         return True
 
