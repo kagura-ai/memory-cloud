@@ -3533,6 +3533,7 @@
   },
   "device": {
     "title": "Device Authorization",
+    "badge": "Device authorization",
     "description": "Enter the code displayed in your CLI to authorize this device.",
     "codeLabel": "Device Code",
     "codePlaceholder": "XXXXXXXX",

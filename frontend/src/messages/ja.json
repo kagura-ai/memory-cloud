@@ -3533,6 +3533,7 @@
   },
   "device": {
     "title": "デバイス認証",
+    "badge": "デバイス認証",
     "description": "CLIに表示されたコードを入力してデバイスを認証してください。",
     "codeLabel": "デバイスコード",
     "codePlaceholder": "XXXXXXXX",
