@@ -60,12 +60,13 @@ OAuth is optional. You can skip the callback entirely by configuring a Bearer AP
    ```json
    {
      "mcpServers": {
-       "kagura-memory": {
-         "url": "https://your-domain.com/mcp/w/{workspace_id}",
-         "headers": {
-           "Authorization": "Bearer kagura_{your_api_key}"
-         }
-       }
+      "kagura-memory": {
+        "type": "http",
+        "url": "https://your-domain.com/mcp/w/{workspace_id}",
+        "headers": {
+          "Authorization": "Bearer kagura_{your_api_key}"
+        }
+      }
      }
    }
    ```
