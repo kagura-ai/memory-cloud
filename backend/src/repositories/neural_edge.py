@@ -1243,15 +1243,40 @@ class NeuralEdgeRepository:
             existing_edge = conflict_result.scalar_one_or_none()
 
             if existing_edge and existing_edge.id != edge.id:
-                # Keep the edge with higher weight, delete the other
-                if existing_edge.weight >= edge.weight:
-                    await self.db.delete(edge)
+                # Origin-aware conflict resolution (#725). A non-hebbian edge
+                # (semantic/declared) must not be displaced by a hebbian one
+                # regardless of weight, mirroring the sticky-upsert guard in
+                # create_or_update_edge (#722). Only same-origin-tier conflicts
+                # fall back to the weight tie-break (heavier wins, existing on
+                # tie — preserving the pre-#725 behavior). Declared and semantic
+                # share the non-hebbian tier here, so neither can lose to a
+                # hebbian edge; declared-vs-semantic merges are resolved by
+                # weight, which is acceptable for the dedup-merge path.
+                existing_is_hebbian = existing_edge.origin == EDGE_ORIGIN_HEBBIAN
+                incoming_is_hebbian = edge.origin == EDGE_ORIGIN_HEBBIAN
+
+                if existing_is_hebbian and not incoming_is_hebbian:
+                    keep_incoming = True
+                elif not existing_is_hebbian and incoming_is_hebbian:
+                    keep_incoming = False
                 else:
+                    keep_incoming = edge.weight > existing_edge.weight
+
+                if keep_incoming:
                     await self.db.delete(existing_edge)
+                    # Flush the DELETE before re-pointing the incoming edge onto
+                    # the now-freed (new_src, new_dst) slot. Without this the
+                    # unit-of-work can emit the UPDATE before the DELETE, both
+                    # rows momentarily occupy the (user_id, src_id, dst_id)
+                    # unique_edge key, and Postgres raises UniqueViolationError.
+                    # flush() (not commit()) keeps the caller's tx boundary.
+                    await self.db.flush()
                     edge.src_id = new_src
                     edge.dst_id = new_dst
                     edge.last_updated = utcnow()
                     transferred += 1
+                else:
+                    await self.db.delete(edge)
                 continue
 
             # Update edge to point to winner
