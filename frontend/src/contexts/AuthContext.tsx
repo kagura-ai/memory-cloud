@@ -98,9 +98,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * mid-flow. See issue #678 for the tree-killer pattern.
    *
    * Transient refetch errors do NOT log the user out — a network blip should
-   * not eject a logged-in session. Real 401s still set `user` to null because
-   * `getCurrentUser` returns null in that case (see its public-contract
-   * docblock in `lib/auth/auth.ts`), which triggers the normal
+   * not eject a logged-in session. Definitive auth failures (401) DO clear the
+   * session. Two paths reach that outcome:
+   *   - `getCurrentUser` returns null for a 401 under its current public
+   *     contract (see its docblock in `lib/auth/auth.ts`); the success path
+   *     then `setUser(null)`-s.
+   *   - If a 401 ever surfaces as a thrown error instead, the catch below
+   *     branches on `status === 401` and clears the user directly. This makes
+   *     the 401-vs-transient distinction explicit at the AuthContext layer and
+   *     removes the implicit dependency on `getCurrentUser`'s null-for-401
+   *     contract (issue #683).
+   * Either way the user lands on null, triggering the normal
    * redirect-to-login path through DashboardContent.
    *
    * In dev mock-auth mode (`useMockAuth`), refetch is a no-op — the mock
@@ -115,8 +123,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const currentUser = await getCurrentUser();
       setUser(currentUser);
     } catch (error) {
-      console.error("Failed to refetch user (silent):", error);
-      // Intentionally do not setUser(null) here — see the docblock above.
+      const status = (error as { status?: number } | null | undefined)?.status;
+      if (status === 401) {
+        // Definitive auth failure — fall through the normal logout path.
+        setUser(null);
+      } else {
+        // Transient (5xx, network, etc.) — preserve current user state.
+        console.error("Failed to refetch user (silent, transient):", error);
+      }
     }
   };
 

@@ -199,4 +199,34 @@ describe("AuthContext silent refresh (issue #678)", () => {
       expect(screen.getByTestId("user").textContent).toBe("null");
     });
   });
+
+  it("refetchUser clears user when getCurrentUser THROWS a 401 (issue #683)", async () => {
+    mockGetCurrentUser.mockResolvedValueOnce(USER_A);
+
+    render(
+      <AuthProvider>
+        <Probe loadingLog={[]} />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("user").textContent).toBe(USER_A.email);
+    });
+
+    // Future-proofing: even if getCurrentUser's contract changes to THROW on
+    // 401 (instead of returning null), the catch in refetchUser branches on
+    // status === 401 and still clears the session. This path is impossible
+    // under the current null-return contract, hence the explicit thrown error.
+    const error: Error & { status?: number } = new Error("Unauthorized");
+    error.status = 401;
+    mockGetCurrentUser.mockRejectedValueOnce(error);
+
+    await act(async () => {
+      screen.getByTestId("refetch").click();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("user").textContent).toBe("null");
+    });
+  });
 });

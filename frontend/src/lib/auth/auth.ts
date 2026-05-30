@@ -101,10 +101,12 @@ export async function handleAuthCallback(
  * - 401 → returns null (caller treats null as "session ended, go to /login")
  * - other errors (5xx, network) → throws (caller preserves current user state)
  *
- * Changing the 401-returns-null branch to throw will silently break the
- * in-session logout path in `AuthContext.refetchUser` — the catch there
- * intentionally preserves the user on errors, so a 401 thrown instead of
- * returned-as-null would leave a logged-out session displayed as logged-in.
+ * The 401-returns-null branch is the primary in-session logout path. As of
+ * issue #683, `AuthContext.refetchUser` ALSO branches on `status === 401` in
+ * its catch, so a future change that makes this throw on 401 (with the status
+ * preserved on the error) would still clear the session correctly rather than
+ * silently leaving a logged-out session displayed as logged-in. Other thrown
+ * errors (5xx, network) are still treated as transient and preserve the user.
  */
 export async function getCurrentUser(): Promise<User | null> {
   try {
