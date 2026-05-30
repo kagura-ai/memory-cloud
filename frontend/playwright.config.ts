@@ -11,7 +11,10 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
-  reporter: process.env.CI ? "github" : "list",
+  // CI: `github` emits inline log annotations; `html` writes the
+  // `playwright-report/` directory that the frontend-a11y job uploads as a
+  // failure artifact (#786). `open: never` keeps the run non-interactive.
+  reporter: process.env.CI ? [["github"], ["html", { open: "never" }]] : "list",
   use: {
     baseURL: "http://localhost:3000",
     trace: "retain-on-failure",

@@ -19,6 +19,7 @@
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
     "test:e2e": "playwright test",
+    "test:a11y": "playwright test e2e/a11y",
     "test:a11y:authed": "playwright test e2e/authed-a11y"
   },
   "dependencies": {
