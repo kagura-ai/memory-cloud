@@ -436,8 +436,14 @@ def _oauth_cancel_redirect(provider: str, error: str | None, state: str | None) 
 
     # Charset restriction is the primary defense against query-string
     # injection (``&``/``#``/CRLF); quote() below is belt-and-suspenders in
-    # case the charset is ever widened.
-    reason = "".join(c for c in (error or "") if c.isalnum() or c in "_-")[:64] or "unknown"
+    # case the charset is ever widened. ``str.isalnum()`` is Unicode-aware, so
+    # guard with ``isascii()`` to keep the reason to ASCII ``[A-Za-z0-9_-]``
+    # (an IdP-supplied ``error=失敗`` reduces to ``unknown``, not reflected —
+    # Copilot review on PR #832).
+    reason = (
+        "".join(c for c in (error or "") if (c.isascii() and c.isalnum()) or c in "_-")[:64]
+        or "unknown"
+    )
 
     logger.info(
         "oauth_login_cancelled",

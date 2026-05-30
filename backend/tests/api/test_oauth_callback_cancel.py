@@ -114,6 +114,18 @@ class TestCancelRedirectHelper:
         assert "reason=unknown" in _location(_oauth_cancel_redirect("google", "<<<>>>", "s"))
         assert "reason=unknown" in _location(_oauth_cancel_redirect("google", None, "s"))
 
+    def test_non_ascii_error_reduces_to_unknown(self):
+        # str.isalnum() is Unicode-aware; the sanitizer must be ASCII-only so a
+        # non-ASCII IdP error is not reflected (PR #832 Copilot review).
+        loc = _location(_oauth_cancel_redirect("google", "失敗", "s"))
+        assert "reason=unknown" in loc
+        assert "失敗" not in loc
+        assert "%E5" not in loc  # UTF-8 of 失 begins with 0xE5 — not reflected either
+        # Mixed ASCII + non-ASCII keeps only the ASCII allowlist chars.
+        loc2 = _location(_oauth_cancel_redirect("google", "access_denied失敗", "s"))
+        assert "reason=access_denied" in loc2
+        assert "失敗" not in loc2
+
     def test_reason_truncated_to_64_chars(self):
         long_error = "a" * 200
         loc = _location(_oauth_cancel_redirect("google", long_error, "s"))
