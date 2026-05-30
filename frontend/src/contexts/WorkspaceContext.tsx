@@ -25,7 +25,6 @@ interface WorkspaceContextType {
   loading: boolean;
   refreshWorkspaces: () => Promise<void>;
   switchWorkspace: (workspaceId: string) => Promise<void>;
-  setCreatedWorkspace: (workspace: Workspace) => void;
 }
 
 const WorkspaceContext = createContext<WorkspaceContextType | undefined>(undefined);
@@ -75,14 +74,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     await loadWorkspaces(true);
   };
 
-  // Directly set workspace after creation (bypasses API call)
-  const setCreatedWorkspace = (workspace: Workspace) => {
-    workspacesRef.current = [workspace];
-    setWorkspaces([workspace]);
-    setCurrentWorkspace(workspace);
-    setLoading(false);
-  };
-
   const switchWorkspace = async (workspaceId: string) => {
     try {
       // Call API to update backend current_workspace_id
@@ -113,7 +104,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     loading,
     refreshWorkspaces,
     switchWorkspace,
-    setCreatedWorkspace,
   };
 
   return (
