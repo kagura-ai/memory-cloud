@@ -17,9 +17,50 @@ existing process is reused (`reuseExistingServer: !process.env.CI`).
 
 ## Adding a new a11y page
 
+### Hermetic pages (no auth, no backend) → `e2e/a11y/`
+
 Drop a new spec into `e2e/a11y/<page>-contrast.spec.ts` following the
-`login-contrast.spec.ts` shape — `await page.goto("/<path>")` then
-`await new AxeBuilder({ page }).options({ runOnly: ["color-contrast"] }).analyze()`.
+`login-contrast.spec.ts` shape, using the shared helpers from `e2e/fixtures.ts`:
+
+```ts
+import { test } from "@playwright/test";
+import { assertNoColorContrastViolations, gotoAndWaitStable } from "../fixtures";
+
+test("light mode", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "light" });
+  await gotoAndWaitStable(page, "/your-path");
+  await assertNoColorContrastViolations(page);
+});
+```
+
+Specs here are run by the hermetic `frontend-a11y` CI job (#786): only a
+`next dev` server is started — **no backend**. Only put pages that render
+meaningfully without auth or seeded data here.
+
+### Authenticated / backend-dependent pages → `e2e/authed-a11y/` (#785)
+
+Pages that need a live backend, an authenticated user, or seeded data
+(`/device`, `/invite/[token]`, `/workspace/dashboard`) live under
+`e2e/authed-a11y/` instead. The path is deliberately **not** matched by the
+hermetic `playwright test e2e/a11y` glob, so these never run in the
+backend-free CI job. Run them locally with the stack up:
+
+```bash
+export E2E_ADMIN_LOGIN_ID="admin"
+export E2E_ADMIN_PASSWORD="<password>"
+export E2E_API_URL="http://localhost:8080"
+npm run test:a11y:authed
+```
+
+Authenticated specs combine `assertNoColorContrastViolations` / `gotoAndWaitStable`
+from `e2e/fixtures.ts` with the `test` from `e2e/fixtures/admin-auth.ts`.
+
+> **Not yet in CI.** Wiring `e2e/authed-a11y/` into a full-stack a11y CI lane
+> (backend services + seed + `storageState` `globalSetup`) — and contrast-testing
+> the fully-seeded happy paths (e.g. a valid invitation, which needs a Pro-plan
+> workspace) — is tracked as a follow-up to #785. The specs here currently cover
+> only the states reachable without seeding (e.g. `/invite` with an unknown
+> token → error screen).
 
 ## Adding a new authenticated admin spec
 
