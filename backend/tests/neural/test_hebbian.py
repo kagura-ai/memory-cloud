@@ -1,9 +1,13 @@
 """Tests for HebbianLearner."""
 
 from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 
+from models.memory import EDGE_ORIGIN_HEBBIAN, EDGE_ORIGIN_SEMANTIC
 from neural.config import NeuralMemoryConfig
 from neural.hebbian import HebbianLearner
 from neural.models import ActivationState, MemoryKind, NeuralMemoryNode
@@ -289,3 +293,46 @@ class TestHebbianLearner:
 
         # Updates should be queued (pair passed gating)
         assert len(learner._update_queue["u"]) == 2  # Bidirectional
+
+    @pytest.mark.asyncio
+    async def test_prune_weak_edges_excludes_semantic_origin(self, mock_graph):
+        """#724: the per-node top-M pruner only considers hebbian edges.
+
+        A semantic edge survives even when it is the weakest edge overall and
+        would have been pruned first under the old unfiltered weight sort.
+        """
+        config = NeuralMemoryConfig(top_m_edges=2)
+        learner = HebbianLearner(mock_graph, config)
+
+        node_id = str(uuid4())
+        # 3 hebbian edges (1 exceeds top_m=2) + 1 semantic edge that is the
+        # weakest overall — it must NOT be pruned and must NOT count toward top-M.
+        hebbian = [
+            SimpleNamespace(dst_id=uuid4(), weight=w, origin=EDGE_ORIGIN_HEBBIAN)
+            for w in (0.5, 0.6, 0.7)
+        ]
+        semantic = SimpleNamespace(dst_id=uuid4(), weight=0.05, origin=EDGE_ORIGIN_SEMANTIC)
+        all_edges = hebbian + [semantic]
+
+        async def fake_get_outgoing(user_id, src_id, **kwargs):
+            # Mirror the SQL-side origin filter (#741): return only matching rows.
+            origin = kwargs.get("origin")
+            if origin is None:
+                return all_edges
+            return [e for e in all_edges if e.origin == origin]
+
+        mock_graph.edge_repo.get_outgoing_edges = AsyncMock(side_effect=fake_get_outgoing)
+        mock_graph.remove_edge = AsyncMock()
+
+        removed = await learner.prune_weak_edges("u", node_id)
+
+        # The pruner must request the hebbian-filtered list.
+        assert (
+            mock_graph.edge_repo.get_outgoing_edges.await_args.kwargs["origin"]
+            == EDGE_ORIGIN_HEBBIAN
+        )
+        # Exactly one (weakest) hebbian edge pruned; the semantic edge is untouched.
+        assert removed == 1
+        removed_dsts = {call.args[1] for call in mock_graph.remove_edge.await_args_list}
+        assert str(semantic.dst_id) not in removed_dsts
+        assert str(hebbian[0].dst_id) in removed_dsts  # weight 0.5 — weakest hebbian
