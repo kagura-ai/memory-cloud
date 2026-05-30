@@ -410,11 +410,66 @@ async def google_login(
         return LoginResponse(authorization_url=auth_url, state=state)
 
 
+def _oauth_cancel_redirect(provider: str, error: str | None, state: str | None) -> RedirectResponse:
+    """Redirect a cancelled/errored IdP callback to the friendly login page.
+
+    When a user cancels at the IdP (or the IdP rejects the request), the
+    callback arrives as ``?error=<code>&state=...`` with no ``code``. Instead
+    of letting pydantic reject the missing ``code`` with a raw 422 JSON
+    (issue #727), the callbacks short-circuit here: audit-log the cancellation
+    (no PII — the CSRF ``state`` token is HMAC-hashed) and 303-redirect to
+    ``/login?cancelled=1`` so the frontend renders a friendly banner.
+
+    The redirect base is the fixed ``FRONTEND_URL`` origin, so this is not an
+    open redirect (CWE-601). ``error`` is the only IdP-controlled value
+    reflected; it is constrained to a short ``[A-Za-z0-9_-]`` token before
+    being url-encoded. ``error_description`` is intentionally NOT reflected —
+    it is free-form IdP/attacker text.
+    """
+    from urllib.parse import quote
+
+    from config.settings import get_settings
+    from utils.hashing import hmac_sha256_hex
+
+    settings = get_settings()
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+    # Charset restriction is the primary defense against query-string
+    # injection (``&``/``#``/CRLF); quote() below is belt-and-suspenders in
+    # case the charset is ever widened. ``str.isalnum()`` is Unicode-aware, so
+    # guard with ``isascii()`` to keep the reason to ASCII ``[A-Za-z0-9_-]``
+    # (an IdP-supplied ``error=失敗`` reduces to ``unknown``, not reflected —
+    # Copilot review on PR #832).
+    reason = (
+        "".join(c for c in (error or "") if (c.isascii() and c.isalnum()) or c in "_-")[:64]
+        or "unknown"
+    )
+
+    logger.info(
+        "oauth_login_cancelled",
+        provider=provider,
+        reason=reason,
+        state_hash=(hmac_sha256_hex(state, settings.audit_hmac_key) if state else None),
+    )
+
+    return RedirectResponse(
+        f"{frontend_url}/login?cancelled=1"
+        f"&provider={quote(provider, safe='')}&reason={quote(reason, safe='')}",
+        status_code=303,
+    )
+
+
 @google_router.get("/callback")
 async def google_callback(
     request: Request,
-    code: str = Query(..., description="OAuth2 authorization code"),
-    state: str = Query(..., description="CSRF state token"),
+    code: str | None = Query(None, description="OAuth2 authorization code"),
+    state: str | None = Query(None, description="CSRF state token"),
+    error: str | None = Query(
+        None, description="OAuth2 error code (e.g. access_denied) when the user cancels"
+    ),
+    error_description: str | None = Query(
+        None, description="Human-readable OAuth2 error detail (not reflected)"
+    ),
 ):
     """Handle Google OAuth2 callback.
 
@@ -447,6 +502,16 @@ async def google_callback(
         - Secure cookie (HTTPS only)
         - SameSite=Lax (CSRF protection)
     """
+    # Issue #727: a cancelled/errored IdP callback arrives as
+    # ?error=access_denied&state=... with no code. Short-circuit BEFORE any
+    # other validation so the user gets a friendly /login?cancelled=1 page
+    # instead of a raw pydantic 422. The state is left in Redis to expire on
+    # its own TTL — deleting it here would break a concurrent legitimate tab.
+    if error is not None:
+        return _oauth_cancel_redirect("google", error, state)
+    if code is None or state is None:
+        raise HTTPException(status_code=400, detail="Missing required OAuth2 parameters")
+
     if not _oauth2_manager or not _session_manager:
         raise HTTPException(status_code=500, detail="Auth managers not initialized")
 
@@ -891,14 +956,27 @@ async def _github_get_user_info(access_token: str) -> dict[str, Any]:
 @github_router.get("/callback")
 async def github_callback(
     request: Request,
-    code: str = Query(..., description="GitHub authorization code"),
-    state: str = Query(..., description="CSRF state token"),
+    code: str | None = Query(None, description="GitHub authorization code"),
+    state: str | None = Query(None, description="CSRF state token"),
+    error: str | None = Query(
+        None, description="OAuth2 error code (e.g. access_denied) when the user cancels"
+    ),
+    error_description: str | None = Query(
+        None, description="Human-readable OAuth2 error detail (not reflected)"
+    ),
 ):
     """Handle GitHub OAuth2 callback.
 
     Same flow as Google callback: CSRF validation → token exchange →
     user info → session creation → cookie → redirect.
     """
+    # Issue #727: cancelled/errored callback (?error=access_denied&state=...,
+    # no code) → friendly /login?cancelled=1 instead of a raw pydantic 422.
+    if error is not None:
+        return _oauth_cancel_redirect("github", error, state)
+    if code is None or state is None:
+        raise HTTPException(status_code=400, detail="Missing required OAuth2 parameters")
+
     if not _oauth2_manager or not _session_manager:
         raise HTTPException(status_code=500, detail="Auth managers not initialized")
 

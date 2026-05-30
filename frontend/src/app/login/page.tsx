@@ -28,7 +28,14 @@ import {
 } from "@/lib/auth/auth";
 import { safeReturnTo } from "@/lib/auth/safeReturnTo";
 import { buildOAuthRedirect } from "@/lib/auth/buildOAuthRedirect";
-import { ArrowRight, AlertCircle, Sparkles, Shield, Zap } from "lucide-react";
+import {
+  ArrowRight,
+  AlertCircle,
+  Info,
+  Sparkles,
+  Shield,
+  Zap,
+} from "lucide-react";
 import { KaguraLogo } from "@/components/icons/KaguraLogo";
 import { LanguageSelector } from "@/components/LanguageSelector";
 
@@ -39,6 +46,10 @@ function LoginContent() {
 
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Issue #727: neutral notice for a cancelled IdP sign-in (?cancelled=1).
+  // Kept separate from `error` — a cancellation is informational, not a
+  // failure, so it must NOT use the destructive red banner.
+  const [notice, setNotice] = useState<string | null>(null);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
   const [showAdminLogin, setShowAdminLogin] = useState<boolean | null>(null);
@@ -87,6 +98,13 @@ function LoginContent() {
       );
     } else if (errorParam) {
       setError(decodeURIComponent(errorParam));
+    }
+
+    // Issue #727: the OAuth callback redirects a cancelled IdP sign-in here
+    // with ?cancelled=1 instead of surfacing a raw 422. Show a friendly,
+    // non-destructive notice (the `reason`/`provider` params are advisory).
+    if (searchParams.get("cancelled") === "1") {
+      setNotice(t("signinCancelled"));
     }
 
     if (isMockAuth) {
@@ -263,6 +281,14 @@ function LoginContent() {
                 {mfaRequired ? t("enterTotpCode") : t("accessPlatform")}
               </p>
             </div>
+
+            {/* Cancellation notice (Issue #727) — neutral, not an error */}
+            {notice && (
+              <Alert className="mb-6 border-blue-200 bg-blue-50 text-blue-800">
+                <Info className="h-4 w-4" />
+                <AlertDescription>{notice}</AlertDescription>
+              </Alert>
+            )}
 
             {/* Error */}
             {error && (
