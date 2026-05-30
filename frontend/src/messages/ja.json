@@ -3066,7 +3066,12 @@
       "noResultsDesc": "「{query}」に一致するメモリがありません。",
       "filter": {
         "activeLabel": "タグで絞り込み中:",
-        "clearTag": "タグフィルタを解除: {tag}"
+        "clearTag": "タグフィルタを解除: {tag}",
+        "clearAll": "すべて解除",
+        "filteringCount": "{count, plural, other {# 件のメモリー}}を絞り込み中",
+        "announceAdded": "フィルター {tag} を追加しました。共起するタグに絞り込みました。",
+        "announceRemoved": "フィルター {tag} を解除しました。",
+        "announceCleared": "すべてのタグフィルターを解除しました。"
       }
     },
     "tagCloud": {
@@ -3077,7 +3082,10 @@
       "emptyTitle": "タグがまだありません",
       "emptyDesc": "このコンテキストにメモリが追加されるとタグが表示されます。",
       "tagWithCount": "{tag}（{count}件）",
-      "loadFailed": "タグの読み込みに失敗しました"
+      "loadFailed": "タグの読み込みに失敗しました",
+      "emptyRefinedTitle": "これ以上のタグはありません",
+      "emptyRefinedDesc": "現在のフィルターと共起するタグはありません。タグを外すと結果が広がります。",
+      "tagAddWithCount": "フィルター追加 {tag}（{count, plural, other {# 件のメモリー}}）"
     },
     "tagAutocomplete": {
       "suggestionsLabel": "タグ候補"

@@ -472,3 +472,127 @@ class TestAggregateTagsCTE:
 
         with pytest.raises(ValidationError):
             await _agg_rows(db_session, user_id, ctx.id, sort="bogus")
+
+
+@pytest.mark.asyncio
+class TestAggregateTagsWithTags:
+    """#830: ``with_tags`` multi-tag AND drill-down on the tag cloud."""
+
+    async def _seed_cooccurrence(self, db_session, now):
+        """3 memories so co-occurrence is non-trivial:
+
+        m1: {python, backend, api}
+        m2: {python, backend, db}
+        m3: {python, frontend}
+        """
+        user_id = f"u_wt_{uuid4().hex[:6]}"
+        ws, ctx = await _seed_workspace_context(db_session, user_id=user_id)
+        db_session.add_all(
+            [
+                _memory(
+                    ws_id=ws.id,
+                    ctx_id=ctx.id,
+                    user_id=user_id,
+                    tags=["python", "backend", "api"],
+                    created_at=now,
+                ),
+                _memory(
+                    ws_id=ws.id,
+                    ctx_id=ctx.id,
+                    user_id=user_id,
+                    tags=["python", "backend", "db"],
+                    created_at=now,
+                ),
+                _memory(
+                    ws_id=ws.id,
+                    ctx_id=ctx.id,
+                    user_id=user_id,
+                    tags=["python", "frontend"],
+                    created_at=now,
+                ),
+            ]
+        )
+        await db_session.flush()
+        return user_id, ctx
+
+    async def test_with_tags_facets_to_cooccurring_and_self_excludes(self, db_session, now):
+        user_id, ctx = await self._seed_cooccurrence(db_session, now)
+
+        # Drill into "backend": only m1+m2 qualify (both hold backend).
+        # Their other tags are {python, api, db}; "backend" itself is excluded.
+        rows = await _agg_rows(db_session, user_id, ctx.id, with_tags=["backend"])
+        by_tag = {r["tag"]: r["count"] for r in rows}
+        assert set(by_tag) == {"python", "api", "db"}
+        assert "backend" not in by_tag  # self-exclusion
+        assert "frontend" not in by_tag  # m3 lacks backend
+        # Counts reflect the faceted subset: python on both m1,m2 → 2; api/db → 1.
+        assert by_tag == {"python": 2, "api": 1, "db": 1}
+
+    async def test_with_tags_and_semantics_multi(self, db_session, now):
+        user_id, ctx = await self._seed_cooccurrence(db_session, now)
+
+        # AND of python+backend → m1,m2 → remaining {api, db} (python+backend excluded).
+        rows = await _agg_rows(db_session, user_id, ctx.id, with_tags=["python", "backend"])
+        assert {r["tag"] for r in rows} == {"api", "db"}
+
+    async def test_with_tags_empty_matches_618_behavior(self, db_session, now):
+        user_id, ctx = await self._seed_cooccurrence(db_session, now)
+
+        baseline = {r["tag"] for r in await _agg_rows(db_session, user_id, ctx.id)}
+        empty = {r["tag"] for r in await _agg_rows(db_session, user_id, ctx.id, with_tags=[])}
+        assert empty == baseline == {"python", "backend", "api", "db", "frontend"}
+
+    async def test_with_tags_no_cooccurrence_returns_empty(self, db_session, now):
+        user_id, ctx = await self._seed_cooccurrence(db_session, now)
+
+        # api and frontend never co-occur (api∈m1, frontend∈m3) → empty cloud.
+        rows = await _agg_rows(db_session, user_id, ctx.id, with_tags=["api", "frontend"])
+        assert rows == []
+
+    async def test_with_tags_combines_with_q(self, db_session, now):
+        """with_tags AND q both narrow the same memory set."""
+        user_id = f"u_wtq_{uuid4().hex[:6]}"
+        ws, ctx = await _seed_workspace_context(db_session, user_id=user_id)
+        db_session.add_all(
+            [
+                _memory(
+                    ws_id=ws.id,
+                    ctx_id=ctx.id,
+                    user_id=user_id,
+                    tags=["python", "api"],
+                    created_at=now,
+                    summary="deploy api",
+                ),
+                _memory(
+                    ws_id=ws.id,
+                    ctx_id=ctx.id,
+                    user_id=user_id,
+                    tags=["python", "db"],
+                    created_at=now,
+                    summary="schema notes",
+                ),
+            ]
+        )
+        await db_session.flush()
+
+        # with_tags=python narrows to both; q=deploy further narrows to m1 only.
+        rows = await _agg_rows(db_session, user_id, ctx.id, with_tags=["python"], q="deploy")
+        assert {r["tag"] for r in rows} == {"api"}
+
+    async def test_with_tags_over_limit_raises(self, db_session, now):
+        from utils.exceptions import ValidationError
+
+        user_id, ctx = await self._seed_cooccurrence(db_session, now)
+        with pytest.raises(ValidationError):
+            await _agg_rows(db_session, user_id, ctx.id, with_tags=[f"t{i}" for i in range(51)])
+
+    async def test_with_tags_trims_whitespace(self, db_session, now):
+        """`?with_tags=%20backend%20` binds 'backend', not ' backend ' (PR #833
+        Copilot review). Surrounding whitespace must not break the @> match or
+        the self-exclusion."""
+        user_id, ctx = await self._seed_cooccurrence(db_session, now)
+
+        rows = await _agg_rows(db_session, user_id, ctx.id, with_tags=["  backend  "])
+        by_tag = {r["tag"] for r in rows}
+        assert by_tag == {"python", "api", "db"}
+        assert "backend" not in by_tag  # self-excluded despite the whitespace

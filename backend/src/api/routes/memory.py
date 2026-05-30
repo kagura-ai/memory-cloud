@@ -539,6 +539,13 @@ async def list_memories(
         "Repeat the param to pass several: ?tags=a&tags=b. Combined with other "
         "filters (e.g. q) by AND. Blank / whitespace-only entries are ignored.",
     ),
+    tags_match: str = Query(
+        "any",
+        pattern="^(any|all)$",
+        description="How to combine `tags`: `any` (default — memory has at least "
+        "one of the tags, PG array overlap; preserves #618 behavior) or `all` "
+        "(memory holds every given tag, PG array contains — #830 drill-down).",
+    ),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
@@ -642,10 +649,23 @@ async def list_memories(
         if q_pattern is not None:
             query = query.where(Memory.summary.ilike(q_pattern, escape="\\"))
 
-        # ANY-match: row has at least one of the requested tags (PG array
-        # overlap ``&&``). NULL-tags rows never overlap, so they're excluded.
+        # Tag filter (#618 ANY / #830 ALL). Built once and applied to BOTH the
+        # data and count queries so the total always reflects the same filter
+        # (the two used to carry duplicate predicates — easy to let drift).
+        # NULL-tags rows never match either operator, so they're excluded in
+        # both modes.
+        tag_filter = None
         if tags_normalized is not None:
-            query = query.where(Memory.tags.overlap(tags_normalized))
+            if tags_match == "all":
+                # ALL-match (#830): row's tags contain every requested tag
+                # (PG array contains ``@>``).
+                tag_filter = Memory.tags.contains(tags_normalized)
+            else:
+                # ANY-match (default, #618): row has at least one of the
+                # requested tags (PG array overlap ``&&``).
+                tag_filter = Memory.tags.overlap(tags_normalized)
+        if tag_filter is not None:
+            query = query.where(tag_filter)
 
         # Get total count (with same filters as data query)
         count_query = select(func.count(Memory.id)).where(Memory.deleted_at.is_(None))
@@ -659,8 +679,8 @@ async def list_memories(
             count_query = count_query.where(Memory.context_id == context_id)
         if q_pattern is not None:
             count_query = count_query.where(Memory.summary.ilike(q_pattern, escape="\\"))
-        if tags_normalized is not None:
-            count_query = count_query.where(Memory.tags.overlap(tags_normalized))
+        if tag_filter is not None:
+            count_query = count_query.where(tag_filter)
         count_result = await db.execute(count_query)
         total = count_result.scalar() or 0
 

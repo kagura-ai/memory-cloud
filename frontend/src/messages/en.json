@@ -3066,7 +3066,12 @@
       "noResultsDesc": "No memories match \"{query}\".",
       "filter": {
         "activeLabel": "Filtered by tag:",
-        "clearTag": "Clear tag filter: {tag}"
+        "clearTag": "Clear tag filter: {tag}",
+        "clearAll": "Clear all",
+        "filteringCount": "Filtering {count, plural, one {# memory} other {# memories}}",
+        "announceAdded": "Added filter {tag}. Cloud refined to co-occurring tags.",
+        "announceRemoved": "Removed filter {tag}.",
+        "announceCleared": "Cleared all tag filters."
       }
     },
     "tagCloud": {
@@ -3077,7 +3082,10 @@
       "emptyTitle": "No tags yet",
       "emptyDesc": "Tags appear here as memories are added to this context.",
       "tagWithCount": "{tag} ({count, plural, one {# memory} other {# memories}})",
-      "loadFailed": "Failed to load tags"
+      "loadFailed": "Failed to load tags",
+      "emptyRefinedTitle": "No further tags",
+      "emptyRefinedDesc": "No other tags co-occur with the current filter. Remove a tag to widen the results.",
+      "tagAddWithCount": "Add filter {tag} ({count, plural, one {# memory} other {# memories}})"
     },
     "tagAutocomplete": {
       "suggestionsLabel": "Tag suggestions"

@@ -139,6 +139,7 @@ class TestListContextTagsRoute:
             sort="recent",
             prefix="auth",
             q="deploy",
+            with_tags=["python", "backend"],
         )
 
         mock_service.aggregate_tags.assert_awaited_once_with(
@@ -149,4 +150,5 @@ class TestListContextTagsRoute:
             sort="recent",
             prefix="auth",
             q="deploy",
+            with_tags=["python", "backend"],
         )

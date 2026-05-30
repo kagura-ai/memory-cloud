@@ -44,6 +44,12 @@ export interface GetContextTagsParams {
   sort?: TagSortMode;
   /** #618: facet the tags to memories whose summary matches this substring. */
   q?: string;
+  /**
+   * #830: multi-tag AND drill-down. Facets the cloud to tags that co-occur on
+   * memories carrying ALL of these tags; the with_tags values are excluded
+   * from the result. Sent as repeated `?with_tags=a&with_tags=b`.
+   */
+  withTags?: string[];
 }
 
 /**
@@ -65,6 +71,10 @@ export async function getContextTags(
   if (params.q) {
     const trimmed = params.q.trim();
     if (trimmed) sp.set("q", trimmed);
+  }
+  for (const tag of params.withTags ?? []) {
+    const trimmed = tag.trim();
+    if (trimmed) sp.append("with_tags", trimmed);
   }
   const qs = sp.toString();
   return apiClient.get<ContextTagsResponse>(

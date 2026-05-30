@@ -1100,6 +1100,7 @@ class ContextService:
         sort: TagSortMode = "count",
         prefix: str = "",
         q: str | None = None,
+        with_tags: list[str] | None = None,
     ) -> dict:
         """Aggregate tags across non-deleted memories in a context (Issue #614).
 
@@ -1125,6 +1126,15 @@ class ContextService:
                 ``_`` / ``#`` are escaped to literal characters via
                 ``ILIKE ... ESCAPE '#'`` so the parameter cannot be used as a
                 wildcard probe.
+            q: Optional case-insensitive substring filter on ``summary``
+                (#618). Facets the cloud to tags on matching memories;
+                whitespace-only is treated as no filter.
+            with_tags: Optional multi-tag AND drill-down (#830). When set,
+                aggregate only over memories whose tags contain ALL of these
+                values (``tags @> with_tags``), and exclude the ``with_tags``
+                values from the returned tags. AND-combined with ``q``. Bound
+                as a single ``varchar[]`` param (never interpolated). Capped at
+                50 tags, each ≤ 200 chars.
 
         Returns:
             ``{"context_name": str, "rows": list[dict]}`` where each row is
@@ -1171,6 +1181,24 @@ class ContextService:
         else:
             q_pattern = ""
 
+        # #830: optional ``with_tags`` facets the cloud to tags that co-occur
+        # with ALL of the given tags (multi-tag AND drill-down). The matched
+        # memory set is narrowed via ``tags @> with_tags`` (GIN-indexed), and
+        # the with_tags values themselves are excluded from the returned cloud
+        # ("what else can I add"). Bound as a single ``varchar[]`` param — never
+        # interpolated — so each tag value is safe. An empty list is a no-op:
+        # ``tags @> '{}'`` is always true and ``tag <> ALL('{}')`` excludes
+        # nothing, so the result matches the pre-#830 (#618) behaviour exactly.
+        # Bind the STRIPPED value (not the raw one): a request like
+        # ``?with_tags=%20python%20`` must match memories tagged ``python`` and
+        # self-exclude ``python`` from the cloud, not bind a literal `" python "`
+        # that matches nothing (Copilot review on PR #833).
+        with_tags_clean = [s for t in (with_tags or []) if (s := t.strip())]
+        if len(with_tags_clean) > 50:
+            raise ValidationError("with_tags accepts at most 50 tags.")
+        if any(len(t) > 200 for t in with_tags_clean):
+            raise ValidationError("each with_tags value must be at most 200 characters.")
+
         # sort is allow-list validated above; safe to interpolate.
         sort_clause = {
             "count": "ORDER BY cnt DESC, tag ASC",
@@ -1191,6 +1219,7 @@ class ContextService:
                   AND tags IS NOT NULL
                   AND cardinality(tags) > 0
                   AND (:q_pattern = '' OR summary ILIKE :q_pattern ESCAPE '#')
+                  AND tags @> CAST(:with_tags AS varchar[])
             ),
             tag_rows AS (
                 -- DISTINCT id, tag collapses intra-array duplicates so a
@@ -1207,6 +1236,7 @@ class ContextService:
                     MAX(last_at) AS last_used_at
                 FROM tag_rows
                 WHERE (:prefix_pattern = '' OR tag ILIKE :prefix_pattern ESCAPE '#')
+                  AND tag <> ALL(CAST(:with_tags AS varchar[]))
                 GROUP BY tag
                 HAVING COUNT(*) >= :min_count
             )
@@ -1223,6 +1253,7 @@ class ContextService:
                 "context_id": str(context_id),
                 "prefix_pattern": prefix_pattern,
                 "q_pattern": q_pattern,
+                "with_tags": with_tags_clean,
                 "min_count": min_count,
                 "limit": limit,
             },

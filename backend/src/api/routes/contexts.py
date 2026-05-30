@@ -751,6 +751,16 @@ async def list_context_tags(
             "treated as no filter."
         ),
     ),
+    with_tags: list[str] = Query(
+        default_factory=list,
+        description=(
+            "Repeatable tag filter for multi-tag AND drill-down (#830). When "
+            "set, only tags that co-occur on memories carrying ALL of these "
+            "tags are aggregated, and the with_tags values themselves are "
+            "excluded from the result. AND-combined with `q`. Counts reflect "
+            "the faceted (co-occurrence) subset."
+        ),
+    ),
 ) -> ContextTagsResponse:
     """List existing tag vocabulary in a context (Issue #614).
 
@@ -783,6 +793,7 @@ async def list_context_tags(
             sort=sort,
             prefix=prefix,
             q=q,
+            with_tags=with_tags,
         )
     except NotFoundException as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e

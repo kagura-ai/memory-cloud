@@ -26,6 +26,11 @@ export interface ListMemoriesParams {
   q?: string;
   /** ANY-match tag filter (#618). Repeated as ?tags=a&tags=b; blanks ignored. */
   tags?: string[];
+  /**
+   * #830: how to combine `tags`. `"any"` (default — overlap, preserves #618)
+   * or `"all"` (memory must hold every given tag). Only sent when `"all"`.
+   */
+  tagsMatch?: "any" | "all";
   limit?: number;
   offset?: number;
 }
@@ -52,6 +57,9 @@ export async function getMemories(
     const trimmed = tag.trim();
     if (trimmed) searchParams.append("tags", trimmed);
   }
+  // Only send tags_match when "all" — default "any" keeps the URL clean and
+  // matches the backend default (#618 behavior preserved).
+  if (params.tagsMatch === "all") searchParams.set("tags_match", "all");
   searchParams.set("limit", String(params.limit ?? 50));
   searchParams.set("offset", String(params.offset ?? 0));
 
