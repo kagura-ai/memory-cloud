@@ -162,15 +162,28 @@ describe("MCPConfigBlock", () => {
       );
       unmount();
 
-      // Mount with cursor pre-populated → restore + setItem fires again
+      // Mount with chatgpt pre-populated → restore + setItem fires again
       localStorageMock.setItem.mockClear();
-      localStorageStore["kagura_last_mcp_client"] = "cursor";
+      localStorageStore["kagura_last_mcp_client"] = "chatgpt";
       render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
 
       expect(localStorageMock.setItem).toHaveBeenCalledWith(
         "kagura_last_mcp_client",
-        "cursor",
+        "chatgpt",
       );
+    });
+
+    it("falls back to claude-code for a legacy 'cursor' localStorage value (merged tab)", () => {
+      // Claude Code and Cursor were merged into one tab (#631). A returning
+      // user who last selected the old "cursor" tab is no longer a valid
+      // member, so readStoredClient falls back to the default claude-code tab,
+      // which renders the same standard mcpServers JSON Cursor also consumes.
+      localStorageStore["kagura_last_mcp_client"] = "cursor";
+      render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
+
+      const tab = screen.getByRole("tab", { name: "clients.claudeCode" });
+      expect(tab).toHaveAttribute("aria-selected", "true");
+      expect(screen.getByText(/"mcpServers"/)).toBeInTheDocument();
     });
 
     it("restores the persisted tab on mount", () => {

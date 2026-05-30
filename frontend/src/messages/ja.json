@@ -1493,7 +1493,6 @@
     "mcpConfigHiddenCopyDisabled": "動作する設定をコピーするにはキーを再生成してください",
     "clients": {
       "claudeCode": "Claude Code",
-      "cursor": "Cursor",
       "chatgpt": "ChatGPT",
       "codex": "Codex CLI"
     },
