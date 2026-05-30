@@ -220,6 +220,25 @@ def _isolation_memory(*, importance, access_count, age_days):
     return m
 
 
+def _assert_graph_service_isolation(mock_graph_service):
+    """Pin that GraphService was constructed with the isolation identifiers.
+
+    The #659 requirement is 3-level isolation: execute() must build
+    ``GraphService(user_id, db, workspace_id, context_id)``. Without this
+    assertion a regression to ``GraphService(user_id, db)`` — or swapped /
+    dropped ws/ctx — would still pass the behavioral checks while silently
+    violating the isolation contract (Copilot review on PR #838).
+    """
+    mock_graph_service.assert_called_once()
+    args, kwargs = mock_graph_service.call_args
+    # consolidation.py constructs it positionally:
+    #   GraphService(user_id, self.db, workspace_id, context_id)
+    passed_workspace = args[2] if len(args) > 2 else kwargs.get("workspace_id")
+    passed_context = args[3] if len(args) > 3 else kwargs.get("context_id")
+    assert passed_workspace == "ws", "GraphService must receive workspace_id (3-level isolation)"
+    assert passed_context == "ctx", "GraphService must receive context_id (3-level isolation)"
+
+
 class TestNeuralMetricsUnderIsolation:
     """Issue #659: drive ConsolidationPhase.execute() end-to-end to pin the
     neural-metrics promotion criteria and the is_isolated deletion guard under
@@ -249,7 +268,9 @@ class TestNeuralMetricsUnderIsolation:
         )
         with (
             patch("services.sleep.consolidation.MemoryRepository"),
-            patch("services.sleep.consolidation.GraphService", return_value=graph),
+            patch(
+                "services.sleep.consolidation.GraphService", return_value=graph
+            ) as mock_graph_service,
             patch(
                 "services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock
             ) as del_qdrant,
@@ -260,6 +281,7 @@ class TestNeuralMetricsUnderIsolation:
             # LLM off → borderline memories are left untouched.
             result = await phase.execute(_make_config(provider=""), "u", "ws", "ctx", SleepBudget())
 
+        _assert_graph_service_isolation(mock_graph_service)
         phase.memory_repo.delete.assert_not_called()
         del_qdrant.assert_not_called()
         phase.memory_repo.promote_to_persistent.assert_not_called()
@@ -282,7 +304,9 @@ class TestNeuralMetricsUnderIsolation:
         )
         with (
             patch("services.sleep.consolidation.MemoryRepository"),
-            patch("services.sleep.consolidation.GraphService", return_value=graph),
+            patch(
+                "services.sleep.consolidation.GraphService", return_value=graph
+            ) as mock_graph_service,
             patch("services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock),
         ):
             phase = ConsolidationPhase(mock_db, mock_llm)
@@ -290,6 +314,7 @@ class TestNeuralMetricsUnderIsolation:
             phase._fetch_working_memories = AsyncMock(return_value=[mem])
             result = await phase.execute(_make_config(provider=""), "u", "ws", "ctx", SleepBudget())
 
+        _assert_graph_service_isolation(mock_graph_service)
         phase.memory_repo.promote_to_persistent.assert_awaited_once_with(mem.id)
         assert result.details["rule_promoted"] == 1
 
@@ -312,7 +337,9 @@ class TestNeuralMetricsUnderIsolation:
         )
         with (
             patch("services.sleep.consolidation.MemoryRepository"),
-            patch("services.sleep.consolidation.GraphService", return_value=graph),
+            patch(
+                "services.sleep.consolidation.GraphService", return_value=graph
+            ) as mock_graph_service,
             patch("services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock),
         ):
             phase = ConsolidationPhase(mock_db, mock_llm)
@@ -320,5 +347,6 @@ class TestNeuralMetricsUnderIsolation:
             phase._fetch_working_memories = AsyncMock(return_value=[mem])
             await phase.execute(_make_config(provider=""), "u", "ws", "ctx", SleepBudget())
 
+        _assert_graph_service_isolation(mock_graph_service)
         graph.get_node_metrics.assert_awaited()
         assert graph.get_node_metrics.await_count == 1
