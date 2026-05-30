@@ -1189,7 +1189,11 @@ class ContextService:
         # interpolated — so each tag value is safe. An empty list is a no-op:
         # ``tags @> '{}'`` is always true and ``tag <> ALL('{}')`` excludes
         # nothing, so the result matches the pre-#830 (#618) behaviour exactly.
-        with_tags_clean = [t for t in (with_tags or []) if t and t.strip()]
+        # Bind the STRIPPED value (not the raw one): a request like
+        # ``?with_tags=%20python%20`` must match memories tagged ``python`` and
+        # self-exclude ``python`` from the cloud, not bind a literal `" python "`
+        # that matches nothing (Copilot review on PR #833).
+        with_tags_clean = [s for t in (with_tags or []) if (s := t.strip())]
         if len(with_tags_clean) > 50:
             raise ValidationError("with_tags accepts at most 50 tags.")
         if any(len(t) > 200 for t in with_tags_clean):

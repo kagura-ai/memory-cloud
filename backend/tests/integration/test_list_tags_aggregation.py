@@ -585,3 +585,14 @@ class TestAggregateTagsWithTags:
         user_id, ctx = await self._seed_cooccurrence(db_session, now)
         with pytest.raises(ValidationError):
             await _agg_rows(db_session, user_id, ctx.id, with_tags=[f"t{i}" for i in range(51)])
+
+    async def test_with_tags_trims_whitespace(self, db_session, now):
+        """`?with_tags=%20backend%20` binds 'backend', not ' backend ' (PR #833
+        Copilot review). Surrounding whitespace must not break the @> match or
+        the self-exclusion."""
+        user_id, ctx = await self._seed_cooccurrence(db_session, now)
+
+        rows = await _agg_rows(db_session, user_id, ctx.id, with_tags=["  backend  "])
+        by_tag = {r["tag"] for r in rows}
+        assert by_tag == {"python", "api", "db"}
+        assert "backend" not in by_tag  # self-excluded despite the whitespace
