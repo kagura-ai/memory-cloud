@@ -21,6 +21,7 @@ References:
 import logging
 from collections import defaultdict
 
+from models.memory import EDGE_ORIGIN_HEBBIAN
 from src.services.graph_service import GraphService as GraphMemory
 
 from .config import NeuralMemoryConfig
@@ -371,11 +372,18 @@ class HebbianLearner:
             from uuid import UUID
 
             node_uuid = UUID(node_id) if isinstance(node_id, str) else node_id
+            # Issue #724: only Hebbian-origin edges participate in the per-node
+            # top-M cap. Semantic/declared edges (origin != 'hebbian') are exempt
+            # from this pruner — they are managed by sleep edge_discovery and the
+            # decay carve-out (#722) — so they can never be evicted here, nor do
+            # they consume the top_m_edges budget. The filter is pushed into SQL
+            # via get_outgoing_edges(origin=...) (#741).
             outgoing_edges = await self.graph.edge_repo.get_outgoing_edges(
                 user_id,
                 node_uuid,
                 workspace_id=self.graph.workspace_id,
                 context_id=self.graph.context_id,
+                origin=EDGE_ORIGIN_HEBBIAN,
             )
         except Exception as e:
             logger.error(f"Failed to get outgoing edges for node {node_id}: {e}")
