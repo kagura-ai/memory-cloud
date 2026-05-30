@@ -4,6 +4,7 @@ Issue #103: Rule-based parity with legacy consolidation_task,
 LLM borderline path, bridge node protection.
 """
 
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -11,6 +12,7 @@ import pytest
 
 from services.sleep.consolidation import ConsolidationPhase
 from services.sleep.reporter import SleepBudget
+from utils.datetime import utcnow
 
 
 @pytest.fixture
@@ -202,3 +204,121 @@ class TestLLMJudgeParsing:
                 decisions[label_to_id[label]] = action
 
         assert len(decisions) == 0
+
+
+def _isolation_memory(*, importance, access_count, age_days):
+    """Build a working Memory with a concrete created_at so the age computed
+    inside ConsolidationPhase.execute() matches `age_days` exactly."""
+    m = MagicMock()
+    m.id = uuid4()
+    m.summary = "isolation test memory"
+    m.type = "note"
+    m.importance = importance
+    m.access_count = access_count
+    m.scope = "working"
+    m.created_at = utcnow() - timedelta(days=age_days)
+    return m
+
+
+class TestNeuralMetricsUnderIsolation:
+    """Issue #659: drive ConsolidationPhase.execute() end-to-end to pin the
+    neural-metrics promotion criteria and the is_isolated deletion guard under
+    the 3-level isolation model.
+
+    Unlike TestDeletionSafety / TestRuleBasedPromotion (which re-implement the
+    boolean formulas inline), these tests exercise the real code path so they
+    catch the Issue #44 class of regression — e.g. a missing ``await`` on
+    ``get_node_metrics`` that previously made the whole neural branch a silent
+    no-op (#651 root cause).
+    """
+
+    @pytest.mark.asyncio
+    async def test_does_not_delete_connected_memory(self, mock_db, mock_llm):
+        """is_isolated=False old/unused memory is NOT deleted (bridge protection)."""
+        mem = _isolation_memory(importance=0.3, access_count=0, age_days=40)
+        graph = MagicMock()
+        graph.stats = AsyncMock(return_value={"total_edges": 3})
+        graph.get_node_metrics = AsyncMock(
+            return_value={
+                "centrality": 0.1,
+                "edge_count": 2,
+                "avg_edge_weight": 0.2,
+                "is_hub_node": False,
+                "is_isolated": False,
+            }
+        )
+        with (
+            patch("services.sleep.consolidation.MemoryRepository"),
+            patch("services.sleep.consolidation.GraphService", return_value=graph),
+            patch(
+                "services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock
+            ) as del_qdrant,
+        ):
+            phase = ConsolidationPhase(mock_db, mock_llm)
+            phase.memory_repo = AsyncMock()
+            phase._fetch_working_memories = AsyncMock(return_value=[mem])
+            # LLM off → borderline memories are left untouched.
+            result = await phase.execute(_make_config(provider=""), "u", "ws", "ctx", SleepBudget())
+
+        phase.memory_repo.delete.assert_not_called()
+        del_qdrant.assert_not_called()
+        phase.memory_repo.promote_to_persistent.assert_not_called()
+        assert result.details["rule_deleted"] == 0
+
+    @pytest.mark.asyncio
+    async def test_neural_metrics_promotion_under_isolation(self, mock_db, mock_llm):
+        """High centrality promotes a memory that no Issue #1 rule would promote."""
+        mem = _isolation_memory(importance=0.3, access_count=0, age_days=5)
+        graph = MagicMock()
+        graph.stats = AsyncMock(return_value={"total_edges": 10})
+        graph.get_node_metrics = AsyncMock(
+            return_value={
+                "centrality": 0.9,  # >= NEURAL_CENTRALITY_THRESHOLD (0.7)
+                "edge_count": 2,
+                "avg_edge_weight": 0.2,
+                "is_hub_node": False,
+                "is_isolated": False,
+            }
+        )
+        with (
+            patch("services.sleep.consolidation.MemoryRepository"),
+            patch("services.sleep.consolidation.GraphService", return_value=graph),
+            patch("services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock),
+        ):
+            phase = ConsolidationPhase(mock_db, mock_llm)
+            phase.memory_repo = AsyncMock()
+            phase._fetch_working_memories = AsyncMock(return_value=[mem])
+            result = await phase.execute(_make_config(provider=""), "u", "ws", "ctx", SleepBudget())
+
+        phase.memory_repo.promote_to_persistent.assert_awaited_once_with(mem.id)
+        assert result.details["rule_promoted"] == 1
+
+    @pytest.mark.asyncio
+    async def test_get_node_metrics_is_awaited(self, mock_db, mock_llm):
+        """Regression guard for the #44/#651 missing-await: get_node_metrics is
+        actually awaited (an unawaited coroutine would raise TypeError on the
+        ``neural_metrics['centrality']`` subscript and be silently swallowed)."""
+        mem = _isolation_memory(importance=0.3, access_count=0, age_days=5)
+        graph = MagicMock()
+        graph.stats = AsyncMock(return_value={"total_edges": 4})
+        graph.get_node_metrics = AsyncMock(
+            return_value={
+                "centrality": 0.9,
+                "edge_count": 1,
+                "avg_edge_weight": 0.2,
+                "is_hub_node": False,
+                "is_isolated": False,
+            }
+        )
+        with (
+            patch("services.sleep.consolidation.MemoryRepository"),
+            patch("services.sleep.consolidation.GraphService", return_value=graph),
+            patch("services.sleep.consolidation.delete_memory_from_qdrant", new_callable=AsyncMock),
+        ):
+            phase = ConsolidationPhase(mock_db, mock_llm)
+            phase.memory_repo = AsyncMock()
+            phase._fetch_working_memories = AsyncMock(return_value=[mem])
+            await phase.execute(_make_config(provider=""), "u", "ws", "ctx", SleepBudget())
+
+        graph.get_node_metrics.assert_awaited()
+        assert graph.get_node_metrics.await_count == 1
