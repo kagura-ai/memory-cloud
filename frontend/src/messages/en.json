@@ -114,6 +114,7 @@
     "redirecting": "Redirecting...",
     "registrationDisabled": "Registration is disabled. Please ask an admin for an invitation.",
     "emailInUse": "This email is already linked to another sign-in method. Please use the provider you originally signed in with.",
+    "signinCancelled": "Sign-in cancelled. You can try again or choose a different method.",
     "loginId": "Login ID",
     "password": "Password",
     "signIn": "Sign In",
