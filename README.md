@@ -342,6 +342,18 @@ Run `/kagura-memory:guide` for setup help and an optional SessionStart hook you 
 
 </details>
 
+### WSL2 + Claude Code (NAT networking note)
+
+If you run Claude Code **inside WSL2** and use the **OAuth** flow (not the API-key setup above), the browser callback can fail silently: WSL2's default `nat` mode isolates `localhost` between Windows and WSL, so the Windows browser's redirect to `localhost:<port>` never reaches Claude Code's listener inside WSL. **This is a WSL networking issue, not a Kagura server bug** — the resolved server-side cousin was [#689 / PR #692](https://github.com/kagura-ai/memory-cloud/pull/692).
+
+Quick fixes:
+
+- **Enable mirrored networking** — set `networkingMode=mirrored` in `C:\Users\<YourName>\.wslconfig`, then `wsl --shutdown` (requires WSL 2.0.0+ on Windows 11 22H2+).
+- **Use API key (Bearer) auth** — the `.mcp.json` setup above skips the OAuth callback entirely.
+- **Use the device flow** ([#635 / PR #636](https://github.com/kagura-ai/memory-cloud/pull/636), RFC 8628) if your client supports it.
+
+See [Troubleshooting → WSL2 + Claude Code](docs/troubleshooting.md#wsl2--claude-code--mcp-oauth-callback-fails-default-nat-networking) for the full symptom → diagnosis → fix walkthrough.
+
 ### Claude Desktop / Claude Chat (Web)
 
 **Claude Desktop**: Same `.mcp.json` format as Claude Code — place in your project root or `~/.claude/.mcp.json`.
