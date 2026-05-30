@@ -1493,7 +1493,6 @@
     "mcpConfigHiddenCopyDisabled": "Regenerate the key to copy a working config",
     "clients": {
       "claudeCode": "Claude Code",
-      "cursor": "Cursor",
       "chatgpt": "ChatGPT",
       "codex": "Codex CLI"
     },
