@@ -10,6 +10,7 @@ This service handles the core business logic for workspace invitations:
 - Expiration management
 """
 
+import os
 import secrets
 from datetime import timedelta
 from uuid import UUID
@@ -18,7 +19,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import User, Workspace, WorkspaceInvitation, WorkspaceMember
-from utils.datetime import utcnow
+from services.email_service import EmailService, get_email_service
+from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import NotFoundException, QuotaExceededError, ValidationError
 from utils.logger import get_logger
 
@@ -31,6 +33,25 @@ EXPIRY_PRESETS = {
     90: timedelta(days=90),
     365: timedelta(days=365),
 }
+
+
+def build_invitation_url(token: str) -> str:
+    """Build the absolute invitation accept URL from ``FRONTEND_URL``.
+
+    Single source of truth shared by the API response (``api/routes/
+    invitations.py``) and the invitation email (Issue #654), so the link the
+    admin sees and the link the invitee receives can never drift. Falls back
+    to the local dev origin when ``FRONTEND_URL`` is unset.
+
+    Args:
+        token: Invitation token (single-use; treat the returned URL as a
+            credential — do not log it).
+
+    Returns:
+        ``f"{FRONTEND_URL}/invite/{token}"``.
+    """
+    base_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    return f"{base_url}/invite/{token}"
 
 
 class InvitationService:
@@ -47,13 +68,20 @@ class InvitationService:
     - Single-use tokens (cannot be reused after acceptance)
     """
 
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, email_service: EmailService | None = None):
         """Initialize invitation service.
 
         Args:
             db: Async database session
+            email_service: Optional EmailService override (Issue #654). When
+                None, the module singleton is resolved lazily at dispatch time
+                (NOT here) — ``InvitationService`` is also constructed on
+                read-only paths (e.g. the registration gate), which must not
+                pull in provider initialization. Tests inject a stub to assert
+                the courtesy-email dispatch without hitting a provider.
         """
         self.db = db
+        self._email_service_override = email_service
 
     async def create_invitation(
         self,
@@ -220,7 +248,66 @@ class InvitationService:
             f"email={email or 'any'} expires={expires_at or 'never'}"
         )
 
+        # Issue #654: dispatch the invitation email as a COURTESY notification.
+        # The invitation row above is the source of truth — an email (or
+        # inviter-resolution) failure must NEVER roll it back, so the whole
+        # dispatch is guarded and best-effort. ``email`` is validated non-empty
+        # at the top of this method, so it is always a real recipient here.
+        await self._dispatch_invitation_email(
+            workspace=workspace, invitation=invitation, invited_by=invited_by
+        )
+
         return invitation
+
+    async def _resolve_inviter_name(self, invited_by: str) -> str:
+        """Resolve a human-friendly inviter name for the email body.
+
+        Falls back to the email, then a generic label, so a missing/renamed
+        inviter never blocks the courtesy email.
+        """
+        result = await self.db.execute(select(User).where(User.user_id == invited_by))
+        user = result.scalar_one_or_none()
+        if user:
+            return (user.name or "").strip() or user.email
+        return "A Kagura workspace admin"
+
+    async def _dispatch_invitation_email(
+        self,
+        *,
+        workspace: Workspace,
+        invitation: WorkspaceInvitation,
+        invited_by: str,
+    ) -> None:
+        """Best-effort courtesy email send (Issue #654).
+
+        Wrapped so that NOTHING here — a slow/failing provider, a missing
+        inviter row, a config error — can break invitation creation. The
+        ``EmailService`` Protocol already guarantees no-raise, but the
+        surrounding resolution work could throw, hence the broad guard.
+        """
+        try:
+            # Resolve the provider lazily — only this send path needs it, so
+            # read-only InvitationService constructions never trigger provider
+            # init. get_email_service() is a cached singleton (cheap after the
+            # first send).
+            email_service = self._email_service_override or get_email_service()
+            inviter_name = await self._resolve_inviter_name(invited_by)
+            accept_url = build_invitation_url(invitation.token)
+            expires_at_iso = to_utc_iso(invitation.expires_at) if invitation.expires_at else None
+            await email_service.send_workspace_invitation(
+                to_email=invitation.email,
+                inviter_name=inviter_name,
+                workspace_name=workspace.name,
+                accept_url=accept_url,
+                expires_at_iso=expires_at_iso,
+            )
+        except Exception as exc:  # noqa: BLE001 — courtesy email must not break creation
+            # No token / accept URL in the log (it embeds the credential).
+            logger.warning(
+                "invitation_email_dispatch_error",
+                error_type=type(exc).__name__,
+                workspace_id=str(workspace.id),
+            )
 
     async def get_invitation(self, token: str) -> WorkspaceInvitation:
         """Get invitation by token.
