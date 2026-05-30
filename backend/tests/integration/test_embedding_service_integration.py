@@ -151,7 +151,6 @@ def _build_workspace(
         name=f"ws-{uuid4().hex[:8]}",
         plan_name="free",
         owner_user_id=owner_user_id,
-        memory_limit=1000,
         daily_api_limit=500,
         weekly_api_limit=2500,
         embedding_daily_cap_usd=embedding_daily_cap_usd,

@@ -223,7 +223,9 @@ async def update_workspace_plan(
     new_tier = PLAN_TIERS[request.plan_name]
 
     # Save old values for audit
-    old_memory_limit = workspace.memory_limit
+    # #805: memory_limit is no longer a Workspace column — source the audit
+    # "old" value from the old plan tier (before plan_name mutates below).
+    old_memory_limit = get_plan_tier(old_plan).memory_limit
     old_daily_api = workspace.daily_api_limit
     old_weekly_api = workspace.weekly_api_limit
 
@@ -318,7 +320,6 @@ async def update_workspace_plan(
 
     # Update workspace
     workspace.plan_name = request.plan_name
-    workspace.memory_limit = new_tier.memory_limit
     workspace.daily_api_limit = new_tier.daily_api_limit
     workspace.weekly_api_limit = new_tier.weekly_api_limit
 

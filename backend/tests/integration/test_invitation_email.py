@@ -50,7 +50,6 @@ async def _seed(db: AsyncSession) -> tuple[Workspace, User]:
         name=f"ws-{suffix}",
         plan_name="pro",
         owner_user_id=inviter.user_id,
-        memory_limit=100_000,
         daily_api_limit=50_000,
         weekly_api_limit=250_000,
     )

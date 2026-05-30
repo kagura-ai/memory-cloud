@@ -69,7 +69,6 @@ async def test_remove_member_comprehensive_cleanup(db_session):
         name=f"test-workspace-{uuid4().hex[:8]}",
         owner_user_id=owner_id,
         plan_name="pro",
-        memory_limit=100000,
         daily_api_limit=10000,
         weekly_api_limit=50000,
     )
@@ -300,7 +299,6 @@ async def test_remove_member_with_no_context_memberships(db_session):
         name=f"test-workspace-{uuid4().hex[:8]}",
         owner_user_id=owner_id,
         plan_name="free",
-        memory_limit=10000,
         daily_api_limit=1000,
         weekly_api_limit=5000,
     )
@@ -359,7 +357,6 @@ async def test_remove_member_does_not_affect_other_members(db_session):
         name=f"multi-member-workspace-{uuid4().hex[:8]}",
         owner_user_id=owner_id,
         plan_name="pro",
-        memory_limit=100000,
         daily_api_limit=10000,
         weekly_api_limit=50000,
     )
@@ -439,7 +436,6 @@ async def test_cannot_remove_workspace_owner(db_session):
         name=f"test-workspace-{uuid4().hex[:8]}",
         owner_user_id=owner_id,
         plan_name="free",
-        memory_limit=10000,
         daily_api_limit=1000,
         weekly_api_limit=5000,
     )

@@ -60,7 +60,6 @@ async def _seed_workspace_context_pricing(
         name=f"ws-{uuid4().hex[:8]}",
         plan_name=plan,
         owner_user_id=owner_id,
-        memory_limit=100000,
         daily_api_limit=10000,
         weekly_api_limit=50000,
     )

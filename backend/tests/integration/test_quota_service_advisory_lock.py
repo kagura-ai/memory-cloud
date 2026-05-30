@@ -60,7 +60,6 @@ def _new_workspace(owner: str) -> Workspace:
         name=f"toctou-{uuid4().hex[:8]}",
         plan_name="free",
         owner_user_id=owner,
-        memory_limit=1000,
         daily_api_limit=500,
         weekly_api_limit=2500,
         deleted_at=None,

@@ -66,7 +66,6 @@ async def _seed_workspace_context(
         name=f"ws-{uuid4().hex[:8]}",
         plan_name="pro",
         owner_user_id=user_id,
-        memory_limit=100_000,
         daily_api_limit=50_000,
         weekly_api_limit=250_000,
     )

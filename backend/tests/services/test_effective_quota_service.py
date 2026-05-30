@@ -50,7 +50,6 @@ class TestEffectiveQuotaService:
         """
         ws = MagicMock()
         ws.plan_name = plan_name
-        ws.memory_limit = memory_limit
         ws.daily_api_limit = daily_api_limit
         ws.addon_memory_bonus = addon_memory_bonus
         ws.addon_mcp_quota_bonus = addon_mcp_quota_bonus

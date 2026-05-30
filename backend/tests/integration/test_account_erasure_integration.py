@@ -78,7 +78,6 @@ async def erasure_scenario(db_session: AsyncSession):
         name=f"ws-{uuid4().hex[:8]}",
         plan_name="free",
         owner_user_id=target_user_id,
-        memory_limit=1000,
         daily_api_limit=500,
         weekly_api_limit=2500,
     )

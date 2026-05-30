@@ -375,7 +375,6 @@ async def test_apply_plan_change_success():
     workspace = MagicMock()
     workspace.id = uuid4()
     workspace.plan_name = "free"
-    workspace.memory_limit = 100
 
     result_proxy = MagicMock()
     result_proxy.scalar_one_or_none.return_value = workspace
@@ -393,7 +392,8 @@ async def test_apply_plan_change_success():
         await _apply_plan_change(db, workspace.id, "pro", "cus_123", "sub_123")
 
     assert workspace.plan_name == "pro"
-    assert workspace.memory_limit == 500
+    # #805: memory_limit is no longer a Workspace column — the plan change must
+    # NOT sync it onto the workspace (SSoT is plan_tier.memory_limit).
     assert workspace.stripe_customer_id == "cus_123"
     assert workspace.stripe_subscription_id == "sub_123"
     db.add.assert_called_once()
@@ -427,7 +427,7 @@ async def test_handle_subscription_cancelled_downgrades_to_free():
         await _handle_subscription_cancelled(db, "cus_123")
 
     assert workspace.plan_name == "free"
-    assert workspace.memory_limit == 100
+    # #805: memory_limit column dropped — downgrade no longer syncs it.
     assert workspace.stripe_subscription_id is None
     db.add.assert_called_once()
     db.commit.assert_called()

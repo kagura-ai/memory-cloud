@@ -38,7 +38,6 @@ def make_workspace(
         name=f"{'deleted' if soft_deleted else 'active'}-{uuid4().hex[:8]}",
         plan_name=plan_name,
         owner_user_id=owner_user_id,
-        memory_limit=1000,
         daily_api_limit=500,
         weekly_api_limit=2500,
         deleted_at=(func.now() if soft_deleted else None),

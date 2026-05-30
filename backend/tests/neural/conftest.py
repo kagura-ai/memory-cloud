@@ -50,7 +50,6 @@ async def sample_memory_pair(db_session):
         name=f"neural-test-ws-{uuid4().hex[:8]}",
         plan_name="free",
         owner_user_id="test_user",
-        memory_limit=10000,
         daily_api_limit=5000,
         weekly_api_limit=25000,
     )
