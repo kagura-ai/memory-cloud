@@ -1,9 +1,10 @@
 /**
- * Tests for TagCloud (#618): tag buttons, click → onTagClick, active aria-pressed,
- * and the empty state.
+ * Tests for TagCloud (#618 base + #830 drill-down): tag buttons, click →
+ * onTagClick (additive), selectedTags passed as with_tags, aria-pressed
+ * removed, and the two empty states (no tags vs. drilled-down-to-nothing).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 vi.mock("next-intl", () => ({
   useTranslations: () => (key: string, vars?: Record<string, unknown>) =>
@@ -41,28 +42,49 @@ beforeEach(() => {
   });
 });
 
-describe("TagCloud (#618)", () => {
-  it("renders tag buttons and calls onTagClick with the tag on click", async () => {
+describe("TagCloud", () => {
+  it("renders tag buttons and calls onTagClick with the tag on click (#618)", async () => {
     const onTagClick = vi.fn();
     render(
-      <TagCloud contextId="c1" activeTag={null} onTagClick={onTagClick} />,
+      <TagCloud contextId="c1" selectedTags={[]} onTagClick={onTagClick} />,
     );
     const authBtn = await screen.findByRole("button", { name: /"tag":"auth"/ });
     fireEvent.click(authBtn);
     expect(onTagClick).toHaveBeenCalledWith("auth");
   });
 
-  it("marks the active tag with aria-pressed=true", async () => {
-    render(<TagCloud contextId="c1" activeTag="deploy" onTagClick={vi.fn()} />);
-    const deployBtn = await screen.findByRole("button", {
-      name: /"tag":"deploy"/,
-    });
-    expect(deployBtn).toHaveAttribute("aria-pressed", "true");
+  it("passes selectedTags to the API as with_tags (#830)", async () => {
+    render(
+      <TagCloud
+        contextId="c1"
+        selectedTags={["auth", "deploy"]}
+        onTagClick={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(getContextTags).toHaveBeenCalled());
+    expect(getContextTags).toHaveBeenCalledWith(
+      "c1",
+      expect.objectContaining({ withTags: ["auth", "deploy"] }),
+    );
   });
 
-  it("renders the empty state when the context has no tags", async () => {
+  it("does NOT render aria-pressed on tag buttons (#830 — selected tags leave the cloud)", async () => {
+    render(<TagCloud contextId="c1" selectedTags={[]} onTagClick={vi.fn()} />);
+    const authBtn = await screen.findByRole("button", { name: /"tag":"auth"/ });
+    expect(authBtn).not.toHaveAttribute("aria-pressed");
+  });
+
+  it("renders the base empty state when the context has no tags", async () => {
     getContextTags.mockResolvedValue({ context_id: "c1", total: 0, tags: [] });
-    render(<TagCloud contextId="c1" activeTag={null} onTagClick={vi.fn()} />);
+    render(<TagCloud contextId="c1" selectedTags={[]} onTagClick={vi.fn()} />);
     expect(await screen.findByText("emptyTitle")).toBeInTheDocument();
+  });
+
+  it("renders the drill-down empty state when a filter leaves no co-occurring tags (#830)", async () => {
+    getContextTags.mockResolvedValue({ context_id: "c1", total: 0, tags: [] });
+    render(
+      <TagCloud contextId="c1" selectedTags={["auth"]} onTagClick={vi.fn()} />,
+    );
+    expect(await screen.findByText("emptyRefinedTitle")).toBeInTheDocument();
   });
 });

@@ -39,6 +39,7 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/workspace/contexts/ctx-1",
   useSearchParams: () => ({
     get: (k: string) => mockSearchParams.current.get(k),
+    getAll: (k: string) => mockSearchParams.current.getAll(k),
     toString: () => mockSearchParams.current.toString(),
   }),
 }));
@@ -495,5 +496,79 @@ describe("MemoriesTabPanel — debounced search (Issue #580)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tag drill-down (#830)
+// ---------------------------------------------------------------------------
+
+describe("MemoriesTabPanel — tag drill-down (#830)", () => {
+  const lastFetchArgs = () =>
+    mockGetMemories.mock.calls.at(-1)?.[0] as {
+      tags?: string[];
+      tagsMatch?: string;
+    };
+
+  it("seeds selectedTags from ?tags= and sends ALL-match on the first fetch", async () => {
+    mockSearchParams.current = new URLSearchParams("tags=python&tags=backend");
+
+    render(<MemoriesTabPanel contextId="ctx-1" />);
+
+    await waitFor(() => expect(mockGetMemories).toHaveBeenCalled());
+    const args = lastFetchArgs();
+    expect(args.tags).toEqual(["python", "backend"]);
+    expect(args.tagsMatch).toBe("all");
+  });
+
+  it("omits tags + tagsMatch entirely when nothing is selected (#618 default preserved)", async () => {
+    render(<MemoriesTabPanel contextId="ctx-1" />);
+
+    await waitFor(() => expect(mockGetMemories).toHaveBeenCalled());
+    const args = lastFetchArgs();
+    expect(args.tags).toBeUndefined();
+    expect(args.tagsMatch).toBeUndefined();
+  });
+
+  it("de-dupes and drops blank ?tags entries", async () => {
+    mockSearchParams.current = new URLSearchParams(
+      "tags=python&tags=python&tags=%20&tags=db",
+    );
+
+    render(<MemoriesTabPanel contextId="ctx-1" />);
+
+    await waitFor(() => expect(mockGetMemories).toHaveBeenCalled());
+    expect(lastFetchArgs().tags).toEqual(["python", "db"]);
+  });
+
+  it("renders a chip per selected tag plus a clear-all control", async () => {
+    mockSearchParams.current = new URLSearchParams("tags=python&tags=backend");
+
+    render(<MemoriesTabPanel contextId="ctx-1" />);
+    await waitFor(() => expect(mockGetMemories).toHaveBeenCalled());
+
+    expect(
+      screen.getByLabelText("filter.clearTag:python"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("filter.clearTag:backend"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("filter.clearAll")).toBeInTheDocument();
+  });
+
+  it("removing a chip writes the reduced tag set to the URL", async () => {
+    mockSearchParams.current = new URLSearchParams("tags=python&tags=backend");
+
+    render(<MemoriesTabPanel contextId="ctx-1" />);
+    await waitFor(() => expect(mockGetMemories).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByLabelText("filter.clearTag:python"));
+
+    await waitFor(() => {
+      const lastUrl = mockReplace.mock.calls.at(-1)?.[0] as string;
+      expect(lastUrl).toBeDefined();
+      expect(lastUrl).toMatch(/tags=backend/);
+      expect(lastUrl).not.toMatch(/tags=python/);
+    });
   });
 });

@@ -20,7 +20,7 @@
 
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { FileText, Search, SearchX } from "lucide-react";
@@ -46,7 +46,9 @@ interface MemoriesTabPanelProps {
 
 const PAGE_SIZE = 50;
 const SEARCH_PARAM = "q";
-const TAG_PARAM = "tag";
+// #830: repeatable param for the multi-tag AND drill-down (?tags=a&tags=b).
+// Supersedes #618's single `?tag=`.
+const TAGS_PARAM = "tags";
 const DEBOUNCE_MS = 300;
 
 export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
@@ -76,36 +78,88 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   // committed to state.
   const requestIdRef = useRef(0);
 
-  // #618: tracks the previous debounced query so we reset an active tag only
-  // when the search actually *changes* (typing) — not on mount / shared links.
-  const prevDebouncedQueryRef = useRef(debouncedQuery);
-
   const dialog = useMemoryDetailDialog({ memoryIdParam, setMemoryIdParam });
 
-  // Issue #618: a single active tag filter, URL-driven (?tag=) so it's
-  // shareable and survives refresh. Clicking a TagCloud tag toggles it; the
-  // memory list re-fetches with an ANY-match tags filter (AND-ed with q).
-  // Normalize at the source: a whitespace-only ?tag (e.g. ?tag=%20) is ignored
-  // by getMemories, so collapse it to null here too — otherwise the chip /
-  // hasFilter UI would show an "active" filter the API query doesn't apply.
-  const activeTag = searchParams.get(TAG_PARAM)?.trim() || null;
+  // #830: multi-tag AND drill-down set, URL-driven (?tags=a&tags=b) so it's
+  // shareable and survives refresh. Normalized: trim, drop blanks, de-dupe
+  // (order-preserving) — mirrors the backend's tag normalization so the chips
+  // and the API query agree. AND-combined with `q` (both coexist; a changed
+  // query no longer clears the tags — they drill down together).
+  //
+  // Memoize on the value-stable joined key, NOT the `searchParams` object:
+  // `useSearchParams()` can return a fresh reference on every render, which
+  // would give `selectedTags` a new array identity each render and make every
+  // consumer (`fetchMemories`, TagCloud) re-fire on unrelated re-renders.
+  const tagsParamKey = searchParams.getAll(TAGS_PARAM).join("\u0000");
+  const selectedTags = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (tagsParamKey ? tagsParamKey.split("\u0000") : [])
+            .map((s) => s.trim())
+            .filter(Boolean),
+        ),
+      ),
+    [tagsParamKey],
+  );
 
-  const setActiveTagFilter = useCallback(
-    (tag: string | null) => {
+  // Focus targets for the a11y focus-management contract (#830) + the live
+  // region that announces facet changes to screen readers.
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const chipRowRef = useRef<HTMLDivElement>(null);
+  const [announcement, setAnnouncement] = useState("");
+
+  const setSelectedTags = useCallback(
+    (next: string[]) => {
       const params = new URLSearchParams(searchParams.toString());
-      if (tag) params.set(TAG_PARAM, tag);
-      else params.delete(TAG_PARAM);
-      const next = params.toString();
+      params.delete(TAGS_PARAM);
+      for (const tag of next) params.append(TAGS_PARAM, tag);
+      const qs = params.toString();
       setPage(1);
-      router.replace(`${pathname}${next ? `?${next}` : ""}`);
+      router.replace(`${pathname}${qs ? `?${qs}` : ""}`);
     },
     [searchParams, pathname, router],
   );
 
+  // Clicking a cloud tag ADDS it to the drill-down (additive, not replace).
+  // Selected tags are excluded from the cloud by the backend, so a click is
+  // always an "add" — no toggle-off from the cloud (use the chips for that).
   const handleTagClick = useCallback(
-    (tag: string) => setActiveTagFilter(tag === activeTag ? null : tag),
-    [activeTag, setActiveTagFilter],
+    (tag: string) => {
+      if (selectedTags.includes(tag)) return;
+      setSelectedTags([...selectedTags, tag]);
+      setAnnouncement(t("filter.announceAdded", { tag }));
+    },
+    [selectedTags, setSelectedTags, t],
   );
+
+  const removeTag = useCallback(
+    (tag: string) => {
+      const idx = selectedTags.indexOf(tag);
+      setSelectedTags(selectedTags.filter((x) => x !== tag));
+      setAnnouncement(t("filter.announceRemoved", { tag }));
+      // Move focus deterministically after the chip unmounts: the chip that
+      // shifts into this index, else the now-last chip, else the search input.
+      requestAnimationFrame(() => {
+        const chips =
+          chipRowRef.current?.querySelectorAll<HTMLButtonElement>(
+            "[data-chip-remove]",
+          );
+        if (chips && chips.length > 0) {
+          chips[Math.min(idx, chips.length - 1)]?.focus();
+        } else {
+          searchInputRef.current?.focus();
+        }
+      });
+    },
+    [selectedTags, setSelectedTags, t],
+  );
+
+  const clearAllTags = useCallback(() => {
+    setSelectedTags([]);
+    setAnnouncement(t("filter.announceCleared"));
+    requestAnimationFrame(() => searchInputRef.current?.focus());
+  }, [setSelectedTags, t]);
 
   // Debounce: schedule a single timer that promotes `searchInput` into
   // `debouncedQuery` AND resets page to 1 in one batched update. Doing
@@ -134,14 +188,8 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     } else {
       params.delete(SEARCH_PARAM);
     }
-    // #618: a *changed* search resets the active tag so a new query doesn't
-    // silently AND with a stale tag (the cloud re-facets to the query). Mount
-    // / shared-link loads (query unchanged) keep any ?tag intact.
-    const queryChanged = debouncedQuery !== prevDebouncedQueryRef.current;
-    prevDebouncedQueryRef.current = debouncedQuery;
-    if (trimmed && queryChanged) {
-      params.delete(TAG_PARAM);
-    }
+    // #830: q and the selected tags drill down TOGETHER (AND), so a changed
+    // query no longer clears the tags — unlike #618's single-tag reset.
     const next = params.toString();
     const current = searchParams.toString();
     if (next === current) return;
@@ -167,7 +215,9 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         limit: PAGE_SIZE,
         offset,
         q: trimmed || undefined,
-        tags: activeTag ? [activeTag] : undefined,
+        // #830: ALL-match so the list mirrors the cloud's AND drill-down.
+        tags: selectedTags.length ? selectedTags : undefined,
+        tagsMatch: selectedTags.length ? "all" : undefined,
       });
       if (requestId !== requestIdRef.current) return;
       setItems(response.memories);
@@ -178,7 +228,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     } finally {
       if (requestId === requestIdRef.current) setLoading(false);
     }
-  }, [contextId, page, debouncedQuery, activeTag, t]);
+  }, [contextId, page, debouncedQuery, selectedTags, t]);
 
   useEffect(() => {
     fetchMemories();
@@ -229,6 +279,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
           aria-hidden="true"
         />
         <Input
+          ref={searchInputRef}
           type="search"
           value={searchInput}
           onChange={(e) => setSearchInput(e.target.value)}
@@ -237,30 +288,57 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
           className="pl-9"
         />
       </div>
-      {activeTag && (
-        <div className="flex flex-wrap items-center gap-2">
+      {/*
+        #830: selected-tags chip row (generalized from #618's single chip).
+        Each chip removes one tag from the AND drill-down; "clear all" resets
+        the set. The "filtering N" count makes the additive model legible.
+      */}
+      {selectedTags.length > 0 && (
+        <div ref={chipRowRef} className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-gray-500 dark:text-gray-400">
             {t("filter.activeLabel")}
           </span>
-          <Badge variant="secondary" className="gap-1">
-            {activeTag}
-            <button
-              type="button"
-              onClick={() => setActiveTagFilter(null)}
-              aria-label={t("filter.clearTag", { tag: activeTag })}
-              className="ml-0.5 rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
-            >
-              <X className="h-3 w-3" />
-            </button>
-          </Badge>
+          {selectedTags.map((tag) => (
+            <Badge key={tag} variant="secondary" className="gap-1">
+              {tag}
+              <button
+                type="button"
+                data-chip-remove
+                onClick={() => removeTag(tag)}
+                aria-label={t("filter.clearTag", { tag })}
+                className="ml-0.5 rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </Badge>
+          ))}
+          <button
+            type="button"
+            onClick={clearAllTags}
+            className="rounded text-xs text-gray-500 underline-offset-2 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 dark:text-gray-400"
+          >
+            {t("filter.clearAll")}
+          </button>
+          {/* Hide the count while a fetch is in flight so the chip row never
+              shows a stale total (0 on first paint of a shared link, or the
+              previous page's total during a refetch). */}
+          {!loading && (
+            <span className="text-xs text-gray-400 dark:text-gray-500">
+              {t("filter.filteringCount", { count: total })}
+            </span>
+          )}
         </div>
       )}
       <TagCloud
         contextId={contextId}
-        activeTag={activeTag}
+        selectedTags={selectedTags}
         onTagClick={handleTagClick}
         q={debouncedQuery}
       />
+      {/* a11y: announce facet changes — the cloud re-rendering is silent to AT. */}
+      <div aria-live="polite" className="sr-only" role="status">
+        {announcement}
+      </div>
     </div>
   );
 
@@ -274,9 +352,9 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   }
 
   const hasQuery = debouncedQuery.trim().length > 0;
-  // Any active filter (text search OR tag) — distinguishes "no memories at all"
-  // from "no matches for the current filter".
-  const hasFilter = hasQuery || !!activeTag;
+  // Any active filter (text search OR ≥1 selected tag) — distinguishes "no
+  // memories at all" from "no matches for the current filter".
+  const hasFilter = hasQuery || selectedTags.length > 0;
 
   // No memories at all in this context — keep the existing landing copy.
   if (!loading && items.length === 0 && !hasFilter && !memoryIdParam) {
@@ -294,7 +372,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
 
   // Filter produced no matches — distinct copy that echoes the filter so the
   // user can tell whether they mistyped vs. ran a too-narrow filter. Prefer
-  // the tag in the message when a tag filter is active.
+  // the selected tags in the message when a tag filter is active.
   if (!loading && items.length === 0 && hasFilter && !memoryIdParam) {
     return (
       <div className="space-y-4">
@@ -303,7 +381,10 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
           icon={SearchX}
           title={t("noResultsTitle")}
           description={t("noResultsDesc", {
-            query: activeTag && !hasQuery ? activeTag : debouncedQuery,
+            query:
+              selectedTags.length && !hasQuery
+                ? selectedTags.join(", ")
+                : debouncedQuery,
           })}
         />
       </div>

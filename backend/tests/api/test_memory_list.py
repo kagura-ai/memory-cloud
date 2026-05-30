@@ -561,3 +561,80 @@ class TestListMemoriesTagsFilter:
         for call_index in (0, 1):
             sql = _where_sql(mock_db, call_index)
             assert "&&" not in sql, f"blank tags should be ignored (call_index={call_index}): {sql}"
+
+
+class TestListMemoriesTagsMatch:
+    """Issue #830: ``tags_match`` selects ANY (default) vs ALL tag matching."""
+
+    @pytest.mark.asyncio
+    async def test_tags_match_default_is_any_overlap(self):
+        """Regression pin: omitting tags_match preserves #618 ANY-match (&&)."""
+        mock_db = _db_with_rows(total=1, rows=[_mock_memory_row()])
+
+        await list_memories(
+            user=MOCK_USER,
+            db=mock_db,
+            scope=None,
+            type=None,
+            context_id=None,
+            q=None,
+            tags=["python", "auth"],
+            limit=50,
+            offset=0,
+        )
+
+        for call_index in (0, 1):
+            sql = _where_sql(mock_db, call_index)
+            assert "&&" in sql and "@>" not in sql, (
+                f"default tags_match must be ANY-overlap (&&), not @> "
+                f"(call_index={call_index}): {sql}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_tags_match_all_uses_contains(self):
+        """tags_match='all' switches to PG array contains (@>) on both queries."""
+        mock_db = _db_with_rows(total=1, rows=[_mock_memory_row()])
+
+        await list_memories(
+            user=MOCK_USER,
+            db=mock_db,
+            scope=None,
+            type=None,
+            context_id=None,
+            q=None,
+            tags=["python", "auth"],
+            tags_match="all",
+            limit=50,
+            offset=0,
+        )
+
+        for call_index in (0, 1):
+            sql = _where_sql(mock_db, call_index)
+            assert "@>" in sql and "&&" not in sql, (
+                f"tags_match='all' must use ALL-contains (@>), not && "
+                f"(call_index={call_index}): {sql}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_tags_match_all_no_tags_skips_filter(self):
+        """tags_match='all' without tags adds no predicate (no empty-set pin)."""
+        mock_db = _db_with_rows(total=1, rows=[_mock_memory_row()])
+
+        await list_memories(
+            user=MOCK_USER,
+            db=mock_db,
+            scope=None,
+            type=None,
+            context_id=None,
+            q=None,
+            tags=None,
+            tags_match="all",
+            limit=50,
+            offset=0,
+        )
+
+        for call_index in (0, 1):
+            sql = _where_sql(mock_db, call_index)
+            assert "@>" not in sql and "&&" not in sql, (
+                f"no tags → no predicate (call_index={call_index}): {sql}"
+            )
