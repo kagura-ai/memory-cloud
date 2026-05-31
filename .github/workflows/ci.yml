@@ -154,11 +154,19 @@ jobs:
               - 'backend/pyproject.toml'
               - '.github/workflows/ci.yml'
             frontend-a11y-authed:
+              # Broad on purpose: this lane installs + runs the full stack, so any
+              # file it consumes can break it. Cover the whole frontend source tree
+              # (app + components + lib — the rendered /device, /invite, /workspace
+              # pages pull in shared components), the e2e specs, the npm + backend
+              # dependency/script manifests, and the backend it migrates/serves.
               - 'frontend/e2e/**'
-              - 'frontend/src/app/**'
+              - 'frontend/src/**'
+              - 'frontend/package.json'
+              - 'frontend/package-lock.json'
               - 'frontend/playwright.config.ts'
               - 'backend/src/**'
               - 'backend/alembic/versions/**'
+              - 'backend/pyproject.toml'
               - '.github/workflows/ci.yml'
 
   # Integration tests + the all-routes smoke test — both require a live
