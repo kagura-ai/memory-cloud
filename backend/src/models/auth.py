@@ -1276,7 +1276,7 @@ class Workspace(Base):
         name: Workspace display name
         description: Optional description
         owner_user_id: Owner user ID (creator)
-        plan_name: Billing plan (free/pro/enterprise)
+        plan_name: Billing plan (free/basic/pro)
         daily_api_limit: Daily API call limit
         weekly_api_limit: Weekly API call limit
         created_at: Creation timestamp
