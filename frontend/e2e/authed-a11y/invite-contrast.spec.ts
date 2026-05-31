@@ -24,7 +24,10 @@ test.describe("/invite/[token] color-contrast (#785)", () => {
       page,
     }) => {
       await page.emulateMedia({ colorScheme });
-      await gotoAndWaitStable(page, "/invite/e2e-a11y-nonexistent-token");
+      // The unknown-token error screen renders its heading as <h2> inside plain
+      // <div>s — no h1/form/main — so wait on that h2 rather than the default
+      // landmark set (which would time out, #840).
+      await gotoAndWaitStable(page, "/invite/e2e-a11y-nonexistent-token", "h2");
       await assertNoColorContrastViolations(page);
     });
   }

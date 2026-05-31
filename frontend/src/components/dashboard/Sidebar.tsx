@@ -510,9 +510,12 @@ export function Sidebar() {
                   >
                     <h3
                       className={cn(
+                        // typography.caption already carries dark:text-slate-400
+                        // (WCAG-AA on the dark sidebar). Layering colors.text.muted
+                        // (dark:text-slate-500) on top loses contrast in dark mode
+                        // — keep caption's color only (#840 a11y fix).
                         typography.caption,
                         "uppercase tracking-wider",
-                        colors.text.muted,
                       )}
                     >
                       {groupTitle}
@@ -530,9 +533,11 @@ export function Sidebar() {
                   <h3
                     className={cn(
                       "px-3 mb-2",
+                      // See the collapsible h3 above — caption's dark:text-slate-400
+                      // is WCAG-AA on the dark sidebar; colors.text.muted would
+                      // drop it to slate-500 and fail dark-mode contrast (#840).
                       typography.caption,
                       "uppercase tracking-wider",
-                      colors.text.muted,
                     )}
                   >
                     {groupTitle}
