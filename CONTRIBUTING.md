@@ -135,7 +135,9 @@ Use the GitHub **Actions** tab → **CI** → **Run workflow** (the `workflow_di
 
 ### Required status checks (branch protection)
 
-The following checks are **required** to pass before a PR can be merged into `main` (strict / branch-up-to-date): **`lint`**, **`backend-unit`**, **`frontend`**, and **`backend-integration`**.
+The **intended** required-check set for `main` (strict / branch-up-to-date) is: **`lint`**, **`backend-unit`**, **`frontend`**, and **`backend-integration`** — a PR must have these green to merge.
+
+> Enforcement is applied via the `main` branch-protection ruleset (the companion operator step of #768). Until that ruleset is updated to require these checks, this section describes the target gate rather than a live one — confirm the ruleset state in the repo settings.
 
 Intentionally **not** required:
 
