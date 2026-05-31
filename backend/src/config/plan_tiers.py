@@ -41,6 +41,12 @@ class PlanTier:
         max_contexts_per_workspace: Maximum contexts per workspace
         max_members_per_workspace: Maximum members per workspace (Issue #229)
         max_resource_tokens: Maximum active resource tokens (Issue #242)
+        max_connectors: Maximum ai-worker chat-ingest connectors per
+            workspace (Issue #850, F6-a of #755). A SEPARATE seat cap from
+            ``max_resource_tokens`` — connector-owned resource tokens minted
+            by the F6-b setup flow bypass the ``max_resource_tokens`` Pro+
+            gate and are governed by this seat count instead. 0 disables
+            connector creation for the plan.
         memory_limit: Maximum memories per workspace
         daily_api_limit: Maximum API calls per day (legacy, kept for backward compatibility)
         weekly_api_limit: Maximum API calls per week (legacy, kept for backward compatibility)
@@ -68,6 +74,7 @@ class PlanTier:
     daily_api_limit: int  # Legacy field, use mcp_calls_per_day instead
     weekly_api_limit: int  # Legacy field, use mcp_calls_per_week instead
     max_resource_tokens: int = 0  # Issue #242: Active resource tokens limit
+    max_connectors: int = 0  # Issue #850 (F6-a of #755): ai-worker connector seat cap
     mcp_calls_per_day: int = 0  # Issue #238: MCP API quota
     mcp_calls_per_week: int = 0  # Issue #238: MCP API quota
     rest_calls_per_day: int = 0  # Issue #238: REST API quota
@@ -99,6 +106,7 @@ PLAN_FREE = PlanTier(
     max_contexts_per_workspace=1,
     max_members_per_workspace=1,  # Issue #229: Owner only
     max_resource_tokens=0,  # Issue #242: No resource tokens (PRO only)
+    max_connectors=0,  # Issue #850: no ai-worker connectors on Free
     memory_limit=1000,
     daily_api_limit=100,  # Legacy (backward compatibility)
     weekly_api_limit=500,  # Legacy (backward compatibility)
@@ -123,6 +131,7 @@ PLAN_BASIC = PlanTier(
     max_contexts_per_workspace=3,  # Limited to 3 contexts
     max_members_per_workspace=1,  # Issue #229: Owner only
     max_resource_tokens=3,  # Issue #242: Max 3 active tokens
+    max_connectors=1,  # Issue #850: 1 ai-worker connector seat on Basic
     allows_shared_contexts=False,  # Issue #271: Private contexts only (like Free)
     memory_limit=10000,
     daily_api_limit=2000,  # Legacy (backward compatibility)
@@ -147,6 +156,7 @@ PLAN_PRO = PlanTier(
     max_contexts_per_workspace=20,  # Issue #164: Set reasonable limit
     max_members_per_workspace=10,  # Issue #229: 10 members max for Pro plan
     max_resource_tokens=30,  # Issue #242: Max 30 active tokens
+    max_connectors=5,  # Issue #850: 5 ai-worker connector seats on Pro
     allows_shared_contexts=True,  # Issue #271: Shared contexts enabled
     memory_limit=100000,
     daily_api_limit=10000,  # Legacy (backward compatibility)

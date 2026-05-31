@@ -22,6 +22,7 @@ from models.resource import (
     ResourceSchema,
     ResourceToken,
     WorkspaceAddon,
+    WorkspaceConnector,
 )
 
 __all__ = [
@@ -34,4 +35,5 @@ __all__ = [
     "IndexerState",
     "ResourceToken",
     "WorkspaceAddon",
+    "WorkspaceConnector",
 ]
