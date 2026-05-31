@@ -35,6 +35,7 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
         "get_sleep_report",  # Uses report_id, not context_id
         "rollback_sleep_run",  # Uses report_id, not context_id
         "setup_resource",  # Uses resource_id, not context_id
+        "setup_connector",  # Uses resource_id, not context_id
         "ingest_events",  # Uses resource_id, not context_id
         "get_resource_impact",  # Uses resource_id, not context_id
         "get_resource_schema",  # Uses resource_id, not context_id
@@ -116,6 +117,7 @@ def _build_registry() -> dict[str, Any]:
         handle_get_resource_schema,
         handle_ingest_events,
         handle_list_resource_tokens,
+        handle_setup_connector,
         handle_setup_resource,
     )
     from mcp_server.tools.search_config import handle_update_search_config
@@ -150,6 +152,7 @@ def _build_registry() -> dict[str, Any]:
         "get_sleep_report": handle_get_sleep_report,
         "rollback_sleep_run": handle_rollback_sleep_run,
         "setup_resource": handle_setup_resource,
+        "setup_connector": handle_setup_connector,
         "ingest_events": handle_ingest_events,
         "get_resource_impact": handle_get_resource_impact,
         "get_resource_schema": handle_get_resource_schema,

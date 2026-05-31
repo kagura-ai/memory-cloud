@@ -181,6 +181,10 @@ openapi_tags = [
     {"name": "resource-schema", "description": "Resource schema registry"},
     {"name": "resource-indexer", "description": "Resource indexer runtime state"},
     {
+        "name": "workspace-connectors",
+        "description": "ai-worker chat-ingest connector provisioning",
+    },
+    {
         "name": "analyses",
         "description": (
             "Memory Broadlistening analysis runs. REST companion to the "
@@ -417,6 +421,7 @@ from api.routes import (  # noqa: E402
     users,
     well_known,
     workspace,
+    workspace_connectors,  # Issue #851: ai-worker connector setup
     workspace_plan,
     workspaces,
 )
@@ -525,6 +530,9 @@ app.include_router(resources.router, prefix="/api/v1")
 
 # Resource Token routes (Issue #242 - Resource Token Management)
 app.include_router(resource_tokens.router, prefix="/api/v1")
+
+# Workspace connector setup route (Issue #851 - ai-worker connector provisioning)
+app.include_router(workspace_connectors.router, prefix="/api/v1")
 
 # Public Search routes (Issue #238 - Public REST API)
 app.include_router(public_search.router, prefix="/api/v1")

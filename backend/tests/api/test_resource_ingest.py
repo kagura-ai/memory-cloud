@@ -16,6 +16,7 @@ from api.routes.resource_ingest import (
     _enforce_workspace_membership,
     _resolve_authoritative_context,
     ingest_event,
+    verify_resource_token,
 )
 from auth.resource_tokens import ResourceTokenManager
 from db.constraint_names import (
@@ -26,7 +27,7 @@ from db.constraint_names import (
 from models.auth import Context
 from models.resource import ResourceEvent, ResourceToken
 from models.schemas import ResourceEventRequest
-from utils.exceptions import AuthorizationError, ConflictError
+from utils.exceptions import AuthorizationError, ConflictError, ValidationError
 
 
 def _make_integrity_error(
@@ -215,7 +216,13 @@ class TestResourceEventIdempotency:
     async def test_upsert_unique_violation_raises_conflict(self, mock_event_request, mock_auth):
         db = self._build_db(_make_integrity_error(RESOURCE_EVENTS_UPSERT_UNIQUE))
 
-        with patch("api.routes.resource_ingest.check_event_quota", new=AsyncMock()):
+        with (
+            patch("api.routes.resource_ingest.check_event_quota", new=AsyncMock()),
+            patch(
+                "api.routes.resource_ingest.get_connector_id_for_resource_pk",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
             with pytest.raises(ConflictError):
                 await ingest_event(
                     resource_id="ec_products",
@@ -235,7 +242,13 @@ class TestResourceEventIdempotency:
             existing_event=existing,
         )
 
-        with patch("api.routes.resource_ingest.check_event_quota", new=AsyncMock()):
+        with (
+            patch("api.routes.resource_ingest.check_event_quota", new=AsyncMock()),
+            patch(
+                "api.routes.resource_ingest.get_connector_id_for_resource_pk",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
             response = await ingest_event(
                 resource_id="ec_products",
                 request=mock_event_request,
@@ -261,7 +274,13 @@ class TestResourceEventIdempotency:
         # The refresh shim populates event.id after flush
         db.refresh.side_effect = lambda evt: setattr(evt, "id", 42)
 
-        with patch("api.routes.resource_ingest.check_event_quota", new=AsyncMock()):
+        with (
+            patch("api.routes.resource_ingest.check_event_quota", new=AsyncMock()),
+            patch(
+                "api.routes.resource_ingest.get_connector_id_for_resource_pk",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
             with patch(
                 "api.routes.resource_ingest._schedule_indexer_for_resource",
                 new=AsyncMock(),
@@ -287,7 +306,13 @@ class TestResourceEventIdempotency:
         """
         db = self._build_db(_make_integrity_error("some_other_constraint"))
 
-        with patch("api.routes.resource_ingest.check_event_quota", new=AsyncMock()):
+        with (
+            patch("api.routes.resource_ingest.check_event_quota", new=AsyncMock()),
+            patch(
+                "api.routes.resource_ingest.get_connector_id_for_resource_pk",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
             with pytest.raises(HTTPException) as exc_info:
                 await ingest_event(
                     resource_id="ec_products",
@@ -674,3 +699,129 @@ class TestScheduleIndexerForResource:
             await _schedule_indexer_for_resource(mock_db, workspace_id, resource_id)
 
         mock_resolve.assert_awaited_once_with(mock_db, workspace_id, resource_id)
+
+
+class TestConnectorOwnedIngest:
+    @pytest.mark.asyncio
+    async def test_verify_resource_token_accepts_connector_resource_without_context(self):
+        workspace_id = uuid4()
+        token = SimpleNamespace(
+            id=1,
+            resource_pk=uuid4(),
+            workspace_id=workspace_id,
+            quota_events_per_hour=1000,
+            created_by="user-1",
+        )
+        request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+        db = MagicMock()
+
+        with (
+            patch(
+                "api.routes.resource_ingest.ResourceTokenManager.verify_token",
+                new=AsyncMock(return_value=token),
+            ),
+            patch(
+                "api.routes.resource_ingest._resolve_authoritative_context",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "api.routes.resource_ingest._resolve_connector_workspace_id",
+                new=AsyncMock(return_value=workspace_id),
+            ),
+            patch("api.routes.resource_ingest._enforce_workspace_membership", new=AsyncMock()),
+        ):
+            verified_token, quota, context = await verify_resource_token(
+                "slack_general",
+                request,
+                x_resource_api_key="kagura_resource_plain",
+                db=db,
+            )
+
+        assert verified_token is token
+        assert quota == 1000
+        assert context.id is None
+        assert context.workspace_id == workspace_id
+
+    @pytest.mark.asyncio
+    async def test_connector_owned_token_writes_event_with_resource_pk(self):
+        workspace_id = uuid4()
+        resource_pk = uuid4()
+        connector_id = uuid4()
+        token = SimpleNamespace(
+            id=1,
+            resource_pk=resource_pk,
+            workspace_id=workspace_id,
+            quota_events_per_hour=1000,
+            created_by="user-1",
+        )
+        context = SimpleNamespace(id=None, workspace_id=workspace_id, resource_id="slack_general")
+        request = ResourceEventRequest(
+            op="upsert",
+            doc_id="1717000000.000100",
+            version=1,
+            payload={"text": "hello from slack"},
+            idempotency_key=f"{connector_id}:summary-1",
+        )
+        db = MagicMock()
+        db.add = MagicMock()
+        db.commit = AsyncMock()
+        db.refresh = AsyncMock(side_effect=lambda obj: setattr(obj, "id", 42))
+
+        with (
+            patch("api.routes.resource_ingest.check_event_quota", new=AsyncMock()),
+            patch(
+                "api.routes.resource_ingest.get_connector_id_for_resource_pk",
+                new=AsyncMock(return_value=connector_id),
+            ),
+            patch("api.routes.resource_ingest._schedule_indexer_for_resource", new=AsyncMock()),
+            patch("utils.usage_logger.log_usage", new=AsyncMock()),
+        ):
+            response = await ingest_event(
+                "slack_general",
+                request,
+                auth=(token, 1000, context),
+                db=db,
+            )
+
+        added_event = db.add.call_args.args[0]
+        assert isinstance(added_event, ResourceEvent)
+        assert added_event.resource_pk == resource_pk
+        assert added_event.resource_id == "slack_general"
+        assert added_event.idempotency_key == f"{connector_id}:summary-1"
+        assert response.event_id == 42
+
+    @pytest.mark.asyncio
+    async def test_connector_owned_token_rejects_wrong_idempotency_prefix(self):
+        workspace_id = uuid4()
+        resource_pk = uuid4()
+        connector_id = uuid4()
+        token = SimpleNamespace(
+            id=1,
+            resource_pk=resource_pk,
+            workspace_id=workspace_id,
+            quota_events_per_hour=1000,
+            created_by="user-1",
+        )
+        context = SimpleNamespace(id=None, workspace_id=workspace_id, resource_id="slack_general")
+        request = ResourceEventRequest(
+            op="upsert",
+            doc_id="1717000000.000100",
+            version=1,
+            payload={"text": "hello from slack"},
+            idempotency_key=f"{uuid4()}:summary-1",
+        )
+        db = MagicMock()
+
+        with patch(
+            "api.routes.resource_ingest.get_connector_id_for_resource_pk",
+            new=AsyncMock(return_value=connector_id),
+        ):
+            with pytest.raises(ValidationError) as exc_info:
+                await ingest_event(
+                    "slack_general",
+                    request,
+                    auth=(token, 1000, context),
+                    db=db,
+                )
+
+        assert "idempotency_key prefix" in str(exc_info.value)

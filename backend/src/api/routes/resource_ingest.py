@@ -7,6 +7,8 @@ Provides endpoints for external systems (EC inventory, etc.) to push events.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -22,12 +24,16 @@ from db.constraint_names import (
     integrity_error_constraint_name,
 )
 from models.auth import Context
-from models.resource import Resource, ResourceEvent, ResourceToken
+from models.resource import Resource, ResourceEvent, ResourceToken, WorkspaceConnector
 from models.schemas import (
     ResourceEventBatchRequest,
     ResourceEventBatchResponse,
     ResourceEventRequest,
     ResourceEventResponse,
+)
+from services.connector_provisioning import (
+    get_connector_id_for_resource_pk,
+    validate_connector_idempotency_key,
 )
 from services.permission_service import PermissionService
 from services.resource_lookup import resolve_resource_pk
@@ -54,7 +60,7 @@ async def verify_resource_token(
     request: Request,
     x_resource_api_key: str | None = Header(None, alias="X-Resource-API-Key"),
     db: AsyncSession = Depends(get_db),
-) -> tuple[ResourceToken, int, Context]:
+) -> tuple[ResourceToken, int, Context | SimpleNamespace]:
     """Verify resource token and enforce workspace boundary.
 
     See SECURITY.md (2026-04-14 advisory) for the threat model.
@@ -86,14 +92,25 @@ async def verify_resource_token(
 
     context = await _resolve_authoritative_context(db, resource_id)
     if context is None:
-        logger.warning(
-            "resource_id_unbound_on_ingest",
+        connector_workspace_id = await _resolve_connector_workspace_id(
+            db,
+            token_record=token_record,
             resource_id=resource_id,
-            token_id=token_record.id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Resource is not bound to an active context",
+        if connector_workspace_id is None:
+            logger.warning(
+                "resource_id_unbound_on_ingest",
+                resource_id=resource_id,
+                token_id=token_record.id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Resource is not bound to an active context or connector",
+            )
+        context = SimpleNamespace(
+            id=None,
+            resource_id=resource_id,
+            workspace_id=connector_workspace_id,
         )
 
     await _enforce_workspace_membership(db, request, token_record, context)
@@ -149,6 +166,28 @@ async def _resolve_authoritative_context(
             ),
         )
     return rows[0]
+
+
+async def _resolve_connector_workspace_id(
+    db: AsyncSession,
+    *,
+    token_record: ResourceToken,
+    resource_id: str,
+) -> UUID | None:
+    """Resolve workspace for connector-owned resources without Context rows."""
+    if token_record.resource_pk is None:
+        return None
+
+    return (
+        await db.execute(
+            select(Resource.workspace_id)
+            .join(WorkspaceConnector, WorkspaceConnector.resource_pk == Resource.id)
+            .where(
+                Resource.id == token_record.resource_pk,
+                Resource.resource_id == resource_id,
+            )
+        )
+    ).scalar_one_or_none()
 
 
 async def _enforce_workspace_membership(
@@ -267,7 +306,7 @@ async def _enforce_workspace_membership(
 async def ingest_event(
     resource_id: str,
     request: ResourceEventRequest,
-    auth: tuple[ResourceToken, int, Context] = Depends(verify_resource_token),
+    auth: tuple[ResourceToken, int, Any] = Depends(verify_resource_token),
     db: AsyncSession = Depends(get_db),
 ):
     """Ingest a single resource event (upsert or delete).
@@ -318,6 +357,11 @@ async def ingest_event(
     """
     # Context is resolved and workspace-verified in the dependency — always non-None here.
     token_record, quota_per_hour, context = auth
+    connector_id = await get_connector_id_for_resource_pk(db, token_record.resource_pk)
+    validate_connector_idempotency_key(
+        connector_id=connector_id,
+        idempotency_key=request.idempotency_key,
+    )
 
     logger.info(
         "resource_event_ingest_started",
@@ -391,7 +435,7 @@ async def ingest_event(
             method="POST",
             status_code=201,
             response_time_ms=None,
-            context_id=str(context.id),
+            context_id=str(context.id) if context.id is not None else None,
             workspace_id=str(context.workspace_id),
         )
 
@@ -457,7 +501,7 @@ async def ingest_event(
 async def ingest_batch(
     resource_id: str,
     request: ResourceEventBatchRequest,
-    auth: tuple[ResourceToken, int, Context] = Depends(verify_resource_token),
+    auth: tuple[ResourceToken, int, Any] = Depends(verify_resource_token),
     db: AsyncSession = Depends(get_db),
 ):
     """Ingest multiple resource events in a single request.
@@ -498,6 +542,7 @@ async def ingest_batch(
     """
     # Context is resolved and workspace-verified in the dependency — always non-None here.
     token_record, quota_per_hour, context = auth
+    connector_id = await get_connector_id_for_resource_pk(db, token_record.resource_pk)
 
     logger.info(
         "resource_batch_ingest_started",
@@ -534,6 +579,15 @@ async def ingest_batch(
                         }
                     )
                     continue
+
+            try:
+                validate_connector_idempotency_key(
+                    connector_id=connector_id,
+                    idempotency_key=event_req.idempotency_key,
+                )
+            except ValidationError as e:
+                errors.append({"index": idx, "doc_id": event_req.doc_id, "error": e.message})
+                continue
 
             # Create event — see single-ingest path for the resource_pk rationale.
             event = ResourceEvent(
@@ -632,7 +686,7 @@ async def ingest_batch(
             method="POST",
             status_code=201,
             response_time_ms=None,
-            context_id=str(context.id),
+            context_id=str(context.id) if context.id is not None else None,
             workspace_id=str(context.workspace_id),
         )
 
