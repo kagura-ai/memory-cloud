@@ -114,10 +114,12 @@ CI runs via `.github/workflows/ci.yml` on pull requests against `main`, on tag p
 | `lint` | All triggers | none |
 | `backend-unit` | All triggers | redis |
 | `frontend` | All triggers | none |
+| `frontend-a11y` | All triggers (`needs: [frontend]`) | none (hermetic `next dev`) |
 | `detect-changes` | All triggers | none |
 | `backend-integration` | `detect-changes` match **or** `force-integration` label **or** `workflow_dispatch` **or** tag push | postgres + redis |
+| `frontend-a11y-authed` | `detect-changes` (frontend/backend paths) match **or** `force-integration` label **or** `workflow_dispatch` **or** tag push | postgres + redis |
 
-`backend-integration` declares `needs: [detect-changes, backend-unit]`, so unit-failing PRs never pay the integration-suite cost. See `.github/workflows/ci.yml` for exact commands.
+`backend-integration` declares `needs: [detect-changes, backend-unit]`, so unit-failing PRs never pay the integration-suite cost. `frontend-a11y-authed` runs the authenticated color-contrast specs against a full stack (migrated DB + seeded admin + API). See `.github/workflows/ci.yml` for exact commands.
 
 ### Triggering integration tests on a PR
 
@@ -130,6 +132,19 @@ For local pre-PR verification, `make test-integration` runs the same suite again
 ### Manual run
 
 Use the GitHub **Actions** tab → **CI** → **Run workflow** (the `workflow_dispatch` trigger). `backend-integration` runs unconditionally in this mode.
+
+### Required status checks (branch protection)
+
+The **intended** required-check set for `main` (strict / branch-up-to-date) is: **`lint`**, **`backend-unit`**, **`frontend`**, and **`backend-integration`** — a PR must have these green to merge.
+
+> Enforcement is applied via the `main` branch-protection ruleset (the companion operator step of #768). Until that ruleset is updated to require these checks, this section describes the target gate rather than a live one — confirm the ruleset state in the repo settings.
+
+Intentionally **not** required:
+
+- **`detect-changes`** — a conditional gate that does not meaningfully gate every PR (it only computes path filters).
+- **`frontend-a11y` / `frontend-a11y-authed`** — advisory while the authenticated a11y lane stabilizes; promote later once it has a consistent green track record.
+
+`backend-integration` was promoted to a required check only after its integration `skip` marks reached zero (#764–#767) and it produced consistent green runs (#768).
 
 ## Branch Strategy
 
