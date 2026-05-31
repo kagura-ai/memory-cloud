@@ -443,14 +443,11 @@ will **not** resolve. Two working options:
 
 - **Host-gateway (simplest, cross-project):** the sibling publishes a host port
   (e.g. `127.0.0.1:9000`) and the vhost proxies to `host.docker.internal:9000`
-  (as in the example above). This requires Caddy to know the host gateway — add
-  it once to the caddy service in `docker-compose.prod.yml`:
-
-  ```yaml
-  caddy:
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-  ```
+  (as in the example above). This works out-of-the-box — the caddy service in
+  `docker-compose.prod.yml` already maps `host.docker.internal` to the host
+  gateway (`extra_hosts: "host.docker.internal:host-gateway"`), so no
+  memory-cloud change is needed. The sibling just needs to publish its port on
+  the host.
 
 - **Shared network (service-name DNS):** the sibling's compose joins this
   project's network as an `external` network, after which `reverse_proxy

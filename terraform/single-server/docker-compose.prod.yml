@@ -159,6 +159,13 @@ services:
       - /opt/kagura-caddy-extra:/opt/kagura-caddy-extra:ro
       - caddy_data:/data
       - caddy_config:/config
+    # Make the host gateway resolvable as host.docker.internal so sibling vhosts
+    # dropped into /opt/kagura-caddy-extra can `reverse_proxy
+    # host.docker.internal:<port>` out-of-the-box — without this, that name does
+    # not resolve on a Linux VM. Configured here once so the extension point is
+    # usable with no further memory-cloud changes. See README "Caddy extension point".
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # No hard dependency on api-blue/api-green: during normal operation only
     # one color is active. Caddy handles upstream unavailability gracefully.
     depends_on:
