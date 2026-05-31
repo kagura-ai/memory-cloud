@@ -427,9 +427,46 @@ root-owned). Each file may contain full top-level vhost blocks, e.g.:
 # /opt/kagura-caddy-extra/aw.caddy   (owned by the ai-worker operator)
 aw.kagura-ai.com {
 	tls /etc/caddy/origin-ca/cert.pem /etc/caddy/origin-ca/key.pem
-	reverse_proxy ai-worker:9000
+	# Upstream MUST be reachable from inside the kagura-caddy container — see
+	# "Reaching the sibling's upstream" below. The host-gateway form works
+	# regardless of which compose project the sibling runs in:
+	reverse_proxy host.docker.internal:9000
 }
 ```
+
+**Reaching the sibling's upstream.** `kagura-caddy` runs on this compose
+project's default network (there is no explicit `networks:` block in
+`docker-compose.prod.yml`), so it resolves a sibling **service name** only if
+the sibling is on that same network. A service from a *separate* compose project
+is on a *different* network by default, so a bare `reverse_proxy ai-worker:9000`
+will **not** resolve. Two working options:
+
+- **Host-gateway (simplest, cross-project):** the sibling publishes a host port
+  (e.g. `127.0.0.1:9000`) and the vhost proxies to `host.docker.internal:9000`
+  (as in the example above). This requires Caddy to know the host gateway — add
+  it once to the caddy service in `docker-compose.prod.yml`:
+
+  ```yaml
+  caddy:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  ```
+
+- **Shared network (service-name DNS):** the sibling's compose joins this
+  project's network as an `external` network, after which `reverse_proxy
+  ai-worker:9000` resolves by service name. Find the network name with
+  `docker inspect kagura-caddy -f '{{json .NetworkSettings.Networks}}'` (it is
+  this project's `*_default`), then in the sibling's compose:
+
+  ```yaml
+  networks:
+    kagura_shared:
+      external: true
+      name: <kagura-caddy's network, e.g. single-server_default>
+  services:
+    ai-worker:
+      networks: [kagura_shared]
+  ```
 
 **Applying changes — recreate vs reload (read this):**
 
