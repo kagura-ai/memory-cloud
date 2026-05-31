@@ -92,6 +92,13 @@ install -d -m 0700 /var/lib/kagura
 install -d -m 0700 /var/lib/kagura/origin-ca
 install -d -m 0755 /var/lib/kagura/volumes
 
+# Caddy extension point for sibling services co-resident on this VM (e.g.
+# kagura-memory-ai-worker). They drop *.caddy vhost files here; the caddy
+# container bind-mounts this read-only and Caddyfile imports it. root-owned
+# 0755: world-readable so the container can read it, root-write so only an
+# operator with sudo can add vhost files. See README "Caddy extension point".
+install -d -m 0755 -o root -g root /opt/kagura-caddy-extra
+
 # -----------------------------------------------------------------------------
 # Systemd unit — bring the compose stack back up on reboot
 #   The operator enables this with `sudo systemctl enable kagura-memory`

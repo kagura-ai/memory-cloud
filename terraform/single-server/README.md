@@ -407,6 +407,104 @@ If the new color misbehaves after switching:
 This starts the previous color if it's not running, waits for readiness,
 then flips Caddy back and reloads. Safe to run at any time after a deploy.
 
+### Caddy extension point (sibling services)
+
+Other services co-resident on this VM (for example
+`kagura-memory-ai-worker`'s webhook receiver at `aw.kagura-ai.com`) can publish
+their own HTTPS vhost through this server's Caddy **without any further change
+to the memory-cloud repository**. The mechanism is a one-time extension point:
+
+- `Caddyfile.tpl` ends with a top-level `import /opt/kagura-caddy-extra/*.caddy`.
+- The caddy container bind-mounts `/opt/kagura-caddy-extra` read-only
+  (`docker-compose.prod.yml`).
+- `startup.sh` provisions `/opt/kagura-caddy-extra` (root-owned, `0755`).
+
+A sibling service publishes a vhost by dropping a `*.caddy` file into
+`/opt/kagura-caddy-extra/` on the host (requires sudo — the directory is
+root-owned). Each file may contain full top-level vhost blocks, e.g.:
+
+```caddy
+# /opt/kagura-caddy-extra/aw.caddy   (owned by the ai-worker operator)
+aw.kagura-ai.com {
+	tls /etc/caddy/origin-ca/cert.pem /etc/caddy/origin-ca/key.pem
+	# Upstream MUST be reachable from inside the kagura-caddy container — see
+	# "Reaching the sibling's upstream" below. The host-gateway form works
+	# regardless of which compose project the sibling runs in:
+	reverse_proxy host.docker.internal:9000
+}
+```
+
+**Reaching the sibling's upstream.** `kagura-caddy` runs on this compose
+project's default network (there is no explicit `networks:` block in
+`docker-compose.prod.yml`), so it resolves a sibling **service name** only if
+the sibling is on that same network. A service from a *separate* compose project
+is on a *different* network by default, so a bare `reverse_proxy ai-worker:9000`
+will **not** resolve. Two working options:
+
+- **Host-gateway (simplest, cross-project):** the sibling publishes a host port
+  (e.g. `127.0.0.1:9000`) and the vhost proxies to `host.docker.internal:9000`
+  (as in the example above). This works out-of-the-box — the caddy service in
+  `docker-compose.prod.yml` already maps `host.docker.internal` to the host
+  gateway (`extra_hosts: "host.docker.internal:host-gateway"`), so no
+  memory-cloud change is needed. The sibling just needs to publish its port on
+  the host.
+
+- **Shared network (service-name DNS):** the sibling's compose joins this
+  project's network as an `external` network, after which `reverse_proxy
+  ai-worker:9000` resolves by service name. Find the network name with
+  `docker inspect kagura-caddy -f '{{json .NetworkSettings.Networks}}'` (it is
+  this project's `*_default`), then in the sibling's compose:
+
+  ```yaml
+  networks:
+    kagura_shared:
+      external: true
+      name: <kagura-caddy's network, e.g. single-server_default>
+  services:
+    ai-worker:
+      networks: [kagura_shared]
+  ```
+
+**Applying changes — recreate vs reload (read this):**
+
+| Situation | Command | Why |
+|---|---|---|
+| **First rollout of this mount** (deploying the change that adds the `/opt/kagura-caddy-extra` volume) | `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d caddy` | A bind mount is fixed at container **creation** time. `docker compose restart` (and `deploy.sh`'s `restart caddy`) restart the *existing* container and do **not** apply a newly-added mount — the directory would be invisible inside the container. The container must be **recreated** once. |
+| **Adding / editing a `*.caddy` file** after the mount already exists | `docker compose -f docker-compose.prod.yml --env-file .env.prod exec caddy caddy reload --config /etc/caddy/Caddyfile` | The mount is already present, so Caddy only needs to re-read config. A reload is sufficient and zero-downtime. |
+
+> The issue that introduced this called for "confirm with `caddy reload`" — that
+> is correct for steady-state `*.caddy` edits, but **not** for the first rollout
+> of the mount itself, which requires the `up -d caddy` recreate above.
+
+**Verifying a rollout** (the recreate momentarily drops `:80`/`:443` as the
+container is replaced — do it in a maintenance window or accept a brief blip):
+
+```bash
+cd /opt/kagura-memory/src/terraform/single-server
+
+# 1. Validate BEFORE bouncing — never recreate the container on a broken config.
+#    --env-file .env.prod matters: compose parses the whole file (all services),
+#    so omitting it mis-interpolates ${KAGURA_DOMAIN} etc. — see the build-args note above.
+docker compose -f docker-compose.prod.yml --env-file .env.prod exec caddy \
+  caddy validate --config /etc/caddy/Caddyfile
+
+# 2. Apply: recreate (first rollout of the mount) or reload (steady-state edit).
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d caddy        # first rollout
+# docker compose -f docker-compose.prod.yml --env-file .env.prod exec caddy \
+#   caddy reload --config /etc/caddy/Caddyfile                                     # later *.caddy edits
+
+# 3. Confirm EXISTING vhosts are unaffected (acceptance: "no impact on existing
+#    vhosts") — re-check the main endpoints AFTER the recreate, not just the new one.
+curl -fsS https://memory.kagura-ai.com/health        # expect 200
+curl -fsS -o /dev/null -w '%{http_code}\n' https://memory.kagura-ai.com/   # main site
+
+# 4. Confirm the NEW sibling vhost responds.
+curl -fsS https://<sibling-domain>/...               # e.g. aw.kagura-ai.com
+```
+
+An empty `/opt/kagura-caddy-extra/` is valid — Caddy tolerates the glob import
+matching zero files, so the extension point is harmless until a sibling uses it.
+
 ## Teardown
 
 ```bash
