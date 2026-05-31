@@ -10,6 +10,8 @@ Provides ORM models for:
     - ``indexer_state`` — job tracking
     - ``resource_tokens`` — Resource API authentication
     - ``workspace_addons`` — Addon purchase system
+    - ``workspace_connectors`` — ai-worker chat-ingest connector profiles
+      (Issue #850, F6-a of #755; 1:1 with ``resources``)
 
 Phase 1 (Issue #323, shipped v0.12.0): ``resource_pk`` and
 ``resource_tokens.workspace_id`` introduced as nullable shadow columns
@@ -434,6 +436,115 @@ class WorkspaceAddon(Base):
             name="uq_workspace_addons_workspace_addon_source",
         ),
     )
+
+
+class WorkspaceConnector(Base):
+    """ai-worker chat-ingest connector profile (Issue #850, F6-a of #755).
+
+    1:1 with a ``resources`` row (``resource_pk`` UNIQUE) — each connector
+    owns exactly one resource into which it ingests chat events. Net-new
+    table for the F6 epic (#755); the setup flow, seat-cap enforcement, and
+    connector-scoped token minting land in F6-b. This slice is schema only.
+
+    Unlike the other Resource Foundation satellites (events / schemas /
+    indexer_state / tokens), this table links to its resource purely by the
+    ``resource_pk`` UUID FK and carries NO ``resource_id`` slug mirror, so it
+    is intentionally **not** hooked into ``_enforce_resource_pk_invariant``
+    (that listener guards the dual-write ``resource_id``-without-``resource_pk``
+    shape). ``resource_pk`` is NOT NULL here, so the FK is always populated —
+    and the absence of a slug sidesteps the CWE-639 slug-reuse class entirely.
+
+    OAuth tokens are stored Fernet-encrypted in ``oauth_tokens_encrypted``;
+    use :meth:`set_oauth_tokens` / :meth:`get_oauth_tokens` so plaintext never
+    touches the column or the ORM identity map. See ``utils/encryption.py``.
+
+    Attributes:
+        id: Primary key (UUID)
+        resource_pk: 1:1 FK to ``resources.id`` (UNIQUE, CASCADE)
+        workspace_id: Owning workspace FK (CASCADE); denormalized for filter
+            parity with the other resource tables — MUST stay consistent with
+            ``resources.workspace_id``
+        connector_type: One of ``slack`` / ``discord`` / ``teams``
+        oauth_tokens_encrypted: Fernet ciphertext of the connector's OAuth
+            token bundle (NULL until the F6-b setup flow populates it)
+        pii_guardrail_config: PII-scrubbing config consumed by the ai-worker
+            pre-compile stage (F6-d)
+        litellm_virtual_key_id: LiteLLM virtual-key identifier (NULL until set)
+        config_version: Monotonic connector-config revision
+        virtual_key_valid_until: Expiry of the LiteLLM virtual key (NULL = none)
+        created_by: User ID who provisioned the connector
+        created_at / updated_at: Lifecycle timestamps (naive UTC, per backend.md)
+    """
+
+    __tablename__ = "workspace_connectors"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    resource_pk: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("resources.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    connector_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    oauth_tokens_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pii_guardrail_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    litellm_virtual_key_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    config_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    virtual_key_valid_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        # 1:1 connector -> resource. UNIQUE on the FK column is what enforces it.
+        UniqueConstraint("resource_pk", name="uq_workspace_connectors_resource_pk"),
+        CheckConstraint(
+            "connector_type IN ('slack', 'discord', 'teams')",
+            name="check_connector_type",
+        ),
+    )
+
+    def set_oauth_tokens(self, tokens: dict[str, Any] | None) -> None:
+        """Encrypt and store the OAuth token bundle — no plaintext persisted.
+
+        Serializes ``tokens`` to JSON and Fernet-encrypts it into
+        ``oauth_tokens_encrypted``. A falsy bundle clears the column (stores
+        ``None``) rather than encrypting an empty string, which
+        ``APIKeyEncryption.encrypt`` rejects.
+        """
+        import json
+
+        from utils.encryption import get_encryptor
+
+        if not tokens:
+            self.oauth_tokens_encrypted = None
+            return
+        self.oauth_tokens_encrypted = get_encryptor().encrypt(json.dumps(tokens))
+
+    def get_oauth_tokens(self) -> dict[str, Any] | None:
+        """Decrypt and return the OAuth token bundle, or ``None`` if unset."""
+        import json
+
+        from utils.encryption import get_encryptor
+
+        if not self.oauth_tokens_encrypted:
+            return None
+        return json.loads(get_encryptor().decrypt(self.oauth_tokens_encrypted))
 
 
 # ---------------------------------------------------------------------------

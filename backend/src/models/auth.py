@@ -1466,6 +1466,20 @@ class Workspace(Base):
         return self._plan_tier.max_resource_tokens
 
     @property
+    def effective_max_connectors(self) -> int:
+        """Max ai-worker connectors: tier-fixed value (Issue #850, F6-a of #755).
+
+        Like ``effective_max_resource_tokens``, this is a purely
+        tier-determined seat cap with no addon — no ``_zero_floor`` is needed
+        because there is no addon to clamp. It governs ai-worker chat-ingest
+        connector creation independently of ``max_resource_tokens``: the F6-b
+        setup flow mints a connector-owned resource token that bypasses the
+        ``max_resource_tokens`` Pro+ gate and is bounded by this count instead.
+        FREE=0 / BASIC=1 / PRO=5.
+        """
+        return self._plan_tier.max_connectors
+
+    @property
     def effective_sleep_enabled_contexts_limit(self) -> int:
         """Sleep-enabled contexts cap: plan tier base + addon (Issue #560).
 

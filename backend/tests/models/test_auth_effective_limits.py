@@ -124,3 +124,32 @@ class TestZeroBaseBypassClosed:
         ws._plan_tier = tier
         setattr(ws, addon_attr, None)
         assert getattr(Workspace, prop_name).fget(ws) == 100
+
+
+class TestEffectiveMaxConnectors:
+    """Issue #850 (F6-a of #755): the ai-worker connector seat cap is a
+    tier-fixed value with NO addon, mirroring ``effective_max_resource_tokens``.
+    It is therefore NOT part of the ``_zero_floor`` addon-stacking family above.
+    FREE=0 / BASIC=1 / PRO=5.
+    """
+
+    @pytest.mark.parametrize(
+        ("plan_name", "expected"),
+        [("free", 0), ("basic", 1), ("pro", 5)],
+    )
+    def test_tier_fixed_value(self, plan_name, expected):
+        from config.plan_tiers import get_plan_tier
+
+        ws = MagicMock()
+        ws._plan_tier = get_plan_tier(plan_name)
+        assert Workspace.effective_max_connectors.fget(ws) == expected
+
+    def test_reads_tier_directly_with_no_addon(self):
+        """No addon column feeds this cap — the property returns the tier value
+        unchanged (a stray addon-like attribute on the workspace is ignored)."""
+        from config.plan_tiers import get_plan_tier
+
+        ws = MagicMock()
+        ws._plan_tier = get_plan_tier("pro")
+        ws.addon_connector_bonus = 99  # no such addon exists; must be ignored
+        assert Workspace.effective_max_connectors.fget(ws) == 5
