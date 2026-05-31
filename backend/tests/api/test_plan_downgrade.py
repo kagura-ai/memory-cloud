@@ -40,7 +40,6 @@ async def pro_workspace(db_session):
         name=f"test-ws-{uuid4().hex[:8]}",
         plan_name="pro",
         owner_user_id=owner_id,
-        memory_limit=100000,
         daily_api_limit=50000,
         weekly_api_limit=250000,
     )
@@ -104,7 +103,6 @@ async def test_admin_plan_upgrade_free_to_pro(db_session):
         name=f"test-ws-{uuid4().hex[:8]}",
         plan_name="free",
         owner_user_id=owner_id,
-        memory_limit=1000,
         daily_api_limit=1000,
         weekly_api_limit=5000,
     )
@@ -122,7 +120,6 @@ async def test_admin_plan_upgrade_free_to_pro(db_session):
     pro_tier = get_plan_tier("pro")
     old_plan = workspace.plan_name
     workspace.plan_name = "pro"
-    workspace.memory_limit = pro_tier.memory_limit
     workspace.daily_api_limit = pro_tier.daily_api_limit
     workspace.weekly_api_limit = pro_tier.weekly_api_limit
 
@@ -140,7 +137,7 @@ async def test_admin_plan_upgrade_free_to_pro(db_session):
     # Verify
     await db_session.refresh(workspace)
     assert workspace.plan_name == "pro"
-    assert workspace.memory_limit == pro_tier.memory_limit
+    # #805: memory_limit is no longer a Workspace column (SSoT = plan_tier).
     assert workspace.daily_api_limit == pro_tier.daily_api_limit
 
     # Verify audit log
@@ -161,14 +158,13 @@ async def test_admin_plan_downgrade_pro_to_free_updates_quotas(db_session, pro_w
     free_tier = get_plan_tier("free")
 
     workspace.plan_name = "free"
-    workspace.memory_limit = free_tier.memory_limit
     workspace.daily_api_limit = free_tier.daily_api_limit
     workspace.weekly_api_limit = free_tier.weekly_api_limit
     await db_session.commit()
 
     await db_session.refresh(workspace)
     assert workspace.plan_name == "free"
-    assert workspace.memory_limit == free_tier.memory_limit
+    # #805: memory_limit is no longer a Workspace column (SSoT = plan_tier).
     assert workspace.daily_api_limit == free_tier.daily_api_limit
     assert workspace.weekly_api_limit == free_tier.weekly_api_limit
 
@@ -188,8 +184,6 @@ async def test_admin_plan_downgrade_disables_reranking(db_session, workspace_wit
 
     # Downgrade to Free and disable reranking
     workspace.plan_name = "free"
-    free_tier = get_plan_tier("free")
-    workspace.memory_limit = free_tier.memory_limit
 
     # Simulate admin endpoint's reranking disable logic
     context_ids = [ctx.id for ctx in contexts]
@@ -219,7 +213,9 @@ async def test_audit_log_records_old_and_new_limits(db_session, pro_workspace):
     workspace, _ = pro_workspace
     basic_tier = get_plan_tier("basic")
 
-    old_memory = workspace.memory_limit
+    # #805: memory_limit is no longer a Workspace column — source the audit
+    # "old" value from the workspace's current plan tier (matches production).
+    old_memory = get_plan_tier(workspace.plan_name).memory_limit
     old_daily = workspace.daily_api_limit
     old_weekly = workspace.weekly_api_limit
 
@@ -282,7 +278,6 @@ async def test_downgrade_allowed_when_contexts_within_limit(db_session):
         name=f"test-ws-{uuid4().hex[:8]}",
         plan_name="pro",
         owner_user_id=owner_id,
-        memory_limit=100000,
         daily_api_limit=50000,
         weekly_api_limit=250000,
     )
@@ -329,9 +324,7 @@ async def test_addon_bonus_preserved_on_plan_change(db_session, pro_workspace):
     await db_session.commit()
 
     # Change plan to basic
-    basic_tier = get_plan_tier("basic")
     workspace.plan_name = "basic"
-    workspace.memory_limit = basic_tier.memory_limit
     await db_session.commit()
 
     await db_session.refresh(workspace)

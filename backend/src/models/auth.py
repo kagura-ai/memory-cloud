@@ -1276,8 +1276,7 @@ class Workspace(Base):
         name: Workspace display name
         description: Optional description
         owner_user_id: Owner user ID (creator)
-        plan_name: Billing plan (free/pro/enterprise)
-        memory_limit: Max memories per workspace
+        plan_name: Billing plan (free/basic/pro)
         daily_api_limit: Daily API call limit
         weekly_api_limit: Weekly API call limit
         created_at: Creation timestamp
@@ -1289,7 +1288,7 @@ class Workspace(Base):
         contexts: Contexts owned by this workspace (one-to-many)
 
     Constraints:
-        - plan_name must be in: free, pro, enterprise
+        - plan_name must be in: free, basic, pro
     """
 
     __tablename__ = "workspaces"
@@ -1304,7 +1303,11 @@ class Workspace(Base):
 
     # Billing & Plan
     plan_name: Mapped[str] = mapped_column(String(50), nullable=False, server_default="free")
-    memory_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1000")
+    # #805: memory_limit column dropped — it was a vestigial denormalized mirror of
+    # plan_tier.memory_limit with no live consumer (effective_memory_limit reads the
+    # tier, not a column). SSoT is plan_tier.memory_limit. daily/weekly_api_limit are
+    # a separate "legacy API limit" concern (see effective_daily_api_limit) — out of
+    # #805 scope, intentionally left in place.
     daily_api_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1000")
     weekly_api_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default="5000")
 

@@ -81,7 +81,6 @@ async def visibility_scenario(async_engine, db_session):
         name=f"ws-a-{uuid4().hex[:8]}",
         plan_name="pro",
         owner_user_id=owner_a_id,
-        memory_limit=100000,
         daily_api_limit=50000,
         weekly_api_limit=250000,
     )
@@ -90,7 +89,6 @@ async def visibility_scenario(async_engine, db_session):
         name=f"ws-b-{uuid4().hex[:8]}",
         plan_name="pro",
         owner_user_id=outsider_b_id,
-        memory_limit=100000,
         daily_api_limit=50000,
         weekly_api_limit=250000,
     )

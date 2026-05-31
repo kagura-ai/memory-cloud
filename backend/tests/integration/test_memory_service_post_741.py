@@ -58,7 +58,6 @@ async def edge_producer_scenario(db_session: AsyncSession):
         name=f"ws-{uuid4().hex[:8]}",
         plan_name="pro",
         owner_user_id=owner_id,
-        memory_limit=100000,
         daily_api_limit=50000,
         weekly_api_limit=250000,
     )

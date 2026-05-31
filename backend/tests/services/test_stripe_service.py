@@ -13,6 +13,7 @@ from uuid import uuid4
 import pytest
 
 import services.stripe_service as stripe_service
+from models.auth import Workspace
 from services.stripe_service import (
     _run_stripe,
     _run_stripe_erasure,
@@ -372,10 +373,12 @@ async def test_apply_plan_change_workspace_not_found():
 
 @pytest.mark.asyncio
 async def test_apply_plan_change_success():
-    workspace = MagicMock()
+    # spec_set=Workspace: setting workspace.memory_limit would raise (the column
+    # was dropped in #805), so this mock actively prevents a writer being
+    # reintroduced — alongside the explicit daily/weekly assertions below.
+    workspace = MagicMock(spec_set=Workspace)
     workspace.id = uuid4()
     workspace.plan_name = "free"
-    workspace.memory_limit = 100
 
     result_proxy = MagicMock()
     result_proxy.scalar_one_or_none.return_value = workspace
@@ -393,7 +396,11 @@ async def test_apply_plan_change_success():
         await _apply_plan_change(db, workspace.id, "pro", "cus_123", "sub_123")
 
     assert workspace.plan_name == "pro"
-    assert workspace.memory_limit == 500
+    # #805: memory_limit is no longer a Workspace column (SSoT = plan_tier) — the
+    # spec_set mock makes a reintroduced `workspace.memory_limit = ...` write fail
+    # loudly. The remaining quota columns must still be synced from the tier.
+    assert workspace.daily_api_limit == 1000
+    assert workspace.weekly_api_limit == 5000
     assert workspace.stripe_customer_id == "cus_123"
     assert workspace.stripe_subscription_id == "sub_123"
     db.add.assert_called_once()
@@ -407,7 +414,9 @@ async def test_apply_plan_change_success():
 
 @pytest.mark.asyncio
 async def test_handle_subscription_cancelled_downgrades_to_free():
-    workspace = MagicMock()
+    # spec_set=Workspace: a reintroduced workspace.memory_limit write would raise
+    # (column dropped in #805); daily/weekly remain synced from the free tier.
+    workspace = MagicMock(spec_set=Workspace)
     workspace.id = uuid4()
     workspace.plan_name = "pro"
 
@@ -427,7 +436,10 @@ async def test_handle_subscription_cancelled_downgrades_to_free():
         await _handle_subscription_cancelled(db, "cus_123")
 
     assert workspace.plan_name == "free"
-    assert workspace.memory_limit == 100
+    # #805: memory_limit column dropped — downgrade no longer syncs it (spec_set
+    # guards against reintroduction); daily/weekly are still synced from the tier.
+    assert workspace.daily_api_limit == 100
+    assert workspace.weekly_api_limit == 500
     assert workspace.stripe_subscription_id is None
     db.add.assert_called_once()
     db.commit.assert_called()

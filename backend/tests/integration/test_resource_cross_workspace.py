@@ -78,7 +78,6 @@ async def cross_workspace_scenario(async_engine, db_session):
         name=f"ws-a-{uuid4().hex[:8]}",
         plan_name="pro",
         owner_user_id=owner_a_id,
-        memory_limit=100000,
         daily_api_limit=50000,
         weekly_api_limit=250000,
     )
@@ -87,7 +86,6 @@ async def cross_workspace_scenario(async_engine, db_session):
         name=f"ws-b-{uuid4().hex[:8]}",
         plan_name="pro",
         owner_user_id=owner_b_id,
-        memory_limit=100000,
         daily_api_limit=50000,
         weekly_api_limit=250000,
     )
@@ -250,7 +248,6 @@ async def cross_workspace_multi_member_scenario(async_engine, db_session):
         name=f"ws-a-{uuid4().hex[:8]}",
         plan_name="pro",
         owner_user_id=owner_a_id,
-        memory_limit=100000,
         daily_api_limit=50000,
         weekly_api_limit=250000,
     )
@@ -259,7 +256,6 @@ async def cross_workspace_multi_member_scenario(async_engine, db_session):
         name=f"ws-b-{uuid4().hex[:8]}",
         plan_name="pro",
         owner_user_id=owner_b_id,
-        memory_limit=100000,
         daily_api_limit=50000,
         weekly_api_limit=250000,
     )
@@ -425,7 +421,6 @@ async def cross_workspace_list_scenario(async_engine, db_session):
         name=f"ws-a-{uuid4().hex[:8]}",
         plan_name="pro",
         owner_user_id=owner_a_id,
-        memory_limit=100000,
         daily_api_limit=50000,
         weekly_api_limit=250000,
     )
@@ -434,7 +429,6 @@ async def cross_workspace_list_scenario(async_engine, db_session):
         name=f"ws-b-{uuid4().hex[:8]}",
         plan_name="pro",
         owner_user_id=owner_b_id,
-        memory_limit=100000,
         daily_api_limit=50000,
         weekly_api_limit=250000,
     )
@@ -638,7 +632,6 @@ async def test_slug_reuse_after_soft_delete_isolates_orphans(async_engine, db_se
         name=f"ws-a-{uuid4().hex[:8]}",
         plan_name="pro",
         owner_user_id=owner_a_id,
-        memory_limit=100000,
         daily_api_limit=50000,
         weekly_api_limit=250000,
     )
@@ -647,7 +640,6 @@ async def test_slug_reuse_after_soft_delete_isolates_orphans(async_engine, db_se
         name=f"ws-b-{uuid4().hex[:8]}",
         plan_name="pro",
         owner_user_id=owner_b_id,
-        memory_limit=100000,
         daily_api_limit=50000,
         weekly_api_limit=250000,
     )
