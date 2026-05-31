@@ -1288,7 +1288,7 @@ class Workspace(Base):
         contexts: Contexts owned by this workspace (one-to-many)
 
     Constraints:
-        - plan_name must be in: free, pro, enterprise
+        - plan_name must be in: free, basic, pro
     """
 
     __tablename__ = "workspaces"
