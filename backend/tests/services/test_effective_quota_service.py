@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 
+from models.auth import Workspace
 from services.effective_quota_service import EffectiveQuotaService
 
 
@@ -48,7 +49,7 @@ class TestEffectiveQuotaService:
         PR #588 flagged this gap). Issue #663 added ``max_resource_tokens``
         as the 13th key (tier-fixed, no addon).
         """
-        ws = MagicMock()
+        ws = MagicMock(spec_set=Workspace)
         ws.plan_name = plan_name
         ws.daily_api_limit = daily_api_limit
         ws.addon_memory_bonus = addon_memory_bonus
