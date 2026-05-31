@@ -98,3 +98,23 @@ memory.kagura-ai.com {
 		format json
 	}
 }
+
+# =============================================================================
+# Extension point for sibling services (one-time, do not remove)
+# =============================================================================
+# Sibling services co-resident on this VM (e.g. kagura-memory-ai-worker's
+# webhook receiver at aw.kagura-ai.com) plug their own top-level vhost blocks
+# in here by dropping a `*.caddy` file into /opt/kagura-caddy-extra/ on the
+# host. That directory is bind-mounted read-only into the caddy container
+# (see docker-compose.prod.yml). This import sits at TOP LEVEL — outside the
+# site block above — so imported files can define full vhost blocks of their
+# own (e.g. `aw.kagura-ai.com { ... }`), not just snippets.
+#
+# Glob safety: Caddy tolerates this import matching zero files, so the initial
+# (empty) state is valid. The literal path survives deploy.sh's envsubst, which
+# uses an explicit allow-list (`envsubst '${API_UPSTREAM}'`) — no interpolation.
+#
+# Applying a NEW *.caddy file (or this mount on first rollout) takes more than
+# `caddy reload` — see README.md "Caddy extension point" for the exact
+# recreate-vs-reload procedure.
+import /opt/kagura-caddy-extra/*.caddy

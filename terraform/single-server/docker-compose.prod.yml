@@ -151,6 +151,12 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - /var/lib/kagura/origin-ca:/etc/caddy/origin-ca:ro
+      # Extension point for sibling services co-resident on this VM. They drop
+      # *.caddy vhost files here; Caddyfile imports them. Read-only so a sibling
+      # cannot mutate it from inside this container. Adding this mount to a
+      # running stack needs `docker compose up -d caddy` (recreate) — a plain
+      # `restart` does NOT apply a new mount. See README "Caddy extension point".
+      - /opt/kagura-caddy-extra:/opt/kagura-caddy-extra:ro
       - caddy_data:/data
       - caddy_config:/config
     # No hard dependency on api-blue/api-green: during normal operation only

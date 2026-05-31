@@ -83,3 +83,11 @@ memory.kagura-ai.com {
 		format json
 	}
 }
+
+# Extension point for sibling services (one-time) — see Caddyfile.tpl and
+# README.md "Caddy extension point". Sibling services drop *.caddy vhost files
+# into /opt/kagura-caddy-extra/ (bind-mounted read-only into the container).
+# Top-level so imported files can define their own vhost blocks. Caddy tolerates
+# this matching zero files. Applying a new file or this mount on first rollout
+# needs more than `caddy reload` — see the README procedure.
+import /opt/kagura-caddy-extra/*.caddy

@@ -407,6 +407,68 @@ If the new color misbehaves after switching:
 This starts the previous color if it's not running, waits for readiness,
 then flips Caddy back and reloads. Safe to run at any time after a deploy.
 
+### Caddy extension point (sibling services)
+
+Other services co-resident on this VM (for example
+`kagura-memory-ai-worker`'s webhook receiver at `aw.kagura-ai.com`) can publish
+their own HTTPS vhost through this server's Caddy **without any further change
+to the memory-cloud repository**. The mechanism is a one-time extension point:
+
+- `Caddyfile.tpl` ends with a top-level `import /opt/kagura-caddy-extra/*.caddy`.
+- The caddy container bind-mounts `/opt/kagura-caddy-extra` read-only
+  (`docker-compose.prod.yml`).
+- `startup.sh` provisions `/opt/kagura-caddy-extra` (root-owned, `0755`).
+
+A sibling service publishes a vhost by dropping a `*.caddy` file into
+`/opt/kagura-caddy-extra/` on the host (requires sudo — the directory is
+root-owned). Each file may contain full top-level vhost blocks, e.g.:
+
+```caddy
+# /opt/kagura-caddy-extra/aw.caddy   (owned by the ai-worker operator)
+aw.kagura-ai.com {
+	tls /etc/caddy/origin-ca/cert.pem /etc/caddy/origin-ca/key.pem
+	reverse_proxy ai-worker:9000
+}
+```
+
+**Applying changes — recreate vs reload (read this):**
+
+| Situation | Command | Why |
+|---|---|---|
+| **First rollout of this mount** (deploying the change that adds the `/opt/kagura-caddy-extra` volume) | `docker compose -f docker-compose.prod.yml up -d caddy` | A bind mount is fixed at container **creation** time. `docker compose restart` (and `deploy.sh`'s `restart caddy`) restart the *existing* container and do **not** apply a newly-added mount — the directory would be invisible inside the container. The container must be **recreated** once. |
+| **Adding / editing a `*.caddy` file** after the mount already exists | `docker compose -f docker-compose.prod.yml exec caddy caddy reload --config /etc/caddy/Caddyfile` | The mount is already present, so Caddy only needs to re-read config. A reload is sufficient and zero-downtime. |
+
+> The issue that introduced this called for "confirm with `caddy reload`" — that
+> is correct for steady-state `*.caddy` edits, but **not** for the first rollout
+> of the mount itself, which requires the `up -d caddy` recreate above.
+
+**Verifying a rollout** (the recreate momentarily drops `:80`/`:443` as the
+container is replaced — do it in a maintenance window or accept a brief blip):
+
+```bash
+cd /opt/kagura-memory/src/terraform/single-server
+
+# 1. Validate BEFORE bouncing — never recreate the container on a broken config.
+docker compose -f docker-compose.prod.yml exec caddy \
+  caddy validate --config /etc/caddy/Caddyfile
+
+# 2. Apply: recreate (first rollout of the mount) or reload (steady-state edit).
+docker compose -f docker-compose.prod.yml up -d caddy        # first rollout
+# docker compose -f docker-compose.prod.yml exec caddy \
+#   caddy reload --config /etc/caddy/Caddyfile                # later *.caddy edits
+
+# 3. Confirm EXISTING vhosts are unaffected (acceptance: "no impact on existing
+#    vhosts") — re-check the main endpoints AFTER the recreate, not just the new one.
+curl -fsS https://memory.kagura-ai.com/health        # expect 200
+curl -fsS -o /dev/null -w '%{http_code}\n' https://memory.kagura-ai.com/   # main site
+
+# 4. Confirm the NEW sibling vhost responds.
+curl -fsS https://<sibling-domain>/...               # e.g. aw.kagura-ai.com
+```
+
+An empty `/opt/kagura-caddy-extra/` is valid — Caddy tolerates the glob import
+matching zero files, so the extension point is harmless until a sibling uses it.
+
 ## Teardown
 
 ```bash
