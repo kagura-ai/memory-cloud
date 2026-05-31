@@ -469,8 +469,8 @@ will **not** resolve. Two working options:
 
 | Situation | Command | Why |
 |---|---|---|
-| **First rollout of this mount** (deploying the change that adds the `/opt/kagura-caddy-extra` volume) | `docker compose -f docker-compose.prod.yml up -d caddy` | A bind mount is fixed at container **creation** time. `docker compose restart` (and `deploy.sh`'s `restart caddy`) restart the *existing* container and do **not** apply a newly-added mount — the directory would be invisible inside the container. The container must be **recreated** once. |
-| **Adding / editing a `*.caddy` file** after the mount already exists | `docker compose -f docker-compose.prod.yml exec caddy caddy reload --config /etc/caddy/Caddyfile` | The mount is already present, so Caddy only needs to re-read config. A reload is sufficient and zero-downtime. |
+| **First rollout of this mount** (deploying the change that adds the `/opt/kagura-caddy-extra` volume) | `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d caddy` | A bind mount is fixed at container **creation** time. `docker compose restart` (and `deploy.sh`'s `restart caddy`) restart the *existing* container and do **not** apply a newly-added mount — the directory would be invisible inside the container. The container must be **recreated** once. |
+| **Adding / editing a `*.caddy` file** after the mount already exists | `docker compose -f docker-compose.prod.yml --env-file .env.prod exec caddy caddy reload --config /etc/caddy/Caddyfile` | The mount is already present, so Caddy only needs to re-read config. A reload is sufficient and zero-downtime. |
 
 > The issue that introduced this called for "confirm with `caddy reload`" — that
 > is correct for steady-state `*.caddy` edits, but **not** for the first rollout
@@ -483,13 +483,15 @@ container is replaced — do it in a maintenance window or accept a brief blip):
 cd /opt/kagura-memory/src/terraform/single-server
 
 # 1. Validate BEFORE bouncing — never recreate the container on a broken config.
-docker compose -f docker-compose.prod.yml exec caddy \
+#    --env-file .env.prod matters: compose parses the whole file (all services),
+#    so omitting it mis-interpolates ${KAGURA_DOMAIN} etc. — see the build-args note above.
+docker compose -f docker-compose.prod.yml --env-file .env.prod exec caddy \
   caddy validate --config /etc/caddy/Caddyfile
 
 # 2. Apply: recreate (first rollout of the mount) or reload (steady-state edit).
-docker compose -f docker-compose.prod.yml up -d caddy        # first rollout
-# docker compose -f docker-compose.prod.yml exec caddy \
-#   caddy reload --config /etc/caddy/Caddyfile                # later *.caddy edits
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d caddy        # first rollout
+# docker compose -f docker-compose.prod.yml --env-file .env.prod exec caddy \
+#   caddy reload --config /etc/caddy/Caddyfile                                     # later *.caddy edits
 
 # 3. Confirm EXISTING vhosts are unaffected (acceptance: "no impact on existing
 #    vhosts") — re-check the main endpoints AFTER the recreate, not just the new one.
