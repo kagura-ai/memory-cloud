@@ -44,6 +44,10 @@ memory.kagura-ai.com {
 		reverse_proxy api-blue:8080
 	}
 
+	handle /redoc* {
+		reverse_proxy api-blue:8080
+	}
+
 	handle /openapi.json {
 		reverse_proxy api-blue:8080
 	}
