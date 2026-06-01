@@ -49,7 +49,7 @@ Most AI memory tools are just vector databases with a chat wrapper. Kagura is di
 | **Hybrid Search** | Semantic (OpenAI/Ollama) + BM25 keyword — 96% top-1 accuracy |
 | **AI Reranking** | Ollama (local, free), Voyage AI, or Cohere — cross-encoder reranking for precision |
 | **Neural Memory Graph** | Hebbian learning builds a knowledge graph in the background. `explore()` traverses it for serendipitous discovery. |
-| **37 MCP Tools** | Memory, Neural edges, Contexts, Tags, Files (R2), Analyses (broadlistening), Resources, Sleep Maintenance, Usage |
+| **39 MCP Tools** | Memory, Neural edges, Contexts, Tags, Files (R2), Analyses (broadlistening), Resources, Sleep Maintenance, Usage |
 | **Multi-Provider** | OpenAI or Ollama (local, private, zero cost) for embeddings |
 | **Team Ready** | Workspaces, RBAC, context isolation, shared memory |
 | **Web UI** | Next.js dashboard — contexts, search settings, member management |
@@ -404,7 +404,7 @@ curl -X POST -H "Authorization: Bearer kagura_{your_key}" \
 
 ## MCP Tools
 
-37 tools across 9 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
+39 tools across 10 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
 
 ### Memory (6)
 
@@ -491,6 +491,13 @@ Background consolidation of memories (decay, edge pruning, theme summarization).
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `get_usage` | Get current workspace usage (memories, contexts, members, MCP calls/day) | Viewer+ |
+
+### API-Key Bindings (2)
+
+| Tool | Description | Required Role |
+|------|------------|---------------|
+| `list_my_bindings` | List your public-bound API keys (read-only; owner-scoped) | Viewer+ |
+| `describe_binding` | Describe one binding by `key_id` XOR `context_id` (read-only; owner-scoped) | Viewer+ |
 
 ## REST API
 
