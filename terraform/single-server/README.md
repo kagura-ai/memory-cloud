@@ -192,12 +192,14 @@ sudo mv /tmp/cloudflare-origin-key.pem  /var/lib/kagura/origin-ca/key.pem
 sudo chmod 0640 /var/lib/kagura/origin-ca/*
 ```
 
-Edit the Caddyfile to point at your actual domain (it defaults to
-`memory.kagura-ai.com`):
+Edit `Caddyfile.tpl` to point at your actual domain (it defaults to
+`memory.kagura-ai.com`). `Caddyfile.tpl` is the single source of truth; the
+rendered `Caddyfile` is generated from it (see the generation step below) and
+is gitignored, so always edit the template — never the rendered file:
 
 ```bash
 cd /opt/kagura-memory/src/terraform/single-server
-sed -i 's/memory.kagura-ai.com/YOUR_DOMAIN/' Caddyfile
+sed -i 's/memory.kagura-ai.com/YOUR_DOMAIN/' Caddyfile.tpl
 ```
 
 Create `.env.prod`:
@@ -206,6 +208,17 @@ Create `.env.prod`:
 cp .env.prod.example .env.prod
 vim .env.prod      # set KAGURA_DOMAIN, DB_PASSWORD, QDRANT_API_KEY,
                    # API_KEY_SECRET, JWT_SECRET, Google OAuth client, etc.
+```
+
+Generate the rendered `Caddyfile` from the template. The rendered file is
+gitignored (not committed), so it does not exist on a fresh checkout — and the
+first `docker compose up` bind-mounts it into the caddy container, so it must
+exist as a real file first. `deploy.sh` regenerates it on every subsequent
+deploy/rollback; this one-off command covers the bootstrap before the first
+deploy has run:
+
+```bash
+./scripts/deploy.sh --generate-caddyfile
 ```
 
 Start everything (initial setup starts both API colors; Caddy defaults to
@@ -304,13 +317,28 @@ The stack uses **blue-green deploy** for the API container. Caddy always
 routes to one color; the deploy script builds the other, waits for it to
 be ready, switches Caddy, then drains and stops the old color.
 
+> ⚠️ **One-time migration — the release that stops tracking `Caddyfile` (#849).**
+> The rendered `Caddyfile` is now gitignored, so `git reset --hard origin/main`
+> **deletes the on-disk `Caddyfile`** on existing servers. A normal
+> `./scripts/deploy.sh` run immediately afterward regenerates it (before Caddy
+> is restarted), so the bundled `reset --hard` → `deploy.sh` sequence below is
+> safe. **Do not reboot or `docker compose up` Caddy in between** — with the
+> file missing, Docker would create a *directory* at the mount path and Caddy
+> would fail. If unsure, run `./scripts/deploy.sh --generate-caddyfile` right
+> after the reset to re-materialize the file before anything else.
+>
+> If you previously customized the **rendered** `Caddyfile` in place (the old
+> README instructed editing it directly), copy those edits into `Caddyfile.tpl`
+> **first** — otherwise the regenerated file reverts to the template's default
+> domain.
+
 ```bash
 # On the VM
 cd /opt/kagura-memory/src
 git fetch && git reset --hard origin/main
 
 cd terraform/single-server
-./scripts/deploy.sh           # zero-downtime blue-green deploy
+./scripts/deploy.sh           # zero-downtime blue-green deploy (regenerates Caddyfile)
 ```
 
 The script handles building, migrations, readiness checks, Caddy reload,

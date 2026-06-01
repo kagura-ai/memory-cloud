@@ -285,6 +285,26 @@ reload_caddy() {
     log "  Caddy restarted"
 }
 
+cmd_generate_caddyfile() {
+    # Bootstrap helper: render ./Caddyfile from Caddyfile.tpl WITHOUT deploying.
+    #
+    # The rendered Caddyfile is gitignored — Caddyfile.tpl is the single source
+    # of truth — so a fresh checkout has no ./Caddyfile. The very first
+    # `docker compose up` bind-mounts ./Caddyfile into the caddy container;
+    # if the file is absent Docker silently creates a *directory* in its place
+    # and caddy fails to load its config. Run this once before that first `up`
+    # so Docker mounts a real file. Every subsequent deploy/rollback regenerates
+    # it via generate_caddyfile(), so this command is only needed at bootstrap.
+    #
+    # Upstream tracks the current active color (get_active_color defaults to
+    # "blue" when no marker exists, i.e. on first boot), so re-running this on a
+    # live host never rewrites the upstream to the wrong color.
+    local color
+    color="$(get_active_color)"
+    log "Generating Caddyfile (bootstrap) for active color: $color"
+    generate_caddyfile "api-${color}"
+}
+
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
@@ -317,13 +337,17 @@ case "${1:-}" in
     --web)
         cmd_deploy_web
         ;;
+    --generate-caddyfile)
+        cmd_generate_caddyfile
+        ;;
     --help|-h)
-        echo "Usage: $0 [--rollback|--status|--web|--help]"
+        echo "Usage: $0 [--rollback|--status|--web|--generate-caddyfile|--help]"
         echo ""
-        echo "  (no args)    Deploy to the inactive API color (zero-downtime blue-green)"
-        echo "  --rollback   Switch back to the previous API color"
-        echo "  --status     Show current active API color and container states"
-        echo "  --web        Rebuild + restart kagura-web in place"
+        echo "  (no args)             Deploy to the inactive API color (zero-downtime blue-green)"
+        echo "  --rollback            Switch back to the previous API color"
+        echo "  --status              Show current active API color and container states"
+        echo "  --web                 Rebuild + restart kagura-web in place"
+        echo "  --generate-caddyfile  Render ./Caddyfile from Caddyfile.tpl (bootstrap; no deploy)"
         echo ""
         echo "Environment variables:"
         echo "  READINESS_TIMEOUT      Seconds to wait for API /readiness (default: 60)"
