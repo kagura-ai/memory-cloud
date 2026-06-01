@@ -1265,8 +1265,11 @@ class PiiGuardrailConfig(BaseModel):
 
     @model_validator(mode="after")
     def _require_detectors_when_enabled(self) -> "PiiGuardrailConfig":
-        if self.enabled and not self.detectors:
-            raise ValueError("detectors must be non-empty when enabled=true")
+        if self.enabled:
+            if not self.detectors:
+                raise ValueError("detectors must be non-empty when enabled=true")
+            if any(not d or not d.strip() for d in self.detectors):
+                raise ValueError("detectors must not contain blank entries when enabled=true")
         return self
 
 

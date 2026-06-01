@@ -45,6 +45,14 @@ def test_rejects_invalid_redaction_enum():
         PiiGuardrailConfig(enabled=True, detectors=["EMAIL_ADDRESS"], redaction="scramble")
 
 
+@pytest.mark.parametrize("bad", [[""], ["  "], ["EMAIL_ADDRESS", ""]])
+def test_rejects_blank_detector_names_when_enabled(bad):
+    # A non-empty list of blank strings satisfies "list is non-empty" but is a
+    # semantically empty detector set — fail-open. Must be rejected.
+    with pytest.raises(ValidationError):
+        PiiGuardrailConfig(enabled=True, detectors=bad)
+
+
 # --- shared validation helper (used at both the REST and MCP provision call-sites) ---
 
 
