@@ -24,3 +24,10 @@ crash.*.log
 origin-ca/
 *.pem
 *.key
+
+# Generated Caddy config (#849) — Caddyfile.tpl is the single source of truth.
+# deploy.sh renders ./Caddyfile from it on every deploy (and via
+# `deploy.sh --generate-caddyfile` at bootstrap). A committed rendered file
+# drifts from its template (see PR #848), so it is not tracked. Caddyfile.tpl
+# is NOT ignored.
+Caddyfile
