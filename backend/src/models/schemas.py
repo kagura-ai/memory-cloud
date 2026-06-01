@@ -1295,8 +1295,10 @@ def validate_pii_guardrail_config(raw: dict | None) -> dict | None:
     try:
         return PiiGuardrailConfig.model_validate(raw).model_dump()
     except ValidationError as e:
-        locs = "; ".join(
-            ".".join(str(p) for p in err["loc"]) + ": " + err["msg"]
-            for err in e.errors(include_input=False)
-        )
-        raise ValueError(f"invalid pii_guardrail_config — {locs}") from e
+        parts = []
+        for err in e.errors(include_input=False):
+            loc = ".".join(str(p) for p in err["loc"])
+            # Model-level (@model_validator) errors carry an empty loc; render just
+            # the message rather than a dangling "<empty>: msg" prefix.
+            parts.append(f"{loc}: {err['msg']}" if loc else err["msg"])
+        raise ValueError(f"invalid pii_guardrail_config — {'; '.join(parts)}") from e

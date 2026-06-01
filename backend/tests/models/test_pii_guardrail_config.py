@@ -74,6 +74,23 @@ def test_validate_helper_raises_valueerror_on_unknown_key():
         validate_pii_guardrail_config({"enabled": True, "detector": ["EMAIL_ADDRESS"]})
 
 
+def test_model_level_error_message_has_no_empty_loc_prefix():
+    # @model_validator(mode="after") errors carry an empty loc. The helper must
+    # not render that as a bare "— : <msg>" with a dangling colon (#868 Copilot).
+    with pytest.raises(ValueError) as exc:
+        validate_pii_guardrail_config({"enabled": True, "detectors": []})
+    msg = str(exc.value)
+    assert "— :" not in msg
+    assert "detectors must be non-empty" in msg
+
+
+def test_field_level_error_message_keeps_field_location():
+    # Field-level errors should still name the field for debuggability.
+    with pytest.raises(ValueError) as exc:
+        validate_pii_guardrail_config({"enabled": True, "detector": ["EMAIL_ADDRESS"]})
+    assert "detector" in str(exc.value)
+
+
 def test_validate_helper_error_message_does_not_echo_input_values():
     # Secret-leak guard: pydantic ValidationError echoes offending input by default.
     # The helper must surface only field locations, never the offending value.
