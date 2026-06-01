@@ -14,7 +14,8 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.resource_tokens import ResourceTokenManager
@@ -166,6 +167,15 @@ class ConnectorProvisioningService:
         return workspace
 
     async def _enforce_connector_seat_cap(self, workspace: Workspace, workspace_id: UUID) -> None:
+        # Issue #857: acquire a per-workspace ``pg_advisory_xact_lock`` before
+        # the count read so two concurrent provisions for the last seat cannot
+        # both observe ``count < cap`` and both insert (TOCTOU over-provision).
+        # The lock is xact-scoped, so the caller's transaction — which extends
+        # from this gate through ``db.flush()`` of the new connector — keeps the
+        # serialization across the read-then-write. Mirrors the workspace-create
+        # cap (#677, ``quota_service.py``) and the admin-bonus path (``admin.py``).
+        await self._acquire_connector_seat_lock(workspace_id)
+
         max_connectors = workspace.effective_max_connectors
         active_count_result = await self.db.execute(
             select(func.count(WorkspaceConnector.id)).where(
@@ -181,6 +191,55 @@ class ConnectorProvisioningService:
                 max_connectors=max_connectors,
                 active_connectors=active_count,
             )
+
+    async def _acquire_connector_seat_lock(self, workspace_id: UUID) -> None:
+        """Take the per-workspace advisory lock guarding seat-cap enforcement.
+
+        Unlike the workspace-creation cap (#677), connector seat-cap is always
+        enforced — there is no log-only rollout flag — so the lock-error policy
+        is unconditionally **fail-closed**: a lock-acquire failure denies the
+        provision rather than letting it through.
+
+        ``SET LOCAL lock_timeout = '5s'`` bounds the wait so a pathologically
+        long peer transaction cannot stall the worker indefinitely. On SQLSTATE
+        ``55P03`` (``lock_not_available``) we rollback the poisoned session and
+        raise a retriable 503; any other DB error propagates after rollback. The
+        reset to ``'0'`` after a successful acquire keeps the 5s timeout from
+        bleeding into the subsequent count SELECT, connector INSERT, and token
+        mint that share this transaction.
+
+        ``hashtextextended(:key, 0)`` returns the 64-bit hash matching the
+        bigint signature of single-key ``pg_advisory_xact_lock``; 32-bit
+        ``hashtext`` would collide at ~65k workspaces and block unrelated
+        tenants (PR #686 loop 4).
+        """
+        lock_key = f"connector_seat:{workspace_id}"
+        await self.db.execute(text("SET LOCAL lock_timeout = '5s'"))
+        try:
+            await self.db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))").bindparams(
+                    key=lock_key
+                )
+            )
+        except DBAPIError as exc:
+            sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+            # The session is poisoned until rollback — issue it before raising
+            # so the next request on this session starts clean.
+            await self.db.rollback()
+            if sqlstate == "55P03":
+                logger.warning(
+                    "connector_seat_lock_timeout",
+                    workspace_id=str(workspace_id),
+                )
+                raise MemoryCloudException(
+                    "Connector seat lock unavailable; please retry.",
+                    status_code=503,
+                    error_code="CONNECTOR-002",
+                ) from exc
+            raise
+        # Reset is on the success path only; on failure the rollback above has
+        # already cleared the SET LOCAL along with the rest of the transaction.
+        await self.db.execute(text("SET LOCAL lock_timeout = '0'"))
 
     async def _get_connector_for_resource(
         self,
