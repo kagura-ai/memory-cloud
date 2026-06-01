@@ -4,6 +4,7 @@ Issue #46: Add resource management tools (setup, ingest, stats, schema).
 
 Provides 5 tools for managing resources via MCP:
 - setup_resource: Create public context + resource token in one call
+- setup_connector: Create ai-worker connector + resource token in one call
 - ingest_events: Batch ingest resource events
 - get_resource_impact: Get resource stats (tokens, memories, schema version)
 - get_resource_schema: Get field definitions for a resource
@@ -63,6 +64,17 @@ def _validate_resource_id(resource_id: str) -> list[TextContent] | None:
             "Must be lowercase alphanumeric, underscores, and hyphens only.",
         )
     return None
+
+
+def _parse_optional_datetime(value: Any) -> Any:
+    """Parse optional ISO datetime values from MCP JSON arguments."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("virtual_key_valid_until must be an ISO 8601 string.")
+    from datetime import datetime
+
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 async def _check_owner_admin_role(
@@ -516,9 +528,10 @@ async def handle_ingest_events(
                 return boundary_err
 
             # MCP shares the per-hour ceiling with the HTTP ingest path via a
-            # workspace-scoped Redis counter. The cap is derived from the most
-            # permissive ResourceToken for this (workspace, resource) pair, with
-            # a default fallback when no token exists.
+            # workspace-scoped Redis counter. Keep the check after permission
+            # and workspace-boundary gates but before any DB writes so a quota
+            # failure cannot partially ingest a batch. The DB helper resolves
+            # resource_pk internally to avoid slug-only quota scope.
             quota_per_hour = await resolve_workspace_event_quota_per_hour(
                 db, workspace_id, resource_id
             )
@@ -533,35 +546,9 @@ async def handle_ingest_events(
                     retry_after_seconds=quota_err.retry_after,
                 )
 
-            # Process events
-            from sqlalchemy.exc import IntegrityError
-
-            from db.constraint_names import (
-                RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE,
-                RESOURCE_EVENTS_UPSERT_UNIQUE,
-                integrity_error_constraint_name,
-            )
-            from models.resource import ResourceEvent
-            from services.resource_lookup import resolve_resource_pk
-
-            # Resolve resources.id once per batch via the shared chokepoint
-            # (Issue #390 Phase 2). If the Resource entity row does not
-            # exist, ingest cannot safely proceed — the before_insert
-            # invariant listener on ResourceEvent would raise IntegrityError
-            # for every event in the batch and the errors would be masked
-            # as generic "constraint violation" strings. Reject the batch
-            # up front with an actionable error so the caller knows to run
-            # ``setup_resource`` first.
-            resource_pk = await resolve_resource_pk(db, workspace_id, resource_id)
-            if resource_pk is None:
-                return _error_response(
-                    "resource_not_found",
-                    f"Resource '{resource_id}' has no backing entity row in your workspace.",
-                    help="Run setup_resource() first to bind the resource to a Context + Resource entity.",
-                )
-
             created_ids: list[int] = []
             errors: list[dict] = []
+            valid_events: list[dict[str, Any]] = []
 
             for i, event_data in enumerate(events):
                 if not isinstance(event_data, dict):
@@ -636,16 +623,76 @@ async def handle_ingest_events(
                             errors.append({"index": i, "error": "version must be >= 1"})
                             continue
 
+                valid_events.append(
+                    {
+                        "index": i,
+                        "op": op,
+                        "doc_id": doc_id,
+                        "version": version,
+                        "payload": payload if op == "upsert" else None,
+                        "idempotency_key": event_data.get("idempotency_key"),
+                        "event_metadata": event_data.get("event_metadata", {}),
+                        "importance": importance,
+                    }
+                )
+
+            if valid_events:
+                from services.connector_provisioning import (
+                    get_connector_id_for_resource_pk,
+                    validate_connector_idempotency_key,
+                )
+                from services.resource_lookup import resolve_resource_pk
+                from utils.exceptions import ValidationError
+
+                # Resolve resources.id once per batch via the shared chokepoint
+                # (Issue #390 Phase 2). If the Resource entity row does not
+                # exist, ingest cannot safely proceed — the before_insert
+                # invariant listener on ResourceEvent would raise IntegrityError
+                # for every event in the batch and the errors would be masked
+                # as generic "constraint violation" strings. Reject the batch
+                # up front with an actionable error so the caller knows to run
+                # ``setup_resource`` or ``setup_connector`` first.
+                resource_pk = await resolve_resource_pk(db, workspace_id, resource_id)
+                if resource_pk is None:
+                    return _error_response(
+                        "resource_not_found",
+                        f"Resource '{resource_id}' has no backing entity row in your workspace.",
+                        help="Run setup_resource() or setup_connector() first to bind the resource.",
+                    )
+                connector_id = await get_connector_id_for_resource_pk(db, resource_pk)
+
+                # Process events
+                from sqlalchemy.exc import IntegrityError
+
+                from db.constraint_names import (
+                    RESOURCE_EVENTS_IDEMPOTENCY_UNIQUE,
+                    RESOURCE_EVENTS_UPSERT_UNIQUE,
+                    integrity_error_constraint_name,
+                )
+                from models.resource import ResourceEvent
+
+            for event_data in valid_events:
+                i = event_data["index"]
+                doc_id = event_data["doc_id"]
+                try:
+                    validate_connector_idempotency_key(
+                        connector_id=connector_id,
+                        idempotency_key=event_data["idempotency_key"],
+                    )
+                except ValidationError as ve:
+                    errors.append({"index": i, "doc_id": doc_id, "error": ve.message})
+                    continue
+
                 event = ResourceEvent(
                     resource_id=resource_id,
                     resource_pk=resource_pk,
-                    op=op,
+                    op=event_data["op"],
                     doc_id=doc_id,
-                    version=version,
-                    payload=payload if op == "upsert" else None,
-                    idempotency_key=event_data.get("idempotency_key"),
-                    event_metadata=event_data.get("event_metadata", {}),
-                    importance=importance,
+                    version=event_data["version"],
+                    payload=event_data["payload"],
+                    idempotency_key=event_data["idempotency_key"],
+                    event_metadata=event_data["event_metadata"],
+                    importance=event_data["importance"],
                 )
 
                 try:
@@ -1006,5 +1053,119 @@ async def handle_setup_resource(
                 workspace_id=workspace_id,
             )
             return _error_response("setup_resource_error", error_str)
+
+
+async def handle_setup_connector(
+    args: dict[str, Any], user_id: str, workspace_id: UUID | None
+) -> list[TextContent]:
+    """Provision an ai-worker connector using Resource Foundation."""
+    if "connector_type" not in args or "resource_id" not in args:
+        return _error_response(
+            "missing_fields",
+            "Missing required fields: connector_type, resource_id",
+        )
+
+    connector_type = args["connector_type"]
+    resource_id = args["resource_id"]
+    err = _validate_resource_id(resource_id)
+    if err:
+        return err
+
+    if not workspace_id:
+        return _error_response("workspace_required", "No active workspace.")
+
+    from db.base import get_db
+
+    start_time = time.time()
+    async for db in get_db():
+        try:
+            role_err = await _check_owner_admin_role(db, user_id, workspace_id)
+            if role_err:
+                return role_err
+
+            try:
+                quota_events_per_hour = int(args.get("quota_events_per_hour", 1000))
+                virtual_key_valid_until = _parse_optional_datetime(
+                    args.get("virtual_key_valid_until")
+                )
+            except (TypeError, ValueError) as ve:
+                return _error_response("validation_error", str(ve))
+
+            oauth_tokens = args.get("oauth_tokens")
+            if oauth_tokens is not None and not isinstance(oauth_tokens, dict):
+                return _error_response("validation_error", "oauth_tokens must be an object.")
+            pii_guardrail_config = args.get("pii_guardrail_config")
+            if pii_guardrail_config is not None and not isinstance(pii_guardrail_config, dict):
+                return _error_response(
+                    "validation_error", "pii_guardrail_config must be an object."
+                )
+
+            from services.connector_provisioning import ConnectorProvisioningService
+            from utils.exceptions import MemoryCloudException
+
+            result = await ConnectorProvisioningService(db).provision_connector(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                connector_type=connector_type,
+                resource_id=resource_id,
+                display_name=args.get("display_name"),
+                oauth_tokens=oauth_tokens,
+                pii_guardrail_config=pii_guardrail_config,
+                litellm_virtual_key_id=args.get("litellm_virtual_key_id"),
+                virtual_key_valid_until=virtual_key_valid_until,
+                quota_events_per_hour=quota_events_per_hour,
+            )
+            await db.commit()
+            await db.refresh(result.connector)
+            await db.refresh(result.token)
+
+            await _log_tool_usage(
+                db,
+                user_id,
+                "setup_connector",
+                start_time,
+                201,
+                workspace_id=workspace_id,
+            )
+
+            return _success_response(
+                message=f"Connector '{result.connector.id}' set up successfully.",
+                connector_id=str(result.connector.id),
+                connector_type=result.connector.connector_type,
+                resource_id=result.resource_id,
+                resource_pk=str(result.resource_pk),
+                token_id=result.token.id,
+                token=result.plaintext_token,
+                quota_events_per_hour=result.token.quota_events_per_hour,
+                idempotency_key_prefix=f"{result.connector.id}:",
+            )
+
+        except MemoryCloudException as exc:
+            await db.rollback()
+            await _log_tool_usage(
+                db,
+                user_id,
+                "setup_connector",
+                start_time,
+                exc.status_code,
+                workspace_id=workspace_id,
+            )
+            return _error_response(
+                exc.error_code,
+                exc.message,
+                **exc.details,
+            )
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"setup_connector_failed: {e}", exc_info=True)
+            await _log_tool_usage(
+                db,
+                user_id,
+                "setup_connector",
+                start_time,
+                500,
+                workspace_id=workspace_id,
+            )
+            return _error_response("setup_connector_error", str(e))
 
     return _error_response("internal_error", "Database session unavailable")

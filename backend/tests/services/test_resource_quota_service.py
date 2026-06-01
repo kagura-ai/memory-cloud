@@ -222,8 +222,11 @@ class TestResolveWorkspaceEventQuotaPerHour:
         result_mock = MagicMock()
         result_mock.scalar_one_or_none.return_value = 5000
         mock_db.execute = AsyncMock(return_value=result_mock)
+        resource_pk = uuid4()
 
-        quota = await resolve_workspace_event_quota_per_hour(mock_db, WORKSPACE_ID, "ec_products")
+        quota = await resolve_workspace_event_quota_per_hour(
+            mock_db, WORKSPACE_ID, "ec_products", resource_pk=resource_pk
+        )
 
         assert quota == 5000
 
@@ -233,31 +236,52 @@ class TestResolveWorkspaceEventQuotaPerHour:
         result_mock = MagicMock()
         result_mock.scalar_one_or_none.return_value = None
         mock_db.execute = AsyncMock(return_value=result_mock)
+        resource_pk = uuid4()
 
-        quota = await resolve_workspace_event_quota_per_hour(mock_db, WORKSPACE_ID, "ec_products")
+        quota = await resolve_workspace_event_quota_per_hour(
+            mock_db, WORKSPACE_ID, "ec_products", resource_pk=resource_pk
+        )
 
         assert quota == MCP_INGEST_DEFAULT_QUOTA_PER_HOUR
 
     @pytest.mark.asyncio
-    async def test_query_filters_on_resource_id(self):
+    async def test_query_filters_on_resource_pk_and_workspace_id(self):
         """Regression for Copilot review: workspace-wide MAX would over-allow
         ingest into a low-quota resource if a higher-quota token exists for a
-        sibling resource. The query MUST filter on resource_id."""
+        sibling resource. The query MUST filter on resource_pk + workspace_id."""
         from models.resource import ResourceToken
 
         mock_db = MagicMock()
         result_mock = MagicMock()
         result_mock.scalar_one_or_none.return_value = 100
         mock_db.execute = AsyncMock(return_value=result_mock)
+        resource_pk = uuid4()
 
-        await resolve_workspace_event_quota_per_hour(mock_db, WORKSPACE_ID, "ec_products")
+        await resolve_workspace_event_quota_per_hour(
+            mock_db, WORKSPACE_ID, "ec_products", resource_pk=resource_pk
+        )
 
-        # Inspect the compiled WHERE clause includes a resource_id predicate.
+        # Inspect the compiled WHERE clause includes resource_pk + workspace predicates.
         called_stmt = mock_db.execute.await_args.args[0]
         compiled = str(called_stmt.compile(compile_kwargs={"literal_binds": False}))
-        assert "resource_id" in compiled
+        assert "resource_pk" in compiled
         assert "workspace_id" in compiled
         assert "is_active" in compiled
         # ResourceToken is referenced for the import side-effect; static
         # analyzers should not flag it as unused.
         assert ResourceToken is not None
+
+    @pytest.mark.asyncio
+    async def test_resolves_resource_pk_when_not_supplied(self):
+        mock_db = MagicMock()
+        resource_pk = uuid4()
+        resource_result = MagicMock()
+        resource_result.scalar_one_or_none.return_value = resource_pk
+        quota_result = MagicMock()
+        quota_result.scalar_one_or_none.return_value = 250
+        mock_db.execute = AsyncMock(side_effect=[resource_result, quota_result])
+
+        quota = await resolve_workspace_event_quota_per_hour(mock_db, WORKSPACE_ID, "ec_products")
+
+        assert quota == 250
+        assert mock_db.execute.await_count == 2

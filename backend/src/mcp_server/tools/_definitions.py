@@ -1143,6 +1143,66 @@ Requires action recording (reports created before this feature have no actions t
             },
         },
         {
+            "name": "setup_connector",
+            "description": (
+                "Create an ai-worker chat-ingest connector backed by Resource Foundation. "
+                "This creates a resources row, a workspace_connectors row, and a "
+                "connector-scoped resource token in one operation.\n\n"
+                "Requires owner or admin role. Gated by max_connectors seats, not by "
+                "the setup_resource public-context / resource-token plan gate.\n\n"
+                "Returns connector_id, resource_id, resource_pk, and a plaintext token. "
+                "Save the token immediately — it is shown only once. Connector event "
+                "idempotency keys must start with the returned idempotency_key_prefix.\n\n"
+                "Example:\n"
+                '  setup_connector(connector_type="slack", resource_id="slack_general")\n'
+                '  → connector created, token issued, use idempotency_key="{connector_id}:..."'
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["connector_type", "resource_id"],
+                "properties": {
+                    "connector_type": {
+                        "type": "string",
+                        "enum": ["slack", "discord", "teams"],
+                        "description": "Connector backend to provision.",
+                    },
+                    "resource_id": {
+                        "type": "string",
+                        "description": (
+                            "Resource identifier (lowercase alphanumeric, hyphens, underscores; "
+                            "max 255 chars). Must be unique in the workspace."
+                        ),
+                    },
+                    "display_name": {
+                        "type": "string",
+                        "description": "Human-readable connector/resource label.",
+                    },
+                    "oauth_tokens": {
+                        "type": "object",
+                        "description": "OAuth token bundle; stored Fernet-encrypted.",
+                    },
+                    "pii_guardrail_config": {
+                        "type": "object",
+                        "description": "PII guardrail config for ai-worker pre-compile.",
+                    },
+                    "litellm_virtual_key_id": {
+                        "type": "string",
+                        "description": "LiteLLM virtual-key identifier for this connector.",
+                    },
+                    "virtual_key_valid_until": {
+                        "type": "string",
+                        "description": "Optional ISO 8601 expiry for the LiteLLM virtual key.",
+                    },
+                    "quota_events_per_hour": {
+                        "type": "integer",
+                        "description": (
+                            "Event ingestion quota per hour for the token (1-10000, default: 1000)."
+                        ),
+                    },
+                },
+            },
+        },
+        {
             "name": "ingest_events",
             "description": (
                 "Batch ingest resource events (upsert/delete) into a resource. "
