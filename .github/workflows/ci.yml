@@ -85,8 +85,15 @@ jobs:
       - name: Type check
         run: cd frontend && npx tsc --noEmit
 
+      # CI builds with the webpack compiler (`--webpack`) instead of the
+      # Next.js 16 default (Turbopack). Turbopack's `next build` hard-requires
+      # the native @next/swc-* binding, which `npm ci` fails to provide on the
+      # GitHub Actions runner (only the WASM fallback loads), aborting the
+      # build on every PR. The prod Docker build (frontend/Dockerfile) still
+      # uses Turbopack, so this flag is scoped to CI only — package.json's
+      # shared `build` script is left as the canonical Turbopack build. See #855.
       - name: Build
-        run: cd frontend && npm run build
+        run: cd frontend && npm run build -- --webpack
         env:
           NEXT_PUBLIC_API_URL: http://localhost:8080
 
