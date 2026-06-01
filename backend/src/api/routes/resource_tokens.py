@@ -20,7 +20,7 @@ from auth.dependencies import WorkspaceOwner
 from auth.resource_tokens import ResourceTokenManager
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
-from models.resource import ResourceToken
+from models.resource import ResourceToken, WorkspaceConnector
 from services.resource_lookup import resolve_resource_pk
 from utils.logger import get_logger
 
@@ -326,11 +326,28 @@ async def create_resource_token(
                 # Check active token count limit
                 # Note: Race condition possible but low impact (concurrent creation rare)
                 # Alternative: Use database constraint on token count (future improvement)
+                #
+                # Issue #858: exclude connector-owned tokens from this count.
+                # The connector setup flow mints a resource token that bypasses
+                # the max_resource_tokens gate on purpose (connectors are gated
+                # by max_connectors seats instead). Counting it here would let it
+                # eat a regular slot post-mint — an asymmetry that can prematurely
+                # 403 a legitimate regular-token creation. The anti-join against
+                # workspace_connectors (UNIQUE resource_pk, so no count inflation)
+                # drops exactly the connector-owned tokens. A regular token with a
+                # NULL resource_pk never matches the join condition, so it is
+                # correctly still counted.
                 active_count_result = await db.execute(
-                    select(func.count(ResourceToken.id)).where(
+                    select(func.count(ResourceToken.id))
+                    .outerjoin(
+                        WorkspaceConnector,
+                        WorkspaceConnector.resource_pk == ResourceToken.resource_pk,
+                    )
+                    .where(
                         and_(
                             ResourceToken.created_by == user_id,
                             ResourceToken.is_active == True,  # noqa: E712
+                            WorkspaceConnector.id.is_(None),
                         )
                     )
                 )
