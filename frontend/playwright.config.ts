@@ -20,7 +20,11 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: "npm run dev",
+    // In CI, force the webpack compiler — Turbopack (the Next.js 16 default)
+    // can't load its native @next/swc binding on the GitHub Actions runner,
+    // the same failure that breaks `next build` there. Locally, keep the
+    // default (Turbopack) for the faster dev experience. See #855.
+    command: process.env.CI ? "npm run dev -- --webpack" : "npm run dev",
     url: "http://localhost:3000",
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
