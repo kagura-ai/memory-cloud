@@ -244,13 +244,21 @@ class TestConnectorSeatCapNegativeControl:
                 try:
                     await all_read.abort()
                 except Exception:
+                    # Best-effort: the original exception is re-raised below, so a
+                    # failure to abort the (possibly already-broken) barrier must
+                    # not mask it.
                     pass
                 raise
 
-        await asyncio.gather(
+        results = await asyncio.gather(
             *[attempt_with_barrier(resource_pks[i]) for i in range(_PARALLEL_ATTEMPTS)],
             return_exceptions=True,
         )
+        # Surface unexpected worker exceptions instead of letting them masquerade
+        # as the race outcome (mirrors the positive test's guard). Every worker
+        # must return a bool; a non-bool entry is a setup failure, not contention.
+        unexpected = [r for r in results if not isinstance(r, bool)]
+        assert not unexpected, f"unexpected exceptions from barrier workers: {unexpected!r}"
 
         async with session_maker() as session:
             count = await _count_connectors(session, workspace_id)
