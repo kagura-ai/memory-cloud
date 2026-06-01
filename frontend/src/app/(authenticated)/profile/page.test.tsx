@@ -15,10 +15,11 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-import ProfilePage, {
+import ProfilePage from "./page";
+import {
   getSignInMethodLabel,
   getRefreshProviderName,
-} from "./page";
+} from "./signInLabels";
 
 // ---------- Mocks ------------------------------------------------------------
 
