@@ -62,7 +62,11 @@ import {
 } from "@/lib/api";
 
 const DEFAULT_LOOKBACK_DAYS = 30;
-const MAX_LOOKBACK_DAYS = 365;
+// MUST stay in sync with the backend cap (#528):
+// backend/src/services/cost_aggregation_service.py `MAX_LOOKBACK_DAYS`.
+// A one-sided bump makes the UI accept a window the API then rejects with a
+// 400. Exported + pinned by a test so a change here trips CI; bump both sides.
+export const MAX_LOOKBACK_DAYS = 365;
 
 function defaultDateRange(): { from: string; to: string } {
   const today = new Date();
@@ -174,12 +178,12 @@ export function CostDashboard({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
-  // Client-side range validation. The server validates `period` and
-  // `from <= to` (#472), but does NOT enforce a maximum window today —
-  // so MAX_LOOKBACK_DAYS is a UI-only soft cap to keep accidental huge
-  // queries from hitting the backend. A non-UI caller (curl / SDK)
-  // can still request arbitrarily large ranges. Backend enforcement
-  // is tracked as a follow-up to #472.
+  // Client-side range validation — early inline UX before the fetch.
+  // The backend enforces MAX_LOOKBACK_DAYS as a hard cap server-side
+  // (#528: route returns 400, service raises ValueError), so a non-UI
+  // caller (curl / SDK) is rejected too. This client check just surfaces
+  // the same limit inline without a round-trip; keep it in sync with the
+  // backend constant (see the export comment above).
   const rangeError = useMemo<string | null>(() => {
     if (!from || !to) return null;
     if (from > to) return t("validation.invertedRange");

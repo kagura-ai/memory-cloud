@@ -497,6 +497,61 @@ async def test_inverted_window_raises_value_error(db_session):
 
 
 @pytest.mark.asyncio
+async def test_window_exceeding_cap_raises_value_error(db_session):
+    """A window wider than ``MAX_LOOKBACK_DAYS`` raises ValueError before SQL.
+
+    Defense-in-depth guardrail: a non-UI caller (curl / SDK / MCP) that
+    bypasses the frontend's 365-day soft cap must not be able to scan
+    years of ``sleep_reports``. 366 days is one past the boundary.
+    """
+    service = CostAggregationService(db_session)
+    with pytest.raises(ValueError, match="exceeds"):
+        await service.aggregate(
+            period="day",
+            start=datetime(2026, 1, 1),
+            end=datetime(2027, 1, 2),  # 366-day half-open window
+        )
+
+
+@pytest.mark.asyncio
+async def test_window_at_cap_boundary_is_allowed(db_session):
+    """Exactly ``MAX_LOOKBACK_DAYS`` (365) does NOT raise — pins off-by-one.
+
+    The half-open window ``end - start`` equals the frontend's inclusive
+    day count (``end = to + 1 day``), so a 365-day backend window is the
+    UI's maximum permitted selection and must pass. Empty DB → empty list.
+    """
+    service = CostAggregationService(db_session)
+    rows = await service.aggregate(
+        period="day",
+        start=datetime(2026, 1, 1),
+        end=datetime(2027, 1, 1),  # 365-day half-open window (2026 is not a leap year)
+    )
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_sub_day_overage_message_reports_precise_span(db_session):
+    """A sub-day overage past the cap is rejected with a precise message.
+
+    The cap uses ``> timedelta`` so 365 days + 1 hour is rejected, but
+    reporting ``.days`` would truncate to a misleading "365 days" — the
+    *allowed* boundary. The message must carry the sub-day remainder so it
+    matches the predicate that fired. (Copilot review, PR #863.)
+    """
+    service = CostAggregationService(db_session)
+    with pytest.raises(ValueError, match="exceeds") as exc:
+        await service.aggregate(
+            period="day",
+            start=datetime(2026, 1, 1, 0, 0),
+            end=datetime(2027, 1, 1, 1, 0),  # 365 days + 1 hour
+        )
+    # Must not claim a bare "365 days" (the allowed boundary) — the message
+    # carries the sub-day remainder that pushed the window past the cap.
+    assert "1:00:00" in str(exc.value)
+
+
+@pytest.mark.asyncio
 async def test_period_week_collapses_seven_daily_reports_into_one_bucket(db_session):
     """Seven reports across one ISO week roll into a single weekly bucket.
 
