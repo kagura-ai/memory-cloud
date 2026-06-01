@@ -691,7 +691,18 @@ class TestIngestEventsHappyPath:
         # invariant landed and has been updated accordingly.
         pk_result = MagicMock()
         pk_result.scalar_one_or_none.return_value = uuid4()
-        mock_db.execute.side_effect = [role_result, boundary_result, pk_result]
+        # 4) connector lookup (Issue #851): get_connector_id_for_resource_pk
+        # runs after resolve_resource_pk. This is a non-connector resource, so
+        # no WorkspaceConnector owns the pk → None → connector_id stays None and
+        # validate_connector_idempotency_key is a no-op.
+        connector_result = MagicMock()
+        connector_result.scalar_one_or_none.return_value = None
+        mock_db.execute.side_effect = [
+            role_result,
+            boundary_result,
+            pk_result,
+            connector_result,
+        ]
 
         # Capture the added event so we can assign an id before flush returns
         added_events: list = []
