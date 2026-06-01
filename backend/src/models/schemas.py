@@ -8,7 +8,14 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from auth.workspace_roles import ContextRole, WorkspaceRole
 from models.api_base import TZAwareBaseModel
@@ -1224,3 +1231,69 @@ class ResourceEventBatchResponse(BaseModel):
     failed_count: int = Field(0, description="Number of events that failed")
     event_ids: list[int] = Field(default_factory=list, description="Created event IDs")
     errors: list[dict] = Field(default_factory=list, description="Error details for failed events")
+
+
+class PiiGuardrailConfig(BaseModel):
+    """Connector PII-scrubbing config consumed by the ai-worker pre-compile stage.
+
+    Issue #866 (F6-d follow-up). memory-cloud stores this opaquely as JSONB on
+    ``workspace_connectors.pii_guardrail_config`` but validates the shape at the
+    provision path so a malformed config (typo'd/unknown key, missing detectors)
+    is rejected loudly instead of silently accepted — a Fail-Secure guardrail.
+    The agreed schema is the contract in ``docs/pii-guardrail-consumption-contract.md``.
+
+    ``extra="forbid"`` is deliberate: this is *request* validation, so an unknown
+    key (e.g. ``detector`` vs ``detectors``) must fail rather than be ignored
+    (silently-ignore would be fail-open). This is the opposite default from
+    response models, which use ``extra="ignore"`` for forward-compat.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(..., description="Master switch for worker-side scrubbing.")
+    detectors: list[str] = Field(
+        default_factory=list,
+        description="Presidio-style recognizer names; non-empty required when enabled=true.",
+    )
+    redaction: Literal["mask", "hash", "remove"] = Field(
+        "mask", description="How a matched span is rewritten."
+    )
+    locale: str = Field("en", description="Recognizer locale (e.g. en / ja).")
+    fail_closed: bool = Field(
+        True, description="On detection error: true=drop event, false=ingest with warning."
+    )
+
+    @model_validator(mode="after")
+    def _require_detectors_when_enabled(self) -> "PiiGuardrailConfig":
+        if self.enabled and not self.detectors:
+            raise ValueError("detectors must be non-empty when enabled=true")
+        return self
+
+
+def validate_pii_guardrail_config(raw: dict | None) -> dict | None:
+    """Validate a raw ``pii_guardrail_config`` against :class:`PiiGuardrailConfig`.
+
+    Shared by both provision call-sites (REST ``POST /workspace-connectors`` and the
+    MCP ``setup_connector`` tool) so the documented schema has a single enforcement
+    point. ``None`` (unconfigured) is accepted and passed through unchanged — the
+    worker enforces fail-closed at ingest per the null asymmetry in the contract doc.
+
+    Returns the normalized config dict (defaults materialized) ready for JSONB
+    storage, or ``None``.
+
+    Raises:
+        ValueError: if ``raw`` is not a valid config. The message lists only field
+            locations and reasons — never the offending input values
+            (``include_input=False``), so a malformed config cannot echo sensitive
+            content back to the caller.
+    """
+    if raw is None:
+        return None
+    try:
+        return PiiGuardrailConfig.model_validate(raw).model_dump()
+    except ValidationError as e:
+        locs = "; ".join(
+            ".".join(str(p) for p in err["loc"]) + ": " + err["msg"]
+            for err in e.errors(include_input=False)
+        )
+        raise ValueError(f"invalid pii_guardrail_config — {locs}") from e

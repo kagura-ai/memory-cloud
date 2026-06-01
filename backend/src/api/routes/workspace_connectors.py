@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import WorkspaceAdmin
 from db.base import get_db
+from models.schemas import validate_pii_guardrail_config
 from services.connector_provisioning import ConnectorProvisioningService
 from utils.exceptions import MemoryCloudException
 from utils.logger import get_logger
@@ -79,6 +80,15 @@ async def create_workspace_connector(
             detail="No workspace selected. Please select a workspace first.",
         )
 
+    # #866: validate pii_guardrail_config against the documented schema before it is
+    # stored opaquely. Fail-secure — a malformed config is rejected, not silently kept.
+    try:
+        pii_guardrail_config = validate_pii_guardrail_config(request.pii_guardrail_config)
+    except ValueError as ve:
+        raise MemoryCloudException(
+            str(ve), status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, error_code="VALIDATION-001"
+        ) from ve
+
     try:
         result = await ConnectorProvisioningService(db).provision_connector(
             workspace_id=workspace_id,
@@ -87,7 +97,7 @@ async def create_workspace_connector(
             resource_id=request.resource_id,
             display_name=request.display_name,
             oauth_tokens=request.oauth_tokens,
-            pii_guardrail_config=request.pii_guardrail_config,
+            pii_guardrail_config=pii_guardrail_config,
             litellm_virtual_key_id=request.litellm_virtual_key_id,
             virtual_key_valid_until=request.virtual_key_valid_until,
             quota_events_per_hour=request.quota_events_per_hour,

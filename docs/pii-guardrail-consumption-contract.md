@@ -27,13 +27,17 @@ on the way in.
 | **Setting** the config | memory-cloud | `POST /api/v1/workspace-connectors` (`api/routes/workspace_connectors.py`) and the MCP `setup_connector` tool |
 | **Interpreting + enforcing** the config (actual scrubbing) | **ai-worker** | pre-compile stage (ai-worker#91) |
 
-**memory-cloud stores the config opaquely.** The only server-side validation is
-"must be a JSON object" — `setup_connector` rejects a non-object with a
-`validation_error` (`mcp_server/tools/resource.py:1097-1100`), and the REST
-field is typed `dict[str, Any] | None`. **No key-level schema is enforced on the
-server.** That makes *this document* the source of truth for the config shape:
-the worker and whatever sets the config must agree here, because the database
-will silently accept any object.
+**memory-cloud validates the config shape at provision, then stores it as JSONB.**
+Since #866, both provision call-sites — the REST `POST /api/v1/workspace-connectors`
+endpoint and the MCP `setup_connector` tool — validate `pii_guardrail_config`
+against the `PiiGuardrailConfig` schema (`models/schemas.py`,
+`validate_pii_guardrail_config`) before storing it. A malformed config (unknown
+key such as `detector` vs `detectors`, or `enabled: true` with empty `detectors`)
+is rejected with a `422` / `validation_error` rather than silently stored. This
+document remains the human-readable source of truth; the server schema enforces
+it at the write boundary. The column itself is untyped JSONB, so the worker should
+**still** validate what it reads as defense-in-depth (a config written before #866,
+or via a future unguarded path, is not guaranteed to match).
 
 ## Config lifecycle (current constraints)
 
@@ -43,10 +47,11 @@ will silently accept any object.
   `config_version` column exists (defaults to `1`) but there is no server route
   that bumps it yet. A connector that needs a different guardrail config must be
   re-provisioned, or an update path must be added first (track separately).
-- **`null` is allowed.** The column is nullable and the field defaults to
-  `None`. A connector can be provisioned with no guardrail config — see
-  [Null config](#null-config-fail-closed) for the contract the worker must honor
-  in that case.
+- **`null` is allowed at provision.** The column is nullable and the field
+  defaults to `None`; provision-time validation (#866) accepts `null` and only
+  validates a non-null object. A connector can therefore be provisioned with no
+  guardrail config — see [Null config](#null-config-fail-closed) for the
+  fail-closed contract the worker must honor in that case.
 - **`connector_type` is one of `slack` / `discord` / `teams`**
   (`services/connector_provisioning.py:30`). The guardrail contract is identical
   across all three; only the message-extraction differs (out of scope here).
@@ -139,9 +144,11 @@ worker (pre-compile stage, ai-worker#91)
 
 ## Known pitfalls
 
-- **The server does not validate the schema.** A typo'd key (`detector` vs
-  `detectors`) is accepted and stored. The worker must validate the config it
-  reads and fail loudly on a shape it does not recognize.
+- **The server validates the schema at provision (#866), but the worker should
+  still validate what it reads.** Provision rejects a typo'd/unknown key or
+  missing `detectors`; however the stored column is untyped JSONB, so a config
+  written before #866 or via a future unguarded path is not guaranteed valid. The
+  worker must validate the config it reads and fail loudly on an unrecognized shape.
 - **Config is write-once.** No update endpoint exists; do not assume a connector's
   guardrail can be tightened in place without re-provisioning.
 - **`null` ≠ `{"enabled": false}`.** See [Null config](#null-config-fail-closed).
