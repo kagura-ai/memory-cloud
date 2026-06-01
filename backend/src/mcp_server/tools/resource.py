@@ -1094,11 +1094,17 @@ async def handle_setup_connector(
             oauth_tokens = args.get("oauth_tokens")
             if oauth_tokens is not None and not isinstance(oauth_tokens, dict):
                 return _error_response("validation_error", "oauth_tokens must be an object.")
-            pii_guardrail_config = args.get("pii_guardrail_config")
-            if pii_guardrail_config is not None and not isinstance(pii_guardrail_config, dict):
-                return _error_response(
-                    "validation_error", "pii_guardrail_config must be an object."
+            # #866: validate pii_guardrail_config against the documented schema
+            # (shared with the REST provision path). Fail-secure on malformed input;
+            # rejects unknown keys and missing detectors, not just non-objects.
+            from models.schemas import validate_pii_guardrail_config
+
+            try:
+                pii_guardrail_config = validate_pii_guardrail_config(
+                    args.get("pii_guardrail_config")
                 )
+            except ValueError as ve:
+                return _error_response("validation_error", str(ve))
 
             from services.connector_provisioning import ConnectorProvisioningService
             from utils.exceptions import MemoryCloudException
