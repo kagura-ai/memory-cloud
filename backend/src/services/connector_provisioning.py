@@ -175,10 +175,7 @@ class ConnectorProvisioningService:
         active_count = active_count_result.scalar() or 0
         if active_count >= max_connectors:
             raise MemoryCloudException(
-                (
-                    "Connector seat limit reached. "
-                    f"Your plan allows {max_connectors} connector(s)."
-                ),
+                (f"Connector seat limit reached. Your plan allows {max_connectors} connector(s)."),
                 status_code=403,
                 error_code="CONNECTOR-001",
                 max_connectors=max_connectors,
@@ -230,4 +227,3 @@ def validate_connector_idempotency_key(
             field="idempotency_key",
             connector_id=str(connector_id),
         )
-

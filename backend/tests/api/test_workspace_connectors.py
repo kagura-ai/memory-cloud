@@ -23,9 +23,7 @@ async def test_create_workspace_connector_rolls_back_on_service_failure():
     )
     admin = {"user_id": "user-1", "current_workspace_id": uuid4()}
 
-    with patch(
-        "api.routes.workspace_connectors.ConnectorProvisioningService"
-    ) as service_cls:
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
         service_cls.return_value.provision_connector = AsyncMock(
             side_effect=MemoryCloudException(
                 "Connector seat limit reached.",
@@ -38,4 +36,3 @@ async def test_create_workspace_connector_rolls_back_on_service_failure():
 
     db.rollback.assert_awaited_once()
     db.commit.assert_not_awaited()
-

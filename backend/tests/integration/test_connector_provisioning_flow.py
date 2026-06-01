@@ -145,4 +145,3 @@ class TestConnectorProvisioningDbFlow:
                 )
             )
         ).scalar_one() == 1
-

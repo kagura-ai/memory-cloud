@@ -117,7 +117,9 @@ class TestConnectorProvisioningService:
         resource_pk = uuid4()
         token = SimpleNamespace(id=123, quota_events_per_hour=1000)
         mock_db.execute.side_effect = [
-            _result(one=SimpleNamespace(effective_max_connectors=1, effective_max_resource_tokens=0)),
+            _result(
+                one=SimpleNamespace(effective_max_connectors=1, effective_max_resource_tokens=0)
+            ),
             _result(scalar=0),
             _result(one=None),
         ]
@@ -168,7 +170,9 @@ class TestConnectorProvisioningService:
                 "services.connector_provisioning.upsert_resource",
                 new=AsyncMock(return_value=resource_pk),
             ),
-            patch("services.connector_provisioning.ResourceTokenManager.create_token") as create_token,
+            patch(
+                "services.connector_provisioning.ResourceTokenManager.create_token"
+            ) as create_token,
         ):
             with pytest.raises(ConflictError):
                 await ConnectorProvisioningService(mock_db).provision_connector(
@@ -200,7 +204,9 @@ class TestConnectorProvisioningService:
                 "services.connector_provisioning.upsert_resource",
                 new=AsyncMock(return_value=resource_pk),
             ),
-            patch("services.connector_provisioning.ResourceTokenManager.create_token") as create_token,
+            patch(
+                "services.connector_provisioning.ResourceTokenManager.create_token"
+            ) as create_token,
         ):
             with pytest.raises(ConflictError) as exc_info:
                 await ConnectorProvisioningService(mock_db).provision_connector(
@@ -234,4 +240,3 @@ class TestConnectorIdempotencyKey:
                 connector_id=connector_id,
                 idempotency_key=f"{uuid4()}:summary-123",
             )
-

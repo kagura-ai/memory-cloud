@@ -58,7 +58,9 @@ class WorkspaceConnectorCreateResponse(BaseModel):
     idempotency_key_prefix: str
 
 
-@router.post("", response_model=WorkspaceConnectorCreateResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "", response_model=WorkspaceConnectorCreateResponse, status_code=status.HTTP_201_CREATED
+)
 async def create_workspace_connector(
     request: WorkspaceConnectorCreateRequest,
     admin: WorkspaceAdmin,
@@ -121,4 +123,3 @@ async def create_workspace_connector(
         quota_events_per_hour=result.token.quota_events_per_hour,
         idempotency_key_prefix=f"{result.connector.id}:",
     )
-
