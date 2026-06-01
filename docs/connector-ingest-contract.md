@@ -147,6 +147,6 @@ worker (connector token)
 
 - Epic #755 (F6) — chat ingest reuses Resource Foundation
 - #852 (F6-c) — this guidance doc + Slack ingest e2e (e2e tracked in ai-worker#91)
-- #853 (F6-d) — PII guardrail + Discord/Teams smoke (ai-worker#91)
+- #853 (F6-d) — PII guardrail + Discord/Teams smoke (ai-worker#91); see [`docs/pii-guardrail-consumption-contract.md`](pii-guardrail-consumption-contract.md) for the guardrail the worker applies before this ingest path
 - [`docs/resource-tokens-guide.md`](resource-tokens-guide.md) — general resource-token ingest
 - [`docs/resource-foundation-migration.md`](resource-foundation-migration.md) — `resource_pk` / UUID model background
