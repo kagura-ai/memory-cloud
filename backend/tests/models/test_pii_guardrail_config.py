@@ -53,6 +53,19 @@ def test_rejects_blank_detector_names_when_enabled(bad):
         PiiGuardrailConfig(enabled=True, detectors=bad)
 
 
+@pytest.mark.parametrize("bad_locale", ["", "  "])
+def test_rejects_blank_locale(bad_locale):
+    # An explicitly blank locale overrides the "en" default with an unusable value
+    # (#868 Copilot). Reject it rather than store a misconfigured recognizer locale.
+    with pytest.raises(ValidationError):
+        PiiGuardrailConfig(enabled=True, detectors=["EMAIL_ADDRESS"], locale=bad_locale)
+
+
+def test_default_locale_is_accepted():
+    cfg = PiiGuardrailConfig(enabled=True, detectors=["EMAIL_ADDRESS"])
+    assert cfg.locale == "en"
+
+
 # --- shared validation helper (used at both the REST and MCP provision call-sites) ---
 
 

@@ -14,7 +14,7 @@ from auth.dependencies import WorkspaceAdmin
 from db.base import get_db
 from models.schemas import validate_pii_guardrail_config
 from services.connector_provisioning import ConnectorProvisioningService
-from utils.exceptions import MemoryCloudException
+from utils.exceptions import MemoryCloudException, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -85,9 +85,7 @@ async def create_workspace_connector(
     try:
         pii_guardrail_config = validate_pii_guardrail_config(request.pii_guardrail_config)
     except ValueError as ve:
-        raise MemoryCloudException(
-            str(ve), status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, error_code="VALIDATION-001"
-        ) from ve
+        raise ValidationError(str(ve), field="pii_guardrail_config") from ve
 
     try:
         result = await ConnectorProvisioningService(db).provision_connector(

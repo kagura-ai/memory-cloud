@@ -58,6 +58,7 @@ async def test_create_rejects_invalid_pii_guardrail_config_before_calling_servic
             await create_workspace_connector(request, admin, db)
 
     assert exc.value.status_code == 422
+    assert exc.value.error_code == "VAL-001"  # canonical validation code, not a one-off
     service_cls.return_value.provision_connector.assert_not_awaited()
 
 

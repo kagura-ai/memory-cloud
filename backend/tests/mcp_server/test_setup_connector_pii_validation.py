@@ -34,7 +34,7 @@ async def test_setup_connector_rejects_invalid_pii_guardrail_config():
     }
 
     with (
-        patch("db.base.get_db", side_effect=lambda: _fake_get_db()),
+        patch("db.base.get_db", side_effect=_fake_get_db),
         patch(
             "mcp_server.tools.resource._check_owner_admin_role",
             new=AsyncMock(return_value=None),

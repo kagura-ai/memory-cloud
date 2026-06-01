@@ -1263,6 +1263,16 @@ class PiiGuardrailConfig(BaseModel):
         True, description="On detection error: true=drop event, false=ingest with warning."
     )
 
+    @field_validator("locale")
+    @classmethod
+    def _locale_not_blank(cls, v: str) -> str:
+        # An explicitly blank locale overrides the "en" default with an unusable
+        # recognizer locale. Reject it (the default is not run through this
+        # validator, so omitting locale still yields "en").
+        if not v or not v.strip():
+            raise ValueError("locale must not be blank")
+        return v
+
     @model_validator(mode="after")
     def _require_detectors_when_enabled(self) -> "PiiGuardrailConfig":
         if self.enabled:
