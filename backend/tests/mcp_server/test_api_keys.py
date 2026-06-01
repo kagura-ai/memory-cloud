@@ -2,9 +2,11 @@
 
 Covers list_my_bindings / describe_binding handler behavior: response shape,
 the key_id-XOR-context_id validation, owner-scoped uniform not-found (no
-existence oracle), and the multi-binding note. The api_key_bound 403 restriction
-is enforced at the MCP auth boundary (a bound key never reaches these handlers),
-so it is pinned by the auth-layer regression test, not here.
+existence oracle), and the multi-binding note. The #629 AC frames the principal
+restriction as "api_key_bound gets 403", but the actual enforcement is at the MCP
+auth boundary: a bound key fails authentication (AuthenticationError, surfaced as
+HTTP 401 by the transport) and never reaches these handlers. So it is pinned by
+the auth-layer regression test, not by an in-handler check here.
 """
 
 import json
@@ -224,11 +226,14 @@ class TestBoundKeyCannotReachBindingTools:
     ``auth.dependencies.verify_api_key`` return None (pinned by
     ``tests/auth/test_api_key_binding.py::test_verify_api_key_standalone_rejects_bound_keys``).
     This test pins the consequence one layer up: ``authenticate_mcp_request``
-    then raises ``AuthenticationError``, so a bound principal never authenticates
-    and therefore can never reach ``list_my_bindings`` / ``describe_binding``.
-    The "api_key_bound gets 403" AC is satisfied structurally here, not by an
-    in-handler check (the handler signature carries no principal-type flag). If a
-    future change loosens this gate, this test fails loudly.
+    then raises ``AuthenticationError`` (surfaced as HTTP 401 by the transport),
+    so a bound principal never authenticates and therefore can never reach
+    ``list_my_bindings`` / ``describe_binding``. The #629 AC frames this as
+    "api_key_bound gets 403"; the realized mechanism is an authentication
+    rejection (401), which equally satisfies the intent (no self-introspection)
+    and is enforced structurally — not by an in-handler check (the handler
+    signature carries no principal-type flag). If a future change loosens this
+    gate, this test fails loudly.
     """
 
     async def test_bound_key_fails_mcp_auth(self):
