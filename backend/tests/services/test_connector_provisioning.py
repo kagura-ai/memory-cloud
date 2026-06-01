@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.exc import DBAPIError
 
 from services.connector_provisioning import (
     ConnectorProvisioningService,
@@ -20,6 +21,19 @@ def _result(*, one=None, scalar=None):
     return result
 
 
+def _lock_results():
+    """Mock execute() results for the #857 advisory-lock acquire sequence.
+
+    ``_acquire_connector_seat_lock`` issues three statements before the
+    seat-count SELECT — ``SET LOCAL lock_timeout='5s'``, the
+    ``pg_advisory_xact_lock`` SELECT, then ``SET LOCAL lock_timeout='0'`` — and
+    ignores all three return values. Splice these into ``execute.side_effect``
+    right after the workspace lookup so the count read still lands on the
+    intended mock result.
+    """
+    return [_result(), _result(), _result()]
+
+
 class TestConnectorProvisioningService:
     @pytest.fixture
     def mock_db(self):
@@ -27,14 +41,16 @@ class TestConnectorProvisioningService:
         db.execute = AsyncMock()
         db.add = MagicMock()
         db.flush = AsyncMock()
+        db.rollback = AsyncMock()
         return db
 
     @pytest.mark.asyncio
     async def test_free_plan_zero_connector_cap_blocks_before_writes(self, mock_db):
         workspace_id = uuid4()
+        # #857/PR #860: a zero-cap plan short-circuits to 403 BEFORE the advisory
+        # lock and count — so only the workspace lookup runs (no lock results).
         mock_db.execute.side_effect = [
             _result(one=SimpleNamespace(effective_max_connectors=0)),
-            _result(scalar=0),
         ]
 
         with patch("services.connector_provisioning.upsert_resource", new=AsyncMock()) as upsert:
@@ -50,6 +66,9 @@ class TestConnectorProvisioningService:
         assert exc_info.value.error_code == "CONNECTOR-001"
         upsert.assert_not_awaited()
         mock_db.add.assert_not_called()
+        # Only the workspace lookup ran — the zero-cap path never reached the
+        # advisory-lock SET LOCAL / pg_advisory_xact_lock or the count query.
+        assert mock_db.execute.call_count == 1
 
     @pytest.mark.asyncio
     async def test_basic_plan_at_cap_blocks_paid_boundary(self, mock_db):
@@ -57,6 +76,7 @@ class TestConnectorProvisioningService:
         workspace_id = uuid4()
         mock_db.execute.side_effect = [
             _result(one=SimpleNamespace(effective_max_connectors=1)),
+            *_lock_results(),
             _result(scalar=1),
         ]
 
@@ -82,6 +102,7 @@ class TestConnectorProvisioningService:
         token = SimpleNamespace(id=123, quota_events_per_hour=1000)
         mock_db.execute.side_effect = [
             _result(one=SimpleNamespace(effective_max_connectors=1)),
+            *_lock_results(),
             _result(scalar=0),
             _result(one=None),
         ]
@@ -120,6 +141,7 @@ class TestConnectorProvisioningService:
             _result(
                 one=SimpleNamespace(effective_max_connectors=1, effective_max_resource_tokens=0)
             ),
+            *_lock_results(),
             _result(scalar=0),
             _result(one=None),
         ]
@@ -151,12 +173,43 @@ class TestConnectorProvisioningService:
         assert mock_db.add.call_args.args[0].resource_pk == resource_pk
 
     @pytest.mark.asyncio
+    async def test_seat_lock_timeout_fails_closed_503(self, mock_db):
+        """#857: lock-acquire 55P03 → rollback + retriable 503 (fail-closed)."""
+        workspace_id = uuid4()
+
+        class _Orig(Exception):
+            sqlstate = "55P03"
+
+        lock_timeout = DBAPIError("SELECT pg_advisory_xact_lock(...)", {}, _Orig())
+        mock_db.execute.side_effect = [
+            _result(one=SimpleNamespace(effective_max_connectors=1)),
+            _result(),  # SET LOCAL lock_timeout = '5s'
+            lock_timeout,  # pg_advisory_xact_lock raises
+        ]
+
+        with patch("services.connector_provisioning.upsert_resource", new=AsyncMock()) as upsert:
+            with pytest.raises(MemoryCloudException) as exc_info:
+                await ConnectorProvisioningService(mock_db).provision_connector(
+                    workspace_id=workspace_id,
+                    user_id="user-1",
+                    connector_type="slack",
+                    resource_id="slack_general",
+                )
+
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.error_code == "CONNECTOR-002"
+        mock_db.rollback.assert_awaited_once()
+        upsert.assert_not_awaited()
+        mock_db.add.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_existing_connector_for_resource_rejects_duplicate(self, mock_db):
         workspace_id = uuid4()
         resource_pk = uuid4()
         connector_id = uuid4()
         mock_db.execute.side_effect = [
             _result(one=SimpleNamespace(effective_max_connectors=5)),
+            *_lock_results(),
             _result(scalar=0),
             _result(one=SimpleNamespace(id=connector_id)),
         ]
@@ -191,6 +244,7 @@ class TestConnectorProvisioningService:
         resource_pk = uuid4()
         mock_db.execute.side_effect = [
             _result(one=SimpleNamespace(effective_max_connectors=5)),
+            *_lock_results(),
             _result(scalar=0),
             _result(one=None),
         ]
