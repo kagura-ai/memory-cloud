@@ -310,9 +310,10 @@ class CostAggregationService:
         # threshold lives in ``window_exceeds_cap`` so the route enforces the
         # same boundary without a second copy of the literal.
         if window_exceeds_cap(start, end):
-            raise ValueError(
-                f"date range exceeds {MAX_LOOKBACK_DAYS}-day cap (got {(end - start).days} days)"
-            )
+            # Report the full span, not ``.days`` — the cap compares the whole
+            # timedelta, so a sub-day overage (e.g. 365 days + 1h) must not be
+            # truncated to a misleading "365 days" (the allowed boundary).
+            raise ValueError(f"date range exceeds {MAX_LOOKBACK_DAYS}-day cap (got {end - start})")
 
         # ---- Build filter fragments ---------------------------------------
         filter_clauses, filter_params = _build_filter_clauses(
