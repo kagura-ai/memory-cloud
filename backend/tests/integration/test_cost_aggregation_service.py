@@ -497,6 +497,40 @@ async def test_inverted_window_raises_value_error(db_session):
 
 
 @pytest.mark.asyncio
+async def test_window_exceeding_cap_raises_value_error(db_session):
+    """A window wider than ``MAX_LOOKBACK_DAYS`` raises ValueError before SQL.
+
+    Defense-in-depth guardrail: a non-UI caller (curl / SDK / MCP) that
+    bypasses the frontend's 365-day soft cap must not be able to scan
+    years of ``sleep_reports``. 366 days is one past the boundary.
+    """
+    service = CostAggregationService(db_session)
+    with pytest.raises(ValueError, match="exceeds"):
+        await service.aggregate(
+            period="day",
+            start=datetime(2026, 1, 1),
+            end=datetime(2027, 1, 2),  # 366-day half-open window
+        )
+
+
+@pytest.mark.asyncio
+async def test_window_at_cap_boundary_is_allowed(db_session):
+    """Exactly ``MAX_LOOKBACK_DAYS`` (365) does NOT raise — pins off-by-one.
+
+    The half-open window ``end - start`` equals the frontend's inclusive
+    day count (``end = to + 1 day``), so a 365-day backend window is the
+    UI's maximum permitted selection and must pass. Empty DB → empty list.
+    """
+    service = CostAggregationService(db_session)
+    rows = await service.aggregate(
+        period="day",
+        start=datetime(2026, 1, 1),
+        end=datetime(2027, 1, 1),  # 365-day half-open window (2026 is not a leap year)
+    )
+    assert rows == []
+
+
+@pytest.mark.asyncio
 async def test_period_week_collapses_seven_daily_reports_into_one_bucket(db_session):
     """Seven reports across one ISO week roll into a single weekly bucket.
 

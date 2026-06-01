@@ -36,9 +36,11 @@ from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.sleep import SLEEP_REPORT_PAID_BY_VALUES, SLEEP_REPORT_SOURCES
 from services.cost_aggregation_service import (
+    MAX_LOOKBACK_DAYS,
     VALID_PERIODS,
     CostAggregationRow,
     CostAggregationService,
+    window_exceeds_cap,
 )
 from services.permission_service import PermissionService
 
@@ -153,6 +155,20 @@ def _parse_window(
     # Half-open: end-of-window is the start of the day AFTER ``to``.
     end_date = date.fromordinal(to.toordinal() + 1)
     end_dt = datetime.combine(end_date, time.min)
+    # Defense-in-depth window cap (#528): reject before the service so a
+    # non-UI caller (curl / SDK / MCP) can't scan years of sleep_reports.
+    # ``end_dt - start_dt`` is the inclusive day count (half-open end = to+1),
+    # so ``window_exceeds_cap`` mirrors the frontend's ``days > MAX_LOOKBACK_DAYS``
+    # exactly — 365 inclusive days pass, 366 reject. The service re-checks as a
+    # backstop using the same shared predicate.
+    if window_exceeds_cap(start_dt, end_dt):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"date range exceeds {MAX_LOOKBACK_DAYS}-day maximum window "
+                f"(got {(end_dt - start_dt).days} days)"
+            ),
+        )
     return period, start_dt, end_dt
 
 

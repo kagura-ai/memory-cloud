@@ -39,7 +39,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -57,6 +57,27 @@ logger = get_logger(__name__)
 # value is bound (not interpolated), passing arbitrary strings would 500
 # the query when ``date_trunc`` rejects them.
 VALID_PERIODS: tuple[str, ...] = ("day", "week", "month")
+
+# Maximum span of a single aggregation request, in days. Mirrors the
+# frontend's UI soft cap (``CostDashboard.tsx`` ``MAX_LOOKBACK_DAYS = 365``)
+# — kept intentionally identical so a server-side rejection never contradicts
+# a selection the UI permits. This is the defense-in-depth layer (#528): a
+# non-UI caller (curl / SDK / MCP) that bypasses the UI cap must not be able
+# to scan years of ``sleep_reports``. The window is half-open ``[start, end)``,
+# so ``end - start`` equals the UI's inclusive day count (``end = to + 1 day``).
+MAX_LOOKBACK_DAYS = 365
+
+
+def window_exceeds_cap(start: datetime, end: datetime) -> bool:
+    """True if the half-open window ``[start, end)`` is wider than the cap.
+
+    Single source of truth for the off-by-one boundary so the route
+    (``_parse_window`` → 400) and the service (``aggregate`` → ValueError)
+    enforce the *same* threshold from two layers without the literal
+    drifting between them. ``> timedelta`` (not ``.days >``) rejects a
+    sub-day overage too, which a direct service caller could pass.
+    """
+    return end - start > timedelta(days=MAX_LOOKBACK_DAYS)
 
 
 class CostBreakdownByModel:
@@ -268,7 +289,8 @@ class CostAggregationService:
 
         Raises:
             ValueError: ``period``, ``source``, or ``paid_by`` outside
-                the allowed set; ``start >= end``.
+                the allowed set; ``start >= end``; window wider than
+                ``MAX_LOOKBACK_DAYS``.
         """
         # ---- Input validation (defense in depth) --------------------------
         # period feeds date_trunc directly; passing junk would 500 the
@@ -284,6 +306,13 @@ class CostAggregationService:
             )
         if start >= end:
             raise ValueError(f"start must be < end (got start={start}, end={end})")
+        # Cap the window to bound the ``sleep_reports`` scan (#528). The
+        # threshold lives in ``window_exceeds_cap`` so the route enforces the
+        # same boundary without a second copy of the literal.
+        if window_exceeds_cap(start, end):
+            raise ValueError(
+                f"date range exceeds {MAX_LOOKBACK_DAYS}-day cap (got {(end - start).days} days)"
+            )
 
         # ---- Build filter fragments ---------------------------------------
         filter_clauses, filter_params = _build_filter_clauses(

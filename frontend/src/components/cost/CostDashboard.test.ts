@@ -11,7 +11,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { CostAggregationRow } from "@/lib/api";
-import { buildChartData, formatCost } from "./CostDashboard";
+import { buildChartData, formatCost, MAX_LOOKBACK_DAYS } from "./CostDashboard";
 
 function row(overrides: Partial<CostAggregationRow>): CostAggregationRow {
   return {
@@ -30,6 +30,17 @@ function row(overrides: Partial<CostAggregationRow>): CostAggregationRow {
     ...overrides,
   };
 }
+
+describe("MAX_LOOKBACK_DAYS", () => {
+  // Cross-stack drift guard (#528): the backend enforces the identical cap in
+  // backend/src/services/cost_aggregation_service.py. The backend value is
+  // pinned by its own 365/366 boundary integration tests; this pins the UI
+  // side, so a one-sided bump here trips CI instead of silently producing a
+  // "UI accepts, API 400s" mismatch. If you change this, change the backend.
+  it("is pinned to 365 to match the backend cap", () => {
+    expect(MAX_LOOKBACK_DAYS).toBe(365);
+  });
+});
 
 describe("formatCost", () => {
   it("renders a positive number as $X.XXXX", () => {

@@ -62,7 +62,11 @@ import {
 } from "@/lib/api";
 
 const DEFAULT_LOOKBACK_DAYS = 30;
-const MAX_LOOKBACK_DAYS = 365;
+// MUST stay in sync with the backend cap (#528):
+// backend/src/services/cost_aggregation_service.py `MAX_LOOKBACK_DAYS`.
+// A one-sided bump makes the UI accept a window the API then rejects with a
+// 400. Exported + pinned by a test so a change here trips CI; bump both sides.
+export const MAX_LOOKBACK_DAYS = 365;
 
 function defaultDateRange(): { from: string; to: string } {
   const today = new Date();

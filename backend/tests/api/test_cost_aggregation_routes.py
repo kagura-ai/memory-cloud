@@ -252,6 +252,29 @@ class TestAdminRoute:
         )
         assert response.status_code == 400
 
+    def test_window_exceeding_cap_returns_400(self, client):
+        # A non-UI caller bypassing the frontend's 365-day soft cap must be
+        # rejected server-side (defense-in-depth, #528). 2026-01-01..2027-01-01
+        # is 366 inclusive days — one past the boundary.
+        mock_aggregate = _install_admin_overrides(client, [])
+        response = client.get(
+            "/api/v1/admin/cost-aggregation?period=day&from=2026-01-01&to=2027-01-01"
+        )
+        assert response.status_code == 400
+        assert "exceeds" in response.json()["detail"]
+        assert mock_aggregate.await_count == 0  # rejected before SQL
+
+    def test_window_at_cap_boundary_returns_200(self, client):
+        # Exactly 365 inclusive days (2026 is not a leap year) is the UI's
+        # maximum permitted window and must pass — pins the off-by-one so the
+        # server cap never rejects a selection the UI allows.
+        mock_aggregate = _install_admin_overrides(client, [])
+        response = client.get(
+            "/api/v1/admin/cost-aggregation?period=day&from=2026-01-01&to=2026-12-31"
+        )
+        assert response.status_code == 200, response.text
+        assert mock_aggregate.await_count == 1
+
     def test_missing_required_query_returns_422(self, client):
         _install_admin_overrides(client, [])
         response = client.get("/api/v1/admin/cost-aggregation?period=day")
@@ -370,6 +393,18 @@ class TestWorkspaceRoute:
         )
         assert response.status_code == 400
         assert "Invalid paid_by" in response.json()["detail"]
+
+    def test_window_exceeding_cap_returns_400(self, client):
+        # Same defense-in-depth cap on the workspace-scoped route (#528).
+        # 2026-01-01..2027-01-01 is 366 inclusive days — past the boundary.
+        mock_aggregate = _install_workspace_overrides(client, [], user=_regular_user())
+        response = client.get(
+            f"/api/v1/workspaces/{_WORKSPACE_ID}/cost-aggregation"
+            "?period=day&from=2026-01-01&to=2027-01-01"
+        )
+        assert response.status_code == 400
+        assert "exceeds" in response.json()["detail"]
+        assert mock_aggregate.await_count == 0  # rejected before SQL
 
 
 # ============================================================================
