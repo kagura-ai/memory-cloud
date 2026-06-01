@@ -263,6 +263,17 @@ generate_caddyfile() {
         error "Caddyfile.tpl not found at $CADDYFILE_TPL"
     fi
 
+    # If a prior `docker compose up` started caddy before ./Caddyfile existed,
+    # Docker creates a *directory* at the bind-mount path. cp-ing into a
+    # directory would silently leave the mounted config wrong, so fail loudly
+    # with recovery steps instead of papering over the bad state.
+    if [ -d "$CADDYFILE" ]; then
+        error "$CADDYFILE is a directory, not a file.
+  Docker created it as a bind-mount placeholder because caddy started before
+  ./Caddyfile existed. Stop caddy, remove the directory, and regenerate:
+    rm -rf '$CADDYFILE' && $0 --generate-caddyfile"
+    fi
+
     # envsubst with explicit var list — only ${API_UPSTREAM} is replaced.
     # Use tmp + cp (not mv) because Caddyfile is bind-mounted as a single
     # file into the caddy container. mv changes the inode, so the container

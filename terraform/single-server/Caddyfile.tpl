@@ -1,8 +1,9 @@
 # =============================================================================
 # Kagura Memory Cloud — Caddy reverse proxy (production, blue-green template)
 # =============================================================================
-# This is a TEMPLATE. Do not edit directly.
-# scripts/deploy.sh generates Caddyfile from this template via envsubst.
+# This is the SOURCE TEMPLATE — edit THIS file (e.g. to set your domain).
+# scripts/deploy.sh renders it to ./Caddyfile via envsubst. That generated
+# ./Caddyfile is gitignored and must NOT be edited or committed directly.
 #
 # Placeholder:
 #   ${API_UPSTREAM} — replaced with "api-blue" or "api-green" at deploy time
