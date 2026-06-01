@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 # Tools that do NOT require context_id in arguments
 _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
     {
+        # Issue #629: binding introspection — list takes no args; describe takes
+        # key_id XOR context_id (and its context_id is a *bound* context selector,
+        # not a memory-context to resolve), so neither goes through the
+        # context_id pre-dispatch.
+        "list_my_bindings",
+        "describe_binding",
         "list_contexts",
         "create_context",
         "update_context",
@@ -53,6 +59,8 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
 # Read-only info tools exempt from rate limiting
 _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
     {
+        "list_my_bindings",  # Issue #629: read-only binding listing
+        "describe_binding",  # Issue #629: read-only binding detail
         "get_usage",
         "list_contexts",
         "get_context_info",  # Must remain callable so agents can inspect context even when rate-limited
@@ -90,6 +98,7 @@ def _build_registry() -> dict[str, Any]:
         handle_get_cluster,
         handle_list_analyses,
     )
+    from mcp_server.tools.api_keys import handle_describe_binding, handle_list_my_bindings
     from mcp_server.tools.context import (
         handle_create_context,
         handle_delete_context,
@@ -129,6 +138,9 @@ def _build_registry() -> dict[str, Any]:
     from mcp_server.tools.usage import handle_get_usage
 
     return {
+        # Issue #629: read-only API-key binding introspection
+        "list_my_bindings": handle_list_my_bindings,
+        "describe_binding": handle_describe_binding,
         "remember": handle_remember,
         "update_memory": handle_update_memory,
         "recall": handle_recall,

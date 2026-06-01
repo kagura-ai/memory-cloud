@@ -15,6 +15,57 @@ def get_tool_definitions() -> list[dict]:
     """
     return [
         {
+            "name": "list_my_bindings",
+            "readOnly": True,
+            "description": """List your public-bound API keys (Issue #629, read-only).
+
+Returns the bindings YOU own — API keys attributed to a single public
+(is_public=true) context for per-key rate-limit, audit, and revoke. This is
+introspection of the keys you created, not of the bound contexts themselves.
+
+Response: bindings: [{key_id, name, context_id, context_name, created_at}].
+Revoked keys are excluded. key_prefix is omitted here — use describe_binding
+for a single binding's prefix.
+
+Read-only: minting and revoking bindings stay on the SDK / CLI / HTTP API /
+dashboard. No parameters.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+        {
+            "name": "describe_binding",
+            "readOnly": True,
+            "description": """Describe one of your public-bound API keys (Issue #629, read-only).
+
+Supply EXACTLY ONE selector: key_id (integer, from list_my_bindings) OR
+context_id (UUID of the bound public context). The result is scoped to the keys
+you own; an unknown or not-yours selector returns a uniform
+"binding_not_found". A context bound by several of your keys returns the most
+recently created one (with a note).
+
+Response: binding: {key_id, name, context_id, context_name, created_at,
+key_prefix}. No secret is ever returned.
+
+Read-only: minting and revoking bindings stay on the SDK / CLI / HTTP API /
+dashboard.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "key_id": {
+                        "type": "integer",
+                        "description": "API key ID from list_my_bindings(). Mutually exclusive with context_id.",
+                    },
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Bound public context UUID. Mutually exclusive with key_id.",
+                    },
+                },
+            },
+        },
+        {
             "name": "remember",
             "description": """Store important information, decisions, code snippets, or context into long-term memory. Use this when you want to preserve information for future recall across conversations.
 

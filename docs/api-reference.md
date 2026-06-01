@@ -870,7 +870,7 @@ Sleep and Neural Memory tuning knobs (LLM provider, budgets, per-phase toggles, 
 
 ## MCP Tools
 
-Kagura Memory Cloud provides 37 MCP tools for AI assistants across 9 categories (Memory, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Sleep Maintenance, Usage). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
+Kagura Memory Cloud provides 39 MCP tools for AI assistants across 10 categories (Memory, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Sleep Maintenance, Usage, API-Key Bindings). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
 
 ### 1. remember
 
@@ -945,6 +945,36 @@ Discover related memories via graph traversal.
   }
 }
 ```
+
+### 6. list_my_bindings
+
+List your public-bound API keys (read-only introspection, Issue #629). Returns the bindings you own — keys attributed to a single public context for per-key rate-limit, audit, and revoke. Revoked keys are excluded; `key_prefix` is omitted (use `describe_binding`). Takes no arguments.
+
+```python
+{
+  "name": "list_my_bindings",
+  "arguments": {}
+}
+# → {"status": "success", "count": 1, "bindings": [
+#     {"key_id": 7, "name": "slack-bot", "context_id": "…",
+#      "context_name": "Slack Bot", "created_at": "2026-06-01T12:00:00Z"}]}
+```
+
+### 7. describe_binding
+
+Describe one of your bindings by **exactly one** of `key_id` (integer) or `context_id` (UUID). The result is scoped to keys you own; an unknown or not-yours selector returns a uniform `binding_not_found`. Adds `key_prefix` to the `list_my_bindings` shape. No secret is ever returned.
+
+```python
+{
+  "name": "describe_binding",
+  "arguments": { "key_id": 7 }   # OR { "context_id": "<uuid>" } — not both
+}
+# → {"status": "success", "binding": {
+#     "key_id": 7, "name": "slack-bot", "context_id": "…",
+#     "context_name": "Slack Bot", "created_at": "…", "key_prefix": "kagura_pub_…"}}
+```
+
+> **Read-only boundary:** minting and revoking bindings stay on the SDK / CLI / HTTP API / dashboard (design decision from #626). Public-bound API keys cannot call any MCP tool — they are rejected at MCP authentication — so these introspection tools are only reachable by the binding's **owner** via a session or workspace-scoped key.
 
 ---
 
