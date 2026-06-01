@@ -6,10 +6,11 @@ follows when it pushes chat-connector messages (Slack / Discord / Teams) into
 Kagura Memory Cloud through the **existing Resource Foundation** ingest path.
 
 There is **no new ingest API** for connectors. Connectors reuse the same
-`POST /api/v1/resources/{resource_id}/events` endpoint (and its
-`ResourceClient.ingest_event` / `ingest_events` SDK wrappers) that all other
-resource sources use. This doc only pins down the connector-specific rules
-layered on top of that endpoint.
+Resource Foundation ingest endpoints that all other resource sources use —
+`POST /api/v1/resources/{resource_id}/events` for a single event and
+`POST /api/v1/resources/{resource_id}/events/batch` for a batch — exposed by the
+`ResourceClient.ingest_event` / `ingest_events` SDK wrappers respectively. This
+doc only pins down the connector-specific rules layered on top of those endpoints.
 
 > **Scope.** This is the F6-c (#852) guidance deliverable of epic #755. The
 > worker-side write-path decision and its e2e/smoke verification are tracked in
@@ -66,10 +67,28 @@ Single event (`ResourceClient.ingest_event`):
 
 ### Batch ingest
 
-`ResourceClient.ingest_events` posts an array of up to **100** events per call:
+`ResourceClient.ingest_events` posts an array of up to **100** events to the
+batch endpoint `POST /api/v1/resources/{resource_id}/events/batch`:
 
 ```json
-{ "events": [ { "op": "upsert", "doc_id": "...", "version": 1, "payload": {...}, "idempotency_key": "<connector_id>:..." }, ... ] }
+{
+  "events": [
+    {
+      "op": "upsert",
+      "doc_id": "1716240000.001500",
+      "version": 1,
+      "payload": { "text": "edited message", "channel": "C123", "user": "U456" },
+      "idempotency_key": "<connector_id>:1716240000.001500"
+    },
+    {
+      "op": "delete",
+      "doc_id": "1716240000.001499",
+      "version": null,
+      "payload": null,
+      "idempotency_key": "<connector_id>:1716240000.001499"
+    }
+  ]
+}
 ```
 
 The server rejects batches of **more than 100** events (`max_length=100`).
@@ -113,9 +132,10 @@ worker (connector token)
   the DB without `resource_pk` set alongside `resource_id`. From the worker's
   side this is automatic: authenticate with the connector-scoped token and the
   server fills `resource_pk`. There is no worker-visible field for it.
-- **Quota is counted per connector resource.** The hourly quota helper filters by
-  `resource_pk` + `workspace_id` (#328/#332) and charges `len(events)` per call,
-  so batching does **not** bypass the ceiling. A connector minting a token
+- **Quota is counted per connector resource.** The hourly quota counter is keyed
+  by `resource_id` (the resource slug) + `workspace_id`
+  (`resource_quota_service._build_key`, #328/#332) and charges `len(events)` per
+  call, so batching does **not** bypass the ceiling. A connector minting a token
   bypasses the `max_resource_tokens` gate but is bounded by the `max_connectors`
   seat cap (#850/#851), not the Pro+ resource-token gate.
 - **`delete` must carry `payload: null`.** An `upsert` payload on a `delete` op is
