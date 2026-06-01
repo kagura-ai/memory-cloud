@@ -167,16 +167,32 @@ class ConnectorProvisioningService:
         return workspace
 
     async def _enforce_connector_seat_cap(self, workspace: Workspace, workspace_id: UUID) -> None:
-        # Issue #857: acquire a per-workspace ``pg_advisory_xact_lock`` before
-        # the count read so two concurrent provisions for the last seat cannot
-        # both observe ``count < cap`` and both insert (TOCTOU over-provision).
-        # The lock is xact-scoped, so the caller's transaction — which extends
-        # from this gate through ``db.flush()`` of the new connector — keeps the
-        # serialization across the read-then-write. Mirrors the workspace-create
-        # cap (#677, ``quota_service.py``) and the admin-bonus path (``admin.py``).
+        max_connectors = workspace.effective_max_connectors
+
+        # Zero-cap plans (Free: max_connectors == 0) can never provision, so deny
+        # deterministically WITHOUT taking the advisory lock. Acquiring it first
+        # would let lock contention / lock_timeout turn this guaranteed 403
+        # (CONNECTOR-001) into a retriable 503 (CONNECTOR-002) for a request that
+        # can never succeed — and waste a lock + count round-trip (PR #860 review).
+        if max_connectors <= 0:
+            raise MemoryCloudException(
+                (f"Connector seat limit reached. Your plan allows {max_connectors} connector(s)."),
+                status_code=403,
+                error_code="CONNECTOR-001",
+                max_connectors=max_connectors,
+                active_connectors=0,
+            )
+
+        # Issue #857: for a positive cap, acquire a per-workspace
+        # ``pg_advisory_xact_lock`` before the count read so two concurrent
+        # provisions for the last seat cannot both observe ``count < cap`` and
+        # both insert (TOCTOU over-provision). The lock is xact-scoped, so the
+        # caller's transaction — which extends from this gate through
+        # ``db.flush()`` of the new connector — keeps the serialization across
+        # the read-then-write. Mirrors the workspace-create cap (#677,
+        # ``quota_service.py``) and the admin-bonus path (``admin.py``).
         await self._acquire_connector_seat_lock(workspace_id)
 
-        max_connectors = workspace.effective_max_connectors
         active_count_result = await self.db.execute(
             select(func.count(WorkspaceConnector.id)).where(
                 WorkspaceConnector.workspace_id == workspace_id

@@ -47,10 +47,10 @@ class TestConnectorProvisioningService:
     @pytest.mark.asyncio
     async def test_free_plan_zero_connector_cap_blocks_before_writes(self, mock_db):
         workspace_id = uuid4()
+        # #857/PR #860: a zero-cap plan short-circuits to 403 BEFORE the advisory
+        # lock and count — so only the workspace lookup runs (no lock results).
         mock_db.execute.side_effect = [
             _result(one=SimpleNamespace(effective_max_connectors=0)),
-            *_lock_results(),
-            _result(scalar=0),
         ]
 
         with patch("services.connector_provisioning.upsert_resource", new=AsyncMock()) as upsert:
@@ -66,6 +66,9 @@ class TestConnectorProvisioningService:
         assert exc_info.value.error_code == "CONNECTOR-001"
         upsert.assert_not_awaited()
         mock_db.add.assert_not_called()
+        # Only the workspace lookup ran — the zero-cap path never reached the
+        # advisory-lock SET LOCAL / pg_advisory_xact_lock or the count query.
+        assert mock_db.execute.call_count == 1
 
     @pytest.mark.asyncio
     async def test_basic_plan_at_cap_blocks_paid_boundary(self, mock_db):
