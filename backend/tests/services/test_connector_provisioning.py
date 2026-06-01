@@ -47,9 +47,68 @@ class TestConnectorProvisioningService:
                 )
 
         assert exc_info.value.status_code == 403
-        assert exc_info.value.error_code == "CONNECTOR-SEAT-CAP"
+        assert exc_info.value.error_code == "CONNECTOR-001"
         upsert.assert_not_awaited()
         mock_db.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_basic_plan_at_cap_blocks_paid_boundary(self, mock_db):
+        """AC2: cap=1 and active=1 must reject; >= cannot regress to >."""
+        workspace_id = uuid4()
+        mock_db.execute.side_effect = [
+            _result(one=SimpleNamespace(effective_max_connectors=1)),
+            _result(scalar=1),
+        ]
+
+        with patch("services.connector_provisioning.upsert_resource", new=AsyncMock()) as upsert:
+            with pytest.raises(MemoryCloudException) as exc_info:
+                await ConnectorProvisioningService(mock_db).provision_connector(
+                    workspace_id=workspace_id,
+                    user_id="user-1",
+                    connector_type="slack",
+                    resource_id="slack_general",
+                )
+
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.details["max_connectors"] == 1
+        assert exc_info.value.details["active_connectors"] == 1
+        upsert.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_basic_plan_below_cap_allows_provision(self, mock_db):
+        """AC2: positive cap with active_count below boundary must proceed."""
+        workspace_id = uuid4()
+        resource_pk = uuid4()
+        token = SimpleNamespace(id=123, quota_events_per_hour=1000)
+        mock_db.execute.side_effect = [
+            _result(one=SimpleNamespace(effective_max_connectors=1)),
+            _result(scalar=0),
+            _result(one=None),
+        ]
+
+        with (
+            patch(
+                "services.connector_provisioning.resolve_resource_pk",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "services.connector_provisioning.upsert_resource",
+                new=AsyncMock(return_value=resource_pk),
+            ),
+            patch(
+                "services.connector_provisioning.ResourceTokenManager.create_token",
+                new=AsyncMock(return_value=("kagura_resource_plain", token)),
+            ),
+        ):
+            result = await ConnectorProvisioningService(mock_db).provision_connector(
+                workspace_id=workspace_id,
+                user_id="user-1",
+                connector_type="slack",
+                resource_id="slack_general",
+            )
+
+        assert result.resource_pk == resource_pk
+        assert result.token is token
 
     @pytest.mark.asyncio
     async def test_basic_connector_token_bypasses_resource_token_gate(self, mock_db):
@@ -64,6 +123,10 @@ class TestConnectorProvisioningService:
         ]
 
         with (
+            patch(
+                "services.connector_provisioning.resolve_resource_pk",
+                new=AsyncMock(return_value=None),
+            ),
             patch(
                 "services.connector_provisioning.upsert_resource",
                 new=AsyncMock(return_value=resource_pk),
@@ -98,6 +161,10 @@ class TestConnectorProvisioningService:
 
         with (
             patch(
+                "services.connector_provisioning.resolve_resource_pk",
+                new=AsyncMock(return_value=resource_pk),
+            ),
+            patch(
                 "services.connector_provisioning.upsert_resource",
                 new=AsyncMock(return_value=resource_pk),
             ),
@@ -111,6 +178,39 @@ class TestConnectorProvisioningService:
                     resource_id="slack_general",
                 )
 
+        create_token.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_existing_non_connector_resource_slug_is_rejected(self, mock_db):
+        """Small guard: a regular resource slug must not become connector-owned."""
+        workspace_id = uuid4()
+        resource_pk = uuid4()
+        mock_db.execute.side_effect = [
+            _result(one=SimpleNamespace(effective_max_connectors=5)),
+            _result(scalar=0),
+            _result(one=None),
+        ]
+
+        with (
+            patch(
+                "services.connector_provisioning.resolve_resource_pk",
+                new=AsyncMock(return_value=resource_pk),
+            ),
+            patch(
+                "services.connector_provisioning.upsert_resource",
+                new=AsyncMock(return_value=resource_pk),
+            ),
+            patch("services.connector_provisioning.ResourceTokenManager.create_token") as create_token,
+        ):
+            with pytest.raises(ConflictError) as exc_info:
+                await ConnectorProvisioningService(mock_db).provision_connector(
+                    workspace_id=workspace_id,
+                    user_id="user-1",
+                    connector_type="slack",
+                    resource_id="existing_resource",
+                )
+
+        assert "not connector-owned" in exc_info.value.message
         create_token.assert_not_called()
 
 

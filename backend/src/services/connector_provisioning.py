@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.resource_tokens import ResourceTokenManager
 from models.auth import Workspace
 from models.resource import ResourceToken, WorkspaceConnector
-from services.resource_lookup import upsert_resource
+from services.resource_lookup import resolve_resource_pk, upsert_resource
 from utils.exceptions import ConflictError, MemoryCloudException, NotFoundException, ValidationError
 from utils.logger import get_logger
 
@@ -72,6 +72,7 @@ class ConnectorProvisioningService:
         workspace = await self._get_workspace(workspace_id)
         await self._enforce_connector_seat_cap(workspace, workspace_id)
 
+        existing_resource_pk = await resolve_resource_pk(self.db, workspace_id, resource_id)
         resource_pk = await upsert_resource(
             self.db,
             workspace_id=workspace_id,
@@ -81,6 +82,14 @@ class ConnectorProvisioningService:
         )
 
         existing_connector = await self._get_connector_for_resource(resource_pk)
+        if existing_resource_pk is not None and existing_connector is None:
+            raise ConflictError(
+                (
+                    f"Resource '{resource_id}' already exists and is not connector-owned. "
+                    "Choose a fresh resource_id for this connector."
+                ),
+                resource_pk=str(existing_resource_pk),
+            )
         if existing_connector is not None:
             raise ConflictError(
                 f"Resource '{resource_id}' already has a workspace connector.",
@@ -171,7 +180,7 @@ class ConnectorProvisioningService:
                     f"Your plan allows {max_connectors} connector(s)."
                 ),
                 status_code=403,
-                error_code="CONNECTOR-SEAT-CAP",
+                error_code="CONNECTOR-001",
                 max_connectors=max_connectors,
                 active_connectors=active_count,
             )
