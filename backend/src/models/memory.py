@@ -234,6 +234,16 @@ class Memory(Base):
             postgresql_using="gin",
             postgresql_ops={"summary": "gin_trgm_ops"},
         ),
+        # Issue #619 compound partial B-tree on (workspace_id, context_id),
+        # accelerating the scope scan used by aggregate_tags, get_context_stats,
+        # and _refresh_hub_tag_cache (migration e29_619_memories_ws_ctx_idx).
+        # Partial on deleted_at IS NULL keeps soft-deleted rows out of the index.
+        Index(
+            "idx_memories_ws_ctx",
+            "workspace_id",
+            "context_id",
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
     )
 
     def __repr__(self) -> str:
