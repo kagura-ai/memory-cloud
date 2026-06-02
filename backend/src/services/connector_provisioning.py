@@ -89,14 +89,32 @@ class ConnectorProvisioningService:
         self._validate_inputs(connector_type, resource_id, quota_events_per_hour)
 
         workspace = await self._get_workspace(workspace_id)
-        await self._enforce_connector_seat_cap(workspace, workspace_id)
 
-        resolved_context_id = await self._resolve_context(
-            workspace_id=workspace_id,
-            user_id=user_id,
-            context_id=context_id,
-            auto_create_context_name=auto_create_context_name,
-        )
+        # ``auto_create_context_name`` goes through ContextService.create_context,
+        # which COMMITS mid-flow — that would release the seat-cap advisory lock
+        # before the connector insert and re-open the TOCTOU over-provision hole.
+        # So for the auto-create path: non-locking pre-check → create+commit the
+        # context → THEN take the lock for the authoritative gate (held through
+        # the connector flush + the caller's commit). The legacy / existing-
+        # context paths keep the original order (lock first) since they never
+        # commit before the insert.
+        if auto_create_context_name:
+            await self._check_seat_cap_available(workspace, workspace_id)
+            resolved_context_id = await self._resolve_context(
+                workspace=workspace,
+                user_id=user_id,
+                context_id=None,
+                auto_create_context_name=auto_create_context_name,
+            )
+            await self._enforce_connector_seat_cap(workspace, workspace_id)
+        else:
+            await self._enforce_connector_seat_cap(workspace, workspace_id)
+            resolved_context_id = await self._resolve_context(
+                workspace=workspace,
+                user_id=user_id,
+                context_id=context_id,
+                auto_create_context_name=None,
+            )
 
         existing_resource_pk = await resolve_resource_pk(self.db, workspace_id, resource_id)
         resource_pk = await upsert_resource(
@@ -186,7 +204,7 @@ class ConnectorProvisioningService:
     async def _resolve_context(
         self,
         *,
-        workspace_id: UUID,
+        workspace: Workspace,
         user_id: str,
         context_id: UUID | None,
         auto_create_context_name: str | None,
@@ -196,6 +214,11 @@ class ConnectorProvisioningService:
         ``context_id`` selects an existing workspace context (verified to belong
         to the workspace); ``auto_create_context_name`` creates a fresh private
         context. Returns ``None`` when neither is given (legacy path).
+
+        Auto-created contexts are attributed to the workspace owner
+        (``created_by=workspace.owner_user_id``) so the private-context
+        owner-only rule in ``ContextService`` is satisfied even when the acting
+        principal is a workspace admin (the endpoint admits both).
         """
         if context_id is not None and auto_create_context_name:
             raise ValidationError(
@@ -208,7 +231,7 @@ class ConnectorProvisioningService:
             result = await self.db.execute(
                 select(Context).where(
                     Context.id == context_id,
-                    Context.workspace_id == workspace_id,
+                    Context.workspace_id == workspace.id,
                 )
             )
             if result.scalar_one_or_none() is None:
@@ -218,9 +241,9 @@ class ConnectorProvisioningService:
             from services.context_service import ContextService
 
             context = await ContextService(self.db).create_context(
-                workspace_id=workspace_id,
+                workspace_id=workspace.id,
                 name=auto_create_context_name,
-                created_by=user_id,
+                created_by=workspace.owner_user_id,
             )
             return context.id
         return None
@@ -254,6 +277,40 @@ class ConnectorProvisioningService:
             raise NotFoundException("Workspace", str(workspace_id))
         return workspace
 
+    @staticmethod
+    def _raise_seat_cap(max_connectors: int, active_connectors: int) -> None:
+        raise MemoryCloudException(
+            (f"Connector seat limit reached. Your plan allows {max_connectors} connector(s)."),
+            status_code=403,
+            error_code="CONNECTOR-001",
+            max_connectors=max_connectors,
+            active_connectors=active_connectors,
+        )
+
+    async def _count_active_connectors(self, workspace_id: UUID) -> int:
+        result = await self.db.execute(
+            select(func.count(WorkspaceConnector.id)).where(
+                WorkspaceConnector.workspace_id == workspace_id
+            )
+        )
+        return result.scalar() or 0
+
+    async def _check_seat_cap_available(self, workspace: Workspace, workspace_id: UUID) -> None:
+        """Non-locking seat-cap pre-check.
+
+        Used on the auto-create-context path BEFORE creating (committing) a
+        context, so a plainly-full cap is rejected without leaving an orphan
+        context behind. The authoritative locked re-check
+        (``_enforce_connector_seat_cap``) still runs afterwards to close the
+        TOCTOU race.
+        """
+        max_connectors = workspace.effective_max_connectors
+        if max_connectors <= 0:
+            self._raise_seat_cap(max_connectors, 0)
+        active_count = await self._count_active_connectors(workspace_id)
+        if active_count >= max_connectors:
+            self._raise_seat_cap(max_connectors, active_count)
+
     async def _enforce_connector_seat_cap(self, workspace: Workspace, workspace_id: UUID) -> None:
         max_connectors = workspace.effective_max_connectors
 
@@ -263,13 +320,7 @@ class ConnectorProvisioningService:
         # (CONNECTOR-001) into a retriable 503 (CONNECTOR-002) for a request that
         # can never succeed — and waste a lock + count round-trip (PR #860 review).
         if max_connectors <= 0:
-            raise MemoryCloudException(
-                (f"Connector seat limit reached. Your plan allows {max_connectors} connector(s)."),
-                status_code=403,
-                error_code="CONNECTOR-001",
-                max_connectors=max_connectors,
-                active_connectors=0,
-            )
+            self._raise_seat_cap(max_connectors, 0)
 
         # Issue #857: for a positive cap, acquire a per-workspace
         # ``pg_advisory_xact_lock`` before the count read so two concurrent
@@ -281,20 +332,9 @@ class ConnectorProvisioningService:
         # ``quota_service.py``) and the admin-bonus path (``admin.py``).
         await self._acquire_connector_seat_lock(workspace_id)
 
-        active_count_result = await self.db.execute(
-            select(func.count(WorkspaceConnector.id)).where(
-                WorkspaceConnector.workspace_id == workspace_id
-            )
-        )
-        active_count = active_count_result.scalar() or 0
+        active_count = await self._count_active_connectors(workspace_id)
         if active_count >= max_connectors:
-            raise MemoryCloudException(
-                (f"Connector seat limit reached. Your plan allows {max_connectors} connector(s)."),
-                status_code=403,
-                error_code="CONNECTOR-001",
-                max_connectors=max_connectors,
-                active_connectors=active_count,
-            )
+            self._raise_seat_cap(max_connectors, active_count)
 
     async def _acquire_connector_seat_lock(self, workspace_id: UUID) -> None:
         """Take the per-workspace advisory lock guarding seat-cap enforcement.

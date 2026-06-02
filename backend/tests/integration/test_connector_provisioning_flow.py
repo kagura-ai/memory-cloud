@@ -255,3 +255,41 @@ async def test_delete_connector_revokes_kmc_key_and_removes_connector(
         await db_session.execute(select(func.count(Context.id)).where(Context.id == context_id))
     ).scalar_one()
     assert ctx_count == 1
+
+
+@pytest.mark.asyncio
+async def test_admin_non_owner_can_auto_create_context(db_session: AsyncSession):
+    """Code-review fix: auto-create attributes the context to the workspace owner.
+
+    The endpoint admits workspace ADMINS, but ContextService restricts private
+    contexts to OWNER. Provisioning passes created_by=owner so an admin acting
+    principal does not hit 'Only workspace owners can create private contexts'.
+    """
+    from models.auth import Context
+
+    owner_id, workspace = await _seed_workspace(db_session, plan_name="pro")
+    admin_id = f"admin-{uuid4().hex}"
+    db_session.add(
+        WorkspaceMember(
+            workspace_id=workspace.id,
+            user_id=admin_id,
+            role=WorkspaceRole.ADMIN,
+        )
+    )
+    await db_session.flush()
+
+    result = await ConnectorProvisioningService(db_session).provision_connector(
+        workspace_id=workspace.id,
+        user_id=admin_id,  # acting principal is a NON-owner admin
+        connector_type="slack",
+        resource_id=f"slack_{uuid4().hex[:8]}",
+        auto_create_context_name=f"slack-{uuid4().hex[:8]}",
+    )
+    await db_session.flush()
+
+    assert result.context_id is not None
+    ctx = (
+        await db_session.execute(select(Context).where(Context.id == result.context_id))
+    ).scalar_one()
+    # Context attributed to the owner, not the acting admin.
+    assert ctx.created_by == owner_id
