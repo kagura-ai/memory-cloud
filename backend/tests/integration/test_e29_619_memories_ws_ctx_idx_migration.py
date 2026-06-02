@@ -30,6 +30,29 @@ _WS_ID = "a0619000-0000-0000-0000-000000000001"
 _CTX_ID = "b0619000-0000-0000-0000-000000000002"
 
 
+def _seed_memories(conn: Connection, n: int = 5) -> None:
+    """Insert n minimal active memory rows (no FK-constrained columns).
+
+    Mirrors the e26 seed pattern: workspace_id and context_id are left NULL
+    so no FK prerequisites are needed, but the rows give the planner enough
+    statistics to prefer the compound index over a bitmap merge when
+    enable_seqscan is off.
+    """
+    for _ in range(n):
+        conn.execute(
+            text(
+                "INSERT INTO memories "
+                "(id, user_id, summary, content, type, embedding_status, "
+                " importance, confidence, scope, long_term, use_count, "
+                " access_count, client, source, created_at) "
+                "VALUES (gen_random_uuid(), 'tester-619', 'scope scan seed', "
+                "'body', 'note', 'success', 0.5, 1.0, 'working', false, "
+                "0, 0, 'test', 'mcp_remember', now())"
+            )
+        )
+    conn.execute(text("ANALYZE memories"))
+
+
 def _leave_db_at_head() -> None:
     """Convention: integration suite expects the test DB at head after each test."""
     with _alembic_at_test_db():
@@ -65,11 +88,14 @@ def test_e29_upgrade_creates_compound_partial_index() -> None:
             assert "context_id" in indexdef
             assert "deleted_at IS NULL" in indexdef
 
+        # Seed rows and ANALYZE so the planner has statistics to work with.
+        # Without data the planner may bitmap-merge the two single-column
+        # indexes instead of using the compound one (Copilot loop 1 lesson).
+        with engine.begin() as conn:
+            _seed_memories(conn)
+
         # Planner check: with seqscan disabled the compound partial index must
         # back the exact three-column predicate the callers emit.
-        # EXPLAIN (without ANALYZE) uses catalog statistics only, so no seed row
-        # is needed — the planner sees the partial index and routes to it when
-        # enable_seqscan is off.
         with engine.connect() as conn:
             conn.execute(text("SET enable_seqscan = off"))
             plan = "\n".join(
