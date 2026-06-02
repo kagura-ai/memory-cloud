@@ -214,6 +214,78 @@ async def handle_update_memory(
     return _error_response("internal_error", "Database session unavailable")
 
 
+async def handle_recall_upcoming(
+    args: dict[str, Any], user_id: str, workspace_id: UUID | None
+) -> list[TextContent]:
+    """Pull Time Memories (#877) whose trigger window overlaps a time range.
+
+    Deterministic filter+sort over type='time' memories — NOT semantic recall,
+    so it has no Hebbian write side-effects (the recall()-vs-list design rule).
+    Soonest-first by trigger_from. The trigger_from/trigger_until columns are
+    TEXT fixed-width ISO, so string comparison == chronological comparison.
+    """
+    if "context_id" not in args:
+        return _error_response("missing_fields", "Missing required field: context_id")
+
+    from sqlalchemy import select
+
+    from db.base import get_db
+    from models.memory import Memory
+
+    q_from = args.get("from")  # naive ISO lower bound; None => no lower filter
+    q_until = args.get("until")  # naive ISO upper bound; None => open-ended
+    k = min(int(args.get("k", 20)), 100)
+
+    async for db in get_db():
+        try:
+            current_context_id = _resolve_context_id(args["context_id"])
+            # Read path: uniform context_not_found on any deny (CWE-639 / OWASP
+            # A01), mirroring handle_recall.
+            current_context = await _resolve_context_for_read(db, user_id, current_context_id)
+
+            query = (
+                select(Memory)
+                .where(Memory.deleted_at.is_(None))
+                .where(Memory.type == "time")
+                .where(Memory.context_id == current_context_id)
+            )
+            # Window overlap: stored [trigger_from, trigger_until] overlaps the
+            # query window [q_from, q_until] iff trigger_until >= q_from AND
+            # trigger_from <= q_until.
+            if isinstance(q_from, str):
+                query = query.where(Memory.trigger_until >= q_from)
+            if isinstance(q_until, str):
+                query = query.where(Memory.trigger_from <= q_until)
+            query = query.order_by(Memory.trigger_from.asc()).limit(k)
+
+            rows = list((await db.execute(query)).scalars().all())
+            results = [
+                {
+                    "memory_id": str(m.id),
+                    "summary": m.summary,
+                    "type": m.type,
+                    "details": m.details,
+                }
+                for m in rows
+            ]
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "status": "success",
+                            "results": results,
+                            **_context_response_fields(current_context),
+                        }
+                    ),
+                )
+            ]
+        except _ContextNotFoundError as e:
+            return e.to_response()
+
+    return _error_response("internal_error", "Database session unavailable")
+
+
 async def handle_recall(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:

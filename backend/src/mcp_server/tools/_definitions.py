@@ -362,6 +362,44 @@ IMPORTANT: Always specify context_id to ensure you're retrieving from the intend
             },
         },
         {
+            "name": "recall_upcoming",
+            "readOnly": True,
+            "description": (
+                "List Time Memories (type='time') whose scheduled window overlaps "
+                "a time range, soonest first. Use for \"what's coming up?\" / "
+                "\"何か予定ある?\" questions. This is a deterministic time query, "
+                "NOT semantic search — for topic search use recall(). Create a "
+                "Time Memory by resolving the date yourself (you know today's date) "
+                "and calling remember(type='time', details={'trigger': {'year': "
+                "2026, 'month': 7}}). Partial dates are allowed: omit month/day for "
+                "fuzzy timing (\"2026年7月ごろ\")."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["context_id"],
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Target context UUID from list_contexts(). Do NOT fabricate.",
+                    },
+                    "from": {
+                        "type": "string",
+                        "description": "Lower bound, naive ISO (e.g. 2026-06-01T00:00:00). "
+                        "Defaults to no lower bound. Typically pass 'now' to get future items.",
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": "Upper bound, naive ISO. Omit for an open-ended (future) window.",
+                    },
+                    "k": {
+                        "type": "integer",
+                        "description": "Max results (default 20, max 100).",
+                    },
+                },
+            },
+        },
+        {
             "name": "forget",
             "description": """Delete memories that are no longer needed, outdated, or incorrect (soft delete, can be recovered within retention period).
 

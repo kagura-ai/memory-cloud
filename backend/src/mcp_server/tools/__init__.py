@@ -144,6 +144,7 @@ def _build_registry() -> dict[str, Any]:
         "remember": handle_remember,
         "update_memory": handle_update_memory,
         "recall": handle_recall,
+        "recall_upcoming": handle_recall_upcoming,
         "forget": handle_forget,
         "reference": handle_reference,
         "explore": handle_explore,
@@ -331,6 +332,7 @@ from mcp_server.tools.explore import handle_explore  # noqa: E402, F401
 from mcp_server.tools.memory import (  # noqa: E402, F401
     handle_forget,
     handle_recall,
+    handle_recall_upcoming,
     handle_reference,
     handle_remember,
     handle_update_memory,
