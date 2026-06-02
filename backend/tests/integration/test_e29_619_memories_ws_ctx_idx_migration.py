@@ -23,7 +23,7 @@ from tests.integration.test_alembic_migrations import (
 )
 
 E29_REVISION = "e29_619_memories_ws_ctx_idx"
-PRIOR_HEAD = "e28_850_workspace_connectors"
+PRIOR_HEAD = "e29_658_drop_graph_cache_cols"
 INDEX_NAME = "idx_memories_ws_ctx"
 
 _WS_ID = "a0619000-0000-0000-0000-000000000001"

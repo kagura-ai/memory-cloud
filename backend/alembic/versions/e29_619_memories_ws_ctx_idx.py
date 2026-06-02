@@ -39,7 +39,7 @@ guard so a retry after a mid-build failure rebuilds cleanly.
 Drops the index ``CONCURRENTLY``.  The single-column indexes are unaffected.
 
 Revision ID: e29_619_memories_ws_ctx_idx
-Revises: e28_850_workspace_connectors
+Revises: e29_658_drop_graph_cache_cols
 Create Date: 2026-06-02
 
 (Revision ID kept ≤ 32 chars to fit ``alembic_version.version_num
