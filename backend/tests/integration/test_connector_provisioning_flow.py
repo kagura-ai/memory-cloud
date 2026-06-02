@@ -325,3 +325,36 @@ async def test_duplicate_team_id_is_rejected(db_session: AsyncSession):
             auto_create_context_name=f"slack-{uuid4().hex[:8]}",
             external_team_id="T0DUP",  # same team — must be rejected
         )
+
+
+@pytest.mark.asyncio
+async def test_orphan_context_cleaned_up_on_post_context_failure(db_session: AsyncSession):
+    """Self-review fix: a failure AFTER the context is committed must not orphan it.
+
+    The context is committed by ContextService.create_context() before the
+    connector/key/token are persisted; a token-mint failure must trigger the
+    orphan-context cleanup so no context is left dangling.
+    """
+    from models.auth import Context
+
+    user_id, workspace = await _seed_workspace(db_session, plan_name="pro")
+    ctx_name = f"slack-{uuid4().hex[:8]}"
+
+    with patch(
+        "services.connector_provisioning.ResourceTokenManager.create_token",
+        new=AsyncMock(side_effect=RuntimeError("token mint failed")),
+    ):
+        with pytest.raises(RuntimeError, match="token mint failed"):
+            await ConnectorProvisioningService(db_session).provision_connector(
+                workspace_id=workspace.id,
+                user_id=user_id,
+                connector_type="slack",
+                resource_id=f"slack_{uuid4().hex[:8]}",
+                auto_create_context_name=ctx_name,
+            )
+
+    # The auto-created context must have been cleaned up (not orphaned).
+    orphan = (
+        await db_session.execute(select(func.count(Context.id)).where(Context.name == ctx_name))
+    ).scalar_one()
+    assert orphan == 0, "auto-created context was orphaned after token-mint failure"
