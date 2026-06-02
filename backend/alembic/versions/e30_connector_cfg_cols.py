@@ -49,6 +49,18 @@ def upgrade() -> None:
         "workspace_connectors",
         sa.Column("locale", sa.String(10), nullable=True),
     )
+    # Queryable external account/team identifier (Slack team_id / Discord guild
+    # id / Teams tenant) — the worker config endpoint dispatches by this. Lives
+    # in a column (not the encrypted oauth bundle) so it can be filtered in SQL.
+    op.add_column(
+        "workspace_connectors",
+        sa.Column("external_team_id", sa.String(255), nullable=True),
+    )
+    op.create_index(
+        "ix_workspace_connectors_type_team",
+        "workspace_connectors",
+        ["connector_type", "external_team_id"],
+    )
     op.add_column(
         "workspace_connectors",
         sa.Column("channel_ids", JSONB, nullable=True),
@@ -67,5 +79,7 @@ def downgrade() -> None:
     op.drop_column("workspace_connectors", "kmc_api_key_encrypted")
     op.drop_column("workspace_connectors", "llm_config_encrypted")
     op.drop_column("workspace_connectors", "channel_ids")
+    op.drop_index("ix_workspace_connectors_type_team", table_name="workspace_connectors")
+    op.drop_column("workspace_connectors", "external_team_id")
     op.drop_column("workspace_connectors", "locale")
     op.drop_column("workspace_connectors", "context_id")

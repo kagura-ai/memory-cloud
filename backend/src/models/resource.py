@@ -505,6 +505,9 @@ class WorkspaceConnector(Base):
     # Worker-facing pre-compile locale (e.g. cluster labelling). Defaults to the
     # workspace locale at provision time; NULL falls back to worker default.
     locale: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Queryable external account/team id (Slack team_id / Discord guild / Teams
+    # tenant). The worker config endpoint dispatches by (connector_type, this).
+    external_team_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Ingest channel selection (Slack channel id list, v1 = ids only).
     channel_ids: Mapped[list[Any] | None] = mapped_column(JSONB, nullable=True)
     oauth_tokens_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -536,6 +539,7 @@ class WorkspaceConnector(Base):
             "connector_type IN ('slack', 'discord', 'teams')",
             name="check_connector_type",
         ),
+        Index("ix_workspace_connectors_type_team", "connector_type", "external_team_id"),
     )
 
     def set_oauth_tokens(self, tokens: dict[str, Any] | None) -> None:

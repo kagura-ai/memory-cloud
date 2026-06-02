@@ -76,6 +76,7 @@ class ConnectorProvisioningService:
         llm_config: dict[str, Any] | None = None,
         channel_ids: list[Any] | None = None,
         locale: str | None = None,
+        external_team_id: str | None = None,
     ) -> ConnectorProvisioningResult:
         """Create resource + connector + connector-scoped token in one flow.
 
@@ -147,6 +148,7 @@ class ConnectorProvisioningService:
             context_id=resolved_context_id,
             locale=locale,
             channel_ids=channel_ids,
+            external_team_id=external_team_id,
             pii_guardrail_config=pii_guardrail_config,
             litellm_virtual_key_id=litellm_virtual_key_id,
             virtual_key_valid_until=virtual_key_valid_until,
@@ -393,6 +395,20 @@ class ConnectorProvisioningService:
             .order_by(WorkspaceConnector.created_at.desc())
         )
         return list(result.scalars().all())
+
+    async def get_connector_for_dispatch(
+        self, connector_type: str, external_team_id: str
+    ) -> WorkspaceConnector | None:
+        """Resolve the connector serving a platform team (worker dispatch key)."""
+        result = await self.db.execute(
+            select(WorkspaceConnector)
+            .where(
+                WorkspaceConnector.connector_type == connector_type,
+                WorkspaceConnector.external_team_id == external_team_id,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
     async def delete_connector(self, workspace_id: UUID, connector_id: UUID) -> bool:
         """Delete a connector: revoke its KMC write key + drop its resource.

@@ -73,6 +73,19 @@ class Settings(BaseSettings):
         default="dev-secret-change-in-production",
         description="API Key encryption secret (32+ bytes)",
     )
+    # ai-worker (kagura-memory-ai-worker) service auth. The worker presents this
+    # as a Bearer token to GET /api/v1/workers/config (Spec 2026-06-02). Empty
+    # disables the worker config endpoint (fail-closed). Use: openssl rand -hex 32.
+    worker_service_token: str = Field(
+        default="",
+        description="Shared bearer token authenticating the ai-worker to /api/v1/workers/* (RFC 6750)",
+    )
+    # Public MCP base URL handed back to the worker in its config so it can write
+    # memories. Defaults to local dev; override in prod (e.g. https://memory.kagura-ai.com/mcp).
+    kmc_mcp_url: str = Field(
+        default="http://localhost:8080/mcp",
+        description="Public MCP base URL returned to ai-worker connectors for memory writes",
+    )
     jwt_secret: str = Field(
         default="dev-secret-change-in-production", description="JWT signing secret (32+ bytes)"
     )

@@ -420,6 +420,7 @@ from api.routes import (  # noqa: E402
     system_admins,
     users,
     well_known,
+    workers,  # Spec 2026-06-02: ai-worker config endpoint
     workspace,
     workspace_connectors,  # Issue #851: ai-worker connector setup
     workspace_plan,
@@ -533,6 +534,7 @@ app.include_router(resource_tokens.router, prefix="/api/v1")
 
 # Workspace connector setup route (Issue #851 - ai-worker connector provisioning)
 app.include_router(workspace_connectors.router, prefix="/api/v1")
+app.include_router(workers.router, prefix="/api/v1")
 
 # Public Search routes (Issue #238 - Public REST API)
 app.include_router(public_search.router, prefix="/api/v1")
