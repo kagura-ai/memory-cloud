@@ -54,7 +54,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "e29_619_memories_ws_ctx_idx"
-down_revision: str | Sequence[str] | None = "e28_850_workspace_connectors"
+down_revision: str | Sequence[str] | None = "e29_658_drop_graph_cache_cols"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
