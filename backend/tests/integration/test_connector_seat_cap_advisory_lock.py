@@ -22,7 +22,7 @@ out of scope here — connector provisioning does not log a per-acquire wait):
    the test setup is genuinely racy when the safeguard is removed, so the
    positive test above cannot pass by lucky scheduling.
 
-The ``pro`` plan grants ``max_connectors = 5`` (cap = 5). The fixture
+The ``pro`` plan grants ``max_connectors = 10`` (cap = 10). The fixture
 pre-creates ``_PARALLEL_ATTEMPTS`` resource rows (the 1:1 FK target each
 connector needs) so every attempt can stage an insert against a distinct
 ``resource_pk`` and the only thing bounding inserts is the seat cap.
@@ -44,7 +44,7 @@ from models.resource import Resource, WorkspaceConnector
 from services.connector_provisioning import ConnectorProvisioningService
 from utils.exceptions import MemoryCloudException
 
-_CAP = 5  # pro plan max_connectors
+_CAP = 10  # pro plan max_connectors (Spec 2026-06-02)
 _PARALLEL_ATTEMPTS = 20
 
 
@@ -61,7 +61,7 @@ async def _count_connectors(session: AsyncSession, workspace_id) -> int:
 async def pro_workspace_with_resources(
     db_session: AsyncSession,
 ) -> AsyncIterator[tuple[object, list[object]]]:
-    """A ``pro`` workspace (cap=5) plus N spare resources for connector inserts.
+    """A ``pro`` workspace (cap=10) plus N spare resources for connector inserts.
 
     Cleans up connectors → resources → workspace → user after the test so
     repeated suite runs do not accumulate rows that skew later fixtures.
