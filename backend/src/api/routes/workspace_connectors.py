@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import WorkspaceAdmin
 from db.base import get_db
+from models.api_base import TZAwareBaseModel
 from models.schemas import validate_pii_guardrail_config
 from services.connector_provisioning import ConnectorProvisioningService
 from utils.exceptions import MemoryCloudException, ValidationError
@@ -57,6 +58,17 @@ class WorkspaceConnectorCreateResponse(BaseModel):
     token: str = Field(..., description="Plaintext resource token; save immediately")
     quota_events_per_hour: int
     idempotency_key_prefix: str
+
+
+class WorkspaceConnectorSummary(TZAwareBaseModel):
+    """One connector row for the workspace list view."""
+
+    connector_id: UUID
+    connector_type: str
+    resource_pk: UUID
+    config_version: int
+    created_at: datetime
+    created_by: str | None = None
 
 
 @router.post(
@@ -131,3 +143,29 @@ async def create_workspace_connector(
         quota_events_per_hour=result.token.quota_events_per_hour,
         idempotency_key_prefix=f"{result.connector.id}:",
     )
+
+
+@router.get("", response_model=list[WorkspaceConnectorSummary])
+async def list_workspace_connectors(
+    admin: WorkspaceAdmin,
+    db: AsyncSession = Depends(get_db),
+) -> list[WorkspaceConnectorSummary]:
+    """List connectors for the current workspace (workspace-admin scoped)."""
+    workspace_id = admin.get("current_workspace_id")
+    if workspace_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No workspace selected. Please select a workspace first.",
+        )
+    connectors = await ConnectorProvisioningService(db).list_connectors(workspace_id)
+    return [
+        WorkspaceConnectorSummary(
+            connector_id=c.id,
+            connector_type=c.connector_type,
+            resource_pk=c.resource_pk,
+            config_version=c.config_version,
+            created_at=c.created_at,
+            created_by=c.created_by,
+        )
+        for c in connectors
+    ]

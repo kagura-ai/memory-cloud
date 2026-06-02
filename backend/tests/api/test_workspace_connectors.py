@@ -98,3 +98,44 @@ async def test_create_passes_normalized_pii_guardrail_config_dict_to_service():
         "locale": "en",
         "fail_closed": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_list_workspace_connectors_returns_summaries():
+    from datetime import datetime
+
+    from api.routes.workspace_connectors import list_workspace_connectors
+
+    db = MagicMock()
+    ws_id = uuid4()
+    admin = {"user_id": "user-1", "current_workspace_id": ws_id}
+
+    c = MagicMock()
+    c.id = uuid4()
+    c.connector_type = "slack"
+    c.resource_pk = uuid4()
+    c.config_version = 1
+    c.created_at = datetime(2026, 6, 2, 0, 0, 0)
+    c.created_by = "user-1"
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.list_connectors = AsyncMock(return_value=[c])
+        result = await list_workspace_connectors(admin, db)
+
+    assert len(result) == 1
+    assert result[0].connector_id == c.id
+    assert result[0].connector_type == "slack"
+    service_cls.return_value.list_connectors.assert_awaited_once_with(ws_id)
+
+
+@pytest.mark.asyncio
+async def test_list_workspace_connectors_400_without_workspace():
+    from api.routes.workspace_connectors import list_workspace_connectors
+    from fastapi import HTTPException
+
+    db = MagicMock()
+    admin = {"user_id": "user-1", "current_workspace_id": None}
+
+    with pytest.raises(HTTPException) as exc:
+        await list_workspace_connectors(admin, db)
+    assert exc.value.status_code == 400
