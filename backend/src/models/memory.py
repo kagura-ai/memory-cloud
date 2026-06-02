@@ -191,6 +191,27 @@ class Memory(Base):
         index=False,  # Partial btree index created in migration e03_485
     )
 
+    # Time Memory (type="time"): generated lower/upper bounds of the trigger
+    # window, extracted as TEXT from details.trigger.from/until (naive ISO
+    # strings derived in MemoryService.remember). Mirrors the external_blob_*
+    # Computed pattern — a plain ``->>'from'`` extraction is IMMUTABLE, whereas
+    # a ``::timestamp`` cast is only STABLE and PostgreSQL rejects it in a STORED
+    # generated column. The from/until strings are fixed-width zero-padded ISO
+    # (YYYY-MM-DDTHH:MM:SS), so lexical comparison == chronological comparison,
+    # which is what the window-overlap filter + ORDER BY trigger_from rely on.
+    # Partial btree index on trigger_from WHERE type='time' is created in
+    # migration e30_877_time_trigger_cols.
+    trigger_from: Mapped[str | None] = mapped_column(
+        String(32),
+        Computed("details->'trigger'->>'from'", persisted=True),
+        index=False,
+    )
+    trigger_until: Mapped[str | None] = mapped_column(
+        String(32),
+        Computed("details->'trigger'->>'until'", persisted=True),
+        index=False,
+    )
+
     # Constraints
     __table_args__ = (
         CheckConstraint("importance BETWEEN 0 AND 1", name="valid_importance"),
@@ -243,6 +264,15 @@ class Memory(Base):
             "workspace_id",
             "context_id",
             postgresql_where=text("deleted_at IS NULL"),
+        ),
+        # Time Memory (type="time") partial btree on the generated lower bound,
+        # supporting the window-overlap query + ORDER BY trigger_from on
+        # GET /memory/list (migration e30_877_time_trigger_cols). Partial so
+        # only time memories carry the index.
+        Index(
+            "idx_memories_trigger_from",
+            "trigger_from",
+            postgresql_where=text("type = 'time'"),
         ),
     )
 

@@ -22,11 +22,26 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-_ISO = "%Y-%m-%dT%H:%M:%S"
-
 
 class TriggerValidationError(ValueError):
     """Raised when caller-supplied trigger components are invalid."""
+
+
+def _iso(dt: datetime) -> str:
+    """Format a naive datetime as fixed-width ISO without a Z suffix.
+
+    The year is explicitly zero-padded to 4 digits (unlike ``strftime('%Y')`` on
+    some libc builds) so the emitted strings are fixed-width. The downstream
+    generated columns ``trigger_from`` / ``trigger_until`` are TEXT (an immutable
+    ``details->'trigger'->>'from'`` extraction — a ``::timestamp`` cast is only
+    STABLE and PostgreSQL rejects it in a STORED generated column), so the
+    window-overlap and ORDER BY rely on lexical order matching chronological
+    order. That equivalence holds only for this fixed-width, zero-padded form.
+    """
+    return (
+        f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d}"
+        f"T{dt.hour:02d}:{dt.minute:02d}:{dt.second:02d}"
+    )
 
 
 def _days_in_month(year: int, month: int) -> int:
@@ -98,8 +113,8 @@ def normalize_trigger(trigger: Any) -> dict:
     result["day"] = day
     result["hour"] = hour
     result["minute"] = minute
-    result["from"] = frm.strftime(_ISO)
-    result["until"] = until.strftime(_ISO)
+    result["from"] = _iso(frm)
+    result["until"] = _iso(until)
     return result
 
 
