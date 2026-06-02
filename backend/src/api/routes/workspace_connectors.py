@@ -126,9 +126,11 @@ async def create_workspace_connector(
     oauth_tokens = request.oauth_tokens
     external_team_id = request.external_team_id
     if request.slack_install_handle:
-        from api.routes.connectors_slack import pop_slack_install
+        # Peek (do NOT consume) so a provisioning failure leaves the handle
+        # intact for retry — it is discarded only after a successful create.
+        from api.routes.connectors_slack import peek_slack_install
 
-        install = await pop_slack_install(request.slack_install_handle)
+        install = await peek_slack_install(request.slack_install_handle)
         if install is None or str(install.get("workspace_id")) != str(workspace_id):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -162,6 +164,12 @@ async def create_workspace_connector(
         await db.commit()
         await db.refresh(result.connector)
         await db.refresh(result.token)
+        # Consume the Slack install handle only now that the connector is
+        # committed — a failure above left it intact for retry.
+        if request.slack_install_handle:
+            from api.routes.connectors_slack import discard_slack_install
+
+            await discard_slack_install(request.slack_install_handle)
     except MemoryCloudException:
         await db.rollback()
         raise

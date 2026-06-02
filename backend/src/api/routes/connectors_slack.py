@@ -54,6 +54,22 @@ async def pop_slack_install(handle: str) -> dict[str, Any] | None:
     return json.loads(raw)
 
 
+async def peek_slack_install(handle: str) -> dict[str, Any] | None:
+    """Read a pending Slack install bundle WITHOUT consuming it.
+
+    Used by the connector-create path so a provisioning failure leaves the
+    handle intact for retry; the caller calls ``discard_slack_install`` only
+    after a successful create.
+    """
+    raw = await get_redis_client().get(_install_key(handle))
+    return json.loads(raw) if raw is not None else None
+
+
+async def discard_slack_install(handle: str) -> None:
+    """Delete a consumed Slack install bundle (best-effort, after success)."""
+    await get_redis_client().delete(_install_key(handle))
+
+
 @router.get("/install")
 async def slack_install(admin: WorkspaceAdmin) -> RedirectResponse:
     """Begin the Slack OAuth install for the current workspace."""

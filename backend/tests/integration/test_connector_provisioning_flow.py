@@ -293,3 +293,35 @@ async def test_admin_non_owner_can_auto_create_context(db_session: AsyncSession)
     ).scalar_one()
     # Context attributed to the owner, not the acting admin.
     assert ctx.created_by == owner_id
+
+
+@pytest.mark.asyncio
+async def test_duplicate_team_id_is_rejected(db_session: AsyncSession):
+    """Code-review fix: one platform team maps to exactly one connector.
+
+    A second connector claiming the same (connector_type, external_team_id)
+    is rejected with a 409 ConflictError — prevents cross-tenant dispatch hijack.
+    """
+    from utils.exceptions import ConflictError
+
+    user_id, workspace = await _seed_workspace(db_session, plan_name="pro")
+    svc = ConnectorProvisioningService(db_session)
+    await svc.provision_connector(
+        workspace_id=workspace.id,
+        user_id=user_id,
+        connector_type="slack",
+        resource_id=f"slack_{uuid4().hex[:8]}",
+        auto_create_context_name=f"slack-{uuid4().hex[:8]}",
+        external_team_id="T0DUP",
+    )
+    await db_session.flush()
+
+    with pytest.raises(ConflictError):
+        await svc.provision_connector(
+            workspace_id=workspace.id,
+            user_id=user_id,
+            connector_type="slack",
+            resource_id=f"slack_{uuid4().hex[:8]}",
+            auto_create_context_name=f"slack-{uuid4().hex[:8]}",
+            external_team_id="T0DUP",  # same team — must be rejected
+        )

@@ -56,10 +56,14 @@ def upgrade() -> None:
         "workspace_connectors",
         sa.Column("external_team_id", sa.String(255), nullable=True),
     )
+    # UNIQUE: one platform team → exactly one connector (no cross-tenant
+    # dispatch hijack). NULL external_team_id rows are exempt (Postgres allows
+    # multiple NULLs in a unique index).
     op.create_index(
         "ix_workspace_connectors_type_team",
         "workspace_connectors",
         ["connector_type", "external_team_id"],
+        unique=True,
     )
     op.add_column(
         "workspace_connectors",

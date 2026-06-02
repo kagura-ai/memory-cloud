@@ -539,7 +539,15 @@ class WorkspaceConnector(Base):
             "connector_type IN ('slack', 'discord', 'teams')",
             name="check_connector_type",
         ),
-        Index("ix_workspace_connectors_type_team", "connector_type", "external_team_id"),
+        # UNIQUE so one platform team maps to exactly one connector (prevents
+        # cross-tenant dispatch hijack). Postgres allows multiple NULL
+        # external_team_id rows, so legacy/not-yet-OAuthed connectors are fine.
+        Index(
+            "ix_workspace_connectors_type_team",
+            "connector_type",
+            "external_team_id",
+            unique=True,
+        ),
     )
 
     def set_oauth_tokens(self, tokens: dict[str, Any] | None) -> None:

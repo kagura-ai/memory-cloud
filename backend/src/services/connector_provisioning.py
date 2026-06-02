@@ -117,6 +117,18 @@ class ConnectorProvisioningService:
                 auto_create_context_name=None,
             )
 
+        # One platform team maps to exactly one connector — reject a duplicate
+        # (connector_type, external_team_id) with a clean 409 instead of letting
+        # the UNIQUE index raise an opaque IntegrityError. Guards against a
+        # tenant hijacking another tenant's Slack team dispatch (code-review).
+        if external_team_id is not None:
+            existing_team = await self.get_connector_for_dispatch(connector_type, external_team_id)
+            if existing_team is not None:
+                raise ConflictError(
+                    f"A {connector_type} connector for team '{external_team_id}' already exists.",
+                    connector_id=str(existing_team.id),
+                )
+
         existing_resource_pk = await resolve_resource_pk(self.db, workspace_id, resource_id)
         resource_pk = await upsert_resource(
             self.db,
