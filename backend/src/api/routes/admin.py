@@ -428,14 +428,20 @@ async def get_user_stats(
 
         # Get memory stats
         total_count_result = await db.execute(
-            select(func.count(Memory.id)).where(Memory.user_id == user_id)
+            select(func.count(Memory.id)).where(
+                Memory.user_id == user_id, Memory.deleted_at.is_(None)
+            )
         )
         total_count = total_count_result.scalar() or 0
 
         # Count by scope (working vs persistent)
         working_count_result = await db.execute(
             select(func.count(Memory.id)).where(
-                and_(Memory.user_id == user_id, Memory.scope == "working")
+                and_(
+                    Memory.user_id == user_id,
+                    Memory.scope == "working",
+                    Memory.deleted_at.is_(None),
+                )
             )
         )
         working_count = working_count_result.scalar() or 0
@@ -445,7 +451,7 @@ async def get_user_stats(
         # Count by type
         type_result = await db.execute(
             select(Memory.type, func.count(Memory.id))
-            .where(Memory.user_id == user_id)
+            .where(Memory.user_id == user_id, Memory.deleted_at.is_(None))
             .group_by(Memory.type)
         )
         by_type = {row[0]: row[1] for row in type_result.all()}
@@ -597,13 +603,19 @@ async def get_user_detail(
 
         # 4. Get stats (reuse logic from get_user_stats)
         total_memories_result = await db.execute(
-            select(func.count(Memory.id)).where(Memory.user_id == user_id)
+            select(func.count(Memory.id)).where(
+                Memory.user_id == user_id, Memory.deleted_at.is_(None)
+            )
         )
         total_memories = total_memories_result.scalar() or 0
 
         working_memories_result = await db.execute(
             select(func.count(Memory.id)).where(
-                and_(Memory.user_id == user_id, Memory.scope == "working")
+                and_(
+                    Memory.user_id == user_id,
+                    Memory.scope == "working",
+                    Memory.deleted_at.is_(None),
+                )
             )
         )
         working_memories = working_memories_result.scalar() or 0
@@ -982,7 +994,11 @@ async def delete_user(
         if not target_user:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-        # Count data to be deleted
+        # Count data to be deleted — intentionally counts ALL rows including
+        # soft-deleted (deleted_at IS NOT NULL): the user is being hard-deleted
+        # and every owned row is removed. Do NOT add a `deleted_at IS NULL`
+        # filter here (unlike the user-stats counts, which report current
+        # holdings and exclude soft-deleted). See #871.
         memory_count_result = await db.execute(
             select(func.count(Memory.id)).where(Memory.user_id == user_id)
         )
