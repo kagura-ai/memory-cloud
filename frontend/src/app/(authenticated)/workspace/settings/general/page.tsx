@@ -40,6 +40,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { WorkspaceCreateForm } from "@/components/workspaces/WorkspaceCreateForm";
+import { WorkspaceIdField } from "@/components/workspaces/WorkspaceIdField";
 import { ApiError } from "@/lib/api/base";
 
 export default function WorkspaceSettingsPage() {
@@ -259,6 +260,11 @@ export default function WorkspaceSettingsPage() {
                 {error}
               </p>
             </div>
+          )}
+
+          {/* Workspace ID — read-only identifier with copy button (Issue #873) */}
+          {currentWorkspaceId && (
+            <WorkspaceIdField workspaceId={currentWorkspaceId} />
           )}
 
           {/* Workspace Name */}
