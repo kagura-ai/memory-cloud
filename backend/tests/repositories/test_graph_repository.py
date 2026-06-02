@@ -26,8 +26,6 @@ class TestGraphRepository:
         graph = GraphMemory(
             user_id=f"test_user_{uid}",
             graph_data={"nodes": [], "links": []},
-            total_nodes=0,
-            total_edges=0,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
@@ -85,8 +83,6 @@ class TestGraphRepository:
             graph = GraphMemory(
                 user_id=f"page_user_{uid}_{i}",
                 graph_data={"nodes": [], "links": []},
-                total_nodes=0,
-                total_edges=0,
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow(),
             )
@@ -110,8 +106,6 @@ class TestGraphRepository:
         new_graph = GraphMemory(
             user_id=f"new_user_{uid}",
             graph_data=graph_data,
-            total_nodes=1,
-            total_edges=0,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
@@ -120,7 +114,7 @@ class TestGraphRepository:
 
         assert created.id is not None
         assert created.user_id == new_graph.user_id
-        assert created.total_nodes == 1
+        assert created.graph_data["nodes"][0]["id"] == "node1"
 
         # Verify in DB
         fetched = await repository.get_by_user_id(new_graph.user_id)
@@ -134,16 +128,15 @@ class TestGraphRepository:
             "nodes": [{"id": "node1", "type": "memory"}],
             "links": [],
         }
-        sample_graph.total_nodes = 1
         sample_graph.updated_at = datetime.utcnow()
 
         updated = await repository.update(sample_graph.id, sample_graph)
 
-        assert updated.total_nodes == 1
+        assert updated.graph_data["nodes"][0]["id"] == "node1"
 
         # Verify in DB
         fetched = await repository.get(sample_graph.id)
-        assert fetched.total_nodes == 1
+        assert fetched.graph_data["nodes"][0]["id"] == "node1"
 
     @pytest.mark.asyncio
     async def test_delete(self, repository, sample_graph):
@@ -173,8 +166,6 @@ class TestGraphRepository:
         graph = GraphMemory(
             user_id=f"json_user_{uid}",
             graph_data=complex_graph,
-            total_nodes=2,
-            total_edges=1,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
@@ -193,8 +184,6 @@ class TestGraphRepository:
         duplicate_graph = GraphMemory(
             user_id=sample_graph.user_id,  # Same user as sample_graph
             graph_data={"nodes": [], "links": []},
-            total_nodes=0,
-            total_edges=0,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
@@ -205,14 +194,3 @@ class TestGraphRepository:
         with pytest.raises(IntegrityError):
             db_session.add(duplicate_graph)
             await db_session.commit()
-
-    @pytest.mark.asyncio
-    async def test_stats_update(self, repository, sample_graph):
-        """Test updating node/edge counts."""
-        sample_graph.total_nodes = 10
-        sample_graph.total_edges = 15
-
-        updated = await repository.update(sample_graph.id, sample_graph)
-
-        assert updated.total_nodes == 10
-        assert updated.total_edges == 15

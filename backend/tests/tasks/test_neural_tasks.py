@@ -30,11 +30,6 @@ def _make_graph(user_id: str = "user-1"):
     graph.user_id = user_id
     graph.last_decay_at = None
     graph.updated_at = None
-    # Pre-existing cache columns — we assert these are NOT touched by the task.
-    graph.total_nodes = 0
-    graph.total_edges = 0
-    graph.avg_edge_weight = 0.0
-    graph.max_edge_weight = 0.0
     return graph
 
 
@@ -152,11 +147,6 @@ class TestWeightDecayTask:
         # Telemetry was refreshed.
         assert graph.last_decay_at is not None
         assert graph.updated_at is not None
-        # Dead cache columns were left untouched.
-        assert graph.total_nodes == 0
-        assert graph.total_edges == 0
-        assert graph.avg_edge_weight == 0.0
-        assert graph.max_edge_weight == 0.0
 
     @pytest.mark.asyncio
     async def test_skips_timestamp_update_when_no_edges_decayed(self, monkeypatch):

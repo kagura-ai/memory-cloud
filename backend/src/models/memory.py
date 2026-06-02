@@ -300,10 +300,6 @@ class GraphMemory(Base):
         id: Primary key
         user_id: Owner user ID (unique - one graph per user)
         graph_data: NetworkX graph as JSON
-        total_nodes: Node count (cached)
-        total_edges: Edge count (cached)
-        avg_edge_weight: Average edge weight (cached)
-        max_edge_weight: Max edge weight (cached)
         created_at: Creation timestamp
         updated_at: Last modification timestamp
         last_decay_at: Last decay operation timestamp
@@ -318,12 +314,6 @@ class GraphMemory(Base):
     # NetworkX グラフ全体（node_link_data形式）
     graph_data: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
-    # 統計情報（キャッシュ・監視用）
-    total_nodes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    total_edges: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    avg_edge_weight: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
-    max_edge_weight: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
-
     # タイムスタンプ
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
@@ -337,7 +327,7 @@ class GraphMemory(Base):
     last_consolidation_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     def __repr__(self) -> str:
-        return f"<GraphMemory(user='{self.user_id}', nodes={self.total_nodes}, edges={self.total_edges})>"
+        return f"<GraphMemory(id={self.id}, user='{self.user_id}')>"
 
 
 # Edge type constants — named aliases for the persisted edge_type string values.

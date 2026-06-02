@@ -118,10 +118,6 @@ class GraphRepository(BaseRepository[GraphMemory]):
 
         # Update fields
         existing.graph_data = graph.graph_data
-        existing.total_nodes = graph.total_nodes
-        existing.total_edges = graph.total_edges
-        existing.avg_edge_weight = graph.avg_edge_weight
-        existing.max_edge_weight = graph.max_edge_weight
         existing.updated_at = utcnow()
 
         if graph.last_decay_at:
@@ -141,16 +137,14 @@ class GraphRepository(BaseRepository[GraphMemory]):
         self,
         user_id: str,
         graph_data: dict[str, Any],
-        stats: dict[str, Any] | None = None,
     ) -> GraphMemory:
         """Update graph data for user.
 
-        Convenience method for updating graph JSON and stats.
+        Convenience method for updating graph JSON.
 
         Args:
             user_id: User ID
             graph_data: NetworkX node_link_data JSON
-            stats: Optional stats (nodes, edges, weights)
 
         Returns:
             Updated GraphMemory
@@ -166,22 +160,10 @@ class GraphRepository(BaseRepository[GraphMemory]):
         existing.graph_data = graph_data
         existing.updated_at = utcnow()
 
-        # Update stats if provided
-        if stats:
-            existing.total_nodes = stats.get("total_nodes", 0)
-            existing.total_edges = stats.get("total_edges", 0)
-            existing.avg_edge_weight = stats.get("avg_edge_weight", 0.0)
-            existing.max_edge_weight = stats.get("max_edge_weight", 0.0)
-
         await self.db.flush()
         await self.db.refresh(existing)
 
-        logger.info(
-            "graph_data_updated",
-            user_id=user_id,
-            nodes=existing.total_nodes,
-            edges=existing.total_edges,
-        )
+        logger.info("graph_data_updated", user_id=user_id)
 
         return existing
 
@@ -260,10 +242,6 @@ class GraphRepository(BaseRepository[GraphMemory]):
         new_graph = GraphMemory(
             user_id=user_id,
             graph_data={"directed": True, "multigraph": False, "nodes": [], "links": []},
-            total_nodes=0,
-            total_edges=0,
-            avg_edge_weight=0.0,
-            max_edge_weight=0.0,
         )
 
         return await self.create(new_graph)
