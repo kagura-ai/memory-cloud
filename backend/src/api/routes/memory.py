@@ -546,6 +546,24 @@ async def list_memories(
         "one of the tags, PG array overlap; preserves #618 behavior) or `all` "
         "(memory holds every given tag, PG array contains — #830 drill-down).",
     ),
+    trigger_from: str | None = Query(
+        None,
+        description="Time Memory (#877) window lower bound (naive ISO, e.g. "
+        "2026-07-01T00:00:00). Selects type='time' memories whose stored "
+        "[trigger_from, trigger_until] window overlaps the query window. "
+        "Pass 'now' here to get upcoming items.",
+    ),
+    trigger_until: str | None = Query(
+        None,
+        description="Time Memory (#877) window upper bound (naive ISO). Omit for "
+        "an open-ended (future) window.",
+    ),
+    order_by: str = Query(
+        "created_at",
+        pattern="^(created_at|trigger_from)$",
+        description="Sort key. 'created_at' (default, desc) or 'trigger_from' "
+        "(asc) for upcoming-first Time Memory listing (#877).",
+    ),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
@@ -667,6 +685,24 @@ async def list_memories(
         if tag_filter is not None:
             query = query.where(tag_filter)
 
+        # Time Memory (#877) window overlap, built once and applied to BOTH
+        # queries (same anti-drift rationale as tag_filter above). A stored
+        # window [trigger_from, trigger_until] overlaps the query window
+        # [trigger_from, trigger_until] iff trigger_from <= quntil AND
+        # trigger_until >= qfrom. The columns are TEXT fixed-width ISO, so
+        # string comparison == chronological comparison. trigger_until omitted
+        # => open-ended (everything not entirely in the past).
+        # isinstance(str) (not `is not None`) so a real ISO bound is required;
+        # this also keeps direct-call unit tests safe, where an unset Query()
+        # default is the FieldInfo sentinel rather than None.
+        window_filters = []
+        if isinstance(trigger_from, str):
+            window_filters.append(Memory.trigger_until >= trigger_from)
+        if isinstance(trigger_until, str):
+            window_filters.append(Memory.trigger_from <= trigger_until)
+        for wf in window_filters:
+            query = query.where(wf)
+
         # Get total count (with same filters as data query)
         count_query = select(func.count(Memory.id)).where(Memory.deleted_at.is_(None))
         if owner_filter is not None:
@@ -681,12 +717,20 @@ async def list_memories(
             count_query = count_query.where(Memory.summary.ilike(q_pattern, escape="\\"))
         if tag_filter is not None:
             count_query = count_query.where(tag_filter)
+        for wf in window_filters:
+            count_query = count_query.where(wf)
         count_result = await db.execute(count_query)
         total = count_result.scalar() or 0
 
-        # Get memories
+        # Get memories. order_by=trigger_from (#877) sorts ascending for
+        # upcoming-first Time Memory listing; default stays created_at desc.
+        order_clause = (
+            Memory.trigger_from.asc()
+            if order_by == "trigger_from"
+            else Memory.created_at.desc()
+        )
         result = await db.execute(
-            query.order_by(Memory.created_at.desc()).limit(limit).offset(offset)
+            query.order_by(order_clause).limit(limit).offset(offset)
         )
         memories = list(result.scalars().all())
 

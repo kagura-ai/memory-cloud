@@ -1,0 +1,108 @@
+"""Tests for the Time Memory window filter + sort on GET /memory/list (#877).
+
+Follows the direct-call + mock-db + compiled-SQL-shape convention of
+test_memory_list.py: this endpoint is unit-tested by inspecting the emitted SQL
+(WHERE predicates + ORDER BY), not via an HTTP round-trip. The actual lexical
+window-overlap behavior against PostgreSQL is covered by the migration
+round-trip test (TEXT columns) + the recall_upcoming integration test.
+"""
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from api.routes.memory import list_memories
+
+MOCK_USER = {"user_id": "test_user_123"}
+
+
+def _db_with_rows(total: int = 0, rows: list | None = None):
+    mock_db = AsyncMock()
+    count_result = MagicMock()
+    count_result.scalar.return_value = total
+    rows_result = MagicMock()
+    scalars = MagicMock()
+    scalars.all.return_value = rows or []
+    rows_result.scalars.return_value = scalars
+    mock_db.execute.side_effect = [count_result, rows_result]
+    return mock_db
+
+
+def _where_sql(mock_db, call_index: int) -> str:
+    stmt = mock_db.execute.call_args_list[call_index].args[0]
+    return str(stmt.whereclause.compile(compile_kwargs={"literal_binds": False}))
+
+
+def _full_sql(mock_db, call_index: int) -> str:
+    stmt = mock_db.execute.call_args_list[call_index].args[0]
+    return str(stmt.compile(compile_kwargs={"literal_binds": False}))
+
+
+@pytest.mark.asyncio
+async def test_window_predicates_applied_to_both_queries():
+    """trigger_from/trigger_until add the overlap predicate to BOTH the count
+    and data queries: trigger_until >= qfrom AND trigger_from <= quntil."""
+    mock_db = _db_with_rows()
+    await list_memories(
+        user=MOCK_USER,
+        db=mock_db,
+        scope=None,
+        type="time",
+        context_id=None,
+        q=None,
+        tags=None,
+        trigger_from="2026-06-01T00:00:00",
+        trigger_until="2026-12-31T23:59:59",
+        order_by="trigger_from",
+        limit=50,
+        offset=0,
+    )
+    for call_index in (0, 1):  # 0 = count query, 1 = data query
+        sql = _where_sql(mock_db, call_index)
+        assert "memories.trigger_until >=" in sql, sql
+        assert "memories.trigger_from <=" in sql, sql
+
+
+@pytest.mark.asyncio
+async def test_order_by_trigger_from_and_open_ended_window():
+    """order_by='trigger_from' sorts ascending; omitting trigger_until leaves an
+    open-ended (lower-bound-only) window."""
+    mock_db = _db_with_rows()
+    await list_memories(
+        user=MOCK_USER,
+        db=mock_db,
+        scope=None,
+        type="time",
+        context_id=None,
+        q=None,
+        tags=None,
+        trigger_from="2026-06-01T00:00:00",
+        trigger_until=None,
+        order_by="trigger_from",
+        limit=50,
+        offset=0,
+    )
+    assert "ORDER BY memories.trigger_from ASC" in _full_sql(mock_db, 1)
+    where = _where_sql(mock_db, 1)
+    assert "memories.trigger_until >=" in where
+    assert "memories.trigger_from <=" not in where  # no upper bound
+
+
+@pytest.mark.asyncio
+async def test_default_order_and_no_window_when_params_omitted():
+    """Without trigger params the endpoint keeps its legacy created_at desc sort
+    and adds no window predicate (backward compatible)."""
+    mock_db = _db_with_rows()
+    await list_memories(
+        user=MOCK_USER,
+        db=mock_db,
+        scope=None,
+        type=None,
+        context_id=None,
+        q=None,
+        tags=None,
+        limit=50,
+        offset=0,
+    )
+    assert "ORDER BY memories.created_at DESC" in _full_sql(mock_db, 1)
+    assert "trigger_from" not in _where_sql(mock_db, 1)
