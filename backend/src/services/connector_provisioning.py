@@ -257,6 +257,15 @@ class ConnectorProvisioningService:
         # already cleared the SET LOCAL along with the rest of the transaction.
         await self.db.execute(text("SET LOCAL lock_timeout = '0'"))
 
+    async def list_connectors(self, workspace_id: UUID) -> list[WorkspaceConnector]:
+        """Return all connectors for a workspace, newest first."""
+        result = await self.db.execute(
+            select(WorkspaceConnector)
+            .where(WorkspaceConnector.workspace_id == workspace_id)
+            .order_by(WorkspaceConnector.created_at.desc())
+        )
+        return list(result.scalars().all())
+
     async def _get_connector_for_resource(
         self,
         resource_pk: UUID,
