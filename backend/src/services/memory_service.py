@@ -238,6 +238,26 @@ class MemoryService:
         normalized_summary = normalize_for_search(request.summary)
         normalized_context_summary = normalize_for_search(request.context_summary)
 
+        # Time Memory (Issue #877): when type="time", the caller (assistant)
+        # supplies resolved Y/M/D[/H/M] components in details.trigger. Validate
+        # them and derive the [from, until] window written back into details so
+        # the generated columns trigger_from / trigger_until can index it. No LLM
+        # here — the caller already resolved any relative phrasing ("来週")
+        # against its own clock.
+        if request.type == "time":
+            from utils.time_trigger import TriggerValidationError, normalize_trigger
+
+            trigger = (request.details or {}).get("trigger")
+            if trigger is None:
+                raise ValueError(
+                    "type='time' requires details.trigger with at least {'year': ...}"
+                )
+            try:
+                normalized = normalize_trigger(trigger)
+            except TriggerValidationError as exc:
+                raise ValueError(f"invalid details.trigger: {exc}") from exc
+            request.details = {**(request.details or {}), "trigger": normalized}
+
         # Create memory entity first with pending status
         memory = Memory(
             id=memory_id,
