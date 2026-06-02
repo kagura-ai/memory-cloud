@@ -65,7 +65,7 @@ def downgrade() -> None:
     )
     op.add_column(
         "graph_memory",
-        sa.Column("avg_edge_weight", sa.Float(), nullable=False, server_default="0"),
+        sa.Column("avg_edge_weight", sa.Float(), nullable=False, server_default="0.0"),
     )
     op.add_column(
         "graph_memory",
