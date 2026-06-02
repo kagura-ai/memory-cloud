@@ -495,7 +495,26 @@ class WorkspaceConnector(Base):
         index=True,
     )
     connector_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Spec 2026-06-02: write-target context for the worker (path a). NULL on
+    # legacy rows provisioned before the connector-registration refactor.
+    context_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("contexts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Worker-facing pre-compile locale (e.g. cluster labelling). Defaults to the
+    # workspace locale at provision time; NULL falls back to worker default.
+    locale: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Ingest channel selection (Slack channel id list, v1 = ids only).
+    channel_ids: Mapped[list[Any] | None] = mapped_column(JSONB, nullable=True)
     oauth_tokens_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Fernet ciphertext of the BYO LLM config bundle ({provider, model, api_key}).
+    llm_config_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Fernet ciphertext of the workspace-scoped KMC write key (path a). The
+    # api_keys row stores only the SHA256 hash for verification; this column
+    # holds the encrypted plaintext so the worker config endpoint can hand it
+    # back on every config fetch.
+    kmc_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     pii_guardrail_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     litellm_virtual_key_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     config_version: Mapped[int] = mapped_column(
@@ -545,6 +564,44 @@ class WorkspaceConnector(Base):
         if not self.oauth_tokens_encrypted:
             return None
         return json.loads(get_encryptor().decrypt(self.oauth_tokens_encrypted))
+
+    def set_llm_config(self, config: dict[str, Any] | None) -> None:
+        """Encrypt and store the BYO LLM config bundle — no plaintext persisted."""
+        import json
+
+        from utils.encryption import get_encryptor
+
+        if not config:
+            self.llm_config_encrypted = None
+            return
+        self.llm_config_encrypted = get_encryptor().encrypt(json.dumps(config))
+
+    def get_llm_config(self) -> dict[str, Any] | None:
+        """Decrypt and return the BYO LLM config bundle, or ``None`` if unset."""
+        import json
+
+        from utils.encryption import get_encryptor
+
+        if not self.llm_config_encrypted:
+            return None
+        return json.loads(get_encryptor().decrypt(self.llm_config_encrypted))
+
+    def set_kmc_api_key(self, plaintext: str | None) -> None:
+        """Encrypt and store the workspace-scoped KMC write key (path a)."""
+        from utils.encryption import get_encryptor
+
+        if not plaintext:
+            self.kmc_api_key_encrypted = None
+            return
+        self.kmc_api_key_encrypted = get_encryptor().encrypt(plaintext)
+
+    def get_kmc_api_key(self) -> str | None:
+        """Decrypt and return the KMC write key plaintext, or ``None`` if unset."""
+        from utils.encryption import get_encryptor
+
+        if not self.kmc_api_key_encrypted:
+            return None
+        return get_encryptor().decrypt(self.kmc_api_key_encrypted)
 
 
 # ---------------------------------------------------------------------------

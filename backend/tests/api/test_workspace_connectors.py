@@ -114,6 +114,7 @@ async def test_list_workspace_connectors_returns_summaries():
     c.id = uuid4()
     c.connector_type = "slack"
     c.resource_pk = uuid4()
+    c.context_id = uuid4()
     c.config_version = 1
     c.created_at = datetime(2026, 6, 2, 0, 0, 0)
     c.created_by = "user-1"
@@ -139,3 +140,43 @@ async def test_list_workspace_connectors_400_without_workspace():
     with pytest.raises(HTTPException) as exc:
         await list_workspace_connectors(admin, db)
     assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_delete_workspace_connector_204_on_success():
+    from api.routes.workspace_connectors import delete_workspace_connector
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    ws_id = uuid4()
+    conn_id = uuid4()
+    admin = {"user_id": "user-1", "current_workspace_id": ws_id}
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.delete_connector = AsyncMock(return_value=True)
+        resp = await delete_workspace_connector(conn_id, admin, db)
+
+    assert resp.status_code == 204
+    db.commit.assert_awaited_once()
+    service_cls.return_value.delete_connector.assert_awaited_once_with(ws_id, conn_id)
+
+
+@pytest.mark.asyncio
+async def test_delete_workspace_connector_404_when_missing():
+    from api.routes.workspace_connectors import delete_workspace_connector
+    from fastapi import HTTPException
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    admin = {"user_id": "user-1", "current_workspace_id": uuid4()}
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.delete_connector = AsyncMock(return_value=False)
+        with pytest.raises(HTTPException) as exc:
+            await delete_workspace_connector(uuid4(), admin, db)
+
+    assert exc.value.status_code == 404
+    db.rollback.assert_awaited_once()
+    db.commit.assert_not_awaited()

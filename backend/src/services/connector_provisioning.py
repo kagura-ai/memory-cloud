@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,6 +40,11 @@ class ConnectorProvisioningResult:
     plaintext_token: str
     resource_id: str
     resource_pk: UUID
+    # Spec 2026-06-02 (registration flow). Both NULL on the legacy path that
+    # does not pass context info; populated when the connector is registered
+    # with a write-target context.
+    context_id: UUID | None = None
+    plaintext_kmc_api_key: str | None = None
 
 
 class ConnectorProvisioningService:
@@ -66,12 +71,32 @@ class ConnectorProvisioningService:
         litellm_virtual_key_id: str | None = None,
         virtual_key_valid_until: datetime | None = None,
         quota_events_per_hour: int = 1000,
+        context_id: UUID | None = None,
+        auto_create_context_name: str | None = None,
+        llm_config: dict[str, Any] | None = None,
+        channel_ids: list[Any] | None = None,
+        locale: str | None = None,
     ) -> ConnectorProvisioningResult:
-        """Create resource + connector + connector-scoped token in one flow."""
+        """Create resource + connector + connector-scoped token in one flow.
+
+        Spec 2026-06-02 (registration flow): when ``context_id`` or
+        ``auto_create_context_name`` is supplied, the connector is bound to a
+        write-target context and a workspace-scoped KMC write key is minted and
+        stored Fernet-encrypted so the worker config endpoint can hand it back.
+        Callers that pass neither keep the legacy behaviour (no context, no
+        KMC key) for backward compatibility.
+        """
         self._validate_inputs(connector_type, resource_id, quota_events_per_hour)
 
         workspace = await self._get_workspace(workspace_id)
         await self._enforce_connector_seat_cap(workspace, workspace_id)
+
+        resolved_context_id = await self._resolve_context(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            context_id=context_id,
+            auto_create_context_name=auto_create_context_name,
+        )
 
         existing_resource_pk = await resolve_resource_pk(self.db, workspace_id, resource_id)
         resource_pk = await upsert_resource(
@@ -101,14 +126,33 @@ class ConnectorProvisioningService:
             resource_pk=resource_pk,
             workspace_id=workspace_id,
             connector_type=connector_type,
+            context_id=resolved_context_id,
+            locale=locale,
+            channel_ids=channel_ids,
             pii_guardrail_config=pii_guardrail_config,
             litellm_virtual_key_id=litellm_virtual_key_id,
             virtual_key_valid_until=virtual_key_valid_until,
             created_by=user_id,
         )
         connector.set_oauth_tokens(oauth_tokens)
+        connector.set_llm_config(llm_config)
         self.db.add(connector)
         await self.db.flush()
+
+        # Mint the workspace-scoped KMC write key (path a) when this connector
+        # has a write-target context. Stored Fernet-encrypted on the connector
+        # so the worker config endpoint can return it on every fetch.
+        plaintext_kmc_api_key: str | None = None
+        if resolved_context_id is not None:
+            from auth.api_keys import APIKeyManager
+
+            plaintext_kmc_api_key, _ = await APIKeyManager(self.db).create_key(
+                name=f"connector:{connector.id}",
+                user_id=user_id,
+                workspace_id=workspace_id,
+            )
+            connector.set_kmc_api_key(plaintext_kmc_api_key)
+            await self.db.flush()
 
         plaintext_token, token_record = await ResourceTokenManager(self.db).create_token(
             resource_id=resource_id,
@@ -135,7 +179,51 @@ class ConnectorProvisioningService:
             plaintext_token=plaintext_token,
             resource_id=resource_id,
             resource_pk=resource_pk,
+            context_id=resolved_context_id,
+            plaintext_kmc_api_key=plaintext_kmc_api_key,
         )
+
+    async def _resolve_context(
+        self,
+        *,
+        workspace_id: UUID,
+        user_id: str,
+        context_id: UUID | None,
+        auto_create_context_name: str | None,
+    ) -> UUID | None:
+        """Resolve the write-target context for a connector.
+
+        ``context_id`` selects an existing workspace context (verified to belong
+        to the workspace); ``auto_create_context_name`` creates a fresh private
+        context. Returns ``None`` when neither is given (legacy path).
+        """
+        if context_id is not None and auto_create_context_name:
+            raise ValidationError(
+                "Provide either context_id or auto_create_context_name, not both.",
+                field="context_id",
+            )
+        if context_id is not None:
+            from models.auth import Context
+
+            result = await self.db.execute(
+                select(Context).where(
+                    Context.id == context_id,
+                    Context.workspace_id == workspace_id,
+                )
+            )
+            if result.scalar_one_or_none() is None:
+                raise NotFoundException("Context", str(context_id))
+            return context_id
+        if auto_create_context_name:
+            from services.context_service import ContextService
+
+            context = await ContextService(self.db).create_context(
+                workspace_id=workspace_id,
+                name=auto_create_context_name,
+                created_by=user_id,
+            )
+            return context.id
+        return None
 
     @staticmethod
     def _validate_inputs(
@@ -265,6 +353,41 @@ class ConnectorProvisioningService:
             .order_by(WorkspaceConnector.created_at.desc())
         )
         return list(result.scalars().all())
+
+    async def delete_connector(self, workspace_id: UUID, connector_id: UUID) -> bool:
+        """Delete a connector: revoke its KMC write key + drop its resource.
+
+        Revokes the workspace-scoped ``connector:{id}`` API key so the worker's
+        next config fetch fails closed, then deletes the owning ``resources``
+        row (CASCADE removes the connector + its resource token). The
+        write-target context is intentionally preserved (it holds user data).
+        Returns ``False`` if no matching connector exists in the workspace.
+        """
+        from models.auth import APIKey
+        from models.resource import Resource
+        from utils.datetime import utcnow
+
+        result = await self.db.execute(
+            select(WorkspaceConnector).where(
+                WorkspaceConnector.id == connector_id,
+                WorkspaceConnector.workspace_id == workspace_id,
+            )
+        )
+        connector = result.scalar_one_or_none()
+        if connector is None:
+            return False
+
+        await self.db.execute(
+            update(APIKey)
+            .where(
+                APIKey.workspace_id == workspace_id,
+                APIKey.name == f"connector:{connector_id}",
+                APIKey.revoked_at.is_(None),
+            )
+            .values(revoked_at=utcnow())
+        )
+        await self.db.execute(delete(Resource).where(Resource.id == connector.resource_pk))
+        return True
 
     async def _get_connector_for_resource(
         self,

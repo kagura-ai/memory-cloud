@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -66,6 +66,7 @@ class WorkspaceConnectorSummary(TZAwareBaseModel):
     connector_id: UUID
     connector_type: str
     resource_pk: UUID
+    context_id: UUID | None = None
     config_version: int
     created_at: datetime
     created_by: str | None = None
@@ -163,9 +164,54 @@ async def list_workspace_connectors(
             connector_id=c.id,
             connector_type=c.connector_type,
             resource_pk=c.resource_pk,
+            context_id=c.context_id,
             config_version=c.config_version,
             created_at=c.created_at,
             created_by=c.created_by,
         )
         for c in connectors
     ]
+
+
+@router.delete("/{connector_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_workspace_connector(
+    connector_id: UUID,
+    admin: WorkspaceAdmin,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Delete a connector (workspace-admin scoped).
+
+    Revokes the connector's KMC write key and drops its resource so the worker
+    stops on its next config fetch. 404 if the connector is not in the workspace.
+    """
+    workspace_id = admin.get("current_workspace_id")
+    if workspace_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No workspace selected. Please select a workspace first.",
+        )
+    try:
+        deleted = await ConnectorProvisioningService(db).delete_connector(
+            workspace_id, connector_id
+        )
+        if not deleted:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found"
+            )
+        await db.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await db.rollback()
+        logger.error(
+            "workspace_connector_delete_failed",
+            connector_id=str(connector_id),
+            workspace_id=str(workspace_id),
+            error=str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete workspace connector",
+        ) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
