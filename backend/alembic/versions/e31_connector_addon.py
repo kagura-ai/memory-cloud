@@ -53,4 +53,22 @@ def downgrade() -> None:
         f"ALTER TABLE workspace_addons ADD CONSTRAINT check_addon_type "
         f"CHECK (addon_type IN ({_TYPES_BEFORE}))"
     )
-    op.drop_column("workspaces", "addon_connector_bonus")
+    # Idempotent drop: mirrors the IF NOT EXISTS guard in upgrade().
+    # Note: any extra_connectors WorkspaceAddon rows are left in place (their
+    # addon_type is now outside the CHECK constraint, so they will fail
+    # validation on writes but remain as orphans). Operators should delete them
+    # manually or zero the bonus before downgrading.
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'workspaces'
+                  AND column_name = 'addon_connector_bonus'
+            ) THEN
+                ALTER TABLE workspaces DROP COLUMN addon_connector_bonus;
+            END IF;
+        END $$;
+        """
+    )

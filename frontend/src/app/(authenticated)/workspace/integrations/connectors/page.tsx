@@ -105,13 +105,16 @@ export default function ConnectorsPage() {
             title: t("installExpiredTitle"),
             description: t("installExpiredDesc"),
           });
+          // Strip the stale ?slack_install param so a page refresh or
+          // navigation back doesn't re-trigger this toast on every visit.
+          router.replace("/workspace/integrations/connectors");
         }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [installHandle, t, toast]);
+  }, [installHandle, t, toast, router]);
 
   const closeCreateDialog = useCallback(() => {
     setPending(null);

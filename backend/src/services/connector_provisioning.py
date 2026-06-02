@@ -91,6 +91,18 @@ class ConnectorProvisioningService:
 
         workspace = await self._get_workspace(workspace_id)
 
+        # One platform team maps to exactly one connector — check BEFORE creating
+        # any context so a duplicate is rejected without leaving orphan rows.
+        # Falsy check (not `is not None`) also rejects empty-string team_id from
+        # a malformed OAuth response. Do NOT include the conflicting connector_id —
+        # it may belong to a different workspace (cross-tenant UUID disclosure).
+        if external_team_id:
+            existing_team = await self.get_connector_for_dispatch(connector_type, external_team_id)
+            if existing_team is not None:
+                raise ConflictError(
+                    f"A {connector_type} connector for team '{external_team_id}' already exists.",
+                )
+
         # ``auto_create_context_name`` goes through ContextService.create_context,
         # which COMMITS mid-flow — that would release the seat-cap advisory lock
         # before the connector insert and re-open the TOCTOU over-provision hole.
@@ -107,7 +119,14 @@ class ConnectorProvisioningService:
                 context_id=None,
                 auto_create_context_name=auto_create_context_name,
             )
-            await self._enforce_connector_seat_cap(workspace, workspace_id)
+            try:
+                await self._enforce_connector_seat_cap(workspace, workspace_id)
+            except MemoryCloudException:
+                # The context was already committed by ContextService.create_context().
+                # Clean it up so we don't leave an orphan context with no connector.
+                if resolved_context_id is not None:
+                    await self._delete_orphan_context(resolved_context_id)
+                raise
         else:
             await self._enforce_connector_seat_cap(workspace, workspace_id)
             resolved_context_id = await self._resolve_context(
@@ -116,18 +135,6 @@ class ConnectorProvisioningService:
                 context_id=context_id,
                 auto_create_context_name=None,
             )
-
-        # One platform team maps to exactly one connector — reject a duplicate
-        # (connector_type, external_team_id) with a clean 409 instead of letting
-        # the UNIQUE index raise an opaque IntegrityError. Guards against a
-        # tenant hijacking another tenant's Slack team dispatch (code-review).
-        if external_team_id is not None:
-            existing_team = await self.get_connector_for_dispatch(connector_type, external_team_id)
-            if existing_team is not None:
-                raise ConflictError(
-                    f"A {connector_type} connector for team '{external_team_id}' already exists.",
-                    connector_id=str(existing_team.id),
-                )
 
         existing_resource_pk = await resolve_resource_pk(self.db, workspace_id, resource_id)
         resource_pk = await upsert_resource(
@@ -282,6 +289,28 @@ class ConnectorProvisioningService:
             raise ValidationError(
                 "quota_events_per_hour must be between 1 and 10000",
                 field="quota_events_per_hour",
+            )
+
+    async def _delete_orphan_context(self, context_id: UUID) -> None:
+        """Hard-delete a context that was committed before a provisioning failure.
+
+        ContextService.create_context() issues its own db.commit(), so the context
+        row is durable before provision_connector finishes. If the seat-cap check
+        subsequently fails, the already-committed context must be deleted explicitly
+        — the route-layer rollback cannot undo a prior commit. Uses a new session
+        connection via a raw Core DELETE so it commits independently.
+        """
+        from models.auth import Context
+
+        try:
+            await self.db.execute(delete(Context).where(Context.id == context_id))
+            await self.db.commit()
+            logger.info("orphan_context_cleaned_up", context_id=str(context_id))
+        except Exception:
+            logger.error(
+                "orphan_context_cleanup_failed",
+                context_id=str(context_id),
+                note="Manual cleanup required for orphaned context",
             )
 
     async def _get_workspace(self, workspace_id: UUID) -> Workspace:

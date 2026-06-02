@@ -8,6 +8,14 @@ server-side so the bot token never reaches the browser.
 
 Mirrors the GitHub OAuth pattern in ``auth.py`` (httpx token exchange, Redis
 CSRF state, ``_safe_redirect_url`` for the final redirect).
+
+Security notes
+--------------
+* ``/callback`` requires ``WorkspaceAdmin`` — the CSRF state alone is not
+  sufficient to authenticate the caller; the admin dependency ensures only the
+  workspace admin who initiated the install can complete it.
+* The bot_token is Fernet-encrypted before being stashed in Redis so it cannot
+  be read from a Redis dump, MONITOR output, or replication stream.
 """
 
 from __future__ import annotations
@@ -24,6 +32,7 @@ from fastapi.responses import RedirectResponse
 from auth.dependencies import WorkspaceAdmin
 from config.settings import get_settings
 from db.redis import get_redis_client
+from utils.encryption import get_encryptor
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -44,30 +53,39 @@ def _install_key(handle: str) -> str:
     return f"slack_install:{handle}"
 
 
-async def pop_slack_install(handle: str) -> dict[str, Any] | None:
-    """Fetch and delete a pending Slack install bundle (one-time use)."""
-    redis = get_redis_client()
-    raw = await redis.get(_install_key(handle))
-    if raw is None:
-        return None
-    await redis.delete(_install_key(handle))
-    return json.loads(raw)
-
-
 async def peek_slack_install(handle: str) -> dict[str, Any] | None:
     """Read a pending Slack install bundle WITHOUT consuming it.
 
     Used by the connector-create path so a provisioning failure leaves the
     handle intact for retry; the caller calls ``discard_slack_install`` only
-    after a successful create.
+    after a successful create. The bot_token in the returned dict is the
+    decrypted plaintext (decrypted at read time from the Fernet ciphertext
+    stored in Redis).
     """
-    raw = await get_redis_client().get(_install_key(handle))
-    return json.loads(raw) if raw is not None else None
+    try:
+        raw = await get_redis_client().get(_install_key(handle))
+    except Exception:
+        logger.warning("slack_install_redis_read_failed", handle=handle[:8])
+        return None
+    if raw is None:
+        return None
+    bundle = json.loads(raw)
+    # Decrypt the bot_token that was Fernet-encrypted before storage.
+    if bundle.get("bot_token_enc"):
+        try:
+            bundle["bot_token"] = get_encryptor().decrypt(bundle.pop("bot_token_enc"))
+        except Exception:
+            logger.warning("slack_install_bot_token_decrypt_failed", handle=handle[:8])
+            return None
+    return bundle
 
 
 async def discard_slack_install(handle: str) -> None:
     """Delete a consumed Slack install bundle (best-effort, after success)."""
-    await get_redis_client().delete(_install_key(handle))
+    try:
+        await get_redis_client().delete(_install_key(handle))
+    except Exception:
+        logger.warning("slack_install_discard_failed", handle=handle[:8])
 
 
 @router.get("/install")
@@ -87,7 +105,14 @@ async def slack_install(admin: WorkspaceAdmin) -> RedirectResponse:
         )
 
     state = secrets.token_urlsafe(32)
-    await get_redis_client().setex(_state_key(state), _STATE_TTL_SECONDS, str(workspace_id))
+    try:
+        await get_redis_client().setex(_state_key(state), _STATE_TTL_SECONDS, str(workspace_id))
+    except Exception:
+        logger.error("slack_oauth_state_store_failed", workspace_id=str(workspace_id))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to initiate Slack OAuth (storage unavailable)",
+        ) from None
 
     query = urlencode(
         {
@@ -103,7 +128,10 @@ async def slack_install(admin: WorkspaceAdmin) -> RedirectResponse:
 async def _exchange_slack_code(code: str) -> dict[str, Any]:
     """Exchange an OAuth code for a bot token + team identity."""
     settings = get_settings()
-    async with httpx.AsyncClient() as client:
+    # Explicit connect + read timeouts so a stalled Slack endpoint cannot
+    # block the async worker indefinitely (connect stall = OS timeout ~75s).
+    timeout = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=2.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(
             _SLACK_TOKEN_URL,
             data={
@@ -112,7 +140,6 @@ async def _exchange_slack_code(code: str) -> dict[str, Any]:
                 "code": code,
                 "redirect_uri": settings.slack_redirect_uri,
             },
-            timeout=10.0,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -123,6 +150,10 @@ async def _exchange_slack_code(code: str) -> dict[str, Any]:
 
 @router.get("/callback")
 async def slack_callback(
+    # WorkspaceAdmin re-asserts the caller's identity at callback time.
+    # The CSRF state alone validates origin but not the calling principal —
+    # any authenticated admin in the workspace can complete the install.
+    admin: WorkspaceAdmin,
     code: str = Query(...),
     state: str = Query(...),
 ) -> RedirectResponse:
@@ -130,13 +161,39 @@ async def slack_callback(
     settings = get_settings()
     redis = get_redis_client()
 
-    workspace_id = await redis.get(_state_key(state))
-    if workspace_id is None:
+    try:
+        stored = await redis.get(_state_key(state))
+    except Exception:
+        logger.error("slack_oauth_state_read_failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="OAuth state storage unavailable",
+        ) from None
+
+    if stored is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired state token (CSRF protection)",
         )
-    await redis.delete(_state_key(state))
+
+    # Normalise workspace_id: aioredis may return str or bytes depending on
+    # decode_responses config; str(UUID()) and str(bytes) are both valid
+    # UUID strings so we normalise via str() on both sides.
+    stored_workspace_id = stored.decode() if isinstance(stored, bytes) else stored
+
+    # Validate that the callback is for the same workspace admin who initiated
+    # the install, preventing cross-workspace install completion.
+    current_workspace_id = str(admin.get("current_workspace_id") or "")
+    if stored_workspace_id != current_workspace_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Workspace mismatch — please start the Slack connection again",
+        )
+
+    try:
+        await redis.delete(_state_key(state))
+    except Exception:
+        logger.warning("slack_oauth_state_delete_failed", state=state[:8])
 
     try:
         data = await _exchange_slack_code(code)
@@ -149,15 +206,35 @@ async def slack_callback(
 
     team = data.get("team") or {}
     authed_user = data.get("authed_user") or {}
+    bot_token = data.get("access_token") or ""
+
+    # Fernet-encrypt the bot_token before storing in Redis so it is never
+    # exposed in a Redis memory dump, MONITOR trace, or replication stream.
+    try:
+        bot_token_enc = get_encryptor().encrypt(bot_token) if bot_token else ""
+    except Exception:
+        logger.error("slack_bot_token_encrypt_failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to secure Slack credentials",
+        ) from None
+
     install = {
-        "workspace_id": workspace_id.decode() if isinstance(workspace_id, bytes) else workspace_id,
-        "bot_token": data.get("access_token"),
+        "workspace_id": stored_workspace_id,
+        "bot_token_enc": bot_token_enc,
         "team_id": team.get("id"),
         "team_name": team.get("name"),
         "installing_admin_user_id": authed_user.get("id"),
     }
     handle = secrets.token_urlsafe(24)
-    await redis.setex(_install_key(handle), _INSTALL_TTL_SECONDS, json.dumps(install))
+    try:
+        await redis.setex(_install_key(handle), _INSTALL_TTL_SECONDS, json.dumps(install))
+    except Exception:
+        logger.error("slack_install_store_failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to store Slack install (storage unavailable)",
+        ) from None
 
     frontend = settings.frontend_url.rstrip("/")
     return RedirectResponse(
@@ -175,12 +252,17 @@ async def slack_pending(handle: str, admin: WorkspaceAdmin) -> dict[str, Any]:
     to another workspace.
     """
     workspace_id = admin.get("current_workspace_id")
-    raw = await get_redis_client().get(_install_key(handle))
+    try:
+        raw = await get_redis_client().get(_install_key(handle))
+    except Exception:
+        logger.warning("slack_pending_redis_read_failed", handle=handle[:8])
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Storage unavailable") from None
     if raw is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No pending Slack install")
     install = json.loads(raw)
     if str(install.get("workspace_id")) != str(workspace_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No pending Slack install")
+    # Never return bot_token_enc or any secret field.
     return {
         "team_id": install.get("team_id"),
         "team_name": install.get("team_name"),

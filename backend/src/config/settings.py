@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     # ai-worker (kagura-memory-ai-worker) service auth. The worker presents this
     # as a Bearer token to GET /api/v1/workers/config (Spec 2026-06-02). Empty
     # disables the worker config endpoint (fail-closed). Use: openssl rand -hex 32.
+    #
+    # SECURITY NOTE: Settings are read once at process startup and cached as a
+    # module-level singleton (see get_settings()). Rotating WORKER_SERVICE_TOKEN
+    # in the environment requires a process restart to take effect — the in-memory
+    # cached value is not reloaded automatically. This applies to all secrets in
+    # this class. Ensure your secret-rotation runbook includes a rolling restart.
     worker_service_token: str = Field(
         default="",
         description="Shared bearer token authenticating the ai-worker to /api/v1/workers/* (RFC 6750)",

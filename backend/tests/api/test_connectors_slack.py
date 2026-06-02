@@ -36,6 +36,14 @@ def _settings(**over):
     return SimpleNamespace(**base)
 
 
+def _fake_encryptor():
+    """Return a minimal encryptor stub: encrypt prepends 'ENC:', decrypt strips it."""
+    enc = MagicMock()
+    enc.encrypt = lambda s: f"ENC:{s}"
+    enc.decrypt = lambda s: s[4:] if s.startswith("ENC:") else s
+    return enc
+
+
 @pytest.mark.asyncio
 async def test_install_redirects_to_slack_and_stores_state():
     from api.routes.connectors_slack import slack_install
@@ -71,11 +79,13 @@ async def test_install_503_when_unconfigured():
 
 
 @pytest.mark.asyncio
-async def test_callback_exchanges_code_and_stashes_install():
+async def test_callback_exchanges_code_and_stashes_encrypted_install():
+    """Callback requires WorkspaceAdmin; bot_token is Fernet-encrypted in Redis."""
     from api.routes.connectors_slack import slack_callback
 
     ws_id = uuid4()
     redis = _FakeRedis({f"slack_oauth_state:st": str(ws_id)})
+    admin = {"user_id": "u1", "current_workspace_id": ws_id}
 
     token_resp = MagicMock()
     token_resp.raise_for_status = MagicMock()
@@ -95,16 +105,19 @@ async def test_callback_exchanges_code_and_stashes_install():
         patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
         patch("api.routes.connectors_slack.get_redis_client", return_value=redis),
         patch("api.routes.connectors_slack.httpx.AsyncClient", return_value=http_ctx),
+        patch("api.routes.connectors_slack.get_encryptor", return_value=_fake_encryptor()),
     ):
-        resp = await slack_callback(code="abc", state="st")
+        resp = await slack_callback(admin=admin, code="abc", state="st")
 
     assert resp.status_code == 303
     assert "/workspace/integrations/connectors?slack_install=" in resp.headers["location"]
-    # State consumed; install stashed with the bot token + team id.
+    # State consumed.
     assert "slack_oauth_state:st" not in redis.store
+    # Install stashed with encrypted bot_token (no plaintext bot_token key).
     install_raw = next(v for k, v in redis.store.items() if k.startswith("slack_install:"))
     install = json.loads(install_raw)
-    assert install["bot_token"] == "xoxb-123"
+    assert "bot_token" not in install, "bot_token must not be stored in plaintext"
+    assert install["bot_token_enc"] == "ENC:xoxb-123"
     assert install["team_id"] == "T01"
     assert install["installing_admin_user_id"] == "U01"
     assert str(install["workspace_id"]) == str(ws_id)
@@ -116,12 +129,34 @@ async def test_callback_rejects_unknown_state():
 
     from api.routes.connectors_slack import slack_callback
 
+    admin = {"user_id": "u1", "current_workspace_id": uuid4()}
     with (
         patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
         patch("api.routes.connectors_slack.get_redis_client", return_value=_FakeRedis()),
     ):
         with pytest.raises(HTTPException) as exc:
-            await slack_callback(code="abc", state="missing")
+            await slack_callback(admin=admin, code="abc", state="missing")
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_workspace_mismatch():
+    """Admin's workspace must match the workspace stored in the CSRF state."""
+    from fastapi import HTTPException
+
+    from api.routes.connectors_slack import slack_callback
+
+    stored_ws = uuid4()
+    different_ws = uuid4()
+    redis = _FakeRedis({f"slack_oauth_state:st": str(stored_ws)})
+    admin = {"user_id": "u1", "current_workspace_id": different_ws}  # mismatch
+
+    with (
+        patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
+        patch("api.routes.connectors_slack.get_redis_client", return_value=redis),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await slack_callback(admin=admin, code="abc", state="st")
     assert exc.value.status_code == 400
 
 
@@ -130,9 +165,10 @@ async def test_pending_returns_summary_without_bot_token():
     from api.routes.connectors_slack import slack_pending
 
     ws_id = uuid4()
+    # The store uses bot_token_enc (encrypted), not bot_token.
     install = {
         "workspace_id": str(ws_id),
-        "bot_token": "xoxb-secret",
+        "bot_token_enc": "ENC:xoxb-secret",
         "team_id": "T01",
         "team_name": "Acme",
         "installing_admin_user_id": "U01",
@@ -145,6 +181,7 @@ async def test_pending_returns_summary_without_bot_token():
 
     assert result == {"team_id": "T01", "team_name": "Acme", "installing_admin_user_id": "U01"}
     assert "bot_token" not in result
+    assert "bot_token_enc" not in result
 
 
 @pytest.mark.asyncio
@@ -164,13 +201,23 @@ async def test_pending_404_for_other_workspace():
 
 
 @pytest.mark.asyncio
-async def test_pop_slack_install_is_one_time():
+async def test_peek_does_not_consume_and_discard_removes():
+    """peek_slack_install is non-consuming; discard_slack_install removes the entry."""
     from api.routes import connectors_slack
 
-    redis = _FakeRedis({"slack_install:h1": json.dumps({"team_id": "T01"})})
-    with patch("api.routes.connectors_slack.get_redis_client", return_value=redis):
-        first = await connectors_slack.pop_slack_install("h1")
-        second = await connectors_slack.pop_slack_install("h1")
+    install = {"workspace_id": "ws1", "bot_token_enc": "ENC:xoxb-x", "team_id": "T01"}
+    redis = _FakeRedis({"slack_install:h1": json.dumps(install)})
 
-    assert first == {"team_id": "T01"}
-    assert second is None  # consumed
+    with (
+        patch("api.routes.connectors_slack.get_redis_client", return_value=redis),
+        patch("api.routes.connectors_slack.get_encryptor", return_value=_fake_encryptor()),
+    ):
+        first = await connectors_slack.peek_slack_install("h1")
+        second = await connectors_slack.peek_slack_install("h1")  # still present
+        assert first is not None
+        assert second is not None  # peek does NOT consume
+        assert first["bot_token"] == "xoxb-x"  # decrypted at read time
+
+        await connectors_slack.discard_slack_install("h1")
+        third = await connectors_slack.peek_slack_install("h1")
+    assert third is None  # now consumed by discard

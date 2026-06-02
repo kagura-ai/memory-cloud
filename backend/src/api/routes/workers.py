@@ -18,7 +18,7 @@ import secrets
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
@@ -74,7 +74,7 @@ class WorkerConnectorConfig(TZAwareBaseModel):
 @router.get("/config", response_model=WorkerConnectorConfig)
 async def get_worker_config(
     platform: Literal["slack", "discord", "teams"],
-    team_id: str,
+    team_id: str = Query(..., max_length=255),
     _: None = Depends(verify_worker_token),
     db: AsyncSession = Depends(get_db),
 ) -> WorkerConnectorConfig:
@@ -86,7 +86,8 @@ async def get_worker_config(
     connector = await ConnectorProvisioningService(db).get_connector_for_dispatch(
         connector_type=platform, external_team_id=team_id
     )
-    if connector is None or connector.context_id is None:
+    kmc_api_key = connector.get_kmc_api_key() if connector else None
+    if connector is None or connector.context_id is None or not kmc_api_key:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No ready connector for this team",
@@ -106,7 +107,7 @@ async def get_worker_config(
         platform=connector.connector_type,
         locale=connector.locale,
         slack=slack,
-        kmc={"mcp_url": get_settings().kmc_mcp_url, "api_key": connector.get_kmc_api_key()},
+        kmc={"mcp_url": get_settings().kmc_mcp_url, "api_key": kmc_api_key},
         llm=connector.get_llm_config(),
         pii_guardrail_config=connector.pii_guardrail_config,
     )

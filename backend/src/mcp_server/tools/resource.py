@@ -1120,6 +1120,14 @@ async def handle_setup_connector(
                 litellm_virtual_key_id=args.get("litellm_virtual_key_id"),
                 virtual_key_valid_until=virtual_key_valid_until,
                 quota_events_per_hour=quota_events_per_hour,
+                # Spec 2026-06-02 registration fields: forwarded so the MCP path
+                # can bind a write-target context and mint a KMC write key.
+                context_id=args.get("context_id"),
+                auto_create_context_name=args.get("auto_create_context_name"),
+                llm_config=args.get("llm_config"),
+                channel_ids=args.get("channel_ids"),
+                locale=args.get("locale"),
+                external_team_id=args.get("external_team_id"),
             )
             await db.commit()
             await db.refresh(result.connector)
@@ -1134,17 +1142,22 @@ async def handle_setup_connector(
                 workspace_id=workspace_id,
             )
 
-            return _success_response(
-                message=f"Connector '{result.connector.id}' set up successfully.",
-                connector_id=str(result.connector.id),
-                connector_type=result.connector.connector_type,
-                resource_id=result.resource_id,
-                resource_pk=str(result.resource_pk),
-                token_id=result.token.id,
-                token=result.plaintext_token,
-                quota_events_per_hour=result.token.quota_events_per_hour,
-                idempotency_key_prefix=f"{result.connector.id}:",
-            )
+            success_kwargs: dict[str, object] = {
+                "message": f"Connector '{result.connector.id}' set up successfully.",
+                "connector_id": str(result.connector.id),
+                "connector_type": result.connector.connector_type,
+                "resource_id": result.resource_id,
+                "resource_pk": str(result.resource_pk),
+                "token_id": result.token.id,
+                "token": result.plaintext_token,
+                "quota_events_per_hour": result.token.quota_events_per_hour,
+                "idempotency_key_prefix": f"{result.connector.id}:",
+            }
+            if result.context_id is not None:
+                success_kwargs["context_id"] = str(result.context_id)
+            if result.plaintext_kmc_api_key is not None:
+                success_kwargs["kmc_api_key"] = result.plaintext_kmc_api_key
+            return _success_response(**success_kwargs)
 
         except MemoryCloudException as exc:
             await db.rollback()

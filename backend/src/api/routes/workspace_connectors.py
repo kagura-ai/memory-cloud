@@ -123,12 +123,20 @@ async def create_workspace_connector(
 
     # Resolve a Slack OAuth install handle server-side so the bot token never
     # has to be sent by the browser (Spec 2026-06-02, Plan 4).
+    # Mutual exclusion: sending both slack_install_handle AND oauth_tokens is
+    # ambiguous — reject it explicitly rather than silently dropping one.
+    if request.slack_install_handle and request.oauth_tokens:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide either slack_install_handle or oauth_tokens, not both",
+        )
+
     oauth_tokens = request.oauth_tokens
     external_team_id = request.external_team_id
     if request.slack_install_handle:
         # Peek (do NOT consume) so a provisioning failure leaves the handle
         # intact for retry — it is discarded only after a successful create.
-        from api.routes.connectors_slack import peek_slack_install
+        from api.routes.connectors_slack import discard_slack_install, peek_slack_install
 
         install = await peek_slack_install(request.slack_install_handle)
         if install is None or str(install.get("workspace_id")) != str(workspace_id):
@@ -164,12 +172,6 @@ async def create_workspace_connector(
         await db.commit()
         await db.refresh(result.connector)
         await db.refresh(result.token)
-        # Consume the Slack install handle only now that the connector is
-        # committed — a failure above left it intact for retry.
-        if request.slack_install_handle:
-            from api.routes.connectors_slack import discard_slack_install
-
-            await discard_slack_install(request.slack_install_handle)
     except MemoryCloudException:
         await db.rollback()
         raise
@@ -187,6 +189,13 @@ async def create_workspace_connector(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create workspace connector",
         ) from exc
+
+    # Discard the Slack install handle AFTER the commit succeeds and OUTSIDE
+    # the try block so a Redis failure here does not trigger a spurious rollback
+    # of an already-committed connector.  discard_slack_install is best-effort
+    # (handles its own exceptions) — the handle will expire via TTL regardless.
+    if request.slack_install_handle:
+        await discard_slack_install(request.slack_install_handle)
 
     return WorkspaceConnectorCreateResponse(
         connector_id=result.connector.id,
