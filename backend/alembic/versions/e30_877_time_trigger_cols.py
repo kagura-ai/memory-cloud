@@ -10,6 +10,7 @@ the window-overlap query + ORDER BY trigger_from sort on GET /memory/list.
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 # revision identifiers
