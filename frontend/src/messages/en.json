@@ -29,7 +29,8 @@
     "copy": "Copy",
     "areYouSure": "Are you sure?",
     "thisActionCannotBeUndone": "This action cannot be undone.",
-    "saving": "Saving..."
+    "saving": "Saving...",
+    "done": "Done"
   },
   "navigation": {
     "dashboard": "Dashboard",
@@ -81,7 +82,8 @@
     "version": "v{version}",
     "kaguraLogoAria": "Kagura Memory Cloud",
     "languageChanged": "Language changed",
-    "languageChangeError": "An error occurred while changing the language"
+    "languageChangeError": "An error occurred while changing the language",
+    "connectors": "Connectors"
   },
   "auth": {
     "signIn": "Sign In",
@@ -3580,5 +3582,30 @@
     "errorMessage": "An unexpected error occurred. Please try again.",
     "backToVerify": "Enter a different code",
     "tryAgain": "Try again"
+  },
+  "connectors": {
+    "title": "Workspace Connectors",
+    "description": "Connect external chat platforms so the ai-worker ingests conversations into a memory context.",
+    "connectSlack": "Connect Slack",
+    "emptyTitle": "No connectors yet",
+    "emptyDesc": "Connect Slack to start ingesting conversations into a memory context.",
+    "contextBound": "Writes to context {id}",
+    "contextNotReady": "Setup incomplete — no write-target context",
+    "createTitle": "Create Slack connector",
+    "createDesc": "Connecting {team}. A private context will be created to hold ingested conversations.",
+    "displayName": "Display name",
+    "contextName": "Context name",
+    "contextNameHelp": "Lowercase letters, numbers, hyphen and underscore only.",
+    "createConnector": "Create connector",
+    "createdTitle": "Connector created",
+    "createdDesc": "Copy the worker credentials now — they are shown only once.",
+    "connectorId": "Connector ID",
+    "kmcApiKey": "KMC write key",
+    "deleteTitle": "Delete connector?",
+    "deleteDesc": "This revokes the connector's write key and stops ingestion. The memory context is preserved.",
+    "connectorDeleted": "Connector deleted",
+    "deleteFailed": "Failed to delete connector",
+    "installExpiredTitle": "Slack install expired",
+    "installExpiredDesc": "The Slack authorization handle is invalid or expired. Please connect again."
   }
 }

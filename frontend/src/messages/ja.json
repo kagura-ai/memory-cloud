@@ -29,7 +29,8 @@
     "copy": "コピー",
     "areYouSure": "本当によろしいですか？",
     "thisActionCannotBeUndone": "この操作は元に戻せません。",
-    "saving": "保存中..."
+    "saving": "保存中...",
+    "done": "完了"
   },
   "navigation": {
     "dashboard": "ダッシュボード",
@@ -81,7 +82,8 @@
     "version": "v{version}",
     "kaguraLogoAria": "Kagura Memory Cloud",
     "languageChanged": "言語を変更しました",
-    "languageChangeError": "言語の変更中にエラーが発生しました"
+    "languageChangeError": "言語の変更中にエラーが発生しました",
+    "connectors": "コネクタ"
   },
   "auth": {
     "signIn": "サインイン",
@@ -3580,5 +3582,30 @@
     "errorMessage": "予期しないエラーが発生しました。もう一度お試しください。",
     "backToVerify": "別のコードを入力",
     "tryAgain": "再試行"
+  },
+  "connectors": {
+    "title": "ワークスペースコネクタ",
+    "description": "外部チャットプラットフォームを接続し、ai-worker が会話をメモリコンテキストに取り込みます。",
+    "connectSlack": "Slack を接続",
+    "emptyTitle": "コネクタがありません",
+    "emptyDesc": "Slack を接続して会話のメモリ取り込みを開始します。",
+    "contextBound": "コンテキスト {id} に書き込み",
+    "contextNotReady": "セットアップ未完了 — 書き込み先コンテキストなし",
+    "createTitle": "Slack コネクタを作成",
+    "createDesc": "{team} を接続します。取り込んだ会話を保持するプライベートコンテキストを作成します。",
+    "displayName": "表示名",
+    "contextName": "コンテキスト名",
+    "contextNameHelp": "英小文字・数字・ハイフン・アンダースコアのみ。",
+    "createConnector": "コネクタを作成",
+    "createdTitle": "コネクタを作成しました",
+    "createdDesc": "ワーカー用の認証情報を今すぐコピーしてください（一度だけ表示されます）。",
+    "connectorId": "コネクタ ID",
+    "kmcApiKey": "KMC 書き込みキー",
+    "deleteTitle": "コネクタを削除しますか？",
+    "deleteDesc": "コネクタの書き込みキーを失効し取り込みを停止します。メモリコンテキストは保持されます。",
+    "connectorDeleted": "コネクタを削除しました",
+    "deleteFailed": "コネクタの削除に失敗しました",
+    "installExpiredTitle": "Slack 連携の期限切れ",
+    "installExpiredDesc": "Slack 認可ハンドルが無効か期限切れです。もう一度接続してください。"
   }
 }
