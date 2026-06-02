@@ -127,29 +127,28 @@ class TestZeroBaseBypassClosed:
 
 
 class TestEffectiveMaxConnectors:
-    """Issue #850 (F6-a of #755): the ai-worker connector seat cap is a
-    tier-fixed value with NO addon, mirroring ``effective_max_resource_tokens``.
-    It is therefore NOT part of the ``_zero_floor`` addon-stacking family above.
-    FREE=0 / BASIC=3 / PRO=10.
+    """Spec 2026-06-02: the ai-worker connector seat cap is plan tier base +
+    the ``extra_connectors`` addon (mirrors ``effective_max_members``).
+    Tier bases FREE=0 / BASIC=3 / PRO=10.
     """
 
     @pytest.mark.parametrize(
         ("plan_name", "expected"),
         [("free", 0), ("basic", 3), ("pro", 10)],
     )
-    def test_tier_fixed_value(self, plan_name, expected):
+    def test_tier_base_with_no_addon(self, plan_name, expected):
         from config.plan_tiers import get_plan_tier
 
         ws = MagicMock()
         ws._plan_tier = get_plan_tier(plan_name)
+        ws.addon_connector_bonus = 0
         assert Workspace.effective_max_connectors.fget(ws) == expected
 
-    def test_reads_tier_directly_with_no_addon(self):
-        """No addon column feeds this cap — the property returns the tier value
-        unchanged (a stray addon-like attribute on the workspace is ignored)."""
+    def test_addon_stacks_on_tier_base(self):
+        """The extra_connectors addon adds seats on top of the tier base."""
         from config.plan_tiers import get_plan_tier
 
         ws = MagicMock()
-        ws._plan_tier = get_plan_tier("pro")
-        ws.addon_connector_bonus = 99  # no such addon exists; must be ignored
-        assert Workspace.effective_max_connectors.fget(ws) == 10
+        ws._plan_tier = get_plan_tier("pro")  # base 10
+        ws.addon_connector_bonus = 5
+        assert Workspace.effective_max_connectors.fget(ws) == 15

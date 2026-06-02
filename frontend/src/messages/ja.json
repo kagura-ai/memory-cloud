@@ -2174,7 +2174,8 @@
         "resource": "リソース",
         "base": "ベース",
         "addon": "アドオン",
-        "effectiveUsage": "有効値 / 使用量"
+        "effectiveUsage": "有効値 / 使用量",
+        "connector": "コネクタ"
       },
       "addonDialog": {
         "title": "アドオン編集",
@@ -2198,7 +2199,8 @@
         "invalidWarning": {
           "title": "保存できないアドオン値があります",
           "body": "{keys} の値が単位の倍数になっていない（または負の値）ため、保存時に拒否されます。有効な値を入力するまで保存は無効化されます。"
-        }
+        },
+        "connector": "コネクタ"
       },
       "spendCapDialog": {
         "title": "上限額を編集",

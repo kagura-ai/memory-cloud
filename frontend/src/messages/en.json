@@ -2174,7 +2174,8 @@
         "resource": "Resource",
         "base": "Base",
         "addon": "Addon",
-        "effectiveUsage": "Effective / Usage"
+        "effectiveUsage": "Effective / Usage",
+        "connector": "Connectors"
       },
       "addonDialog": {
         "title": "Edit Addons",
@@ -2198,7 +2199,8 @@
         "invalidWarning": {
           "title": "Some addon values can't be saved",
           "body": "The value for {keys} is not a valid multiple of its unit (or is negative) and would be rejected on save. Saving is disabled until you enter a valid amount."
-        }
+        },
+        "connector": "Connectors"
       },
       "spendCapDialog": {
         "title": "Edit Spend Cap",

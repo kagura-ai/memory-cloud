@@ -1331,6 +1331,9 @@ class Workspace(Base):
     addon_sleep_contexts_bonus: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )  # Issue #560: Sleep-enabled contexts addon (PRO-only)
+    addon_connector_bonus: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )  # Spec 2026-06-02: extra ai-worker connector seats addon
 
     # Issue #709: Per-workspace embedding spend caps (USD, BYOK-only). NULL =
     # "inherit tier default from ``PlanTier.embedding_*_cap_usd``"; non-NULL =
@@ -1467,17 +1470,16 @@ class Workspace(Base):
 
     @property
     def effective_max_connectors(self) -> int:
-        """Max ai-worker connectors: tier-fixed value (Issue #850, F6-a of #755).
+        """Max ai-worker connectors: plan tier base + ``extra_connectors`` addon.
 
-        Like ``effective_max_resource_tokens``, this is a purely
-        tier-determined seat cap with no addon — no ``_zero_floor`` is needed
-        because there is no addon to clamp. It governs ai-worker chat-ingest
-        connector creation independently of ``max_resource_tokens``: the F6-b
-        setup flow mints a connector-owned resource token that bypasses the
-        ``max_resource_tokens`` Pro+ gate and is bounded by this count instead.
-        FREE=0 / BASIC=1 / PRO=5.
+        Tier bases are FREE=0 / BASIC=3 / PRO=10 (Spec 2026-06-02). Admins can
+        grant extra seats per workspace via the ``extra_connectors`` addon, which
+        ``AddonCalculatorService`` accumulates into ``addon_connector_bonus``
+        (mirrors ``effective_max_members`` / sleep contexts). It governs
+        ai-worker chat-ingest connector creation independently of
+        ``max_resource_tokens``.
         """
-        return self._plan_tier.max_connectors
+        return _zero_floor(self._plan_tier.max_connectors, self.addon_connector_bonus)
 
     @property
     def effective_sleep_enabled_contexts_limit(self) -> int:

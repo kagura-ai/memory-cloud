@@ -33,7 +33,8 @@ export type AddonKey =
   | "contexts"
   | "analysis"
   | "storage"
-  | "sleep";
+  | "sleep"
+  | "connector";
 
 export type AddonValuesByKey = Record<AddonKey, number>;
 
@@ -153,6 +154,14 @@ export const ADDON_TYPES: readonly AddonTypeMeta[] = [
     updateField: "addon_sleep_contexts_bonus",
     proOnly: true,
   },
+  {
+    key: "connector",
+    perUnit: 1,
+    unitSuffix: "",
+    baseField: "max_connectors",
+    addonField: "connector_bonus",
+    updateField: "addon_connector_bonus",
+  },
 ];
 
 /**
@@ -185,6 +194,7 @@ export const EMPTY_ADDON_VALUES: AddonValuesByKey = {
   analysis: 0,
   storage: 0,
   sleep: 0,
+  connector: 0,
 };
 
 /**

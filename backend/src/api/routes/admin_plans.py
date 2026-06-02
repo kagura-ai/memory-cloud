@@ -91,6 +91,7 @@ class QuotaBreakdown(BaseModel):
     storage_bytes_limit: int = 0
     sleep_enabled_contexts_limit: int = 0
     max_resource_tokens: int = 0  # Issue #663: tier-fixed (no addon), surfaced read-only
+    max_connectors: int = 0  # Spec 2026-06-02: tier base for the extra_connectors addon
 
 
 class AddonValues(BaseModel):
@@ -110,6 +111,7 @@ class AddonValues(BaseModel):
     analysis_bonus: int = 0
     storage_bonus_mb: int = 0
     sleep_contexts_bonus: int = 0
+    connector_bonus: int = 0
 
 
 class UsageValues(BaseModel):
@@ -186,6 +188,7 @@ class UpdateAddonRequest(BaseModel):
     addon_public_quota_bonus: int | None = Field(None, ge=0, le=2_000_000_000)
     addon_storage_bonus_mb: int | None = Field(None, ge=0, le=2_000_000_000)
     addon_sleep_contexts_bonus: int | None = Field(None, ge=0, le=2_000_000_000)
+    addon_connector_bonus: int | None = Field(None, ge=0, le=2_000_000_000)
 
 
 class UpdateSpendCapRequest(BaseModel):
@@ -770,6 +773,7 @@ async def get_workspace_quotas(
                 storage_bytes_limit=plan_tier.storage_limit_bytes,
                 sleep_enabled_contexts_limit=plan_tier.sleep_enabled_contexts_limit,
                 max_resource_tokens=plan_tier.max_resource_tokens,
+                max_connectors=plan_tier.max_connectors,
             ),
             addon=AddonValues(
                 memory_bonus=workspace.addon_memory_bonus,
@@ -781,6 +785,7 @@ async def get_workspace_quotas(
                 analysis_bonus=workspace.addon_analysis_bonus,
                 storage_bonus_mb=workspace.addon_storage_bonus_mb,
                 sleep_contexts_bonus=workspace.addon_sleep_contexts_bonus,
+                connector_bonus=workspace.addon_connector_bonus,
             ),
             effective=QuotaBreakdown(
                 memory_limit=effective["memory_limit"],
@@ -793,6 +798,7 @@ async def get_workspace_quotas(
                 storage_bytes_limit=effective["storage_bytes_limit"],
                 sleep_enabled_contexts_limit=effective["sleep_enabled_contexts_limit"],
                 max_resource_tokens=effective["max_resource_tokens"],
+                max_connectors=workspace.effective_max_connectors,
             ),
             usage=UsageValues(
                 memories=memory_count,
@@ -888,6 +894,12 @@ _ADDON_FIELD_SPECS: tuple[_AddonFieldSpec, ...] = (
         "extra_sleep_contexts",
         ADDON_UNIT_VALUES["extra_sleep_contexts"],
         "sleep_contexts",
+    ),
+    _AddonFieldSpec(
+        "addon_connector_bonus",
+        "extra_connectors",
+        ADDON_UNIT_VALUES["extra_connectors"],
+        None,  # Spec 2026-06-02: no usage-clamp guard (cap enforced at create time)
     ),
 )
 
