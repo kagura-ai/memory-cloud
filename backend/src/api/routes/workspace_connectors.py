@@ -45,17 +45,32 @@ class WorkspaceConnectorCreateRequest(BaseModel):
     litellm_virtual_key_id: str | None = Field(None, max_length=255)
     virtual_key_valid_until: datetime | None = None
     quota_events_per_hour: int = Field(1000, ge=1, le=10000)
+    # Spec 2026-06-02 registration flow (all optional, backward-compatible).
+    context_id: UUID | None = Field(None, description="Existing write-target context")
+    auto_create_context_name: str | None = Field(
+        None, max_length=100, description="Create a fresh private context with this name"
+    )
+    llm_config: dict[str, Any] | None = Field(None, description="BYO LLM bundle; Fernet-encrypted")
+    channel_ids: list[Any] | None = Field(None, description="Ingest channel selection")
+    locale: str | None = Field(None, max_length=10)
+    external_team_id: str | None = Field(
+        None, max_length=255, description="Platform team id (worker dispatch key)"
+    )
 
 
 class WorkspaceConnectorCreateResponse(BaseModel):
-    """Connector setup response. The token is shown exactly once."""
+    """Connector setup response. The token + KMC key are shown exactly once."""
 
     connector_id: UUID
     connector_type: str
     resource_id: str
     resource_pk: UUID
+    context_id: UUID | None = None
     token_id: int
     token: str = Field(..., description="Plaintext resource token; save immediately")
+    kmc_api_key: str | None = Field(
+        None, description="Plaintext KMC write key; shown once (registration flow only)"
+    )
     quota_events_per_hour: int
     idempotency_key_prefix: str
 
@@ -112,6 +127,12 @@ async def create_workspace_connector(
             litellm_virtual_key_id=request.litellm_virtual_key_id,
             virtual_key_valid_until=request.virtual_key_valid_until,
             quota_events_per_hour=request.quota_events_per_hour,
+            context_id=request.context_id,
+            auto_create_context_name=request.auto_create_context_name,
+            llm_config=request.llm_config,
+            channel_ids=request.channel_ids,
+            locale=request.locale,
+            external_team_id=request.external_team_id,
         )
         await db.commit()
         await db.refresh(result.connector)
@@ -139,8 +160,10 @@ async def create_workspace_connector(
         connector_type=result.connector.connector_type,
         resource_id=result.resource_id,
         resource_pk=result.resource_pk,
+        context_id=result.context_id,
         token_id=result.token.id,
         token=result.plaintext_token,
+        kmc_api_key=result.plaintext_kmc_api_key,
         quota_events_per_hour=result.token.quota_events_per_hour,
         idempotency_key_prefix=f"{result.connector.id}:",
     )
