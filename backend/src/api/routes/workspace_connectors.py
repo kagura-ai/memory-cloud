@@ -56,6 +56,12 @@ class WorkspaceConnectorCreateRequest(BaseModel):
     external_team_id: str | None = Field(
         None, max_length=255, description="Platform team id (worker dispatch key)"
     )
+    slack_install_handle: str | None = Field(
+        None,
+        max_length=255,
+        description="One-time handle from the Slack OAuth callback; resolved "
+        "server-side to oauth_tokens + external_team_id (bot token never sent by client)",
+    )
 
 
 class WorkspaceConnectorCreateResponse(BaseModel):
@@ -115,6 +121,25 @@ async def create_workspace_connector(
     except ValueError as ve:
         raise ValidationError(str(ve), field="pii_guardrail_config") from ve
 
+    # Resolve a Slack OAuth install handle server-side so the bot token never
+    # has to be sent by the browser (Spec 2026-06-02, Plan 4).
+    oauth_tokens = request.oauth_tokens
+    external_team_id = request.external_team_id
+    if request.slack_install_handle:
+        from api.routes.connectors_slack import pop_slack_install
+
+        install = await pop_slack_install(request.slack_install_handle)
+        if install is None or str(install.get("workspace_id")) != str(workspace_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Slack install handle is invalid or expired",
+            )
+        oauth_tokens = {
+            "bot_token": install.get("bot_token"),
+            "installing_admin_user_id": install.get("installing_admin_user_id"),
+        }
+        external_team_id = install.get("team_id")
+
     try:
         result = await ConnectorProvisioningService(db).provision_connector(
             workspace_id=workspace_id,
@@ -122,7 +147,7 @@ async def create_workspace_connector(
             connector_type=request.connector_type,
             resource_id=request.resource_id,
             display_name=request.display_name,
-            oauth_tokens=request.oauth_tokens,
+            oauth_tokens=oauth_tokens,
             pii_guardrail_config=pii_guardrail_config,
             litellm_virtual_key_id=request.litellm_virtual_key_id,
             virtual_key_valid_until=request.virtual_key_valid_until,
@@ -132,7 +157,7 @@ async def create_workspace_connector(
             llm_config=request.llm_config,
             channel_ids=request.channel_ids,
             locale=request.locale,
-            external_team_id=request.external_team_id,
+            external_team_id=external_team_id,
         )
         await db.commit()
         await db.refresh(result.connector)

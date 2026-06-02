@@ -86,6 +86,18 @@ class Settings(BaseSettings):
         default="http://localhost:8080/mcp",
         description="Public MCP base URL returned to ai-worker connectors for memory writes",
     )
+    # Slack connector OAuth (shared Kagura Slack app). Empty client_id disables
+    # the Slack connect flow (Spec 2026-06-02, Plan 4).
+    slack_client_id: str = Field(default="", description="Slack app OAuth client id")
+    slack_client_secret: str = Field(default="", description="Slack app OAuth client secret")
+    slack_redirect_uri: str = Field(
+        default="http://localhost:8080/api/v1/connectors/slack/callback",
+        description="Slack OAuth redirect URI (must match the Slack app config)",
+    )
+    slack_oauth_scopes: str = Field(
+        default="channels:history,channels:read,groups:history,chat:write,team:read,users:read",
+        description="Comma-separated Slack bot scopes requested at install",
+    )
     jwt_secret: str = Field(
         default="dev-secret-change-in-production", description="JWT signing secret (32+ bytes)"
     )

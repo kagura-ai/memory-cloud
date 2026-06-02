@@ -395,6 +395,7 @@ from api.routes import (  # noqa: E402
     auth,
     bm25_drift,  # Issue #343: BM25 IDF drift admin (preview, cron disabled by default)
     config,
+    connectors_slack,  # Spec 2026-06-02: Slack connector OAuth install/callback
     context_search_config,
     contexts,
     cost_aggregation,  # Issue #472: cost aggregation API (admin + workspace-scoped)
@@ -535,6 +536,7 @@ app.include_router(resource_tokens.router, prefix="/api/v1")
 # Workspace connector setup route (Issue #851 - ai-worker connector provisioning)
 app.include_router(workspace_connectors.router, prefix="/api/v1")
 app.include_router(workers.router, prefix="/api/v1")
+app.include_router(connectors_slack.router, prefix="/api/v1")
 
 # Public Search routes (Issue #238 - Public REST API)
 app.include_router(public_search.router, prefix="/api/v1")

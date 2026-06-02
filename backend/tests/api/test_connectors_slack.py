@@ -1,0 +1,176 @@
+"""Tests for Slack connector OAuth flow (Spec 2026-06-02, Plan 4)."""
+
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
+
+import pytest
+
+
+class _FakeRedis:
+    """Minimal async Redis stub: setex / get / delete over a dict."""
+
+    def __init__(self, initial=None):
+        self.store = dict(initial or {})
+
+    async def setex(self, key, ttl, value):
+        self.store[key] = value
+
+    async def get(self, key):
+        return self.store.get(key)
+
+    async def delete(self, key):
+        self.store.pop(key, None)
+
+
+def _settings(**over):
+    base = dict(
+        slack_client_id="cid",
+        slack_client_secret="csec",
+        slack_redirect_uri="http://localhost:8080/api/v1/connectors/slack/callback",
+        slack_oauth_scopes="chat:write",
+        frontend_url="http://localhost:3000/",
+    )
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+@pytest.mark.asyncio
+async def test_install_redirects_to_slack_and_stores_state():
+    from api.routes.connectors_slack import slack_install
+
+    redis = _FakeRedis()
+    ws_id = uuid4()
+    admin = {"user_id": "u1", "current_workspace_id": ws_id}
+
+    with (
+        patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
+        patch("api.routes.connectors_slack.get_redis_client", return_value=redis),
+    ):
+        resp = await slack_install(admin)
+
+    assert resp.status_code == 302
+    assert resp.headers["location"].startswith("https://slack.com/oauth/v2/authorize?")
+    # State persisted → workspace id.
+    assert any(k.startswith("slack_oauth_state:") for k in redis.store)
+    assert str(ws_id) in redis.store.values()
+
+
+@pytest.mark.asyncio
+async def test_install_503_when_unconfigured():
+    from fastapi import HTTPException
+
+    from api.routes.connectors_slack import slack_install
+
+    admin = {"user_id": "u1", "current_workspace_id": uuid4()}
+    with patch("api.routes.connectors_slack.get_settings", return_value=_settings(slack_client_id="")):
+        with pytest.raises(HTTPException) as exc:
+            await slack_install(admin)
+    assert exc.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_callback_exchanges_code_and_stashes_install():
+    from api.routes.connectors_slack import slack_callback
+
+    ws_id = uuid4()
+    redis = _FakeRedis({f"slack_oauth_state:st": str(ws_id)})
+
+    token_resp = MagicMock()
+    token_resp.raise_for_status = MagicMock()
+    token_resp.json.return_value = {
+        "ok": True,
+        "access_token": "xoxb-123",
+        "team": {"id": "T01", "name": "Acme"},
+        "authed_user": {"id": "U01"},
+    }
+    http_client = MagicMock()
+    http_client.post = AsyncMock(return_value=token_resp)
+    http_ctx = MagicMock()
+    http_ctx.__aenter__ = AsyncMock(return_value=http_client)
+    http_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
+        patch("api.routes.connectors_slack.get_redis_client", return_value=redis),
+        patch("api.routes.connectors_slack.httpx.AsyncClient", return_value=http_ctx),
+    ):
+        resp = await slack_callback(code="abc", state="st")
+
+    assert resp.status_code == 303
+    assert "/workspace/integrations/connectors?slack_install=" in resp.headers["location"]
+    # State consumed; install stashed with the bot token + team id.
+    assert "slack_oauth_state:st" not in redis.store
+    install_raw = next(v for k, v in redis.store.items() if k.startswith("slack_install:"))
+    install = json.loads(install_raw)
+    assert install["bot_token"] == "xoxb-123"
+    assert install["team_id"] == "T01"
+    assert install["installing_admin_user_id"] == "U01"
+    assert str(install["workspace_id"]) == str(ws_id)
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_unknown_state():
+    from fastapi import HTTPException
+
+    from api.routes.connectors_slack import slack_callback
+
+    with (
+        patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
+        patch("api.routes.connectors_slack.get_redis_client", return_value=_FakeRedis()),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await slack_callback(code="abc", state="missing")
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_pending_returns_summary_without_bot_token():
+    from api.routes.connectors_slack import slack_pending
+
+    ws_id = uuid4()
+    install = {
+        "workspace_id": str(ws_id),
+        "bot_token": "xoxb-secret",
+        "team_id": "T01",
+        "team_name": "Acme",
+        "installing_admin_user_id": "U01",
+    }
+    redis = _FakeRedis({"slack_install:h1": json.dumps(install)})
+    admin = {"user_id": "u1", "current_workspace_id": ws_id}
+
+    with patch("api.routes.connectors_slack.get_redis_client", return_value=redis):
+        result = await slack_pending("h1", admin)
+
+    assert result == {"team_id": "T01", "team_name": "Acme", "installing_admin_user_id": "U01"}
+    assert "bot_token" not in result
+
+
+@pytest.mark.asyncio
+async def test_pending_404_for_other_workspace():
+    from fastapi import HTTPException
+
+    from api.routes.connectors_slack import slack_pending
+
+    install = {"workspace_id": str(uuid4()), "team_id": "T01"}
+    redis = _FakeRedis({"slack_install:h1": json.dumps(install)})
+    admin = {"user_id": "u1", "current_workspace_id": uuid4()}  # different ws
+
+    with patch("api.routes.connectors_slack.get_redis_client", return_value=redis):
+        with pytest.raises(HTTPException) as exc:
+            await slack_pending("h1", admin)
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_pop_slack_install_is_one_time():
+    from api.routes import connectors_slack
+
+    redis = _FakeRedis({"slack_install:h1": json.dumps({"team_id": "T01"})})
+    with patch("api.routes.connectors_slack.get_redis_client", return_value=redis):
+        first = await connectors_slack.pop_slack_install("h1")
+        second = await connectors_slack.pop_slack_install("h1")
+
+    assert first == {"team_id": "T01"}
+    assert second is None  # consumed
