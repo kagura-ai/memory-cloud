@@ -105,6 +105,7 @@ class TestConnectorProvisioningService:
             *_lock_results(),
             _result(scalar=0),
             _result(one=None),
+            _result(one=None),  # #910: canonical chat schema existence check → none → provision
         ]
 
         with (
@@ -144,6 +145,7 @@ class TestConnectorProvisioningService:
             *_lock_results(),
             _result(scalar=0),
             _result(one=None),
+            _result(one=None),  # #910: canonical chat schema existence check → none → provision
         ]
 
         with (

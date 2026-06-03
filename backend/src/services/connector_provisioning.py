@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.resource_tokens import ResourceTokenManager
 from models.auth import Workspace
-from models.resource import ResourceToken, WorkspaceConnector
+from models.resource import ResourceSchema, ResourceToken, WorkspaceConnector
 from services.resource_lookup import resolve_resource_pk, upsert_resource
 from utils.exceptions import ConflictError, MemoryCloudException, NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -29,6 +29,27 @@ logger = get_logger(__name__)
 
 CONNECTOR_TYPES = frozenset({"slack", "discord", "teams"})
 _RESOURCE_ID_RE = re.compile(r"^[a-z0-9_-]+$")
+
+# Issue #910: canonical chat resource schema provisioned at connector
+# registration. The ai-worker writes ``payload={"text": <llm_summary>, ...}`` on
+# every ingest_event upsert; ``text`` is the single agreed fulltext field
+# (confirmed with ai-worker 2026-06-03) so the indexer's _project_payload
+# projects the summary into ``fulltext_content`` (and the vector path). Shape
+# matches ``api.routes.resource_schema.FieldDefinition.model_dump()``. Lineage
+# (source_uri / memory_details) stays in event_metadata, NOT the payload (#896).
+_CANONICAL_CHAT_FIELD_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "name": "text",
+        "type": "text",
+        "description": "Chat message / LLM summary fulltext content (ai-worker ingest payload).",
+        "classification": "public",
+        "index_hint": "fulltext+vector",
+        "unit": None,
+        "enum_values": None,
+        "example": None,
+        "required": False,
+    }
+]
 
 
 @dataclass(frozen=True)
@@ -190,6 +211,14 @@ class ConnectorProvisioningService:
                     f"Resource '{resource_id}' already has a workspace connector.",
                     connector_id=str(existing_connector.id),
                 )
+
+            # Issue #910: provision the canonical chat resource schema so the
+            # ai-worker's LLM summary (written as ``payload={"text": ...}`` on
+            # ingest_event) lands in an indexed fulltext field. Without a schema
+            # the indexer's _project_payload skips the summary entirely (lost
+            # from search), and schema registration is owner/UI-only so the
+            # worker can't self-bootstrap one.
+            await self._ensure_chat_resource_schema(resource_pk, resource_id)
 
             connector = WorkspaceConnector(
                 resource_pk=resource_pk,
@@ -645,6 +674,31 @@ class ConnectorProvisioningService:
             select(WorkspaceConnector).where(WorkspaceConnector.resource_pk == resource_pk)
         )
         return result.scalar_one_or_none()
+
+    async def _ensure_chat_resource_schema(self, resource_pk: UUID, resource_id: str) -> None:
+        """Provision the canonical chat resource schema (v1) if none exists (#910).
+
+        Idempotent: a re-provision (or a resource that already carries a schema,
+        e.g. a manually registered one) is left untouched so an operator's custom
+        schema is never clobbered. Only the first registration seeds the
+        canonical ``text`` fulltext field the worker writes to.
+        """
+        existing = (
+            await self.db.execute(
+                select(ResourceSchema.id).where(ResourceSchema.resource_pk == resource_pk).limit(1)
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return
+        self.db.add(
+            ResourceSchema(
+                resource_pk=resource_pk,
+                resource_id=resource_id,
+                schema_version=1,
+                field_definitions=_CANONICAL_CHAT_FIELD_DEFINITIONS,
+            )
+        )
+        await self.db.flush()
 
 
 async def get_connector_id_for_resource_pk(

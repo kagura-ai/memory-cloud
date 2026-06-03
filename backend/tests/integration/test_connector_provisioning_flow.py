@@ -218,6 +218,68 @@ async def test_registration_path_creates_context_and_mints_kmc_key(
 
 
 @pytest.mark.asyncio
+async def test_provision_seeds_canonical_chat_resource_schema(db_session: AsyncSession):
+    """Issue #910: connector registration provisions the canonical chat schema.
+
+    The ai-worker writes ``payload={"text": <summary>}`` on ingest; the indexer
+    only projects fields the ResourceSchema marks fulltext/vector. So a chat
+    connector must get a v1 schema with a fulltext ``text`` field or the summary
+    is lost from search.
+    """
+    from models.resource import ResourceSchema
+
+    user_id, workspace = await _seed_workspace(db_session, plan_name="basic")
+    resource_id = f"slack_{uuid4().hex[:8]}"
+
+    result = await ConnectorProvisioningService(db_session).provision_connector(
+        workspace_id=workspace.id,
+        user_id=user_id,
+        connector_type="slack",
+        resource_id=resource_id,
+    )
+    await db_session.flush()
+
+    schema = (
+        await db_session.execute(
+            select(ResourceSchema).where(ResourceSchema.resource_pk == result.resource_pk)
+        )
+    ).scalar_one()
+    assert schema.schema_version == 1
+    fields = {f["name"]: f for f in schema.field_definitions}
+    assert "text" in fields
+    text_field = fields["text"]
+    assert text_field["classification"] == "public"
+    assert "fulltext" in text_field["index_hint"]
+    assert "vector" in text_field["index_hint"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_chat_schema_is_idempotent(db_session: AsyncSession):
+    """A second _ensure_chat_resource_schema call does not duplicate or clobber."""
+    from sqlalchemy import func as _func
+
+    from models.resource import Resource, ResourceSchema
+
+    user_id, workspace = await _seed_workspace(db_session, plan_name="basic")
+    # Create a bare resource to attach a schema to.
+    res = Resource(workspace_id=workspace.id, resource_id="slack_idem", created_by=user_id)
+    db_session.add(res)
+    await db_session.flush()
+
+    svc = ConnectorProvisioningService(db_session)
+    await svc._ensure_chat_resource_schema(res.id, "slack_idem")
+    await svc._ensure_chat_resource_schema(res.id, "slack_idem")
+    await db_session.flush()
+
+    count = (
+        await db_session.execute(
+            select(_func.count(ResourceSchema.id)).where(ResourceSchema.resource_pk == res.id)
+        )
+    ).scalar_one()
+    assert count == 1
+
+
+@pytest.mark.asyncio
 async def test_delete_connector_revokes_kmc_key_and_removes_connector(
     db_session: AsyncSession,
 ):
