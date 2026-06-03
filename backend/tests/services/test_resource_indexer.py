@@ -184,6 +184,175 @@ class TestResourceIndexerNamedVectorUpsert:
 
         assert first_id == second_id
 
+    @pytest.mark.asyncio
+    async def test_apply_upsert_passes_through_worker_lineage(self, indexer, mock_db):
+        """#896: event_metadata.memory_details + source_uri project onto the
+        created Memory so an ingest_event-written memory is byte-equivalent (in
+        details + source_uri) to a remember()-written one. The 6 worker lineage
+        keys survive and coexist with the indexer's 4 lifecycle keys."""
+        event = _make_event()
+        event.event_metadata = {
+            "memory_details": {
+                "connector_id": "c-1",
+                "platform": "slack",
+                "team_id": "T01",
+                "channel_id": "C01",
+                "thread_ts": "1700000000.0001",
+                "source_message_ids": ["1700000000.0001"],
+            },
+            "source_uri": "slack://c-1/T01/C01/1700000000.0001",
+        }
+        schema = _make_schema()
+        context = _make_context()
+
+        await indexer._apply_upsert(
+            event, schema, context, "kagura_memories", indexer.embedding_service
+        )
+
+        memory = mock_db.add.call_args.args[0]
+        # All 6 worker lineage keys preserved (recall scope guard reads these).
+        assert memory.details["channel_id"] == "C01"
+        assert memory.details["thread_ts"] == "1700000000.0001"
+        assert memory.details["connector_id"] == "c-1"
+        assert memory.details["source_message_ids"] == ["1700000000.0001"]
+        # Indexer lifecycle keys coexist (authoritative).
+        assert memory.details["resource_id"] == "res_test"
+        assert memory.details["doc_id"] == "doc_1"
+        assert memory.details["version"] == 1
+        assert "indexed_at" in memory.details
+        # source_uri set so source_uri_prefix (find_by_channel) works.
+        assert memory.source_uri == "slack://c-1/T01/C01/1700000000.0001"
+
+    @pytest.mark.asyncio
+    async def test_apply_upsert_without_lineage_keeps_legacy_shape(self, indexer, mock_db):
+        """#896: non-worker resources (no event_metadata lineage) keep the legacy
+        4-key details and NULL source_uri — backward compatible."""
+        event = _make_event()
+        event.event_metadata = None
+        schema = _make_schema()
+        context = _make_context()
+
+        await indexer._apply_upsert(
+            event, schema, context, "kagura_memories", indexer.embedding_service
+        )
+
+        memory = mock_db.add.call_args.args[0]
+        assert set(memory.details.keys()) == {"resource_id", "doc_id", "version", "indexed_at"}
+        assert memory.source_uri is None
+
+    @staticmethod
+    def _db_with_existing(existing_memory):
+        """Build a db whose first execute() returns an existing memory (update
+        path) and second returns an empty old-version scan."""
+        db = AsyncMock()
+        existing = MagicMock()
+        existing.scalar_one_or_none.return_value = existing_memory
+        old_versions = MagicMock()
+        old_versions.scalars.return_value.all.return_value = []
+        call_count = 0
+
+        def _side_effect(*_a, **_k):
+            nonlocal call_count
+            call_count += 1
+            return existing if call_count % 2 == 1 else old_versions
+
+        db.execute.side_effect = _side_effect
+        db.add = MagicMock()
+        return db
+
+    @pytest.mark.asyncio
+    async def test_apply_upsert_update_path_projects_lineage(self):
+        """#896: the UPDATE (re-index) branch also projects worker lineage onto
+        the existing memory's details + source_uri."""
+        existing_memory = MagicMock()
+        db = self._db_with_existing(existing_memory)
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(db)
+        indexer.embedding_service = MagicMock()
+        indexer.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+
+        event = _make_event()
+        event.event_metadata = {
+            "memory_details": {"channel_id": "C01", "thread_ts": "1700000000.0001"},
+            "source_uri": "slack://c-1/T01/C01/1700000000.0001",
+        }
+        await indexer._apply_upsert(
+            event, _make_schema(), _make_context(), "kagura_memories", indexer.embedding_service
+        )
+
+        assert existing_memory.details["channel_id"] == "C01"
+        assert existing_memory.details["resource_id"] == "res_test"
+        assert existing_memory.source_uri == "slack://c-1/T01/C01/1700000000.0001"
+
+    @pytest.mark.asyncio
+    async def test_apply_upsert_update_path_clears_stale_source_uri(self):
+        """#896 (haiku review): re-indexing a doc whose event carries NO lineage
+        must CLEAR a previously-set source_uri, not leave it stale (symmetry with
+        the create branch)."""
+        existing_memory = MagicMock()
+        existing_memory.source_uri = "slack://old/stale/uri"  # from a prior index
+        db = self._db_with_existing(existing_memory)
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(db)
+        indexer.embedding_service = MagicMock()
+        indexer.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+
+        event = _make_event()
+        event.event_metadata = None  # no lineage this time
+        await indexer._apply_upsert(
+            event, _make_schema(), _make_context(), "kagura_memories", indexer.embedding_service
+        )
+
+        assert existing_memory.source_uri is None
+
+    @pytest.mark.asyncio
+    async def test_apply_upsert_strips_computed_column_keys(self, indexer, mock_db):
+        """#896 (haiku review): worker-supplied external_blob/trigger keys are
+        stripped so they can't pollute the persisted Computed columns."""
+        event = _make_event()
+        event.event_metadata = {
+            "memory_details": {
+                "channel_id": "C01",
+                "external_blob": {"backend": "r2", "ref": "x"},
+                "trigger": {"from": "2099", "until": "2100"},
+            },
+        }
+        await indexer._apply_upsert(
+            event, _make_schema(), _make_context(), "kagura_memories", indexer.embedding_service
+        )
+
+        memory = mock_db.add.call_args.args[0]
+        assert memory.details["channel_id"] == "C01"
+        assert "external_blob" not in memory.details
+        assert "trigger" not in memory.details
+
+    @pytest.mark.asyncio
+    async def test_apply_upsert_drops_oversized_source_uri(self, indexer, mock_db):
+        """#896 (haiku review): a source_uri longer than the column width is
+        dropped (None), not assigned — avoids a flush DataError poisoning the
+        event offset."""
+        event = _make_event()
+        event.event_metadata = {"source_uri": "slack://" + "x" * 3000}
+        await indexer._apply_upsert(
+            event, _make_schema(), _make_context(), "kagura_memories", indexer.embedding_service
+        )
+
+        memory = mock_db.add.call_args.args[0]
+        assert memory.source_uri is None
+
+    @pytest.mark.asyncio
+    async def test_apply_upsert_non_dict_memory_details_ignored(self, indexer, mock_db):
+        """#896 (haiku review): a non-dict memory_details (worker schema bug) is
+        dropped to the legacy 4-key shape, not crashed on."""
+        event = _make_event()
+        event.event_metadata = {"memory_details": 0}  # falsy non-dict
+        await indexer._apply_upsert(
+            event, _make_schema(), _make_context(), "kagura_memories", indexer.embedding_service
+        )
+
+        memory = mock_db.add.call_args.args[0]
+        assert set(memory.details.keys()) == {"resource_id", "doc_id", "version", "indexed_at"}
+
 
 class TestResolveContextRouting:
     """Issue #334 (Layer B) + #338 (Layer C) + #341 (shared helper).

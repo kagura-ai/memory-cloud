@@ -42,6 +42,11 @@ from utils.sparse_vector import build_resource_sparse_vector
 
 logger = get_logger(__name__)
 
+# #896: Memory.source_uri is String(2048); a longer worker-supplied URI is
+# dropped (not truncated) so a corrupted slack:// prefix can't break
+# find_by_channel and a flush DataError can't poison the event offset.
+_SOURCE_URI_MAX_LEN = 2048
+
 
 @dataclass
 class IndexerMetrics:
@@ -487,6 +492,72 @@ class ResourceIndexer:
             "metadata": metadata,
         }
 
+    # #896: details keys that drive persisted Computed columns the resource path
+    # must NOT let a worker populate — a worker-supplied external_blob would make
+    # external_blob_backend/ref non-NULL (triggering R2 blob/retention logic on a
+    # non-blob memory), and trigger would make a resource_data memory surface as a
+    # Time Memory. resource_id/doc_id are also computed-backed but the indexer
+    # overwrites those itself, so they need no stripping.
+    _LINEAGE_RESERVED_KEYS = frozenset({"external_blob", "trigger"})
+
+    def _extract_worker_lineage(self, event: ResourceEvent) -> tuple[dict[str, Any], str | None]:
+        """Extract ai-worker lineage (#896) from event_metadata.
+
+        Returns ``(memory_details, source_uri)``. Both default to empty/None for
+        non-worker events. Malformed values are dropped with a warning rather
+        than silently masked, so worker schema bugs surface in logs.
+        """
+        meta = event.event_metadata or {}
+
+        raw_details = meta.get("memory_details")
+        if raw_details is None:
+            opaque_details: dict[str, Any] = {}
+        elif isinstance(raw_details, dict):
+            opaque_details = dict(raw_details)
+            # Strip computed-column source keys (defense against pollution).
+            reserved = self._LINEAGE_RESERVED_KEYS & opaque_details.keys()
+            if reserved:
+                logger.warning(
+                    "ingest_event_lineage_reserved_keys_stripped",
+                    event_id=event.id,
+                    keys=sorted(reserved),
+                )
+                for key in reserved:
+                    opaque_details.pop(key, None)
+        else:
+            logger.warning(
+                "ingest_event_memory_details_not_dict",
+                event_id=event.id,
+                got_type=type(raw_details).__name__,
+            )
+            opaque_details = {}
+
+        raw_uri = meta.get("source_uri")
+        source_uri: str | None
+        if raw_uri is None:
+            source_uri = None
+        elif not isinstance(raw_uri, str):
+            logger.warning(
+                "ingest_event_source_uri_not_str",
+                event_id=event.id,
+                got_type=type(raw_uri).__name__,
+            )
+            source_uri = None
+        elif len(raw_uri) > _SOURCE_URI_MAX_LEN:
+            # Drop (don't truncate — a corrupted slack:// prefix would break
+            # find_by_channel) and don't poison the event with a flush DataError.
+            logger.warning(
+                "ingest_event_source_uri_too_long",
+                event_id=event.id,
+                length=len(raw_uri),
+                max_length=_SOURCE_URI_MAX_LEN,
+            )
+            source_uri = None
+        else:
+            source_uri = raw_uri
+
+        return opaque_details, source_uri
+
     async def _apply_upsert(
         self,
         event: ResourceEvent,
@@ -509,6 +580,17 @@ class ResourceIndexer:
         if not event.payload:
             logger.warning("upsert_event_has_no_payload", event_id=event.id)
             return
+
+        # #896: opaque lineage passthrough. The ai-worker (resource-ingest write
+        # path, worker #91 Option A) supplies the recall-contract lineage in
+        # event_metadata so an ingest_event-written Memory is byte-equivalent in
+        # details + source_uri to a remember()-written one:
+        #   event_metadata["memory_details"] -> merged into Memory.details
+        #   event_metadata["source_uri"]     -> Memory.source_uri
+        # Both are optional; absent (non-worker resources) → legacy behavior.
+        # event_metadata lives on the event, NOT in payload, so payload/content
+        # stays pure document data (mirrors the ResourceEventRequest precedent).
+        opaque_details, lineage_source_uri = self._extract_worker_lineage(event)
 
         # 1. Project payload
         projected = self._project_payload(event.payload, schema)
@@ -650,13 +732,24 @@ class ResourceIndexer:
                 existing_memory.importance = (
                     event.importance if event.importance is not None else 0.6
                 )
+                # #896: worker lineage keys first, indexer lifecycle keys layered
+                # on top. The two sets are orthogonal (worker: connector_id /
+                # platform / team_id / channel_id / thread_ts / source_message_ids;
+                # indexer: resource_id / doc_id / version / indexed_at), so neither
+                # clobbers the other — the spread order just makes the indexer's
+                # lifecycle identity authoritative.
                 existing_memory.details = {
+                    **opaque_details,
                     "resource_id": event.resource_id,
                     "doc_id": event.doc_id,
                     "version": event.version,
                     # Bugfix: Keep timezone for ISO string
                     "indexed_at": to_utc_iso(utcnow()),
                 }
+                # Always assign (mirrors the create branch) — re-indexing a doc
+                # whose event carries no lineage must clear a stale source_uri,
+                # not leave it matching spurious source_uri_prefix queries.
+                existing_memory.source_uri = lineage_source_uri
                 # Bugfix: Remove timezone for DB compatibility
                 existing_memory.updated_at = utcnow()
                 existing_memory.embedding_status = "success"
@@ -686,13 +779,20 @@ class ResourceIndexer:
                     summary=summary[:500],
                     context_summary=context_summary,
                     content=json.dumps(event.payload, ensure_ascii=False),
+                    # #896: worker lineage keys first, indexer lifecycle keys on
+                    # top (orthogonal sets — see the update branch comment).
                     details={
+                        **opaque_details,
                         "resource_id": event.resource_id,
                         "doc_id": event.doc_id,
                         "version": event.version,
                         # Bugfix: Keep timezone for ISO string
                         "indexed_at": to_utc_iso(utcnow()),
                     },
+                    # #896: source_uri from worker lineage (slack://…) so
+                    # source_uri_prefix queries (find_by_channel) work; NULL for
+                    # non-worker resources (legacy behavior).
+                    source_uri=lineage_source_uri,
                     type="resource_data",
                     # P0-2: Fix - use 'is not None' to allow importance=0.0
                     importance=event.importance if event.importance is not None else 0.6,
