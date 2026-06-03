@@ -1827,6 +1827,62 @@ Requires action recording (reports created before this feature have no actions t
             },
             "readOnly": True,
         },
+        {
+            "name": "set_state",
+            "description": """Set ephemeral agent run-state at (context_id, key) (Issue #889).
+
+A TTL-bounded key/value lane for autonomous-agent run state (current task,
+step, scratch flags). It is SEPARATE from memories: state is NOT embedded and
+is structurally excluded from recall(), so it never pollutes the knowledge
+search space. Writing upserts the value for the key.
+
+Use this for transient run state, NOT durable knowledge (use remember() for
+knowledge). ttl_seconds expires the entry automatically; omit it for no expiry.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "description": "Target context UUID (state is scoped to this context).",
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "State key (max 255 chars). Re-using a key overwrites its value.",
+                    },
+                    "value": {
+                        "description": "Arbitrary JSON value to store (object, array, string, number, or boolean).",
+                    },
+                    "ttl_seconds": {
+                        "type": "integer",
+                        "description": "Optional TTL in seconds (clamped to 2592000 = 30 days). Omit for no expiry.",
+                    },
+                },
+                "required": ["context_id", "key", "value"],
+            },
+        },
+        {
+            "name": "get_state",
+            "readOnly": True,
+            "description": """Get ephemeral agent run-state (Issue #889).
+
+Reads from the agent session-state lane (see set_state). Supply ``key`` to read
+one value, or omit it to list all live keys for the context. Expired entries are
+never returned. This lane is excluded from recall() by design.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "description": "Target context UUID.",
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "Optional. Omit to list all live (key, value) entries for the context.",
+                    },
+                },
+                "required": ["context_id"],
+            },
+        },
     ]
 
 
