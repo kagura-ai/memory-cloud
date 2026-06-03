@@ -131,6 +131,40 @@ class MemoryService:
         context = await self.context_service.get_context(user_id, context_id)
         return context, str(context.workspace_id), str(context_id)
 
+    @staticmethod
+    def _apply_time_trigger(memory_type: str | None, details: dict | None) -> dict | None:
+        """Validate + normalize a Time Memory trigger window (Issue #877).
+
+        When ``memory_type == "time"``, ``details.trigger`` must carry caller-
+        resolved Y/M/D[/H/M] components; this derives the canonical ``from``/
+        ``until`` window so the generated ``trigger_from``/``trigger_until``
+        columns index it. For any other type, ``details`` is returned unchanged.
+
+        Centralized here so every write path (remember, _update_in_place,
+        patch_memory) enforces the same invariant — a ``type="time"`` row that
+        skips normalization would store NULL trigger columns and become
+        invisible to recall_upcoming and the trigger_from window filter.
+
+        Raises:
+            ValueError: if a time memory has no trigger or an invalid one (the
+                established "bad request" signal inside MemoryService).
+        """
+        if memory_type != "time":
+            return details
+
+        from utils.time_trigger import TriggerValidationError, normalize_trigger
+
+        trigger = (details or {}).get("trigger")
+        if trigger is None:
+            raise ValueError(
+                "type='time' requires details.trigger with at least {'year': ...}"
+            )
+        try:
+            normalized = normalize_trigger(trigger)
+        except TriggerValidationError as exc:
+            raise ValueError(f"invalid details.trigger: {exc}") from exc
+        return {**(details or {}), "trigger": normalized}
+
     async def remember(
         self,
         request: RememberRequest,
@@ -243,20 +277,9 @@ class MemoryService:
         # them and derive the [from, until] window written back into details so
         # the generated columns trigger_from / trigger_until can index it. No LLM
         # here — the caller already resolved any relative phrasing ("来週")
-        # against its own clock.
-        if request.type == "time":
-            from utils.time_trigger import TriggerValidationError, normalize_trigger
-
-            trigger = (request.details or {}).get("trigger")
-            if trigger is None:
-                raise ValueError(
-                    "type='time' requires details.trigger with at least {'year': ...}"
-                )
-            try:
-                normalized = normalize_trigger(trigger)
-            except TriggerValidationError as exc:
-                raise ValueError(f"invalid details.trigger: {exc}") from exc
-            request.details = {**(request.details or {}), "trigger": normalized}
+        # against its own clock. Centralized in _apply_time_trigger so the
+        # update/patch paths enforce the same invariant (see those methods).
+        request.details = self._apply_time_trigger(request.type, request.details)
 
         # Create memory entity first with pending status
         memory = Memory(
@@ -427,8 +450,15 @@ class MemoryService:
             memory.context_summary = normalized_ctx_summary
         if request.content is not None:
             memory.content = request.content
-        if request.details is not None:
-            memory.details = request.details
+        # Time Memory (#877): normalize the trigger against the *effective* type
+        # and details after this update, so changing details.trigger (or flipping
+        # type to "time") on an existing memory re-derives the from/until window
+        # the generated columns index — the same invariant remember() enforces.
+        effective_type = request.type if request.type is not None else memory.type
+        effective_details = request.details if request.details is not None else memory.details
+        effective_details = self._apply_time_trigger(effective_type, effective_details)
+        if request.details is not None or effective_type == "time":
+            memory.details = effective_details
         if request.type is not None:
             memory.type = request.type
         if request.importance is not None:
@@ -617,9 +647,23 @@ class MemoryService:
             memory.importance = request.importance
         if "tags" in provided_fields:
             memory.tags = request.tags
-        if "details" in provided_fields:
-            # Explicit null clears the column; non-null replaces it.
-            memory.details = request.details
+        # Time Memory (#877): normalize the trigger against the effective type/
+        # details after this patch (mirrors remember/_update_in_place), so a
+        # PATCH that touches details.trigger or flips type to "time" still
+        # populates the generated trigger_from/trigger_until columns.
+        effective_type = (
+            request.type
+            if ("type" in provided_fields and request.type is not None)
+            else memory.type
+        )
+        effective_details = (
+            request.details if "details" in provided_fields else memory.details
+        )
+        effective_details = self._apply_time_trigger(effective_type, effective_details)
+        if "details" in provided_fields or effective_type == "time":
+            # Explicit null clears the column; non-null replaces it. A
+            # type="time" patch always (re)writes the normalized details.
+            memory.details = effective_details
 
         memory.updated_at = utcnow()
 

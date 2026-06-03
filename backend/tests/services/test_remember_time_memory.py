@@ -85,3 +85,29 @@ async def test_time_memory_invalid_trigger_raises(service):
     req = _req({"trigger": {"year": 2026, "month": 13}})
     with pytest.raises(ValueError, match="invalid details.trigger"):
         await _call(service, req)
+
+
+# _apply_time_trigger is the centralized helper used by remember(),
+# _update_in_place(), and patch_memory(), so the update/patch normalization
+# invariant is covered by testing it directly (no DB needed — it is pure).
+
+
+def test_apply_time_trigger_passthrough_for_non_time():
+    details = {"foo": "bar"}
+    assert MemoryService._apply_time_trigger("note", details) is details
+
+
+def test_apply_time_trigger_normalizes_time_window():
+    out = MemoryService._apply_time_trigger("time", {"trigger": {"year": 2026, "month": 7}})
+    assert out["trigger"]["from"] == "2026-07-01T00:00:00"
+    assert out["trigger"]["until"] == "2026-07-31T23:59:59"
+
+
+def test_apply_time_trigger_missing_trigger_raises():
+    with pytest.raises(ValueError, match="details.trigger"):
+        MemoryService._apply_time_trigger("time", {})
+
+
+def test_apply_time_trigger_invalid_trigger_raises():
+    with pytest.raises(ValueError, match="invalid details.trigger"):
+        MemoryService._apply_time_trigger("time", {"trigger": {"year": 2026, "month": 13}})

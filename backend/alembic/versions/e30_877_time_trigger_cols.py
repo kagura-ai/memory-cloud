@@ -41,9 +41,30 @@ def upgrade() -> None:
         ["trigger_from"],
         postgresql_where=sa.text("type = 'time'"),
     )
+    # Defense-in-depth for the lexical==chronological invariant: a type='time'
+    # row MUST carry both window bounds in fixed-width zero-padded ISO. Gated on
+    # type<>'time' so non-time memories that happen to have a details.trigger.*
+    # path are unaffected. Catches raw/admin SQL or any future write path that
+    # bypasses MemoryService.normalize_trigger, where a malformed or NULL bound
+    # would silently corrupt ORDER BY / window-overlap results.
+    # The IS NOT NULL guards are load-bearing: a CHECK passes when the
+    # expression is TRUE *or NULL*, and `NULL ~ regex` is NULL — so without the
+    # explicit non-null test a type='time' row missing a bound would slip
+    # through. Spelling them out makes the predicate a definite FALSE in that
+    # case, enforcing presence as well as format.
+    op.create_check_constraint(
+        "valid_trigger_window_format",
+        "memories",
+        "type <> 'time' OR ("
+        "trigger_from IS NOT NULL "
+        "AND trigger_from ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$' "
+        "AND trigger_until IS NOT NULL "
+        "AND trigger_until ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$')",
+    )
 
 
 def downgrade() -> None:
+    op.drop_constraint("valid_trigger_window_format", "memories", type_="check")
     op.drop_index("idx_memories_trigger_from", table_name="memories")
     op.drop_column("memories", "trigger_until")
     op.drop_column("memories", "trigger_from")

@@ -125,13 +125,21 @@ async def remember(
     # Issue #146: Pass current workspace ID for workspace-scoped API keys
     # Issue #273: Use context_id from request.context dict (if provided)
     context_id = request.context.get("context_id") if request.context else None
-    result = await memory_service.remember(
-        request,
-        user_id=user["user_id"],
-        client=user.get("client", "web"),
-        current_context_id=context_id,
-        current_workspace_id=user.get("current_workspace_id"),  # NEW: Issue #146
-    )
+    try:
+        result = await memory_service.remember(
+            request,
+            user_id=user["user_id"],
+            client=user.get("client", "web"),
+            current_context_id=context_id,
+            current_workspace_id=user.get("current_workspace_id"),  # NEW: Issue #146
+        )
+    except ValueError as e:
+        # MemoryService raises ValueError as its "bad request" signal (e.g. an
+        # invalid type="time" details.trigger). Map it to 422 rather than
+        # letting it surface as an unhandled 500.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)
+        ) from e
 
     return result
 
@@ -688,18 +696,28 @@ async def list_memories(
         # Time Memory (#877) window overlap, built once and applied to BOTH
         # queries (same anti-drift rationale as tag_filter above). A stored
         # window [trigger_from, trigger_until] overlaps the query window
-        # [trigger_from, trigger_until] iff trigger_from <= quntil AND
-        # trigger_until >= qfrom. The columns are TEXT fixed-width ISO, so
-        # string comparison == chronological comparison. trigger_until omitted
-        # => open-ended (everything not entirely in the past).
-        # isinstance(str) (not `is not None`) so a real ISO bound is required;
-        # this also keeps direct-call unit tests safe, where an unset Query()
-        # default is the FieldInfo sentinel rather than None.
+        # [qfrom, quntil] iff trigger_from <= quntil AND trigger_until >= qfrom.
+        # The columns are TEXT fixed-width ISO, so string comparison ==
+        # chronological comparison — but ONLY if the caller's bounds are the
+        # same fixed-width form. parse_query_bound re-normalizes them (and
+        # resolves the 'now' shortcut); a malformed bound is a 422, not silent
+        # wrong results. isinstance(str) (not `is not None`) skips the unset
+        # Query() FieldInfo sentinel that direct-call unit tests pass.
+        from utils.time_trigger import TriggerValidationError, parse_query_bound
+
+        try:
+            qfrom = parse_query_bound(trigger_from) if isinstance(trigger_from, str) else None
+            quntil = parse_query_bound(trigger_until) if isinstance(trigger_until, str) else None
+        except TriggerValidationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)
+            ) from e
+
         window_filters = []
-        if isinstance(trigger_from, str):
-            window_filters.append(Memory.trigger_until >= trigger_from)
-        if isinstance(trigger_until, str):
-            window_filters.append(Memory.trigger_from <= trigger_until)
+        if qfrom is not None:
+            window_filters.append(Memory.trigger_until >= qfrom)
+        if quntil is not None:
+            window_filters.append(Memory.trigger_from <= quntil)
         for wf in window_filters:
             query = query.where(wf)
 

@@ -10,6 +10,7 @@ round-trip test (TEXT columns) + the recall_upcoming integration test.
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from api.routes.memory import list_memories
 
@@ -106,3 +107,51 @@ async def test_default_order_and_no_window_when_params_omitted():
     )
     assert "ORDER BY memories.created_at DESC" in _full_sql(mock_db, 1)
     assert "trigger_from" not in _where_sql(mock_db, 1)
+
+
+@pytest.mark.asyncio
+async def test_now_bound_resolved_not_passed_literally():
+    """trigger_from='now' is resolved to a fixed-width ISO bound, not compared
+    literally (which would match nothing)."""
+    mock_db = _db_with_rows()
+    await list_memories(
+        user=MOCK_USER,
+        db=mock_db,
+        scope=None,
+        type="time",
+        context_id=None,
+        q=None,
+        tags=None,
+        trigger_from="now",
+        order_by="trigger_from",
+        limit=50,
+        offset=0,
+    )
+    data_sql = str(
+        mock_db.execute.call_args_list[1].args[0].whereclause.compile(
+            compile_kwargs={"literal_binds": True}
+        )
+    )
+    assert "'now'" not in data_sql  # literal must not reach the query
+    assert "memories.trigger_until >=" in _where_sql(mock_db, 1)
+
+
+@pytest.mark.asyncio
+async def test_malformed_trigger_bound_returns_422():
+    """A non-zero-padded / non-ISO bound is a 422, not silent wrong results."""
+    mock_db = _db_with_rows()
+    with pytest.raises(HTTPException) as exc:
+        await list_memories(
+            user=MOCK_USER,
+            db=mock_db,
+            scope=None,
+            type="time",
+            context_id=None,
+            q=None,
+            tags=None,
+            trigger_from="2026-7-1",
+            order_by="trigger_from",
+            limit=50,
+            offset=0,
+        )
+    assert exc.value.status_code == 422

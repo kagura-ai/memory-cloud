@@ -77,6 +77,7 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         "get_file_download_url",  # Issue #485: read-only presigned GET
         "list_files",  # Issue #485: read-only workspace listing
         "list_tags",  # Issue #614: read-only tag discovery
+        "recall_upcoming",  # Issue #877: deterministic read-only Time Memory window query (no Hebbian write)
     }
 )
 

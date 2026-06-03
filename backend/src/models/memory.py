@@ -274,6 +274,19 @@ class Memory(Base):
             "trigger_from",
             postgresql_where=text("type = 'time'"),
         ),
+        # Defense-in-depth for the lexical==chronological invariant: a
+        # type="time" row must carry both window bounds in fixed-width
+        # zero-padded ISO (NULL fails the regex, so this also enforces
+        # presence). Gated on type<>'time' so other memory types are
+        # unaffected even if they use a details.trigger.* path.
+        CheckConstraint(
+            "type <> 'time' OR ("
+            "trigger_from IS NOT NULL "
+            "AND trigger_from ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$' "
+            "AND trigger_until IS NOT NULL "
+            "AND trigger_until ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$')",
+            name="valid_trigger_window_format",
+        ),
     )
 
     def __repr__(self) -> str:
