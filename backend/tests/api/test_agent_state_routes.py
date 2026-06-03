@@ -1,15 +1,14 @@
 """Route-surface tests for the agent session-state REST lane (Issue #906).
 
-Pins the REST wiring around a mocked ``AgentStateService`` + mocked
-``PermissionService`` (the CRUD itself is integration-tested via #889). The
-load-bearing contracts here are:
-- the read/write gate split mirrors the MCP handler: writes (set/delete) go
-  through ``check_context_write``, reads (get/list) through
-  ``check_context_access`` at VIEWER;
-- gate denials propagate as the structured ``MemoryCloudException`` (404/403),
+Pins the REST wiring around a mocked AgentStateService + mocked PermissionService.
+Load-bearing contracts (post-#914 Copilot review):
+- every path resolves the context with a UNIFORM 404 first
+  (``resolve_context_for_workspace_read``) so a cross-workspace context never
+  leaks via a 403 (CWE-639); writes then apply ``check_context_write``;
+- a gate denial propagates as the structured MemoryCloudException (404/403),
   not swallowed into a 500;
-- absent key → 404 on get and delete; null value → 422 on set;
-- envelope shapes (key / value / states+count).
+- null value → ``ValidationError`` (422 with the standard error envelope), not a
+  bare HTTPException.
 """
 
 from __future__ import annotations
@@ -18,8 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
-from pydantic import ValidationError
+from pydantic import ValidationError as PydanticValidationError
 
 from api.routes.agent_state import (
     AgentStateSetRequest,
@@ -28,8 +26,7 @@ from api.routes.agent_state import (
     list_agent_state,
     set_agent_state,
 )
-from auth.workspace_roles import ContextRole
-from utils.exceptions import AuthorizationError, NotFoundException
+from utils.exceptions import AuthorizationError, NotFoundException, ValidationError
 
 MOCK_USER = {"user_id": "test_user"}
 
@@ -52,42 +49,42 @@ def service():
 @pytest.fixture
 def perm():
     return MagicMock(
+        resolve_context_for_workspace_read=AsyncMock(),
         check_context_write=AsyncMock(),
-        check_context_access=AsyncMock(),
     )
 
 
 class TestSetAgentState:
     @pytest.mark.asyncio
-    async def test_set_success_returns_key_and_uses_write_gate(self, service, perm, context_id):
+    async def test_set_success_resolves_then_write_gates(self, service, perm, context_id):
         body = AgentStateSetRequest(value={"step": 3}, ttl_seconds=60)
         resp = await set_agent_state(
             context_id=context_id, user=MOCK_USER, body=body, key="run", service=service, perm=perm
         )
         assert resp.key == "run"
+        # Uniform-404 reach check happens, AND the editor/owner write gate.
+        perm.resolve_context_for_workspace_read.assert_awaited_once_with("test_user", context_id)
         perm.check_context_write.assert_awaited_once_with("test_user", context_id)
-        perm.check_context_access.assert_not_awaited()  # write path must NOT use the read gate
         service.set_state.assert_awaited_once_with(context_id, "run", {"step": 3}, ttl_seconds=60)
 
     @pytest.mark.asyncio
-    async def test_set_null_value_returns_422_before_touching_service(
+    async def test_set_null_value_raises_validation_error_before_touching_service(
         self, service, perm, context_id
     ):
-        body = AgentStateSetRequest(value=None)
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(ValidationError):  # utils.exceptions → 422 + VAL-001 envelope
             await set_agent_state(
                 context_id=context_id,
                 user=MOCK_USER,
-                body=body,
+                body=AgentStateSetRequest(value=None),
                 key="k",
                 service=service,
                 perm=perm,
             )
-        assert exc.value.status_code == 422
         service.set_state.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_set_viewer_denied_propagates_403(self, service, perm, context_id):
+        # Reach check passes (workspace member); the write gate 403s a viewer.
         perm.check_context_write.side_effect = AuthorizationError()
         with pytest.raises(AuthorizationError):
             await set_agent_state(
@@ -101,8 +98,10 @@ class TestSetAgentState:
         service.set_state.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_set_unreachable_context_propagates_404(self, service, perm, context_id):
-        perm.check_context_write.side_effect = NotFoundException("Context")
+    async def test_set_unreachable_context_propagates_uniform_404(self, service, perm, context_id):
+        # Cross-workspace/unreachable → the RESOLVE step raises a uniform 404
+        # before the write gate can 403-leak existence.
+        perm.resolve_context_for_workspace_read.side_effect = NotFoundException("Context")
         with pytest.raises(NotFoundException):
             await set_agent_state(
                 context_id=context_id,
@@ -112,27 +111,27 @@ class TestSetAgentState:
                 service=service,
                 perm=perm,
             )
+        perm.check_context_write.assert_not_awaited()
+        service.set_state.assert_not_awaited()
 
     @pytest.mark.parametrize("bad_ttl", [0, -1, -3600])
     def test_non_positive_ttl_rejected_by_schema(self, bad_ttl):
         # gt=0 on the schema is the enforcement point: a 0/negative TTL is a 422
-        # ValidationError at request parsing, before the route runs.
-        with pytest.raises(ValidationError):
+        # at request parsing, before the route runs.
+        with pytest.raises(PydanticValidationError):
             AgentStateSetRequest(value=1, ttl_seconds=bad_ttl)
 
 
 class TestGetAgentState:
     @pytest.mark.asyncio
-    async def test_get_present_returns_value_and_uses_read_gate(self, service, perm, context_id):
+    async def test_get_present_returns_value_via_uniform_read_gate(self, service, perm, context_id):
         service.get_state.return_value = {"cursor": "abc"}
         resp = await get_agent_state(
             context_id=context_id, user=MOCK_USER, key="run", service=service, perm=perm
         )
         assert resp.key == "run"
         assert resp.value == {"cursor": "abc"}
-        perm.check_context_access.assert_awaited_once_with(
-            "test_user", context_id, required_role=ContextRole.VIEWER
-        )
+        perm.resolve_context_for_workspace_read.assert_awaited_once_with("test_user", context_id)
         perm.check_context_write.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -144,10 +143,8 @@ class TestGetAgentState:
             )
 
     @pytest.mark.asyncio
-    async def test_get_unreachable_context_propagates_404(self, service, perm, context_id):
-        # Cross-workspace / IDOR: the read gate raises a uniform 404 and the route
-        # must propagate it (not swallow into the except-Exception 500 arm).
-        perm.check_context_access.side_effect = NotFoundException("Context")
+    async def test_get_unreachable_context_propagates_uniform_404(self, service, perm, context_id):
+        perm.resolve_context_for_workspace_read.side_effect = NotFoundException("Context")
         with pytest.raises(NotFoundException):
             await get_agent_state(
                 context_id=context_id, user=MOCK_USER, key="k", service=service, perm=perm
@@ -174,9 +171,7 @@ class TestListAgentState:
         )
         assert resp.states == {"a": 1, "b": {"x": 2}}
         assert resp.count == 2
-        perm.check_context_access.assert_awaited_once_with(
-            "test_user", context_id, required_role=ContextRole.VIEWER
-        )
+        perm.resolve_context_for_workspace_read.assert_awaited_once_with("test_user", context_id)
 
     @pytest.mark.asyncio
     async def test_list_empty_returns_200_with_empty_dict(self, service, perm, context_id):
@@ -188,10 +183,10 @@ class TestListAgentState:
         assert resp.count == 0
 
     @pytest.mark.asyncio
-    async def test_list_denied_propagates_403(self, service, perm, context_id):
-        # No-access caller: the read gate raises 403 and the route propagates it.
-        perm.check_context_access.side_effect = AuthorizationError()
-        with pytest.raises(AuthorizationError):
+    async def test_list_unreachable_context_propagates_uniform_404(self, service, perm, context_id):
+        # No-reach caller: the resolve step raises a uniform 404 (not a 403 leak).
+        perm.resolve_context_for_workspace_read.side_effect = NotFoundException("Context")
+        with pytest.raises(NotFoundException):
             await list_agent_state(
                 context_id=context_id, user=MOCK_USER, service=service, perm=perm
             )
@@ -200,14 +195,14 @@ class TestListAgentState:
 
 class TestDeleteAgentState:
     @pytest.mark.asyncio
-    async def test_delete_present_returns_key_and_uses_write_gate(self, service, perm, context_id):
+    async def test_delete_present_resolves_then_write_gates(self, service, perm, context_id):
         service.delete_state.return_value = True
         resp = await delete_agent_state(
             context_id=context_id, user=MOCK_USER, key="run", service=service, perm=perm
         )
         assert resp.key == "run"
+        perm.resolve_context_for_workspace_read.assert_awaited_once_with("test_user", context_id)
         perm.check_context_write.assert_awaited_once_with("test_user", context_id)
-        perm.check_context_access.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_delete_absent_returns_404(self, service, perm, context_id):

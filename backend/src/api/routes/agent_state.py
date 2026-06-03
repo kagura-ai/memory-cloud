@@ -5,13 +5,15 @@
 / dashboard consumers get the full set/get/list/delete surface.
 
 Access control mirrors the MCP handler (``mcp_server/tools/state.py``) using the
-REST-layer equivalents:
-- **reads** (get one / list) → ``PermissionService.check_context_access`` at
-  ``VIEWER`` (IDOR guard — uniform 404 ``NotFoundException`` on an unreachable
-  context, CWE-639 safe).
-- **writes** (set / delete) → ``PermissionService.check_context_write`` (editor/
-  owner only; read-only viewers get 403 ``AuthorizationError``). It resolves the
-  context first, so a missing context still surfaces a uniform 404.
+REST-layer equivalents — every path resolves the context with a UNIFORM 404 first
+so a cross-workspace context never leaks its existence via a 403 (CWE-639 / OWASP
+A01), exactly like the MCP ``_resolve_context_for_read``:
+- **reads** (get one / list) → ``PermissionService.resolve_context_for_workspace_read``
+  (uniform 404 on unreachable/cross-workspace context).
+- **writes** (set / delete) → ``resolve_context_for_workspace_read`` (uniform-404
+  reach check) **then** ``check_context_write`` (editor/owner; a read-only viewer
+  who CAN reach the context gets 403 — safe, since workspace membership is already
+  confirmed so the 403 leaks nothing cross-workspace).
 
 The agent_states lane is TTL-bounded and structurally excluded from ``recall()``
 (separate table, never embedded). ``expires_at`` is not surfaced here because
@@ -29,11 +31,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import APIKeyOrSessionUser
-from auth.workspace_roles import ContextRole
 from db.base import get_db
 from services.agent_state_service import AgentStateService
 from services.permission_service import PermissionService
-from utils.exceptions import MemoryCloudException, NotFoundException
+from utils.exceptions import MemoryCloudException, NotFoundException, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -106,14 +107,17 @@ async def set_agent_state(
 ):
     """Upsert ``value`` at ``(context_id, key)`` (PUT = idempotent, 200 on replace)."""
     if body.value is None:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="'value' must not be null",
-        )
+        # ValidationError (not a raw HTTPException) so the client gets the
+        # standard {error, message, details} envelope + VAL-001 code via the
+        # global MemoryCloudException handler.
+        raise ValidationError("'value' must not be null", field="value")
     user_id = user.get("user_id")
     logger.info("agent_state_set_requested", user_id=user_id, context_id=str(context_id), key=key)
     try:
-        # Write gate (editor/owner). Resolves the context first → uniform 404.
+        # Reach check with UNIFORM 404 first (CWE-639: a cross-workspace context
+        # must not leak its existence via a 403), then the editor/owner write
+        # gate — whose 403 is safe once workspace membership is confirmed.
+        await perm.resolve_context_for_workspace_read(user_id, context_id)
         await perm.check_context_write(user_id, context_id)
         await service.set_state(context_id, key, body.value, ttl_seconds=body.ttl_seconds)
         return AgentStateKeyResponse(key=key)
@@ -141,8 +145,9 @@ async def get_agent_state(
     user_id = user.get("user_id")
     logger.info("agent_state_get_requested", user_id=user_id, context_id=str(context_id), key=key)
     try:
-        # Read gate (VIEWER). Uniform 404 on an unreachable context (IDOR guard).
-        await perm.check_context_access(user_id, context_id, required_role=ContextRole.VIEWER)
+        # Read gate with UNIFORM 404 on an unreachable/cross-workspace context
+        # (CWE-639 IDOR guard; mirrors the MCP handler's _resolve_context_for_read).
+        await perm.resolve_context_for_workspace_read(user_id, context_id)
         value = await service.get_state(context_id, key)
         if value is None:
             raise NotFoundException("AgentState")
@@ -170,7 +175,8 @@ async def list_agent_state(
     user_id = user.get("user_id")
     logger.info("agent_state_list_requested", user_id=user_id, context_id=str(context_id))
     try:
-        await perm.check_context_access(user_id, context_id, required_role=ContextRole.VIEWER)
+        # Uniform-404 read gate (CWE-639 IDOR guard).
+        await perm.resolve_context_for_workspace_read(user_id, context_id)
         states = await service.list_state(context_id)
         return AgentStateListResponse(states=states, count=len(states))
     except (HTTPException, MemoryCloudException):
@@ -199,6 +205,8 @@ async def delete_agent_state(
         "agent_state_delete_requested", user_id=user_id, context_id=str(context_id), key=key
     )
     try:
+        # Uniform-404 reach check, then the editor/owner write gate (CWE-639).
+        await perm.resolve_context_for_workspace_read(user_id, context_id)
         await perm.check_context_write(user_id, context_id)
         removed = await service.delete_state(context_id, key)
         if not removed:
