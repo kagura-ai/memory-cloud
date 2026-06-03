@@ -725,6 +725,10 @@ class ResourceIndexer:
                 # P1-5: Truncate summary to 500 chars (database limit)
                 summary = f"[{event.resource_id}] {event.doc_id} v{event.version}"
                 existing_memory.summary = summary[:500]
+                # Issue #887: keep connector provenance on re-index — a row
+                # backfilled to 'manual' (pre-#887) or any stale value is
+                # restamped 'connector' so provenance reflects the ingest path.
+                existing_memory.source_type = SOURCE_TYPE_CONNECTOR
                 # P2-10: Safe truncation with ellipsis for context_summary
                 if len(content) > 2000:
                     existing_memory.context_summary = content[:1997] + "..."

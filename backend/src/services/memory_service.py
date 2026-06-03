@@ -20,7 +20,7 @@ from db.qdrant import (
     delete_memory_from_qdrant,
     update_memory_payload_in_qdrant,
 )
-from models.auth import Context
+from models.auth import CONTEXT_TRUST_TIER_TRUSTED, Context
 from models.memory import (
     DELIVERY_MODE_ALWAYS,
     EDGE_ORIGIN_DECLARED,
@@ -1479,14 +1479,20 @@ class MemoryService:
             if stype := request.filters.get("source_type"):
                 pg_conditions.append(Memory.source_type == stype)
             # Issue #887: trust-tier read filter. ``trusted`` excludes
-            # external-origin (connector-ingested) memories from
-            # behaviour-influencing reads (OWASP LLM01/LLM03 — external content
-            # is data, not instructions). Connector contexts are stamped
-            # ``Context.trust_tier='external'`` (the authoritative signal) and
-            # contain only ``source_type='connector'`` rows, so this row-level
-            # exclusion matches the context-level trust in practice without
-            # restructuring the recall hot path.
+            # external-origin memories from behaviour-influencing reads (OWASP
+            # LLM01/LLM03 — external content is data, not instructions).
             if request.filters.get("trust_tier") == "trusted":
+                # Authoritative check: the memory's context must itself be
+                # trusted. ``Context.trust_tier`` is the server-side trust
+                # signal (connector contexts = 'external'), so a non-connector
+                # row that somehow lives in an external context is still
+                # excluded — this does not rely on the per-row source_type.
+                pg_conditions.append(
+                    Memory.context_id.in_(
+                        select(Context.id).where(Context.trust_tier == CONTEXT_TRUST_TIER_TRUSTED)
+                    )
+                )
+                # Defense-in-depth: also drop any connector-sourced row.
                 pg_conditions.append(Memory.source_type != SOURCE_TYPE_CONNECTOR)
         # Issue #496: cluster-scoped recall — restrict to the
         # cluster's member memories. ``cluster_memory_ids`` was
