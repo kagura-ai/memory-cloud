@@ -510,6 +510,23 @@ class ResourceIndexer:
             logger.warning("upsert_event_has_no_payload", event_id=event.id)
             return
 
+        # #896: opaque lineage passthrough. The ai-worker (resource-ingest write
+        # path, worker #91 Option A) supplies the recall-contract lineage in
+        # event_metadata so an ingest_event-written Memory is byte-equivalent in
+        # details + source_uri to a remember()-written one:
+        #   event_metadata["memory_details"] -> merged into Memory.details
+        #   event_metadata["source_uri"]     -> Memory.source_uri
+        # Both are optional; absent (non-worker resources) → legacy behavior.
+        # event_metadata lives on the event, NOT in payload, so payload/content
+        # stays pure document data (mirrors the ResourceEventRequest precedent).
+        meta = event.event_metadata or {}
+        opaque_details = meta.get("memory_details") or {}
+        if not isinstance(opaque_details, dict):
+            opaque_details = {}
+        lineage_source_uri = meta.get("source_uri")
+        if not isinstance(lineage_source_uri, str):
+            lineage_source_uri = None
+
         # 1. Project payload
         projected = self._project_payload(event.payload, schema)
 
@@ -650,13 +667,22 @@ class ResourceIndexer:
                 existing_memory.importance = (
                     event.importance if event.importance is not None else 0.6
                 )
+                # #896: worker lineage keys first, indexer lifecycle keys layered
+                # on top. The two sets are orthogonal (worker: connector_id /
+                # platform / team_id / channel_id / thread_ts / source_message_ids;
+                # indexer: resource_id / doc_id / version / indexed_at), so neither
+                # clobbers the other — the spread order just makes the indexer's
+                # lifecycle identity authoritative.
                 existing_memory.details = {
+                    **opaque_details,
                     "resource_id": event.resource_id,
                     "doc_id": event.doc_id,
                     "version": event.version,
                     # Bugfix: Keep timezone for ISO string
                     "indexed_at": to_utc_iso(utcnow()),
                 }
+                if lineage_source_uri is not None:
+                    existing_memory.source_uri = lineage_source_uri
                 # Bugfix: Remove timezone for DB compatibility
                 existing_memory.updated_at = utcnow()
                 existing_memory.embedding_status = "success"
@@ -686,13 +712,20 @@ class ResourceIndexer:
                     summary=summary[:500],
                     context_summary=context_summary,
                     content=json.dumps(event.payload, ensure_ascii=False),
+                    # #896: worker lineage keys first, indexer lifecycle keys on
+                    # top (orthogonal sets — see the update branch comment).
                     details={
+                        **opaque_details,
                         "resource_id": event.resource_id,
                         "doc_id": event.doc_id,
                         "version": event.version,
                         # Bugfix: Keep timezone for ISO string
                         "indexed_at": to_utc_iso(utcnow()),
                     },
+                    # #896: source_uri from worker lineage (slack://…) so
+                    # source_uri_prefix queries (find_by_channel) work; NULL for
+                    # non-worker resources (legacy behavior).
+                    source_uri=lineage_source_uri,
                     type="resource_data",
                     # P0-2: Fix - use 'is not None' to allow importance=0.0
                     importance=event.importance if event.importance is not None else 0.6,

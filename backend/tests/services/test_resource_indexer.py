@@ -184,6 +184,62 @@ class TestResourceIndexerNamedVectorUpsert:
 
         assert first_id == second_id
 
+    @pytest.mark.asyncio
+    async def test_apply_upsert_passes_through_worker_lineage(self, indexer, mock_db):
+        """#896: event_metadata.memory_details + source_uri project onto the
+        created Memory so an ingest_event-written memory is byte-equivalent (in
+        details + source_uri) to a remember()-written one. The 6 worker lineage
+        keys survive and coexist with the indexer's 4 lifecycle keys."""
+        event = _make_event()
+        event.event_metadata = {
+            "memory_details": {
+                "connector_id": "c-1",
+                "platform": "slack",
+                "team_id": "T01",
+                "channel_id": "C01",
+                "thread_ts": "1700000000.0001",
+                "source_message_ids": ["1700000000.0001"],
+            },
+            "source_uri": "slack://c-1/T01/C01/1700000000.0001",
+        }
+        schema = _make_schema()
+        context = _make_context()
+
+        await indexer._apply_upsert(
+            event, schema, context, "kagura_memories", indexer.embedding_service
+        )
+
+        memory = mock_db.add.call_args.args[0]
+        # All 6 worker lineage keys preserved (recall scope guard reads these).
+        assert memory.details["channel_id"] == "C01"
+        assert memory.details["thread_ts"] == "1700000000.0001"
+        assert memory.details["connector_id"] == "c-1"
+        assert memory.details["source_message_ids"] == ["1700000000.0001"]
+        # Indexer lifecycle keys coexist (authoritative).
+        assert memory.details["resource_id"] == "res_test"
+        assert memory.details["doc_id"] == "doc_1"
+        assert memory.details["version"] == 1
+        assert "indexed_at" in memory.details
+        # source_uri set so source_uri_prefix (find_by_channel) works.
+        assert memory.source_uri == "slack://c-1/T01/C01/1700000000.0001"
+
+    @pytest.mark.asyncio
+    async def test_apply_upsert_without_lineage_keeps_legacy_shape(self, indexer, mock_db):
+        """#896: non-worker resources (no event_metadata lineage) keep the legacy
+        4-key details and NULL source_uri — backward compatible."""
+        event = _make_event()
+        event.event_metadata = None
+        schema = _make_schema()
+        context = _make_context()
+
+        await indexer._apply_upsert(
+            event, schema, context, "kagura_memories", indexer.embedding_service
+        )
+
+        memory = mock_db.add.call_args.args[0]
+        assert set(memory.details.keys()) == {"resource_id", "doc_id", "version", "indexed_at"}
+        assert memory.source_uri is None
+
 
 class TestResolveContextRouting:
     """Issue #334 (Layer B) + #338 (Layer C) + #341 (shared helper).
