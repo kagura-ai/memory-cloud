@@ -501,6 +501,82 @@ class ConnectorProvisioningService:
         await self.db.execute(delete(Resource).where(Resource.id == connector.resource_pk))
         return True
 
+    async def rotate_kmc_key(
+        self,
+        workspace_id: UUID,
+        connector_id: UUID,
+        user_id: str,
+        expires_days: int = 365,
+    ) -> str:
+        """Revoke the current KMC write key and mint a replacement.
+
+        Revokes the existing ``connector:{id}`` API key, mints a fresh
+        workspace-scoped key with the given expiry, Fernet-encrypts it on
+        the connector row, and bumps ``config_version`` so the worker
+        re-fetches on its next poll.
+
+        Returns:
+            Plaintext new KMC write key (shown exactly once to the caller).
+
+        Raises:
+            NotFoundException: if no matching connector exists in workspace.
+            ValidationError: if the connector has no KMC key to rotate
+                (registration flow was not completed).
+        """
+        from datetime import timedelta
+
+        from auth.api_keys import APIKeyManager
+        from models.auth import APIKey
+        from utils.datetime import utcnow
+
+        result = await self.db.execute(
+            select(WorkspaceConnector).where(
+                WorkspaceConnector.id == connector_id,
+                WorkspaceConnector.workspace_id == workspace_id,
+            )
+        )
+        connector = result.scalar_one_or_none()
+        if connector is None:
+            raise NotFoundException(f"Connector {connector_id} not found")
+        if not connector.kmc_api_key_encrypted:
+            raise ValidationError(
+                "Connector has no KMC write key; register with a write-target context first"
+            )
+
+        # Revoke the old key immediately — no grace period for v1.
+        # Operators should schedule rotation before the worker is active or
+        # during a brief maintenance window.
+        await self.db.execute(
+            update(APIKey)
+            .where(
+                APIKey.workspace_id == workspace_id,
+                APIKey.name == f"connector:{connector_id}",
+                APIKey.revoked_at.is_(None),
+            )
+            .values(revoked_at=utcnow())
+        )
+
+        # Mint replacement key.
+        plaintext_new_key, _ = await APIKeyManager(self.db).create_key(
+            name=f"connector:{connector_id}",
+            user_id=user_id,
+            workspace_id=workspace_id,
+            expires_days=expires_days,
+        )
+        connector.set_kmc_api_key(plaintext_new_key)
+        connector.kmc_api_key_expires_at = utcnow() + timedelta(days=expires_days)
+        connector.config_version = connector.config_version + 1
+        await self.db.flush()
+
+        logger.info(
+            "connector_kmc_key_rotated",
+            connector_id=str(connector_id),
+            workspace_id=str(workspace_id),
+            user_id=user_id,
+            expires_days=expires_days,
+        )
+        return plaintext_new_key
+
     async def _get_connector_for_resource(
         self,
         resource_pk: UUID,
