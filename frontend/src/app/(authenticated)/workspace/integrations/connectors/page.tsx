@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useTranslations } from "next-intl";
-import { Plug, Trash2 } from "lucide-react";
+import { useTranslations, useLocale } from "next-intl";
+import { Check, Copy, Plug, Trash2 } from "lucide-react";
 
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -13,6 +13,13 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -24,6 +31,8 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
+import { useCopyFeedback } from "@/hooks/useCopyFeedback";
+import { API_BASE_URL } from "@/lib/api/base";
 import {
   createConnector,
   deleteConnector,
@@ -40,6 +49,39 @@ import {
 // limit (100); resource_id allows up to 255 so 100 is safe for both uses.
 const CONNECTOR_NAME_MAX = 100;
 
+// #890: Presidio recognizer names offered in the PII config UI. Kept in sync
+// with the worker's recognizer set; the backend validates the full
+// PiiGuardrailConfig shape (extra keys forbidden, redaction enum, non-blank locale,
+// and requires detectors when enabled).
+const PII_DETECTORS = [
+  "EMAIL_ADDRESS",
+  "PHONE_NUMBER",
+  "CREDIT_CARD",
+  "PERSON",
+  "IP_ADDRESS",
+  "IBAN_CODE",
+] as const;
+const PII_DEFAULT_DETECTORS = [
+  "EMAIL_ADDRESS",
+  "PHONE_NUMBER",
+  "CREDIT_CARD",
+  "PERSON",
+];
+const PII_REDACTION_MODES = ["mask", "hash", "remove"] as const;
+type PiiRedaction = (typeof PII_REDACTION_MODES)[number];
+
+// #893: copy-pastable curl against the resource-ingest API for manual CLI
+// testing (verify events become memories without a worker). Single-quote the
+// header value so a token with shell metacharacters is safe to paste.
+function curlSample(resourceId: string, token: string): string {
+  return [
+    `curl -X POST '${API_BASE_URL}/api/v1/resources/${resourceId}/events' \\`,
+    `  -H 'X-Resource-API-Key: ${token}' \\`,
+    `  -H 'Content-Type: application/json' \\`,
+    `  -d '{"op":"upsert","doc_id":"test-1","payload":{"text":"hello"}}'`,
+  ].join("\n");
+}
+
 function toResourceId(seed: string): string {
   const slug = seed
     .toLowerCase()
@@ -51,9 +93,24 @@ function toResourceId(seed: string): string {
 export default function ConnectorsPage() {
   const t = useTranslations("connectors");
   const tCommon = useTranslations("common");
+  const locale = useLocale();
   const { toast } = useToast();
+  const { isCopied, copyToTarget } = useCopyFeedback();
   const router = useRouter();
   const searchParams = useSearchParams();
+
+  // Copy with the shared per-key feedback hook (unmount-safe, 2000ms standard);
+  // surface clipboard failures via the destructive-toast channel.
+  const handleCopy = useCallback(
+    async (text: string, key: string) => {
+      try {
+        await copyToTarget(text, key);
+      } catch {
+        toast({ variant: "destructive", title: tCommon("error") });
+      }
+    },
+    [copyToTarget, toast, tCommon],
+  );
   const installHandle = searchParams.get("slack_install");
 
   const [connectors, setConnectors] = useState<
@@ -67,6 +124,15 @@ export default function ConnectorsPage() {
   const [contextName, setContextName] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+
+  // #890: PII guardrail config for the create form. Defaults scrub on by
+  // default so an admin who touches nothing still ships a safe config.
+  const [piiEnabled, setPiiEnabled] = useState(true);
+  const [piiDetectors, setPiiDetectors] = useState<string[]>(
+    PII_DEFAULT_DETECTORS,
+  );
+  const [piiRedaction, setPiiRedaction] = useState<PiiRedaction>("mask");
+  const [piiFailClosed, setPiiFailClosed] = useState(true);
 
   // One-time credentials reveal after a successful create
   const [created, setCreated] = useState<CreateConnectorResponse | null>(null);
@@ -102,6 +168,12 @@ export default function ConnectorsPage() {
         const seed = info.team_name || info.team_id;
         setDisplayName(info.team_name || info.team_id);
         setContextName(toResourceId(seed));
+        // Reset PII config to safe defaults for each new install session so a
+        // prior session's choices don't leak into a fresh connector dialog.
+        setPiiEnabled(true);
+        setPiiDetectors(PII_DEFAULT_DETECTORS);
+        setPiiRedaction("mask");
+        setPiiFailClosed(true);
       } catch {
         if (!cancelled) {
           toast({
@@ -132,17 +204,25 @@ export default function ConnectorsPage() {
     setSubmitting(true);
     setCreateError(null);
     try {
+      // #890: build a valid pii_guardrail_config. When disabled, send an
+      // empty detectors list (backend only requires non-empty when enabled);
+      // when enabled, the UI guarantees ≥1 detector (submit is blocked
+      // otherwise) so the {enabled:true, detectors:[]} 422 can't occur.
       const result = await createConnector({
         connector_type: "slack",
         resource_id: toResourceId(pending.team_id),
         display_name: displayName || undefined,
         auto_create_context_name: contextName || undefined,
         slack_install_handle: installHandle,
-        // pii_guardrail_config is intentionally left unset: the backend rejects
-        // `{enabled:true}` without a non-empty `detectors` list. An omitted field
-        // is received by FastAPI as None, which the contract treats as
-        // fail-closed (the ai-worker scrubs at ingest). A detector-config UI is
-        // a follow-up.
+        pii_guardrail_config: {
+          enabled: piiEnabled,
+          detectors: piiEnabled ? piiDetectors : [],
+          redaction: piiRedaction,
+          // Derive the recognizer locale from the UI locale so a ja workspace
+          // gets ja-aware PII detection instead of English-only.
+          locale,
+          fail_closed: piiFailClosed,
+        },
       });
       setPending(null);
       setCreated(result);
@@ -153,7 +233,19 @@ export default function ConnectorsPage() {
     } finally {
       setSubmitting(false);
     }
-  }, [installHandle, pending, displayName, contextName, router, reload]);
+  }, [
+    installHandle,
+    pending,
+    displayName,
+    contextName,
+    piiEnabled,
+    piiDetectors,
+    piiRedaction,
+    piiFailClosed,
+    locale,
+    router,
+    reload,
+  ]);
 
   const handleDelete = useCallback(async () => {
     if (!toDelete) return;
@@ -201,13 +293,36 @@ export default function ConnectorsPage() {
               key={c.connector_id}
               className="flex items-center justify-between p-4"
             >
-              <div>
+              <div className="min-w-0">
                 <p className="font-medium capitalize">{c.connector_type}</p>
                 <p className="text-sm text-muted-foreground">
                   {c.context_id
                     ? t("contextBound", { id: c.context_id })
                     : t("contextNotReady")}
                 </p>
+                {/* #893: connector_id is non-secret — show it in the list
+                    (support / log correlation / CLI target) with a copy button,
+                    instead of in the one-time reveal. */}
+                <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
+                  <span className="font-mono break-all">
+                    {t("connectorIdLabel", { id: c.connector_id })}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    aria-label={t("copyConnectorId")}
+                    onClick={() =>
+                      handleCopy(c.connector_id, `cid-${c.connector_id}`)
+                    }
+                  >
+                    {isCopied(`cid-${c.connector_id}`) ? (
+                      <Check className="h-4 w-4" />
+                    ) : (
+                      <Copy className="h-4 w-4" />
+                    )}
+                  </Button>
+                </div>
               </div>
               <Button
                 variant="ghost"
@@ -272,6 +387,93 @@ export default function ConnectorsPage() {
                 {t("contextNameHelp")}
               </p>
             </div>
+
+            {/* #890: PII guardrail configuration */}
+            <div className="border-t pt-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">{t("piiTitle")}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {t("piiDesc")}
+                  </p>
+                </div>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={piiEnabled}
+                    onChange={(e) => setPiiEnabled(e.target.checked)}
+                  />
+                  {t("piiEnabled")}
+                </label>
+              </div>
+
+              {piiEnabled && (
+                <div className="mt-3 space-y-3">
+                  <div>
+                    <p className="mb-1 text-xs font-medium">
+                      {t("piiDetectors")}
+                    </p>
+                    <div className="grid grid-cols-2 gap-1">
+                      {PII_DETECTORS.map((d) => (
+                        <label
+                          key={d}
+                          className="flex items-center gap-2 text-sm"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={piiDetectors.includes(d)}
+                            onChange={(e) =>
+                              setPiiDetectors((prev) =>
+                                e.target.checked
+                                  ? [...prev, d]
+                                  : prev.filter((x) => x !== d),
+                              )
+                            }
+                          />
+                          <span className="font-mono text-xs">{d}</span>
+                        </label>
+                      ))}
+                    </div>
+                    {piiDetectors.length === 0 && (
+                      <p className="mt-1 text-xs text-destructive">
+                        {t("piiDetectorsRequired")}
+                      </p>
+                    )}
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="conn-pii-redaction"
+                      className="mb-1 block text-xs font-medium"
+                    >
+                      {t("piiRedaction")}
+                    </label>
+                    <Select
+                      value={piiRedaction}
+                      onValueChange={(v) => setPiiRedaction(v as PiiRedaction)}
+                    >
+                      <SelectTrigger id="conn-pii-redaction" className="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {PII_REDACTION_MODES.map((m) => (
+                          <SelectItem key={m} value={m}>
+                            {t(`piiRedaction_${m}`)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={piiFailClosed}
+                      onChange={(e) => setPiiFailClosed(e.target.checked)}
+                    />
+                    {t("piiFailClosed")}
+                  </label>
+                </div>
+              )}
+            </div>
           </div>
           <AlertDialogFooter>
             <AlertDialogCancel
@@ -282,7 +484,11 @@ export default function ConnectorsPage() {
             </AlertDialogCancel>
             <AlertDialogAction
               onClick={handleCreate}
-              disabled={submitting || !contextName}
+              disabled={
+                submitting ||
+                !contextName ||
+                (piiEnabled && piiDetectors.length === 0)
+              }
             >
               {t("createConnector")}
             </AlertDialogAction>
@@ -298,25 +504,87 @@ export default function ConnectorsPage() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{t("createdTitle")}</AlertDialogTitle>
-            <AlertDialogDescription>{t("createdDesc")}</AlertDialogDescription>
+            {/* #893: Model B users do nothing after registration — the worker
+                fetches credentials server-to-server. Don't frame secrets as
+                "save these now". */}
+            <AlertDialogDescription>
+              {t("createdDescModelB")}
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="space-y-3 text-sm">
-            <div>
-              <p className="font-medium">{t("connectorId")}</p>
-              <code className="break-all">{created?.connector_id}</code>
-            </div>
-            {created?.kmc_api_key && (
-              <div>
-                <p className="font-medium">{t("kmcApiKey")}</p>
-                <code className="break-all">{created.kmc_api_key}</code>
+            {/* #893: developer/CLI credentials collapsed by default — only
+                needed for manual curl/CLI testing or a self-hosted worker. */}
+            <details className="rounded-md border p-3">
+              <summary className="cursor-pointer text-sm font-medium">
+                {t("devDisclosureTitle")}
+              </summary>
+              <div className="mt-3 space-y-3">
+                <p className="text-xs text-muted-foreground">
+                  {t("devDisclosureNote")}
+                </p>
+                {created?.token && (
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <p className="font-medium">{t("resourceToken")}</p>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        aria-label={t("copyResourceToken")}
+                        onClick={() =>
+                          handleCopy(created.token, "reveal-token")
+                        }
+                      >
+                        {isCopied("reveal-token") ? (
+                          <Check className="h-4 w-4" />
+                        ) : (
+                          <Copy className="h-4 w-4" />
+                        )}
+                      </Button>
+                    </div>
+                    <code className="block break-all text-xs">
+                      {created.token}
+                    </code>
+                  </div>
+                )}
+                {created?.token && created?.resource_id && (
+                  <div>
+                    <p className="mb-1 font-medium">{t("curlSampleTitle")}</p>
+                    <pre className="overflow-x-auto rounded bg-muted p-2 text-xs">
+                      {curlSample(created.resource_id, created.token)}
+                    </pre>
+                  </div>
+                )}
+                {created?.kmc_api_key && (
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <p className="font-medium">{t("kmcApiKey")}</p>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        aria-label={t("copyKmcApiKey")}
+                        onClick={() =>
+                          handleCopy(created.kmc_api_key!, "reveal-kmc")
+                        }
+                      >
+                        {isCopied("reveal-kmc") ? (
+                          <Check className="h-4 w-4" />
+                        ) : (
+                          <Copy className="h-4 w-4" />
+                        )}
+                      </Button>
+                    </div>
+                    <p className="mb-1 text-xs text-muted-foreground">
+                      {t("kmcApiKeyNote")}
+                    </p>
+                    <code className="block break-all text-xs">
+                      {created.kmc_api_key}
+                    </code>
+                  </div>
+                )}
               </div>
-            )}
-            {created?.token && (
-              <div>
-                <p className="font-medium">{t("resourceToken")}</p>
-                <code className="break-all">{created.token}</code>
-              </div>
-            )}
+            </details>
           </div>
           <AlertDialogFooter>
             <AlertDialogAction onClick={() => setCreated(null)}>
