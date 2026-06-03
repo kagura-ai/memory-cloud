@@ -253,7 +253,7 @@ async def load_pinned(
     real count — never a silent truncation.
 
     Request:
-        {"context_id": "550e8400-e29b-41d4-a716-446655440000", "cap": 100}
+        {"context_id": "<context-uuid>", "cap": 100}
 
     Example:
         POST /api/v1/memory/pinned
