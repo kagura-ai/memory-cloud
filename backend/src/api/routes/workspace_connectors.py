@@ -310,7 +310,8 @@ async def rotate_connector_kmc_key(
     this call returns. A grace-period dual-key approach is deferred to a
     follow-up issue once usage patterns are better understood.
     """
-    from utils.exceptions import NotFoundException, ValidationError as SvcValidationError
+    from utils.exceptions import NotFoundException
+    from utils.exceptions import ValidationError as SvcValidationError
 
     workspace_id = admin.get("current_workspace_id")
     if workspace_id is None:
@@ -326,12 +327,16 @@ async def rotate_connector_kmc_key(
             user_id=user_id,
         )
         await db.commit()
-    except NotFoundException:
+    except NotFoundException as exc:
         await db.rollback()
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found"
+        ) from exc
     except SvcValidationError as exc:
         await db.rollback()
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
     except HTTPException:
         raise
     except Exception as exc:
