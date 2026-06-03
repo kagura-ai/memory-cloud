@@ -33,6 +33,7 @@ ADDON_UNIT_VALUES = {
     "extra_contexts": 5,  # contexts per unit
     "extra_analysis_runs": 1,  # Issue #494: +1 broadlistening run/day per unit
     "extra_sleep_contexts": 1,  # Issue #560: +1 sleep-enabled context per unit (PRO-only)
+    "extra_connectors": 1,  # Spec 2026-06-02: +1 ai-worker connector seat per unit
 }
 
 
@@ -129,6 +130,7 @@ class AddonCalculatorService:
             "addon_context_bonus": 0,
             "addon_analysis_bonus": 0,
             "addon_sleep_contexts_bonus": 0,  # Issue #560
+            "addon_connector_bonus": 0,  # Spec 2026-06-02
         }
 
         for addon in active_addons:
@@ -155,6 +157,8 @@ class AddonCalculatorService:
                 bonuses["addon_analysis_bonus"] += total_bonus
             elif addon_type == "extra_sleep_contexts":
                 bonuses["addon_sleep_contexts_bonus"] += total_bonus  # Issue #560
+            elif addon_type == "extra_connectors":
+                bonuses["addon_connector_bonus"] += total_bonus  # Spec 2026-06-02
             else:
                 # Issue #665 review-finding #3: a WorkspaceAddon row exists
                 # for an addon_type that has no corresponding cache-column
@@ -204,6 +208,7 @@ class AddonCalculatorService:
         workspace.addon_context_bonus = bonuses["addon_context_bonus"]
         workspace.addon_analysis_bonus = bonuses["addon_analysis_bonus"]
         workspace.addon_sleep_contexts_bonus = bonuses["addon_sleep_contexts_bonus"]  # Issue #560
+        workspace.addon_connector_bonus = bonuses["addon_connector_bonus"]  # Spec 2026-06-02
 
         await self.db.commit()
 

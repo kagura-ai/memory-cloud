@@ -73,6 +73,37 @@ class Settings(BaseSettings):
         default="dev-secret-change-in-production",
         description="API Key encryption secret (32+ bytes)",
     )
+    # ai-worker (kagura-memory-ai-worker) service auth. The worker presents this
+    # as a Bearer token to GET /api/v1/workers/config (Spec 2026-06-02). Empty
+    # disables the worker config endpoint (fail-closed). Use: openssl rand -hex 32.
+    #
+    # SECURITY NOTE: Settings are read once at process startup and cached as a
+    # module-level singleton (see get_settings()). Rotating WORKER_SERVICE_TOKEN
+    # in the environment requires a process restart to take effect — the in-memory
+    # cached value is not reloaded automatically. This applies to all secrets in
+    # this class. Ensure your secret-rotation runbook includes a rolling restart.
+    worker_service_token: str = Field(
+        default="",
+        description="Shared bearer token authenticating the ai-worker to /api/v1/workers/* (RFC 6750)",
+    )
+    # Public MCP base URL handed back to the worker in its config so it can write
+    # memories. Defaults to local dev; override in prod (e.g. https://memory.kagura-ai.com/mcp).
+    kmc_mcp_url: str = Field(
+        default="http://localhost:8080/mcp",
+        description="Public MCP base URL returned to ai-worker connectors for memory writes",
+    )
+    # Slack connector OAuth (shared Kagura Slack app). Empty client_id disables
+    # the Slack connect flow (Spec 2026-06-02, Plan 4).
+    slack_client_id: str = Field(default="", description="Slack app OAuth client id")
+    slack_client_secret: str = Field(default="", description="Slack app OAuth client secret")
+    slack_redirect_uri: str = Field(
+        default="http://localhost:8080/api/v1/connectors/slack/callback",
+        description="Slack OAuth redirect URI (must match the Slack app config)",
+    )
+    slack_oauth_scopes: str = Field(
+        default="channels:history,channels:read,groups:history,chat:write,team:read,users:read",
+        description="Comma-separated Slack bot scopes requested at install",
+    )
     jwt_secret: str = Field(
         default="dev-secret-change-in-production", description="JWT signing secret (32+ bytes)"
     )

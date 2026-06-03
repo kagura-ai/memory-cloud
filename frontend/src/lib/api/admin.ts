@@ -150,6 +150,8 @@ export interface QuotaBreakdown {
   // No corresponding addon column exists — the value is identical
   // across ``base`` and ``effective`` for any given workspace.
   max_resource_tokens: number;
+  // Spec 2026-06-02: tier base for the extra_connectors addon.
+  max_connectors: number;
 }
 
 export interface WorkspaceQuotaDetail {
@@ -172,6 +174,7 @@ export interface WorkspaceQuotaDetail {
     analysis_bonus: number;
     storage_bonus_mb: number;
     sleep_contexts_bonus: number;
+    connector_bonus: number;
   };
   effective: QuotaBreakdown;
   usage: { memories: number; contexts: number; members: number };
@@ -199,6 +202,7 @@ export interface UpdateAddonRequest {
   addon_public_quota_bonus?: number;
   addon_storage_bonus_mb?: number;
   addon_sleep_contexts_bonus?: number;
+  addon_connector_bonus?: number;
 }
 
 /**

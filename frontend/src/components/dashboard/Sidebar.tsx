@@ -67,6 +67,7 @@ import {
   Globe,
   ExternalLink,
   Check,
+  Plug,
 } from "lucide-react";
 import {
   useLocale,
@@ -166,6 +167,12 @@ const navigationGroups: NavGroup[] = [
         nameKey: "oauthApps",
         href: "/workspace/integrations/credentials?tab=oauth-apps",
         icon: Puzzle,
+      },
+      {
+        nameKey: "connectors",
+        href: "/workspace/integrations/connectors",
+        icon: Plug,
+        requiredWorkspaceRole: WorkspaceRole.Admin,
       },
     ],
   },

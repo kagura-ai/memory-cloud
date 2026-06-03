@@ -294,3 +294,22 @@ class TestConnectorIdempotencyKey:
                 connector_id=connector_id,
                 idempotency_key=f"{uuid4()}:summary-123",
             )
+
+
+@pytest.mark.asyncio
+async def test_list_connectors_returns_workspace_scoped_rows_newest_first():
+    ws_id = uuid4()
+    rows = [SimpleNamespace(id=uuid4()), SimpleNamespace(id=uuid4())]
+
+    db = MagicMock()
+    scalars = MagicMock()
+    scalars.all.return_value = rows
+    exec_result = MagicMock()
+    exec_result.scalars.return_value = scalars
+    db.execute = AsyncMock(return_value=exec_result)
+
+    service = ConnectorProvisioningService(db)
+    result = await service.list_connectors(ws_id)
+
+    assert result == rows
+    db.execute.assert_awaited_once()

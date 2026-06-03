@@ -82,6 +82,8 @@ async def test_create_passes_normalized_pii_guardrail_config_dict_to_service():
     result.connector.connector_type = "slack"
     result.resource_id = "slack_general"
     result.resource_pk = uuid4()
+    result.context_id = None
+    result.plaintext_kmc_api_key = None
     result.token.id = 1
     result.plaintext_token = "kagura_resource_x"
     result.token.quota_events_per_hour = 1000
@@ -98,3 +100,87 @@ async def test_create_passes_normalized_pii_guardrail_config_dict_to_service():
         "locale": "en",
         "fail_closed": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_list_workspace_connectors_returns_summaries():
+    from datetime import datetime
+
+    from api.routes.workspace_connectors import list_workspace_connectors
+
+    db = MagicMock()
+    ws_id = uuid4()
+    admin = {"user_id": "user-1", "current_workspace_id": ws_id}
+
+    c = MagicMock()
+    c.id = uuid4()
+    c.connector_type = "slack"
+    c.resource_pk = uuid4()
+    c.context_id = uuid4()
+    c.config_version = 1
+    c.created_at = datetime(2026, 6, 2, 0, 0, 0)
+    c.created_by = "user-1"
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.list_connectors = AsyncMock(return_value=[c])
+        result = await list_workspace_connectors(admin, db)
+
+    assert len(result) == 1
+    assert result[0].connector_id == c.id
+    assert result[0].connector_type == "slack"
+    service_cls.return_value.list_connectors.assert_awaited_once_with(ws_id)
+
+
+@pytest.mark.asyncio
+async def test_list_workspace_connectors_400_without_workspace():
+    from fastapi import HTTPException
+
+    from api.routes.workspace_connectors import list_workspace_connectors
+
+    db = MagicMock()
+    admin = {"user_id": "user-1", "current_workspace_id": None}
+
+    with pytest.raises(HTTPException) as exc:
+        await list_workspace_connectors(admin, db)
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_delete_workspace_connector_204_on_success():
+    from api.routes.workspace_connectors import delete_workspace_connector
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    ws_id = uuid4()
+    conn_id = uuid4()
+    admin = {"user_id": "user-1", "current_workspace_id": ws_id}
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.delete_connector = AsyncMock(return_value=True)
+        resp = await delete_workspace_connector(conn_id, admin, db)
+
+    assert resp.status_code == 204
+    db.commit.assert_awaited_once()
+    service_cls.return_value.delete_connector.assert_awaited_once_with(ws_id, conn_id)
+
+
+@pytest.mark.asyncio
+async def test_delete_workspace_connector_404_when_missing():
+    from fastapi import HTTPException
+
+    from api.routes.workspace_connectors import delete_workspace_connector
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    admin = {"user_id": "user-1", "current_workspace_id": uuid4()}
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.delete_connector = AsyncMock(return_value=False)
+        with pytest.raises(HTTPException) as exc:
+            await delete_workspace_connector(uuid4(), admin, db)
+
+    assert exc.value.status_code == 404
+    db.rollback.assert_awaited_once()
+    db.commit.assert_not_awaited()

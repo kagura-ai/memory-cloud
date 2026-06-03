@@ -162,3 +162,34 @@ class TestAddonCalculatorStorageBonus:
         assert first["addon_memory_bonus"] == 2 * ADDON_UNIT_VALUES["extra_memory"]
         assert first["addon_sleep_contexts_bonus"] == 3 * ADDON_UNIT_VALUES["extra_sleep_contexts"]
         assert mock_db.commit.await_count == 2
+
+
+class TestAddonCalculatorConnectorBonus:
+    """Spec 2026-06-02: extra_connectors addon → addon_connector_bonus column."""
+
+    @pytest.fixture
+    def mock_db(self):
+        db = MagicMock()
+        db.execute = AsyncMock()
+        db.commit = AsyncMock()
+        return db
+
+    @pytest.fixture
+    def service(self, mock_db):
+        return AddonCalculatorService(mock_db)
+
+    @pytest.mark.asyncio
+    async def test_extra_connectors_addon_bonus_is_persisted(self, service, mock_db):
+        """extra_connectors (qty=4, unit=1) → addon_connector_bonus = 4."""
+        assert ADDON_UNIT_VALUES["extra_connectors"] == 1
+        workspace_id = uuid4()
+        addons = [_make_addon("extra_connectors", quantity=4)]
+        workspace = _make_workspace(workspace_id)
+        workspace.addon_connector_bonus = 0
+        mock_db.execute.side_effect = _make_side_effects(addons, workspace)
+
+        bonuses = await service.recalculate_workspace_bonuses(workspace_id)
+
+        assert bonuses["addon_connector_bonus"] == 4
+        assert workspace.addon_connector_bonus == 4
+        mock_db.commit.assert_awaited_once()

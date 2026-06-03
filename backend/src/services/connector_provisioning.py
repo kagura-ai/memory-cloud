@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,6 +40,11 @@ class ConnectorProvisioningResult:
     plaintext_token: str
     resource_id: str
     resource_pk: UUID
+    # Spec 2026-06-02 (registration flow). Both NULL on the legacy path that
+    # does not pass context info; populated when the connector is registered
+    # with a write-target context.
+    context_id: UUID | None = None
+    plaintext_kmc_api_key: str | None = None
 
 
 class ConnectorProvisioningService:
@@ -66,58 +71,147 @@ class ConnectorProvisioningService:
         litellm_virtual_key_id: str | None = None,
         virtual_key_valid_until: datetime | None = None,
         quota_events_per_hour: int = 1000,
+        context_id: UUID | None = None,
+        auto_create_context_name: str | None = None,
+        llm_config: dict[str, Any] | None = None,
+        channel_ids: list[Any] | None = None,
+        locale: str | None = None,
+        external_team_id: str | None = None,
     ) -> ConnectorProvisioningResult:
-        """Create resource + connector + connector-scoped token in one flow."""
+        """Create resource + connector + connector-scoped token in one flow.
+
+        Spec 2026-06-02 (registration flow): when ``context_id`` or
+        ``auto_create_context_name`` is supplied, the connector is bound to a
+        write-target context and a workspace-scoped KMC write key is minted and
+        stored Fernet-encrypted so the worker config endpoint can hand it back.
+        Callers that pass neither keep the legacy behaviour (no context, no
+        KMC key) for backward compatibility.
+        """
         self._validate_inputs(connector_type, resource_id, quota_events_per_hour)
 
         workspace = await self._get_workspace(workspace_id)
-        await self._enforce_connector_seat_cap(workspace, workspace_id)
 
-        existing_resource_pk = await resolve_resource_pk(self.db, workspace_id, resource_id)
-        resource_pk = await upsert_resource(
-            self.db,
-            workspace_id=workspace_id,
-            resource_id=resource_id,
-            name=display_name or f"{connector_type} connector",
-            created_by=user_id,
-        )
+        # One platform team maps to exactly one connector — check BEFORE creating
+        # any context so a duplicate is rejected without leaving orphan rows.
+        # Falsy check (not `is not None`) also rejects empty-string team_id from
+        # a malformed OAuth response. Do NOT include the conflicting connector_id —
+        # it may belong to a different workspace (cross-tenant UUID disclosure).
+        if external_team_id:
+            existing_team = await self.get_connector_for_dispatch(connector_type, external_team_id)
+            if existing_team is not None:
+                raise ConflictError(
+                    f"A {connector_type} connector for team '{external_team_id}' already exists.",
+                )
 
-        existing_connector = await self._get_connector_for_resource(resource_pk)
-        if existing_resource_pk is not None and existing_connector is None:
-            raise ConflictError(
-                (
-                    f"Resource '{resource_id}' already exists and is not connector-owned. "
-                    "Choose a fresh resource_id for this connector."
-                ),
-                resource_pk=str(existing_resource_pk),
+        # ``auto_create_context_name`` goes through ContextService.create_context,
+        # which COMMITS mid-flow — that would release the seat-cap advisory lock
+        # before the connector insert and re-open the TOCTOU over-provision hole.
+        # So for the auto-create path: non-locking pre-check → create+commit the
+        # context → THEN take the lock for the authoritative gate (held through
+        # the connector flush + the caller's commit). The legacy / existing-
+        # context paths keep the original order (lock first) since they never
+        # commit before the insert.
+        # Track an auto-created context so we can clean it up on ANY downstream
+        # failure: ContextService.create_context() COMMITS the context, so the
+        # route-layer rollback cannot undo it. Without this, a seat-cap hit,
+        # resource_id conflict, UNIQUE-on-team race at flush, key mint, or token
+        # mint failure would all leave an orphan context with no connector.
+        auto_created_context_id: UUID | None = None
+        if auto_create_context_name:
+            await self._check_seat_cap_available(workspace, workspace_id)
+            resolved_context_id = await self._resolve_context(
+                workspace=workspace,
+                user_id=user_id,
+                context_id=None,
+                auto_create_context_name=auto_create_context_name,
             )
-        if existing_connector is not None:
-            raise ConflictError(
-                f"Resource '{resource_id}' already has a workspace connector.",
-                connector_id=str(existing_connector.id),
+            auto_created_context_id = resolved_context_id
+        else:
+            await self._enforce_connector_seat_cap(workspace, workspace_id)
+            resolved_context_id = await self._resolve_context(
+                workspace=workspace,
+                user_id=user_id,
+                context_id=context_id,
+                auto_create_context_name=None,
             )
 
-        connector = WorkspaceConnector(
-            resource_pk=resource_pk,
-            workspace_id=workspace_id,
-            connector_type=connector_type,
-            pii_guardrail_config=pii_guardrail_config,
-            litellm_virtual_key_id=litellm_virtual_key_id,
-            virtual_key_valid_until=virtual_key_valid_until,
-            created_by=user_id,
-        )
-        connector.set_oauth_tokens(oauth_tokens)
-        self.db.add(connector)
-        await self.db.flush()
+        try:
+            # For the auto-create path the authoritative locked seat-cap gate runs
+            # here (after the context commit) so the advisory lock is held through
+            # the connector flush below without an intervening commit releasing it.
+            if auto_create_context_name:
+                await self._enforce_connector_seat_cap(workspace, workspace_id)
 
-        plaintext_token, token_record = await ResourceTokenManager(self.db).create_token(
-            resource_id=resource_id,
-            resource_pk=resource_pk,
-            workspace_id=workspace_id,
-            description=f"Connector token for {connector_type}:{connector.id}",
-            quota_events_per_hour=quota_events_per_hour,
-            created_by=user_id,
-        )
+            existing_resource_pk = await resolve_resource_pk(self.db, workspace_id, resource_id)
+            resource_pk = await upsert_resource(
+                self.db,
+                workspace_id=workspace_id,
+                resource_id=resource_id,
+                name=display_name or f"{connector_type} connector",
+                created_by=user_id,
+            )
+
+            existing_connector = await self._get_connector_for_resource(resource_pk)
+            if existing_resource_pk is not None and existing_connector is None:
+                raise ConflictError(
+                    (
+                        f"Resource '{resource_id}' already exists and is not connector-owned. "
+                        "Choose a fresh resource_id for this connector."
+                    ),
+                    resource_pk=str(existing_resource_pk),
+                )
+            if existing_connector is not None:
+                raise ConflictError(
+                    f"Resource '{resource_id}' already has a workspace connector.",
+                    connector_id=str(existing_connector.id),
+                )
+
+            connector = WorkspaceConnector(
+                resource_pk=resource_pk,
+                workspace_id=workspace_id,
+                connector_type=connector_type,
+                context_id=resolved_context_id,
+                locale=locale,
+                channel_ids=channel_ids,
+                external_team_id=external_team_id,
+                pii_guardrail_config=pii_guardrail_config,
+                litellm_virtual_key_id=litellm_virtual_key_id,
+                virtual_key_valid_until=virtual_key_valid_until,
+                created_by=user_id,
+            )
+            connector.set_oauth_tokens(oauth_tokens)
+            connector.set_llm_config(llm_config)
+            self.db.add(connector)
+            await self.db.flush()
+
+            # Mint the workspace-scoped KMC write key (path a) when this connector
+            # has a write-target context. Stored Fernet-encrypted on the connector
+            # so the worker config endpoint can return it on every fetch.
+            plaintext_kmc_api_key: str | None = None
+            if resolved_context_id is not None:
+                from auth.api_keys import APIKeyManager
+
+                plaintext_kmc_api_key, _ = await APIKeyManager(self.db).create_key(
+                    name=f"connector:{connector.id}",
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                )
+                connector.set_kmc_api_key(plaintext_kmc_api_key)
+                await self.db.flush()
+
+            plaintext_token, token_record = await ResourceTokenManager(self.db).create_token(
+                resource_id=resource_id,
+                resource_pk=resource_pk,
+                workspace_id=workspace_id,
+                description=f"Connector token for {connector_type}:{connector.id}",
+                quota_events_per_hour=quota_events_per_hour,
+                created_by=user_id,
+            )
+        except Exception:
+            # Delete the committed auto-created context so it is not orphaned.
+            if auto_created_context_id is not None:
+                await self._delete_orphan_context(auto_created_context_id)
+            raise
 
         logger.info(
             "workspace_connector_provisioned",
@@ -135,7 +229,56 @@ class ConnectorProvisioningService:
             plaintext_token=plaintext_token,
             resource_id=resource_id,
             resource_pk=resource_pk,
+            context_id=resolved_context_id,
+            plaintext_kmc_api_key=plaintext_kmc_api_key,
         )
+
+    async def _resolve_context(
+        self,
+        *,
+        workspace: Workspace,
+        user_id: str,
+        context_id: UUID | None,
+        auto_create_context_name: str | None,
+    ) -> UUID | None:
+        """Resolve the write-target context for a connector.
+
+        ``context_id`` selects an existing workspace context (verified to belong
+        to the workspace); ``auto_create_context_name`` creates a fresh private
+        context. Returns ``None`` when neither is given (legacy path).
+
+        Auto-created contexts are attributed to the workspace owner
+        (``created_by=workspace.owner_user_id``) so the private-context
+        owner-only rule in ``ContextService`` is satisfied even when the acting
+        principal is a workspace admin (the endpoint admits both).
+        """
+        if context_id is not None and auto_create_context_name:
+            raise ValidationError(
+                "Provide either context_id or auto_create_context_name, not both.",
+                field="context_id",
+            )
+        if context_id is not None:
+            from models.auth import Context
+
+            result = await self.db.execute(
+                select(Context).where(
+                    Context.id == context_id,
+                    Context.workspace_id == workspace.id,
+                )
+            )
+            if result.scalar_one_or_none() is None:
+                raise NotFoundException("Context", str(context_id))
+            return context_id
+        if auto_create_context_name:
+            from services.context_service import ContextService
+
+            context = await ContextService(self.db).create_context(
+                workspace_id=workspace.id,
+                name=auto_create_context_name,
+                created_by=workspace.owner_user_id,
+            )
+            return context.id
+        return None
 
     @staticmethod
     def _validate_inputs(
@@ -159,12 +302,72 @@ class ConnectorProvisioningService:
                 field="quota_events_per_hour",
             )
 
+    async def _delete_orphan_context(self, context_id: UUID) -> None:
+        """Hard-delete a context that was committed before a provisioning failure.
+
+        ContextService.create_context() issues its own db.commit(), so the context
+        row is durable before provision_connector finishes. If the seat-cap check
+        subsequently fails, the already-committed context must be deleted explicitly
+        — the route-layer rollback cannot undo a prior commit. Uses a new session
+        connection via a raw Core DELETE so it commits independently.
+        """
+        from models.auth import Context
+
+        try:
+            # Roll back any half-applied work (e.g. a connector INSERT that hit a
+            # UNIQUE violation at flush) so the session is clean before we delete
+            # the already-committed context in its own transaction.
+            await self.db.rollback()
+            await self.db.execute(delete(Context).where(Context.id == context_id))
+            await self.db.commit()
+            logger.info("orphan_context_cleaned_up", context_id=str(context_id))
+        except Exception:
+            logger.error(
+                "orphan_context_cleanup_failed",
+                context_id=str(context_id),
+                note="Manual cleanup required for orphaned context",
+            )
+
     async def _get_workspace(self, workspace_id: UUID) -> Workspace:
         result = await self.db.execute(select(Workspace).where(Workspace.id == workspace_id))
         workspace = result.scalar_one_or_none()
         if workspace is None:
             raise NotFoundException("Workspace", str(workspace_id))
         return workspace
+
+    @staticmethod
+    def _raise_seat_cap(max_connectors: int, active_connectors: int) -> None:
+        raise MemoryCloudException(
+            (f"Connector seat limit reached. Your plan allows {max_connectors} connector(s)."),
+            status_code=403,
+            error_code="CONNECTOR-001",
+            max_connectors=max_connectors,
+            active_connectors=active_connectors,
+        )
+
+    async def _count_active_connectors(self, workspace_id: UUID) -> int:
+        result = await self.db.execute(
+            select(func.count(WorkspaceConnector.id)).where(
+                WorkspaceConnector.workspace_id == workspace_id
+            )
+        )
+        return result.scalar() or 0
+
+    async def _check_seat_cap_available(self, workspace: Workspace, workspace_id: UUID) -> None:
+        """Non-locking seat-cap pre-check.
+
+        Used on the auto-create-context path BEFORE creating (committing) a
+        context, so a plainly-full cap is rejected without leaving an orphan
+        context behind. The authoritative locked re-check
+        (``_enforce_connector_seat_cap``) still runs afterwards to close the
+        TOCTOU race.
+        """
+        max_connectors = workspace.effective_max_connectors
+        if max_connectors <= 0:
+            self._raise_seat_cap(max_connectors, 0)
+        active_count = await self._count_active_connectors(workspace_id)
+        if active_count >= max_connectors:
+            self._raise_seat_cap(max_connectors, active_count)
 
     async def _enforce_connector_seat_cap(self, workspace: Workspace, workspace_id: UUID) -> None:
         max_connectors = workspace.effective_max_connectors
@@ -175,13 +378,7 @@ class ConnectorProvisioningService:
         # (CONNECTOR-001) into a retriable 503 (CONNECTOR-002) for a request that
         # can never succeed — and waste a lock + count round-trip (PR #860 review).
         if max_connectors <= 0:
-            raise MemoryCloudException(
-                (f"Connector seat limit reached. Your plan allows {max_connectors} connector(s)."),
-                status_code=403,
-                error_code="CONNECTOR-001",
-                max_connectors=max_connectors,
-                active_connectors=0,
-            )
+            self._raise_seat_cap(max_connectors, 0)
 
         # Issue #857: for a positive cap, acquire a per-workspace
         # ``pg_advisory_xact_lock`` before the count read so two concurrent
@@ -193,20 +390,9 @@ class ConnectorProvisioningService:
         # ``quota_service.py``) and the admin-bonus path (``admin.py``).
         await self._acquire_connector_seat_lock(workspace_id)
 
-        active_count_result = await self.db.execute(
-            select(func.count(WorkspaceConnector.id)).where(
-                WorkspaceConnector.workspace_id == workspace_id
-            )
-        )
-        active_count = active_count_result.scalar() or 0
+        active_count = await self._count_active_connectors(workspace_id)
         if active_count >= max_connectors:
-            raise MemoryCloudException(
-                (f"Connector seat limit reached. Your plan allows {max_connectors} connector(s)."),
-                status_code=403,
-                error_code="CONNECTOR-001",
-                max_connectors=max_connectors,
-                active_connectors=active_count,
-            )
+            self._raise_seat_cap(max_connectors, active_count)
 
     async def _acquire_connector_seat_lock(self, workspace_id: UUID) -> None:
         """Take the per-workspace advisory lock guarding seat-cap enforcement.
@@ -256,6 +442,64 @@ class ConnectorProvisioningService:
         # Reset is on the success path only; on failure the rollback above has
         # already cleared the SET LOCAL along with the rest of the transaction.
         await self.db.execute(text("SET LOCAL lock_timeout = '0'"))
+
+    async def list_connectors(self, workspace_id: UUID) -> list[WorkspaceConnector]:
+        """Return all connectors for a workspace, newest first."""
+        result = await self.db.execute(
+            select(WorkspaceConnector)
+            .where(WorkspaceConnector.workspace_id == workspace_id)
+            .order_by(WorkspaceConnector.created_at.desc())
+        )
+        return list(result.scalars().all())
+
+    async def get_connector_for_dispatch(
+        self, connector_type: str, external_team_id: str
+    ) -> WorkspaceConnector | None:
+        """Resolve the connector serving a platform team (worker dispatch key)."""
+        result = await self.db.execute(
+            select(WorkspaceConnector)
+            .where(
+                WorkspaceConnector.connector_type == connector_type,
+                WorkspaceConnector.external_team_id == external_team_id,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def delete_connector(self, workspace_id: UUID, connector_id: UUID) -> bool:
+        """Delete a connector: revoke its KMC write key + drop its resource.
+
+        Revokes the workspace-scoped ``connector:{id}`` API key so the worker's
+        next config fetch fails closed, then deletes the owning ``resources``
+        row (CASCADE removes the connector + its resource token). The
+        write-target context is intentionally preserved (it holds user data).
+        Returns ``False`` if no matching connector exists in the workspace.
+        """
+        from models.auth import APIKey
+        from models.resource import Resource
+        from utils.datetime import utcnow
+
+        result = await self.db.execute(
+            select(WorkspaceConnector).where(
+                WorkspaceConnector.id == connector_id,
+                WorkspaceConnector.workspace_id == workspace_id,
+            )
+        )
+        connector = result.scalar_one_or_none()
+        if connector is None:
+            return False
+
+        await self.db.execute(
+            update(APIKey)
+            .where(
+                APIKey.workspace_id == workspace_id,
+                APIKey.name == f"connector:{connector_id}",
+                APIKey.revoked_at.is_(None),
+            )
+            .values(revoked_at=utcnow())
+        )
+        await self.db.execute(delete(Resource).where(Resource.id == connector.resource_pk))
+        return True
 
     async def _get_connector_for_resource(
         self,
