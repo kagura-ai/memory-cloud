@@ -184,3 +184,89 @@ async def test_delete_workspace_connector_404_when_missing():
     assert exc.value.status_code == 404
     db.rollback.assert_awaited_once()
     db.commit.assert_not_awaited()
+
+
+# --- rotate-kmc-key (#892) ---
+
+
+@pytest.mark.asyncio
+async def test_rotate_kmc_key_returns_new_key_on_success():
+    from datetime import datetime
+
+    from api.routes.workspace_connectors import rotate_connector_kmc_key
+    from services.connector_provisioning import KmcKeyRotationResult
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    ws_id = uuid4()
+    conn_id = uuid4()
+    admin = {"user_id": "user-1", "current_workspace_id": ws_id}
+    expires = datetime(2099, 1, 1)
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.rotate_kmc_key = AsyncMock(
+            return_value=KmcKeyRotationResult(
+                plaintext_kmc_api_key="kmc-new-plaintext",
+                expires_at=expires,
+                config_version=3,
+            )
+        )
+        resp = await rotate_connector_kmc_key(conn_id, admin, db)
+
+    assert resp.connector_id == conn_id
+    assert resp.kmc_api_key == "kmc-new-plaintext"
+    assert resp.kmc_api_key_expires_at == expires
+    assert resp.config_version == 3
+    db.commit.assert_awaited_once()
+    service_cls.return_value.rotate_kmc_key.assert_awaited_once_with(
+        workspace_id=ws_id, connector_id=conn_id, user_id="user-1"
+    )
+
+
+@pytest.mark.asyncio
+async def test_rotate_kmc_key_404_when_connector_missing():
+    from fastapi import HTTPException
+
+    from api.routes.workspace_connectors import rotate_connector_kmc_key
+    from utils.exceptions import NotFoundException
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    admin = {"user_id": "user-1", "current_workspace_id": uuid4()}
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.rotate_kmc_key = AsyncMock(
+            side_effect=NotFoundException("Connector", str(uuid4()))
+        )
+        with pytest.raises(HTTPException) as exc:
+            await rotate_connector_kmc_key(uuid4(), admin, db)
+
+    assert exc.value.status_code == 404
+    db.rollback.assert_awaited_once()
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rotate_kmc_key_422_when_no_kmc_key():
+    from fastapi import HTTPException
+
+    from api.routes.workspace_connectors import rotate_connector_kmc_key
+    from utils.exceptions import ValidationError
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    admin = {"user_id": "user-1", "current_workspace_id": uuid4()}
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.rotate_kmc_key = AsyncMock(
+            side_effect=ValidationError("Connector has no KMC write key")
+        )
+        with pytest.raises(HTTPException) as exc:
+            await rotate_connector_kmc_key(uuid4(), admin, db)
+
+    assert exc.value.status_code == 422
+    db.rollback.assert_awaited_once()
+    db.commit.assert_not_awaited()

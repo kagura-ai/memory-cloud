@@ -57,6 +57,8 @@ async def test_get_worker_config_returns_secrets_for_ready_connector():
         "installing_admin_user_id": "U01",
     }
     conn.get_kmc_api_key.return_value = "kagura_writekey"
+    # #892: expiry check reads this; None = non-expiring (avoids MagicMock < datetime)
+    conn.kmc_api_key_expires_at = None
     conn.get_llm_config.return_value = {"provider": "anthropic", "model": "m", "api_key": "sk"}
 
     with (

@@ -93,6 +93,15 @@ class WorkspaceConnectorSummary(TZAwareBaseModel):
     created_by: str | None = None
 
 
+class RotateKmcKeyResponse(TZAwareBaseModel):
+    """Response after rotating a connector's KMC write key. Shown exactly once."""
+
+    connector_id: UUID
+    kmc_api_key: str = Field(..., description="New plaintext KMC write key; save immediately")
+    kmc_api_key_expires_at: datetime
+    config_version: int
+
+
 @router.post(
     "", response_model=WorkspaceConnectorCreateResponse, status_code=status.HTTP_201_CREATED
 )
@@ -278,3 +287,73 @@ async def delete_workspace_connector(
             detail="Failed to delete workspace connector",
         ) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{connector_id}/rotate-kmc-key",
+    response_model=RotateKmcKeyResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def rotate_connector_kmc_key(
+    connector_id: UUID,
+    admin: WorkspaceAdmin,
+    db: AsyncSession = Depends(get_db),
+) -> RotateKmcKeyResponse:
+    """Rotate the KMC write key for a connector (workspace-admin scoped).
+
+    Revokes the current key immediately, mints a replacement with a 365-day
+    expiry, and bumps ``config_version`` so the worker re-fetches on its next
+    poll. The new plaintext key is returned exactly once.
+
+    **No grace period (v1)**: coordinate rotation during a maintenance window
+    or a brief pause in ai-worker activity; the old key is invalid as soon as
+    this call returns. A grace-period dual-key approach is deferred to a
+    follow-up issue once usage patterns are better understood.
+    """
+    from utils.exceptions import NotFoundException
+    from utils.exceptions import ValidationError as SvcValidationError
+
+    workspace_id = admin.get("current_workspace_id")
+    if workspace_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No workspace selected. Please select a workspace first.",
+        )
+    user_id = admin["user_id"]
+    try:
+        rotation = await ConnectorProvisioningService(db).rotate_kmc_key(
+            workspace_id=workspace_id,
+            connector_id=connector_id,
+            user_id=user_id,
+        )
+        await db.commit()
+    except NotFoundException as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found"
+        ) from exc
+    except SvcValidationError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await db.rollback()
+        logger.error(
+            "workspace_connector_rotate_kmc_key_failed",
+            connector_id=str(connector_id),
+            workspace_id=str(workspace_id),
+            error=str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to rotate KMC write key",
+        ) from exc
+    return RotateKmcKeyResponse(
+        connector_id=connector_id,
+        kmc_api_key=rotation.plaintext_kmc_api_key,
+        kmc_api_key_expires_at=rotation.expires_at,
+        config_version=rotation.config_version,
+    )

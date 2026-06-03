@@ -95,6 +95,15 @@ async def get_worker_config(
             detail="No ready connector for this team",
         )
 
+    from utils.datetime import utcnow
+
+    if connector.kmc_api_key_expires_at and connector.kmc_api_key_expires_at < utcnow():
+        logger.warning(
+            "connector_kmc_key_expired",
+            connector_id=str(connector.id),
+            expired_at=connector.kmc_api_key_expires_at.isoformat(),
+        )
+
     oauth = connector.get_oauth_tokens() or {}
     slack = {
         "bot_token": oauth.get("bot_token"),

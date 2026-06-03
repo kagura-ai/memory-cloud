@@ -518,6 +518,9 @@ class WorkspaceConnector(Base):
     # holds the encrypted plaintext so the worker config endpoint can hand it
     # back on every config fetch.
     kmc_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Expiry of the KMC write key. NULL = non-expiring (legacy). Set by the
+    # rotate endpoint; the worker config endpoint logs a warning when expired.
+    kmc_api_key_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     pii_guardrail_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     litellm_virtual_key_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     config_version: Mapped[int] = mapped_column(

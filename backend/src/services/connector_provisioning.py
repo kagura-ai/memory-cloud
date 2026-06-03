@@ -47,6 +47,15 @@ class ConnectorProvisioningResult:
     plaintext_kmc_api_key: str | None = None
 
 
+@dataclass(frozen=True)
+class KmcKeyRotationResult:
+    """Result returned after rotating a connector's KMC write key (#892)."""
+
+    plaintext_kmc_api_key: str
+    expires_at: datetime
+    config_version: int
+
+
 class ConnectorProvisioningService:
     """Provision ai-worker chat-ingest connectors atomically.
 
@@ -500,6 +509,108 @@ class ConnectorProvisioningService:
         )
         await self.db.execute(delete(Resource).where(Resource.id == connector.resource_pk))
         return True
+
+    async def rotate_kmc_key(
+        self,
+        workspace_id: UUID,
+        connector_id: UUID,
+        user_id: str,
+        expires_days: int = 365,
+    ) -> KmcKeyRotationResult:
+        """Revoke the current KMC write key and mint a replacement.
+
+        Revokes the existing ``connector:{id}`` API key, mints a fresh
+        workspace-scoped key with the given expiry, Fernet-encrypts it on
+        the connector row, and bumps ``config_version`` so the worker
+        re-fetches on its next poll.
+
+        Returns:
+            ``KmcKeyRotationResult`` with the one-time plaintext key, the new
+            expiry, and the bumped config_version (so the caller need not
+            re-query the connector).
+
+        Raises:
+            NotFoundException: if no matching connector exists in workspace.
+            ValidationError: if the connector has no KMC key to rotate
+                (registration flow was not completed).
+        """
+        from auth.api_keys import APIKeyManager
+        from models.auth import APIKey
+        from utils.datetime import utcnow
+        from utils.hashing import sha256_hex
+
+        result = await self.db.execute(
+            select(WorkspaceConnector).where(
+                WorkspaceConnector.id == connector_id,
+                WorkspaceConnector.workspace_id == workspace_id,
+            )
+        )
+        connector = result.scalar_one_or_none()
+        if connector is None:
+            raise NotFoundException("Connector", str(connector_id))
+        current_key = connector.get_kmc_api_key()
+        if not current_key:
+            raise ValidationError(
+                "Connector has no KMC write key; register with a write-target context first"
+            )
+
+        # Locate the exact active APIKey row backing the stored key (matched by
+        # key_hash, NOT name — create_key only enforces name uniqueness per
+        # (user_id, workspace_id), so a name match could hit an unrelated user's
+        # key). Fetching the row lets us (a) fail loudly if the stored key is
+        # stale instead of silently minting a duplicate, and (b) preserve the
+        # original owner's user_id on the replacement so rotation by a different
+        # admin doesn't transfer key ownership.
+        old_key_result = await self.db.execute(
+            select(APIKey).where(
+                APIKey.workspace_id == workspace_id,
+                APIKey.key_hash == sha256_hex(current_key),
+                APIKey.revoked_at.is_(None),
+            )
+        )
+        old_key = old_key_result.scalar_one_or_none()
+        if old_key is None:
+            # Stored key matches no active APIKey row (Fernet secret rotated,
+            # external revocation, or DB drift). Fail with a clear diagnostic
+            # rather than letting create_key surface an opaque 500.
+            raise ValidationError(
+                "Connector's stored KMC key matches no active API key; "
+                "re-register the connector to mint a fresh key"
+            )
+        owner_user_id = old_key.user_id
+
+        # Revoke the old key immediately — no grace period for v1. Operators
+        # should schedule rotation during a maintenance window or worker pause.
+        old_key.revoked_at = utcnow()
+
+        # Mint replacement key under the ORIGINAL owner (not the rotating admin)
+        # so per-user key listings stay correct. create_key computes and stores
+        # expires_at on the row; reuse that exact value for the connector column
+        # so the two never drift (a second utcnow() would differ by microseconds).
+        plaintext_new_key, new_key_row = await APIKeyManager(self.db).create_key(
+            name=f"connector:{connector_id}",
+            user_id=owner_user_id,
+            workspace_id=workspace_id,
+            expires_days=expires_days,
+        )
+        connector.set_kmc_api_key(plaintext_new_key)
+        connector.kmc_api_key_expires_at = new_key_row.expires_at
+        connector.config_version = connector.config_version + 1
+        await self.db.flush()
+
+        logger.info(
+            "connector_kmc_key_rotated",
+            connector_id=str(connector_id),
+            workspace_id=str(workspace_id),
+            rotated_by=user_id,
+            key_owner=owner_user_id,
+            expires_days=expires_days,
+        )
+        return KmcKeyRotationResult(
+            plaintext_kmc_api_key=plaintext_new_key,
+            expires_at=new_key_row.expires_at,
+            config_version=connector.config_version,
+        )
 
     async def _get_connector_for_resource(
         self,
