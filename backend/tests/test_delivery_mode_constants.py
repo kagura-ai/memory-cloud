@@ -55,9 +55,7 @@ def test_valid_delivery_mode_check_constraint_matches_migration_literal() -> Non
     expected = "delivery_mode IN ('always', 'on_recall', 'on_trigger')"
 
     check = next(
-        c
-        for c in Memory.__table_args__
-        if getattr(c, "name", None) == "valid_delivery_mode"
+        c for c in Memory.__table_args__ if getattr(c, "name", None) == "valid_delivery_mode"
     )
     # ``.sqltext.text`` is the raw CheckConstraint string (no SQLAlchemy
     # compilation), so byte-identical comparison stays stable across upgrades.

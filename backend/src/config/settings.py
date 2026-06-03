@@ -181,7 +181,8 @@ class Settings(BaseSettings):
     # exceeds it, the read is bounded and the response flags truncated=true with
     # the true total_available (never silently dropped).
     pinned_load_cap: int = Field(
-        default=100, description="Max memories returned by the deterministic always-load path (#886)"
+        default=100,
+        description="Max memories returned by the deterministic always-load path (#886)",
     )
 
     # Ollama Configuration (Issue #44)

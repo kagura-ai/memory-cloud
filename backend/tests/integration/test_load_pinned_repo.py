@@ -88,12 +88,30 @@ async def test_list_pinned_returns_only_always_in_context(db_session):
     await _seed_context(db_session, ws, ctx_a)
     await _seed_context(db_session, ws, ctx_b)
     a1, a2 = uuid.uuid4(), uuid.uuid4()
-    await _insert_memory(db_session, mem_id=a1, workspace_id=ws, context_id=ctx_a, delivery_mode="always")
-    await _insert_memory(db_session, mem_id=a2, workspace_id=ws, context_id=ctx_a, delivery_mode="always")
-    await _insert_memory(db_session, mem_id=uuid.uuid4(), workspace_id=ws, context_id=ctx_a, delivery_mode="on_recall")
-    await _insert_memory(db_session, mem_id=uuid.uuid4(), workspace_id=ws, context_id=ctx_a, delivery_mode="on_trigger")
+    await _insert_memory(
+        db_session, mem_id=a1, workspace_id=ws, context_id=ctx_a, delivery_mode="always"
+    )
+    await _insert_memory(
+        db_session, mem_id=a2, workspace_id=ws, context_id=ctx_a, delivery_mode="always"
+    )
+    await _insert_memory(
+        db_session,
+        mem_id=uuid.uuid4(),
+        workspace_id=ws,
+        context_id=ctx_a,
+        delivery_mode="on_recall",
+    )
+    await _insert_memory(
+        db_session,
+        mem_id=uuid.uuid4(),
+        workspace_id=ws,
+        context_id=ctx_a,
+        delivery_mode="on_trigger",
+    )
     # always memory in a DIFFERENT context must not leak in
-    await _insert_memory(db_session, mem_id=uuid.uuid4(), workspace_id=ws, context_id=ctx_b, delivery_mode="always")
+    await _insert_memory(
+        db_session, mem_id=uuid.uuid4(), workspace_id=ws, context_id=ctx_b, delivery_mode="always"
+    )
 
     repo = MemoryRepository(db_session)
     rows, total = await repo.list_pinned(ws, ctx_a, limit=100)
@@ -110,9 +128,30 @@ async def test_list_pinned_deterministic_order(db_session):
     high = uuid.uuid4()
     early = uuid.uuid4()
     late = uuid.uuid4()
-    await _insert_memory(db_session, mem_id=late, workspace_id=ws, context_id=ctx, importance=0.5, created_at="2026-06-02T00:00:00")
-    await _insert_memory(db_session, mem_id=early, workspace_id=ws, context_id=ctx, importance=0.5, created_at="2026-06-01T00:00:00")
-    await _insert_memory(db_session, mem_id=high, workspace_id=ws, context_id=ctx, importance=0.9, created_at="2026-06-03T00:00:00")
+    await _insert_memory(
+        db_session,
+        mem_id=late,
+        workspace_id=ws,
+        context_id=ctx,
+        importance=0.5,
+        created_at="2026-06-02T00:00:00",
+    )
+    await _insert_memory(
+        db_session,
+        mem_id=early,
+        workspace_id=ws,
+        context_id=ctx,
+        importance=0.5,
+        created_at="2026-06-01T00:00:00",
+    )
+    await _insert_memory(
+        db_session,
+        mem_id=high,
+        workspace_id=ws,
+        context_id=ctx,
+        importance=0.9,
+        created_at="2026-06-03T00:00:00",
+    )
 
     repo = MemoryRepository(db_session)
     rows, total = await repo.list_pinned(ws, ctx, limit=100)
@@ -129,7 +168,10 @@ async def test_list_pinned_excludes_soft_deleted(db_session):
     live = uuid.uuid4()
     await _insert_memory(db_session, mem_id=live, workspace_id=ws, context_id=ctx)
     await _insert_memory(
-        db_session, mem_id=uuid.uuid4(), workspace_id=ws, context_id=ctx,
+        db_session,
+        mem_id=uuid.uuid4(),
+        workspace_id=ws,
+        context_id=ctx,
         deleted_at="2026-06-01T00:00:00",
     )
     repo = MemoryRepository(db_session)
@@ -145,8 +187,12 @@ async def test_list_pinned_cap_bounds_rows_but_total_is_accurate(db_session):
     await _seed_context(db_session, ws, ctx)
     for i in range(5):
         await _insert_memory(
-            db_session, mem_id=uuid.uuid4(), workspace_id=ws, context_id=ctx,
-            importance=0.5, created_at=f"2026-06-0{i + 1}T00:00:00",
+            db_session,
+            mem_id=uuid.uuid4(),
+            workspace_id=ws,
+            context_id=ctx,
+            importance=0.5,
+            created_at=f"2026-06-0{i + 1}T00:00:00",
         )
     repo = MemoryRepository(db_session)
     rows, total = await repo.list_pinned(ws, ctx, limit=3)
