@@ -304,13 +304,25 @@ verify_workers_blocked() {
     # intended for the co-resident ai-worker on the internal Docker network
     # only. Use -k (insecure) because the Cloudflare Origin CA cert is not
     # trusted by the system CA bundle, but we only care about the HTTP status.
+    #
+    # Domain is extracted from CADDYFILE_TPL so this stays in sync with the
+    # configured site block without manual updates here.
+    #
+    # Retry up to 3 times (2 s apart) to tolerate Caddy's brief startup window
+    # after `dc restart caddy` — avoids a false-positive abort on the first
+    # request while the process is still initialising.
     log "  Security gate: verifying /api/v1/workers/* is blocked at Caddy..."
-    local http_status
-    http_status=$(curl -sk -o /dev/null -w "%{http_code}" \
-        --max-time 5 \
-        -H "Host: memory.kagura-ai.com" \
-        "https://127.0.0.1:443/api/v1/workers/config" 2>/dev/null)
-    http_status=${http_status:-000}
+    local domain http_status attempt
+    domain=$(awk '/^[a-zA-Z]/ { gsub(/ *\{.*/, ""); print; exit }' "$CADDYFILE_TPL")
+    for attempt in 1 2 3; do
+        http_status=$(curl -sk -o /dev/null -w "%{http_code}" \
+            --max-time 5 \
+            -H "Host: ${domain}" \
+            "https://127.0.0.1:443/api/v1/workers/config" 2>/dev/null)
+        http_status=${http_status:-000}
+        [ "$http_status" = "404" ] && break
+        [ "$attempt" -lt 3 ] && sleep 2
+    done
     if [ "$http_status" = "404" ]; then
         log "  /api/v1/workers/* is correctly blocked (HTTP 404)"
     else
