@@ -211,3 +211,25 @@ class TestDeleteAgentState:
             await delete_agent_state(
                 context_id=context_id, user=MOCK_USER, key="missing", service=service, perm=perm
             )
+
+    @pytest.mark.asyncio
+    async def test_delete_viewer_denied_propagates_403(self, service, perm, context_id):
+        # Reach check passes; the write gate 403s a read-only viewer.
+        perm.check_context_write.side_effect = AuthorizationError()
+        with pytest.raises(AuthorizationError):
+            await delete_agent_state(
+                context_id=context_id, user=MOCK_USER, key="k", service=service, perm=perm
+            )
+        service.delete_state.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_delete_unreachable_context_propagates_uniform_404(
+        self, service, perm, context_id
+    ):
+        perm.resolve_context_for_workspace_read.side_effect = NotFoundException("Context")
+        with pytest.raises(NotFoundException):
+            await delete_agent_state(
+                context_id=context_id, user=MOCK_USER, key="k", service=service, perm=perm
+            )
+        perm.check_context_write.assert_not_awaited()
+        service.delete_state.assert_not_awaited()
