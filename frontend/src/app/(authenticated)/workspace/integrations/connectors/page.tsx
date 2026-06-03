@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useTranslations } from "next-intl";
+import { useTranslations, useLocale } from "next-intl";
 import { Check, Copy, Plug, Trash2 } from "lucide-react";
 
 import { PageContainer } from "@/components/common/PageContainer";
@@ -31,6 +31,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
+import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { API_BASE_URL } from "@/lib/api/base";
 import {
   createConnector,
@@ -88,32 +89,27 @@ function toResourceId(seed: string): string {
   return `slack-${slug || "team"}`.slice(0, CONNECTOR_NAME_MAX);
 }
 
-/** Inline copy-to-clipboard button with a transient checkmark. */
-function CopyButton({ value, label }: { value: string; label: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <Button
-      type="button"
-      variant="ghost"
-      size="sm"
-      aria-label={label}
-      onClick={() => {
-        void navigator.clipboard.writeText(value);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      }}
-    >
-      {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-    </Button>
-  );
-}
-
 export default function ConnectorsPage() {
   const t = useTranslations("connectors");
   const tCommon = useTranslations("common");
+  const locale = useLocale();
   const { toast } = useToast();
+  const { isCopied, copyToTarget } = useCopyFeedback();
   const router = useRouter();
   const searchParams = useSearchParams();
+
+  // Copy with the shared per-key feedback hook (unmount-safe, 2000ms standard);
+  // surface clipboard failures via the destructive-toast channel.
+  const handleCopy = useCallback(
+    async (text: string, key: string) => {
+      try {
+        await copyToTarget(text, key);
+      } catch {
+        toast({ variant: "destructive", title: tCommon("error") });
+      }
+    },
+    [copyToTarget, toast, tCommon],
+  );
   const installHandle = searchParams.get("slack_install");
 
   const [connectors, setConnectors] = useState<
@@ -171,6 +167,12 @@ export default function ConnectorsPage() {
         const seed = info.team_name || info.team_id;
         setDisplayName(info.team_name || info.team_id);
         setContextName(toResourceId(seed));
+        // Reset PII config to safe defaults for each new install session so a
+        // prior session's choices don't leak into a fresh connector dialog.
+        setPiiEnabled(true);
+        setPiiDetectors(PII_DEFAULT_DETECTORS);
+        setPiiRedaction("mask");
+        setPiiFailClosed(true);
       } catch {
         if (!cancelled) {
           toast({
@@ -215,7 +217,9 @@ export default function ConnectorsPage() {
           enabled: piiEnabled,
           detectors: piiEnabled ? piiDetectors : [],
           redaction: piiRedaction,
-          locale: "en",
+          // Derive the recognizer locale from the UI locale so a ja workspace
+          // gets ja-aware PII detection instead of English-only.
+          locale,
           fail_closed: piiFailClosed,
         },
       });
@@ -237,6 +241,7 @@ export default function ConnectorsPage() {
     piiDetectors,
     piiRedaction,
     piiFailClosed,
+    locale,
     router,
     reload,
   ]);
@@ -301,10 +306,21 @@ export default function ConnectorsPage() {
                   <span className="font-mono break-all">
                     {t("connectorIdLabel", { id: c.connector_id })}
                   </span>
-                  <CopyButton
-                    value={c.connector_id}
-                    label={t("copyConnectorId")}
-                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    aria-label={t("copyConnectorId")}
+                    onClick={() =>
+                      handleCopy(c.connector_id, `cid-${c.connector_id}`)
+                    }
+                  >
+                    {isCopied(`cid-${c.connector_id}`) ? (
+                      <Check className="h-4 w-4" />
+                    ) : (
+                      <Copy className="h-4 w-4" />
+                    )}
+                  </Button>
                 </div>
               </div>
               <Button
@@ -509,10 +525,21 @@ export default function ConnectorsPage() {
                   <div>
                     <div className="flex items-center justify-between">
                       <p className="font-medium">{t("resourceToken")}</p>
-                      <CopyButton
-                        value={created.token}
-                        label={t("copyResourceToken")}
-                      />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        aria-label={t("copyResourceToken")}
+                        onClick={() =>
+                          handleCopy(created.token, "reveal-token")
+                        }
+                      >
+                        {isCopied("reveal-token") ? (
+                          <Check className="h-4 w-4" />
+                        ) : (
+                          <Copy className="h-4 w-4" />
+                        )}
+                      </Button>
                     </div>
                     <code className="block break-all text-xs">
                       {created.token}
@@ -531,10 +558,21 @@ export default function ConnectorsPage() {
                   <div>
                     <div className="flex items-center justify-between">
                       <p className="font-medium">{t("kmcApiKey")}</p>
-                      <CopyButton
-                        value={created.kmc_api_key}
-                        label={t("copyKmcApiKey")}
-                      />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        aria-label={t("copyKmcApiKey")}
+                        onClick={() =>
+                          handleCopy(created.kmc_api_key!, "reveal-kmc")
+                        }
+                      >
+                        {isCopied("reveal-kmc") ? (
+                          <Check className="h-4 w-4" />
+                        ) : (
+                          <Copy className="h-4 w-4" />
+                        )}
+                      </Button>
                     </div>
                     <p className="mb-1 text-xs text-muted-foreground">
                       {t("kmcApiKeyNote")}
