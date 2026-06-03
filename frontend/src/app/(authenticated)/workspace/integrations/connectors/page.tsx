@@ -168,7 +168,10 @@ export default function ConnectorsPage() {
     // Don't fire the admin-only list call for non-admins — it would 403.
     if (!allowed) return;
     void reload();
-  }, [reload, allowed]);
+    // Key on currentWorkspaceId too: switching workspace (while staying
+    // admin/owner) must refetch so stale connectors from the previous
+    // workspace aren't left rendered. listConnectors is workspace-scoped.
+  }, [reload, allowed, currentWorkspaceId]);
 
   // After the Slack OAuth callback redirects back with ?slack_install=<handle>,
   // fetch the non-secret install summary and open the create dialog.
