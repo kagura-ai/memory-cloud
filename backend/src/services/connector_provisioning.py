@@ -537,6 +537,7 @@ class ConnectorProvisioningService:
         from auth.api_keys import APIKeyManager
         from models.auth import APIKey
         from utils.datetime import utcnow
+        from utils.hashing import sha256_hex
 
         result = await self.db.execute(
             select(WorkspaceConnector).where(
@@ -546,8 +547,9 @@ class ConnectorProvisioningService:
         )
         connector = result.scalar_one_or_none()
         if connector is None:
-            raise NotFoundException(f"Connector {connector_id} not found")
-        if not connector.kmc_api_key_encrypted:
+            raise NotFoundException("Connector", str(connector_id))
+        current_key = connector.get_kmc_api_key()
+        if not current_key:
             raise ValidationError(
                 "Connector has no KMC write key; register with a write-target context first"
             )
@@ -555,11 +557,16 @@ class ConnectorProvisioningService:
         # Revoke the old key immediately — no grace period for v1.
         # Operators should schedule rotation before the worker is active or
         # during a brief maintenance window.
+        #
+        # Revoke by the exact key_hash of the key currently stored on the
+        # connector — NOT by name. create_key only enforces name uniqueness
+        # per (user_id, workspace_id), so a name-only revoke could touch an
+        # unrelated user's key that happens to share the connector:{id} name.
         await self.db.execute(
             update(APIKey)
             .where(
                 APIKey.workspace_id == workspace_id,
-                APIKey.name == f"connector:{connector_id}",
+                APIKey.key_hash == sha256_hex(current_key),
                 APIKey.revoked_at.is_(None),
             )
             .values(revoked_at=utcnow())
