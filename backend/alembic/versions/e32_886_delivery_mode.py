@@ -91,7 +91,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Symmetric retry-safety with upgrade(): the autocommit_block commits the
+    # concurrent index drop before the transactional constraint/column drops, so
+    # a mid-downgrade failure must also be re-runnable. IF EXISTS guards on the
+    # constraint and column make the transactional part idempotent.
     with op.get_context().autocommit_block():
         op.execute(sa.text(f"DROP INDEX CONCURRENTLY IF EXISTS {_INDEX_NAME}"))
-    op.drop_constraint("valid_delivery_mode", "memories", type_="check")
-    op.drop_column("memories", "delivery_mode")
+    op.execute(sa.text("ALTER TABLE memories DROP CONSTRAINT IF EXISTS valid_delivery_mode"))
+    op.execute(sa.text("ALTER TABLE memories DROP COLUMN IF EXISTS delivery_mode"))
