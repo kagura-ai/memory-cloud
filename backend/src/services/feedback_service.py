@@ -16,12 +16,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import Memory
-from models.retrieval_feedback import QUERY_MAX_LEN, RetrievalFeedback
+from models.retrieval_feedback import NOTE_MAX_LEN, QUERY_MAX_LEN, RetrievalFeedback
 from utils.exceptions import NotFoundException
-
-# Free-text note cap (the column is Text; we still bound input to avoid unbounded
-# retention, mirroring the query truncation).
-_NOTE_MAX_LEN = 2000
 
 
 @dataclass(frozen=True)
@@ -82,7 +78,7 @@ class FeedbackService:
             helpful=helpful,
             user_id=user_id,
             query=query[:QUERY_MAX_LEN] if query is not None else None,
-            note=note[:_NOTE_MAX_LEN] if note is not None else None,
+            note=note[:NOTE_MAX_LEN] if note is not None else None,
         )
         self.db.add(row)
         await self.db.commit()

@@ -1859,7 +1859,7 @@ series). Anyone who can read the context may record feedback.""",
                     },
                     "note": {
                         "type": "string",
-                        "description": "Optional free-text note (e.g. why the result was wrong).",
+                        "description": "Optional free-text note (e.g. why the result was wrong). Max 2000 chars.",
                     },
                 },
                 "required": ["context_id", "memory_id", "helpful"],

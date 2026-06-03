@@ -36,6 +36,10 @@ from db.base import Base
 # Query text is stored truncated to this length — the signal needs the query for
 # offline analysis, not unbounded text retention (CIO gate1 note).
 QUERY_MAX_LEN = 1024
+# Free-text note cap. The column is Text (unbounded at the DB), so this is the
+# single source of truth enforced at every boundary (API schema, MCP handler,
+# service truncation) to avoid silent truncation / unbounded request bodies.
+NOTE_MAX_LEN = 2000
 
 
 class RetrievalFeedback(Base):

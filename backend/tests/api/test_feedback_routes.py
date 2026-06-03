@@ -108,3 +108,29 @@ async def test_record_feedback_wraps_unexpected_error_as_500(service, perm, cont
 def test_overlong_query_rejected_by_schema(memory_id):
     with pytest.raises(ValueError):  # pydantic ValidationError subclasses ValueError
         FeedbackRequest(memory_id=memory_id, helpful=True, query="x" * 1025)
+
+
+def test_overlong_note_rejected_by_schema(memory_id):
+    # note > 2000 chars is a 422 at the schema boundary, NOT silent truncation.
+    with pytest.raises(ValueError):
+        FeedbackRequest(memory_id=memory_id, helpful=True, note="y" * 2001)
+
+
+@pytest.mark.asyncio
+async def test_mcp_handle_feedback_rejects_overlong_note():
+    """The MCP tool rejects an overlong note with a structured validation error,
+    before touching the DB (no silent truncation)."""
+    from mcp_server.tools.feedback import handle_feedback
+
+    result = await handle_feedback(
+        {
+            "context_id": str(uuid4()),
+            "memory_id": str(uuid4()),
+            "helpful": True,
+            "note": "y" * 2001,
+        },
+        user_id="test_user",
+        workspace_id=None,
+    )
+    # _error_response returns a single TextContent whose text carries the error.
+    assert "validation_error" in result[0].text

@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import APIKeyOrSessionUser
 from auth.workspace_roles import ContextRole
 from db.base import get_db
-from models.retrieval_feedback import QUERY_MAX_LEN
+from models.retrieval_feedback import NOTE_MAX_LEN, QUERY_MAX_LEN
 from services.feedback_service import FeedbackService
 from services.permission_service import PermissionService
 from utils.exceptions import MemoryCloudException
@@ -42,7 +42,11 @@ class FeedbackRequest(BaseModel):
         max_length=QUERY_MAX_LEN,
         description="The recall query this feedback is about (optional)",
     )
-    note: str | None = Field(None, description="Optional free-text note (e.g. why it was wrong)")
+    note: str | None = Field(
+        None,
+        max_length=NOTE_MAX_LEN,
+        description="Optional free-text note (e.g. why it was wrong). Max 2000 chars.",
+    )
 
 
 class FeedbackResponse(BaseModel):

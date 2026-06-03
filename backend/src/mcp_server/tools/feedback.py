@@ -22,11 +22,12 @@ from mcp_server.tools._helpers import (
     _resolve_context_id,
     _success_response,
 )
+from models.retrieval_feedback import NOTE_MAX_LEN, QUERY_MAX_LEN
 from utils.exceptions import NotFoundException
 
-# Matches retrieval_feedback.query VARCHAR(1024). Enforced here so an overlong
-# query returns a structured error instead of a DB-layer 500.
-_QUERY_MAX_LEN = 1024
+# Length caps reuse the model's single source of truth (query is VARCHAR(1024);
+# note is bounded in the service). Enforced here so an overlong value returns a
+# structured validation error instead of silent truncation / a DB-layer 500.
 
 
 async def handle_feedback(
@@ -47,14 +48,17 @@ async def handle_feedback(
         return _error_response("validation_error", "'memory_id' must be a valid UUID")
 
     query = args.get("query")
-    if query is not None and (not isinstance(query, str) or len(query) > _QUERY_MAX_LEN):
+    if query is not None and (not isinstance(query, str) or len(query) > QUERY_MAX_LEN):
         return _error_response(
             "validation_error",
-            f"'query' must be a string of at most {_QUERY_MAX_LEN} characters",
+            f"'query' must be a string of at most {QUERY_MAX_LEN} characters",
         )
     note = args.get("note")
-    if note is not None and not isinstance(note, str):
-        return _error_response("validation_error", "'note' must be a string")
+    if note is not None and (not isinstance(note, str) or len(note) > NOTE_MAX_LEN):
+        return _error_response(
+            "validation_error",
+            f"'note' must be a string of at most {NOTE_MAX_LEN} characters",
+        )
 
     from db.base import get_db
     from services.feedback_service import FeedbackService
