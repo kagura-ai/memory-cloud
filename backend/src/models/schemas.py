@@ -198,7 +198,11 @@ class MemoryResponse(TZAwareBaseModel):
     context: dict | None
     score: float | None = Field(None, description="検索スコア（recall時のみ）")
     source_uri: str | None = None
-    source_type: Literal["file", "url", "vault", "api", "manual"] | None = None
+    # Issue #887: response models must allow 'connector' (the server-stamped
+    # value on connector-ingested memories); recall/reference of a connector
+    # memory would otherwise raise a Pydantic ValidationError. The *request*
+    # schema (RememberRequest) intentionally omits it — the forge guard.
+    source_type: Literal["file", "url", "vault", "api", "manual", "connector"] | None = None
 
     class Config:
         from_attributes = True
@@ -342,7 +346,11 @@ class ReferenceResponse(TZAwareBaseModel):
     # Use the same Literal as MemoryResponse / RememberRequest so the OpenAPI
     # contract stays consistent and unexpected values can't leak to the UI.
     source_uri: str | None = None
-    source_type: Literal["file", "url", "vault", "api", "manual"] | None = None
+    # Issue #887: response models must allow 'connector' (the server-stamped
+    # value on connector-ingested memories); recall/reference of a connector
+    # memory would otherwise raise a Pydantic ValidationError. The *request*
+    # schema (RememberRequest) intentionally omits it — the forge guard.
+    source_type: Literal["file", "url", "vault", "api", "manual", "connector"] | None = None
     # Issue #440: declared_link references for the dialog "References" section.
     # Naming: outgoing_has_more / incoming_has_more matches MemoryListResponse.has_more
     # (codebase precedent for capped collections); the issue body's `*_truncated`

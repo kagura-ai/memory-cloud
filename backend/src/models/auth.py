@@ -1111,6 +1111,17 @@ class UsageStats(Base):
 # Context-based Multi-Collection (Issue #82 → #160: renamed from Project)
 # ============================================================================
 
+# Issue #887: context-level trust tiers (server-authoritative). CHECK is
+# derived from this ordered tuple (single quotes), byte-identical to the alembic
+# migration literal; new values are APPENDED, never reordered.
+CONTEXT_TRUST_TIER_TRUSTED = "trusted"
+CONTEXT_TRUST_TIER_EXTERNAL = "external"
+
+_ALL_CONTEXT_TRUST_TIERS: tuple[str, ...] = (
+    CONTEXT_TRUST_TIER_TRUSTED,
+    CONTEXT_TRUST_TIER_EXTERNAL,
+)
+
 
 class Context(Base):
     """Context model for multi-collection memory workspace.
@@ -1208,6 +1219,19 @@ class Context(Base):
     # Issue #85: Context lock to prevent accidental deletion
     is_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
+    # Issue #887: server-authoritative trust tier. This is the PREFERRED trust
+    # mechanism — trust is stamped on the context at provision time (connector
+    # contexts = 'external'), so every memory in the context inherits it
+    # server-side regardless of client-supplied per-row source_type (survives
+    # BYOK key leakage). 'trusted' (default) = user-owned; 'external' =
+    # connector-ingested / untrusted-origin. A recall(filters={'trust_tier':
+    # 'trusted'}) read excludes external-origin contexts from behaviour-
+    # influencing reads. CHECK is pinned by
+    # test_valid_context_trust_tier_check_constraint_matches_migration_literal.
+    trust_tier: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=CONTEXT_TRUST_TIER_TRUSTED
+    )
+
     # Issue #101: Sleep Maintenance mode
     # 'full' = all phases (personal AI memory)
     # 'edges_only' = Edge Discovery + Reindex only (resource ingest contexts)
@@ -1218,6 +1242,12 @@ class Context(Base):
     __table_args__ = (
         # Note: Index idx_contexts_workspace_name is created in migration with WHERE deleted_at IS NULL
         CheckConstraint("name ~ '^[a-z0-9_-]+$'", name="valid_context_name"),
+        # Issue #887: CHECK derived from ``_ALL_CONTEXT_TRUST_TIERS`` (single
+        # quotes), byte-identical to the alembic migration literal.
+        CheckConstraint(
+            f"trust_tier IN ({', '.join(repr(t) for t in _ALL_CONTEXT_TRUST_TIERS)})",
+            name="valid_context_trust_tier",
+        ),
         # Issue #238 / migration a96 — global partial UNIQUE on
         # ``contexts.resource_id`` excluding soft-deleted rows. Mirrored to
         # the ORM so ``Base.metadata.create_all`` matches the production schema.

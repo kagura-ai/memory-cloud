@@ -310,6 +310,10 @@ async def test_admin_non_owner_can_auto_create_context(db_session: AsyncSession)
     ).scalar_one()
     # Context attributed to the owner, not the acting admin.
     assert ctx.created_by == owner_id
+    # Issue #887: an auto-created connector context is stamped 'external' — the
+    # authoritative trust signal that excludes connector-ingested memories from
+    # behaviour-influencing (trust_tier='trusted') reads.
+    assert ctx.trust_tier == "external"
 
 
 @pytest.mark.asyncio

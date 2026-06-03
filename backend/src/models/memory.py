@@ -57,6 +57,32 @@ _ALL_DELIVERY_MODES: tuple[str, ...] = (
     DELIVERY_MODE_ON_TRIGGER,
 )
 
+# Issue #887: server-authoritative provenance. ``source_type`` records HOW a
+# memory entered the system; it is NOT NULL + CHECK (tuple-derived, test-pinned,
+# same discipline as delivery_mode / edge origin). Values
+# file/url/vault/api/manual are user-origin provenance (legitimately client-set
+# on import — #213/#262);
+# ``connector`` is server-only (stamped by resource_indexer for external
+# ingestion). Trust is NOT carried here — it is authoritative at the context
+# level (``Context.trust_tier``); source_type is provenance, not a trust claim.
+# New values are APPENDED (never reordered) to preserve byte-identity with the
+# alembic migration literal.
+SOURCE_TYPE_FILE = "file"
+SOURCE_TYPE_URL = "url"
+SOURCE_TYPE_VAULT = "vault"
+SOURCE_TYPE_API = "api"
+SOURCE_TYPE_MANUAL = "manual"
+SOURCE_TYPE_CONNECTOR = "connector"
+
+_ALL_SOURCE_TYPES: tuple[str, ...] = (
+    SOURCE_TYPE_FILE,
+    SOURCE_TYPE_URL,
+    SOURCE_TYPE_VAULT,
+    SOURCE_TYPE_API,
+    SOURCE_TYPE_MANUAL,
+    SOURCE_TYPE_CONNECTOR,
+)
+
 
 class Memory(Base):
     """Memory model with 3-layer architecture.
@@ -187,8 +213,15 @@ class Memory(Base):
     # Issue #213: Origin URI for external integration (Obsidian, code ingestion, web clipping)
     # Partial index idx_memories_source_uri created in migration a95
     source_uri: Mapped[str | None] = mapped_column(String(2048), nullable=True)
-    source_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    # source_type: file, url, vault, api, manual
+    # Issue #887: NOT NULL + CHECK; legacy NULL rows backfilled to 'manual' in
+    # the alembic migration. server_default keeps the migration backfill and ORM
+    # default in lock-step. Values are constrained by valid_source_type below.
+    source_type: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=SOURCE_TYPE_MANUAL,
+        server_default=SOURCE_TYPE_MANUAL,
+    )
 
     # Migration 061: Generated columns for efficient resource memory lookups
     # These columns are automatically computed from details JSONB field
@@ -258,6 +291,14 @@ class Memory(Base):
         CheckConstraint(
             f"delivery_mode IN ({', '.join(repr(d) for d in _ALL_DELIVERY_MODES)})",
             name="valid_delivery_mode",
+        ),
+        # Issue #887: CHECK derived from ``_ALL_SOURCE_TYPES`` (registration
+        # order, single quotes), byte-identical to the alembic migration literal.
+        # Drift is pinned by
+        # test_valid_source_type_check_constraint_matches_migration_literal.
+        CheckConstraint(
+            f"source_type IN ({', '.join(repr(s) for s in _ALL_SOURCE_TYPES)})",
+            name="valid_source_type",
         ),
         CheckConstraint(
             "embedding_status IN ('pending', 'processing', 'success', 'failed')",
