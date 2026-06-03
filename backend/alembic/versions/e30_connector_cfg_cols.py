@@ -20,7 +20,14 @@ per-connector configuration that the F6-a schema-only slice did not carry:
 All columns are nullable so existing connector rows upgrade without backfill.
 
 Revision ID: e30_connector_cfg_cols
-Revises: e29_619_memories_ws_ctx_idx
+Revises: e30_877_time_trigger_cols
+
+Note: chained after ``e30_877_time_trigger_cols`` (#877/#880), not its original
+``e29_619`` parent. Both this connector chain (#879) and the Time Memory chain
+(#880) branched from ``e29_619`` and merged to main independently, forking the
+revision graph into two heads. Re-pointing this migration linearises the graph
+(single head) without a merge node — safe because neither chain had been
+deployed yet (#882).
 """
 
 import sqlalchemy as sa
@@ -30,7 +37,7 @@ from alembic import op
 
 # NOTE: revision id kept <= 32 chars — alembic_version.version_num is VARCHAR(32).
 revision = "e30_connector_cfg_cols"
-down_revision = "e29_619_memories_ws_ctx_idx"
+down_revision = "e30_877_time_trigger_cols"
 branch_labels = None
 depends_on = None
 
