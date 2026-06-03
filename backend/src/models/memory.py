@@ -59,8 +59,9 @@ _ALL_DELIVERY_MODES: tuple[str, ...] = (
 
 # Issue #887: server-authoritative provenance. ``source_type`` records HOW a
 # memory entered the system; it is NOT NULL + CHECK (tuple-derived, test-pinned,
-# same discipline as delivery_mode / edge origin). Values file/url/vault/manual
-# are user-origin provenance (legitimately client-set on import — #213/#262);
+# same discipline as delivery_mode / edge origin). Values
+# file/url/vault/api/manual are user-origin provenance (legitimately client-set
+# on import — #213/#262);
 # ``connector`` is server-only (stamped by resource_indexer for external
 # ingestion). Trust is NOT carried here — it is authoritative at the context
 # level (``Context.trust_tier``); source_type is provenance, not a trust claim.

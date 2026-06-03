@@ -135,20 +135,6 @@ class ConnectorProvisioningService:
                 auto_create_context_name=auto_create_context_name,
             )
             auto_created_context_id = resolved_context_id
-            # Issue #887: a freshly auto-created connector context receives
-            # external ingestion, so stamp it 'external' — the authoritative,
-            # server-side trust signal that excludes it from behaviour-
-            # influencing reads regardless of any client-supplied per-row
-            # source_type (survives BYOK key leakage). Scoped to the auto-create
-            # path only: a bring-your-own existing context is the user's own and
-            # its trust tier is not silently changed here.
-            from models.auth import CONTEXT_TRUST_TIER_EXTERNAL, Context
-
-            await self.db.execute(
-                update(Context)
-                .where(Context.id == resolved_context_id)
-                .values(trust_tier=CONTEXT_TRUST_TIER_EXTERNAL)
-            )
         else:
             await self._enforce_connector_seat_cap(workspace, workspace_id)
             resolved_context_id = await self._resolve_context(
@@ -164,6 +150,22 @@ class ConnectorProvisioningService:
             # the connector flush below without an intervening commit releasing it.
             if auto_create_context_name:
                 await self._enforce_connector_seat_cap(workspace, workspace_id)
+                # Issue #887: a freshly auto-created connector context receives
+                # external ingestion, so stamp it 'external' — the authoritative,
+                # server-side trust signal that excludes it from behaviour-
+                # influencing reads regardless of any client-supplied per-row
+                # source_type (survives BYOK key leakage). Scoped to the
+                # auto-create path; a bring-your-own existing context is the
+                # user's own and is not silently re-tiered. Placed INSIDE the
+                # try so a failure here triggers the orphan-context cleanup in
+                # the except below (it would otherwise leak a committed context).
+                from models.auth import CONTEXT_TRUST_TIER_EXTERNAL, Context
+
+                await self.db.execute(
+                    update(Context)
+                    .where(Context.id == resolved_context_id)
+                    .values(trust_tier=CONTEXT_TRUST_TIER_EXTERNAL)
+                )
 
             existing_resource_pk = await resolve_resource_pk(self.db, workspace_id, resource_id)
             resource_pk = await upsert_resource(
