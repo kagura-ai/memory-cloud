@@ -366,13 +366,13 @@ IMPORTANT: Always specify context_id to ensure you're retrieving from the intend
             "readOnly": True,
             "description": (
                 "List Time Memories (type='time') whose scheduled window overlaps "
-                "a time range, soonest first. Use for \"what's coming up?\" / "
-                "\"何か予定ある?\" questions. This is a deterministic time query, "
+                'a time range, soonest first. Use for "what\'s coming up?" / '
+                '"何か予定ある?" questions. This is a deterministic time query, '
                 "NOT semantic search — for topic search use recall(). Create a "
                 "Time Memory by resolving the date yourself (you know today's date) "
                 "and calling remember(type='time', details={'trigger': {'year': "
                 "2026, 'month': 7}}). Partial dates are allowed: omit month/day for "
-                "fuzzy timing (\"2026年7月ごろ\")."
+                'fuzzy timing ("2026年7月ごろ").'
             ),
             "inputSchema": {
                 "type": "object",

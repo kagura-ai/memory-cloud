@@ -206,6 +206,16 @@ async def handle_update_memory(
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
+        except ValueError as e:
+            # _apply_time_trigger raises ValueError for an invalid type="time"
+            # details.trigger on the update path. Return a structured
+            # validation_error rather than re-raising as an opaque tool crash
+            # (mirrors handle_remember).
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "update_memory", start_time, 422, args.get("context_id"), workspace_id
+            )
+            return _error_response("validation_error", str(e))
         except Exception:
             await db.rollback()
             await _log_tool_usage(

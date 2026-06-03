@@ -156,9 +156,7 @@ class MemoryService:
 
         trigger = (details or {}).get("trigger")
         if trigger is None:
-            raise ValueError(
-                "type='time' requires details.trigger with at least {'year': ...}"
-            )
+            raise ValueError("type='time' requires details.trigger with at least {'year': ...}")
         try:
             normalized = normalize_trigger(trigger)
         except TriggerValidationError as exc:
@@ -656,9 +654,7 @@ class MemoryService:
             if ("type" in provided_fields and request.type is not None)
             else memory.type
         )
-        effective_details = (
-            request.details if "details" in provided_fields else memory.details
-        )
+        effective_details = request.details if "details" in provided_fields else memory.details
         effective_details = self._apply_time_trigger(effective_type, effective_details)
         if "details" in provided_fields or effective_type == "time":
             # Explicit null clears the column; non-null replaces it. A

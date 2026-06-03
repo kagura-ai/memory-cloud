@@ -137,9 +137,7 @@ async def remember(
         # MemoryService raises ValueError as its "bad request" signal (e.g. an
         # invalid type="time" details.trigger). Map it to 422 rather than
         # letting it surface as an unhandled 500.
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)
-        ) from e
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
 
     return result
 
@@ -283,11 +281,17 @@ async def patch_memory(
         fields=sorted(request.model_fields_set),
     )
 
-    return await memory_service.patch_memory(
-        memory_id=memory_id,
-        request=request,
-        user_id=user["user_id"],
-    )
+    try:
+        return await memory_service.patch_memory(
+            memory_id=memory_id,
+            request=request,
+            user_id=user["user_id"],
+        )
+    except ValueError as e:
+        # MemoryService raises ValueError as its "bad request" signal (e.g. a
+        # PATCH flipping type to "time" without a valid details.trigger). Map it
+        # to 422 — same as the remember route — rather than an unhandled 500.
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
 
 
 @router.post("/forget", response_model=ForgetResponse)
@@ -743,13 +747,9 @@ async def list_memories(
         # Get memories. order_by=trigger_from (#877) sorts ascending for
         # upcoming-first Time Memory listing; default stays created_at desc.
         order_clause = (
-            Memory.trigger_from.asc()
-            if order_by == "trigger_from"
-            else Memory.created_at.desc()
+            Memory.trigger_from.asc() if order_by == "trigger_from" else Memory.created_at.desc()
         )
-        result = await db.execute(
-            query.order_by(order_clause).limit(limit).offset(offset)
-        )
+        result = await db.execute(query.order_by(order_clause).limit(limit).offset(offset))
         memories = list(result.scalars().all())
 
         # Convert to response. Memory.created_at / updated_at are stored as

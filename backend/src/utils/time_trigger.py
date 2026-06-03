@@ -44,8 +44,7 @@ def _iso(dt: datetime) -> str:
     invariant behind the lexical==chronological comparison (see module docstring).
     """
     return (
-        f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d}"
-        f"T{dt.hour:02d}:{dt.minute:02d}:{dt.second:02d}"
+        f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d}T{dt.hour:02d}:{dt.minute:02d}:{dt.second:02d}"
     )
 
 

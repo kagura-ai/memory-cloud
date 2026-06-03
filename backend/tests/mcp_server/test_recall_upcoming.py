@@ -40,6 +40,7 @@ def _mock_db_returning(rows):
 def _patched(mock_db):
     """Patch the handler's DB session, read-path context resolver, response
     fields, and usage logger so the test exercises pure handler logic."""
+
     async def mock_get_db():
         yield mock_db
 

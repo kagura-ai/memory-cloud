@@ -8,11 +8,13 @@ round-trip test (TEXT columns) + the recall_upcoming integration test.
 """
 
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
 
-from api.routes.memory import list_memories
+from api.routes.memory import list_memories, patch_memory
+from models.schemas import PatchMemoryRequest
 
 MOCK_USER = {"user_id": "test_user_123"}
 
@@ -128,9 +130,9 @@ async def test_now_bound_resolved_not_passed_literally():
         offset=0,
     )
     data_sql = str(
-        mock_db.execute.call_args_list[1].args[0].whereclause.compile(
-            compile_kwargs={"literal_binds": True}
-        )
+        mock_db.execute.call_args_list[1]
+        .args[0]
+        .whereclause.compile(compile_kwargs={"literal_binds": True})
     )
     assert "'now'" not in data_sql  # literal must not reach the query
     assert "memories.trigger_until >=" in _where_sql(mock_db, 1)
@@ -153,5 +155,25 @@ async def test_malformed_trigger_bound_returns_422():
             order_by="trigger_from",
             limit=50,
             offset=0,
+        )
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_patch_route_maps_time_trigger_value_error_to_422():
+    """A PATCH that flips type to 'time' with an invalid trigger raises ValueError
+    from MemoryService._apply_time_trigger; the route must map it to 422 (same as
+    the remember route), not an unhandled 500."""
+    svc = MagicMock()
+    svc.patch_memory = AsyncMock(
+        side_effect=ValueError("invalid details.trigger: trigger.month out of range (1-12)")
+    )
+    req = PatchMemoryRequest(type="time", details={"trigger": {"year": 2026, "month": 13}})
+    with pytest.raises(HTTPException) as exc:
+        await patch_memory(
+            memory_id=uuid4(),
+            request=req,
+            user=MOCK_USER,
+            memory_service=svc,
         )
     assert exc.value.status_code == 422
