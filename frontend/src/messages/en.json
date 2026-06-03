@@ -3603,6 +3603,7 @@
     "createdDesc": "Copy the worker credentials now — they are shown only once.",
     "connectorId": "Connector ID",
     "kmcApiKey": "KMC write key",
+    "resourceToken": "Resource token (resource-ingest API)",
     "deleteTitle": "Delete connector?",
     "deleteDesc": "This revokes the connector's write key and stops ingestion. The memory context is preserved.",
     "connectorDeleted": "Connector deleted",

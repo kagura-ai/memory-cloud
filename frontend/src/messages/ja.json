@@ -3603,6 +3603,7 @@
     "createdDesc": "ワーカー用の認証情報を今すぐコピーしてください（一度だけ表示されます）。",
     "connectorId": "コネクタ ID",
     "kmcApiKey": "KMC 書き込みキー",
+    "resourceToken": "リソーストークン（resource-ingest API）",
     "deleteTitle": "コネクタを削除しますか？",
     "deleteDesc": "コネクタの書き込みキーを失効し取り込みを停止します。メモリコンテキストは保持されます。",
     "connectorDeleted": "コネクタを削除しました",

@@ -307,6 +307,12 @@ export default function ConnectorsPage() {
                 <code className="break-all">{created.kmc_api_key}</code>
               </div>
             )}
+            {created?.token && (
+              <div>
+                <p className="font-medium">{t("resourceToken")}</p>
+                <code className="break-all">{created.token}</code>
+              </div>
+            )}
           </div>
           <AlertDialogFooter>
             <AlertDialogAction onClick={() => setCreated(null)}>
