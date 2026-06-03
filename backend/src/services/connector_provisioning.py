@@ -554,30 +554,42 @@ class ConnectorProvisioningService:
                 "Connector has no KMC write key; register with a write-target context first"
             )
 
-        # Revoke the old key immediately — no grace period for v1.
-        # Operators should schedule rotation before the worker is active or
-        # during a brief maintenance window.
-        #
-        # Revoke by the exact key_hash of the key currently stored on the
-        # connector — NOT by name. create_key only enforces name uniqueness
-        # per (user_id, workspace_id), so a name-only revoke could touch an
-        # unrelated user's key that happens to share the connector:{id} name.
-        await self.db.execute(
-            update(APIKey)
-            .where(
+        # Locate the exact active APIKey row backing the stored key (matched by
+        # key_hash, NOT name — create_key only enforces name uniqueness per
+        # (user_id, workspace_id), so a name match could hit an unrelated user's
+        # key). Fetching the row lets us (a) fail loudly if the stored key is
+        # stale instead of silently minting a duplicate, and (b) preserve the
+        # original owner's user_id on the replacement so rotation by a different
+        # admin doesn't transfer key ownership.
+        old_key_result = await self.db.execute(
+            select(APIKey).where(
                 APIKey.workspace_id == workspace_id,
                 APIKey.key_hash == sha256_hex(current_key),
                 APIKey.revoked_at.is_(None),
             )
-            .values(revoked_at=utcnow())
         )
+        old_key = old_key_result.scalar_one_or_none()
+        if old_key is None:
+            # Stored key matches no active APIKey row (Fernet secret rotated,
+            # external revocation, or DB drift). Fail with a clear diagnostic
+            # rather than letting create_key surface an opaque 500.
+            raise ValidationError(
+                "Connector's stored KMC key matches no active API key; "
+                "re-register the connector to mint a fresh key"
+            )
+        owner_user_id = old_key.user_id
 
-        # Mint replacement key. create_key computes and stores expires_at on the
-        # APIKey row; reuse that exact value for the connector column so the two
-        # never drift (a second utcnow() would differ by microseconds).
+        # Revoke the old key immediately — no grace period for v1. Operators
+        # should schedule rotation during a maintenance window or worker pause.
+        old_key.revoked_at = utcnow()
+
+        # Mint replacement key under the ORIGINAL owner (not the rotating admin)
+        # so per-user key listings stay correct. create_key computes and stores
+        # expires_at on the row; reuse that exact value for the connector column
+        # so the two never drift (a second utcnow() would differ by microseconds).
         plaintext_new_key, new_key_row = await APIKeyManager(self.db).create_key(
             name=f"connector:{connector_id}",
-            user_id=user_id,
+            user_id=owner_user_id,
             workspace_id=workspace_id,
             expires_days=expires_days,
         )
@@ -590,7 +602,8 @@ class ConnectorProvisioningService:
             "connector_kmc_key_rotated",
             connector_id=str(connector_id),
             workspace_id=str(workspace_id),
-            user_id=user_id,
+            rotated_by=user_id,
+            key_owner=owner_user_id,
             expires_days=expires_days,
         )
         return KmcKeyRotationResult(
