@@ -39,8 +39,16 @@ def _sudachi_version() -> str:
 
 
 async def _ingest_corpus(svc: Any, corpus: Corpus, user_id: str, ctx_id, ws_id) -> dict[str, str]:
-    """Ingest every corpus doc as a memory; return memory_id → corpus_doc_id."""
+    """Ingest every corpus doc as a memory; return memory_id → corpus_doc_id.
+
+    ``remember()`` schedules embedding + Qdrant upsert as a fire-and-forget
+    ``asyncio.create_task`` and returns before indexing completes. For a
+    deterministic eval we must NOT recall before the docs are searchable, so we
+    AWAIT ``process_pending_embedding`` for each memory here — turning the async
+    write into a synchronous "ingested AND indexed" barrier.
+    """
     from models.schemas import RememberRequest
+    from services.memory_service import process_pending_embedding
 
     id_map: dict[str, str] = {}
     for doc in corpus.documents:
@@ -58,6 +66,9 @@ async def _ingest_corpus(svc: Any, corpus: Corpus, user_id: str, ctx_id, ws_id) 
             current_context_id=ctx_id,
             current_workspace_id=ws_id,
         )
+        # Deterministically drive the embedding/upsert to completion before any
+        # recall runs (idempotent with the background task remember() fired).
+        await process_pending_embedding(resp.memory_id)
         id_map[str(resp.memory_id)] = doc.id
     return id_map
 

@@ -16,7 +16,7 @@ def test_every_query_is_stratified():
     for s in strata:
         assert s.bm25_rank_label in {"easy", "medium", "hard"}
         assert s.specificity >= 0.0
-        assert 0.0 <= s.corpus_jaccard <= 1.0
+        assert 0.0 <= s.corpus_overlap <= 1.0
 
 
 def test_corpus_spans_multiple_difficulty_regimes():

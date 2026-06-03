@@ -8,9 +8,11 @@ Assigns each query a deterministic difficulty signal from three indicators
 - **bm25_rank** — rank of the query's first relevant doc under a BM25-only
   ranking over the corpus → ``easy`` (rank 1), ``medium`` (rank 2-3), ``hard``
   (rank > 3 or unranked). This is the lexical-difficulty pseudo-label.
-- **corpus_jaccard** — Jaccard of the query's tokens with the corpus's top-1000
-  most-frequent tokens. High overlap = query rides on common vocabulary (a
-  weak-signal query).
+- **corpus_overlap** — overlap coefficient = fraction of the query's tokens that
+  are among the corpus's top-1000 most-frequent tokens (|q ∩ top| / |q|). High =
+  query rides on common vocabulary (a weak-signal query). (This is intentionally
+  the overlap coefficient, not true Jaccard: |q ∪ top| ≈ 1000 would make a true
+  Jaccard vanishingly small and uninformative.)
 
 These are *descriptive* — they characterize the eval set's coverage, they are
 NOT pass/fail gates. Used to confirm the corpus spans easy→hard rather than
@@ -49,7 +51,7 @@ class QueryStrata:
     specificity: float
     bm25_rank_label: str  # "easy" | "medium" | "hard"
     first_relevant_rank: int | None  # 1-based, None if no relevant doc ranked
-    corpus_jaccard: float
+    corpus_overlap: float
 
 
 def _bm25_scores(
@@ -119,14 +121,14 @@ def stratify_query(
     q_set = set(q_tokens)
     spec = sum(stats.idf.get(t, 0.0) for t in q_set) / len(q_set) if q_set else 0.0
     rank = _first_relevant_rank(_bm25_scores(q_tokens, corpus, stats), query.relevant)
-    jac = (len(q_set & top_tokens) / len(q_set)) if q_set else 0.0
+    overlap = (len(q_set & top_tokens) / len(q_set)) if q_set else 0.0
     return QueryStrata(
         query_id=query.id,
         bucket=query.bucket,
         specificity=round(spec, 4),
         bm25_rank_label=_rank_label(rank),
         first_relevant_rank=rank,
-        corpus_jaccard=round(jac, 4),
+        corpus_overlap=round(overlap, 4),
     )
 
 
@@ -153,7 +155,7 @@ def main() -> int:
         print(
             f"  {s.query_id:24s} {s.bucket:18s} spec={s.specificity:6.3f} "
             f"rank={s.first_relevant_rank} → {s.bm25_rank_label:6s} "
-            f"corpus_jaccard={s.corpus_jaccard:.3f}"
+            f"corpus_overlap={s.corpus_overlap:.3f}"
         )
     return 0
 
