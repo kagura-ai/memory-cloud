@@ -12,7 +12,12 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision = "e35_889_agent_state"
-down_revision = "e34_895_resource_token_enc"
+# Re-chained onto e35_887 (was e34) so the two independently-branched #887/#889
+# migrations form a single linear chain instead of two heads needing a merge
+# revision (a merge revision breaks `alembic downgrade -1`). The two are
+# independent — #887 alters memories/contexts, #889 adds agent_states — so the
+# order is arbitrary; neither is deployed yet.
+down_revision = "e35_887_provenance_trust_tier"
 branch_labels = None
 depends_on = None
 
