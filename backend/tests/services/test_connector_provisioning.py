@@ -105,6 +105,8 @@ class TestConnectorProvisioningService:
             *_lock_results(),
             _result(scalar=0),
             _result(one=None),
+            _result(one=None),  # #910: canonical chat schema existence check → none → provision
+            _result(),  # #910: ON CONFLICT DO NOTHING insert (return not consumed)
         ]
 
         with (
@@ -144,6 +146,8 @@ class TestConnectorProvisioningService:
             *_lock_results(),
             _result(scalar=0),
             _result(one=None),
+            _result(one=None),  # #910: canonical chat schema existence check → none → provision
+            _result(),  # #910: ON CONFLICT DO NOTHING insert (return not consumed)
         ]
 
         with (
