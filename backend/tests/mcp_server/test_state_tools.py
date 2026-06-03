@@ -133,6 +133,53 @@ class TestSetState:
         svc.set_state.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_overlong_key_is_rejected(self):
+        svc = MagicMock(set_state=AsyncMock())
+        with ExitStack() as stack:
+            _enter(stack, service=svc)
+            result = await handle_set_state(
+                args={"context_id": CTX, "key": "k" * 256, "value": 1},
+                user_id="u",
+                workspace_id=uuid4(),
+            )
+        assert _payload(result)["error"] == "validation_error"
+        svc.set_state.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_viewer_gate_uses_context_workspace_when_workspace_id_none(self):
+        # Regression: with workspace_id=None (OAuth2/session MCP auth), the
+        # write gate must still fire against the resolved context's workspace.
+        svc = MagicMock(set_state=AsyncMock())
+        ctx_ws = uuid4()
+        blocked = _error_response("permission_denied", "viewers cannot write")
+        viewer = AsyncMock(return_value=blocked)
+
+        async def gen():
+            yield AsyncMock()
+
+        with ExitStack() as stack:
+            resolved = AsyncMock(return_value=MagicMock(workspace_id=ctx_ws))
+            stack.enter_context(patch("db.base.get_db", new=gen))
+            stack.enter_context(
+                patch("mcp_server.tools.state._resolve_context_for_read", new=resolved)
+            )
+            stack.enter_context(
+                patch("mcp_server.tools.state._check_viewer_permission", new=viewer)
+            )
+            stack.enter_context(
+                patch("services.agent_state_service.AgentStateService", return_value=svc)
+            )
+            result = await handle_set_state(
+                args={"context_id": CTX, "key": "k", "value": 1},
+                user_id="u",
+                workspace_id=None,
+            )
+        # gate fired (blocked) and used the context's workspace, not None
+        assert _payload(result)["error"] == "permission_denied"
+        assert viewer.await_args.args[2] == ctx_ws
+        svc.set_state.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_viewer_is_blocked_from_writing(self):
         svc = MagicMock(set_state=AsyncMock())
         blocked = _error_response("permission_denied", "viewers cannot write")

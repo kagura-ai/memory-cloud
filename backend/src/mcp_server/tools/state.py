@@ -23,6 +23,10 @@ from mcp_server.tools._helpers import (
     _success_response,
 )
 
+# Matches the agent_states.key column length (VARCHAR(255)). Enforced in the
+# handlers so an overlong key returns a structured error, not a DB-layer 500.
+_STATE_KEY_MAX_LEN = 255
+
 
 async def handle_set_state(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
@@ -35,6 +39,10 @@ async def handle_set_state(
     key = args["key"]
     if not isinstance(key, str) or not key:
         return _error_response("validation_error", "'key' must be a non-empty string")
+    if len(key) > _STATE_KEY_MAX_LEN:
+        return _error_response(
+            "validation_error", f"'key' must be at most {_STATE_KEY_MAX_LEN} characters"
+        )
     value = args["value"]
     if value is None:
         # JSONB column is NOT NULL — reject up front instead of a generic 500.
@@ -61,11 +69,18 @@ async def handle_set_state(
             return _error_response("invalid_context_id_format", str(exc))
         try:
             # Verify the caller can reach the context (IDOR guard) ...
-            await _resolve_context_for_read(db, user_id, context_id)
+            context = await _resolve_context_for_read(db, user_id, context_id)
         except _ContextNotFoundError as exc:
             return exc.to_response()
         # ... and is not a read-only viewer (write gate, mirrors remember).
-        perm_error = await _check_viewer_permission(db, user_id, workspace_id, "set agent state")
+        # workspace_id is often None under OAuth2 / session-cookie MCP auth,
+        # which would make _check_viewer_permission short-circuit and skip the
+        # write gate. Fall back to the resolved context's workspace so the gate
+        # always fires against the authoritative workspace.
+        effective_workspace_id = workspace_id or context.workspace_id
+        perm_error = await _check_viewer_permission(
+            db, user_id, effective_workspace_id, "set agent state"
+        )
         if perm_error:
             return perm_error
 
@@ -103,9 +118,13 @@ async def handle_get_state(
         # lists all. Reject a present-but-invalid key (non-string / empty) so an
         # empty string doesn't silently fall through to list-all.
         key = args.get("key")
-        if key is not None and (not isinstance(key, str) or not key):
+        if key is not None and (
+            not isinstance(key, str) or not key or len(key) > _STATE_KEY_MAX_LEN
+        ):
             return _error_response(
-                "validation_error", "'key' must be a non-empty string when provided"
+                "validation_error",
+                f"'key' must be a non-empty string of at most {_STATE_KEY_MAX_LEN} "
+                "characters when provided",
             )
         if key:
             value = await service.get_state(context_id, key)
