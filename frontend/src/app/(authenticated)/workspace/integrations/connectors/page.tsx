@@ -138,7 +138,10 @@ export default function ConnectorsPage() {
         display_name: displayName || undefined,
         auto_create_context_name: contextName || undefined,
         slack_install_handle: installHandle,
-        pii_guardrail_config: { enabled: true },
+        // Omit pii_guardrail_config (null): the backend rejects `{enabled:true}`
+        // without a non-empty `detectors` list, and per the contract a null
+        // config makes the worker fail-closed (scrub) at ingest. A detector-
+        // configuration UI is a follow-up.
       });
       setPending(null);
       setCreated(result);
