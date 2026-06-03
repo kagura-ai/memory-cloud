@@ -108,6 +108,9 @@ async def test_list_excludes_expired(db_session, context_id):
     await db_session.commit()
 
     assert await svc.list_state(context_id) == {"live": 1}
+    # list_state opportunistically reaps expired rows so list-heavy readers
+    # don't accumulate dead rows: only the live row remains.
+    assert await _row_count(db_session, context_id) == 1
 
 
 @pytest.mark.asyncio

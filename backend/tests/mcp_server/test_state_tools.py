@@ -93,6 +93,46 @@ class TestSetState:
         svc.set_state.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_null_value_is_rejected(self):
+        svc = MagicMock(set_state=AsyncMock())
+        with ExitStack() as stack:
+            _enter(stack, service=svc)
+            result = await handle_set_state(
+                args={"context_id": CTX, "key": "k", "value": None},
+                user_id="u",
+                workspace_id=uuid4(),
+            )
+        assert _payload(result)["error"] == "validation_error"
+        svc.set_state.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_positive_or_non_int_ttl_is_rejected(self):
+        svc = MagicMock(set_state=AsyncMock())
+        for bad_ttl in ("60", 0, -5, True):
+            with ExitStack() as stack:
+                _enter(stack, service=svc)
+                result = await handle_set_state(
+                    args={"context_id": CTX, "key": "k", "value": 1, "ttl_seconds": bad_ttl},
+                    user_id="u",
+                    workspace_id=uuid4(),
+                )
+            assert _payload(result)["error"] == "validation_error", bad_ttl
+        svc.set_state.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_key_is_rejected(self):
+        svc = MagicMock(set_state=AsyncMock())
+        with ExitStack() as stack:
+            _enter(stack, service=svc)
+            result = await handle_set_state(
+                args={"context_id": CTX, "key": "", "value": 1},
+                user_id="u",
+                workspace_id=uuid4(),
+            )
+        assert _payload(result)["error"] == "validation_error"
+        svc.set_state.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_viewer_is_blocked_from_writing(self):
         svc = MagicMock(set_state=AsyncMock())
         blocked = _error_response("permission_denied", "viewers cannot write")
@@ -162,6 +202,18 @@ class TestGetState:
         body = _payload(result)
         assert body["count"] == 2
         assert body["states"] == {"a": 1, "b": 2}
+
+    @pytest.mark.asyncio
+    async def test_empty_key_is_rejected_not_treated_as_list(self):
+        svc = MagicMock(get_state=AsyncMock(), list_state=AsyncMock(return_value={"a": 1}))
+        with ExitStack() as stack:
+            _enter(stack, service=svc)
+            result = await handle_get_state(
+                args={"context_id": CTX, "key": ""}, user_id="u", workspace_id=uuid4()
+            )
+        assert _payload(result)["error"] == "validation_error"
+        svc.get_state.assert_not_called()
+        svc.list_state.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_context_not_found_short_circuits(self):

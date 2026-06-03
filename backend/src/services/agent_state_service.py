@@ -96,7 +96,13 @@ class AgentStateService:
         return row.value
 
     async def list_state(self, context_id: UUID) -> dict[str, Any]:
-        """Return all live ``key → value`` entries for the context."""
+        """Return all live ``key → value`` entries for the context.
+
+        Opportunistically reaps the context's expired rows first so a
+        list-heavy read pattern (agents reading all state each step) still
+        drives the TTL sweep and the table doesn't accumulate dead rows.
+        """
+        await self._reap_expired_context(context_id)
         now = utcnow()
         rows = (
             await self.db.execute(
@@ -137,6 +143,20 @@ class AgentStateService:
                 and_(
                     AgentState.context_id == context_id,
                     AgentState.key == key,
+                    AgentState.expires_at.is_not(None),
+                    AgentState.expires_at <= now,
+                )
+            )
+        )
+        await self.db.commit()
+
+    async def _reap_expired_context(self, context_id: UUID) -> None:
+        """Best-effort delete of ALL expired rows for a context (list sweep)."""
+        now = utcnow()
+        await self.db.execute(
+            delete(AgentState).where(
+                and_(
+                    AgentState.context_id == context_id,
                     AgentState.expires_at.is_not(None),
                     AgentState.expires_at <= now,
                 )

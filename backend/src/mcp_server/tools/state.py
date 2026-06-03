@@ -30,6 +30,20 @@ async def handle_set_state(
     """Upsert an agent-state value at ``(context_id, key)`` with an optional TTL."""
     if "key" not in args or "value" not in args:
         return _error_response("missing_fields", "Missing required fields: key, value")
+    # These handlers have no pydantic request model, so validate the loosely
+    # typed args explicitly rather than letting bad values reach SQL.
+    key = args["key"]
+    if not isinstance(key, str) or not key:
+        return _error_response("validation_error", "'key' must be a non-empty string")
+    value = args["value"]
+    if value is None:
+        # JSONB column is NOT NULL — reject up front instead of a generic 500.
+        return _error_response("validation_error", "'value' must not be null")
+    ttl_seconds = args.get("ttl_seconds")
+    if ttl_seconds is not None and (
+        isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or ttl_seconds <= 0
+    ):
+        return _error_response("validation_error", "'ttl_seconds' must be a positive integer")
 
     from db.base import get_db
     from services.agent_state_service import AgentStateService
@@ -55,15 +69,10 @@ async def handle_set_state(
         if perm_error:
             return perm_error
 
-        await AgentStateService(db).set_state(
-            context_id,
-            args["key"],
-            args["value"],
-            ttl_seconds=args.get("ttl_seconds"),
-        )
+        await AgentStateService(db).set_state(context_id, key, value, ttl_seconds=ttl_seconds)
         # Use the helper's standard {"status":"success"} envelope (consistent
         # with get_state and the rest of the MCP tools / tests).
-        return _success_response(key=args["key"])
+        return _success_response(key=key)
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -90,7 +99,14 @@ async def handle_get_state(
             return exc.to_response()
 
         service = AgentStateService(db)
+        # ``key`` is optional: a non-empty string reads one entry; omitting it
+        # lists all. Reject a present-but-invalid key (non-string / empty) so an
+        # empty string doesn't silently fall through to list-all.
         key = args.get("key")
+        if key is not None and (not isinstance(key, str) or not key):
+            return _error_response(
+                "validation_error", "'key' must be a non-empty string when provided"
+            )
         if key:
             value = await service.get_state(context_id, key)
             return _success_response(key=key, value=value, found=value is not None)
