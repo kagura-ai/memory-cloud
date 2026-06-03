@@ -27,6 +27,8 @@ from models.memory import (
     EDGE_ORIGIN_HEBBIAN,
     EDGE_ORIGIN_SEMANTIC,
     EDGE_TYPE_NEURAL_ASSOCIATION,
+    SOURCE_TYPE_CONNECTOR,
+    SOURCE_TYPE_MANUAL,
     Memory,
 )
 from models.schemas import (
@@ -346,7 +348,12 @@ class MemoryService:
             summary_embedding_id=memory_id,  # Same as memory_id
             embedding_status="pending",  # Issue #122: Track embedding state
             source_uri=request.source_uri,
-            source_type=request.source_type,
+            # Issue #887: server-authoritative provenance. The request schema
+            # only permits user-origin values (file/url/vault/api/manual) — the
+            # reserved 'connector' value cannot be client-set, so a caller on the
+            # remember path can never forge external-ingestion provenance.
+            # NULL coerces to 'manual' to satisfy the NOT NULL column.
+            source_type=request.source_type or SOURCE_TYPE_MANUAL,
         )
         # Issue #886: pin-on-write. delivery_mode='always' pins straight to
         # persistent (so it is exempt from sleep consolidation — which only acts
@@ -1471,6 +1478,16 @@ class MemoryService:
                 pg_conditions.append(Memory.source_uri.like(f"{escaped}%", escape="\\"))
             if stype := request.filters.get("source_type"):
                 pg_conditions.append(Memory.source_type == stype)
+            # Issue #887: trust-tier read filter. ``trusted`` excludes
+            # external-origin (connector-ingested) memories from
+            # behaviour-influencing reads (OWASP LLM01/LLM03 — external content
+            # is data, not instructions). Connector contexts are stamped
+            # ``Context.trust_tier='external'`` (the authoritative signal) and
+            # contain only ``source_type='connector'`` rows, so this row-level
+            # exclusion matches the context-level trust in practice without
+            # restructuring the recall hot path.
+            if request.filters.get("trust_tier") == "trusted":
+                pg_conditions.append(Memory.source_type != SOURCE_TYPE_CONNECTOR)
         # Issue #496: cluster-scoped recall — restrict to the
         # cluster's member memories. ``cluster_memory_ids`` was
         # pre-resolved above and is guaranteed non-empty by the

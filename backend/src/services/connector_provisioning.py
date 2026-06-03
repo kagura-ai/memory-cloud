@@ -135,6 +135,20 @@ class ConnectorProvisioningService:
                 auto_create_context_name=auto_create_context_name,
             )
             auto_created_context_id = resolved_context_id
+            # Issue #887: a freshly auto-created connector context receives
+            # external ingestion, so stamp it 'external' — the authoritative,
+            # server-side trust signal that excludes it from behaviour-
+            # influencing reads regardless of any client-supplied per-row
+            # source_type (survives BYOK key leakage). Scoped to the auto-create
+            # path only: a bring-your-own existing context is the user's own and
+            # its trust tier is not silently changed here.
+            from models.auth import CONTEXT_TRUST_TIER_EXTERNAL, Context
+
+            await self.db.execute(
+                update(Context)
+                .where(Context.id == resolved_context_id)
+                .values(trust_tier=CONTEXT_TRUST_TIER_EXTERNAL)
+            )
         else:
             await self._enforce_connector_seat_cap(workspace, workspace_id)
             resolved_context_id = await self._resolve_context(

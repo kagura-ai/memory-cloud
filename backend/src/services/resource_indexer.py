@@ -31,7 +31,10 @@ from db.qdrant import (
     get_qdrant_client,
 )
 from models.auth import Context
-from models.memory import Memory  # Issue #262: Memory model for resource data storage
+from models.memory import (  # Issue #262: Memory model for resource data storage
+    SOURCE_TYPE_CONNECTOR,
+    Memory,
+)
 from models.resource import IndexerState, Resource, ResourceEvent, ResourceSchema
 from services.context_routing import resolve_context_routing
 from services.embedding_service import EmbeddingService
@@ -798,6 +801,10 @@ class ResourceIndexer:
                     importance=event.importance if event.importance is not None else 0.6,
                     scope="working",
                     source="resource_ingest",  # Issue #262: Track provenance
+                    # Issue #887: server-stamped provenance — connector/external
+                    # ingestion is 'connector', never client-set. (Trust is
+                    # authoritative at the context level; this is provenance.)
+                    source_type=SOURCE_TYPE_CONNECTOR,
                     tags=[],
                     context={"context_id": str(context.id)},
                     client="resource_indexer",
