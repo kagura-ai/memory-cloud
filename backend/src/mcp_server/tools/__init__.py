@@ -137,6 +137,7 @@ def _build_registry() -> dict[str, Any]:
         handle_get_sleep_report,
         handle_rollback_sleep_run,
     )
+    from mcp_server.tools.state import handle_get_state, handle_set_state
     from mcp_server.tools.usage import handle_get_usage
 
     return {
@@ -151,6 +152,9 @@ def _build_registry() -> dict[str, Any]:
         "forget": handle_forget,
         "reference": handle_reference,
         "explore": handle_explore,
+        # Issue #889: agent session-state lane (TTL, recall-excluded)
+        "set_state": handle_set_state,
+        "get_state": handle_get_state,
         "get_context_info": handle_get_context_info,
         "create_context": handle_create_context,
         "update_context": handle_update_context,
