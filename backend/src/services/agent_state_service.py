@@ -116,7 +116,7 @@ class AgentStateService:
     async def delete_state(self, context_id: UUID, key: str) -> bool:
         """Delete ``(context_id, key)``. Returns True if a row was removed."""
         result = cast(
-            "CursorResult[Any]",
+            CursorResult[Any],
             await self.db.execute(
                 delete(AgentState).where(
                     and_(

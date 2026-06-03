@@ -97,7 +97,7 @@ class TestSetState:
                 user_id="u",
                 workspace_id=uuid4(),
             )
-        assert _payload(result)["status"] == "ok"
+        assert _payload(result)["status"] == "success"
         svc.set_state.assert_awaited_once()
         assert svc.set_state.call_args.kwargs["ttl_seconds"] == 60
 

@@ -52,7 +52,9 @@ async def handle_set_state(
             args["value"],
             ttl_seconds=args.get("ttl_seconds"),
         )
-        return _success_response(status="ok", key=args["key"])
+        # Use the helper's standard {"status":"success"} envelope (consistent
+        # with get_state and the rest of the MCP tools / tests).
+        return _success_response(key=args["key"])
 
     return _error_response("internal_error", "Database session unavailable")
 
