@@ -14,6 +14,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -423,20 +430,21 @@ export default function ConnectorsPage() {
                     >
                       {t("piiRedaction")}
                     </label>
-                    <select
-                      id="conn-pii-redaction"
-                      className="h-9 w-full rounded-md border bg-transparent px-2 text-sm"
+                    <Select
                       value={piiRedaction}
-                      onChange={(e) =>
-                        setPiiRedaction(e.target.value as PiiRedaction)
-                      }
+                      onValueChange={(v) => setPiiRedaction(v as PiiRedaction)}
                     >
-                      {PII_REDACTION_MODES.map((m) => (
-                        <option key={m} value={m}>
-                          {t(`piiRedaction_${m}`)}
-                        </option>
-                      ))}
-                    </select>
+                      <SelectTrigger id="conn-pii-redaction" className="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {PII_REDACTION_MODES.map((m) => (
+                          <SelectItem key={m} value={m}>
+                            {t(`piiRedaction_${m}`)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
                   <label className="flex items-center gap-2 text-sm">
                     <input

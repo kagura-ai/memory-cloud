@@ -3600,8 +3600,6 @@
     "contextNameHelp": "Lowercase letters, numbers, hyphen and underscore only.",
     "createConnector": "Create connector",
     "createdTitle": "Connector created",
-    "createdDesc": "Copy the worker credentials now — they are shown only once.",
-    "connectorId": "Connector ID",
     "kmcApiKey": "KMC write key",
     "resourceToken": "Resource token (resource-ingest API)",
     "deleteTitle": "Delete connector?",

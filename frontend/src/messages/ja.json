@@ -3600,8 +3600,6 @@
     "contextNameHelp": "英小文字・数字・ハイフン・アンダースコアのみ。",
     "createConnector": "コネクタを作成",
     "createdTitle": "コネクタを作成しました",
-    "createdDesc": "ワーカー用の認証情報を今すぐコピーしてください（一度だけ表示されます）。",
-    "connectorId": "コネクタ ID",
     "kmcApiKey": "KMC 書き込みキー",
     "resourceToken": "リソーストークン（resource-ingest API）",
     "deleteTitle": "コネクタを削除しますか？",
