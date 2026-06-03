@@ -315,10 +315,14 @@ verify_workers_blocked() {
     local domain http_status attempt
     domain=$(awk '/^[a-zA-Z]/ { gsub(/ *\{.*/, ""); print; exit }' "$CADDYFILE_TPL")
     for attempt in 1 2 3; do
+        # --resolve sets both the TCP target AND the TLS SNI to $domain so
+        # Caddy selects the correct vhost. A plain -H "Host:" with 127.0.0.1
+        # in the URL leaves SNI as "127.0.0.1" and Caddy may not match the
+        # site block.
         http_status=$(curl -sk -o /dev/null -w "%{http_code}" \
             --max-time 5 \
-            -H "Host: ${domain}" \
-            "https://127.0.0.1:443/api/v1/workers/config" 2>/dev/null)
+            --resolve "${domain}:443:127.0.0.1" \
+            "https://${domain}/api/v1/workers/config" 2>/dev/null)
         http_status=${http_status:-000}
         [ "$http_status" = "404" ] && break
         [ "$attempt" -lt 3 ] && sleep 2
