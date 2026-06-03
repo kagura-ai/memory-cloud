@@ -35,7 +35,16 @@ async def handle_set_state(
     from services.agent_state_service import AgentStateService
 
     async for db in get_db():
-        context_id = _resolve_context_id(args["context_id"])
+        # Defense-in-depth: the dispatcher already validates context_id for
+        # non-exempt tools, but guard here too so a direct handler call returns
+        # a structured error instead of raising KeyError/ValueError.
+        raw_ctx = args.get("context_id")
+        if not raw_ctx:
+            return _error_response("missing_fields", "Missing required field: context_id")
+        try:
+            context_id = _resolve_context_id(str(raw_ctx))
+        except ValueError as exc:
+            return _error_response("invalid_context_id_format", str(exc))
         try:
             # Verify the caller can reach the context (IDOR guard) ...
             await _resolve_context_for_read(db, user_id, context_id)
@@ -67,7 +76,14 @@ async def handle_get_state(
     from services.agent_state_service import AgentStateService
 
     async for db in get_db():
-        context_id = _resolve_context_id(args["context_id"])
+        # Defense-in-depth context_id guard (see handle_set_state).
+        raw_ctx = args.get("context_id")
+        if not raw_ctx:
+            return _error_response("missing_fields", "Missing required field: context_id")
+        try:
+            context_id = _resolve_context_id(str(raw_ctx))
+        except ValueError as exc:
+            return _error_response("invalid_context_id_format", str(exc))
         try:
             await _resolve_context_for_read(db, user_id, context_id)
         except _ContextNotFoundError as exc:

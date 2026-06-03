@@ -69,6 +69,30 @@ class TestSetState:
         svc.set_state.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_missing_context_id_returns_error(self):
+        svc = MagicMock(set_state=AsyncMock())
+        with ExitStack() as stack:
+            _enter(stack, service=svc)
+            result = await handle_set_state(
+                args={"key": "k", "value": 1}, user_id="u", workspace_id=uuid4()
+            )
+        assert _payload(result)["error"] == "missing_fields"
+        svc.set_state.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_invalid_context_id_returns_error(self):
+        svc = MagicMock(set_state=AsyncMock())
+        with ExitStack() as stack:
+            _enter(stack, service=svc)
+            result = await handle_set_state(
+                args={"context_id": "not-a-uuid", "key": "k", "value": 1},
+                user_id="u",
+                workspace_id=uuid4(),
+            )
+        assert _payload(result)["error"] == "invalid_context_id_format"
+        svc.set_state.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_viewer_is_blocked_from_writing(self):
         svc = MagicMock(set_state=AsyncMock())
         blocked = _error_response("permission_denied", "viewers cannot write")
