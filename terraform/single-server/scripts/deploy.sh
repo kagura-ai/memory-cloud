@@ -104,6 +104,7 @@ cmd_rollback() {
     mv "${MARKER_FILE}.tmp" "$MARKER_FILE"
     generate_caddyfile "api-${inactive}"
     reload_caddy
+    verify_workers_blocked
 
     log "Rollback complete. Active: $inactive"
 }
@@ -143,6 +144,7 @@ cmd_deploy() {
     log "Step 6/7: Switching Caddy upstream -> api-${inactive}..."
     generate_caddyfile "api-${inactive}"
     reload_caddy
+    verify_workers_blocked
 
     # Step 7: Drain and stop old container
     # Disable restart policy first — otherwise `restart: always` revives
@@ -294,6 +296,44 @@ reload_caddy() {
     # re-mounts the file, guaranteeing the new Caddyfile is picked up.
     dc restart caddy
     log "  Caddy restarted"
+}
+
+verify_workers_blocked() {
+    # Security gate: /api/v1/workers/* must return 404 via Caddy after every
+    # config reload. The route carries decrypted connector secrets and is
+    # intended for the co-resident ai-worker on the internal Docker network
+    # only. Use -k (insecure) because the Cloudflare Origin CA cert is not
+    # trusted by the system CA bundle, but we only care about the HTTP status.
+    #
+    # Domain is extracted from CADDYFILE_TPL so this stays in sync with the
+    # configured site block without manual updates here.
+    #
+    # Retry up to 3 times (2 s apart) to tolerate Caddy's brief startup window
+    # after `dc restart caddy` — avoids a false-positive abort on the first
+    # request while the process is still initialising.
+    log "  Security gate: verifying /api/v1/workers/* is blocked at Caddy..."
+    local domain http_status attempt
+    domain=$(awk '/^[a-zA-Z]/ { gsub(/ *\{.*/, ""); print; exit }' "$CADDYFILE_TPL")
+    for attempt in 1 2 3; do
+        # --resolve sets both the TCP target AND the TLS SNI to $domain so
+        # Caddy selects the correct vhost. A plain -H "Host:" with 127.0.0.1
+        # in the URL leaves SNI as "127.0.0.1" and Caddy may not match the
+        # site block.
+        http_status=$(curl -sk -o /dev/null -w "%{http_code}" \
+            --max-time 5 \
+            --resolve "${domain}:443:127.0.0.1" \
+            "https://${domain}/api/v1/workers/config" 2>/dev/null)
+        http_status=${http_status:-000}
+        [ "$http_status" = "404" ] && break
+        [ "$attempt" -lt 3 ] && sleep 2
+    done
+    if [ "$http_status" = "404" ]; then
+        log "  /api/v1/workers/* is correctly blocked (HTTP 404)"
+    else
+        error "/api/v1/workers/* is NOT blocked by Caddy (HTTP ${http_status}, expected 404).
+  Check Caddyfile: the 'handle /api/v1/workers*' block must appear BEFORE 'handle /api/*'.
+  Regenerate and redeploy: $0 --generate-caddyfile && dc restart caddy"
+    fi
 }
 
 cmd_generate_caddyfile() {

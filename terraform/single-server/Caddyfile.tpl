@@ -38,6 +38,14 @@ memory.kagura-ai.com {
 
 	encode zstd gzip
 
+	# /api/v1/workers/* is internal-only — must precede the /api/* catch-all.
+	# The co-resident ai-worker reaches this via the Docker internal network
+	# directly on the API container port; it must never be reachable through
+	# public ingress. Return 404 (not 403) to avoid confirming the path exists.
+	handle /api/v1/workers* {
+		respond 404
+	}
+
 	# -------------------------------------------------------------------------
 	# Backend API (FastAPI on :8080) — blue-green upstream
 	# -------------------------------------------------------------------------
