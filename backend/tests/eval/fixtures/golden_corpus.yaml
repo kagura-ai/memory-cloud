@@ -1,0 +1,245 @@
+# Golden retrieval eval corpus (Issue #344) — frozen snapshot.
+#
+# This is a REGRESSION / self-consistency harness, NOT a human-labeled gold
+# benchmark (see ../README.md). Absolute P@5/MRR numbers are drift signals, not
+# quality claims. Relevance labels are binary (a query's `relevant` list is the
+# gold set of document ids).
+#
+# Vocabulary is intentionally shared across documents so the leakage check's
+# rare-term-unique-cooccurrence rule reflects genuine giveaways, not artifacts.
+meta:
+  version: 1
+  domain: "Kagura Memory Cloud (dogfooded knowledge-base content)"
+  # sudachi_version is stamped into the live results JSON at run time
+  # (test_retrieval_quality.py); the corpus itself is tokenizer-version-agnostic.
+  notes: "30 queries x 6 buckets; 16 documents (memory + resource). Authored starter set."
+
+documents:
+  # --- memory-source documents ---
+  - id: doc_mem_hybrid
+    source: memory
+    text: >-
+      Recall blends dense vector similarity with BM25 keyword scoring. The
+      default weighting leans on semantic matches while keyword scoring keeps
+      exact terms from being lost.
+  - id: doc_mem_neural
+    source: memory
+    text: >-
+      Neural memory strengthens associations between items that activate
+      together, so frequently co-recalled notes drift closer over repeated use.
+      The graph it builds feeds the explore traversal.
+  - id: doc_mem_sleep
+    source: memory
+    text: >-
+      Sleep maintenance runs offline consolidation: it prunes weak links,
+      reindexes drifted entries, and rediscovers associations without blocking
+      live reads.
+  - id: doc_mem_trust
+    source: memory
+    text: >-
+      Each context carries a server stamped trust level. Connector ingested
+      contexts are marked external so behaviour influencing reads can exclude
+      untrusted origin content.
+  - id: doc_mem_agentstate
+    source: memory
+    text: >-
+      The session state lane stores short lived run values for an agent under a
+      key, with an optional expiry. It lives apart from durable notes and never
+      surfaces in ordinary recall.
+  - id: doc_mem_context
+    source: memory
+    text: >-
+      A context groups related notes inside a workspace and scopes every
+      operation. Members hold a role that decides whether they may read or write
+      entries.
+  - id: doc_mem_rerank
+    source: memory
+    text: >-
+      An optional second pass reorders the first set of candidates with a
+      cross encoder model, trading extra latency for sharper ordering on hard
+      queries.
+  - id: doc_mem_jp_kioku
+    source: memory
+    text: >-
+      記憶は会話を越えて保持され、必要なときに検索で呼び戻される。重要度の高い項目ほど
+      上位に並び替えられ、古い項目は整理される。
+  - id: doc_mem_jp_neural
+    source: memory
+    text: >-
+      一緒に思い出される項目どうしの結び付きが強くなり、関連の探索がたどりやすくなる。
+      使うほどに関連の地図が育っていく。
+
+  # --- resource-source documents ---
+  - id: doc_res_chunking
+    source: resource
+    text: >-
+      Split long documents into semantic sections before indexing. A short
+      overview sentence per section improves matching far more than fixed length
+      character windows.
+  - id: doc_res_deploy
+    source: resource
+    text: >-
+      The blue green rollout starts the new release on the idle colour, checks
+      health, then flips traffic. Database migrations are applied before the
+      flip so both colours share one schema.
+  - id: doc_res_apikey
+    source: resource
+    text: >-
+      Programmatic clients authenticate with a scoped key sent in the request
+      header. Keys are stored only as a salted hash, so a leaked store cannot be
+      replayed against the service.
+  - id: doc_res_quota
+    source: resource
+    text: >-
+      Each plan tier sets a daily and weekly request allowance. When a workspace
+      crosses its allowance the service returns a rate limit response until the
+      window resets.
+  - id: doc_res_embedding
+    source: resource
+    text: >-
+      Vectors are produced by an external embedding provider chosen per context.
+      Bring your own key routes the cost to the owning workspace and keeps the
+      provider choice configurable.
+  - id: doc_res_jp_chunk
+    source: resource
+    text: >-
+      長い資料は取り込み前に意味のまとまりで分割するとよい。節ごとに短い要約文を添えると、
+      固定長で切るよりも一致の精度が上がる。
+  - id: doc_res_jp_deploy
+    source: resource
+    text: >-
+      新しい配信はまず待機側の色で起動し、正常性を確認してから通信を切り替える。
+      移行は切り替えの前に適用し、両方の色が同じ構成を共有する。
+
+queries:
+  # === retrieval-exact (5) — share a verbatim phrase (3-gram leakage exempt) ===
+  - id: q_exact_01
+    bucket: retrieval-exact
+    text: "dense vector similarity with BM25 keyword scoring"
+    relevant: [doc_mem_hybrid]
+  - id: q_exact_02
+    bucket: retrieval-exact
+    text: "server stamped trust level for each context"
+    relevant: [doc_mem_trust]
+  - id: q_exact_03
+    bucket: retrieval-exact
+    text: "split long documents into semantic sections before indexing"
+    relevant: [doc_res_chunking]
+  - id: q_exact_04
+    bucket: retrieval-exact
+    text: "daily and weekly request allowance per plan tier"
+    relevant: [doc_res_quota]
+  - id: q_exact_05
+    bucket: retrieval-exact
+    text: "external embedding provider chosen per context"
+    relevant: [doc_res_embedding]
+
+  # === retrieval-semantic (5) — paraphrase, low lexical overlap ===
+  - id: q_sem_01
+    bucket: retrieval-semantic
+    text: "how are word matches and meaning matches combined when looking things up"
+    relevant: [doc_mem_hybrid]
+  - id: q_sem_02
+    bucket: retrieval-semantic
+    text: "what reorders early candidates to improve ranking on tough lookups"
+    relevant: [doc_mem_rerank]
+  - id: q_sem_03
+    bucket: retrieval-semantic
+    text: "offline cleanup that tidies links and refreshes the index quietly"
+    relevant: [doc_mem_sleep]
+  - id: q_sem_04
+    bucket: retrieval-semantic
+    text: "keeping a client secret safe even if the credential store is stolen"
+    relevant: [doc_res_apikey]
+  - id: q_sem_05
+    bucket: retrieval-semantic
+    text: "releasing a new version with no downtime by switching idle and active"
+    relevant: [doc_res_deploy]
+
+  # === hiragana-only (5) — query in hiragana, target in kanji/mixed ===
+  - id: q_hira_01
+    bucket: hiragana-only
+    text: "きおくは かいわを こえて のこる のか"
+    relevant: [doc_mem_jp_kioku]
+  - id: q_hira_02
+    bucket: hiragana-only
+    text: "いっしょに おもいだす こうもくの むすびつき"
+    relevant: [doc_mem_jp_neural]
+  - id: q_hira_03
+    bucket: hiragana-only
+    text: "ながい しりょうを いみの まとまりで わける"
+    relevant: [doc_res_jp_chunk]
+  - id: q_hira_04
+    bucket: hiragana-only
+    text: "あたらしい はいしんを たいきがわの いろで おこす"
+    relevant: [doc_res_jp_deploy]
+  - id: q_hira_05
+    bucket: hiragana-only
+    text: "じゅうようどの たかい こうもくを じょういに ならべる"
+    relevant: [doc_mem_jp_kioku]
+
+  # === cross-source (5) — relevant docs span memory AND resource ===
+  - id: q_cross_01
+    bucket: cross-source
+    text: "how chunking before indexing helps later keyword and semantic lookup"
+    relevant: [doc_res_chunking, doc_mem_hybrid]
+  - id: q_cross_02
+    bucket: cross-source
+    text: "where does the cost of producing vectors land for a context"
+    relevant: [doc_res_embedding, doc_mem_context]
+  - id: q_cross_03
+    bucket: cross-source
+    text: "stopping connector sourced data from steering reads that change behaviour"
+    relevant: [doc_mem_trust, doc_res_apikey]
+  - id: q_cross_04
+    bucket: cross-source
+    text: "consolidation and reindexing that keeps retrieval quality stable"
+    relevant: [doc_mem_sleep, doc_res_chunking]
+  - id: q_cross_05
+    bucket: cross-source
+    text: "zero downtime release and the schema both colours rely on"
+    relevant: [doc_res_deploy, doc_mem_context]
+
+  # === resource-only (5) — relevant docs are resource source ===
+  - id: q_res_01
+    bucket: resource-only
+    text: "advice on preparing lengthy material before it is ingested"
+    relevant: [doc_res_chunking]
+  - id: q_res_02
+    bucket: resource-only
+    text: "what response a team receives after passing its usage budget"
+    relevant: [doc_res_quota]
+  - id: q_res_03
+    bucket: resource-only
+    text: "how programmatic callers prove their identity to the service"
+    relevant: [doc_res_apikey]
+  - id: q_res_04
+    bucket: resource-only
+    text: "choosing who pays for vector generation per context"
+    relevant: [doc_res_embedding]
+  - id: q_res_05
+    bucket: resource-only
+    text: "switching live traffic only after the standby passes its checks"
+    relevant: [doc_res_deploy]
+
+  # === memory-only (5) — relevant docs are memory source ===
+  - id: q_mem_01
+    bucket: memory-only
+    text: "items recalled together grow more strongly linked over time"
+    relevant: [doc_mem_neural]
+  - id: q_mem_02
+    bucket: memory-only
+    text: "short lived per agent values stored under a key with an expiry"
+    relevant: [doc_mem_agentstate]
+  - id: q_mem_03
+    bucket: memory-only
+    text: "what bundles associated notes and limits the reach of each operation within a workspace"
+    relevant: [doc_mem_context]
+  - id: q_mem_04
+    bucket: memory-only
+    text: "an extra reordering step that sharpens results for hard lookups using a heavier model"
+    relevant: [doc_mem_rerank]
+  - id: q_mem_05
+    bucket: memory-only
+    text: "blending meaning based and exact term matching during lookup"
+    relevant: [doc_mem_hybrid]

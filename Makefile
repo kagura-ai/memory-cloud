@@ -151,6 +151,17 @@ test-urls:
 	cd $(BACKEND_DIR) && pytest tests/smoke/test_all_routes.py -v --timeout=60
 	@echo "URL validation tests complete."
 
+.PHONY: eval-leakage
+eval-leakage:
+	@echo "Running golden-corpus leakage check (Issue #344)..."
+	cd $(BACKEND_DIR) && PYTHONPATH=src:. python -m tests.eval.tools.leakage_check
+
+.PHONY: eval-retrieval
+eval-retrieval:
+	@echo "Running live retrieval-quality eval (needs the stack: make up)..."
+	@echo "Writes backend/tests/eval/results/<date>.json — real run only, never fabricated."
+	cd $(BACKEND_DIR) && KAGURA_EVAL_LIVE=1 PYTHONPATH=src:. python -m tests.eval.runner
+
 .PHONY: test-cov
 test-cov:
 	@echo "Running tests with coverage in Docker..."
