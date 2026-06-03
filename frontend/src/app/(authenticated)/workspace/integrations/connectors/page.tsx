@@ -138,10 +138,11 @@ export default function ConnectorsPage() {
         display_name: displayName || undefined,
         auto_create_context_name: contextName || undefined,
         slack_install_handle: installHandle,
-        // Omit pii_guardrail_config (null): the backend rejects `{enabled:true}`
-        // without a non-empty `detectors` list, and per the contract a null
-        // config makes the worker fail-closed (scrub) at ingest. A detector-
-        // configuration UI is a follow-up.
+        // pii_guardrail_config is intentionally left unset: the backend rejects
+        // `{enabled:true}` without a non-empty `detectors` list. An omitted field
+        // is received by FastAPI as None, which the contract treats as
+        // fail-closed (the ai-worker scrubs at ingest). A detector-config UI is
+        // a follow-up.
       });
       setPending(null);
       setCreated(result);
