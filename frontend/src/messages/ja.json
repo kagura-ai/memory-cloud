@@ -3609,6 +3609,25 @@
     "connectorDeleted": "コネクタを削除しました",
     "deleteFailed": "コネクタの削除に失敗しました",
     "installExpiredTitle": "Slack 連携の期限切れ",
-    "installExpiredDesc": "Slack 認可ハンドルが無効か期限切れです。もう一度接続してください。"
+    "installExpiredDesc": "Slack 認可ハンドルが無効か期限切れです。もう一度接続してください。",
+    "piiTitle": "PII マスキング",
+    "piiDesc": "ai-worker が保存前に個人情報をどう秘匿するかを設定します。",
+    "piiEnabled": "有効",
+    "piiDetectors": "検出器",
+    "piiDetectorsRequired": "検出器を1つ以上選択するか、PII マスキングをオフにしてください。",
+    "piiRedaction": "秘匿方式",
+    "piiRedaction_mask": "マスク（**** で置換）",
+    "piiRedaction_hash": "ハッシュ（ハッシュ値で置換）",
+    "piiRedaction_remove": "削除（該当箇所を除去）",
+    "piiFailClosed": "マスキング失敗時はイベントを破棄（フェイルクローズ）",
+    "connectorIdLabel": "ID: {id}",
+    "copyConnectorId": "コネクタ ID をコピー",
+    "createdDescModelB": "設定完了です。Kagura 運用ワーカーは認証情報を自動取得するため、コピーや保存は不要です。以下の値は手動 CLI テストまたはセルフホストワーカー用です。",
+    "devDisclosureTitle": "開発者 / CLI テスト（任意）",
+    "devDisclosureNote": "Kagura 運用ワーカーを使う場合は不要です。手動 CLI/curl テストまたはセルフホストワーカー専用。紛失した場合はコネクタを削除して再作成すると新しい値を取得できます。",
+    "curlSampleTitle": "リクエスト例（resource-ingest API）",
+    "copyResourceToken": "リソーストークンをコピー",
+    "copyKmcApiKey": "KMC 書き込みキーをコピー",
+    "kmcApiKeyNote": "セルフホストワーカー設定専用。人間の CLI 用途には API Keys タブの個人 API キーを使ってください。"
   }
 }
