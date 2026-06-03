@@ -15,6 +15,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import delete, func, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -682,6 +683,12 @@ class ConnectorProvisioningService:
         e.g. a manually registered one) is left untouched so an operator's custom
         schema is never clobbered. Only the first registration seeds the
         canonical ``text`` fulltext field the worker writes to.
+
+        The pre-check skips seeding when ANY schema version already exists; the
+        insert itself is ``ON CONFLICT DO NOTHING`` on the partial unique index
+        ``uq_resource_schemas_version (resource_pk, schema_version)`` so two
+        concurrent first-provisions for the same resource can't raise a UNIQUE
+        violation (the loser's insert is a no-op — the desired end state holds).
         """
         existing = (
             await self.db.execute(
@@ -690,15 +697,19 @@ class ConnectorProvisioningService:
         ).scalar_one_or_none()
         if existing is not None:
             return
-        self.db.add(
-            ResourceSchema(
+        await self.db.execute(
+            pg_insert(ResourceSchema)
+            .values(
                 resource_pk=resource_pk,
                 resource_id=resource_id,
                 schema_version=1,
                 field_definitions=_CANONICAL_CHAT_FIELD_DEFINITIONS,
             )
+            .on_conflict_do_nothing(
+                index_elements=["resource_pk", "schema_version"],
+                index_where=text("resource_pk IS NOT NULL"),
+            )
         )
-        await self.db.flush()
 
 
 async def get_connector_id_for_resource_pk(
