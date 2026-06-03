@@ -125,13 +125,19 @@ async def remember(
     # Issue #146: Pass current workspace ID for workspace-scoped API keys
     # Issue #273: Use context_id from request.context dict (if provided)
     context_id = request.context.get("context_id") if request.context else None
-    result = await memory_service.remember(
-        request,
-        user_id=user["user_id"],
-        client=user.get("client", "web"),
-        current_context_id=context_id,
-        current_workspace_id=user.get("current_workspace_id"),  # NEW: Issue #146
-    )
+    try:
+        result = await memory_service.remember(
+            request,
+            user_id=user["user_id"],
+            client=user.get("client", "web"),
+            current_context_id=context_id,
+            current_workspace_id=user.get("current_workspace_id"),  # NEW: Issue #146
+        )
+    except ValueError as e:
+        # MemoryService raises ValueError as its "bad request" signal (e.g. an
+        # invalid type="time" details.trigger). Map it to 422 rather than
+        # letting it surface as an unhandled 500.
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
 
     return result
 
@@ -275,11 +281,17 @@ async def patch_memory(
         fields=sorted(request.model_fields_set),
     )
 
-    return await memory_service.patch_memory(
-        memory_id=memory_id,
-        request=request,
-        user_id=user["user_id"],
-    )
+    try:
+        return await memory_service.patch_memory(
+            memory_id=memory_id,
+            request=request,
+            user_id=user["user_id"],
+        )
+    except ValueError as e:
+        # MemoryService raises ValueError as its "bad request" signal (e.g. a
+        # PATCH flipping type to "time" without a valid details.trigger). Map it
+        # to 422 — same as the remember route — rather than an unhandled 500.
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
 
 
 @router.post("/forget", response_model=ForgetResponse)
@@ -546,6 +558,24 @@ async def list_memories(
         "one of the tags, PG array overlap; preserves #618 behavior) or `all` "
         "(memory holds every given tag, PG array contains — #830 drill-down).",
     ),
+    trigger_from: str | None = Query(
+        None,
+        description="Time Memory (#877) window lower bound (naive ISO, e.g. "
+        "2026-07-01T00:00:00). Selects type='time' memories whose stored "
+        "[trigger_from, trigger_until] window overlaps the query window. "
+        "Pass 'now' here to get upcoming items.",
+    ),
+    trigger_until: str | None = Query(
+        None,
+        description="Time Memory (#877) window upper bound (naive ISO). Omit for "
+        "an open-ended (future) window.",
+    ),
+    order_by: str = Query(
+        "created_at",
+        pattern="^(created_at|trigger_from)$",
+        description="Sort key. 'created_at' (default, desc) or 'trigger_from' "
+        "(asc) for upcoming-first Time Memory listing (#877).",
+    ),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
@@ -667,6 +697,34 @@ async def list_memories(
         if tag_filter is not None:
             query = query.where(tag_filter)
 
+        # Time Memory (#877) window overlap, built once and applied to BOTH
+        # queries (same anti-drift rationale as tag_filter above). A stored
+        # window [trigger_from, trigger_until] overlaps the query window
+        # [qfrom, quntil] iff trigger_from <= quntil AND trigger_until >= qfrom.
+        # The columns are TEXT fixed-width ISO, so string comparison ==
+        # chronological comparison — but ONLY if the caller's bounds are the
+        # same fixed-width form. parse_query_bound re-normalizes them (and
+        # resolves the 'now' shortcut); a malformed bound is a 422, not silent
+        # wrong results. isinstance(str) (not `is not None`) skips the unset
+        # Query() FieldInfo sentinel that direct-call unit tests pass.
+        from utils.time_trigger import TriggerValidationError, parse_query_bound
+
+        try:
+            qfrom = parse_query_bound(trigger_from) if isinstance(trigger_from, str) else None
+            quntil = parse_query_bound(trigger_until) if isinstance(trigger_until, str) else None
+        except TriggerValidationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)
+            ) from e
+
+        window_filters = []
+        if qfrom is not None:
+            window_filters.append(Memory.trigger_until >= qfrom)
+        if quntil is not None:
+            window_filters.append(Memory.trigger_from <= quntil)
+        for wf in window_filters:
+            query = query.where(wf)
+
         # Get total count (with same filters as data query)
         count_query = select(func.count(Memory.id)).where(Memory.deleted_at.is_(None))
         if owner_filter is not None:
@@ -681,13 +739,17 @@ async def list_memories(
             count_query = count_query.where(Memory.summary.ilike(q_pattern, escape="\\"))
         if tag_filter is not None:
             count_query = count_query.where(tag_filter)
+        for wf in window_filters:
+            count_query = count_query.where(wf)
         count_result = await db.execute(count_query)
         total = count_result.scalar() or 0
 
-        # Get memories
-        result = await db.execute(
-            query.order_by(Memory.created_at.desc()).limit(limit).offset(offset)
+        # Get memories. order_by=trigger_from (#877) sorts ascending for
+        # upcoming-first Time Memory listing; default stays created_at desc.
+        order_clause = (
+            Memory.trigger_from.asc() if order_by == "trigger_from" else Memory.created_at.desc()
         )
+        result = await db.execute(query.order_by(order_clause).limit(limit).offset(offset))
         memories = list(result.scalars().all())
 
         # Convert to response. Memory.created_at / updated_at are stored as

@@ -77,6 +77,7 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         "get_file_download_url",  # Issue #485: read-only presigned GET
         "list_files",  # Issue #485: read-only workspace listing
         "list_tags",  # Issue #614: read-only tag discovery
+        "recall_upcoming",  # Issue #877: deterministic read-only Time Memory window query (no Hebbian write)
     }
 )
 
@@ -144,6 +145,7 @@ def _build_registry() -> dict[str, Any]:
         "remember": handle_remember,
         "update_memory": handle_update_memory,
         "recall": handle_recall,
+        "recall_upcoming": handle_recall_upcoming,
         "forget": handle_forget,
         "reference": handle_reference,
         "explore": handle_explore,
@@ -331,6 +333,7 @@ from mcp_server.tools.explore import handle_explore  # noqa: E402, F401
 from mcp_server.tools.memory import (  # noqa: E402, F401
     handle_forget,
     handle_recall,
+    handle_recall_upcoming,
     handle_reference,
     handle_remember,
     handle_update_memory,

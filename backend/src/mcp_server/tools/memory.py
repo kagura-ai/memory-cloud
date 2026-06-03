@@ -103,6 +103,15 @@ async def handle_remember(
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
+        except ValueError as e:
+            # MemoryService raises ValueError as its "bad request" signal (e.g.
+            # an invalid type="time" details.trigger). Return a structured
+            # validation_error rather than re-raising as an opaque tool crash.
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "remember", start_time, 422, args.get("context_id"), workspace_id
+            )
+            return _error_response("validation_error", str(e))
         except Exception:
             await db.rollback()
             await _log_tool_usage(
@@ -197,6 +206,16 @@ async def handle_update_memory(
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
+        except ValueError as e:
+            # _apply_time_trigger raises ValueError for an invalid type="time"
+            # details.trigger on the update path. Return a structured
+            # validation_error rather than re-raising as an opaque tool crash
+            # (mirrors handle_remember).
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "update_memory", start_time, 422, args.get("context_id"), workspace_id
+            )
+            return _error_response("validation_error", str(e))
         except Exception:
             await db.rollback()
             await _log_tool_usage(
@@ -211,6 +230,103 @@ async def handle_update_memory(
             raise
 
     # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")
+
+
+async def handle_recall_upcoming(
+    args: dict[str, Any], user_id: str, workspace_id: UUID | None
+) -> list[TextContent]:
+    """Pull Time Memories (#877) whose trigger window overlaps a time range.
+
+    Deterministic filter+sort over type='time' memories — NOT semantic recall,
+    so it has no Hebbian write side-effects (the recall()-vs-list design rule).
+    Soonest-first by trigger_from. The trigger_from/trigger_until columns are
+    TEXT fixed-width ISO, so string comparison == chronological comparison.
+    """
+    if "context_id" not in args:
+        return _error_response("missing_fields", "Missing required field: context_id")
+
+    from sqlalchemy import select
+
+    from db.base import get_db
+    from models.memory import Memory
+    from utils.time_trigger import TriggerValidationError, parse_query_bound
+
+    # Validate inputs up front (before opening a DB session) so a malformed
+    # argument is a structured validation_error, not an unhandled crash.
+    try:
+        raw_k = args.get("k", 20)
+        k = int(raw_k)
+    except (TypeError, ValueError):
+        return _error_response("validation_error", f"k must be an integer, got {args.get('k')!r}")
+    # Clamp into [1, 100]: a missing lower bound let k<=0 through as LIMIT 0
+    # (always empty) or LIMIT -1 (no cap, bypassing the 100 ceiling).
+    k = max(1, min(k, 100))
+
+    try:
+        # Re-normalize bounds to fixed-width ISO (and resolve 'now') so the
+        # lexical comparison against the TEXT columns is correct. None => no
+        # bound on that side.
+        q_from = parse_query_bound(args.get("from"))
+        q_until = parse_query_bound(args.get("until"))
+    except TriggerValidationError as e:
+        return _error_response("validation_error", str(e))
+
+    start_time = time.time()
+    async for db in get_db():
+        current_context_id: UUID | None = None
+        try:
+            current_context_id = _resolve_context_id(args["context_id"])
+            # Read path: uniform context_not_found on any deny (CWE-639 / OWASP
+            # A01), mirroring handle_recall.
+            current_context = await _resolve_context_for_read(db, user_id, current_context_id)
+
+            query = (
+                select(Memory)
+                .where(Memory.deleted_at.is_(None))
+                .where(Memory.type == "time")
+                .where(Memory.context_id == current_context_id)
+            )
+            # Window overlap: stored [trigger_from, trigger_until] overlaps the
+            # query window [q_from, q_until] iff trigger_until >= q_from AND
+            # trigger_from <= q_until.
+            if q_from is not None:
+                query = query.where(Memory.trigger_until >= q_from)
+            if q_until is not None:
+                query = query.where(Memory.trigger_from <= q_until)
+            query = query.order_by(Memory.trigger_from.asc()).limit(k)
+
+            rows = (await db.execute(query)).scalars().all()
+            results = [
+                {
+                    "memory_id": str(m.id),
+                    "summary": m.summary,
+                    "type": m.type,
+                    "details": m.details,
+                }
+                for m in rows
+            ]
+            await _log_tool_usage(
+                db, user_id, "recall_upcoming", start_time, 200, current_context_id, workspace_id
+            )
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "status": "success",
+                            "results": results,
+                            **_context_response_fields(current_context),
+                        }
+                    ),
+                )
+            ]
+        except _ContextNotFoundError as e:
+            await _log_tool_usage(
+                db, user_id, "recall_upcoming", start_time, 404, current_context_id, workspace_id
+            )
+            return e.to_response()
+
     return _error_response("internal_error", "Database session unavailable")
 
 
