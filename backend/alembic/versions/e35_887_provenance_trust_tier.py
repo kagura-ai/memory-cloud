@@ -32,7 +32,15 @@ _TRUST_TIER_CHECK = "trust_tier IN ('trusted', 'external')"
 
 def upgrade() -> None:
     # 1. memories.source_type → backfill, NOT NULL, default, CHECK.
-    op.execute("UPDATE memories SET source_type = 'manual' WHERE source_type IS NULL")
+    # source_type was historically an unconstrained client-supplied string, so
+    # coerce BOTH NULL and any out-of-set legacy value to 'manual' before adding
+    # the CHECK — otherwise create_check_constraint would fail on pre-existing
+    # rows that violate the new IN (...) set.
+    op.execute(
+        "UPDATE memories SET source_type = 'manual' "
+        "WHERE source_type IS NULL "
+        "OR source_type NOT IN ('file', 'url', 'vault', 'api', 'manual', 'connector')"
+    )
     op.alter_column(
         "memories",
         "source_type",
