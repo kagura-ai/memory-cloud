@@ -155,6 +155,11 @@ IMPORTANT: Always specify context_id to ensure you're using the intended context
                         "type": "object",
                         "description": "Additional context metadata as JSON. Can include context info, related issue numbers, or custom fields.",
                     },
+                    "delivery_mode": {
+                        "type": "string",
+                        "enum": ["always", "on_recall", "on_trigger"],
+                        "description": "When this memory is surfaced (orthogonal to type). 'on_recall' (default): only via probabilistic recall(). 'always': pinned and deterministically loaded EVERY turn via load_pinned() — use ONLY for an agent's Goal / Guardrail / critical policy, and it is pinned to persistent on write (no sleep-consolidation wait). 'on_trigger': time-windowed (set via Time Memory type='time').",
+                    },
                     "context_id": {
                         "type": "string",
                         "format": "uuid",
@@ -246,6 +251,11 @@ IMPORTANT: Always specify context_id.""",
                     "context": {
                         "type": "object",
                         "description": "Updated context metadata.",
+                    },
+                    "delivery_mode": {
+                        "type": "string",
+                        "enum": ["always", "on_recall", "on_trigger"],
+                        "description": "Change when this memory is surfaced. Set 'always' to pin it (deterministically loaded every turn via load_pinned, pinned to persistent). Set 'on_recall' to unpin (back to probabilistic recall only; the memory stays persistent). Omit to leave unchanged.",
                     },
                     "context_id": {
                         "type": "string",
@@ -395,6 +405,39 @@ IMPORTANT: Always specify context_id to ensure you're retrieving from the intend
                     "k": {
                         "type": "integer",
                         "description": "Max results (default 20, max 100).",
+                    },
+                },
+            },
+        },
+        {
+            "name": "load_pinned",
+            "readOnly": True,
+            "description": (
+                "Deterministically load a context's always-load memories "
+                "(delivery_mode='always'). This is the DETERMINISTIC counterpart to "
+                "recall(): it returns the COMPLETE, UNRANKED set every call — no "
+                "semantic search, no ranking, no rerank — so an agent's Goal / "
+                "Guardrail / critical policy loads identically every turn. recall() "
+                "is probabilistic; load_pinned() is exact. Pin a memory with "
+                "remember(delivery_mode='always') or update_memory(delivery_mode="
+                "'always'); unpin with update_memory(delivery_mode='on_recall'). "
+                "Results are summary + context_summary only (Layer 1+2) — fetch full "
+                "content with reference(memory_id). The set is bounded: if more "
+                "pinned memories exist than the cap, 'truncated' is true and "
+                "'total_available' reports the real count (never silently dropped)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "required": ["context_id"],
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Target context UUID from list_contexts(). Do NOT fabricate.",
+                    },
+                    "cap": {
+                        "type": "integer",
+                        "description": "Optional override for the max returned (1-1000; server default applies if omitted).",
                     },
                 },
             },

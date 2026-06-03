@@ -20,6 +20,8 @@ from models.schemas import (
     ExploreResponse,
     ForgetRequest,
     ForgetResponse,
+    LoadPinnedRequest,
+    LoadPinnedResponse,
     MemoryStatsResponse,
     PatchMemoryRequest,
     RecallRequest,
@@ -232,6 +234,55 @@ async def recall(
     )
 
     return result
+
+
+@router.post("/pinned", response_model=LoadPinnedResponse)
+async def load_pinned(
+    request: LoadPinnedRequest,
+    user: APIKeyOrSessionUser,
+    memory_service: MemoryServiceDep,
+):
+    """Deterministically load a context's always-delivery memories (Issue #886).
+
+    The deterministic counterpart to ``/recall``: returns the complete,
+    unranked, ordered ``delivery_mode='always'`` set for the given context —
+    no semantic ranking, no rerank. Items carry L1 + L2 only (summary +
+    context_summary); fetch full content via ``/reference``. Bounded by
+    ``settings.pinned_load_cap`` (or the request ``cap``); when the pinned set
+    exceeds the cap, ``truncated`` is true and ``total_available`` reports the
+    real count — never a silent truncation.
+
+    Request:
+        {"context_id": "<context-uuid>", "cap": 100}
+
+    Example:
+        POST /api/v1/memory/pinned
+        Authorization: Bearer <session_token>
+    """
+    logger.info("load_pinned_request", user_id=user["user_id"], context_id=request.context_id)
+
+    # Parse context_id to a UUID up front: a non-UUID string would otherwise
+    # reach `Context.id == <str>` and raise a DB DataError, which the global
+    # SQLAlchemyError handler maps to a misleading 503. Reject it as a 422 here.
+    context_uuid: UUID | None = None
+    if request.context_id is not None:
+        try:
+            context_uuid = UUID(request.context_id)
+        except (ValueError, AttributeError) as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"context_id must be a valid UUID: {request.context_id!r}",
+            ) from e
+
+    try:
+        return await memory_service.load_pinned(
+            user_id=user["user_id"],
+            current_context_id=context_uuid,
+            current_workspace_id=user.get("current_workspace_id"),
+            cap=request.cap,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
 
 
 @router.patch("/{memory_id}", response_model=ReferenceResponse)

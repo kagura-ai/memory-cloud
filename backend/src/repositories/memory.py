@@ -7,7 +7,7 @@ from uuid import UUID
 from sqlalchemy import and_, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.memory import Memory
+from models.memory import DELIVERY_MODE_ALWAYS, Memory
 from repositories.base import BaseRepository
 from utils.datetime import utcnow
 from utils.exceptions import NotFoundException
@@ -273,6 +273,74 @@ class MemoryRepository(BaseRepository[Memory]):
             .limit(1)
         )
         return result.scalars().first()
+
+    # Issue #886: the always-load read returns L1 (summary) + L2
+    # (context_summary) + a few metadata fields only — never L3 (content /
+    # details). Selecting just these columns keeps the every-turn load_pinned
+    # path from fetching the potentially large content/details TEXT+JSONB it
+    # would only discard. Order matches PinnedMemoryItem field access.
+    _PINNED_COLUMNS = (
+        Memory.id,
+        Memory.summary,
+        Memory.context_summary,
+        Memory.type,
+        Memory.importance,
+        Memory.delivery_mode,
+        Memory.created_at,
+    )
+
+    async def list_pinned(
+        self, workspace_id: UUID, context_id: UUID, limit: int
+    ) -> tuple[list, int]:
+        """Deterministic always-load set for a context (Issue #886).
+
+        Returns up to ``limit`` always-delivery memories ordered by
+        ``importance DESC, created_at ASC, id ASC`` — fully deterministic down
+        to the ``id`` tie-break, so the same context yields the same ordered set
+        every call. Also returns the total count of matching rows so the caller
+        can report ``truncated`` / ``total_available`` without silent loss.
+
+        Rows are partial (L1 + L2 + metadata only — see ``_PINNED_COLUMNS``); the
+        L3 ``content`` / ``details`` are intentionally not loaded. Each row
+        exposes the selected columns by name (``row.summary`` etc.).
+
+        This is the deterministic counterpart to ``recall()``: no embedding, no
+        Qdrant, no rerank — a plain indexed SQL scan (backed by the partial
+        index ``idx_memories_delivery_always``).
+
+        Args:
+            workspace_id: Workspace isolation scope.
+            context_id: Context whose pinned memories to load.
+            limit: Hard cap on returned rows (bound; total may exceed it).
+
+        Returns:
+            ``(rows, total)`` — the bounded ordered partial rows and full count.
+        """
+        conditions = (
+            Memory.workspace_id == workspace_id,
+            Memory.context_id == context_id,
+            Memory.delivery_mode == DELIVERY_MODE_ALWAYS,
+            Memory.deleted_at.is_(None),
+        )
+        # Fetch limit+1 so the common (untruncated) case needs a single query:
+        # if we get <= limit rows, that count IS the exact total. Only when the
+        # probe row appears (set exceeds the cap) do we pay for a COUNT to report
+        # the true total_available. load_pinned runs every agent turn, so saving
+        # the COUNT on the hot path matters.
+        result = await self.db.execute(
+            select(*self._PINNED_COLUMNS)
+            .where(*conditions)
+            .order_by(desc(Memory.importance), Memory.created_at.asc(), Memory.id.asc())
+            .limit(limit + 1)
+        )
+        rows = list(result.all())
+        if len(rows) <= limit:
+            return rows, len(rows)
+
+        total = (
+            await self.db.execute(select(func.count(Memory.id)).where(*conditions))
+        ).scalar_one()
+        return rows[:limit], total
 
     async def get_old_working_memories(self, user_id: str, age_days: int = 30) -> list[Memory]:
         """Get old working memories for cleanup.

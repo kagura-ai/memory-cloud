@@ -51,6 +51,7 @@ async def handle_remember(
         importance=args.get("importance", 0.5),
         tags=args.get("tags", []),
         context=args.get("context"),
+        delivery_mode=args.get("delivery_mode", "on_recall"),  # Issue #886
         source_uri=args.get("source_uri"),
         source_type=args.get("source_type"),
         linked_memory_ids=args.get("linked_memory_ids"),
@@ -154,6 +155,7 @@ async def handle_update_memory(
             importance=args.get("importance"),
             tags=args.get("tags"),
             context=args.get("context"),
+            delivery_mode=args.get("delivery_mode"),  # Issue #886 (pin/unpin)
         )
     except (ValueError, ValidationError) as e:
         return _error_response("validation_error", str(e))
@@ -326,6 +328,83 @@ async def handle_recall_upcoming(
                 db, user_id, "recall_upcoming", start_time, 404, current_context_id, workspace_id
             )
             return e.to_response()
+
+    return _error_response("internal_error", "Database session unavailable")
+
+
+async def handle_load_pinned(
+    args: dict[str, Any], user_id: str, workspace_id: UUID | None
+) -> list[TextContent]:
+    """Deterministically load a context's always-delivery memories (#886).
+
+    The deterministic counterpart to recall(): returns the complete, unranked,
+    bounded delivery_mode='always' set for the context — no embeddings, no
+    Hebbian write side-effects (the recall()-vs-list design rule). Items are
+    L1+L2 only; fetch full content via reference(). On cap-exceeded the response
+    carries truncated=true + total_available (never a silent truncation).
+    """
+    if "context_id" not in args:
+        return _error_response("missing_fields", "Missing required field: context_id")
+
+    from db.base import get_db
+    from services.memory_service import MemoryService
+
+    cap = args.get("cap")
+    start_time = time.time()
+    async for db in get_db():
+        current_context_id: UUID | None = None
+        try:
+            current_context_id = _resolve_context_id(args["context_id"])
+            # Read path: uniform context_not_found on any deny (CWE-639 / OWASP
+            # A01), mirroring handle_recall / handle_recall_upcoming.
+            current_context = await _resolve_context_for_read(db, user_id, current_context_id)
+
+            service = MemoryService(db)
+            result = await execute_with_timeout(
+                service.load_pinned(
+                    user_id=user_id,
+                    current_context_id=current_context_id,
+                    current_workspace_id=workspace_id,
+                    cap=cap,
+                ),
+                operation_name="load_pinned",
+            )
+
+            await _log_tool_usage(
+                db, user_id, "load_pinned", start_time, 200, current_context_id, workspace_id
+            )
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "status": "success",
+                            "memories": [
+                                {
+                                    "memory_id": str(m.memory_id),
+                                    "summary": m.summary,
+                                    "context_summary": m.context_summary,
+                                    "type": m.type,
+                                    "importance": m.importance,
+                                    "delivery_mode": m.delivery_mode,
+                                }
+                                for m in result.memories
+                            ],
+                            "total_available": result.total_available,
+                            "truncated": result.truncated,
+                            "cap": result.cap,
+                            **_context_response_fields(current_context),
+                        }
+                    ),
+                )
+            ]
+        except _ContextNotFoundError as e:
+            await _log_tool_usage(
+                db, user_id, "load_pinned", start_time, 404, current_context_id, workspace_id
+            )
+            return e.to_response()
+        except ValueError as e:
+            return _error_response("validation_error", str(e))
 
     return _error_response("internal_error", "Database session unavailable")
 

@@ -22,6 +22,7 @@ from db.qdrant import (
 )
 from models.auth import Context
 from models.memory import (
+    DELIVERY_MODE_ALWAYS,
     EDGE_ORIGIN_DECLARED,
     EDGE_ORIGIN_HEBBIAN,
     EDGE_ORIGIN_SEMANTIC,
@@ -35,9 +36,11 @@ from models.schemas import (
     ForgetRequest,
     ForgetResponse,
     LinkedMemoryRef,
+    LoadPinnedResponse,
     MemoryResponse,
     MemoryStatsResponse,
     PatchMemoryRequest,
+    PinnedMemoryItem,
     RecallRequest,
     RecallResponse,
     ReferenceResponse,
@@ -63,6 +66,11 @@ from utils.exceptions import (
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Issue #886: upper bound for the always-load cap, matching the REST schema's
+# ``LoadPinnedRequest.cap`` le=1000. The MCP path sends the raw arg with no
+# Pydantic validation, so the service clamps defensively (see _clamp_pinned_cap).
+_PINNED_LOAD_CAP_MAX = 1000
 
 
 def _log_embedding_task_result(task: asyncio.Task, memory_id: str) -> None:
@@ -130,6 +138,41 @@ class MemoryService:
 
         context = await self.context_service.get_context(user_id, context_id)
         return context, str(context.workspace_id), str(context_id)
+
+    @staticmethod
+    def _apply_pin_on_write(memory: Memory) -> None:
+        """Pin a memory to persistent when delivery_mode='always' (Issue #886).
+
+        Centralizes the pin-on-write rule shared by ``remember`` and
+        ``_update_in_place`` (and any future write path), mirroring how
+        ``_apply_time_trigger`` centralizes the Time Memory invariant — so the
+        two sites cannot drift. Idempotent and matches ``promote_to_persistent``
+        semantics (scope='persistent' + promoted_at stamped); a memory already
+        persistent keeps its original promoted_at.
+        """
+        if memory.delivery_mode == DELIVERY_MODE_ALWAYS and memory.scope != "persistent":
+            memory.scope = "persistent"
+            memory.promoted_at = utcnow()
+
+    @staticmethod
+    def _clamp_pinned_cap(cap: int | str | None, default: int) -> int:
+        """Coerce + bound the always-load cap (Issue #886).
+
+        The REST path validates ``cap`` via Pydantic (int, 1..1000), but the MCP
+        path forwards the raw tool arg, so the service is the shared chokepoint
+        that must defend the LIMIT: ``None`` → default; otherwise coerce to int
+        and clamp to [1, _PINNED_LOAD_CAP_MAX]. Clamping the lower bound to 1 is
+        load-bearing — a 0 would emit ``LIMIT 0`` (empty set + a false
+        truncated=true) and a negative would emit ``LIMIT -1`` (no cap at all,
+        defeating the safety valve).
+        """
+        if cap is None:
+            return default
+        try:
+            cap_int = int(cap)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"cap must be an integer, got {cap!r}") from exc
+        return max(1, min(cap_int, _PINNED_LOAD_CAP_MAX))
 
     @staticmethod
     def _apply_time_trigger(memory_type: str | None, details: dict | None) -> dict | None:
@@ -298,12 +341,17 @@ class MemoryService:
             tags=request.tags,
             context=request.context,
             scope="working",
+            delivery_mode=request.delivery_mode,  # Issue #886
             client=client,
             summary_embedding_id=memory_id,  # Same as memory_id
             embedding_status="pending",  # Issue #122: Track embedding state
             source_uri=request.source_uri,
             source_type=request.source_type,
         )
+        # Issue #886: pin-on-write. delivery_mode='always' pins straight to
+        # persistent (so it is exempt from sleep consolidation — which only acts
+        # on scope='working' — without waiting for a consolidation pass).
+        self._apply_pin_on_write(memory)
 
         try:
             # Save to PostgreSQL first (with pending status)
@@ -331,7 +379,7 @@ class MemoryService:
                 functools.partial(_log_embedding_task_result, memory_id=str(memory_id))
             )
 
-            return RememberResponse(memory_id=memory_id, scope="working")
+            return RememberResponse(memory_id=memory_id, scope=memory.scope)
 
         except Exception as e:
             await self.db.rollback()
@@ -465,6 +513,14 @@ class MemoryService:
             memory.tags = request.tags
         if request.context is not None:
             memory.context = request.context
+        # Issue #886: in-place delivery_mode change. Setting 'always' pins to
+        # persistent via the shared helper (mirrors remember's pin-on-write);
+        # other modes leave scope untouched so unpinning ('always' → 'on_recall')
+        # keeps the memory persistent — delivery_mode controls loading, scope
+        # controls lifecycle.
+        if request.delivery_mode is not None:
+            memory.delivery_mode = request.delivery_mode
+            self._apply_pin_on_write(memory)
 
         memory.updated_at = utcnow()
 
@@ -1590,6 +1646,73 @@ class MemoryService:
 
         return RecallResponse(
             results=responses, related_tags=related_tags, explore_hints=explore_hints
+        )
+
+    async def load_pinned(
+        self,
+        user_id: str,
+        current_context_id: UUID | None = None,
+        current_workspace_id: UUID | None = None,
+        cap: int | str | None = None,
+    ) -> LoadPinnedResponse:
+        """Deterministically load a context's always-delivery memories (#886).
+
+        The deterministic counterpart to ``recall()``: returns the complete,
+        unranked, ordered always-load set for the bound context — no embedding,
+        no Qdrant, no rerank. Bounded by ``cap`` (default
+        ``settings.pinned_load_cap``); when the pinned set exceeds it, the
+        response flags ``truncated`` with the true ``total_available`` and logs
+        a warning (never a silent truncation). Items carry L1 + L2 only; full
+        content is fetched on demand via ``reference()``.
+
+        Args:
+            user_id: Caller user ID.
+            current_context_id: Bound context (the always-load set is per-context).
+            current_workspace_id: Bound workspace (isolation scope).
+            cap: Optional override for the hard cap (defaults to settings).
+
+        Returns:
+            LoadPinnedResponse with the bounded ordered set + truncation flags.
+        """
+        from config.settings import get_settings
+
+        context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
+            user_id, current_context_id
+        )
+        if not workspace_id_str or not context_id_str:
+            raise ValueError("load_pinned() requires current_context_id")
+
+        effective_cap = self._clamp_pinned_cap(cap, get_settings().pinned_load_cap)
+
+        rows, total = await self.memory_repo.list_pinned(
+            UUID(workspace_id_str), UUID(context_id_str), effective_cap
+        )
+        truncated = total > effective_cap
+        if truncated:
+            logger.warning(
+                "pinned_load_capped",
+                context_id=context_id_str,
+                workspace_id=workspace_id_str,
+                total_available=total,
+                cap=effective_cap,
+            )
+
+        return LoadPinnedResponse(
+            memories=[
+                PinnedMemoryItem(
+                    memory_id=m.id,
+                    summary=m.summary,
+                    context_summary=m.context_summary,
+                    type=m.type,
+                    importance=m.importance,
+                    delivery_mode=m.delivery_mode,
+                    created_at=m.created_at,
+                )
+                for m in rows
+            ],
+            total_available=total,
+            truncated=truncated,
+            cap=effective_cap,
         )
 
     async def forget(
