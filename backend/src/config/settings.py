@@ -175,6 +175,15 @@ class Settings(BaseSettings):
     )
     embedding_dimensions: int = Field(default=512, description="Embedding vector dimensions")
 
+    # Issue #886: hard cap on the deterministic always-load (load_pinned) set.
+    # always-load memories are injected into the agent's context every turn, so
+    # the cap is a safety valve against runaway pinning. When the pinned set
+    # exceeds it, the read is bounded and the response flags truncated=true with
+    # the true total_available (never silently dropped).
+    pinned_load_cap: int = Field(
+        default=100, description="Max memories returned by the deterministic always-load path (#886)"
+    )
+
     # Ollama Configuration (Issue #44)
     ollama_base_url: str = Field(
         default="http://localhost:11434", description="Ollama API base URL"

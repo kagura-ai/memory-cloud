@@ -36,6 +36,27 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
 
+# Delivery mode constants (Issue #886, design memory 242cb28a) — an ORTHOGONAL
+# delivery attribute on Memory, deliberately NOT a new memory ``type``. It
+# controls *when* a memory is surfaced, independent of *what* it is about:
+#   - always:     deterministically loaded every turn (Goal / Guardrail / policy)
+#   - on_recall:  surfaced only via probabilistic recall() (the default)
+#   - on_trigger: surfaced when a trigger fires — already realized as Time Memory
+#                 (type='time' + details.trigger + Computed trigger_from)
+# The DB CHECK constraint is generated from the ordered ``_ALL_DELIVERY_MODES``
+# tuple (see ``Memory.__table_args__``), mirroring the edge_type/origin pattern on
+# NeuralMemoryEdge. New modes are APPENDED (never reordered) to preserve
+# byte-identity with the alembic migration literal.
+DELIVERY_MODE_ALWAYS = "always"
+DELIVERY_MODE_ON_RECALL = "on_recall"
+DELIVERY_MODE_ON_TRIGGER = "on_trigger"
+
+_ALL_DELIVERY_MODES: tuple[str, ...] = (
+    DELIVERY_MODE_ALWAYS,
+    DELIVERY_MODE_ON_RECALL,
+    DELIVERY_MODE_ON_TRIGGER,
+)
+
 
 class Memory(Base):
     """Memory model with 3-layer architecture.
@@ -122,6 +143,19 @@ class Memory(Base):
     # Working/Persistent メモリ
     scope: Mapped[str] = mapped_column(String(20), nullable=False, default="working", index=True)
     long_term: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    # Issue #886: orthogonal delivery attribute (sibling of ``scope``, NOT a
+    # new ``type``). Default 'on_recall' = current probabilistic-only behavior,
+    # so existing rows are unaffected. server_default keeps the migration
+    # backfill and ORM default in lock-step. The partial index supporting the
+    # deterministic always-load read path is created in the alembic migration
+    # (on (context_id, delivery_mode) WHERE delivery_mode='always').
+    delivery_mode: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=DELIVERY_MODE_ON_RECALL,
+        server_default=DELIVERY_MODE_ON_RECALL,
+    )
     promoted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # 利用統計（Consolidation判定用）
@@ -217,6 +251,14 @@ class Memory(Base):
         CheckConstraint("importance BETWEEN 0 AND 1", name="valid_importance"),
         CheckConstraint("confidence BETWEEN 0 AND 1", name="valid_confidence"),
         CheckConstraint("scope IN ('working', 'persistent')", name="valid_scope"),
+        # Issue #886: CHECK derived from ``_ALL_DELIVERY_MODES`` (registration
+        # order, single quotes, exact whitespace), byte-identical to the alembic
+        # migration literal. Drift is pinned by
+        # test_valid_delivery_mode_check_constraint_matches_migration_literal.
+        CheckConstraint(
+            f"delivery_mode IN ({', '.join(repr(d) for d in _ALL_DELIVERY_MODES)})",
+            name="valid_delivery_mode",
+        ),
         CheckConstraint(
             "embedding_status IN ('pending', 'processing', 'success', 'failed')",
             name="valid_embedding_status",
@@ -264,6 +306,16 @@ class Memory(Base):
             "workspace_id",
             "context_id",
             postgresql_where=text("deleted_at IS NULL"),
+        ),
+        # Issue #886: partial B-tree supporting the deterministic always-load
+        # read path (load_pinned). Scopes to context_id and is partial on
+        # delivery_mode='always' AND deleted_at IS NULL so only pinned, live
+        # rows carry the index — the always-set is bounded and small per
+        # context. Created in migration e32_886_delivery_mode.
+        Index(
+            "idx_memories_delivery_always",
+            "context_id",
+            postgresql_where=text("delivery_mode = 'always' AND deleted_at IS NULL"),
         ),
         # Time Memory (type="time") partial btree on the generated lower bound,
         # supporting the window-overlap query + ORDER BY trigger_from on

@@ -78,6 +78,7 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         "list_files",  # Issue #485: read-only workspace listing
         "list_tags",  # Issue #614: read-only tag discovery
         "recall_upcoming",  # Issue #877: deterministic read-only Time Memory window query (no Hebbian write)
+        "load_pinned",  # Issue #886: deterministic always-load read (must run every turn; no Hebbian write)
     }
 )
 
@@ -146,6 +147,7 @@ def _build_registry() -> dict[str, Any]:
         "update_memory": handle_update_memory,
         "recall": handle_recall,
         "recall_upcoming": handle_recall_upcoming,
+        "load_pinned": handle_load_pinned,
         "forget": handle_forget,
         "reference": handle_reference,
         "explore": handle_explore,
@@ -332,6 +334,7 @@ async def execute_tool_call(
 from mcp_server.tools.explore import handle_explore  # noqa: E402, F401
 from mcp_server.tools.memory import (  # noqa: E402, F401
     handle_forget,
+    handle_load_pinned,
     handle_recall,
     handle_recall_upcoming,
     handle_reference,

@@ -88,6 +88,16 @@ class RememberRequest(BaseModel):
     tags: list[str] = Field(default_factory=list, description="タグ")
     context: dict | None = Field(default=None, description="コンテキスト情報")
 
+    # Issue #886: orthogonal delivery attribute (NOT a memory type). 'always'
+    # pins the memory to persistent on write (deterministic always-load); the
+    # default 'on_recall' is the legacy probabilistic-only behavior. The Literal
+    # set is pinned to models.memory._ALL_DELIVERY_MODES by a cross-module drift
+    # test. 'on_trigger' is realized via Time Memory (type='time').
+    delivery_mode: Literal["always", "on_recall", "on_trigger"] = Field(
+        default="on_recall",
+        description="Delivery mode: always (pin, load every turn) | on_recall (default) | on_trigger",
+    )
+
     # Issue #213: Origin tracking for external integration
     source_uri: str | None = Field(
         default=None,
@@ -192,6 +202,57 @@ class MemoryResponse(TZAwareBaseModel):
 
     class Config:
         from_attributes = True
+
+
+class PinnedMemoryItem(TZAwareBaseModel):
+    """A single always-load memory (Issue #886).
+
+    Deliberately L1 + L2 only (summary + context_summary) — the deterministic
+    always-load path injects these into the agent's context every turn, so the
+    full L3 ``content`` is intentionally omitted and fetched on demand via
+    ``reference(memory_id)``. No ``score`` field: this path is unranked.
+    """
+
+    memory_id: UUID
+    summary: str
+    context_summary: str | None
+    type: str
+    importance: float
+    delivery_mode: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class LoadPinnedRequest(BaseModel):
+    """Request for the deterministic always-load read path (Issue #886).
+
+    ``context_id`` selects which context's always-load set to return (the set
+    is per-context). ``cap`` optionally overrides ``settings.pinned_load_cap``.
+    """
+
+    context_id: str | None = Field(
+        default=None, description="Context UUID whose pinned memories to load"
+    )
+    cap: int | None = Field(
+        default=None, ge=1, le=1000, description="Optional override for the max returned (bounded)"
+    )
+
+
+class LoadPinnedResponse(BaseModel):
+    """Response for the deterministic always-load read path (Issue #886).
+
+    ``memories`` is the complete, unranked, ordered set up to ``cap``. When the
+    context holds more pinned memories than ``cap``, ``truncated`` is true and
+    ``total_available`` reports the real count — the set is never silently cut.
+    """
+
+    status: str = "success"
+    memories: list[PinnedMemoryItem]
+    total_available: int
+    truncated: bool
+    cap: int
 
 
 class RelatedTagItem(TZAwareBaseModel):
@@ -333,6 +394,13 @@ class UpdateMemoryRequest(BaseModel):
     importance: float | None = Field(None, ge=0.0, le=1.0, description="Updated importance")
     tags: list[str] | None = Field(None, description="Updated tags")
     context: dict | None = Field(None, description="Updated context metadata")
+    # Issue #886: change delivery_mode in place. Setting 'always' pins the
+    # memory to persistent (like remember's pin-on-write); setting 'on_recall'
+    # unpins it (the memory stays persistent — delivery_mode controls loading,
+    # not lifecycle). None leaves it unchanged.
+    delivery_mode: Literal["always", "on_recall", "on_trigger"] | None = Field(
+        None, description="Updated delivery mode (always pins to persistent; on_recall unpins)"
+    )
 
     @model_validator(mode="after")
     def validate_identifier_and_required_fields(self) -> "UpdateMemoryRequest":

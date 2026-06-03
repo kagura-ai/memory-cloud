@@ -7,7 +7,7 @@ from uuid import UUID
 from sqlalchemy import and_, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.memory import Memory
+from models.memory import DELIVERY_MODE_ALWAYS, Memory
 from repositories.base import BaseRepository
 from utils.datetime import utcnow
 from utils.exceptions import NotFoundException
@@ -273,6 +273,55 @@ class MemoryRepository(BaseRepository[Memory]):
             .limit(1)
         )
         return result.scalars().first()
+
+    async def list_pinned(
+        self, workspace_id: UUID, context_id: UUID, limit: int
+    ) -> tuple[list[Memory], int]:
+        """Deterministic always-load set for a context (Issue #886).
+
+        Returns up to ``limit`` always-delivery memories ordered by
+        ``importance DESC, created_at ASC, id ASC`` — fully deterministic down
+        to the ``id`` tie-break, so the same context yields the same ordered set
+        every call. Also returns the total count of matching rows so the caller
+        can report ``truncated`` / ``total_available`` without silent loss.
+
+        This is the deterministic counterpart to ``recall()``: no embedding, no
+        Qdrant, no rerank — a plain indexed SQL scan (backed by the partial
+        index ``idx_memories_delivery_always``).
+
+        Args:
+            workspace_id: Workspace isolation scope.
+            context_id: Context whose pinned memories to load.
+            limit: Hard cap on returned rows (bound; total may exceed it).
+
+        Returns:
+            ``(rows, total)`` — the bounded ordered rows and the full count.
+        """
+        conditions = (
+            Memory.workspace_id == workspace_id,
+            Memory.context_id == context_id,
+            Memory.delivery_mode == DELIVERY_MODE_ALWAYS,
+            Memory.deleted_at.is_(None),
+        )
+        # Fetch limit+1 so the common (untruncated) case needs a single query:
+        # if we get <= limit rows, that count IS the exact total. Only when the
+        # probe row appears (set exceeds the cap) do we pay for a COUNT to report
+        # the true total_available. load_pinned runs every agent turn, so saving
+        # the COUNT on the hot path matters.
+        result = await self.db.execute(
+            select(Memory)
+            .where(*conditions)
+            .order_by(desc(Memory.importance), Memory.created_at.asc(), Memory.id.asc())
+            .limit(limit + 1)
+        )
+        rows = list(result.scalars().all())
+        if len(rows) <= limit:
+            return rows, len(rows)
+
+        total = (
+            await self.db.execute(select(func.count(Memory.id)).where(*conditions))
+        ).scalar_one()
+        return rows[:limit], total
 
     async def get_old_working_memories(self, user_id: str, age_days: int = 30) -> list[Memory]:
         """Get old working memories for cleanup.
