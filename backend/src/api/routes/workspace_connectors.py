@@ -320,20 +320,11 @@ async def rotate_connector_kmc_key(
         )
     user_id = admin["user_id"]
     try:
-        plaintext_key = await ConnectorProvisioningService(db).rotate_kmc_key(
+        rotation = await ConnectorProvisioningService(db).rotate_kmc_key(
             workspace_id=workspace_id,
             connector_id=connector_id,
             user_id=user_id,
         )
-        # Re-fetch to return the updated connector fields.
-        from sqlalchemy import select as sa_select
-
-        from models.resource import WorkspaceConnector
-
-        result = await db.execute(
-            sa_select(WorkspaceConnector).where(WorkspaceConnector.id == connector_id)
-        )
-        connector = result.scalar_one()
         await db.commit()
     except NotFoundException:
         await db.rollback()
@@ -357,7 +348,7 @@ async def rotate_connector_kmc_key(
         ) from exc
     return RotateKmcKeyResponse(
         connector_id=connector_id,
-        kmc_api_key=plaintext_key,
-        kmc_api_key_expires_at=connector.kmc_api_key_expires_at,
-        config_version=connector.config_version,
+        kmc_api_key=rotation.plaintext_kmc_api_key,
+        kmc_api_key_expires_at=rotation.expires_at,
+        config_version=rotation.config_version,
     )

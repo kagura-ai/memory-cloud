@@ -47,6 +47,15 @@ class ConnectorProvisioningResult:
     plaintext_kmc_api_key: str | None = None
 
 
+@dataclass(frozen=True)
+class KmcKeyRotationResult:
+    """Result returned after rotating a connector's KMC write key (#892)."""
+
+    plaintext_kmc_api_key: str
+    expires_at: datetime
+    config_version: int
+
+
 class ConnectorProvisioningService:
     """Provision ai-worker chat-ingest connectors atomically.
 
@@ -507,7 +516,7 @@ class ConnectorProvisioningService:
         connector_id: UUID,
         user_id: str,
         expires_days: int = 365,
-    ) -> str:
+    ) -> KmcKeyRotationResult:
         """Revoke the current KMC write key and mint a replacement.
 
         Revokes the existing ``connector:{id}`` API key, mints a fresh
@@ -516,15 +525,15 @@ class ConnectorProvisioningService:
         re-fetches on its next poll.
 
         Returns:
-            Plaintext new KMC write key (shown exactly once to the caller).
+            ``KmcKeyRotationResult`` with the one-time plaintext key, the new
+            expiry, and the bumped config_version (so the caller need not
+            re-query the connector).
 
         Raises:
             NotFoundException: if no matching connector exists in workspace.
             ValidationError: if the connector has no KMC key to rotate
                 (registration flow was not completed).
         """
-        from datetime import timedelta
-
         from auth.api_keys import APIKeyManager
         from models.auth import APIKey
         from utils.datetime import utcnow
@@ -556,15 +565,17 @@ class ConnectorProvisioningService:
             .values(revoked_at=utcnow())
         )
 
-        # Mint replacement key.
-        plaintext_new_key, _ = await APIKeyManager(self.db).create_key(
+        # Mint replacement key. create_key computes and stores expires_at on the
+        # APIKey row; reuse that exact value for the connector column so the two
+        # never drift (a second utcnow() would differ by microseconds).
+        plaintext_new_key, new_key_row = await APIKeyManager(self.db).create_key(
             name=f"connector:{connector_id}",
             user_id=user_id,
             workspace_id=workspace_id,
             expires_days=expires_days,
         )
         connector.set_kmc_api_key(plaintext_new_key)
-        connector.kmc_api_key_expires_at = utcnow() + timedelta(days=expires_days)
+        connector.kmc_api_key_expires_at = new_key_row.expires_at
         connector.config_version = connector.config_version + 1
         await self.db.flush()
 
@@ -575,7 +586,11 @@ class ConnectorProvisioningService:
             user_id=user_id,
             expires_days=expires_days,
         )
-        return plaintext_new_key
+        return KmcKeyRotationResult(
+            plaintext_kmc_api_key=plaintext_new_key,
+            expires_at=new_key_row.expires_at,
+            config_version=connector.config_version,
+        )
 
     async def _get_connector_for_resource(
         self,
