@@ -216,6 +216,15 @@ class ConnectorProvisioningService:
                 quota_events_per_hour=quota_events_per_hour,
                 created_by=user_id,
             )
+            # #895: capture the one-time resource-token plaintext encrypted on
+            # the connector so the worker config endpoint can return it for the
+            # resource-ingest write path. resource_tokens only stores the hash.
+            # Guarded by context (mirrors the kmc key): the worker config
+            # endpoint 404s without a write-target context, so a context-less
+            # connector is never worker-usable and need not store the token.
+            if resolved_context_id is not None:
+                connector.set_resource_token(plaintext_token)
+                await self.db.flush()
         except Exception:
             # Delete the committed auto-created context so it is not orphaned.
             if auto_created_context_id is not None:

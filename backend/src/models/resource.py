@@ -521,6 +521,12 @@ class WorkspaceConnector(Base):
     # Expiry of the KMC write key. NULL = non-expiring (legacy). Set by the
     # rotate endpoint; the worker config endpoint logs a warning when expired.
     kmc_api_key_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Fernet ciphertext of the connector's resource token (X-Resource-API-Key,
+    # #895). resource_tokens stores only the SHA256 hash, so the one-time
+    # plaintext is captured here at provision time for the worker config
+    # endpoint to return (resource-ingest write path, worker #91 Option A).
+    # NULL on legacy rows → the worker falls back to the kmc/remember path.
+    resource_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     pii_guardrail_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     litellm_virtual_key_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     config_version: Mapped[int] = mapped_column(
@@ -617,6 +623,23 @@ class WorkspaceConnector(Base):
         if not self.kmc_api_key_encrypted:
             return None
         return get_encryptor().decrypt(self.kmc_api_key_encrypted)
+
+    def set_resource_token(self, plaintext: str | None) -> None:
+        """Encrypt and store the connector's resource token (X-Resource-API-Key, #895)."""
+        from utils.encryption import get_encryptor
+
+        if not plaintext:
+            self.resource_token_encrypted = None
+            return
+        self.resource_token_encrypted = get_encryptor().encrypt(plaintext)
+
+    def get_resource_token(self) -> str | None:
+        """Decrypt and return the resource token plaintext, or ``None`` if unset."""
+        from utils.encryption import get_encryptor
+
+        if not self.resource_token_encrypted:
+            return None
+        return get_encryptor().decrypt(self.resource_token_encrypted)
 
 
 # ---------------------------------------------------------------------------
