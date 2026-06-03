@@ -32,6 +32,8 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
+import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { API_BASE_URL } from "@/lib/api/base";
 import {
   createConnector,
@@ -99,6 +101,17 @@ export default function ConnectorsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
+  // Client-side RBAC gate (#903). All connector endpoints require workspace
+  // ADMIN/OWNER (backend `require_workspace_admin` is the source of truth);
+  // without this gate a member/viewer would hit a 403 on the list load and
+  // see a broken page with action buttons that always fail. This is
+  // defense-in-depth UX, not a security boundary.
+  const { currentWorkspace, currentWorkspaceId, loading } = useWorkspace();
+  const allowed = hasWorkspaceRole(
+    currentWorkspace?.current_user_role,
+    WorkspaceRole.Admin,
+  );
+
   // Copy with the shared per-key feedback hook (unmount-safe, 2000ms standard);
   // surface clipboard failures via the destructive-toast channel.
   const handleCopy = useCallback(
@@ -152,13 +165,16 @@ export default function ConnectorsPage() {
   }, []);
 
   useEffect(() => {
+    // Don't fire the admin-only list call for non-admins — it would 403.
+    if (!allowed) return;
     void reload();
-  }, [reload]);
+  }, [reload, allowed]);
 
   // After the Slack OAuth callback redirects back with ?slack_install=<handle>,
   // fetch the non-secret install summary and open the create dialog.
   useEffect(() => {
     if (!installHandle) return;
+    if (!allowed) return;
     let cancelled = false;
     (async () => {
       try {
@@ -190,7 +206,7 @@ export default function ConnectorsPage() {
     return () => {
       cancelled = true;
     };
-  }, [installHandle, t, toast, router]);
+  }, [installHandle, allowed, t, toast, router]);
 
   const closeCreateDialog = useCallback(() => {
     setPending(null);
@@ -263,6 +279,38 @@ export default function ConnectorsPage() {
       });
     }
   }, [toDelete, t, toast, reload]);
+
+  // Resolve loading before role gating to avoid a flash of the admin UI
+  // before the workspace role is known. All hooks above run unconditionally
+  // (these early returns are after every hook call).
+  if (loading) {
+    return (
+      <PageContainer>
+        <PageHeader title={t("title")} description={t("description")} />
+        <TableLoadingState rows={3} />
+      </PageContainer>
+    );
+  }
+
+  // Distinguish "no workspace selected" from "wrong role" so a brand-new
+  // account with zero workspaces doesn't see a misleading role banner.
+  if (!currentWorkspaceId) {
+    return (
+      <PageContainer>
+        <PageHeader title={t("title")} description={t("description")} />
+        <ErrorBanner error={t("errors.noWorkspaceSelected")} />
+      </PageContainer>
+    );
+  }
+
+  if (!allowed) {
+    return (
+      <PageContainer>
+        <PageHeader title={t("title")} description={t("description")} />
+        <ErrorBanner error={t("errors.forbiddenWorkspace")} />
+      </PageContainer>
+    );
+  }
 
   return (
     <PageContainer>
