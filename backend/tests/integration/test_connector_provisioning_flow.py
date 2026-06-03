@@ -232,9 +232,7 @@ async def test_delete_connector_revokes_kmc_key_and_removes_connector(
     # Connector row gone.
     remaining = (
         await db_session.execute(
-            select(func.count(WorkspaceConnector.id)).where(
-                WorkspaceConnector.id == connector_id
-            )
+            select(func.count(WorkspaceConnector.id)).where(WorkspaceConnector.id == connector_id)
         )
     ).scalar_one()
     assert remaining == 0
@@ -278,7 +276,9 @@ async def test_admin_non_owner_can_auto_create_context(db_session: AsyncSession)
     )
     await db_session.flush()
 
-    result = await ConnectorProvisioningService(db_session).provision_connector(
+    result = await ConnectorProvisioningService(
+        db_session
+    ).provision_connector(
         workspace_id=workspace.id,
         user_id=admin_id,  # acting principal is a NON-owner admin
         connector_type="slack",

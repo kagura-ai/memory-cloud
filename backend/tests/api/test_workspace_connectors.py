@@ -133,8 +133,9 @@ async def test_list_workspace_connectors_returns_summaries():
 
 @pytest.mark.asyncio
 async def test_list_workspace_connectors_400_without_workspace():
-    from api.routes.workspace_connectors import list_workspace_connectors
     from fastapi import HTTPException
+
+    from api.routes.workspace_connectors import list_workspace_connectors
 
     db = MagicMock()
     admin = {"user_id": "user-1", "current_workspace_id": None}
@@ -166,8 +167,9 @@ async def test_delete_workspace_connector_204_on_success():
 
 @pytest.mark.asyncio
 async def test_delete_workspace_connector_404_when_missing():
-    from api.routes.workspace_connectors import delete_workspace_connector
     from fastapi import HTTPException
+
+    from api.routes.workspace_connectors import delete_workspace_connector
 
     db = MagicMock()
     db.commit = AsyncMock()

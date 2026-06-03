@@ -5,6 +5,11 @@ admin /plans workspaces tab. Adds the ``addon_connector_bonus`` cache column on
 ``workspaces`` and extends the ``workspace_addons.addon_type`` CHECK to allow
 ``extra_connectors`` (1 seat per unit). Mirrors e06_560 (sleep contexts addon).
 
+NOTE: the CHECK constraint is written as a plain string literal (not an
+f-string) so the schema-drift detector (tests/test_schema_drift.py) — which
+parses migrations with ``ast.parse`` and cannot evaluate f-strings — can read
+the addon_type set and compare it against the ORM ``__table_args__``.
+
 Revision ID: e31_connector_addon
 Revises: e30_connector_cfg_cols
 """
@@ -15,13 +20,6 @@ revision = "e31_connector_addon"
 down_revision = "e30_connector_cfg_cols"
 branch_labels = None
 depends_on = None
-
-_TYPES_BEFORE = (
-    "'extra_storage', 'extra_memory', 'extra_mcp_quota', 'extra_rest_quota', "
-    "'extra_public_quota', 'extra_members', 'extra_contexts', 'extra_analysis_runs', "
-    "'extra_sleep_contexts'"
-)
-_TYPES_AFTER = _TYPES_BEFORE + ", 'extra_connectors'"
 
 
 def upgrade() -> None:
@@ -42,16 +40,20 @@ def upgrade() -> None:
     )
     op.execute("ALTER TABLE workspace_addons DROP CONSTRAINT IF EXISTS check_addon_type")
     op.execute(
-        f"ALTER TABLE workspace_addons ADD CONSTRAINT check_addon_type "
-        f"CHECK (addon_type IN ({_TYPES_AFTER}))"
+        "ALTER TABLE workspace_addons ADD CONSTRAINT check_addon_type "
+        "CHECK (addon_type IN ('extra_storage', 'extra_memory', 'extra_mcp_quota', "
+        "'extra_rest_quota', 'extra_public_quota', 'extra_members', 'extra_contexts', "
+        "'extra_analysis_runs', 'extra_sleep_contexts', 'extra_connectors'))"
     )
 
 
 def downgrade() -> None:
     op.execute("ALTER TABLE workspace_addons DROP CONSTRAINT IF EXISTS check_addon_type")
     op.execute(
-        f"ALTER TABLE workspace_addons ADD CONSTRAINT check_addon_type "
-        f"CHECK (addon_type IN ({_TYPES_BEFORE}))"
+        "ALTER TABLE workspace_addons ADD CONSTRAINT check_addon_type "
+        "CHECK (addon_type IN ('extra_storage', 'extra_memory', 'extra_mcp_quota', "
+        "'extra_rest_quota', 'extra_public_quota', 'extra_members', 'extra_contexts', "
+        "'extra_analysis_runs', 'extra_sleep_contexts'))"
     )
     # Idempotent drop: mirrors the IF NOT EXISTS guard in upgrade().
     # Note: any extra_connectors WorkspaceAddon rows are left in place (their

@@ -261,9 +261,7 @@ async def delete_workspace_connector(
         )
         if not deleted:
             await db.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found"
-            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
         await db.commit()
     except HTTPException:
         raise

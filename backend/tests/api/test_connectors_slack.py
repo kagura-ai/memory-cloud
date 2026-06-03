@@ -25,13 +25,13 @@ class _FakeRedis:
 
 
 def _settings(**over):
-    base = dict(
-        slack_client_id="cid",
-        slack_client_secret="csec",
-        slack_redirect_uri="http://localhost:8080/api/v1/connectors/slack/callback",
-        slack_oauth_scopes="chat:write",
-        frontend_url="http://localhost:3000/",
-    )
+    base = {
+        "slack_client_id": "cid",
+        "slack_client_secret": "csec",
+        "slack_redirect_uri": "http://localhost:8080/api/v1/connectors/slack/callback",
+        "slack_oauth_scopes": "chat:write",
+        "frontend_url": "http://localhost:3000/",
+    }
     base.update(over)
     return SimpleNamespace(**base)
 
@@ -72,7 +72,9 @@ async def test_install_503_when_unconfigured():
     from api.routes.connectors_slack import slack_install
 
     admin = {"user_id": "u1", "current_workspace_id": uuid4()}
-    with patch("api.routes.connectors_slack.get_settings", return_value=_settings(slack_client_id="")):
+    with patch(
+        "api.routes.connectors_slack.get_settings", return_value=_settings(slack_client_id="")
+    ):
         with pytest.raises(HTTPException) as exc:
             await slack_install(admin)
     assert exc.value.status_code == 503
@@ -84,7 +86,7 @@ async def test_callback_exchanges_code_and_stashes_encrypted_install():
     from api.routes.connectors_slack import slack_callback
 
     ws_id = uuid4()
-    redis = _FakeRedis({f"slack_oauth_state:st": str(ws_id)})
+    redis = _FakeRedis({"slack_oauth_state:st": str(ws_id)})
     admin = {"user_id": "u1", "current_workspace_id": ws_id}
 
     token_resp = MagicMock()
@@ -148,7 +150,7 @@ async def test_callback_rejects_workspace_mismatch():
 
     stored_ws = uuid4()
     different_ws = uuid4()
-    redis = _FakeRedis({f"slack_oauth_state:st": str(stored_ws)})
+    redis = _FakeRedis({"slack_oauth_state:st": str(stored_ws)})
     admin = {"user_id": "u1", "current_workspace_id": different_ws}  # mismatch
 
     with (

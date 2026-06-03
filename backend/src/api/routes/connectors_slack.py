@@ -256,12 +256,18 @@ async def slack_pending(handle: str, admin: WorkspaceAdmin) -> dict[str, Any]:
         raw = await get_redis_client().get(_install_key(handle))
     except Exception:
         logger.warning("slack_pending_redis_read_failed", handle=handle[:8])
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Storage unavailable") from None
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Storage unavailable"
+        ) from None
     if raw is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No pending Slack install")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No pending Slack install"
+        )
     install = json.loads(raw)
     if str(install.get("workspace_id")) != str(workspace_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No pending Slack install")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No pending Slack install"
+        )
     # Never return bot_token_enc or any secret field.
     return {
         "team_id": install.get("team_id"),
