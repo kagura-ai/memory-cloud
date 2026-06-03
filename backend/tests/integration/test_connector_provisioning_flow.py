@@ -16,6 +16,23 @@ from models.schemas import ResourceEventRequest
 from services.connector_provisioning import ConnectorProvisioningService
 
 
+@pytest.fixture(autouse=True)
+def _mock_qdrant_collection():
+    """Stub out Qdrant collection creation for the auto-create-context path.
+
+    The CI backend-integration job runs with Postgres + Redis only (no Qdrant),
+    so ContextService.create_context(create_collection=True) — reached when a
+    connector auto-creates its write-target context — would fail with a
+    connection error. These tests exercise the provisioning DB flow, not Qdrant,
+    so the collection-ensure call is mocked to a no-op.
+    """
+    with patch(
+        "services.context_service.ContextService._ensure_context_collection",
+        new=AsyncMock(return_value=None),
+    ):
+        yield
+
+
 async def _seed_workspace(
     db: AsyncSession,
     *,
