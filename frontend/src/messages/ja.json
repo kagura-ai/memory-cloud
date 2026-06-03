@@ -3626,6 +3626,10 @@
     "curlSampleTitle": "リクエスト例（resource-ingest API）",
     "copyResourceToken": "リソーストークンをコピー",
     "copyKmcApiKey": "KMC 書き込みキーをコピー",
-    "kmcApiKeyNote": "セルフホストワーカー設定専用。人間の CLI 用途には API Keys タブの個人 API キーを使ってください。"
+    "kmcApiKeyNote": "セルフホストワーカー設定専用。人間の CLI 用途には API Keys タブの個人 API キーを使ってください。",
+    "errors": {
+      "noWorkspaceSelected": "ワークスペースが選択されていません。コネクタを管理するにはワークスペースを選択してください。",
+      "forbiddenWorkspace": "コネクタを管理するにはワークスペースのオーナーまたは管理者権限が必要です。"
+    }
   }
 }

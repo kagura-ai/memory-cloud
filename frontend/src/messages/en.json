@@ -3626,6 +3626,10 @@
     "curlSampleTitle": "Sample request (resource-ingest API)",
     "copyResourceToken": "Copy resource token",
     "copyKmcApiKey": "Copy KMC write key",
-    "kmcApiKeyNote": "Self-hosted worker config only. For human CLI use a personal API key from the API Keys tab instead."
+    "kmcApiKeyNote": "Self-hosted worker config only. For human CLI use a personal API key from the API Keys tab instead.",
+    "errors": {
+      "noWorkspaceSelected": "No workspace selected. Select a workspace to manage its connectors.",
+      "forbiddenWorkspace": "Workspace owner or admin role required to manage connectors."
+    }
   }
 }
