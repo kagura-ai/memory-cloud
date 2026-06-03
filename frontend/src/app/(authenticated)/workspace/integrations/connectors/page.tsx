@@ -35,13 +35,17 @@ import {
   type WorkspaceConnectorSummary,
 } from "@/lib/api/workspace-connectors";
 
-/** Slugify into the backend's resource_id charset: ^[a-z0-9_-]+$ */
+// Slugify into the backend's resource_id charset (^[a-z0-9_-]+$). Capped at 100
+// so the derived value also satisfies the backend's auto_create_context_name
+// limit (100); resource_id allows up to 255 so 100 is safe for both uses.
+const CONNECTOR_NAME_MAX = 100;
+
 function toResourceId(seed: string): string {
   const slug = seed
     .toLowerCase()
     .replace(/[^a-z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return `slack-${slug || "team"}`.slice(0, 255);
+  return `slack-${slug || "team"}`.slice(0, CONNECTOR_NAME_MAX);
 }
 
 export default function ConnectorsPage() {
@@ -257,6 +261,7 @@ export default function ConnectorsPage() {
               <Input
                 id="conn-context-name"
                 value={contextName}
+                maxLength={CONNECTOR_NAME_MAX}
                 onChange={(e) => setContextName(e.target.value)}
               />
               <p className="mt-1 text-xs text-muted-foreground">

@@ -73,7 +73,9 @@ class WorkerConnectorConfig(TZAwareBaseModel):
 
 @router.get("/config", response_model=WorkerConnectorConfig)
 async def get_worker_config(
-    platform: Literal["slack", "discord", "teams"],
+    # Only Slack is implemented end-to-end (the response carries a Slack-specific
+    # ``slack`` block). Widen to discord/teams when those connectors ship.
+    platform: Literal["slack"],
     team_id: str = Query(..., max_length=255),
     _: None = Depends(verify_worker_token),
     db: AsyncSession = Depends(get_db),
